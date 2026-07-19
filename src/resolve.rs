@@ -432,16 +432,10 @@ impl Default for SymbolTable {
 
 impl SymbolTable {
     pub fn insert_class(&mut self, name: String, sig: ClassSig) -> Option<ClassSig> {
-        let internal = sig.internal.render();
-        self.insert_class_with_internal(name, &internal, sig)
+        self.insert_class_sig(name, sig)
     }
 
-    pub fn insert_class_with_internal(
-        &mut self,
-        name: String,
-        _internal: &str,
-        sig: ClassSig,
-    ) -> Option<ClassSig> {
+    pub fn insert_class_sig(&mut self, name: String, sig: ClassSig) -> Option<ClassSig> {
         self.classes_by_type_name.insert(sig.internal, name.clone());
         self.classes.insert(name, sig)
     }
@@ -2347,9 +2341,8 @@ pub fn collect_signatures_with_cp(
                     let super_internal_ref = super_internal
                         .as_ref()
                         .map(|super_internal| type_name(super_internal));
-                    table.insert_class_with_internal(
+                    table.insert_class_sig(
                         c.name.clone(),
-                        &internal,
                         ClassSig {
                             internal: internal_ref,
                             props,
@@ -2392,9 +2385,8 @@ pub fn collect_signatures_with_cp(
                         let companion_super_internal_ref = companion_super_internal
                             .as_ref()
                             .map(|super_internal| type_name(super_internal));
-                        table.insert_class_with_internal(
+                        table.insert_class_sig(
                             comp_internal.clone(),
-                            &comp_internal,
                             ClassSig {
                                 internal: comp_internal_ref,
                                 props: Vec::new(),
@@ -7226,11 +7218,15 @@ impl<'a> Checker<'a> {
     }
 
     fn obj_with_targs(&mut self, internal: &str, r: &TypeRef) -> Ty {
+        self.obj_with_targs_name(type_name(internal), r)
+    }
+
+    fn obj_with_targs_name(&mut self, internal: TypeName, r: &TypeRef) -> Ty {
         if r.targs.is_empty() {
-            Ty::obj(internal)
+            Ty::obj_name(internal)
         } else {
             let args: Vec<Ty> = r.targs.iter().map(|a| self.resolve_ty(a)).collect();
-            Ty::obj_args(internal, &args)
+            Ty::obj_args_name(internal, &args)
         }
     }
 
@@ -7266,8 +7262,7 @@ impl<'a> Checker<'a> {
             // `info.ty`, the construction-expression lowering, keeping them consistent.
             self.obj_with_targs(&internal, r)
         } else if let Some(cs) = self.syms.classes.get(&r.name) {
-            let internal = cs.internal();
-            self.obj_with_targs(&internal, r)
+            self.obj_with_targs_name(cs.internal_name(), r)
         } else if let Some(internal) = self.syms.class_names.get(&r.name) {
             // Built-in mapped types (`Number`, `Comparable`, `List`, …), classpath classes, and
             // type aliases — the *same* map emit resolves against, so the checker and codegen agree
@@ -7275,7 +7270,7 @@ impl<'a> Checker<'a> {
             // `"__ty/<Prim>"` encodes an alias to a primitive/builtin.
             match internal.strip_prefix("__ty/") {
                 Some(prim) => Ty::from_name(&prim).unwrap_or(Ty::Error),
-                None => self.obj_with_targs(&internal.render(), r),
+                None => self.obj_with_targs_name(internal, r),
             }
         } else if let Some(internal) = self.imported_type_internal(&r.name) {
             // An explicit/wildcard import resolves a name whose simple form is ABSENT from the global
