@@ -1187,14 +1187,14 @@ impl Classpath {
     /// descriptor (receiver + value parameters) — the SAME selection the call-fact lookup uses, so both
     /// agree. Outer `None` means no metadata function by this JVM name, so the caller may use JVM
     /// `Signature`; inner `None` means metadata owns the callable but has no usable generic signature.
-    pub fn aligned_generic_sig(
+    pub fn aligned_generic_sig_name(
         &self,
-        internal: &str,
+        internal: TypeName,
         jvm_name: &str,
         desc_params: &[Ty],
         desc_ret: &Ty,
     ) -> Option<Option<crate::libraries::GenericSig>> {
-        let meta = self.class_meta(internal);
+        let meta = self.class_meta_name(internal);
         meta.by_jvm_name.contains_key(jvm_name).then(|| {
             aligned_meta_index(&meta, jvm_name, desc_params, desc_ret)
                 .and_then(|(_, idx)| meta.fns.get(idx))
@@ -1222,7 +1222,24 @@ impl Classpath {
         desc_ret: &Ty,
         extension: bool,
     ) -> MetadataCallFacts {
-        let meta = self.class_meta(internal);
+        self.metadata_call_facts_name(
+            type_name(internal),
+            fn_name,
+            desc_params,
+            desc_ret,
+            extension,
+        )
+    }
+
+    pub fn metadata_call_facts_name(
+        &self,
+        internal: TypeName,
+        fn_name: &str,
+        desc_params: &[Ty],
+        desc_ret: &Ty,
+        extension: bool,
+    ) -> MetadataCallFacts {
+        let meta = self.class_meta_name(internal);
         let Some((end, c)) = aligned_meta_callable(&meta, fn_name, desc_params, desc_ret) else {
             return MetadataCallFacts::fallback(if extension {
                 CallSig::default()
@@ -1257,13 +1274,13 @@ impl Classpath {
     /// own `@Metadata` function record. Names, default flags, return classifier, and nullability come
     /// from the SAME member record, so a data-class `copy`, value-class-mangled member, or `suspend`
     /// return cannot drift across separate metadata lookups.
-    pub fn metadata_member_call_facts(
+    pub fn metadata_member_call_facts_name(
         &self,
-        internal: &str,
+        internal: TypeName,
         jvm_name: &str,
         arity: usize,
     ) -> MetadataCallFacts {
-        let Some(ci) = self.find(internal) else {
+        let Some(ci) = self.find_name(internal) else {
             return MetadataCallFacts::fallback(CallSig::metadata_plain(arity));
         };
         let Some(f) = super::metadata::class_functions(&ci)
@@ -1290,19 +1307,19 @@ impl Classpath {
         // parts, so union every class's own metadata up the superclass chain — exactly how the extension
         // index reaches the part methods (a part isn't listed in the facade's `d1`).
         let mut names = LambdaReturnOverloads::new();
-        let mut cur = Some(internal.to_string());
+        let mut cur = Some(internal_id);
         let mut seen = std::collections::HashSet::new();
         while let Some(cn) = cur {
-            if !seen.insert(cn.clone()) {
+            if !seen.insert(cn) {
                 break;
             }
-            let Some(ci) = self.find(&cn) else { break };
-            for f in self.meta_functions(&cn).iter() {
+            let Some(ci) = self.find_name(cn) else { break };
+            for f in self.meta_functions_name(cn).iter() {
                 if f.jvm_desc.is_some() && f.ret_class.is_some() {
                     names.insert(f.kotlin_name.clone());
                 }
             }
-            cur = ci.super_class();
+            cur = ci.super_class;
         }
         let rc = std::rc::Rc::new(names);
         self.meta_overloads
@@ -1862,14 +1879,14 @@ impl Classpath {
     /// Whether the selected JVM callable is `inline`, matching by `(jvm name, descriptor)` through the
     /// decoded Kotlin metadata. Use this once overload resolution has selected a concrete descriptor; it
     /// avoids a name-wide inline flag leaking from one overload to another.
-    pub fn is_inline_callable(
+    pub fn is_inline_callable_name(
         &self,
-        internal: &str,
+        internal: TypeName,
         name: &str,
         descriptor: &str,
         desc_params: &[Ty],
     ) -> bool {
-        self.meta_functions(internal).iter().any(|f| {
+        self.meta_functions_name(internal).iter().any(|f| {
             if !f.is_inline || f.jvm_name != name {
                 return false;
             }
@@ -1892,10 +1909,6 @@ impl Classpath {
     /// Whether `internal.name(...)` is a Kotlin `suspend` function, per the class's `@Metadata`
     /// `IS_SUSPEND` flag. A call to it is a coroutine suspension point. Includes the superclass walk
     /// needed for facade part classes.
-    pub fn is_suspend_method(&self, internal: &str, name: &str) -> bool {
-        self.is_suspend_method_name(type_name(internal), name)
-    }
-
     pub fn is_suspend_method_name(&self, internal: TypeName, name: &str) -> bool {
         let mut cur = Some(internal);
         while let Some(s) = cur.take() {

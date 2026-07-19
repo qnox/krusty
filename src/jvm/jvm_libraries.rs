@@ -113,14 +113,9 @@ impl JvmLibraries {
             // leading params (their exact types — an extension receiver, a vararg array) and
             // truncate the trailing synthetics. A normal function's metadata count equals the
             // descriptor's param count, so this is a no-op for it (no regression).
-            let owner_rendered = c.owner.render();
-            let meta = self.cp.metadata_call_facts(
-                &owner_rendered,
-                meta_name,
-                &params,
-                &physical_ret,
-                false,
-            );
+            let meta =
+                self.cp
+                    .metadata_call_facts_name(c.owner, meta_name, &params, &physical_ret, false);
             if let Some(keep) = meta.kept_params {
                 if keep < params.len() {
                     params.truncate(keep);
@@ -131,9 +126,9 @@ impl JvmLibraries {
             } else {
                 c.descriptor.clone()
             };
-            let inline =
-                self.cp
-                    .is_inline_callable(&owner_rendered, meta_name, &inline_desc, &params);
+            let inline = self
+                .cp
+                .is_inline_callable_name(c.owner, meta_name, &inline_desc, &params);
             let call_sig = meta.call_sig;
             let ret_metadata = meta.ret;
             let ret = if suspend {
@@ -170,7 +165,7 @@ impl JvmLibraries {
             // by-receiver query; keeping the kind honest is what lets the top-level queries ignore it
             // without per-call-site receiver checks.
             let generic_sig = self.callable_generic_sig(
-                &owner_rendered,
+                c.owner,
                 &c.name,
                 &c.descriptor,
                 c.signature.as_deref(),
@@ -490,7 +485,7 @@ impl JvmLibraries {
     /// record for the name — a Java class, a synthetic/bridge method, or a facade part metadata omits.
     fn callable_generic_sig(
         &self,
-        owner: &str,
+        owner: TypeName,
         jvm_name: &str,
         jvm_desc: &str,
         jvm_sig: Option<&str>,
@@ -503,9 +498,9 @@ impl JvmLibraries {
         // a synthetic, or a PROPERTY getter — recorded as a property, not a function) do we read the JVM
         // `Signature`, which uses the legacy receiver-in-`params[0]` shape.
         let (desc_params, desc_ret) = parse_method_desc_with_field_params(jvm_desc);
-        if let Some(gsig) = self
-            .cp
-            .aligned_generic_sig(owner, jvm_name, &desc_params, &desc_ret)
+        if let Some(gsig) =
+            self.cp
+                .aligned_generic_sig_name(owner, jvm_name, &desc_params, &desc_ret)
         {
             // Metadata DESCRIBES this class's function — it is the authoritative signature and there is NO
             // fallback to the JVM `Signature`. A failure to align/decode here is a bug to fix in the reader.
@@ -1492,7 +1487,7 @@ impl SymbolSource for JvmLibraries {
                 // The member's parsed generic signature — carries type-variable binding facts so a caller can
                 // infer a generic return from the receiver's type arguments (`Repo<Config>.load(): Config`).
                 member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
-                member.suspend = self.cp.is_suspend_method(internal, &m.name);
+                member.suspend = self.cp.is_suspend_method_name(internal_name, &m.name);
                 // A `suspend` member's descriptor erases its return to `Object` (the CPS convention). Recover
                 // the LOGICAL return from `@Metadata` (`Int`, not `Object`) so a caller unboxes the suspension
                 // result — keeping the erased type as `physical_ret` for the emitter.
@@ -2090,7 +2085,7 @@ impl SymbolSource for JvmLibraries {
                         // continuation, recover the real return from the `Continuation<T>` type
                         // argument in the generic signature) so a normal call resolves. The coroutine
                         // pass re-derives the CPS form for the emit.
-                        let suspend = self.cp.is_suspend_method(&cn_rendered, &m.name);
+                        let suspend = self.cp.is_suspend_method_name(cn, &m.name);
                         let params: Vec<Ty> = if suspend {
                             m.params
                                 .split_last()
@@ -2108,11 +2103,9 @@ impl SymbolSource for JvmLibraries {
                         // mangled members (`copy` → `copy-<hash>`), and by the source/JVM name for
                         // ordinary members.
                         let meta_name = m.physical_name.as_deref().unwrap_or(&m.name);
-                        let member_facts = self.cp.metadata_member_call_facts(
-                            &cn_rendered,
-                            meta_name,
-                            params.len(),
-                        );
+                        let member_facts =
+                            self.cp
+                                .metadata_member_call_facts_name(cn, meta_name, params.len());
                         // A `suspend` member's return facts are erased twice (to `Object`, then via the
                         // `Continuation<T>` type argument), so recover nullability and exact source
                         // classifier from the same class `@Metadata` member record.
