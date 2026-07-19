@@ -706,27 +706,102 @@ struct ClassMeta {
 
 #[derive(Default)]
 struct BuiltinsFile {
-    names: NameTree,
-    classes: HashMap<NameId, super::metadata::BuiltinClass>,
+    classes: HashMap<TypeName, BuiltinClass>,
+}
+
+struct BuiltinClass {
+    supertypes: TypeNameList,
+    members: Vec<BuiltinMember>,
+    is_interface: bool,
+    nullable_member_returns: Vec<(String, usize)>,
+}
+
+struct BuiltinMember {
+    name: String,
+    params: Vec<BuiltinType>,
+    ret: BuiltinType,
+    is_property: bool,
+    ret_nullable: bool,
+}
+
+enum BuiltinType {
+    Class(TypeName),
+    Param(String),
+}
+
+impl BuiltinType {
+    fn from_metadata(name: String) -> Self {
+        if name.contains('/') {
+            BuiltinType::Class(type_name(&name))
+        } else {
+            BuiltinType::Param(name)
+        }
+    }
+
+    fn descriptor(&self) -> String {
+        match self {
+            BuiltinType::Class(name) => type_descriptor(kotlin_type_name_to_ty(*name)),
+            BuiltinType::Param(_) => "Ljava/lang/Object;".to_string(),
+        }
+    }
+
+    fn ty(&self) -> Ty {
+        match self {
+            BuiltinType::Class(name) => kotlin_type_name_to_ty(*name),
+            BuiltinType::Param(name) => Ty::obj(name),
+        }
+    }
+
+    fn is_class(&self) -> bool {
+        matches!(self, BuiltinType::Class(_))
+    }
 }
 
 impl BuiltinsFile {
     fn from_classes(classes: HashMap<String, super::metadata::BuiltinClass>) -> Self {
         let mut file = BuiltinsFile::default();
         for (internal, class) in classes {
-            let id = file.names.insert(&internal);
-            file.classes.insert(id, class);
+            let internal = type_name(&internal);
+            let supertypes = class
+                .supertypes
+                .into_iter()
+                .map(|name| type_name(&name))
+                .collect::<Vec<_>>()
+                .into();
+            let members = class
+                .members
+                .into_iter()
+                .map(|m| BuiltinMember {
+                    name: m.name,
+                    params: m
+                        .params
+                        .into_iter()
+                        .map(BuiltinType::from_metadata)
+                        .collect(),
+                    ret: BuiltinType::from_metadata(m.ret),
+                    is_property: m.is_property,
+                    ret_nullable: m.ret_nullable,
+                })
+                .collect();
+            file.classes.insert(
+                internal,
+                BuiltinClass {
+                    supertypes,
+                    members,
+                    is_interface: class.is_interface,
+                    nullable_member_returns: class.nullable_member_returns,
+                },
+            );
         }
         file
     }
 
-    fn get(&self, internal: &str) -> Option<&super::metadata::BuiltinClass> {
-        let id = self.names.get(internal)?;
-        self.classes.get(&id)
+    fn get(&self, internal: &str) -> Option<&BuiltinClass> {
+        self.classes.get(&type_name(internal))
     }
 
-    fn get_name(&self, internal: TypeName) -> Option<&super::metadata::BuiltinClass> {
-        self.get(&internal.render())
+    fn get_name(&self, internal: TypeName) -> Option<&BuiltinClass> {
+        self.classes.get(&internal)
     }
 
     fn contains_key(&self, internal: &str) -> bool {
@@ -738,25 +813,16 @@ impl BuiltinsFile {
     }
 
     fn is_subtype(&self, sub: &str, sup: &str) -> bool {
-        let Some(sup) = self.names.get(sup) else {
-            return false;
-        };
-        self.is_subtype_id(sub, sup)
+        self.is_subtype_name(type_name(sub), type_name(sup))
     }
 
     fn is_subtype_name(&self, sub: TypeName, sup: TypeName) -> bool {
-        self.is_subtype(&sub.render(), &sup.render())
-    }
-
-    fn is_subtype_id(&self, sub: &str, sup: NameId) -> bool {
-        let Some(sub_id) = self.names.get(sub) else {
-            return false;
-        };
-        sub_id == sup
-            || self
-                .classes
-                .get(&sub_id)
-                .is_some_and(|c| c.supertypes.iter().any(|s| self.is_subtype_id(s, sup)))
+        sub == sup
+            || self.classes.get(&sub).is_some_and(|c| {
+                c.supertypes
+                    .iter_ids()
+                    .any(|s| self.is_subtype_name(s, sup))
+            })
     }
 }
 
@@ -1455,19 +1521,10 @@ impl Classpath {
             .get(internal)
             .map(|class| {
                 class.members.iter().map(|m| {
-                    // A qualified Kotlin name (`kotlin/Int`, `kotlin/String`) → its JVM descriptor; a bare type
-                    // parameter (`E`, `T` — no package) erases to `Object`.
-                    let desc_of = |n: &str| -> String {
-                        if n.contains('/') {
-                            type_descriptor(kotlin_name_to_ty(n))
-                        } else {
-                            "Ljava/lang/Object;".to_string()
-                        }
-                    };
-                    let pdesc: String = m.params.iter().map(|p| desc_of(p)).collect();
-                    let descriptor = format!("({pdesc}){}", desc_of(&m.ret));
-                    let ret = kotlin_name_to_ty(&m.ret);
-                    let physical_ret = if m.ret.contains('/') {
+                    let pdesc: String = m.params.iter().map(BuiltinType::descriptor).collect();
+                    let descriptor = format!("({pdesc}){}", m.ret.descriptor());
+                    let ret = m.ret.ty();
+                    let physical_ret = if m.ret.is_class() {
                         ret
                     } else {
                         Ty::obj("kotlin/Any")
@@ -1517,7 +1574,7 @@ impl Classpath {
                         name: member_name,
                         owner: Some(type_name(&owner)),
                         physical_name: None,
-                        params: m.params.iter().map(|p| kotlin_name_to_ty(p)).collect(),
+                        params: m.params.iter().map(BuiltinType::ty).collect(),
                         ret,
                         // The declared return nullability from the `.kotlin_builtins` `Type.nullable`
                         // flag (`Map.get(K): V?`) — the JVM descriptor erases it.
@@ -1582,7 +1639,7 @@ impl Classpath {
         let path = Self::builtins_path_for(internal);
         self.builtins_file(&path)
             .get(internal)
-            .map(|c| c.supertypes.clone())
+            .map(|c| c.supertypes.iter_rendered().collect())
             .unwrap_or_default()
     }
 
@@ -1590,13 +1647,7 @@ impl Classpath {
         let path = Self::builtins_path_for(&internal.render());
         self.builtins_file(&path)
             .get_name(internal)
-            .map(|c| {
-                c.supertypes
-                    .iter()
-                    .map(|s| type_name(s))
-                    .collect::<Vec<_>>()
-                    .into()
-            })
+            .map(|c| c.supertypes.clone())
             .unwrap_or_default()
     }
 
