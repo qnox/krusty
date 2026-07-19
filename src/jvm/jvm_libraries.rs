@@ -7,7 +7,7 @@ use super::classpath::{
     kotlin_name_to_ty, kotlin_type_name_to_ty, metadata_return_info, Classpath,
 };
 use super::classreader::{ConstVal, FieldSig};
-use super::jvm_class_map::{to_jvm_internal, to_kotlin_internal};
+use super::jvm_class_map::to_kotlin_internal;
 use super::metadata;
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{
@@ -430,14 +430,14 @@ impl JvmLibraries {
         let mut seen = std::collections::HashSet::new();
         let mut q = std::collections::VecDeque::new();
         q.push_back((
-            to_jvm_internal(&start.render()).to_string(),
+            super::jvm_class_map::to_jvm_type_name(start),
             start_args.to_vec(),
         ));
         while let Some((internal, targs)) = q.pop_front() {
-            if !seen.insert(internal.clone()) {
+            if !seen.insert(internal) {
                 continue;
             }
-            let Some(ci) = self.cp.find(&internal) else {
+            let Some(ci) = self.cp.find_name(internal) else {
                 continue;
             };
             let (formals, supers) = ci.signature.as_deref().and_then(parse_class_gsig).unzip();
@@ -467,13 +467,13 @@ impl JvmLibraries {
                     if let Ty::Obj(sup_internal, sup_args) = sup {
                         let sup_targs = ty_subst_all(sup_args, &binds);
                         q.push_back((
-                            to_jvm_internal(&sup_internal.render()).to_string(),
+                            super::jvm_class_map::to_jvm_type_name(sup_internal),
                             sup_targs,
                         ));
                     }
                 }
             } else {
-                for i in ci.interfaces.iter_rendered().chain(ci.super_class()) {
+                for i in ci.interfaces.iter_ids().chain(ci.super_class) {
                     q.push_back((i, vec![]));
                 }
             }
@@ -547,18 +547,18 @@ impl JvmLibraries {
         if start_args.is_empty() {
             return std::collections::HashMap::new();
         }
-        let target = to_jvm_internal(target_internal);
+        let target = super::jvm_class_map::to_jvm_type_name(type_name(target_internal));
         let mut seen = std::collections::HashSet::new();
         let mut q = std::collections::VecDeque::new();
         q.push_back((
-            to_jvm_internal(&start.render()).to_string(),
+            super::jvm_class_map::to_jvm_type_name(start),
             start_args.to_vec(),
         ));
         while let Some((internal, targs)) = q.pop_front() {
-            if !seen.insert(internal.clone()) {
+            if !seen.insert(internal) {
                 continue;
             }
-            let Some(ci) = self.cp.find(&internal) else {
+            let Some(ci) = self.cp.find_name(internal) else {
                 continue;
             };
             let (formals, supers) = ci.signature.as_deref().and_then(parse_class_gsig).unzip();
@@ -573,13 +573,13 @@ impl JvmLibraries {
                     if let Ty::Obj(sup_internal, sup_args) = sup {
                         let sup_targs = ty_subst_all(sup_args, &binds);
                         q.push_back((
-                            to_jvm_internal(&sup_internal.render()).to_string(),
+                            super::jvm_class_map::to_jvm_type_name(sup_internal),
                             sup_targs,
                         ));
                     }
                 }
             } else {
-                for i in ci.interfaces.iter_rendered().chain(ci.super_class()) {
+                for i in ci.interfaces.iter_ids().chain(ci.super_class) {
                     q.push_back((i, vec![]));
                 }
             }
@@ -1238,8 +1238,8 @@ fn supertype_descriptors(cp: &Classpath, receiver: Ty) -> Vec<String> {
         // by the JVM ARRAY descriptor (`[I`, `[Ljava/lang/String;`), not a `Lkotlin/…Array;` class name —
         // so key off the array descriptor + `Object`, exactly as the legacy `Ty::Array` spelling did.
         _ if receiver.is_array() => return vec![type_descriptor(receiver), object],
-        Ty::Obj(i, _) => to_jvm_internal(&i.render()).to_string(),
-        Ty::String => to_jvm_internal("kotlin/String").to_string(),
+        Ty::Obj(i, _) => super::jvm_class_map::to_jvm_type_name(i),
+        Ty::String => super::jvm_class_map::to_jvm_type_name(type_name("kotlin/String")),
         _ => return vec![type_descriptor(receiver), object],
     };
     let mut out = Vec::new();
@@ -1247,13 +1247,13 @@ fn supertype_descriptors(cp: &Classpath, receiver: Ty) -> Vec<String> {
     let mut q = std::collections::VecDeque::new();
     q.push_back(start);
     while let Some(name) = q.pop_front() {
-        if !seen.insert(name.clone()) {
+        if !seen.insert(name) {
             continue;
         }
-        out.push(format!("L{name};"));
-        if let Some(ci) = cp.find(&name) {
-            q.extend(ci.interfaces.iter_rendered());
-            if let Some(s) = ci.super_class() {
+        out.push(format!("L{};", name.render()));
+        if let Some(ci) = cp.find_name(name) {
+            q.extend(ci.interfaces.iter_ids());
+            if let Some(s) = ci.super_class {
                 q.push_back(s);
             }
         }
@@ -1268,20 +1268,23 @@ fn supertype_descriptors(cp: &Classpath, receiver: Ty) -> Vec<String> {
 /// at any depth). Names are normalized to their JVM spelling so a Kotlin built-in (`kotlin/collections/
 /// MutableMap`) and its `java/util/Map` realization compare equal.
 fn class_implements(cp: &Classpath, internal: &str, target: &str) -> bool {
+    class_implements_name(cp, type_name(internal), type_name(target))
+}
+
+fn class_implements_name(cp: &Classpath, internal: TypeName, target: TypeName) -> bool {
+    let target = super::jvm_class_map::to_jvm_type_name(target);
     let mut seen = std::collections::HashSet::new();
     let mut q = std::collections::VecDeque::new();
-    q.push_back(to_jvm_internal(internal).to_string());
+    q.push_back(super::jvm_class_map::to_jvm_type_name(internal));
     while let Some(name) = q.pop_front() {
         if name == target {
             return true;
         }
-        if !seen.insert(name.clone()) {
+        if !seen.insert(name) {
             continue;
         }
-        if let Some(ci) = cp.find(&name) {
-            for s in ci.interfaces.iter_rendered().chain(ci.super_class()) {
-                q.push_back(to_jvm_internal(&s).to_string());
-            }
+        if let Some(ci) = cp.find_name(name) {
+            q.extend(ci.interfaces.iter_ids().chain(ci.super_class));
         }
     }
     false
