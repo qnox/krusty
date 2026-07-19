@@ -2261,11 +2261,8 @@ pub fn lower_file_at_reporting(
                                 .libraries
                                 .resolve_type_name(sup)
                                 .is_some_and(|t| t.is_interface());
-                        if is_iface {
-                            let sup = sup.render();
-                            if !ifaces.contains(&sup) {
-                                ifaces.push(&sup);
-                            }
+                        if is_iface && !ifaces.contains_name(sup) {
+                            ifaces.push_name(sup);
                         }
                     }
                     let mut seen: std::collections::HashSet<String> = lo.ir.classes[cid as usize]
@@ -2273,8 +2270,8 @@ pub fn lower_file_at_reporting(
                         .iter()
                         .map(|b| format!("{}{:?}{:?}", b.name, b.erased_params, b.erased_ret))
                         .collect();
-                    for itf in ifaces.iter_rendered() {
-                        for (mname, ifid) in lo.collect_iface_methods(&itf) {
+                    for itf in ifaces.iter_ids() {
+                        for (mname, ifid) in lo.collect_iface_methods(itf) {
                             if let Some((_, _, impl_fid, _)) = lo.resolve_method(&internal, &mname)
                             {
                                 let ip = lo.ir.functions[ifid as usize].params.clone();
@@ -2315,43 +2312,40 @@ pub fn lower_file_at_reporting(
                         // interface's erased `compareTo(Object)`), emit the `ACC_BRIDGE` the JVM needs to
                         // dispatch an interface-typed call — without it `(x as Comparable).compareTo(y)`
                         // hits `AbstractMethodError` instead of running the override (or throwing CCE).
-                        if !lo.contains_class(&itf) {
-                            if let Some(m) = lo
-                                .syms
+                        let classpath_sam = if lo.contains_class_name(itf) {
+                            None
+                        } else {
+                            lo.syms
                                 .libraries
-                                .resolve_type(&itf)
+                                .resolve_type_name(itf)
                                 .and_then(|t| t.sam_method)
+                        };
+                        if let Some(m) = classpath_sam {
+                            if let Some((_, _, impl_fid, _)) = lo.resolve_method(&internal, &m.name)
                             {
-                                if let Some((_, _, impl_fid, _)) =
-                                    lo.resolve_method(&internal, &m.name)
+                                let ip = tys_to_ir(&m.params);
+                                let ir_ = ty_to_ir(m.ret);
+                                let cp = lo.ir.functions[impl_fid as usize].params.clone();
+                                let cr = lo.ir.functions[impl_fid as usize].ret.clone();
+                                // A suspend override needing an erasure bridge can't be modeled (the
+                                // bridge isn't CPS-fixed-up) — skip the file. See the same guard above.
+                                if (ip != cp || ir_ != cr) && lo.ir.suspend_funs.contains(&impl_fid)
                                 {
-                                    let ip = tys_to_ir(&m.params);
-                                    let ir_ = ty_to_ir(m.ret);
-                                    let cp = lo.ir.functions[impl_fid as usize].params.clone();
-                                    let cr = lo.ir.functions[impl_fid as usize].ret.clone();
-                                    // A suspend override needing an erasure bridge can't be modeled (the
-                                    // bridge isn't CPS-fixed-up) — skip the file. See the same guard above.
-                                    if (ip != cp || ir_ != cr)
-                                        && lo.ir.suspend_funs.contains(&impl_fid)
-                                    {
-                                        return None;
-                                    }
-                                    if (ip != cp || ir_ != cr)
-                                        && seen.insert(format!("{}{:?}{:?}", m.name, ip, ir_))
-                                    {
-                                        lo.ir.classes[cid as usize].bridges.push(
-                                            crate::ir::Bridge {
-                                                name: m.name.clone(),
-                                                erased_params: ip,
-                                                erased_ret: ir_,
-                                                concrete_params: cp,
-                                                concrete_ret: cr,
-                                                target_name: None,
-                                                box_ret: None,
-                                                unbox_params: Vec::new(),
-                                            },
-                                        );
-                                    }
+                                    return None;
+                                }
+                                if (ip != cp || ir_ != cr)
+                                    && seen.insert(format!("{}{:?}{:?}", m.name, ip, ir_))
+                                {
+                                    lo.ir.classes[cid as usize].bridges.push(crate::ir::Bridge {
+                                        name: m.name.clone(),
+                                        erased_params: ip,
+                                        erased_ret: ir_,
+                                        concrete_params: cp,
+                                        concrete_ret: cr,
+                                        target_name: None,
+                                        box_ret: None,
+                                        unbox_params: Vec::new(),
+                                    });
                                 }
                             }
                         }
@@ -6110,8 +6104,7 @@ impl<'a> Lower<'a> {
     fn value_class_underlying(&self, t: Ty) -> Option<Ty> {
         let internal = t.obj_internal()?;
         self.syms
-            .classes
-            .get(&internal.render())
+            .class_by_type_name(internal)
             .and_then(|c| c.value_field.as_ref())
             .map(|(_, u)| *u)
     }
@@ -8879,9 +8872,9 @@ impl<'a> Lower<'a> {
     }
 
     /// All `(method_name, FunId)` declared by an interface and its super-interfaces (transitively).
-    fn collect_iface_methods(&self, itf: &str) -> Vec<(String, u32)> {
+    fn collect_iface_methods(&self, itf: TypeName) -> Vec<(String, u32)> {
         let mut out = Vec::new();
-        let mut stack = vec![type_name(itf)];
+        let mut stack = vec![itf];
         let mut seen = std::collections::HashSet::new();
         while let Some(i) = stack.pop() {
             if !seen.insert(i) {
@@ -8891,9 +8884,7 @@ impl<'a> Lower<'a> {
                 for (name, &(_, fid, _)) in &ci.methods {
                     out.push((name.clone(), fid));
                 }
-                for sup in self.ir.classes[ci.id as usize].interfaces.iter_rendered() {
-                    stack.push(type_name(&sup));
-                }
+                stack.extend(self.ir.classes[ci.id as usize].interfaces.iter_ids());
             }
         }
         out
