@@ -656,7 +656,7 @@ impl<'a> SymbolResolver<'a> {
     /// candidate fqn `pkg/name` over the federated source. THE way to resolve an unqualified name: the
     /// caller extracts `classifier`, `callables.functions` (∪ classifier constructors, then `invoke`), or
     /// `callables.properties` from the records. Empty when there is no import scope (caller falls back).
-    fn symbols_in_scope(&self, name: &str) -> Vec<(String, crate::libraries::ResolvedSymbols)> {
+    fn symbols_in_scope(&self, name: &str) -> Vec<(TypeName, crate::libraries::ResolvedSymbols)> {
         self.fn_scope
             .map(|scope| resolve_symbols_in_scope(&self.src, name, scope))
             .unwrap_or_default()
@@ -2002,7 +2002,7 @@ pub(crate) fn resolve_symbols_in_scope(
     src: &dyn SymbolSource,
     name: &str,
     packages: &[String],
-) -> Vec<(String, crate::libraries::ResolvedSymbols)> {
+) -> Vec<(TypeName, crate::libraries::ResolvedSymbols)> {
     let lib = src;
     packages
         .iter()
@@ -2012,14 +2012,15 @@ pub(crate) fn resolve_symbols_in_scope(
             } else {
                 format!("{pkg}/{name}")
             };
-            let r = lib.resolve_symbols_name(type_name(&fqn));
+            let fqn = type_name(&fqn);
+            let r = lib.resolve_symbols_name(fqn);
             (!r.is_empty()).then_some((fqn, r))
         })
         .collect()
 }
 
 fn function_set_from_symbols(
-    symbols: impl IntoIterator<Item = (String, crate::libraries::ResolvedSymbols)>,
+    symbols: impl IntoIterator<Item = (TypeName, crate::libraries::ResolvedSymbols)>,
 ) -> FunctionSet {
     FunctionSet {
         overloads: symbols

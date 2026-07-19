@@ -1053,10 +1053,10 @@ fn resolve_name_against_imports(
         // yields a candidate fqn's namespace record; a type position consumes only its `classifier`. The
         // level-precedence + within-level ambiguity is applied HERE (the caller's own rule), the record
         // keeping classifier separate from callables so a coexisting `fun`/`val` never perturbs it.
-        let mut hits: Vec<String> = Vec::new();
+        let mut hits: Vec<TypeName> = Vec::new();
         for (fqn, r) in crate::symbol_resolver::resolve_symbols_in_scope(source, name, level) {
             if let Some(t) = r.classifier {
-                let internal = t.alias_target.map(|target| target.render()).unwrap_or(fqn);
+                let internal = t.alias_target.unwrap_or(fqn);
                 if !hits.contains(&internal) {
                     hits.push(internal);
                 }
@@ -1064,7 +1064,7 @@ fn resolve_name_against_imports(
         }
         match hits.len() {
             0 => continue,
-            1 => return hits.into_iter().next(),
+            1 => return hits.into_iter().next().map(TypeName::render),
             _ => return None, // ambiguous within this level — kotlinc rejects; leave unresolved
         }
     }
