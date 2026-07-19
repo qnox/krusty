@@ -224,11 +224,7 @@ pub(crate) fn apply_override_final_drop(
             continue;
         }
         let mut supers: Vec<TypeName> = c.interfaces.iter_ids().collect();
-        supers.extend(
-            c.supertypes
-                .iter()
-                .filter_map(|t| t.obj_internal()),
-        );
+        supers.extend(c.supertypes.iter().filter_map(|t| t.obj_internal()));
         if c.has_non_top_superclass() {
             supers.push(c.superclass);
         }

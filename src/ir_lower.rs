@@ -2381,7 +2381,7 @@ pub fn lower_file_at_reporting(
                     lo.scope.clear();
                     lo.boxed_elem.clear();
                     lo.next_value = 0;
-                    lo.cur_class = Some(internal.clone());
+                    lo.cur_class = Some(type_name(&internal));
                     lo.cur_fn_name = m.name.clone();
                     lo.cur_fn_suspend = m.is_suspend;
                     lo.lambda_seq = 0;
@@ -2454,7 +2454,7 @@ pub fn lower_file_at_reporting(
                     lo.scope.clear();
                     lo.boxed_elem.clear();
                     lo.next_value = 0;
-                    lo.cur_class = Some(internal.clone());
+                    lo.cur_class = Some(type_name(&internal));
                     lo.cur_fn_name = gname;
                     lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
                     lo.lambda_seq = 0;
@@ -2483,7 +2483,7 @@ pub fn lower_file_at_reporting(
                         lo.scope.clear();
                         lo.boxed_elem.clear();
                         lo.next_value = 0;
-                        lo.cur_class = Some(internal.clone());
+                        lo.cur_class = Some(type_name(&internal));
                         lo.cur_field = Some((class_id, fidx, fty_ir.clone()));
                         lo.cur_fn_name = gname;
                         lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
@@ -2505,7 +2505,7 @@ pub fn lower_file_at_reporting(
                             lo.scope.clear();
                             lo.boxed_elem.clear();
                             lo.next_value = 0;
-                            lo.cur_class = Some(internal.clone());
+                            lo.cur_class = Some(type_name(&internal));
                             lo.cur_field = Some((class_id, fidx, fty_ir.clone()));
                             lo.cur_fn_name = sname;
                             lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
@@ -2640,7 +2640,7 @@ pub fn lower_file_at_reporting(
                         lo.scope.clear();
                         lo.boxed_elem.clear();
                         lo.next_value = 0;
-                        lo.cur_class = Some(comp_fq.clone());
+                        lo.cur_class = Some(comp_name);
                         lo.cur_fn_name = m.name.clone();
                         lo.lambda_seq = 0;
                         let this_v = lo.fresh_value();
@@ -2754,7 +2754,7 @@ pub fn lower_file_at_reporting(
                     lo.scope.clear();
                     lo.boxed_elem.clear();
                     lo.next_value = 0;
-                    lo.cur_class = Some(internal.clone());
+                    lo.cur_class = Some(type_name(&internal));
                     let this_v = lo.fresh_value();
                     lo.scope
                         .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -2825,7 +2825,7 @@ pub fn lower_file_at_reporting(
                             lo.scope.clear();
                             lo.boxed_elem.clear();
                             lo.next_value = 0;
-                            lo.cur_class = Some(internal.clone());
+                            lo.cur_class = Some(type_name(&internal));
                             lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
                             let pty = ty_of(file, &p.ty, &*syms.libraries);
                             let v = lo.fresh_value(); // value-index 0 = the underlying param
@@ -2849,7 +2849,7 @@ pub fn lower_file_at_reporting(
                     lo.scope.clear();
                     lo.boxed_elem.clear();
                     lo.next_value = 0;
-                    lo.cur_class = Some(internal.clone());
+                    lo.cur_class = Some(type_name(&internal));
                     lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
                     let this_v = lo.fresh_value(); // value 0 = `this`
                     lo.scope
@@ -2909,7 +2909,7 @@ pub fn lower_file_at_reporting(
                     lo.scope.clear();
                     lo.boxed_elem.clear();
                     lo.next_value = 0;
-                    lo.cur_class = Some(internal.clone());
+                    lo.cur_class = Some(type_name(&internal));
                     // Property initializers run here (`var s: T = x as T`), so class type params are
                     // in scope as `as T` cast targets.
                     lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
@@ -3137,7 +3137,7 @@ pub fn lower_file_at_reporting(
                         lo.scope.clear();
                         lo.boxed_elem.clear();
                         lo.next_value = 0;
-                        lo.cur_class = Some(internal.clone());
+                        lo.cur_class = Some(type_name(&internal));
                         lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
                         let this_v = lo.fresh_value();
                         lo.scope
@@ -3547,7 +3547,7 @@ pub fn lower_file_at_reporting(
                             lo.scope.clear();
                             lo.boxed_elem.clear();
                             lo.next_value = 0;
-                            lo.cur_class = Some(sub_fq.clone());
+                            lo.cur_class = Some(type_name(&sub_fq));
                             lo.cur_fn_name = "<init>".to_string();
                             lo.lambda_seq = 0;
                             let this_v = lo.fresh_value();
@@ -3593,7 +3593,7 @@ pub fn lower_file_at_reporting(
                             lo.scope.clear();
                             lo.boxed_elem.clear();
                             lo.next_value = 0;
-                            lo.cur_class = Some(body_cur.clone());
+                            lo.cur_class = Some(type_name(&body_cur));
                             lo.cur_fn_name = bm.name.clone();
                             lo.lambda_seq = 0;
                             let this_v = lo.fresh_value();
@@ -4570,7 +4570,7 @@ pub(crate) struct Lower<'a> {
     /// Consumed take-once by [`Lower::synth_array_elem`] (the inner `arrayOf(1)` keeps its own element). A
     /// `Cell` so the take-once read works through `&self`; save/restore guards a nested-array initializer.
     expected_array_elem: std::cell::Cell<Option<Ty>>,
-    cur_class: Option<String>,
+    cur_class: Option<TypeName>,
     /// When lowering a property's custom accessor body (`get()`/`set()`), the property's backing field
     /// `(class_id, field_index, field_ir_type)` — so the `field` keyword reads/writes it. `None`
     /// outside an accessor body.
@@ -6530,7 +6530,7 @@ impl<'a> Lower<'a> {
             && self.lookup("this$0").is_some()
             && self.lambda_uses_outer_this_param(body, &bind_names, deep);
         if captures_this {
-            let tty = Ty::obj(self.cur_class.as_deref().unwrap());
+            let tty = Ty::obj_name(self.cur_class.unwrap());
             captures.insert(0, ("this".to_string(), 0, tty));
         } else if captures_outer_this {
             let (v, tty) = self.lookup("this$0")?;
@@ -6581,7 +6581,7 @@ impl<'a> Lower<'a> {
         // rather than emitting a `GetField(GetValue(0))` that reads the wrong captured slot. When it
         // DOES capture `this` (slot 0), keep `cur_class` so those accesses resolve against it.
         let saved_cur_class = if captures_this {
-            self.cur_class.clone()
+            self.cur_class
         } else {
             self.cur_class.take()
         };
@@ -6688,8 +6688,8 @@ impl<'a> Lower<'a> {
         // the file facade. (Skip an inline-only impl — it is spliced, never emitted as a standalone
         // method.)
         if !self.ir.inline_only_fns.contains(&fid) {
-            if let Some(internal) = self.cur_class.clone() {
-                if let Some(cid) = self.class_info(&internal).map(|ci| ci.id) {
+            if let Some(internal) = self.cur_class {
+                if let Some(cid) = self.class_info_name(internal).map(|ci| ci.id) {
                     self.ir.classes[cid as usize].methods.push(fid);
                 }
             }
@@ -6718,10 +6718,10 @@ impl<'a> Lower<'a> {
     /// counting it here would make the outer splice's `this`-capture asymmetric with its (shallow) named
     /// captures.
     fn lambda_uses_enclosing_this(&self, body: AstExprId, bound: &[String], deep: bool) -> bool {
-        let Some(cur) = self.cur_class.clone() else {
+        let Some(cur) = self.cur_class else {
             return false;
         };
-        fn scan(lo: &Lower, cur: &str, bound: &[String], e: AstExprId, deep: bool) -> bool {
+        fn scan(lo: &Lower, cur: TypeName, bound: &[String], e: AstExprId, deep: bool) -> bool {
             if let Expr::Name(n) = lo.afile.expr(e) {
                 // `this`/`super` (incl. labeled `this@Outer`) are bare names here, not a dedicated
                 // variant — an explicit enclosing-instance reference.
@@ -6732,7 +6732,8 @@ impl<'a> Lower<'a> {
                 // A bare name resolving to an instance field/method of the enclosing class is an
                 // implicit-`this` member access.
                 if !bound.contains(n)
-                    && (lo.resolve_field(cur, n).is_some() || lo.resolve_method(cur, n).is_some())
+                    && (lo.resolve_field_name(cur, n).is_some()
+                        || lo.resolve_method_name(cur, n).is_some())
                 {
                     return true;
                 }
@@ -6747,7 +6748,7 @@ impl<'a> Lower<'a> {
                         .any_child_stmt(s, &mut |c| scan(lo, cur, bound, c, deep))
                 })
         }
-        scan(self, &cur, bound, body, deep)
+        scan(self, cur, bound, body, deep)
     }
 
     /// In an inner-class constructor prelude (`super(...)` arguments), the captured outer instance is a
@@ -9600,8 +9601,8 @@ impl<'a> Lower<'a> {
     /// `obj::m` form does. Member-property and extension implicit refs aren't modeled here (the type
     /// isn't `Ty::Fun` / there's no member method), so they fall through.
     fn lower_implicit_this_method_ref(&mut self, e: AstExprId, name: &str) -> Option<u32> {
-        let internal = self.cur_class.clone()?;
-        let (_, _, target_fid, _) = self.resolve_method(&internal, name)?;
+        let internal = self.cur_class?;
+        let (_, _, target_fid, _) = self.resolve_method_name(internal, name)?;
         let Ty::Fun(sig) = self.info.ty(e) else {
             return None;
         };
@@ -9612,12 +9613,12 @@ impl<'a> Lower<'a> {
         // If the accessor can't be synthesized, BAIL (skip the file) rather than fall back to the private
         // method, which would emit an illegal access.
         let call_name = if self.ir.private_methods.contains(&target_fid) {
-            self.ensure_private_accessor(&internal, name)?
+            self.ensure_private_accessor_name(internal, name)?
         } else {
             name.to_string()
         };
         let call_interface = self
-            .class_info(&internal)
+            .class_info_name(internal)
             .is_some_and(|ci| self.ir.classes[ci.id as usize].is_interface);
         let this_e = self.emit_get_value(0);
         let param_tys = tys_to_ir(&sig.params);
@@ -9625,11 +9626,11 @@ impl<'a> Lower<'a> {
             e.0,
             true,
             sig.params.len() as u8,
-            Some(type_name(&internal)),
+            Some(internal),
             name.to_string(),
             0,
             crate::ir::FrDispatch::VirtualBound,
-            Some(type_name(&internal)),
+            Some(internal),
             call_name,
             call_interface,
             param_tys,
@@ -9982,7 +9983,7 @@ impl<'a> Lower<'a> {
     /// through `this$0`). Returns `(method_class, method_index, method_fid, inner_class_id)`.
     fn inner_outer_method(&self, name: &str) -> Option<(ClassId, u32, u32, ClassId)> {
         let cur = self.cur_class.as_ref()?;
-        let cur_id = self.class_info(cur)?.id;
+        let cur_id = self.class_info_name(*cur)?.id;
         let outer = match self.ir.classes[cur_id as usize].fields.first() {
             Some(IrField { name: n0, ty, .. })
                 if n0 == "this$0" && ty.non_null().obj_internal().is_some() =>
@@ -11110,8 +11111,8 @@ impl<'a> Lower<'a> {
         recv_slot_ty: Option<Ty>,
     ) -> Option<u32> {
         let (class, idx, pty) = self.resolve_field(recv_internal, name)?;
-        let owner_internal = self.ir.classes[class as usize].fq_name();
-        if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
+        let owner_internal = self.ir.classes[class as usize].fq_name_id();
+        if self.cur_class != Some(owner_internal) {
             if let Some((mclass, mindex, _, _)) =
                 self.resolve_method(recv_internal, &property_getter_name(name))
             {
@@ -11121,8 +11122,8 @@ impl<'a> Lower<'a> {
         }
         // Smartcast: if the receiver's slot type isn't the owning class, checkcast it so `getfield` is
         // valid (an erased generic / `Any?` local narrowed by `is`).
-        let recv = if recv_slot_ty.is_some_and(|t| t != Ty::obj(&owner_internal)) {
-            self.emit_type_op(IrTypeOp::Cast, recv, ty_to_ir(Ty::obj(&owner_internal)))
+        let recv = if recv_slot_ty.is_some_and(|t| t != Ty::obj_name(owner_internal)) {
+            self.emit_type_op(IrTypeOp::Cast, recv, ty_to_ir(Ty::obj_name(owner_internal)))
         } else {
             recv
         };
@@ -11807,7 +11808,7 @@ impl<'a> Lower<'a> {
         let recv = self.expr(rl.receiver)?;
         let depth = self.scope.len();
         let p_slot = self.fresh_value();
-        let saved_cur = self.cur_class.clone();
+        let saved_cur = self.cur_class;
         self.cur_class = None;
         self.scope.push(("this".to_string(), p_slot, rty));
         let var_p = self.emit_variable(p_slot, ty_to_ir(rty), Some(recv));
@@ -11848,7 +11849,7 @@ impl<'a> Lower<'a> {
         };
         let depth = self.scope.len();
         let p_slot = self.fresh_value();
-        let saved_cur = self.cur_class.clone();
+        let saved_cur = self.cur_class;
         if pname == "this" {
             self.cur_class = None;
         }
@@ -13017,12 +13018,10 @@ impl<'a> Lower<'a> {
                         // A `var` custom-accessor property writes through `setX`, never the raw field.
                         // A `val` custom-accessor (no setter) is assigned once in a constructor by
                         // writing its backing field directly, so it is NOT excluded here.
-                        if existing_type_name(c).is_some_and(|c| {
-                            self.field_accessor_var_props.contains(&(c, name.clone()))
-                        }) {
+                        if self.field_accessor_var_props.contains(&(*c, name.clone())) {
                             return None;
                         }
-                        self.class_info(c).and_then(|ci| {
+                        self.class_info_name(*c).and_then(|ci| {
                             ci.fields
                                 .iter()
                                 .position(|(fn_, _)| *fn_ == name)
@@ -13125,12 +13124,10 @@ impl<'a> Lower<'a> {
                     // A field of *this* class is read/written directly; an inherited one (or an external
                     // `this`), or a CUSTOM-accessor property, goes through its getter/setter accessors.
                     let own = self.cur_class.as_ref().and_then(|c| {
-                        if existing_type_name(c)
-                            .is_some_and(|c| self.field_accessor_props.contains(&(c, name.clone())))
-                        {
+                        if self.field_accessor_props.contains(&(*c, name.clone())) {
                             return None;
                         }
-                        self.class_info(c).and_then(|ci| {
+                        self.class_info_name(*c).and_then(|ci| {
                             ci.fields
                                 .iter()
                                 .position(|(fn_, _)| *fn_ == name)
@@ -14060,7 +14057,7 @@ impl<'a> Lower<'a> {
         let owner_internal = self.class_of(rt)?.internal();
         // The backing field is private; a write from outside the declaring class goes through
         // the public `setX()` accessor (matching kotlinc). Inside the class, write directly.
-        if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
+        if self.cur_class != existing_type_name(&owner_internal) {
             if let Some((mclass, mindex, mfid, _)) =
                 self.resolve_method(&owner_internal, &property_setter_name(name))
             {
@@ -14974,7 +14971,7 @@ impl<'a> Lower<'a> {
         let recv2 = self.emit_get_value(v);
         let member = if let Some((fclass, idx, _)) = self.resolve_field(&internal, name) {
             let owner_internal = self.ir.classes[fclass as usize].fq_name();
-            if self.cur_class.as_deref() != Some(owner_internal.as_str()) {
+            if self.cur_class != existing_type_name(&owner_internal) {
                 if let Some((mclass, mindex, _, _)) =
                     self.resolve_method(&internal, &property_getter_name(name))
                 {
@@ -15839,8 +15836,8 @@ impl<'a> Lower<'a> {
                     match self.info.expr_lowers.get(&e) {
                         Some(ExprLowering::LabeledThisInner) => "this".to_string(),
                         Some(ExprLowering::LabeledThisOuter) => {
-                            let internal = self.cur_class.clone()?;
-                            let class = self.class_info(&internal)?.id;
+                            let internal = self.cur_class?;
+                            let class = self.class_info_name(internal)?.id;
                             if let Some((v, _)) = self.lookup("this$0") {
                                 return Some(self.emit_get_value(v));
                             }
@@ -15980,8 +15977,7 @@ impl<'a> Lower<'a> {
                 } else if let Some(c) = self
                     .cur_class
                     .as_ref()
-                    .and_then(|cc| existing_type_name(cc))
-                    .and_then(|cc| self.object_const_lits.get(&(cc, n.clone())))
+                    .and_then(|cc| self.object_const_lits.get(&(*cc, n.clone())))
                     .cloned()
                 {
                     // A `const val` of the enclosing `object` read UNQUALIFIED inside its own method
@@ -16092,21 +16088,20 @@ impl<'a> Lower<'a> {
                         let (fclass, idx, _) = self.resolve_field_name(bi, &n)?;
                         return Some(self.emit_get_field(cast, fclass, idx));
                     }
-                    let read = if let Some(cur) = self.cur_class.clone() {
+                    let read = if let Some(cur) = self.cur_class {
                         // An interface has no backing fields — its properties are abstract getters, so
                         // an unqualified property read in a default method routes through the getter
                         // (`invokeinterface getX`), never a (nonexistent) interface field.
                         let cur_is_iface = self
-                            .class_info(&cur)
+                            .class_info_name(cur)
                             .is_some_and(|ci| self.ir.classes[ci.id as usize].is_interface);
                         let field = if cur_is_iface
-                            || existing_type_name(&cur).is_some_and(|cur| {
-                                self.field_accessor_props.contains(&(cur, n.clone()))
-                            }) {
+                            || self.field_accessor_props.contains(&(cur, n.clone()))
+                        {
                             // A custom-accessor property reads through `getX`, never the raw field.
                             None
                         } else {
-                            self.class_info(&cur).and_then(|ci| {
+                            self.class_info_name(cur).and_then(|ci| {
                                 ci.fields
                                     .iter()
                                     .position(|(fn_, _)| *fn_ == n)
@@ -16116,12 +16111,12 @@ impl<'a> Lower<'a> {
                         if let Some((class, idx)) = field {
                             self.emit_get_field(recv, class, idx)
                         } else if let Some((class, index, _, _)) =
-                            self.resolve_method(&cur, &property_getter_name(&n))
+                            self.resolve_method_name(cur, &property_getter_name(&n))
                         {
                             self.emit_method_call(class, index, recv, vec![])
                         } else {
                             // An inner class reads an enclosing member through `this$0` (its field 0).
-                            let cur_id = self.class_info(&cur)?.id;
+                            let cur_id = self.class_info_name(cur)?.id;
                             let outer = match self.ir.classes[cur_id as usize].fields.first() {
                                 Some(IrField { name: n0, ty, .. })
                                     if n0 == "this$0" && ty.non_null().obj_internal().is_some() =>
@@ -17704,9 +17699,9 @@ impl<'a> Lower<'a> {
                     // a top-level function) — invoking a function value through a field isn't modeled;
                     // bail rather than miscompile (it would emit a bogus constructor call).
                     if self.lookup(&fname).is_none() && !self.module_declares(&fname) {
-                        if let Some(cur) = self.cur_class.clone() {
+                        if let Some(cur) = self.cur_class {
                             if self
-                                .class_info(&cur)
+                                .class_info_name(cur)
                                 .map_or(false, |ci| ci.fields.iter().any(|(n, _)| *n == fname))
                             {
                                 return None;
@@ -17921,10 +17916,9 @@ impl<'a> Lower<'a> {
                             && self.lookup(&fname).is_none()
                             && !self.module_declares(&fname)
                             && (self.info.resolved_member(e).is_some()
-                                || self
-                                    .cur_class
-                                    .as_ref()
-                                    .is_some_and(|cur| self.resolve_method(cur, &fname).is_some()))
+                                || self.cur_class.as_ref().is_some_and(|cur| {
+                                    self.resolve_method_name(*cur, &fname).is_some()
+                                }))
                         {
                             self.lookup("this").and_then(|(this_v, this_ty)| {
                                 self.lower_this_member_call(this_v, this_ty, &fname, &args, e)
@@ -17979,14 +17973,14 @@ impl<'a> Lower<'a> {
                             "resolve",
                             "lower toplevel-callable probe {fname}() cur_class={:?} has_member={}",
                             self.cur_class,
-                            self.cur_class
-                                .as_ref()
-                                .is_some_and(|cur| self.resolve_method(cur, &fname).is_some())
+                            self.cur_class.as_ref().is_some_and(|cur| self
+                                .resolve_method_name(*cur, &fname)
+                                .is_some())
                         );
                         if self
                             .cur_class
                             .as_ref()
-                            .is_some_and(|cur| self.resolve_method(cur, &fname).is_some())
+                            .is_some_and(|cur| self.resolve_method_name(*cur, &fname).is_some())
                         {
                             None
                         } else {
@@ -18164,8 +18158,7 @@ impl<'a> Lower<'a> {
                         }
                     } else if let Some((cur, (class, index, mfid, _))) = self
                         .cur_class
-                        .clone()
-                        .and_then(|cur| self.resolve_method(&cur, &fname).map(|m| (cur, m)))
+                        .and_then(|cur| self.resolve_method_name(cur, &fname).map(|m| (cur, m)))
                     {
                         // Unqualified instance method call inside a class body: `foo()` → `this.foo()`.
                         crate::trace_compiler!(
@@ -18174,7 +18167,7 @@ impl<'a> Lower<'a> {
                             self.ir.functions[mfid as usize].ret
                         );
                         let params = self.ir.functions[mfid as usize].params.clone();
-                        let vararg = self.syms.method_is_vararg(&cur, &fname);
+                        let vararg = self.syms.method_is_vararg_name(cur, &fname);
                         let n_fixed = vararg_arity(vararg, params.len(), args.len())?;
                         let this = self.emit_get_value(0);
                         let a = self.lower_call_args_vararg(&args, &params, vararg, n_fixed)?;
@@ -18558,8 +18551,8 @@ impl<'a> Lower<'a> {
                         if matches!(self.afile.expr(receiver), Expr::Name(rn) if rn.contains('@')) {
                             return None;
                         }
-                        let cur = self.cur_class.clone()?;
-                        let cur_id = self.class_info(&cur)?.id as usize;
+                        let cur = self.cur_class?;
+                        let cur_id = self.class_info_name(cur)?.id as usize;
                         // A `super.f()` inside a `@JvmInline value class` calls through the unboxed
                         // receiver, which invokespecial can't target — not modeled (value classes are
                         // handled by the dedicated pass); skip rather than emit a verify error.
@@ -18832,7 +18825,7 @@ impl<'a> Lower<'a> {
                         // An inlined receiver lambda runs in the *caller's* method, so the receiver's
                         // members are accessed externally (getter/setter), never as the enclosing
                         // class's own private fields — clear `cur_class` for the body.
-                        let saved_cur = self.cur_class.clone();
+                        let saved_cur = self.cur_class;
                         if is_recv_lambda {
                             self.cur_class = None;
                         }
