@@ -1262,8 +1262,11 @@ impl IrFile {
     }
 
     pub fn mark_value_param_ctor(&mut self, internal: &str) {
-        self.value_param_ctors
-            .insert(crate::types::type_name(internal));
+        self.mark_value_param_ctor_name(crate::types::type_name(internal));
+    }
+
+    pub fn mark_value_param_ctor_name(&mut self, internal: TypeName) {
+        self.value_param_ctors.insert(internal);
     }
 
     pub fn has_value_param_ctor(&self, internal: &str) -> bool {

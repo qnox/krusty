@@ -276,7 +276,7 @@ pub fn lower_value_classes(
                     }
                 });
                 let u = if null_capable { Ty::nullable(*t) } else { *t };
-                (type_name(&c.fq_name()), u)
+                (c.fq_name, u)
             })
         })
         .collect();
@@ -315,11 +315,11 @@ pub fn lower_value_classes(
     // codegen would emit an unsound cast (the shape reaches here only via an `Outer<X>.Inner<Y>`
     // underlying). Bail so the whole file skips cleanly rather than miscompiling. An inner class is
     // identified by its synthetic `this$0` first field (created only at inner-class synthesis).
-    let inner_class_names: std::collections::HashSet<String> = ir
+    let inner_class_names: std::collections::HashSet<TypeName> = ir
         .classes
         .iter()
         .filter(|c| c.fields.first().is_some_and(|f| f.name == "this$0"))
-        .map(|c| c.fq_name().replace(['.', '$'], "/"))
+        .map(|c| c.fq_name)
         .collect();
     if !inner_class_names.is_empty()
         && value_class_ids.iter().any(|&cid| {
@@ -327,7 +327,7 @@ pub fn lower_value_classes(
                 .fields
                 .first()
                 .and_then(|f| f.ty.kotlin_class_internal())
-                .is_some_and(|n| inner_class_names.contains(&n.render().replace(['.', '$'], "/")))
+                .is_some_and(|n| inner_class_names.contains(&n))
         })
     {
         return false;
@@ -414,7 +414,7 @@ pub fn lower_value_classes(
 
     // Per-class id metadata (parallel to ir.classes).
     let is_vc: Vec<bool> = ir.classes.iter().map(|c| c.is_value).collect();
-    let fq: Vec<TypeName> = ir.classes.iter().map(|c| type_name(&c.fq_name())).collect();
+    let fq: Vec<TypeName> = ir.classes.iter().map(|c| c.fq_name).collect();
     // Getter method name for each value class's sole field (`getV`), to recognize property access.
     let getter: Vec<Option<String>> = ir
         .classes
@@ -437,7 +437,7 @@ pub fn lower_value_classes(
         .filter_map(|c| {
             c.fields
                 .first()
-                .map(|f| (type_name(&c.fq_name()), property_getter_name(&f.name)))
+                .map(|f| (c.fq_name, property_getter_name(&f.name)))
         })
         .collect();
     // A classpath value class's sole-property getter (`ids/RoleId` → `getV`), so `r.v` (an
@@ -449,11 +449,11 @@ pub fn lower_value_classes(
 
     // Interfaces that value classes implement — a function returning one of these (or `Any`) boxes a
     // value-class tail so virtual/interface dispatch works.
-    let vc_interfaces: HashSet<String> = ir
+    let vc_interfaces: HashSet<TypeName> = ir
         .classes
         .iter()
         .filter(|c| c.is_value)
-        .flat_map(|c| c.interfaces.iter_rendered())
+        .flat_map(|c| c.interfaces.iter_ids())
         .collect();
 
     // Functions that are members of a value class — their bodies operate on the BOXED object and must
@@ -546,7 +546,7 @@ pub fn lower_value_classes(
         .classes
         .iter()
         .filter(|c| c.is_value && !c.type_params.is_empty())
-        .map(|c| type_name(&c.fq_name()))
+        .map(|c| c.fq_name)
         .collect();
     let mut slot_types = slot_types;
     for c in &ir.classes {
@@ -631,10 +631,11 @@ pub fn lower_value_classes(
     // `(owner-internal, plain name, arity)` → mangled name, for rewriting resolved-by-name calls
     // (`super.f(vc)`, an interface method) to the value-class-mangled method.
     let mut mangle_map: HashMap<(TypeName, String, usize), String> = HashMap::new();
-    let mut target_param_map: HashMap<(String, String, usize), Vec<Ty>> = HashMap::new();
-    let mut target_nullable_map: HashMap<(String, String, usize), Vec<bool>> = HashMap::new();
+    let mut target_param_map: HashMap<(Option<TypeName>, String, usize), Vec<Ty>> = HashMap::new();
+    let mut target_nullable_map: HashMap<(Option<TypeName>, String, usize), Vec<bool>> =
+        HashMap::new();
     for (fid, f) in ir.functions.iter().enumerate() {
-        let owner = f.dispatch_receiver.clone().unwrap_or_default();
+        let owner = f.dispatch_receiver.as_deref().map(type_name);
         let key = (owner, f.name.clone(), orig_params[fid].len());
         let nullable = orig_params[fid]
             .iter()
@@ -787,9 +788,7 @@ pub fn lower_value_classes(
                 let Some(base) = f.name.strip_suffix("$annotations") else {
                     continue;
                 };
-                if let Some(mangled) =
-                    mangle_map.get(&(type_name(&c.fq_name()), base.to_string(), 0))
-                {
+                if let Some(mangled) = mangle_map.get(&(c.fq_name, base.to_string(), 0)) {
                     renames.push((fid, format!("{mangled}$annotations")));
                 }
             }
@@ -846,13 +845,13 @@ pub fn lower_value_classes(
             _ => 0usize,
         };
         let call_params = fr.param_tys[first_call_arg..].to_vec();
-        let call_owner = fr.call_owner_key();
+        let call_owner = fr.call_owner;
         let target_decl_params = target_param_map
-            .get(&(call_owner.clone(), fr.call_name.clone(), call_params.len()))
+            .get(&(call_owner, fr.call_name.clone(), call_params.len()))
             .cloned()
             .unwrap_or_else(|| call_params.clone());
         let target_nullable = target_nullable_map
-            .get(&(call_owner.clone(), fr.call_name.clone(), call_params.len()))
+            .get(&(call_owner, fr.call_name.clone(), call_params.len()))
             .cloned()
             .unwrap_or_else(|| target_decl_params.iter().map(|t| t.is_nullable()).collect());
         // A BOUND extension reference on a VALUE-CLASS receiver (`Z(42)::test`, `FrDispatch::StaticBound`)
@@ -869,7 +868,7 @@ pub fn lower_value_classes(
             target_decl_params.clone()
         };
         let fr_suspend = suspend_sig.contains(&(
-            call_owner.clone(),
+            call_owner.map(TypeName::render).unwrap_or_default(),
             fr.call_name.clone(),
             target_decl_params.len(),
         ));
@@ -952,9 +951,7 @@ pub fn lower_value_classes(
             let owner_fq = c.fq_name();
             for b in &mut c.bridges {
                 let target = b.target_name.clone().unwrap_or_else(|| b.name.clone());
-                if let Some(m) =
-                    mangle_map.get(&(type_name(&owner_fq), target, b.concrete_params.len()))
-                {
+                if let Some(m) = mangle_map.get(&(c.fq_name, target, b.concrete_params.len())) {
                     b.target_name = Some(m.clone());
                 }
                 crate::trace_compiler!(
@@ -1111,14 +1108,14 @@ pub fn lower_value_classes(
     //    that erased to a non-reference (a value-class ctor arg `a: Na` → `int` can't be null-checked).
     // A NON-value class whose primary ctor has a value-class-typed param gets kotlinc's private-primary +
     // synthetic marker accessor ABI — recorded BEFORE erasure loses the value-class identity of the param.
-    let mut value_param_ctors: Vec<String> = Vec::new();
+    let mut value_param_ctors: Vec<TypeName> = Vec::new();
     for c in &mut ir.classes {
         if !c.is_value
             && !c.is_object
             && !c.is_interface
             && c.ctor_args.iter().any(|a| is_vc_ty(&a.ty))
         {
-            value_param_ctors.push(c.fq_name());
+            value_param_ctors.push(c.fq_name);
         }
         for fld in &mut c.fields {
             fld.ty = erase(&fld.ty, &under);
@@ -1148,7 +1145,7 @@ pub fn lower_value_classes(
         }
     }
     for internal in value_param_ctors {
-        ir.mark_value_param_ctor(&internal);
+        ir.mark_value_param_ctor_name(internal);
     }
 
     for c in &mut ir.classes {
@@ -2181,7 +2178,7 @@ pub fn lower_value_classes(
             .non_null()
             .obj_internal()
             .is_some_and(|fq_name| {
-                fq_name.matches("kotlin/Any") || vc_interfaces.contains(&fq_name.render())
+                fq_name.matches("kotlin/Any") || vc_interfaces.contains(&fq_name)
             })
         {
             // A function declared to return `Any` or an interface a value class implements (NOT the
