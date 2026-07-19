@@ -5375,6 +5375,10 @@ impl<'a> Lower<'a> {
         existing_type_name(internal).and_then(|name| self.classes.get_mut(&name))
     }
 
+    fn class_info_name_mut(&mut self, internal: TypeName) -> Option<&mut ClassInfo> {
+        self.classes.get_mut(&internal)
+    }
+
     fn class_info_name(&self, internal: TypeName) -> Option<&ClassInfo> {
         self.classes.get(&internal)
     }
@@ -9568,8 +9572,7 @@ impl<'a> Lower<'a> {
         let inst = self.emit_static_instance(cid, cid, "INSTANCE");
         let (_, _, target_fid, _) = self.resolve_method_name(internal, name)?;
         let call_name = if self.ir.private_methods.contains(&target_fid) {
-            let internal_rendered = internal.render();
-            self.ensure_private_accessor(&internal_rendered, name)?
+            self.ensure_private_accessor_name(internal, name)?
         } else {
             name.to_string()
         };
@@ -9716,8 +9719,7 @@ impl<'a> Lower<'a> {
         // method of this name) — those go through the synthesized-impl path below.
         let user_method = rty
             .obj_internal()
-            .map(|internal| internal.render())
-            .filter(|internal| self.resolve_method(internal, name).is_some());
+            .filter(|internal| self.resolve_method_name(*internal, name).is_some());
         if user_method.is_none() {
             // A null-risky receiver (type parameter / nullable / bare erased `Any`) may be `null`;
             // kotlinc null-guards `toString`/`equals`/`hashCode` on those (`null::toString` → "null"),
@@ -9762,7 +9764,7 @@ impl<'a> Lower<'a> {
         // Bound member reference on a user-class receiver: synthesize `(recv, args…) -> recv.name(args…)`
         // and capture the receiver.
         let internal = user_method.expect("user method internal");
-        let (class_id, index, target_fid, _ret) = self.resolve_method(&internal, name)?;
+        let (class_id, index, target_fid, _ret) = self.resolve_method_name(internal, name)?;
         let is_adapted = params.len() < self.ir.functions[target_fid as usize].params.len();
         // The synthesized impl lives in a SEPARATE reference class; a private target would be an illegal
         // `invokespecial` from there. Target the public `access$name` accessor instead (an ordinary
@@ -9774,8 +9776,8 @@ impl<'a> Lower<'a> {
             if is_adapted {
                 return None;
             }
-            let acc = self.ensure_private_accessor(&internal, name)?;
-            let (cid, idx, _, _) = self.resolve_method(&internal, &acc)?;
+            let acc = self.ensure_private_accessor_name(internal, name)?;
+            let (cid, idx, _, _) = self.resolve_method_name(internal, &acc)?;
             (cid, idx)
         } else {
             (class_id, index)
@@ -9832,14 +9834,22 @@ impl<'a> Lower<'a> {
     /// legal. Memoized by name. Returns the accessor's method name (to retarget the reference's invoke),
     /// or `None` if the target method can't be resolved.
     fn ensure_private_accessor(&mut self, internal: &str, method_name: &str) -> Option<String> {
+        self.ensure_private_accessor_name(existing_type_name(internal)?, method_name)
+    }
+
+    fn ensure_private_accessor_name(
+        &mut self,
+        internal: TypeName,
+        method_name: &str,
+    ) -> Option<String> {
         let accessor = format!("access${method_name}");
         if self
-            .class_info(internal)
+            .class_info_name(internal)
             .is_some_and(|ci| ci.methods.contains_key(&accessor))
         {
             return Some(accessor);
         }
-        let (class_id, index, fid, ret) = self.resolve_method(internal, method_name)?;
+        let (class_id, index, fid, ret) = self.resolve_method_name(internal, method_name)?;
         let params = self.ir.functions[fid as usize].params.clone();
         let ret_ir = self.ir.functions[fid as usize].ret;
         let recv = self.emit_get_value(0);
@@ -9862,13 +9872,13 @@ impl<'a> Lower<'a> {
             ret: ret_ir,
             body: Some(body),
             is_static: false,
-            dispatch_receiver: Some(internal.to_string()),
+            dispatch_receiver: Some(internal.render()),
             param_checks: Vec::new(),
         });
-        let cid = self.class_info(internal)?.id;
+        let cid = self.class_info_name(internal)?.id;
         let idx = self.ir.classes[cid as usize].methods.len() as u32;
         self.ir.classes[cid as usize].methods.push(acc_fid);
-        if let Some(ci) = self.class_info_mut(internal) {
+        if let Some(ci) = self.class_info_name_mut(internal) {
             ci.methods.insert(accessor.clone(), (idx, acc_fid, ret));
         }
         Some(accessor)
@@ -11137,20 +11147,19 @@ impl<'a> Lower<'a> {
         // field is private). Resolved from the sibling class's `ClassSig`.
         if let Ty::Obj(i, _) = rt {
             if self.class_of(rt).is_none() {
-                let i = i.render();
                 if let Some((owner, ret_ty, is_iface)) = self
                     .syms
-                    .class_by_internal(&i)
+                    .class_by_type_name(i)
                     .filter(|cs| cs.value_field.is_none())
                     .and_then(|cs| {
-                        cs.props.iter().find_map(|(n, t, _)| {
-                            (n == name).then(|| (i.clone(), *t, cs.is_interface))
-                        })
+                        cs.props
+                            .iter()
+                            .find_map(|(n, t, _)| (n == name).then_some((i, *t, cs.is_interface)))
                     })
                 {
                     return Some(self.emit_call(
                         Callee::CrossFileVirtual {
-                            owner: type_name(&owner),
+                            owner,
                             name: property_getter_name(name),
                             params: vec![],
                             ret: ty_to_ir(ret_ty),
@@ -13992,14 +14001,13 @@ impl<'a> Lower<'a> {
         // (the backing field is private). A cross-file `val` write bails.
         if self.class_of(rt).is_none() {
             if let Ty::Obj(i, _) = &rt {
-                let i = i.render();
                 if let Some((owner, pty, is_var, interface)) = self
                     .syms
-                    .class_by_internal(&i)
+                    .class_by_type_name(*i)
                     .filter(|cs| cs.value_field.is_none())
                     .and_then(|cs| {
                         cs.props.iter().find_map(|(n, t, v)| {
-                            (n.as_str() == name).then(|| (i.clone(), *t, *v, cs.is_interface))
+                            (n.as_str() == name).then_some((*i, *t, *v, cs.is_interface))
                         })
                     })
                 {
@@ -14010,7 +14018,7 @@ impl<'a> Lower<'a> {
                     let v = self.lower_arg(value, &ty_to_ir(pty))?;
                     return Some(self.emit_call(
                         Callee::CrossFileVirtual {
-                            owner: type_name(&owner),
+                            owner,
                             name: property_setter_name(name),
                             params: vec![ty_to_ir(pty)],
                             ret: Ty::Unit,
