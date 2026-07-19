@@ -505,10 +505,10 @@ pub struct IrEnumEntry {
     /// Lowered constructor-argument value ids (`RED(0xFF0000)`); empty for an arg-less entry. Filled in a
     /// later lowering pass — built empty when the entry list is first created.
     pub args: Vec<ExprId>,
-    /// `Some(subclass_fq)` when the entry has a body and is constructed as an instance of a synthesized
+    /// `Some(subclass_internal)` when the entry has a body and is constructed as an instance of a synthesized
     /// anonymous subclass (`new Enum$ENTRY(name, ordinal, args)`); `None` when constructed as the enum
     /// itself.
-    pub subclass: Option<String>,
+    pub subclass: Option<TypeName>,
 }
 
 /// One instance field of an [`IrClass`]. Groups what were parallel `Vec`s keyed by field index, so a

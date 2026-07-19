@@ -3252,7 +3252,10 @@ fn emit_enum_class(
             };
             // A bodied entry is an instance of its synthesized subclass (`new Enum$ENTRY(...)`); the
             // subclass constructor shares the enum's `(String,int,<user>)V` descriptor.
-            let new_class = entry.subclass.clone().unwrap_or_else(|| fq.clone());
+            let new_class = entry
+                .subclass
+                .map(TypeName::render)
+                .unwrap_or_else(|| fq.clone());
             let cls = e.cw.class_ref(&new_class);
             clinit.new_obj(cls);
             clinit.dup();

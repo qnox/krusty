@@ -3625,7 +3625,8 @@ pub fn lower_file_at_reporting(
                                 true,
                             );
                         }
-                        lo.ir.classes[class_id as usize].enum_entries[ei].subclass = Some(sub_fq);
+                        lo.ir.classes[class_id as usize].enum_entries[ei].subclass =
+                            Some(type_name(&sub_fq));
                     }
                 }
             }
