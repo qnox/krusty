@@ -8528,8 +8528,6 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        // Receiver first, then arguments in SOURCE order into temps. `params[0]` is the declared
-        // receiver — upcast a subtype receiver to it (`checkcast`) for parity, as the positional path does.
         let recv_v = self.lower_ext_receiver(receiver, &params[0], &params[0])?;
         let recv_tmp = self.fresh_value();
         let recv_decl = self.emit_variable(recv_tmp, params[0], Some(recv_v));
@@ -8606,23 +8604,9 @@ impl<'a> Lower<'a> {
         self.info.ty(receiver)
     }
 
-    /// The emitted id of a top-level extension `name` applicable to a receiver of type `recv_ty`.
-    /// The EXACT receiver is tried first — identical to the original exact-key lookup, so any receiver
-    /// (primitive, classpath, user) keeps its previous binding and a builtin member/operator that
-    /// shadows an extension still wins. Only when that misses is the receiver's USER-class supertype
-    /// closure walked (interfaces before the superclass — the checker's order), so a `fun A.f()` binds
-    /// on a `B : A`. Two deliberate limits keep the walk from binding an extension the emit can't
-    /// honor the way the checker resolves it: a GENERIC user supertype (`Top<D>`) is skipped — a
-    /// generic-receiver extension needs erased-`Object` boxing the emit doesn't model, so leaving it
-    /// unmatched keeps the file skipped rather than miscompiled; and CLASSPATH supertypes (`Any`,
-    /// `Number`, …) are not walked at all, so a builtin/operator on them is never shadowed by an
-    /// extension registered under the supertype.
-    /// Returns `(fid, declared_receiver)` — the declared receiver is the type the extension was found on
-    /// (the exact receiver, or a supertype). The caller upcasts the actual receiver to it (`checkcast`)
-    /// when they differ, matching kotlinc.
+    /// The emitted id of a top-level extension `name` applicable to `recv_ty`, plus the receiver type
+    /// the extension was found on. Exact receiver matches win before walking supertypes.
     fn ext_fun_id_for_recv(&self, recv_ty: Ty, name: &str, n_args: usize) -> Option<(u32, Ty)> {
-        // An extension overloaded by arity resolves to the overload whose logical parameter count
-        // matches the call's argument count; a single-overload extension falls back to the primary id.
         let pick = |recv: Ty| {
             self.ext_fun_id_by_arity
                 .get(&(recv.erased_recv(), name.to_string(), n_args))
@@ -8635,12 +8619,6 @@ impl<'a> Lower<'a> {
         if let Some(fid) = pick(recv_ty) {
             return Some((fid, recv_ty));
         }
-        // A MEMBER (own or inherited through the user hierarchy) shadows a SUPERTYPE extension of the
-        // same name — decline so the call lowers as a member instead (Kotlin member-over-extension
-        // precedence). Without this, `.contains(1)` on a `Foo` subtype would bind the vararg
-        // `fun Foo.contains` extension over the real `Foo.contains` member. This guards only the
-        // supertype walk below; the exact-receiver key above is the long-standing exact lookup this
-        // method replaced, kept verbatim so no exact-receiver call changes binding.
         if let Some(i) = recv_ty.non_null().obj_internal() {
             if self.resolve_method(i, name).is_some() {
                 return None;
@@ -8657,14 +8635,9 @@ impl<'a> Lower<'a> {
             if !seen.insert(internal.clone()) {
                 continue;
             }
-            // Never bind on `Any`/`Object`: an extension registered there must not shadow a builtin.
             if internal == "kotlin/Any" || internal == "java/lang/Object" {
                 continue;
             }
-            // A GENERIC user supertype (`Top<D>`) needs erased-`Object` boxing the emit doesn't model —
-            // skip BINDING on it (but keep walking through). A classpath supertype is keyed by its raw
-            // internal (no type args), so it binds normally — this lets a same-file extension on a
-            // classpath BASE (`fun V.f()`) resolve when called on a classpath SUBTYPE value (`V.Ok`).
             let generic_user = self
                 .syms
                 .class_by_internal(&internal)
@@ -8682,10 +8655,6 @@ impl<'a> Lower<'a> {
         None
     }
 
-    /// Lower an extension call's receiver as its first argument, coerced to the extension's declared
-    /// receiver `param0`. When the receiver's static type is a strict SUBTYPE of the declared receiver
-    /// (`fun A.f()` called on a `B : A`), kotlinc emits an explicit `checkcast` upcast before the static
-    /// call — replicate it for byte parity; the exact-receiver case gets none.
     fn lower_ext_receiver(
         &mut self,
         receiver: AstExprId,
@@ -8700,10 +8669,6 @@ impl<'a> Lower<'a> {
         Some(recv)
     }
 
-    /// The DIRECT supertypes (implemented interfaces + superclass) of `internal`, whether a same-file
-    /// user class (`ClassSig`) or a classpath type (library `@Metadata`). The uniform supertype step that
-    /// [`Self::ext_fun_id_for_recv`] walks, so an extension declared on a classpath base binds on a
-    /// classpath subtype exactly as it does across the user hierarchy.
     fn direct_supertypes(&self, internal: &str) -> Vec<String> {
         if let Some(c) = self.syms.class_by_internal(internal) {
             let mut v = c.interfaces.clone();
@@ -18931,8 +18896,6 @@ impl<'a> Lower<'a> {
                     }
                     // A top-level extension function `recv.name(args)` → a static call whose first
                     // argument is the receiver (matching how the extension was registered/emitted).
-                    // Resolve exact-receiver-first, then the receiver's supertype closure, so a
-                    // `fun A.f()` called on a `B : A` binds (the checker already resolves it that way).
                     {
                         if let Some((fid, decl_recv)) =
                             self.ext_fun_id_for_recv(self.recv_ty(receiver), &name, args.len())
