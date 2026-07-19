@@ -1665,6 +1665,15 @@ pub fn collect_signatures_with_cp(
                         } else {
                             match (&bp.ty, &bp.getter) {
                                 (Some(r), _) => ty_of_ref(r, &class_names, &ctp, diags),
+                                (None, Some(FunBody::Expr(g))) if !c.is_value => infer_lit_ty_p(
+                                    file,
+                                    *g,
+                                    &class_names,
+                                    &fun_rets,
+                                    &init_scope,
+                                    &*libraries,
+                                    &|ci, cn| table.prop_of(ci, cn).map(|(pt, _)| pt),
+                                ),
                                 (None, Some(FunBody::Expr(g))) => {
                                     let locals: HashMap<&str, Ty> = init_scope
                                         .iter()
