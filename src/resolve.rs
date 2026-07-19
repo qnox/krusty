@@ -1036,15 +1036,15 @@ fn import_levels(file: &File, platform_defaults: &[&str]) -> [Vec<String>; 4] {
 /// within one level are AMBIGUOUS — kotlinc rejects a name two star-imports both supply — and resolve
 /// to `None` (a genuinely ambiguous name never appears in a compiling program). A classpath `typealias`
 /// candidate resolves to its target internal. Existence is verified via `resolve_type`.
-fn resolve_name_against_imports(
+fn resolve_name_against_imports_name(
     name: &str,
     explicit: &HashMap<String, String>,
     levels: &[Vec<String>],
     source: &dyn SymbolSource,
-) -> Option<String> {
+) -> Option<TypeName> {
     if let Some(fq) = explicit.get(name) {
         // A nested-type import (`import lib.Outer.Ws` → `lib/Outer$Ws`) resolves through the flat form.
-        if let Some(internal) = resolve_nested_internal(fq, source) {
+        if let Some(internal) = resolve_nested_internal_name(fq, source) {
             return Some(internal);
         }
     }
@@ -1064,7 +1064,7 @@ fn resolve_name_against_imports(
         }
         match hits.len() {
             0 => continue,
-            1 => return hits.into_iter().next().map(TypeName::render),
+            1 => return hits.into_iter().next(),
             _ => return None, // ambiguous within this level — kotlinc rejects; leave unresolved
         }
     }
@@ -1109,14 +1109,15 @@ fn object_member_import_sig(file: &File, name: &str, src: &dyn SymbolSource) -> 
 }
 
 fn resolve_nested_internal(internal: &str, source: &dyn SymbolSource) -> Option<String> {
+    resolve_nested_internal_name(internal, source).map(TypeName::render)
+}
+
+fn resolve_nested_internal_name(internal: &str, source: &dyn SymbolSource) -> Option<TypeName> {
     // A `typealias` resolves to its target internal, not to the (classless) alias name.
-    let resolved = |name: &str| -> Option<String> {
-        let t = source.resolve_type(name)?;
-        Some(
-            t.alias_target
-                .map(|target| target.render())
-                .unwrap_or_else(|| name.to_string()),
-        )
+    let resolved = |name: &str| -> Option<TypeName> {
+        let name = type_name(name);
+        let t = source.resolve_type_name(name)?;
+        Some(t.alias_target.unwrap_or(name))
     };
     if let Some(r) = resolved(internal) {
         return Some(r);
@@ -1254,7 +1255,7 @@ pub fn collect_signatures_with_cp(
     // alias expansion so a user `typealias A = Foo` (Foo a classpath type) finds `Foo` already resolved.
     // A name imported INCONSISTENTLY across files (different full internals) is left unresolved (ambiguous).
     {
-        let mut from_import: HashMap<String, Option<String>> = HashMap::new();
+        let mut from_import: HashMap<String, Option<TypeName>> = HashMap::new();
         for file in files {
             let imap = import_map(file);
             let wilds = import_wildcards(file, platform_default_imports);
@@ -1271,7 +1272,7 @@ pub fn collect_signatures_with_cp(
                 // Resolve the name to an FQN against the file's import set (explicit import, then the
                 // implicit FQN candidates by kotlinc precedence) — the SAME resolver the checker uses.
                 // Fall back to a dotted FQ / nested-under-prefix.
-                let full = resolve_name_against_imports(&name, &imap, &levels, &*libraries)
+                let full = resolve_name_against_imports_name(&name, &imap, &levels, &*libraries)
                     .or_else(|| {
                         // A dotted type name (`lib.Thing`, `Wrap.Box`) — resolve the FQ package path
                         // or a nested type under a resolvable outer prefix.
@@ -1282,6 +1283,7 @@ pub fn collect_signatures_with_cp(
                             &wilds,
                             &*libraries,
                         )
+                        .map(|internal| type_name(&internal))
                     });
                 if let Some(full) = full {
                     match from_import.get(&name) {
@@ -1298,7 +1300,7 @@ pub fn collect_signatures_with_cp(
         }
         for (simple, full) in from_import {
             if let Some(full) = full {
-                class_names.insert(simple, full);
+                class_names.insert_name(simple, full);
             }
         }
     }
@@ -7130,12 +7132,12 @@ impl<'a> Checker<'a> {
     /// precedence level, with same-level ambiguity left unresolved. Existence is verified via
     /// `resolve_type`.
     fn imported_type_internal(&self, name: &str) -> Option<String> {
-        let source = self.fed_source();
-        resolve_name_against_imports(name, &self.imports, &self.import_levels, &source)
+        self.imported_type_name(name).map(TypeName::render)
     }
 
     fn imported_type_name(&self, name: &str) -> Option<TypeName> {
-        self.imported_type_internal(name).as_deref().map(type_name)
+        let source = self.fed_source();
+        resolve_name_against_imports_name(name, &self.imports, &self.import_levels, &source)
     }
 
     /// Resolve a dotted import flattened to slashes (`import lib.Scope.Ws` → `lib/Scope/Ws`) to the
