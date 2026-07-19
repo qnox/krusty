@@ -3802,10 +3802,10 @@ pub fn lower_file_at_reporting(
     // class. A primitive-underlying value class (`UInt`/`ULong` → `Int`/`Long`) is EXCLUDED — it keeps
     // its existing dedicated handling, and erasing it here would disturb that.
     {
-        let mut referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let note = |t: &Ty, set: &mut std::collections::HashSet<String>| {
+        let mut referenced: std::collections::HashSet<TypeName> = std::collections::HashSet::new();
+        let note = |t: &Ty, set: &mut std::collections::HashSet<TypeName>| {
             if let Some(fq_name) = t.non_null().obj_internal() {
-                set.insert(fq_name.to_string());
+                set.insert(fq_name);
             }
         };
         for f in &lo.ir.functions {
@@ -3849,7 +3849,7 @@ pub fn lower_file_at_reporting(
                     callee: Callee::Static { owner, name, .. },
                     ..
                 } if name.starts_with("constructor-impl") || name == "box-impl" => {
-                    referenced.insert(owner.render());
+                    referenced.insert(*owner);
                 }
                 _ => {}
             }
@@ -3863,7 +3863,7 @@ pub fn lower_file_at_reporting(
                 lo.runtime
                     .unsigned_integer_box_type(u)
                     .and_then(|b| b.obj_internal())
-                    .is_some_and(|n| n.matches(fq.as_str()))
+                    .is_some_and(|n| n == fq)
             });
             if native_unsigned {
                 continue;
@@ -3871,10 +3871,10 @@ pub fn lower_file_at_reporting(
             // The unsigned specialized arrays (`UIntArray`, `ULongArray`) are inline classes over
             // `[I`/`[J`, but the compiler models and emits them AS the primitive array — never boxing to
             // the wrapper object. Excluding them here keeps them out of the value-class erasure map.
-            if crate::types::prim_array_element(&fq).is_some() {
+            if crate::types::prim_array_element(&fq.render()).is_some() {
                 continue;
             }
-            let Some(t) = lo.syms.libraries.resolve_type(&fq) else {
+            let Some(t) = lo.syms.libraries.resolve_type_name(fq) else {
                 continue;
             };
             if let Some(under) = t.value_underlying {
@@ -3887,7 +3887,7 @@ pub fn lower_file_at_reporting(
                     Some(scalar) => ty_to_ir(scalar),
                     None => Ty::nullable(ty_to_ir(under)),
                 };
-                lo.ir.insert_external_value_class(&fq, ir_under);
+                lo.ir.insert_external_value_class_name(fq, ir_under);
                 // The sole-property getter (`getV`) — the no-arg member returning the underlying — so
                 // the value-class pass can rewrite `x.v` (emitted as `invokevirtual X.getV()`) to
                 // identity on the unboxed value.
@@ -3897,7 +3897,7 @@ pub fn lower_file_at_reporting(
                     .find(|m| m.params.is_empty() && m.ret == under && m.name.starts_with("get"))
                 {
                     lo.ir
-                        .insert_external_value_class_getter(&fq, getter.name.clone());
+                        .insert_external_value_class_getter_name(fq, getter.name.clone());
                 }
             }
         }

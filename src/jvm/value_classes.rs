@@ -444,7 +444,7 @@ pub fn lower_value_classes(
     // `invokevirtual X.getV()`) on an unboxed external value is rewritten to identity like a user one.
     vc_getters.extend(
         ir.external_value_class_getters()
-            .map(|(k, v)| (type_name(&k), v.to_string())),
+            .map(|(k, v)| (k, v.to_string())),
     );
 
     // Interfaces that value classes implement — a function returning one of these (or `Any`) boxes a

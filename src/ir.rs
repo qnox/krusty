@@ -1315,49 +1315,26 @@ impl IrFile {
             .get(&crate::types::type_name(internal))
     }
 
-    pub fn insert_external_value_class(&mut self, internal: &str, underlying: Ty) {
-        self.external_value_classes
-            .insert(crate::types::type_name(internal), underlying);
-    }
-
-    pub fn external_value_class(&self, internal: &str) -> Option<&Ty> {
-        self.external_value_classes
-            .get(&crate::types::type_name(internal))
+    pub fn insert_external_value_class_name(&mut self, internal: TypeName, underlying: Ty) {
+        self.external_value_classes.insert(internal, underlying);
     }
 
     pub fn external_value_class_name(&self, internal: TypeName) -> Option<&Ty> {
         self.external_value_classes.get(&internal)
     }
 
-    pub fn has_external_value_class(&self, internal: &str) -> bool {
-        self.external_value_class(internal).is_some()
-    }
-
     pub fn has_external_value_class_name(&self, internal: TypeName) -> bool {
         self.external_value_class_name(internal).is_some()
     }
 
-    pub fn insert_external_value_class_getter(&mut self, internal: &str, getter: String) {
-        self.external_value_class_getters
-            .insert(crate::types::type_name(internal), getter);
+    pub fn insert_external_value_class_getter_name(&mut self, internal: TypeName, getter: String) {
+        self.external_value_class_getters.insert(internal, getter);
     }
 
-    pub fn external_value_class_getter(&self, internal: &str) -> Option<&str> {
-        self.external_value_class_getters
-            .get(&crate::types::type_name(internal))
-            .map(String::as_str)
-    }
-
-    pub fn external_value_classes(&self) -> impl Iterator<Item = (String, Ty)> + '_ {
-        self.external_value_classes
-            .iter()
-            .map(|(&internal, &ty)| (internal.render(), ty))
-    }
-
-    pub fn external_value_class_getters(&self) -> impl Iterator<Item = (String, &str)> + '_ {
+    pub fn external_value_class_getters(&self) -> impl Iterator<Item = (TypeName, &str)> + '_ {
         self.external_value_class_getters
             .iter()
-            .map(|(&internal, getter)| (internal.render(), getter.as_str()))
+            .map(|(&internal, getter)| (internal, getter.as_str()))
     }
 
     pub fn param_defaults(&self, fid: u32) -> Option<&Vec<Option<ExprId>>> {
