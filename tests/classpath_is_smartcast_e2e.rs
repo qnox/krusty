@@ -48,6 +48,30 @@ fn is_smartcast_to_imported_top_level_subclass() {
 }
 
 #[test]
+fn this_smartcast_reads_classpath_subclass_member() {
+    const LIB: &str = "package q\n\
+        sealed class V {\n\
+        \x20 abstract val id: String\n\
+        \x20 class Ok(override val id: String, val v: String) : V()\n\
+        \x20 class Err(override val id: String, val why: String) : V()\n\
+        }\n\
+        object Make { fun ok(id: String, v: String): V = V.Ok(id, v)\n\
+        \x20 fun err(id: String, why: String): V = V.Err(id, why) }\n";
+    const MAIN: &str = "import q.V\nimport q.Make\n\
+        fun V.render(): String = when (this) {\n\
+        \x20 is V.Ok -> id + \":\" + v\n\
+        \x20 is V.Err -> id + \"!\" + why\n\
+        }\n\
+        fun box(): String =\n\
+        \x20 if (Make.ok(\"a\", \"x\").render() == \"a:x\" && Make.err(\"b\", \"y\").render() == \"b!y\") \"OK\"\n\
+        \x20 else \"fail\"\n";
+    assert_eq!(
+        run("cc1_this", LIB, MAIN).expect("this smart-cast classpath member"),
+        "OK"
+    );
+}
+
+#[test]
 fn is_smartcast_negated_else_branch() {
     // The `!is` / else-branch narrowing (`if (v !is Ok) return "x"; v.v`) also resolves the classpath type.
     const LIB: &str = "package q\n\
