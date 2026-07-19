@@ -6827,9 +6827,9 @@ impl<'a> Lower<'a> {
         let callees = std::cell::RefCell::new(Vec::new());
         collect_calls(self.afile, body, &callees);
         callees.into_inner().into_iter().any(|call| {
-            let method_suspends = |internal: &str, name: &str| {
+            let method_suspends = |internal: TypeName, name: &str| {
                 self.syms
-                    .class_by_internal(internal)
+                    .class_by_type_name(internal)
                     .and_then(|c| c.methods.get(name))
                     .is_some_and(|s| s.is_suspend)
             };
@@ -6844,7 +6844,7 @@ impl<'a> Lower<'a> {
                         member: None,
                     } if receiver_ty
                         .obj_internal()
-                        .is_some_and(|i| method_suspends(&i.render(), "invoke")) =>
+                        .is_some_and(|i| method_suspends(i, "invoke")) =>
                     {
                         return true
                     }
@@ -6876,7 +6876,7 @@ impl<'a> Lower<'a> {
                     let recv_ty = self.info.ty(*receiver);
                     if recv_ty
                         .obj_internal()
-                        .is_some_and(|i| method_suspends(&i.render(), name))
+                        .is_some_and(|i| method_suspends(i, name))
                     {
                         return true;
                     }
@@ -12851,9 +12851,7 @@ impl<'a> Lower<'a> {
                                     let recv_ty = self.info.ty(*receiver);
                                     recv_ty
                                         .obj_internal()
-                                        .and_then(|internal| {
-                                            self.resolve_method(&internal.render(), name)
-                                        })
+                                        .and_then(|internal| self.resolve_method_name(internal, name))
                                         .is_some_and(|(_, _, fid, _)| {
                                             self.ir.functions[fid as usize].ret.is_nullable()
                                         })
