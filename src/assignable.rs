@@ -15,7 +15,6 @@
 //! arguments and nullability) and without a type-variable context.
 
 use crate::types::{Ty, TypeName};
-use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// The class-hierarchy oracle the assignability relation walks — the direct supertypes of a class in
@@ -32,53 +31,10 @@ pub trait TypeOracle {
         None
     }
 
-    /// A canonical class identity used to equate names the platform unifies — a Kotlin collection interface
-    /// and its single JVM interface (`kotlin/collections/List` ≡ `kotlin/collections/MutableList` ≡
-    /// `java/util/List`). Two classes with the same canonical identity are the same class here. Default:
-    /// the name itself (no aliasing).
-    fn canonical_class<'a>(&self, internal: &'a str) -> Cow<'a, str> {
-        Cow::Borrowed(internal)
-    }
-
-    /// Whether two class names denote the same platform class identity. The default compares canonical
-    /// names; platforms that have spelling aliases should override this to avoid materializing a
-    /// normalized string on hot hierarchy walks.
-    fn same_class(&self, a: &str, b: &str) -> bool {
-        a == b || self.canonical_class(a) == self.canonical_class(b)
-    }
-
-    /// Whether `candidate` denotes the class whose original name is `target` and whose canonical name
-    /// was already computed. Hierarchy walks use this so the target identity is not recomputed for every
-    /// visited superclass.
-    fn matches_class(&self, candidate: &str, target: &str, target_canonical: &str) -> bool {
-        candidate == target || self.canonical_class(candidate).as_ref() == target_canonical
-    }
-
-    /// Id-backed variant used by hot hierarchy walks. The default renders only when the id did not match
-    /// directly and platform canonicalization must be consulted.
-    fn matches_class_name(
-        &self,
-        candidate: TypeName,
-        target: TypeName,
-        target_canonical: &str,
-    ) -> bool {
-        if candidate == target {
-            return true;
-        }
-        let candidate = candidate.render();
-        self.canonical_class(&candidate).as_ref() == target_canonical
-    }
-
-    /// Id-backed class identity comparison used by assignability/coercion walks. The default preserves
-    /// legacy string hooks only as a compatibility fallback; production oracles should override this when
-    /// they can compare platform identities by ids.
+    /// Id-backed class identity comparison used by assignability/coercion walks. Platforms that unify
+    /// multiple source names onto one runtime class override this without rendering full internal names.
     fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
-        if a == b {
-            return true;
-        }
-        let a = a.render();
-        let b = b.render();
-        self.same_class(&a, &b)
+        a == b
     }
 }
 
@@ -315,11 +271,10 @@ mod tests {
                 _ => None,
             }
         }
-        fn canonical_class<'a>(&self, internal: &'a str) -> Cow<'a, str> {
-            match internal {
-                "canonical/Readonly" | "canonical/Mutable" => Cow::Borrowed("canonical/List"),
-                _ => Cow::Borrowed(internal),
-            }
+        fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
+            a == b
+                || ((a.matches("canonical/Readonly") || a.matches("canonical/Mutable"))
+                    && (b.matches("canonical/Readonly") || b.matches("canonical/Mutable")))
         }
     }
 
@@ -377,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_class_aliases_match_through_assignability() {
+    fn id_class_aliases_match_through_assignability() {
         assert!(ok(s("canonical/Mutable"), s("canonical/Readonly")));
     }
 

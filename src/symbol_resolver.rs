@@ -15,7 +15,6 @@ use crate::libraries::{
 };
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
-use std::borrow::Cow;
 
 #[derive(Clone, Debug, Default)]
 pub struct TopLevelLambdaShape {
@@ -62,48 +61,6 @@ impl crate::assignable::TypeOracle for PlatformOracle<'_> {
     fn value_underlying(&self, ty: Ty) -> Option<Ty> {
         self.0.value_underlying(ty)
     }
-    fn canonical_class<'a>(&self, internal: &'a str) -> Cow<'a, str> {
-        let Some(value_internal) = self.0.library_value_form(Ty::obj(internal)).obj_internal()
-        else {
-            return Cow::Borrowed(platform_class_identity(internal));
-        };
-        if let Some(mapped) =
-            crate::jvm::jvm_class_map::type_name_to_jvm_builtin_internal(value_internal)
-        {
-            return Cow::Borrowed(mapped);
-        }
-        Cow::Owned(platform_class_identity(&value_internal.render()).to_string())
-    }
-    fn same_class(&self, a: &str, b: &str) -> bool {
-        let a_value = self.0.library_value_form(Ty::obj(a)).obj_internal();
-        let b_value = self.0.library_value_form(Ty::obj(b)).obj_internal();
-        if let (Some(a), Some(b)) = (a_value, b_value) {
-            if crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(a, b) {
-                return true;
-            }
-        }
-        let a = platform_value_identity(a_value, a);
-        let b = platform_value_identity(b_value, b);
-        platform_class_names_match(&a, &b)
-    }
-    fn matches_class(&self, candidate: &str, _target: &str, target_canonical: &str) -> bool {
-        let candidate_value = self.0.library_value_form(Ty::obj(candidate)).obj_internal();
-        if let Some(candidate) =
-            candidate_value.and_then(crate::jvm::jvm_class_map::type_name_to_jvm_builtin_internal)
-        {
-            return platform_class_names_match(candidate, target_canonical);
-        }
-        let candidate_rendered;
-        let candidate = match candidate_value {
-            Some(n) => {
-                candidate_rendered = n.render();
-                platform_class_identity(&candidate_rendered)
-            }
-            None => platform_class_identity(candidate),
-        };
-        platform_class_names_match(candidate, target_canonical)
-    }
-
     fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
         let a = self.0.library_value_form_name(a);
         let b = self.0.library_value_form_name(b);
@@ -111,20 +68,12 @@ impl crate::assignable::TypeOracle for PlatformOracle<'_> {
     }
 }
 
-fn platform_value_identity<'a>(value: Option<TypeName>, original: &'a str) -> Cow<'a, str> {
-    let Some(value) = value else {
-        return Cow::Borrowed(platform_class_identity(original));
-    };
-    if let Some(mapped) = crate::jvm::jvm_class_map::type_name_to_jvm_builtin_internal(value) {
-        return Cow::Borrowed(mapped);
-    }
-    Cow::Owned(platform_class_identity(&value.render()).to_string())
-}
-
+#[cfg(test)]
 pub(crate) fn platform_class_identity(internal: &str) -> &str {
     crate::jvm::jvm_class_map::kotlin_builtin_to_jvm(internal).unwrap_or(internal)
 }
 
+#[cfg(test)]
 pub(crate) fn platform_class_names_match(a: &str, b: &str) -> bool {
     a == b || nested_separator_names_match(a, b)
 }
@@ -135,6 +84,7 @@ pub(crate) fn platform_type_names_match(a: TypeName, b: TypeName) -> bool {
         || a.nested_separator_matches(b)
 }
 
+#[cfg(test)]
 fn nested_separator_names_match(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
@@ -2618,38 +2568,22 @@ mod tests {
     }
 
     #[test]
-    fn platform_oracle_canonicalizes_map_entry_spellings() {
+    fn platform_oracle_compares_map_entry_spellings_by_type_name() {
         let src = FakeSource {
             name: "unused",
             receiver: None,
             info: top_level_nullable_string_info(),
         };
         let oracle = PlatformOracle(&src);
-        assert_eq!(
-            crate::assignable::TypeOracle::canonical_class(&oracle, "kotlin/collections/Map.Entry")
-                .as_ref(),
-            "java/util/Map$Entry"
-        );
-        assert!(matches!(
-            crate::assignable::TypeOracle::canonical_class(&oracle, "kotlin/collections/Map.Entry"),
-            std::borrow::Cow::Borrowed("java/util/Map$Entry")
-        ));
-        assert_eq!(
-            crate::assignable::TypeOracle::canonical_class(&oracle, "kotlin/collections/Map$Entry"),
-            crate::assignable::TypeOracle::canonical_class(&oracle, "kotlin/collections/Map.Entry")
-        );
-        assert!(crate::assignable::TypeOracle::same_class(
+        assert!(crate::assignable::TypeOracle::same_class_name(
             &oracle,
-            "lib/Flex.FMap",
-            "lib/Flex$FMap"
+            crate::types::type_name("kotlin/collections/Map.Entry"),
+            crate::types::type_name("kotlin/collections/Map$Entry"),
         ));
-        let nested_target =
-            crate::assignable::TypeOracle::canonical_class(&oracle, "lib/Flex$FMap");
-        assert!(crate::assignable::TypeOracle::matches_class(
+        assert!(crate::assignable::TypeOracle::same_class_name(
             &oracle,
-            "lib/Flex.FMap",
-            "lib/Flex$FMap",
-            nested_target.as_ref()
+            crate::types::type_name("lib/Flex.FMap"),
+            crate::types::type_name("lib/Flex$FMap"),
         ));
     }
 
