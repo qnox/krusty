@@ -21,7 +21,25 @@ fn type_names() -> &'static RwLock<NameTree> {
 }
 
 pub fn type_name(internal: &str) -> TypeName {
-    TypeName(type_names().write().unwrap().insert(internal))
+    // Ids are global and stable, so a per-thread memo of already-interned strings is always valid; it
+    // turns the repeated interning of hot names (metadata decode re-reads the same FQNs constantly)
+    // into a lock-free lookup instead of a write-lock walk of the shared tree.
+    thread_local! {
+        static INTERNED: std::cell::RefCell<crate::name_tree::FxHashMap<Box<str>, TypeName>> =
+            std::cell::RefCell::new(crate::name_tree::FxHashMap::default());
+    }
+    INTERNED.with(|memo| {
+        if let Some(&t) = memo.borrow().get(internal) {
+            return t;
+        }
+        let t = TypeName(type_names().write().unwrap().insert(internal));
+        let mut memo = memo.borrow_mut();
+        if memo.len() >= 16_384 {
+            memo.clear();
+        }
+        memo.insert(internal.into(), t);
+        t
+    })
 }
 
 pub fn type_name_from(names: &NameTree, id: NameId) -> TypeName {
@@ -38,6 +56,15 @@ pub fn type_name_child(parent: TypeName, segment: &str) -> TypeName {
         }
         full.push_str(segment);
         return type_name(&full);
+    }
+    // Probes repeat the same (parent, segment) pairs constantly; answer from the read side and take
+    // the write lock only for a genuinely new child.
+    if let Some(id) = type_names()
+        .read()
+        .unwrap()
+        .existing_child_of(parent.0, segment)
+    {
+        return TypeName(id);
     }
     TypeName(type_names().write().unwrap().child_of(parent.0, segment))
 }
