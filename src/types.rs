@@ -14,8 +14,8 @@ pub struct TypeNameList {
     names: Vec<TypeName>,
 }
 
-// The tree itself is concurrent (lock-free reads, internally-locked inserts), so the global interner
-// is just a shared instance — no outer lock and no per-thread memo.
+// The tree is concurrent (lock-free reads, internally-locked inserts), so the global interner is a
+// bare shared instance.
 static TYPE_NAMES: OnceLock<NameTree> = OnceLock::new();
 
 fn type_names() -> &'static NameTree {

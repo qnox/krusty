@@ -648,6 +648,49 @@ mod tests {
     }
 
     #[test]
+    fn clone_replays_identical_ids_and_isolates_growth() {
+        let names = NameTree::default();
+        let map = names.insert("kotlin/collections/Map");
+        let entry = names.insert("kotlin/collections/Map$Entry");
+        // Past a table growth, so the clone replays a grown tree.
+        let ids: Vec<_> = (0..200).map(|i| names.insert(&format!("p/C{i}"))).collect();
+
+        let copy = names.clone();
+        assert_eq!(copy.len(), names.len());
+        assert_eq!(copy.get("kotlin/collections/Map"), Some(map));
+        assert_eq!(copy.render(entry), "kotlin/collections/Map$Entry");
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(copy.render(*id), format!("p/C{i}"));
+        }
+        // The copy grows independently of the original.
+        let only_in_copy = copy.insert("copy/Only");
+        assert_eq!(copy.render(only_in_copy), "copy/Only");
+        assert_eq!(names.get("copy/Only"), None);
+    }
+
+    #[test]
+    fn insert_from_maps_ids_across_trees() {
+        let src = NameTree::default();
+        let id = src.insert("a/b/C");
+        let dst = NameTree::default();
+        dst.insert("unrelated/Name");
+        let moved = dst.insert_from(&src, id);
+        assert_eq!(dst.render(moved), "a/b/C");
+        assert_eq!(dst.insert_from(&src, NameTree::ROOT), NameTree::ROOT);
+        // Re-inserting the same source id is idempotent in the destination.
+        assert_eq!(dst.insert_from(&src, id), moved);
+    }
+
+    #[test]
+    fn debug_reports_len_without_walking() {
+        let names = NameTree::default();
+        names.insert("a/b");
+        let dbg = format!("{names:?}");
+        assert!(dbg.contains("NameTree"), "{dbg}");
+        assert!(dbg.contains("len"), "{dbg}");
+    }
+
+    #[test]
     fn concurrent_insert_and_read() {
         let names = std::sync::Arc::new(NameTree::default());
         let mut handles = Vec::new();

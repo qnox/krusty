@@ -671,8 +671,8 @@ impl<'a> SymbolResolver<'a> {
         self.src.resolve_type(internal)
     }
 
-    /// Id-backed type query for callers that already carry a [`TypeName`]. Returns the source's shared
-    /// handle — a memo hit is a refcount bump, not a deep clone.
+    /// Id-backed type query for callers that already carry a [`TypeName`], returning the source's
+    /// shared handle.
     pub fn resolve_type_name(
         &self,
         internal: TypeName,

@@ -35,10 +35,9 @@ pub trait SymbolSource {
         None
     }
 
-    /// Id-backed type lookup, returning a SHARED handle: the memoized shape is reference-counted, so a
-    /// cache hit costs a pointer bump instead of a deep clone of the member vectors. Providers that
-    /// already index by ids should override this; the default keeps legacy string-backed sources working
-    /// while callers stop rendering names at each use site.
+    /// Id-backed type lookup, returning a SHARED handle — providers memoize the shape and hand out the
+    /// same `Rc`. Providers that already index by ids should override this; the default keeps legacy
+    /// string-backed sources working while callers stop rendering names at each use site.
     fn resolve_type_name(&self, internal: TypeName) -> Option<std::rc::Rc<LibraryType>> {
         self.resolve_type(&internal.render()).map(std::rc::Rc::new)
     }
@@ -64,10 +63,10 @@ pub trait SymbolSource {
         ResolvedSymbols::default()
     }
 
-    /// Id-backed namespace lookup, returning a SHARED record: a memo hit is a refcount bump, and a
-    /// classifier-only consumer (a type position) never clones the callable vectors. Providers that
-    /// already carry class/internal names as ids should override this; the default keeps legacy
-    /// string-backed sources working while callers stop rendering names at each use site.
+    /// Id-backed namespace lookup, returning a SHARED record — consumers borrow the halves they need
+    /// (a type position reads only the classifier). Providers that already carry class/internal names
+    /// as ids should override this; the default keeps legacy string-backed sources working while
+    /// callers stop rendering names at each use site.
     fn resolve_symbols_name(&self, fqn: TypeName) -> std::rc::Rc<ResolvedSymbols> {
         std::rc::Rc::new(self.resolve_symbols(&fqn.render()))
     }
@@ -154,8 +153,7 @@ impl SymbolSource for CompositeSource<'_> {
         use crate::libraries::Callables;
         // Classifier: first source wins (user shadows library). Callables: concatenate in precedence
         // order (each overload keeps its origin) — functions XOR a property, so take whichever appears.
-        // The common case is a single contributing source; pass its record through untouched so the
-        // federation layer adds no clone of its own.
+        // A single contributing source (the common case) passes its record through unmerged.
         let mut records: Vec<std::rc::Rc<ResolvedSymbols>> = Vec::new();
         for c in &self.children {
             let r = c.resolve_symbols_name(fqn);
@@ -310,6 +308,26 @@ mod tests {
                 None
             }
         }
+        fn resolve_symbols(&self, fqn: &str) -> ResolvedSymbols {
+            // The record at `fqn`: this fake's type (when `typed` matches) and its one top-level
+            // overload (when `fn_name` matches).
+            let classifier = self.resolve_type(fqn).map(std::rc::Rc::new);
+            let callables = if self.fn_name.as_deref() == Some(fqn) {
+                crate::libraries::Callables::Functions(FunctionSet {
+                    overloads: vec![FunctionInfo::plain(
+                        FnKind::TopLevel,
+                        None,
+                        callable(&self.owner, fqn),
+                    )],
+                })
+            } else {
+                crate::libraries::Callables::None
+            };
+            ResolvedSymbols {
+                classifier,
+                callables,
+            }
+        }
     }
 
     fn module() -> FakeSource {
@@ -436,5 +454,59 @@ mod tests {
             .overloads
             .is_empty());
         assert!(c.resolve_type("anything").is_none());
+    }
+
+    #[test]
+    fn resolve_symbols_passes_a_single_contributor_through() {
+        // Only the library answers `greet`: the composite must surface its record intact (the
+        // single-record fast path) and stay empty for an unknown name.
+        let m = FakeSource {
+            fn_name: None,
+            owner: "module".into(),
+            typed: None,
+        };
+        let l = library();
+        let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
+        let r = c.resolve_symbols_name(crate::types::type_name("greet"));
+        assert!(r.classifier.is_none());
+        match &r.callables {
+            crate::libraries::Callables::Functions(f) => {
+                assert_eq!(f.overloads.len(), 1);
+                assert!(f.overloads[0].callable.owner.matches("library"));
+            }
+            _ => panic!("expected functions"),
+        }
+        assert!(c
+            .resolve_symbols_name(crate::types::type_name("missing"))
+            .is_empty());
+    }
+
+    #[test]
+    fn resolve_symbols_merges_classifier_and_callables_across_children() {
+        // The module knows the TYPE `shared`, the library the FUNCTION `shared` — the merged record
+        // carries both namespaces, classifier from the earliest contributor, overloads concatenated in
+        // precedence order.
+        let m = FakeSource {
+            fn_name: Some("shared".into()),
+            owner: "module".into(),
+            typed: Some("shared".into()),
+        };
+        let l = FakeSource {
+            fn_name: Some("shared".into()),
+            owner: "library".into(),
+            typed: Some("shared".into()),
+        };
+        let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
+        let r = c.resolve_symbols("shared");
+        let classifier = r.classifier.expect("merged record keeps the classifier");
+        assert!(classifier.supertypes.contains("module"));
+        match &r.callables {
+            crate::libraries::Callables::Functions(f) => {
+                assert_eq!(f.overloads.len(), 2);
+                assert!(f.overloads[0].callable.owner.matches("module"));
+                assert!(f.overloads[1].callable.owner.matches("library"));
+            }
+            _ => panic!("expected functions"),
+        }
     }
 }
