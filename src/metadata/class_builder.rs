@@ -197,6 +197,16 @@ fn jvm_method_sig(st: &mut StringTable, name: Option<&str>, desc: &str) -> Pb {
 /// `ctor_params` are the primary-constructor `(name, type)` pairs; `ctor_desc` its JVM descriptor.
 /// `Class.flags` values kotlinc emits: a plain class = 0 (omitted), `data class` = 1030,
 /// `object` = 326. Passed in by the caller.
+/// Class-level metadata beyond the members: the `Class.flags`, the companion object's simple name (if
+/// any), and the nested class simple names — kept in one struct so [`build_class`] stays within the
+/// argument-count limit.
+#[derive(Default)]
+pub struct ClassTail<'a> {
+    pub flags: u64,
+    pub companion: Option<&'a str>,
+    pub nested: &'a [&'a str],
+}
+
 pub fn build_class(
     class_internal: &str,
     ctor_params: &[(String, Ty)],
@@ -204,26 +214,26 @@ pub fn build_class(
     props: &[PropMeta],
     methods: &[FnMeta],
     enum_entries: &[String],
-    class_flags: u64,
+    tail: &ClassTail,
 ) -> (Vec<u8>, Vec<String>) {
+    let class_flags = tail.flags;
+    let companion_name = tail.companion;
+    let nested_class_names = tail.nested;
     let mut st = StringTable::default();
-    let mut class = Pb::new();
 
-    // f1 = flags (omitted ⇒ 0 for a plain class; IS_DATA / object bits otherwise).
-    if class_flags != 0 {
-        class.field_varint(1, class_flags);
-    }
+    // STRINGS ARE INTERNED IN kotlinc's ORDER (fq_name, supertype, constructors, properties'
+    // JVM signatures, functions, enum entries, then the companion + nested names LAST) even though the
+    // proto writes fields in field-number order below — so the d2 indices match. Build every sub-message
+    // first (interning), then assemble the `Class` message.
 
     // f3 = fq_name: a class-id derived from the `L...;` descriptor.
     let fq = st.class_id_from_desc(&format!("L{class_internal};"));
-    class.field_varint(3, fq as u64);
 
     // f6 = supertype kotlin/Any.
-    let mut any = Pb::new();
-    any.field_varint(6, st.builtin(ANY_PREDEFINED) as u64);
-    class.field_message(6, &any);
+    let mut supertype = Pb::new();
+    supertype.field_varint(6, st.builtin(ANY_PREDEFINED) as u64);
 
-    // f8 = primary constructor.
+    // f8 = primary constructor. kotlinc emits the ctor's JVM name `<init>` explicitly (not omitted).
     let mut ctor = Pb::new();
     for (pname, pty) in ctor_params {
         let mut vp = Pb::new();
@@ -232,16 +242,10 @@ pub fn build_class(
         vp.field_message(3, &ty); // ValueParameter.type = 3
         ctor.repeated_message(2, &vp); // Constructor.value_parameter = 2
     }
-    // kotlinc emits the ctor's JVM name `<init>` explicitly (not omitted) — matching it keeps the d2
-    // string table + d1 byte-identical.
     let ctor_sig = jvm_method_sig(&mut st, Some("<init>"), ctor_desc);
     ctor.field_message(100, &ctor_sig); // JvmProtoBuf.constructorSignature = 100
-    class.repeated_message(8, &ctor);
 
-    // kotlinc interns strings in member-DECLARATION order — property JVM signatures (getX/getY/setY…)
-    // BEFORE function names — even though the proto writes functions (f9) before properties (f10). So
-    // build the property messages first (to intern their strings), then the function messages, then
-    // write them in proto field order. (For a class with no methods the order is irrelevant.)
+    // Properties BEFORE functions (kotlinc interns property JVM signatures before function names).
     let prop_msgs: Vec<Pb> = props
         .iter()
         .map(|p| {
@@ -290,18 +294,48 @@ pub fn build_class(
         })
         .collect();
 
+    // f13 = enum entries (`EnumEntry { name = f1 }`).
+    let enum_msgs: Vec<Pb> = enum_entries
+        .iter()
+        .map(|entry| {
+            let mut ee = Pb::new();
+            ee.field_varint(1, st.local(entry) as u64);
+            ee
+        })
+        .collect();
+
+    // Companion + nested class names intern LAST (kotlinc's d2 places them after all members).
+    let companion_idx = companion_name.map(|c| st.local(c));
+    let nested_idxs: Vec<u32> = nested_class_names.iter().map(|n| st.local(n)).collect();
+
+    // Assemble the `Class` message in FIELD order: f1 flags, f3 fq_name, f4 companionObjectName,
+    // f6 supertype, f7 nestedClassName (packed repeated int32), f8 ctors, f9 functions, f10 properties,
+    // f13 enum entries.
+    let mut class = Pb::new();
+    if class_flags != 0 {
+        class.field_varint(1, class_flags);
+    }
+    class.field_varint(3, fq as u64);
+    if let Some(ci) = companion_idx {
+        class.field_varint(4, ci as u64); // Class.companion_object_name = 4
+    }
+    class.field_message(6, &supertype);
+    if !nested_idxs.is_empty() {
+        let mut packed = Pb::new();
+        for &n in &nested_idxs {
+            packed.varint(n as u64);
+        }
+        class.field_bytes(7, packed.as_bytes()); // Class.nested_class_name = 7 (packed)
+    }
+    class.repeated_message(8, &ctor);
     for func in &func_msgs {
         class.repeated_message(9, func); // Class.function = 9
     }
     for prop in &prop_msgs {
         class.repeated_message(10, prop); // Class.property = 10
     }
-
-    // f13 = enum entries (`EnumEntry { name = f1 }`).
-    for entry in enum_entries {
-        let mut ee = Pb::new();
-        ee.field_varint(1, st.local(entry) as u64);
-        class.repeated_message(13, &ee);
+    for ee in &enum_msgs {
+        class.repeated_message(13, ee); // Class.enum_entry = 13
     }
 
     let stt = st.serialize_types();
@@ -322,7 +356,7 @@ mod tests {
     // exact d1 protobuf (mUTF-8-decoded to raw bytes) + d2 string table. Drives byte-for-byte parity.
     #[test]
     fn empty_class_metadata_byte_matches_kotlinc() {
-        let (d1, d2) = build_class("demo/E", &[], "()V", &[], &[], &[], 0);
+        let (d1, d2) = build_class("demo/E", &[], "()V", &[], &[], &[], &ClassTail::default());
         assert_eq!(
             d2,
             vec![
@@ -360,7 +394,7 @@ mod tests {
             }],
             &[],
             &[],
-            0,
+            &ClassTail::default(),
         );
         assert_eq!(
             d2,
@@ -455,7 +489,10 @@ mod tests {
             &props,
             &methods,
             &[],
-            DATA_CLASS_FLAGS,
+            &ClassTail {
+                flags: DATA_CLASS_FLAGS,
+                ..Default::default()
+            },
         );
         assert_eq!(
             d1,
@@ -496,7 +533,7 @@ mod tests {
                 Ty::Int,
             )],
             &[],
-            0,
+            &ClassTail::default(),
         );
         assert_eq!(
             d1,
@@ -505,6 +542,43 @@ mod tests {
                 0x0a, 0x02, 0x10, 0x08, 0x0a, 0x00, 0x18, 0x00, 0x32, 0x02, 0x30, 0x01, 0x42, 0x07,
                 0xa2, 0x06, 0x04, 0x08, 0x02, 0x10, 0x03, 0x4a, 0x0e, 0x10, 0x04, 0x1a, 0x02, 0x30,
                 0x05, 0x32, 0x06, 0x10, 0x06, 0x1a, 0x02, 0x30, 0x05,
+            ],
+            "d1 protobuf",
+        );
+    }
+
+    // Ground truth: kotlinc 2.4.0 `package demo; class C { companion object }`. The companion object
+    // adds `companionObjectName` (f4) + a `nestedClassName` (f7), both referencing `Companion`, interned
+    // after the ctor.
+    #[test]
+    fn companion_object_metadata_byte_matches_kotlinc() {
+        let (d1, d2) = build_class(
+            "demo/C",
+            &[],
+            "()V",
+            &[],
+            &[],
+            &[],
+            &ClassTail {
+                companion: Some("Companion"),
+                nested: &["Companion"],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            d2,
+            vec!["Ldemo/C;", "", "<init>", "()V", "Companion"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+            "d2",
+        );
+        assert_eq!(
+            d1,
+            vec![
+                0x00, 0x0c, 0x0a, 0x02, 0x18, 0x02, 0x0a, 0x02, 0x10, 0x00, 0x0a, 0x02, 0x08, 0x03,
+                0x18, 0x00, 0x20, 0x04, 0x32, 0x02, 0x30, 0x01, 0x3a, 0x01, 0x04, 0x42, 0x07, 0xa2,
+                0x06, 0x04, 0x08, 0x02, 0x10, 0x03,
             ],
             "d1 protobuf",
         );
@@ -534,7 +608,7 @@ mod tests {
             ],
             &[],
             &[],
-            0,
+            &ClassTail::default(),
         );
         // The class id descriptor and the JVM signatures must all appear verbatim in d2.
         assert!(d2.contains(&"Ldemo/Point;".to_string()));
