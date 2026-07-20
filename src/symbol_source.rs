@@ -35,18 +35,19 @@ pub trait SymbolSource {
         None
     }
 
-    /// Id-backed type lookup. Providers that already index by ids should override this; the default keeps
-    /// legacy string-backed sources working while callers stop rendering names at each use site.
-    fn resolve_type_name(&self, internal: TypeName) -> Option<LibraryType> {
-        self.resolve_type(&internal.render())
+    /// Id-backed type lookup, returning a SHARED handle: the memoized shape is reference-counted, so a
+    /// cache hit costs a pointer bump instead of a deep clone of the member vectors. Providers that
+    /// already index by ids should override this; the default keeps legacy string-backed sources working
+    /// while callers stop rendering names at each use site.
+    fn resolve_type_name(&self, internal: TypeName) -> Option<std::rc::Rc<LibraryType>> {
+        self.resolve_type(&internal.render()).map(std::rc::Rc::new)
     }
 
     /// Whether `internal` names a `@JvmInline value`/inline class — the value-class-ness attribute of the
     /// class SYMBOL, queried by name. THE authority the value-class pass and resolver consult, rather than
     /// a side "value-class set". Derived from the symbol's `value_underlying` shape.
     fn is_value(&self, internal: &str) -> bool {
-        self.resolve_type(internal)
-            .is_some_and(|t| t.value_underlying.is_some())
+        self.is_value_name(crate::types::type_name(internal))
     }
 
     fn is_value_name(&self, internal: TypeName) -> bool {
@@ -138,7 +139,7 @@ impl SymbolSource for CompositeSource<'_> {
         self.children.iter().find_map(|c| c.resolve_type(internal))
     }
 
-    fn resolve_type_name(&self, internal: TypeName) -> Option<LibraryType> {
+    fn resolve_type_name(&self, internal: TypeName) -> Option<std::rc::Rc<LibraryType>> {
         self.children
             .iter()
             .find_map(|c| c.resolve_type_name(internal))

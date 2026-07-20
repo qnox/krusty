@@ -2318,7 +2318,7 @@ pub fn lower_file_at_reporting(
                             lo.syms
                                 .libraries
                                 .resolve_type_name(itf)
-                                .and_then(|t| t.sam_method)
+                                .and_then(|t| t.sam_method.clone())
                         };
                         if let Some(m) = classpath_sam {
                             if let Some((_, _, impl_fid, _)) = lo.resolve_method(&internal, &m.name)

@@ -5933,7 +5933,10 @@ impl<'a> Checker<'a> {
         self.resolver().resolve_type(internal)
     }
 
-    fn resolved_type_name(&self, internal: TypeName) -> Option<crate::libraries::LibraryType> {
+    fn resolved_type_name(
+        &self,
+        internal: TypeName,
+    ) -> Option<std::rc::Rc<crate::libraries::LibraryType>> {
         self.resolver().resolve_type_name(internal)
     }
 
@@ -8257,7 +8260,7 @@ impl<'a> Checker<'a> {
             return None;
         }
         let lt = self.resolved_type_name(internal)?;
-        let (_, companion_ty) = lt.companion_object?;
+        let companion_ty = lt.companion_object.as_ref()?.1;
         Some(Ty::obj_name(companion_ty))
     }
 
@@ -12794,10 +12797,13 @@ impl<'a> Checker<'a> {
                     if !self.value_root_shadows_classifier(&root) {
                         if let Some(internal) = self.imported_type_name(&root) {
                             if let Some(cf) = self.resolved_type_name(internal).and_then(|t| {
-                                t.value_companion_fns.into_iter().find(|cf| {
-                                    cf.callable.name == name
-                                        && cf.callable.params.len() == args.len()
-                                })
+                                t.value_companion_fns
+                                    .iter()
+                                    .find(|cf| {
+                                        cf.callable.name == name
+                                            && cf.callable.params.len() == args.len()
+                                    })
+                                    .cloned()
                             }) {
                                 for &a in args {
                                     self.expr(a);
@@ -14148,8 +14154,9 @@ impl<'a> Checker<'a> {
                     }
                     // A classpath functional interface (`Runnable`, `Comparator`, …).
                     if let Some(internal) = self.syms.class_names.get(&fname) {
-                        if let Some(sam) =
-                            self.resolved_type_name(internal).and_then(|t| t.sam_method)
+                        if let Some(sam) = self
+                            .resolved_type_name(internal)
+                            .and_then(|t| t.sam_method.clone())
                         {
                             self.check_lambda_with_types(lambda, &sam.params);
                             return self.set(call, Ty::obj_name(internal));
@@ -16411,7 +16418,7 @@ fun box(): String {
                 "BoxedComparable" | "BoxedIndex" | "BoxedIterable" | "BoxedIterator" | "TestMutex"
             ) {
                 return crate::libraries::ResolvedSymbols {
-                    classifier: self.resolve_type(fqn),
+                    classifier: self.resolve_type(fqn).map(std::rc::Rc::new),
                     callables: crate::libraries::Callables::None,
                 };
             }

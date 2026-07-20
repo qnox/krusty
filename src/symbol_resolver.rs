@@ -668,8 +668,12 @@ impl<'a> SymbolResolver<'a> {
         self.src.resolve_type(internal)
     }
 
-    /// Id-backed type query for callers that already carry a [`TypeName`].
-    pub fn resolve_type_name(&self, internal: TypeName) -> Option<crate::libraries::LibraryType> {
+    /// Id-backed type query for callers that already carry a [`TypeName`]. Returns the source's shared
+    /// handle — a memo hit is a refcount bump, not a deep clone.
+    pub fn resolve_type_name(
+        &self,
+        internal: TypeName,
+    ) -> Option<std::rc::Rc<crate::libraries::LibraryType>> {
         self.src.resolve_type_name(internal)
     }
 

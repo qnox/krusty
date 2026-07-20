@@ -849,7 +849,9 @@ pub enum Callables {
 /// the classifier's constructors, then property-`invoke` fallback; value → property / object).
 #[derive(Clone, Default)]
 pub struct ResolvedSymbols {
-    pub classifier: Option<LibraryType>,
+    /// Shared with the type-name memo: a record clone bumps the refcount instead of deep-cloning the
+    /// classifier's member vectors.
+    pub classifier: Option<std::rc::Rc<LibraryType>>,
     pub callables: Callables,
 }
 

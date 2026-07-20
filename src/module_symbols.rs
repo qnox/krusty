@@ -423,10 +423,10 @@ impl SymbolSource for ModuleSymbols<'_> {
             .map(|c| self.type_shape_for(c))
     }
 
-    fn resolve_type_name(&self, internal: TypeName) -> Option<LibraryType> {
+    fn resolve_type_name(&self, internal: TypeName) -> Option<std::rc::Rc<LibraryType>> {
         self.syms
             .class_by_type_name(internal)
-            .map(|c| self.type_shape_for(c))
+            .map(|c| std::rc::Rc::new(self.type_shape_for(c)))
     }
 }
 
