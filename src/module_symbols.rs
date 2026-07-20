@@ -13,7 +13,7 @@ use crate::libraries::{
     LibraryType, Origin,
 };
 use crate::symbol_source::SymbolSource;
-use crate::types::Ty;
+use crate::types::{type_name, Ty, TypeName};
 use std::collections::HashMap;
 
 /// The current module's declarations as a [`SymbolSource`]. Borrows the frontend symbols; cheap.
@@ -28,21 +28,89 @@ impl<'a> ModuleSymbols<'a> {
 
     /// The declaring facade of a top-level `name`, if the multi-file driver recorded one. `None` means
     /// "the file being compiled" — the lowerer then resolves it as a same-file local.
-    fn facade_of(&self, name: &str) -> Option<String> {
-        self.syms.fn_facades.get(name).cloned()
+    fn facade_of(&self, name: &str) -> Option<TypeName> {
+        self.syms.fn_facades.get(name).copied()
     }
 
-    fn facade_of_sig(&self, name: &str, sig: &Signature) -> String {
+    fn facade_of_sig(&self, name: &str, sig: &Signature) -> TypeName {
         sig.source_file
             .zip(sig.source_decl)
-            .and_then(|(file, decl)| self.syms.fn_facades_by_decl.get(&(file, decl.0)).cloned())
+            .and_then(|(file, decl)| self.syms.fn_facades_by_decl.get(&(file, decl.0)).copied())
             .or_else(|| self.facade_of(name))
-            .unwrap_or_default()
+            .unwrap_or_else(|| type_name(""))
     }
 
     /// The user [`FrontendClassSig`] whose JVM internal name is `internal`, if any.
     fn class_by_internal(&self, internal: &str) -> Option<&'a FrontendClassSig> {
-        self.syms.classes.values().find(|c| c.internal == internal)
+        self.syms.class_by_internal(internal)
+    }
+
+    fn class_by_type_name(&self, internal: TypeName) -> Option<&'a FrontendClassSig> {
+        self.syms.class_by_type_name(internal)
+    }
+
+    fn type_shape_for(&self, c: &'a FrontendClassSig) -> LibraryType {
+        let members = c
+            .methods
+            .iter()
+            .map(|(n, s)| lib_member(n, s, c.internal_name(), c.is_interface))
+            .collect();
+        let companion = c
+            .static_methods
+            .iter()
+            .map(|(n, s)| lib_member(n, s, c.internal_name(), c.is_interface))
+            .collect();
+        // The primary constructor (+ secondaries) as `<init>` members returning Unit.
+        let mut constructors = vec![LibraryMember::new(
+            "<init>".to_string(),
+            c.ctor_params.clone(),
+            Ty::Unit,
+            String::new(),
+        )];
+        for params in &c.secondary_ctors {
+            constructors.push(LibraryMember::new(
+                "<init>".to_string(),
+                params.clone(),
+                Ty::Unit,
+                String::new(),
+            ));
+        }
+        let mut supertypes: Vec<TypeName> = c.interfaces.iter_ids().collect();
+        if let Some(s) = c.super_internal {
+            supertypes.push(s);
+        }
+        // Module objects resolve as values via the existing user-object path (StaticInstance), not the
+        // classpath ExternalStaticField path, so this needn't distinguish `Object`.
+        let kind = if c.is_annotation {
+            crate::libraries::TypeKind::Annotation
+        } else if c.is_interface {
+            crate::libraries::TypeKind::Interface
+        } else {
+            crate::libraries::TypeKind::Class
+        };
+        LibraryType {
+            is_public: true,
+            kind,
+            supertypes: supertypes.into(),
+            constructors,
+            members,
+            companion,
+            companion_consts: HashMap::new(),
+            sam_method: None,
+            // In-module classes resolve a bare-companion reference via their own companion path
+            // (`companion_class`/`companion_methods`); the classpath fallback isn't used for them.
+            companion_object: None,
+            value_companion_fns: Vec::new(),
+            value_underlying: None,
+            alias_target: None,
+            type_params: Vec::new(),
+            sealed_subclasses: crate::types::TypeNameList::new(),
+            enum_entries: Vec::new(),
+            value_ctor_has_default: false,
+            ctor_named_params: Vec::new(),
+            value_class_properties: Vec::new(),
+            retention: None,
+        }
     }
 
     /// Whether the module declares a top-level function named `name` — the shadow-precedence test (a
@@ -68,24 +136,24 @@ impl<'a> ModuleSymbols<'a> {
 
     fn collect_member_libs(
         &self,
-        internal: &str,
+        internal: TypeName,
         name: &str,
         out: &mut Vec<LibraryMember>,
-        seen: &mut std::collections::HashSet<String>,
+        seen: &mut std::collections::HashSet<TypeName>,
     ) {
-        if !seen.insert(internal.to_string()) {
+        if !seen.insert(internal) {
             return;
         }
-        let Some(c) = self.class_by_internal(internal) else {
+        let Some(c) = self.class_by_type_name(internal) else {
             return; // a classpath supertype — not owned by the module source
         };
         if let Some(sig) = c.methods.get(name) {
-            out.push(lib_member(name, sig, c.internal.clone(), c.is_interface));
+            out.push(lib_member(name, sig, c.internal_name(), c.is_interface));
         }
-        for i in &c.interfaces {
+        for i in c.interfaces.iter_ids() {
             self.collect_member_libs(i, name, out, seen);
         }
-        if let Some(s) = &c.super_internal {
+        if let Some(s) = c.super_internal {
             self.collect_member_libs(s, name, out, seen);
         }
     }
@@ -102,7 +170,7 @@ impl<'a> ModuleSymbols<'a> {
         &self,
         name: &str,
         arg_tys: &[Ty],
-        packages: &[String],
+        packages: &[TypeName],
     ) -> Option<FunctionInfo> {
         let overloads = self.top_level_overloads_in_scope(name, packages);
         let params = overloads
@@ -139,14 +207,12 @@ impl<'a> ModuleSymbols<'a> {
         if let Some(sigs) = self.syms.funs.get(name) {
             for sig in sigs {
                 let owner = self.facade_of_sig(name, sig);
-                let origin = Origin::Module {
-                    facade: owner.clone(),
-                };
+                let origin = Origin::Module { facade: owner };
                 overloads.push(fn_info(
                     FnKind::TopLevel,
                     sig,
                     None,
-                    owner.clone(),
+                    owner,
                     name,
                     0,
                     origin.clone(),
@@ -159,7 +225,7 @@ impl<'a> ModuleSymbols<'a> {
     pub fn top_level_overloads_in_scope(
         &self,
         name: &str,
-        packages: &[String],
+        packages: &[TypeName],
     ) -> Vec<FunctionInfo> {
         self.top_level_overloads(name)
             .into_iter()
@@ -173,7 +239,7 @@ impl<'a> ModuleSymbols<'a> {
                             })
                         })
                     })
-                    .is_some_and(|sig| packages.iter().any(|pkg| pkg == &sig.package))
+                    .is_some_and(|sig| packages.iter().any(|pkg| pkg.matches(&sig.package)))
             })
             .collect()
     }
@@ -183,16 +249,16 @@ impl<'a> ModuleSymbols<'a> {
     /// so the first collected overload is the one that lookup would return. `rung` is the visit counter.
     fn collect_members(
         &self,
-        internal: &str,
+        internal: TypeName,
         name: &str,
         out: &mut Vec<FunctionInfo>,
-        seen: &mut std::collections::HashSet<String>,
+        seen: &mut std::collections::HashSet<TypeName>,
         rung: &mut u32,
     ) {
-        if !seen.insert(internal.to_string()) {
+        if !seen.insert(internal) {
             return;
         }
-        let Some(c) = self.class_by_internal(internal) else {
+        let Some(c) = self.class_by_type_name(internal) else {
             return;
         };
         let here = *rung;
@@ -202,18 +268,18 @@ impl<'a> ModuleSymbols<'a> {
                 FnKind::Member,
                 sig,
                 None,
-                c.internal.clone(),
+                c.internal_name(),
                 name,
                 here,
                 Origin::Module {
-                    facade: c.internal.clone(),
+                    facade: c.internal_name(),
                 },
             ));
         }
-        for i in &c.interfaces {
+        for i in c.interfaces.iter_ids() {
             self.collect_members(i, name, out, seen, rung);
         }
-        if let Some(s) = &c.super_internal {
+        if let Some(s) = c.super_internal {
             self.collect_members(s, name, out, seen, rung);
         }
     }
@@ -222,7 +288,7 @@ impl<'a> ModuleSymbols<'a> {
 /// A user [`Signature`] as a [`LibraryMember`] — the module-source shape of a class method. Carries the
 /// source call-shape (`call_sig`) so a named / omitted-default member call resolves through the type
 /// interface.
-fn lib_member(name: &str, sig: &Signature, owner: String, is_interface: bool) -> LibraryMember {
+fn lib_member(name: &str, sig: &Signature, owner: TypeName, is_interface: bool) -> LibraryMember {
     let mut m = LibraryMember::new(name.to_string(), sig.params.clone(), sig.ret, String::new());
     m.owner = Some(owner);
     m.is_interface = is_interface;
@@ -238,7 +304,7 @@ fn fn_info(
     kind: FnKind,
     sig: &Signature,
     receiver: Option<Ty>,
-    owner: String,
+    owner: TypeName,
     name: &str,
     rank: u32,
     origin: Origin,
@@ -285,16 +351,24 @@ fn fn_info(
 
 impl SymbolSource for ModuleSymbols<'_> {
     fn resolve_symbols(&self, fqn: &str) -> crate::libraries::ResolvedSymbols {
+        (*self.resolve_symbols_name(type_name(fqn))).clone()
+    }
+
+    fn resolve_symbols_name(
+        &self,
+        fqn: TypeName,
+    ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
         use crate::libraries::{Callables, ResolvedSymbols};
         // Classifier: a module class at the fqn. Callables: `functions(name, receiver)` — members (always
         // visible on their type) plus the module's top-level/extension functions when the fqn's package is
         // their declaring package (a same-file function has no recorded facade — it lives in the file's own
         // package, which the resolver queries as the same-package candidate fqn).
-        let classifier = self.resolve_type(fqn);
-        let (pkg, name) = fqn.rsplit_once('/').unwrap_or(("", fqn));
-        let pkg_scope = [pkg.to_string()];
-        let mut overloads = if self.syms.funs.contains_key(name) {
-            self.top_level_overloads_in_scope(name, &pkg_scope)
+        let classifier = self.resolve_type_name(fqn);
+        let pkg = fqn.parent().unwrap_or_else(|| type_name(""));
+        let name = fqn.segment();
+        let pkg_scope = [pkg];
+        let mut overloads = if self.syms.funs.contains_key(&name) {
+            self.top_level_overloads_in_scope(&name, &pkg_scope)
         } else {
             Vec::new()
         };
@@ -303,7 +377,7 @@ impl SymbolSource for ModuleSymbols<'_> {
         // `ext_funs` — the exact-receiver key is rung 0, the universal `Any` key rung 1.
         let any = Ty::obj("kotlin/Any");
         for ((recv, en), sigs) in &self.syms.ext_funs {
-            if en == name {
+            if en == &name {
                 let rank = if *recv == any { 1 } else { 0 };
                 // Surface EVERY overload registered for this (receiver, name) so the resolver's
                 // overload picker can choose by arity/argument types (`fun R.f()` vs `fun R.f(x)`).
@@ -312,11 +386,11 @@ impl SymbolSource for ModuleSymbols<'_> {
                         FnKind::Extension,
                         sig,
                         Some(*recv),
-                        String::new(),
-                        name,
+                        crate::types::type_name(""),
+                        &name,
                         rank,
                         Origin::Module {
-                            facade: String::new(),
+                            facade: type_name(""),
                         },
                     ));
                 }
@@ -327,10 +401,10 @@ impl SymbolSource for ModuleSymbols<'_> {
         } else {
             Callables::Functions(FunctionSet { overloads })
         };
-        ResolvedSymbols {
+        std::rc::Rc::new(ResolvedSymbols {
             classifier,
             callables,
-        }
+        })
     }
 
     fn member_overloads(&self, recv: Ty, name: &str) -> FunctionSet {
@@ -348,68 +422,14 @@ impl SymbolSource for ModuleSymbols<'_> {
     }
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
-        let c = self.class_by_internal(internal)?;
-        let members = c
-            .methods
-            .iter()
-            .map(|(n, s)| lib_member(n, s, c.internal.clone(), c.is_interface))
-            .collect();
-        let companion = c
-            .static_methods
-            .iter()
-            .map(|(n, s)| lib_member(n, s, c.internal.clone(), c.is_interface))
-            .collect();
-        // The primary constructor (+ secondaries) as `<init>` members returning Unit.
-        let mut constructors = vec![LibraryMember::new(
-            "<init>".to_string(),
-            c.ctor_params.clone(),
-            Ty::Unit,
-            String::new(),
-        )];
-        for params in &c.secondary_ctors {
-            constructors.push(LibraryMember::new(
-                "<init>".to_string(),
-                params.clone(),
-                Ty::Unit,
-                String::new(),
-            ));
-        }
-        let mut supertypes = c.interfaces.clone();
-        if let Some(s) = &c.super_internal {
-            supertypes.push(s.clone());
-        }
-        // Module objects resolve as values via the existing user-object path (StaticInstance), not the
-        // classpath ExternalStaticField path, so this needn't distinguish `Object`.
-        let kind = if c.is_annotation {
-            crate::libraries::TypeKind::Annotation
-        } else if c.is_interface {
-            crate::libraries::TypeKind::Interface
-        } else {
-            crate::libraries::TypeKind::Class
-        };
-        Some(LibraryType {
-            is_public: true,
-            kind,
-            supertypes,
-            constructors,
-            members,
-            companion,
-            companion_consts: HashMap::new(),
-            sam_method: None,
-            // In-module classes resolve a bare-companion reference via their own companion path
-            // (`companion_class`/`companion_methods`); the classpath fallback isn't used for them.
-            companion_object: None,
-            value_companion_fns: Vec::new(),
-            value_underlying: None,
-            alias_target: None,
-            type_params: Vec::new(),
-            sealed_subclasses: Vec::new(),
-            enum_entries: Vec::new(),
-            value_ctor_has_default: false,
-            ctor_named_params: Vec::new(),
-            value_class_properties: Vec::new(),
-            retention: None,
-        })
+        self.class_by_internal(internal)
+            .map(|c| self.type_shape_for(c))
+    }
+
+    fn resolve_type_name(&self, internal: TypeName) -> Option<std::rc::Rc<LibraryType>> {
+        self.syms
+            .class_by_type_name(internal)
+            .map(|c| std::rc::Rc::new(self.type_shape_for(c)))
     }
 }
 
@@ -441,7 +461,7 @@ mod tests {
 
     fn class(internal: &str) -> FrontendClassSig {
         FrontendClassSig {
-            internal: internal.to_string(),
+            internal: internal.into(),
             props: vec![],
             ctor_params: vec![],
             methods: HashMap::new(),
@@ -454,7 +474,7 @@ mod tests {
             static_methods: HashMap::new(),
             static_props: HashMap::new(),
             lateinit_props: HashSet::new(),
-            interfaces: vec![],
+            interfaces: crate::types::TypeNameList::new(),
             super_internal: None,
             super_ctor_params: Vec::new(),
             is_annotation: false,
@@ -481,7 +501,12 @@ mod tests {
         assert_eq!(o.kind, FnKind::TopLevel);
         assert_eq!(o.callable.params, vec![Ty::Int]);
         assert_eq!(o.callable.ret, Ty::Int);
-        assert_eq!(o.callable.origin, Origin::Module { facade: "".into() });
+        assert_eq!(
+            o.callable.origin,
+            Origin::Module {
+                facade: type_name("")
+            }
+        );
     }
 
     #[test]
@@ -516,14 +541,15 @@ mod tests {
     fn cross_file_facade_flows_into_origin() {
         let mut st = FrontendSymbols::default();
         st.funs.insert("helper".into(), vec![sig(vec![], Ty::Unit)]);
-        st.fn_facades.insert("helper".into(), "pkg/AKt".into());
+        st.fn_facades
+            .insert("helper".into(), crate::types::type_name("pkg/AKt"));
         let m = ModuleSymbols::new(&st);
         let o = &m.top_level_overloads("helper")[0];
-        assert_eq!(o.callable.owner, "pkg/AKt");
+        assert!(o.callable.owner.matches("pkg/AKt"));
         assert_eq!(
             o.callable.origin,
             Origin::Module {
-                facade: "pkg/AKt".into()
+                facade: type_name("pkg/AKt")
             }
         );
     }
@@ -534,10 +560,10 @@ mod tests {
         let mut base = class("demo/Base");
         base.methods.insert("greet".into(), sig(vec![], Ty::String));
         let mut sub = class("demo/Sub");
-        sub.super_internal = Some("demo/Base".into());
+        sub.super_internal = Some(crate::types::type_name("demo/Base"));
         sub.methods.insert("own".into(), sig(vec![], Ty::Int));
-        st.classes.insert("Base".into(), base);
-        st.classes.insert("Sub".into(), sub);
+        st.insert_class("Base".into(), base);
+        st.insert_class("Sub".into(), sub);
         let m = ModuleSymbols::new(&st);
 
         // `own` is on Sub itself (rung 0).
@@ -550,7 +576,7 @@ mod tests {
         let greet = m.member_overloads(Ty::obj("demo/Sub"), "greet");
         assert_eq!(greet.overloads.len(), 1);
         assert_eq!(greet.overloads[0].receiver_rank, 1);
-        assert_eq!(greet.overloads[0].callable.owner, "demo/Base");
+        assert!(greet.overloads[0].callable.owner.matches("demo/Base"));
     }
 
     #[test]
@@ -581,8 +607,8 @@ mod tests {
         let mut c = class("demo/Point");
         c.ctor_params = vec![Ty::Int, Ty::Int];
         c.methods.insert("sum".into(), sig(vec![], Ty::Int));
-        c.interfaces = vec!["demo/Shape".into()];
-        st.classes.insert("Point".into(), c);
+        c.interfaces = vec![crate::types::type_name("demo/Shape")].into();
+        st.insert_class("Point".into(), c);
         let m = ModuleSymbols::new(&st);
         let t = m.resolve_type("demo/Point").expect("shape");
         assert_eq!(t.constructors.len(), 1);
@@ -590,7 +616,7 @@ mod tests {
         assert_eq!(t.members.len(), 1);
         assert_eq!(t.members[0].name, "sum");
         assert_eq!(t.members[0].ret, Ty::Int);
-        assert_eq!(t.supertypes, vec!["demo/Shape".to_string()]);
+        assert_eq!(t.supertypes.to_vec(), vec!["demo/Shape".to_string()]);
         assert!(m.resolve_type("demo/Nope").is_none());
     }
 }

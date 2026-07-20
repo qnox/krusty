@@ -13,7 +13,7 @@ pub fn emit_file(ir: &IrFile) -> String {
         // `init_body`.
         let n_params = c.ctor_param_count as usize;
         let params: Vec<String> = (1..=n_params).map(|i| format!("v{i}")).collect();
-        out.push_str(&format!("class {} {{\n", class_simple(&c.fq_name)));
+        out.push_str(&format!("class {} {{\n", class_simple(&c.fq_name())));
         out.push_str(&format!("  constructor({}) {{\n", params.join(", ")));
         for (i, f) in c.fields.iter().take(n_params).enumerate() {
             let n = &f.name;
@@ -67,11 +67,15 @@ fn js_instanceof(arg: &str, t: &Ty) -> String {
     // A bare `Ty::String` has no `obj_internal()` (the Array→Obj migration landmine), so key it
     // explicitly → JS `typeof === "string"`. Other bare primitives (`is Int`) have no JS class/`typeof`
     // mapping here, so they keep the safe `false` default rather than a nonexistent `instanceof Int`.
-    if nn == Ty::String || nn.obj_internal() == Some("kotlin/String") {
+    if nn == Ty::String
+        || nn
+            .obj_internal()
+            .is_some_and(|n| n.matches("kotlin/String"))
+    {
         return format!("(typeof {arg} === \"string\")");
     }
     if let Some(fq_name) = nn.obj_internal() {
-        return format!("({arg} instanceof {})", class_simple(fq_name));
+        return format!("({arg} instanceof {})", class_simple(&fq_name.render()));
     }
     "false".to_string()
 }
@@ -264,7 +268,8 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             format!("{}.{}", emit_expr(ir, *receiver, inst), name)
         }
         IrExpr::New { class, args, .. } => {
-            let name = class_simple(&ir.classes[*class as usize].fq_name);
+            let fq_name = ir.classes[*class as usize].fq_name();
+            let name = class_simple(&fq_name);
             format!("new {}({})", name, emit_args(ir, args, inst))
         }
         IrExpr::MethodCall {

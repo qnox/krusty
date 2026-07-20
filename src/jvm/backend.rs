@@ -6,7 +6,7 @@ use crate::backend::{Artifact, Backend};
 use crate::diag::DiagSink;
 use crate::frontend::{CheckedFile, FrontendSymbols};
 use crate::jvm::names::{file_class_name, type_descriptor};
-use crate::types::Ty;
+use crate::types::{type_name, Ty};
 
 /// Why [`run_backend_passes`] declined a file: the named pass met a shape it can't lower yet, so the
 /// caller must skip (or diagnose) the file rather than miscompile it.
@@ -46,7 +46,7 @@ pub fn run_backend_passes(
     module_name: &str,
     syms: &FrontendSymbols,
 ) -> Result<(), SkipReason> {
-    let resolve_class_name = |name: &str| syms.class_names.get(name).cloned();
+    let resolve_class_name = |name: &str| syms.class_names.get(name).map(|name| name.render());
     crate::plugins::run_enabled(
         ir,
         file,
@@ -123,13 +123,13 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
 
     for (file_index, decl_id, name, facade) in fns {
         syms.fn_facades_by_decl
-            .insert((file_index, decl_id), facade.clone());
-        syms.fn_facades.insert(name, facade);
+            .insert((file_index, decl_id), type_name(&facade));
+        syms.fn_facades.insert(name, type_name(&facade));
     }
     for (name, facade) in props {
         if let Some(&(ty, is_var, is_const)) = syms.props.get(&name) {
             syms.prop_facades
-                .insert(name, (facade, ty, is_var, is_const));
+                .insert(name, (type_name(&facade), ty, is_var, is_const));
         }
     }
 }
@@ -339,12 +339,15 @@ mod tests {
         prepare_module_symbols(&files, &stems, &mut syms);
 
         assert!(!diags.has_errors(), "{:?}", diags.diags);
-        assert_eq!(syms.fn_facades.get("helper"), Some(&"p/AKt".to_string()));
+        assert_eq!(
+            syms.fn_facades.get("helper").map(|facade| facade.render()),
+            Some("p/AKt".to_string())
+        );
         assert_eq!(
             syms.prop_facades
                 .get("answer")
-                .map(|(facade, _, _, _)| facade),
-            Some(&"p/AKt".to_string())
+                .map(|(facade, _, _, _)| facade.render()),
+            Some("p/AKt".to_string())
         );
     }
 

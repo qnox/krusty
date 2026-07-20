@@ -59,9 +59,9 @@ fn serialization_plugin_runs_on_real_lowered_ir() {
     let foo_id = ir
         .classes
         .iter()
-        .position(|c| c.fq_name.ends_with("Foo"))
+        .position(|c| c.fq_name().ends_with("Foo"))
         .expect("lowered Foo class present") as u32;
-    let foo_fq = ir.classes[foo_id as usize].fq_name.clone();
+    let foo_fq = ir.classes[foo_id as usize].fq_name();
     let fields_before = ir.classes[foo_id as usize].fields.len();
 
     let mut ctx = PluginContext::default();
@@ -77,7 +77,7 @@ fn serialization_plugin_runs_on_real_lowered_ir() {
     let ser = ir
         .classes
         .iter()
-        .find(|c| c.fq_name == ser_fq)
+        .find(|c| c.fq_name_matches(&ser_fq))
         .expect("$serializer synthesized on real IR");
     assert!(ser.is_object);
 
@@ -111,7 +111,6 @@ fn serialization_plugin_runs_on_real_lowered_ir() {
     // itself carries a `companion_class` pointing at it.
     let comp_fq = ir.classes[foo_id as usize]
         .companion_class
-        .clone()
         .expect("Foo has a companion_class for the serializer()");
     let comp = ir
         .classes
@@ -150,7 +149,7 @@ fn serialization_activates_from_source_annotation() {
     assert!(
         ir.classes
             .iter()
-            .any(|c| c.fq_name.ends_with("Foo$$serializer")),
+            .any(|c| c.fq_name().ends_with("Foo$$serializer")),
         "$serializer synthesized purely from the source annotation"
     );
 }
@@ -168,7 +167,7 @@ fn serializable_enum_relocates_serializer_to_companion() {
     let e_id = ir
         .classes
         .iter()
-        .position(|c| c.fq_name.ends_with("E"))
+        .position(|c| c.fq_name().ends_with("E"))
         .expect("lowered E enum present") as u32;
 
     let mut ctx = PluginContext::default();
@@ -182,7 +181,6 @@ fn serializable_enum_relocates_serializer_to_companion() {
     // serializer() lives on E$Companion, not statically on E.
     let comp_fq = ir.classes[e_id as usize]
         .companion_class
-        .clone()
         .expect("enum gets a companion_class for serializer()");
     let comp = ir
         .classes
@@ -224,7 +222,7 @@ fn deser_ctor_appends_marker_for_value_class_field() {
     let d_id = ir
         .classes
         .iter()
-        .position(|c| c.fq_name.ends_with("D"))
+        .position(|c| c.fq_name().ends_with("D"))
         .expect("lowered D class present") as u32;
 
     let mut ctx = PluginContext::default();
@@ -239,18 +237,18 @@ fn deser_ctor_appends_marker_for_value_class_field() {
         .iter()
         .find(|sc| sc.synthetic)
         .expect("synthetic deserialization ctor synthesized");
-    let last_two: Vec<Option<&str>> = deser
+    let last_two: Vec<Option<String>> = deser
         .params
         .iter()
         .rev()
         .take(2)
-        .map(|t| t.obj_internal())
+        .map(|t| t.obj_internal().map(|n| n.render()))
         .collect();
     assert_eq!(
         last_two,
         vec![
-            Some("kotlin/jvm/internal/DefaultConstructorMarker"),
-            Some("kotlinx/serialization/internal/SerializationConstructorMarker"),
+            Some("kotlin/jvm/internal/DefaultConstructorMarker".to_string()),
+            Some("kotlinx/serialization/internal/SerializationConstructorMarker".to_string()),
         ],
         "deser ctor ends with SerializationConstructorMarker then DefaultConstructorMarker"
     );
@@ -269,7 +267,7 @@ fn value_class_serializer_omits_write_self() {
     let v_id = ir
         .classes
         .iter()
-        .position(|c| c.fq_name.ends_with("V"))
+        .position(|c| c.fq_name().ends_with("V"))
         .expect("lowered V class present") as u32;
     assert!(ir.classes[v_id as usize].is_value, "V is a value class");
 
