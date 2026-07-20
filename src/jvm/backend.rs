@@ -145,6 +145,11 @@ impl Backend for JvmBackend {
         let syms = checked.symbols;
         let module_name = checked.module_name;
 
+        // Every class this file emits carries a `SourceFile` attribute naming the origin `.kt` — set
+        // it now so `ClassWriter::new` (incl. synthetics) picks it up. kotlinc uses the simple file
+        // name; krusty reconstructs it from the stem (directories already stripped).
+        crate::jvm::classfile::set_source_file(Some(format!("{stem}.kt")));
+
         // Lower the checked file to the backend-agnostic IR, then emit JVM bytecode from it.
         // (The legacy direct AST emitter has been removed — IR is the sole JVM codegen path.)
         let facade_name = file_class_name(stem, file.package.as_deref());
