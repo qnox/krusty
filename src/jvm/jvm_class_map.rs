@@ -172,15 +172,7 @@ pub fn jvm_to_kotlin_builtin_with_members(internal: &str) -> Option<&'static str
 }
 
 pub fn jvm_to_kotlin_builtin_with_members_name(internal: TypeName) -> Option<TypeName> {
-    Some(if internal.matches("java/lang/CharSequence") {
-        crate::types::type_name("kotlin/CharSequence")
-    } else if internal.matches("java/lang/Number") {
-        crate::types::type_name("kotlin/Number")
-    } else if internal.matches("java/lang/Comparable") {
-        crate::types::type_name("kotlin/Comparable")
-    } else {
-        return None;
-    })
+    builtin_ids().with_members.get(&internal).copied()
 }
 
 /// Whether a JVM-mapped Kotlin built-in is a JVM **interface** (so a member dispatches via
@@ -196,22 +188,10 @@ pub fn jvm_mapped_builtin_is_interface(jvm_internal: &str) -> Option<bool> {
 }
 
 pub fn jvm_mapped_builtin_is_interface_name(jvm_internal: TypeName) -> Option<bool> {
-    Some(
-        if jvm_internal.matches("java/lang/CharSequence")
-            || jvm_internal.matches("java/lang/Comparable")
-            || jvm_internal.matches("java/lang/Iterable")
-        {
-            true
-        } else if jvm_internal.matches("java/lang/Number")
-            || jvm_internal.matches("java/lang/Object")
-            || jvm_internal.matches("java/lang/String")
-            || jvm_internal.matches("java/lang/Enum")
-        {
-            false
-        } else {
-            return None;
-        },
-    )
+    builtin_ids()
+        .mapped_is_interface
+        .get(&jvm_internal)
+        .copied()
 }
 
 /// Whether a resolved JVM internal name denotes a `Throwable` subtype, recognised structurally by
@@ -281,25 +261,7 @@ pub fn wrapper_to_kotlin_prim(internal: &str) -> Option<&'static str> {
 }
 
 pub fn wrapper_to_kotlin_prim_name(internal: TypeName) -> Option<&'static str> {
-    Some(if internal.matches("java/lang/Integer") {
-        "kotlin/Int"
-    } else if internal.matches("java/lang/Long") {
-        "kotlin/Long"
-    } else if internal.matches("java/lang/Short") {
-        "kotlin/Short"
-    } else if internal.matches("java/lang/Byte") {
-        "kotlin/Byte"
-    } else if internal.matches("java/lang/Double") {
-        "kotlin/Double"
-    } else if internal.matches("java/lang/Float") {
-        "kotlin/Float"
-    } else if internal.matches("java/lang/Boolean") {
-        "kotlin/Boolean"
-    } else if internal.matches("java/lang/Character") {
-        "kotlin/Char"
-    } else {
-        return None;
-    })
+    builtin_ids().wrapper_prim.get(&internal).copied()
 }
 
 /// Map a Kotlin built-in type's internal name to its JVM name (`kotlin/Any` → `java/lang/Object`).
@@ -331,149 +293,166 @@ pub fn to_jvm_internal(internal: &str) -> &str {
         .unwrap_or(internal)
 }
 
+/// The JVM-erasure identity groups: each group's Kotlin internal names plus the single JVM internal
+/// name they erase to. Group index is the erasure identity used by the id-keyed comparisons below.
+const ERASURE_GROUPS: &[(&[&str], &str)] = &[
+    (&["kotlin/Any"], "java/lang/Object"),
+    (&["kotlin/String"], "java/lang/String"),
+    (&["kotlin/CharSequence"], "java/lang/CharSequence"),
+    (&["kotlin/Throwable"], "java/lang/Throwable"),
+    (&["kotlin/Cloneable"], "java/lang/Cloneable"),
+    (&["kotlin/Number"], "java/lang/Number"),
+    (&["kotlin/Comparable"], "java/lang/Comparable"),
+    (&["kotlin/Enum"], "java/lang/Enum"),
+    (&["kotlin/Annotation"], "java/lang/annotation/Annotation"),
+    (&["kotlin/Nothing"], "java/lang/Void"),
+    (
+        &[
+            "kotlin/collections/Iterable",
+            "kotlin/collections/MutableIterable",
+        ],
+        "java/lang/Iterable",
+    ),
+    (
+        &[
+            "kotlin/collections/Iterator",
+            "kotlin/collections/MutableIterator",
+        ],
+        "java/util/Iterator",
+    ),
+    (
+        &[
+            "kotlin/collections/ListIterator",
+            "kotlin/collections/MutableListIterator",
+        ],
+        "java/util/ListIterator",
+    ),
+    (
+        &[
+            "kotlin/collections/Collection",
+            "kotlin/collections/MutableCollection",
+        ],
+        "java/util/Collection",
+    ),
+    (
+        &["kotlin/collections/List", "kotlin/collections/MutableList"],
+        "java/util/List",
+    ),
+    (
+        &["kotlin/collections/Set", "kotlin/collections/MutableSet"],
+        "java/util/Set",
+    ),
+    (
+        &["kotlin/collections/Map", "kotlin/collections/MutableMap"],
+        "java/util/Map",
+    ),
+    (
+        &[
+            "kotlin/collections/Map.Entry",
+            "kotlin/collections/Map$Entry",
+            "kotlin/collections/MutableMap.MutableEntry",
+            "kotlin/collections/MutableMap$MutableEntry",
+        ],
+        "java/util/Map$Entry",
+    ),
+];
+
+/// Id-keyed views of the curated builtin tables, interned once. Hot resolution paths compare
+/// `TypeName` ids through these maps instead of locking the global name tree per string compare.
+struct BuiltinIds {
+    erasure_group: std::collections::HashMap<TypeName, u8>,
+    /// Any builtin (Kotlin or JVM spelling, primitives included) → its canonical JVM internal.
+    jvm_builtin: std::collections::HashMap<TypeName, (&'static str, TypeName)>,
+    /// Groups whose JVM face is a `java/util/*` collection interface, as a bitmask by group index.
+    collection_groups: u32,
+    coll_to_kotlin: std::collections::HashMap<TypeName, TypeName>,
+    coll_to_kotlin_mutable: std::collections::HashMap<TypeName, TypeName>,
+    wrapper_prim: std::collections::HashMap<TypeName, &'static str>,
+    with_members: std::collections::HashMap<TypeName, TypeName>,
+    mapped_is_interface: std::collections::HashMap<TypeName, bool>,
+}
+
+fn builtin_ids() -> &'static BuiltinIds {
+    use std::collections::HashMap;
+    static IDS: std::sync::OnceLock<BuiltinIds> = std::sync::OnceLock::new();
+    IDS.get_or_init(|| {
+        let tn = crate::types::type_name;
+        let mut erasure_group = HashMap::new();
+        let mut jvm_builtin = HashMap::new();
+        let mut collection_groups = 0u32;
+        let mut coll_to_kotlin = HashMap::new();
+        let mut coll_to_kotlin_mutable = HashMap::new();
+        let mut with_members = HashMap::new();
+        let mut mapped_is_interface = HashMap::new();
+        for (group, (kotlin_names, jvm_name)) in ERASURE_GROUPS.iter().enumerate() {
+            let g = u8::try_from(group).expect("erasure group count fits u8");
+            let jvm_id = tn(jvm_name);
+            for kotlin_name in *kotlin_names {
+                let id = tn(kotlin_name);
+                erasure_group.insert(id, g);
+                jvm_builtin.insert(id, (*jvm_name, jvm_id));
+            }
+            erasure_group.insert(jvm_id, g);
+            jvm_builtin.insert(jvm_id, (*jvm_name, jvm_id));
+            if jvm_name.starts_with("java/util/") {
+                collection_groups |= 1 << group;
+            }
+            if let Some(kotlin) = jvm_collection_to_kotlin(jvm_name) {
+                coll_to_kotlin.insert(jvm_id, tn(kotlin));
+            }
+            if let Some(kotlin) = jvm_collection_to_kotlin_mutable(jvm_name) {
+                coll_to_kotlin_mutable.insert(jvm_id, tn(kotlin));
+            }
+            if let Some(kotlin) = jvm_to_kotlin_builtin_with_members(jvm_name) {
+                with_members.insert(jvm_id, tn(kotlin));
+            }
+            if let Some(is_interface) = jvm_mapped_builtin_is_interface(jvm_name) {
+                mapped_is_interface.insert(jvm_id, is_interface);
+            }
+        }
+        let mut wrapper_prim = HashMap::new();
+        for wrapper in [
+            "java/lang/Integer",
+            "java/lang/Long",
+            "java/lang/Short",
+            "java/lang/Byte",
+            "java/lang/Double",
+            "java/lang/Float",
+            "java/lang/Boolean",
+            "java/lang/Character",
+        ] {
+            let prim = wrapper_to_kotlin_prim(wrapper).expect("wrapper table covers JVM boxes");
+            let wrapper_id = tn(wrapper);
+            wrapper_prim.insert(wrapper_id, prim);
+            jvm_builtin.insert(wrapper_id, (wrapper, wrapper_id));
+            jvm_builtin.insert(tn(prim), (wrapper, wrapper_id));
+        }
+        BuiltinIds {
+            erasure_group,
+            jvm_builtin,
+            collection_groups,
+            coll_to_kotlin,
+            coll_to_kotlin_mutable,
+            wrapper_prim,
+            with_members,
+            mapped_is_interface,
+        }
+    })
+}
+
 /// Compare a semantic Kotlin/internal class name with a JVM-erased internal name without rendering the
 /// semantic name first.
 pub fn type_name_maps_to_jvm_internal(internal: TypeName, jvm_internal: &str) -> bool {
-    match jvm_internal {
-        "java/lang/Object" => internal.matches("kotlin/Any") || internal.matches(jvm_internal),
-        "java/lang/String" => internal.matches("kotlin/String") || internal.matches(jvm_internal),
-        "java/lang/CharSequence" => {
-            internal.matches("kotlin/CharSequence") || internal.matches(jvm_internal)
+    match ERASURE_GROUPS.iter().position(|(_, j)| *j == jvm_internal) {
+        Some(group) => {
+            jvm_erasure_group(internal) == Some(u8::try_from(group).expect("group fits u8"))
         }
-        "java/lang/Throwable" => {
-            internal.matches("kotlin/Throwable") || internal.matches(jvm_internal)
-        }
-        "java/lang/Cloneable" => {
-            internal.matches("kotlin/Cloneable") || internal.matches(jvm_internal)
-        }
-        "java/lang/Number" => internal.matches("kotlin/Number") || internal.matches(jvm_internal),
-        "java/lang/Comparable" => {
-            internal.matches("kotlin/Comparable") || internal.matches(jvm_internal)
-        }
-        "java/lang/Enum" => internal.matches("kotlin/Enum") || internal.matches(jvm_internal),
-        "java/lang/annotation/Annotation" => {
-            internal.matches("kotlin/Annotation") || internal.matches(jvm_internal)
-        }
-        "java/lang/Void" => internal.matches("kotlin/Nothing") || internal.matches(jvm_internal),
-        "java/lang/Iterable" => {
-            internal.matches("kotlin/collections/Iterable")
-                || internal.matches("kotlin/collections/MutableIterable")
-                || internal.matches(jvm_internal)
-        }
-        "java/util/Iterator" => {
-            internal.matches("kotlin/collections/Iterator")
-                || internal.matches("kotlin/collections/MutableIterator")
-                || internal.matches(jvm_internal)
-        }
-        "java/util/ListIterator" => {
-            internal.matches("kotlin/collections/ListIterator")
-                || internal.matches("kotlin/collections/MutableListIterator")
-                || internal.matches(jvm_internal)
-        }
-        "java/util/Collection" => {
-            internal.matches("kotlin/collections/Collection")
-                || internal.matches("kotlin/collections/MutableCollection")
-                || internal.matches(jvm_internal)
-        }
-        "java/util/List" => {
-            internal.matches("kotlin/collections/List")
-                || internal.matches("kotlin/collections/MutableList")
-                || internal.matches(jvm_internal)
-        }
-        "java/util/Set" => {
-            internal.matches("kotlin/collections/Set")
-                || internal.matches("kotlin/collections/MutableSet")
-                || internal.matches(jvm_internal)
-        }
-        "java/util/Map" => {
-            internal.matches("kotlin/collections/Map")
-                || internal.matches("kotlin/collections/MutableMap")
-                || internal.matches(jvm_internal)
-        }
-        "java/util/Map$Entry" => {
-            internal.matches("kotlin/collections/Map.Entry")
-                || internal.matches("kotlin/collections/Map$Entry")
-                || internal.matches("kotlin/collections/MutableMap.MutableEntry")
-                || internal.matches("kotlin/collections/MutableMap$MutableEntry")
-                || internal.matches(jvm_internal)
-        }
-        _ => internal.matches(jvm_internal),
+        None => internal.matches(jvm_internal),
     }
 }
 
 fn jvm_erasure_group(internal: TypeName) -> Option<u8> {
-    Some(
-        if internal.matches("kotlin/Any") || internal.matches("java/lang/Object") {
-            0
-        } else if internal.matches("kotlin/String") || internal.matches("java/lang/String") {
-            1
-        } else if internal.matches("kotlin/CharSequence")
-            || internal.matches("java/lang/CharSequence")
-        {
-            2
-        } else if internal.matches("kotlin/Throwable") || internal.matches("java/lang/Throwable") {
-            3
-        } else if internal.matches("kotlin/Cloneable") || internal.matches("java/lang/Cloneable") {
-            4
-        } else if internal.matches("kotlin/Number") || internal.matches("java/lang/Number") {
-            5
-        } else if internal.matches("kotlin/Comparable") || internal.matches("java/lang/Comparable")
-        {
-            6
-        } else if internal.matches("kotlin/Enum") || internal.matches("java/lang/Enum") {
-            7
-        } else if internal.matches("kotlin/Annotation")
-            || internal.matches("java/lang/annotation/Annotation")
-        {
-            8
-        } else if internal.matches("kotlin/Nothing") || internal.matches("java/lang/Void") {
-            9
-        } else if internal.matches("kotlin/collections/Iterable")
-            || internal.matches("kotlin/collections/MutableIterable")
-            || internal.matches("java/lang/Iterable")
-        {
-            10
-        } else if internal.matches("kotlin/collections/Iterator")
-            || internal.matches("kotlin/collections/MutableIterator")
-            || internal.matches("java/util/Iterator")
-        {
-            11
-        } else if internal.matches("kotlin/collections/ListIterator")
-            || internal.matches("kotlin/collections/MutableListIterator")
-            || internal.matches("java/util/ListIterator")
-        {
-            12
-        } else if internal.matches("kotlin/collections/Collection")
-            || internal.matches("kotlin/collections/MutableCollection")
-            || internal.matches("java/util/Collection")
-        {
-            13
-        } else if internal.matches("kotlin/collections/List")
-            || internal.matches("kotlin/collections/MutableList")
-            || internal.matches("java/util/List")
-        {
-            14
-        } else if internal.matches("kotlin/collections/Set")
-            || internal.matches("kotlin/collections/MutableSet")
-            || internal.matches("java/util/Set")
-        {
-            15
-        } else if internal.matches("kotlin/collections/Map")
-            || internal.matches("kotlin/collections/MutableMap")
-            || internal.matches("java/util/Map")
-        {
-            16
-        } else if internal.matches("kotlin/collections/Map.Entry")
-            || internal.matches("kotlin/collections/Map$Entry")
-            || internal.matches("kotlin/collections/MutableMap.MutableEntry")
-            || internal.matches("kotlin/collections/MutableMap$MutableEntry")
-            || internal.matches("java/util/Map$Entry")
-        {
-            17
-        } else {
-            return None;
-        },
-    )
+    builtin_ids().erasure_group.get(&internal).copied()
 }
 
 /// Compare two id-backed class names by their JVM erasure identity without materializing either name.
@@ -485,122 +464,28 @@ pub fn type_names_map_to_same_jvm_internal(left: TypeName, right: TypeName) -> b
 }
 
 pub fn type_name_maps_to_jvm_collection_interface(internal: TypeName) -> bool {
-    internal.starts_with("java/util/")
-        || type_name_maps_to_jvm_internal(internal, "java/util/Iterator")
-        || type_name_maps_to_jvm_internal(internal, "java/util/ListIterator")
-        || type_name_maps_to_jvm_internal(internal, "java/util/Collection")
-        || type_name_maps_to_jvm_internal(internal, "java/util/List")
-        || type_name_maps_to_jvm_internal(internal, "java/util/Set")
-        || type_name_maps_to_jvm_internal(internal, "java/util/Map")
-        || type_name_maps_to_jvm_internal(internal, "java/util/Map$Entry")
+    let ids = builtin_ids();
+    jvm_erasure_group(internal).is_some_and(|g| ids.collection_groups & (1 << g) != 0)
+        || internal.starts_with("java/util/")
 }
 
 pub fn jvm_collection_to_kotlin_type_name(internal: TypeName) -> Option<TypeName> {
-    Some(if internal.matches("java/lang/Iterable") {
-        crate::types::type_name("kotlin/collections/Iterable")
-    } else if internal.matches("java/util/Iterator") {
-        crate::types::type_name("kotlin/collections/Iterator")
-    } else if internal.matches("java/util/ListIterator") {
-        crate::types::type_name("kotlin/collections/ListIterator")
-    } else if internal.matches("java/util/Collection") {
-        crate::types::type_name("kotlin/collections/Collection")
-    } else if internal.matches("java/util/List") {
-        crate::types::type_name("kotlin/collections/List")
-    } else if internal.matches("java/util/Set") {
-        crate::types::type_name("kotlin/collections/Set")
-    } else if internal.matches("java/util/Map") {
-        crate::types::type_name("kotlin/collections/Map")
-    } else if internal.matches("java/util/Map$Entry") {
-        crate::types::type_name("kotlin/collections/Map.Entry")
-    } else {
-        return None;
-    })
+    builtin_ids().coll_to_kotlin.get(&internal).copied()
 }
 
 pub fn jvm_collection_to_kotlin_mutable_type_name(internal: TypeName) -> Option<TypeName> {
-    Some(if internal.matches("java/lang/Iterable") {
-        crate::types::type_name("kotlin/collections/MutableIterable")
-    } else if internal.matches("java/util/Iterator") {
-        crate::types::type_name("kotlin/collections/MutableIterator")
-    } else if internal.matches("java/util/ListIterator") {
-        crate::types::type_name("kotlin/collections/MutableListIterator")
-    } else if internal.matches("java/util/Collection") {
-        crate::types::type_name("kotlin/collections/MutableCollection")
-    } else if internal.matches("java/util/List") {
-        crate::types::type_name("kotlin/collections/MutableList")
-    } else if internal.matches("java/util/Set") {
-        crate::types::type_name("kotlin/collections/MutableSet")
-    } else if internal.matches("java/util/Map") {
-        crate::types::type_name("kotlin/collections/MutableMap")
-    } else if internal.matches("java/util/Map$Entry") {
-        crate::types::type_name("kotlin/collections/MutableMap.MutableEntry")
-    } else {
-        return None;
-    })
+    builtin_ids().coll_to_kotlin_mutable.get(&internal).copied()
 }
 
 pub fn type_name_to_jvm_builtin_internal(internal: TypeName) -> Option<&'static str> {
-    Some(
-        if internal.matches("kotlin/Int") || internal.matches("java/lang/Integer") {
-            "java/lang/Integer"
-        } else if internal.matches("kotlin/Long") || internal.matches("java/lang/Long") {
-            "java/lang/Long"
-        } else if internal.matches("kotlin/Short") || internal.matches("java/lang/Short") {
-            "java/lang/Short"
-        } else if internal.matches("kotlin/Byte") || internal.matches("java/lang/Byte") {
-            "java/lang/Byte"
-        } else if internal.matches("kotlin/Double") || internal.matches("java/lang/Double") {
-            "java/lang/Double"
-        } else if internal.matches("kotlin/Float") || internal.matches("java/lang/Float") {
-            "java/lang/Float"
-        } else if internal.matches("kotlin/Boolean") || internal.matches("java/lang/Boolean") {
-            "java/lang/Boolean"
-        } else if internal.matches("kotlin/Char") || internal.matches("java/lang/Character") {
-            "java/lang/Character"
-        } else if type_name_maps_to_jvm_internal(internal, "java/lang/Object") {
-            "java/lang/Object"
-        } else if type_name_maps_to_jvm_internal(internal, "java/lang/String") {
-            "java/lang/String"
-        } else if type_name_maps_to_jvm_internal(internal, "java/lang/CharSequence") {
-            "java/lang/CharSequence"
-        } else if type_name_maps_to_jvm_internal(internal, "java/lang/Throwable") {
-            "java/lang/Throwable"
-        } else if type_name_maps_to_jvm_internal(internal, "java/lang/Cloneable") {
-            "java/lang/Cloneable"
-        } else if type_name_maps_to_jvm_internal(internal, "java/lang/Number") {
-            "java/lang/Number"
-        } else if type_name_maps_to_jvm_internal(internal, "java/lang/Comparable") {
-            "java/lang/Comparable"
-        } else if type_name_maps_to_jvm_internal(internal, "java/lang/Enum") {
-            "java/lang/Enum"
-        } else if type_name_maps_to_jvm_internal(internal, "java/lang/annotation/Annotation") {
-            "java/lang/annotation/Annotation"
-        } else if type_name_maps_to_jvm_internal(internal, "java/lang/Void") {
-            "java/lang/Void"
-        } else if type_name_maps_to_jvm_internal(internal, "java/lang/Iterable") {
-            "java/lang/Iterable"
-        } else if type_name_maps_to_jvm_internal(internal, "java/util/Iterator") {
-            "java/util/Iterator"
-        } else if type_name_maps_to_jvm_internal(internal, "java/util/ListIterator") {
-            "java/util/ListIterator"
-        } else if type_name_maps_to_jvm_internal(internal, "java/util/Collection") {
-            "java/util/Collection"
-        } else if type_name_maps_to_jvm_internal(internal, "java/util/List") {
-            "java/util/List"
-        } else if type_name_maps_to_jvm_internal(internal, "java/util/Set") {
-            "java/util/Set"
-        } else if type_name_maps_to_jvm_internal(internal, "java/util/Map") {
-            "java/util/Map"
-        } else if type_name_maps_to_jvm_internal(internal, "java/util/Map$Entry") {
-            "java/util/Map$Entry"
-        } else {
-            return None;
-        },
-    )
+    builtin_ids().jvm_builtin.get(&internal).map(|(s, _)| *s)
 }
 
 pub fn to_jvm_type_name(internal: TypeName) -> TypeName {
-    type_name_to_jvm_builtin_internal(internal).map_or(internal, crate::types::type_name)
+    builtin_ids()
+        .jvm_builtin
+        .get(&internal)
+        .map_or(internal, |(_, id)| *id)
 }
 
 /// Inverse of [`to_jvm_internal`]: normalize a JVM built-in name read from the classpath/descriptors
