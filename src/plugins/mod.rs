@@ -146,8 +146,8 @@ impl<'a> PluginContext<'a> {
 
     fn source_class(&self, ir: &IrFile, class: ClassId) -> Option<&'a crate::ast::ClassDecl> {
         let file = self.source_file?;
-        let internal = &ir.classes.get(class as usize)?.fq_name;
-        source_class_by_internal(file, internal)
+        let internal = ir.classes.get(class as usize)?.fq_name();
+        source_class_by_internal(file, &internal)
     }
 
     fn class_literal_internal(
@@ -297,7 +297,8 @@ impl<'a> PluginContext<'a> {
             target_type_descriptor: no_target_type_descriptor,
         };
         for (i, c) in ir.classes.iter().enumerate() {
-            if let Some(cd) = source_class_by_internal(file, &c.fq_name) {
+            let internal = c.fq_name();
+            if let Some(cd) = source_class_by_internal(file, &internal) {
                 if !cd.annotations.is_empty() {
                     ctx.class_annotations
                         .insert(i as u32, AnnotationList::Borrowed(&cd.annotations));
@@ -483,6 +484,7 @@ impl PluginHost {
 
 /// Fill all `IrClass` fields with empty defaults for a synthesized class.
 pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass {
+    let fq_name = fq_name.into();
     crate::ir::IrClass {
         fq_name: fq_name.into(),
         is_value: false,
@@ -501,13 +503,13 @@ pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass 
         is_sealed: false,
         is_abstract: false,
         is_open: false,
-        superclass: "java/lang/Object".to_string(),
+        superclass: "java/lang/Object".into(),
         super_args: Vec::new(),
         enum_entries: Vec::new(),
         enum_entry_of: None,
         prop_ref: None,
         bridges: Vec::new(),
-        interfaces: Vec::new(),
+        interfaces: Default::default(),
         is_object: false,
         is_companion: false,
         companion_class: None,
@@ -531,7 +533,7 @@ mod tests {
             "touch"
         }
         fn generate_declarations(&self, ir: &mut IrFile, _ctx: &PluginContext<'_>) {
-            ir.classes.push(synthetic_class("demo/Generated"));
+            ir.add_class(synthetic_class("demo/Generated"));
         }
     }
 
@@ -574,7 +576,7 @@ mod tests {
         let mut ir = IrFile::default();
         host.run(&mut ir, &PluginContext::default());
         assert_eq!(ir.classes.len(), 1);
-        assert_eq!(ir.classes[0].fq_name, "demo/Generated");
+        assert!(ir.classes[0].fq_name_matches("demo/Generated"));
     }
 
     #[test]

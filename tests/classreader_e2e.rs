@@ -47,8 +47,8 @@ fn reads_real_javac_class() {
     let bytes = fs::read(dir.join("J.class")).unwrap();
     let info = parse_class(&bytes).expect("parse J.class");
 
-    assert_eq!(info.this_class, "J");
-    assert_eq!(info.super_class.as_deref(), Some("java/lang/Object"));
+    assert!(info.this_class_matches("J"));
+    assert_eq!(info.super_class().as_deref(), Some("java/lang/Object"));
 
     let add = info.method("add", "(II)I").expect("add");
     assert!(add.is_public() && add.is_static());

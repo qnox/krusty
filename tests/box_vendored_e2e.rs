@@ -30,7 +30,7 @@ fn find_box_class(dir: &Path) -> Option<String> {
                             .method("box", "()Ljava/lang/String;")
                             .is_some_and(|m| m.is_static())
                         {
-                            *found = Some(ci.this_class.replace('/', "."));
+                            *found = Some(ci.this_class().replace('/', "."));
                             return;
                         }
                     }

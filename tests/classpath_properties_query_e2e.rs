@@ -32,7 +32,7 @@ fn member_property_getter_and_setter_from_metadata() {
     let label = props
         .overloads
         .iter()
-        .find(|p| p.owner == "Holder")
+        .find(|p| p.owner.matches("Holder"))
         .expect("label property resolved from @Metadata");
     assert_eq!(label.getter.name, "getLabel");
     assert!(label.setter.is_none(), "a `val` exposes no setter");
@@ -42,7 +42,7 @@ fn member_property_getter_and_setter_from_metadata() {
     let count = props
         .overloads
         .iter()
-        .find(|p| p.owner == "Holder")
+        .find(|p| p.owner.matches("Holder"))
         .expect("count property resolved from @Metadata");
     assert_eq!(count.getter.name, "getCount");
     assert_eq!(

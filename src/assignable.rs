@@ -14,8 +14,7 @@
 //! `source_receiver_rank`), each of which re-implemented one slice — usually erased (dropping type
 //! arguments and nullability) and without a type-variable context.
 
-use crate::types::Ty;
-use std::borrow::Cow;
+use crate::types::{Ty, TypeName};
 use std::collections::HashMap;
 
 /// The class-hierarchy oracle the assignability relation walks — the direct supertypes of a class in
@@ -23,7 +22,7 @@ use std::collections::HashMap;
 pub trait TypeOracle {
     /// The DIRECT supertypes (superclass + superinterfaces) of `internal`, as Kotlin internal names.
     /// Empty when the class is unknown or has none (`kotlin/Any`).
-    fn direct_supertypes(&self, internal: &str) -> Vec<String>;
+    fn direct_supertypes(&self, internal: TypeName) -> Vec<TypeName>;
 
     /// The underlying representation type of a value/inline class (`Aid(val v: String)` → `kotlin/String`),
     /// or `None` for a non-value class. Lets the relation accept a value-class argument where its erased
@@ -32,26 +31,10 @@ pub trait TypeOracle {
         None
     }
 
-    /// A canonical class identity used to equate names the platform unifies — a Kotlin collection interface
-    /// and its single JVM interface (`kotlin/collections/List` ≡ `kotlin/collections/MutableList` ≡
-    /// `java/util/List`). Two classes with the same canonical identity are the same class here. Default:
-    /// the name itself (no aliasing).
-    fn canonical_class<'a>(&self, internal: &'a str) -> Cow<'a, str> {
-        Cow::Borrowed(internal)
-    }
-
-    /// Whether two class names denote the same platform class identity. The default compares canonical
-    /// names; platforms that have spelling aliases should override this to avoid materializing a
-    /// normalized string on hot hierarchy walks.
-    fn same_class(&self, a: &str, b: &str) -> bool {
-        a == b || self.canonical_class(a) == self.canonical_class(b)
-    }
-
-    /// Whether `candidate` denotes the class whose original name is `target` and whose canonical name
-    /// was already computed. Hierarchy walks use this so the target identity is not recomputed for every
-    /// visited superclass.
-    fn matches_class(&self, candidate: &str, target: &str, target_canonical: &str) -> bool {
-        candidate == target || self.canonical_class(candidate).as_ref() == target_canonical
+    /// Id-backed class identity comparison used by assignability/coercion walks. Platforms that unify
+    /// multiple source names onto one runtime class override this without rendering full internal names.
+    fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
+        a == b
     }
 }
 
@@ -240,27 +223,22 @@ fn class_assignable(oracle: &dyn TypeOracle, sub: Ty, sup: Ty, value_class: bool
     else {
         return false;
     };
-    let target_c = oracle.canonical_class(target);
-    let mut seen = crate::types::NameWalkSet::new();
-    let (start_id, _) = seen.insert(start.to_string());
-    let mut stack = vec![start_id];
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(start);
+    let mut stack = vec![start];
     while let Some(cur) = stack.pop() {
-        let cur = seen.get(cur).expect("walk index was inserted");
-        if oracle.matches_class(cur, target, target_c.as_ref()) {
+        if oracle.same_class_name(cur, target) {
             return true;
         }
         let direct = oracle.direct_supertypes(cur);
-        stack.extend(direct.into_iter().filter_map(|s| {
-            let (id, inserted) = seen.insert(s);
-            inserted.then_some(id)
-        }));
+        stack.extend(direct.into_iter().filter(|s| seen.insert(*s)));
     }
     // A value/inline class is assignable where its underlying representation is expected (the JVM-ABI
     // boundary) — only under `is_assignable`, not the pure `is_subtype` relation.
     value_class
         && oracle
             .value_underlying(sub)
-            .is_some_and(|u| u.kotlin_class_internal() == Some(target) || u == sup)
+            .is_some_and(|u| u.kotlin_class_internal().is_some_and(|n| n == target) || u == sup)
 }
 
 #[cfg(test)]
@@ -271,33 +249,32 @@ mod tests {
     /// A tiny hand-wired hierarchy oracle for the relation's unit tests.
     struct Fake;
     impl TypeOracle for Fake {
-        fn direct_supertypes(&self, internal: &str) -> Vec<String> {
+        fn direct_supertypes(&self, internal: TypeName) -> Vec<TypeName> {
             let s: &[&str] = match internal {
-                "kotlin/String" => &["kotlin/CharSequence", "kotlin/Comparable"],
-                "kotlin/CharSequence" => &["kotlin/Any"],
-                "kotlin/Comparable" => &["kotlin/Any"],
-                "kotlin/collections/List" => &["kotlin/collections/Iterable"],
-                "kotlin/collections/MutableList" => &["kotlin/collections/List"],
-                "kotlin/collections/Iterable" => &["kotlin/Any"],
-                "kotlin/Int" | "kotlin/Double" => &["kotlin/Number"],
-                "kotlin/Number" => &["kotlin/Any"],
-                "app/Dog" => &["app/Animal"],
-                "app/Animal" => &["kotlin/Any"],
+                n if n.matches("kotlin/String") => &["kotlin/CharSequence", "kotlin/Comparable"],
+                n if n.matches("kotlin/CharSequence") => &["kotlin/Any"],
+                n if n.matches("kotlin/Comparable") => &["kotlin/Any"],
+                n if n.matches("kotlin/collections/List") => &["kotlin/collections/Iterable"],
+                n if n.matches("kotlin/collections/MutableList") => &["kotlin/collections/List"],
+                n if n.matches("kotlin/collections/Iterable") => &["kotlin/Any"],
+                n if n.matches("kotlin/Int") || n.matches("kotlin/Double") => &["kotlin/Number"],
+                n if n.matches("kotlin/Number") => &["kotlin/Any"],
+                n if n.matches("app/Dog") => &["app/Animal"],
+                n if n.matches("app/Animal") => &["kotlin/Any"],
                 _ => &[],
             };
-            s.iter().map(|x| x.to_string()).collect()
+            s.iter().map(|x| crate::types::type_name(x)).collect()
         }
         fn value_underlying(&self, ty: Ty) -> Option<Ty> {
             match ty {
-                Ty::Obj("app/Aid", _) => Some(Ty::String),
+                Ty::Obj(n, _) if n.matches("app/Aid") => Some(Ty::String),
                 _ => None,
             }
         }
-        fn canonical_class<'a>(&self, internal: &'a str) -> Cow<'a, str> {
-            match internal {
-                "canonical/Readonly" | "canonical/Mutable" => Cow::Borrowed("canonical/List"),
-                _ => Cow::Borrowed(internal),
-            }
+        fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
+            a == b
+                || ((a.matches("canonical/Readonly") || a.matches("canonical/Mutable"))
+                    && (b.matches("canonical/Readonly") || b.matches("canonical/Mutable")))
         }
     }
 
@@ -355,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_class_aliases_match_through_assignability() {
+    fn id_class_aliases_match_through_assignability() {
         assert!(ok(s("canonical/Mutable"), s("canonical/Readonly")));
     }
 

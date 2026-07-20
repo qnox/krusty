@@ -7,6 +7,7 @@
 //! to hits once the working set is warm). The count cap defaults per cache and is overridable for all
 //! caches at once via the `KRUSTY_CACHE_CAP` environment variable (for profiling / constrained hosts).
 
+use crate::name_tree::FxBuildHasher;
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -17,7 +18,7 @@ pub struct LruCache<K, V> {
     /// it takes ~580 years to wrap, so overflow (which would invert eviction order) is unreachable in any
     /// real run; a `u64` avoids the pinning `saturating_add` would cause at the ceiling.
     tick: u64,
-    map: HashMap<K, (V, u64)>,
+    map: HashMap<K, (V, u64), FxBuildHasher>,
 }
 
 impl<K: Eq + Hash + Clone, V> LruCache<K, V> {
@@ -31,7 +32,7 @@ impl<K: Eq + Hash + Clone, V> LruCache<K, V> {
         LruCache {
             cap,
             tick: 0,
-            map: HashMap::new(),
+            map: HashMap::default(),
         }
     }
 

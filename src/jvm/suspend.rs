@@ -31,7 +31,7 @@ use crate::ir::{
     IrFunction, IrTypeOp,
 };
 use crate::libraries::InlineKind;
-use crate::types::Ty;
+use crate::types::{type_name, Ty, TypeName};
 use std::collections::HashSet;
 
 const I32_MIN: i32 = i32::MIN;
@@ -93,7 +93,8 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
                     // Capture runs BEFORE the CPS rewrite appends the `Continuation` — only strip a
                     // trailing continuation when it is already there.
                     let has_cont = f.params.last().is_some_and(|t| {
-                        t.obj_internal() == Some("kotlin/coroutines/Continuation")
+                        t.obj_internal()
+                            .is_some_and(|n| n.matches("kotlin/coroutines/Continuation"))
                     });
                     let n_real = f.params.len().saturating_sub(usize::from(has_cont));
                     // ALL value parameters — kotlinc spills primitive params too (`Z$0` for a
@@ -1337,7 +1338,7 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
 
     // For an instance method `this` is value-index 0, so params (and the appended continuation) shift up
     // by one; the receiver's class internal name is the dispatch receiver (the continuation captures it).
-    let receiver: Option<String> = ir.functions[fid as usize].dispatch_receiver.clone();
+    let receiver: Option<TypeName> = ir.functions[fid as usize].dispatch_receiver;
     let this_offset = u32::from(receiver.is_some());
     // Real value parameters (excluding the appended CPS `Continuation`), at value-indices
     // `this_offset .. this_offset + real_params.len()`.
@@ -1504,7 +1505,9 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
     // kotlinc nests a suspend method's continuation class under its ENCLOSING class
     // (`Svc$work$1`), and a top-level suspend fun's under the file facade (`FooKt$foo$1`). The
     // dispatch receiver is the enclosing class internal name; a top-level/extension fun has none.
-    let cont_owner = receiver.as_deref().unwrap_or(facade);
+    let cont_owner = receiver
+        .map(TypeName::render)
+        .unwrap_or_else(|| facade.to_string());
     // The continuation class uses the SOURCE method name, never the value-class-mangled JVM name:
     // kotlinc names `create-SCm-oBs`'s continuation `<Owner>$create$1`. `-` can't occur in a Kotlin
     // identifier, so it only ever separates the mangle hash — strip from the first `-`.
@@ -1524,7 +1527,7 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
     let mut catch_spills: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
     let mut next_ev = base + 4;
     {
-        let mut tries: Vec<(u32, ExprId, String)> = Vec::new();
+        let mut tries: Vec<(u32, ExprId, crate::types::TypeName)> = Vec::new();
         find_suspending_catch_tries(ir, b, &suspend_set, &mut tries);
         for (cvar, cbody, exc_internal) in tries {
             let ev = next_ev;
@@ -1534,7 +1537,7 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
             for n in reads {
                 ir.exprs[n as usize] = IrExpr::GetValue(ev);
             }
-            spilled.push((ev, spill_field_ty(Ty::obj(&exc_internal))));
+            spilled.push((ev, spill_field_ty(Ty::obj(&exc_internal.render()))));
             catch_spills.insert(cvar, ev);
         }
     }
@@ -1586,7 +1589,7 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
         fid,
         &layout,
         &param_caps,
-        receiver.as_deref(),
+        receiver,
         &real_params,
     );
 
@@ -1779,13 +1782,10 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
             "call to 'resume' before 'invoke' with coroutine".to_string(),
         )),
     );
-    let exc = k(
-        ir,
-        IrExpr::NewExternal {
-            internal: "java/lang/IllegalStateException".to_string(),
-            ctor_desc: "(Ljava/lang/String;)V".to_string(),
-            args: vec![msg],
-        },
+    let exc = ir.new_external(
+        "java/lang/IllegalStateException",
+        "(Ljava/lang/String;)V",
+        vec![msg],
     );
     let throw = k(ir, IrExpr::Throw { operand: exc });
     let else_block = k(
@@ -2138,13 +2138,10 @@ fn build_lambda_state_machine(
             "call to 'resume' before 'invoke' with coroutine".to_string(),
         )),
     );
-    let exc = k(
-        ir,
-        IrExpr::NewExternal {
-            internal: "java/lang/IllegalStateException".to_string(),
-            ctor_desc: "(Ljava/lang/String;)V".to_string(),
-            args: vec![msg],
-        },
+    let exc = ir.new_external(
+        "java/lang/IllegalStateException",
+        "(Ljava/lang/String;)V",
+        vec![msg],
     );
     let throw = k(ir, IrExpr::Throw { operand: exc });
     let else_block = k(
@@ -3032,7 +3029,7 @@ impl Flat<'_> {
                     self.cur_handler = saved;
                     // Handler state: the stashed exception arrives in `result` (loaded into `r_v` at the
                     // loop top, like a resume value).
-                    let exc_ty = Ty::obj(&catch.exc_internal);
+                    let exc_ty = Ty::obj(&catch.exc_internal.render());
                     let catch_stmts = if catch_suspends {
                         // The catch body itself suspends, so `r_v` is clobbered by its own resume. Bind
                         // the exception ONCE from `r_v` on handler entry into its spilled local `ev`
@@ -3401,7 +3398,8 @@ impl ScopeWalk<'_> {
                     // suspends, the machine builder remaps it to a fresh exception-spill local and
                     // REWRITES the captured lists to that index (`catch_spills` remap below).
                     if !self.scope.iter().any(|(l, _, _)| *l == c.var) {
-                        self.scope.push((c.var, Ty::obj(&c.exc_internal), true));
+                        self.scope
+                            .push((c.var, Ty::obj(&c.exc_internal.render()), true));
                     }
                     self.walk(c.body);
                     self.close_scope(base);
@@ -3669,7 +3667,7 @@ fn add_static_call(
 ) -> ExprId {
     ir.add_expr(IrExpr::Call {
         callee: Callee::Static {
-            owner: owner.to_string(),
+            owner: type_name(owner),
             name: name.to_string(),
             descriptor: descriptor.to_string(),
             inline: InlineKind::None,
@@ -3695,7 +3693,7 @@ fn build_continuation_class(
     outer_fid: u32,
     layout: &SpillLayout,
     _param_caps: &[(u32, Ty)],
-    receiver: Option<&str>,
+    receiver: Option<TypeName>,
     params: &[Ty],
 ) -> ClassId {
     let class_id = ir.classes.len() as ClassId;
@@ -3750,6 +3748,7 @@ fn build_continuation_class(
             args: reentry_args,
         }),
         Some(owner) => {
+            let owner_internal = owner.render();
             // `((C)this.this$0).m(<params…>, (Continuation)this)` — invokevirtual the member on the receiver.
             let cont_this = ir.add_expr(IrExpr::GetValue(0));
             let recv = ir.add_expr(IrExpr::GetField {
@@ -3796,7 +3795,7 @@ fn build_continuation_class(
                     stmts: vec![aret],
                     value: None,
                 });
-                let mut aparams = vec![Ty::obj(owner)];
+                let mut aparams = vec![Ty::obj_name(owner)];
                 aparams.extend(params.iter().copied());
                 aparams.push(continuation_ty());
                 let afid = ir.add_fun(IrFunction {
@@ -3805,7 +3804,7 @@ fn build_continuation_class(
                     ret: object_ty(),
                     body: Some(abody),
                     is_static: true,
-                    dispatch_receiver: Some(owner.to_string()),
+                    dispatch_receiver: Some(owner),
                     param_checks: Vec::new(),
                 });
                 ir.classes[cid].methods.push(afid);
@@ -3818,11 +3817,11 @@ fn build_continuation_class(
                 );
                 let mut aargs = vec![recv];
                 aargs.extend(reentry_args);
-                add_static_call(ir, owner, &access_name, &adesc, aargs)
+                add_static_call(ir, &owner_internal, &access_name, &adesc, aargs)
             } else {
                 ir.add_expr(IrExpr::Call {
                     callee: Callee::Virtual {
-                        owner: owner.to_string(),
+                        owner,
                         name,
                         descriptor,
                         interface: false,
@@ -3844,7 +3843,7 @@ fn build_continuation_class(
         ret: object_ty(),
         body: Some(inv_body),
         is_static: false,
-        dispatch_receiver: Some(internal.to_string()),
+        dispatch_receiver: Some(type_name(internal)),
         param_checks: vec![None],
     });
 
@@ -3875,7 +3874,7 @@ fn build_continuation_class(
     let mut ctor_stores: Vec<ExprId> = Vec::new();
     let mut arg_idx = 1u32; // value-index of the next ctor argument (`this` is 0)
     if let Some(owner) = receiver {
-        let recv_ty = Ty::obj(owner);
+        let recv_ty = Ty::obj_name(owner);
         fields.push(crate::ir::IrField {
             is_final: true,
             is_private: false,
@@ -3911,7 +3910,7 @@ fn build_continuation_class(
 
     let super_arg = ir.add_expr(IrExpr::GetValue(super_completion_idx));
     let class = IrClass {
-        fq_name: internal.to_string(),
+        fq_name: crate::types::type_name(internal),
         is_value: false,
         type_param_bounds: vec![],
         type_params: Vec::new(),
@@ -3928,14 +3927,14 @@ fn build_continuation_class(
         is_sealed: false,
         is_abstract: false,
         is_open: false,
-        superclass: CONTINUATION_IMPL.to_string(),
+        superclass: crate::types::type_name(CONTINUATION_IMPL),
         super_args: vec![super_arg],
         enum_entries: vec![],
         enum_entry_of: None,
         prop_ref: None,
         func_ref: None,
         bridges: vec![],
-        interfaces: vec![],
+        interfaces: Default::default(),
         is_object: false,
         is_companion: false,
         companion_class: None,
@@ -4051,7 +4050,7 @@ fn wrap_dispatch_for_handlers(
     let when = ir.add_expr(IrExpr::When { branches });
     let catch = crate::ir::IrCatch {
         var: catch_var,
-        exc_internal: "java/lang/Throwable".to_string(),
+        exc_internal: crate::types::type_name("java/lang/Throwable"),
         body: when,
     };
     ir.add_expr(IrExpr::Try {
@@ -4090,7 +4089,7 @@ fn reference_needs_checkcast(t: &Ty) -> bool {
     match t {
         Ty::Nullable(inner) | Ty::TyParam(_, inner) => reference_needs_checkcast(inner),
         Ty::String => true,
-        Ty::Obj(i, _) => *i != "kotlin/Any" && !is_boxed_primitive_internal(i),
+        Ty::Obj(i, _) => !i.matches("kotlin/Any") && !is_boxed_primitive_internal(&i.render()),
         _ => false,
     }
 }
@@ -4280,7 +4279,7 @@ fn binds_value_class_suspension(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u3
             && ir
                 .classes
                 .iter()
-                .any(|c| c.fq_name == *internal && c.is_value)
+                .any(|c| c.fq_name_id() == *internal && c.is_value)
         {
             return true;
         }
@@ -4448,7 +4447,7 @@ fn find_suspending_catch_tries(
     ir: &IrFile,
     e: ExprId,
     suspend_set: &HashSet<u32>,
-    out: &mut Vec<(u32, ExprId, String)>,
+    out: &mut Vec<(u32, ExprId, crate::types::TypeName)>,
 ) {
     match &ir.exprs[e as usize] {
         IrExpr::Lambda { .. } => return,
@@ -4461,7 +4460,7 @@ fn find_suspending_catch_tries(
             && !catch_body_nests_suspending_catch(ir, catches[0].body, suspend_set) =>
         {
             let c = &catches[0];
-            out.push((c.var, c.body, c.exc_internal.clone()));
+            out.push((c.var, c.body, c.exc_internal));
         }
         _ => {}
     }

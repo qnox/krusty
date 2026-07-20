@@ -20,7 +20,7 @@ pub fn stdlib_jar() -> Option<PathBuf> {
     // Prefer the dist's own stdlib — the exact jar the reference compiler uses.
     if let Some(j) = dist_jar("kotlin-stdlib.jar") {
         let cp = Classpath::new(vec![j.clone()]);
-        if !cp.scan_types().type_aliases.is_empty() {
+        if !cp.scan_types().is_empty() {
             return Some(j);
         }
     }
@@ -36,7 +36,7 @@ pub fn stdlib_jar() -> Option<PathBuf> {
     // Prefer a jar whose scan actually yields aliases (a real, non-stub stdlib).
     for jar in found {
         let cp = Classpath::new(vec![jar.clone()]);
-        if !cp.scan_types().type_aliases.is_empty() {
+        if !cp.scan_types().is_empty() {
             return Some(jar);
         }
     }

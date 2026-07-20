@@ -20,7 +20,7 @@ fn splices_real_empty_array_body() {
         .find("kotlin/collections/CollectionsKt")
         .expect("CollectionsKt");
     assert!(
-        !collections.kotlin_d1.is_empty(),
+        collections.meta.is_present(),
         "@Metadata d1 protobuf is read"
     );
     // The metadata reader decodes d1 and identifies inline functions with their JVM signatures.

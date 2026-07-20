@@ -47,3 +47,19 @@ fn conflicting_bindings_do_not_miscompile() {
         }\n";
     assert_eq!(run(SRC).expect("conflicting bindings run"), "OK");
 }
+
+#[test]
+fn zero_arg_lambda_return_binds_type_param() {
+    // A zero-parameter function-type parameter (`action: () -> T`) has an EMPTY `fun_params` list, so
+    // the function-type test must not rely on non-emptiness: `T` binds from the lambda's return type
+    // (KT-42130 shape). A primitive binding is typed as its boxed wrapper (`Boolean?`), so the result
+    // is consumed through the boxed comparison — never as a raw erased `Object` in a branch (the
+    // VerifyError this guards against). A reference binding resolves members on the result.
+    const SRC: &str = "fun <T> run2(action: () -> T): T = action()\n\
+        fun box(): String {\n\
+        \x20 val b = run2 { true }\n\
+        \x20 val s = run2 { \"ab\" }\n\
+        \x20 return if (b == true && s.length == 2) \"OK\" else \"no\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("zero-arg lambda return binding"), "OK");
+}

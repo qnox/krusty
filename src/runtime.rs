@@ -1,7 +1,7 @@
 //! Target runtime and ABI services used after frontend checking.
 
 use crate::libraries::{LibraryCallable, SemanticPlatform};
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 
 /// Platform-provided accessor used by counted range/progression loop lowering. The name and descriptor
 /// are backend tokens; common lowering only emits them back to the same backend.
@@ -166,6 +166,10 @@ pub trait TargetRuntime {
     /// describe its source element type and platform accessors. The default keeps non-platform sources
     /// on the ordinary iterator path.
     fn counted_loop_info(&self, _internal: &str) -> Option<CountedLoopInfo> {
+        None
+    }
+
+    fn counted_loop_info_name(&self, _internal: TypeName) -> Option<CountedLoopInfo> {
         None
     }
 

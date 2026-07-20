@@ -14,8 +14,7 @@ use crate::libraries::{
     LibraryMember, Origin, PropKind, SemanticPlatform,
 };
 use crate::symbol_source::SymbolSource;
-use crate::types::Ty;
-use std::borrow::Cow;
+use crate::types::{Ty, TypeName};
 
 #[derive(Clone, Debug, Default)]
 pub struct TopLevelLambdaShape {
@@ -32,16 +31,20 @@ type GSigBinds = std::collections::HashMap<String, Ty>;
 pub(crate) struct SourceOracle<'a>(pub &'a dyn SymbolSource);
 
 impl crate::assignable::TypeOracle for SourceOracle<'_> {
-    fn direct_supertypes(&self, internal: &str) -> Vec<String> {
+    fn direct_supertypes(&self, internal: TypeName) -> Vec<TypeName> {
         self.0
-            .resolve_type(internal)
-            .map(|t| t.supertypes)
+            .resolve_type_name(internal)
+            .map(|t| t.supertypes.iter_ids().collect())
             .unwrap_or_default()
     }
     fn value_underlying(&self, ty: Ty) -> Option<Ty> {
         self.0
-            .resolve_type(ty.kotlin_class_internal()?)
+            .resolve_type_name(ty.kotlin_class_internal()?)
             .and_then(|t| t.value_underlying)
+    }
+
+    fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
+        a == b
     }
 }
 
@@ -49,57 +52,39 @@ impl crate::assignable::TypeOracle for SourceOracle<'_> {
 pub(crate) struct PlatformOracle<'a>(pub &'a dyn SemanticPlatform);
 
 impl crate::assignable::TypeOracle for PlatformOracle<'_> {
-    fn direct_supertypes(&self, internal: &str) -> Vec<String> {
+    fn direct_supertypes(&self, internal: TypeName) -> Vec<TypeName> {
         self.0
-            .resolve_type(internal)
-            .map(|t| t.supertypes)
+            .resolve_type_name(internal)
+            .map(|t| t.supertypes.iter_ids().collect())
             .unwrap_or_default()
     }
     fn value_underlying(&self, ty: Ty) -> Option<Ty> {
         self.0.value_underlying(ty)
     }
-    fn canonical_class<'a>(&self, internal: &'a str) -> Cow<'a, str> {
-        Cow::Borrowed(platform_class_identity(
-            self.0
-                .library_value_form(Ty::obj(internal))
-                .obj_internal()
-                .unwrap_or(internal),
-        ))
-    }
-    fn same_class(&self, a: &str, b: &str) -> bool {
-        let a = platform_class_identity(
-            self.0
-                .library_value_form(Ty::obj(a))
-                .obj_internal()
-                .unwrap_or(a),
-        );
-        let b = platform_class_identity(
-            self.0
-                .library_value_form(Ty::obj(b))
-                .obj_internal()
-                .unwrap_or(b),
-        );
-        platform_class_names_match(a, b)
-    }
-    fn matches_class(&self, candidate: &str, _target: &str, target_canonical: &str) -> bool {
-        let candidate = platform_class_identity(
-            self.0
-                .library_value_form(Ty::obj(candidate))
-                .obj_internal()
-                .unwrap_or(candidate),
-        );
-        platform_class_names_match(candidate, target_canonical)
+    fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
+        let a = self.0.library_value_form_name(a);
+        let b = self.0.library_value_form_name(b);
+        platform_type_names_match(a, b)
     }
 }
 
+#[cfg(test)]
 pub(crate) fn platform_class_identity(internal: &str) -> &str {
     crate::jvm::jvm_class_map::kotlin_builtin_to_jvm(internal).unwrap_or(internal)
 }
 
+#[cfg(test)]
 pub(crate) fn platform_class_names_match(a: &str, b: &str) -> bool {
     a == b || nested_separator_names_match(a, b)
 }
 
+pub(crate) fn platform_type_names_match(a: TypeName, b: TypeName) -> bool {
+    a == b
+        || crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(a, b)
+        || a.nested_separator_matches(b)
+}
+
+#[cfg(test)]
 fn nested_separator_names_match(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
@@ -176,7 +161,7 @@ pub(crate) fn unify_ty(sig: Ty, actual: Ty, binds: &mut GSigBinds) {
                 // `afsig.ret` instead, and skip the `Continuation` param so it isn't double-unified.
                 let value_params: &[Ty] = match fsig.params.last() {
                     Some(Ty::Obj(n, cargs))
-                        if crate::types::same(n, crate::types::wk::continuation())
+                        if crate::types::same(*n, crate::types::wk::continuation())
                             && !cargs.is_empty() =>
                     {
                         unify_ty(cargs[0], afsig.ret, binds);
@@ -213,7 +198,7 @@ pub(crate) fn ty_subst(sig: Ty, binds: &GSigBinds) -> Ty {
         Ty::Fun(fsig) => Ty::fun(ty_subst_all(&fsig.params, binds), ty_subst(fsig.ret, binds)),
         Ty::Nullable(inner) => Ty::nullable(ty_subst(*inner, binds)),
         Ty::Obj(internal, args) if !args.is_empty() => {
-            Ty::obj_args(internal, &ty_subst_all(args, binds))
+            Ty::obj_args_name(internal, &ty_subst_all(args, binds))
         }
         _ => sig,
     }
@@ -326,8 +311,8 @@ pub(crate) fn arg_fits(p: &Ty, a: &Ty) -> bool {
     // whether spelled `kotlin/Any` or its JVM form `java/lang/Object` (a generic vararg element erases to
     // it) — accepts any reference argument.
     p == a
-        || matches!(p, Ty::Obj(n, _) if crate::types::same(n, crate::types::wk::any())
-            || crate::types::same(n, crate::types::wk::java_object()))
+        || matches!(p, Ty::Obj(n, _) if crate::types::same(*n, crate::types::wk::any())
+            || crate::types::same(*n, crate::types::wk::java_object()))
         || matches!((p.fun_arity(), a.fun_arity()), (Some(pn), Some(an)) if pn == an)
         || matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
 }
@@ -395,7 +380,7 @@ pub(crate) fn trailing_default_arg_indices(
 fn is_default_ctor_marker(ty: Ty) -> bool {
     matches!(
         ty,
-        Ty::Obj("kotlin/jvm/internal/DefaultConstructorMarker", _)
+        Ty::Obj(n, _) if n.matches("kotlin/jvm/internal/DefaultConstructorMarker")
     )
 }
 
@@ -426,7 +411,7 @@ pub struct SymbolResolver<'a> {
     /// When `Some`, a top-level function resolves only if its facade's package is in scope, matching
     /// kotlinc: an unqualified top-level call binds ONLY to an imported/same-package/default function,
     /// not to any classpath function of that name.
-    fn_scope: Option<&'a [String]>,
+    fn_scope: Option<&'a [TypeName]>,
 }
 
 /// The receiver of a reference: a VALUE of some type (`x.name`), or a named TYPE (`Type(args)`,
@@ -435,6 +420,7 @@ pub struct SymbolResolver<'a> {
 pub enum SymRecv<'q> {
     Value(Ty),
     Type(&'q str),
+    TypeName(TypeName),
     /// No receiver — a plain `name(args)` resolved against the import scope's top-level (and same-facade
     /// extension) functions. A DOTTED `name` (`kotlinx.coroutines.runBlocking`) is a fully-qualified
     /// reference: it resolves against its own package, not the import scope.
@@ -596,7 +582,7 @@ impl<'a> SymbolResolver<'a> {
     }
 
     /// A resolver whose top-level function resolution is restricted to `fn_scope`'s packages.
-    pub fn new_scoped(lib: &'a dyn SemanticPlatform, fn_scope: &'a [String]) -> Self {
+    pub fn new_scoped(lib: &'a dyn SemanticPlatform, fn_scope: &'a [TypeName]) -> Self {
         SymbolResolver {
             lib,
             src: crate::symbol_source::CompositeSource::new(vec![lib as &dyn SymbolSource]),
@@ -608,7 +594,7 @@ impl<'a> SymbolResolver<'a> {
     pub fn new_scoped_with_module(
         lib: &'a dyn SemanticPlatform,
         module: &'a dyn SymbolSource,
-        fn_scope: &'a [String],
+        fn_scope: &'a [TypeName],
     ) -> Self {
         SymbolResolver {
             lib,
@@ -624,6 +610,10 @@ impl<'a> SymbolResolver<'a> {
         self.src.is_value(internal)
     }
 
+    pub fn is_value_name(&self, internal: TypeName) -> bool {
+        self.src.is_value_name(internal)
+    }
+
     /// The single-field UNDERLYING type of the value class named `internal` (`Result` → `Object`), resolved
     /// through the federated source. `None` if not a value class this resolver knows.
     pub fn value_underlying(&self, internal: &str) -> Option<Ty> {
@@ -632,17 +622,23 @@ impl<'a> SymbolResolver<'a> {
             .and_then(|t| t.value_underlying)
     }
 
+    pub fn value_underlying_name(&self, internal: TypeName) -> Option<Ty> {
+        self.src
+            .resolve_type_name(internal)
+            .and_then(|t| t.value_underlying)
+    }
+
     /// Whether the type named `internal` — or anything in its (classpath) supertype chain — declares a
     /// member named `name` (Kotlin/source or physical JVM name). Drives the OVERRIDE test for a class
     /// whose supertype is not in the same file: an override is emitted without `ACC_FINAL` (kotlinc).
     pub fn declares_member(&self, internal: &str, name: &str) -> bool {
-        let mut work = vec![internal.to_string()];
+        let mut work = vec![crate::types::type_name(internal)];
         let mut seen = std::collections::HashSet::new();
         while let Some(cur) = work.pop() {
-            if cur == "java/lang/Object" || cur == "kotlin/Any" || !seen.insert(cur.clone()) {
+            if cur.matches("java/lang/Object") || cur.matches("kotlin/Any") || !seen.insert(cur) {
                 continue;
             }
-            let Some(t) = self.src.resolve_type(&cur) else {
+            let Some(t) = self.src.resolve_type_name(cur) else {
                 continue;
             };
             if t.members
@@ -651,7 +647,7 @@ impl<'a> SymbolResolver<'a> {
             {
                 return true;
             }
-            work.extend(t.supertypes.iter().cloned());
+            work.extend(t.supertypes.iter_ids());
         }
         false
     }
@@ -660,7 +656,10 @@ impl<'a> SymbolResolver<'a> {
     /// candidate fqn `pkg/name` over the federated source. THE way to resolve an unqualified name: the
     /// caller extracts `classifier`, `callables.functions` (∪ classifier constructors, then `invoke`), or
     /// `callables.properties` from the records. Empty when there is no import scope (caller falls back).
-    fn symbols_in_scope(&self, name: &str) -> Vec<(String, crate::libraries::ResolvedSymbols)> {
+    fn symbols_in_scope(
+        &self,
+        name: &str,
+    ) -> Vec<(TypeName, std::rc::Rc<crate::libraries::ResolvedSymbols>)> {
         self.fn_scope
             .map(|scope| resolve_symbols_in_scope(&self.src, name, scope))
             .unwrap_or_default()
@@ -670,6 +669,15 @@ impl<'a> SymbolResolver<'a> {
     /// interface shape), or `None` for an unknown name. The type-side counterpart of [`resolve_symbol`].
     pub fn resolve_type(&self, internal: &str) -> Option<crate::libraries::LibraryType> {
         self.src.resolve_type(internal)
+    }
+
+    /// Id-backed type query for callers that already carry a [`TypeName`], returning the source's
+    /// shared handle.
+    pub fn resolve_type_name(
+        &self,
+        internal: TypeName,
+    ) -> Option<std::rc::Rc<crate::libraries::LibraryType>> {
+        self.src.resolve_type_name(internal)
     }
 
     /// Resolve a name on a receiver to the thing it DENOTES — a member, a property, a companion/instance
@@ -720,8 +728,8 @@ impl<'a> SymbolResolver<'a> {
                 let extension_property_getter = self
                     .symbols_in_scope(name)
                     .into_iter()
-                    .flat_map(|(_, r)| match r.callables {
-                        crate::libraries::Callables::Properties(p) => p.overloads,
+                    .flat_map(|(_, r)| match &r.callables {
+                        crate::libraries::Callables::Properties(p) => p.overloads.clone(),
                         _ => Vec::new(),
                     })
                     .filter(|p| p.kind == PropKind::Extension)
@@ -800,22 +808,29 @@ impl<'a> SymbolResolver<'a> {
                     extension_property_getter: None,
                 })))
             }
-            SymRecv::Type(internal) => {
+            SymRecv::Type(internal) => self.resolve_symbol(
+                SymRecv::TypeName(crate::types::type_name(internal)),
+                name,
+                args,
+                type_args,
+            ),
+            SymRecv::TypeName(internal) => {
                 if name.is_empty() {
                     // `Type(args)` — the type's constructor, real or synthesized.
-                    resolve_constructor(self.lib, internal, args)
+                    resolve_constructor_name(self.lib, internal, args)
                         .map(Symbol::Constructor)
                         .or_else(|| {
-                            resolve_synthetic_constructor(self.lib, internal, args)
+                            resolve_synthetic_constructor_name(self.lib, internal, args)
                                 .map(Symbol::SyntheticConstructor)
                         })
                 } else {
                     // `Type.name(args)` — an object/companion instance member, else a static/companion
                     // member. The resolver discovers which.
-                    resolve_instance(self.lib, internal, name, args)
+                    resolve_instance_name(self.lib, internal, name, args)
                         .map(Symbol::Instance)
                         .or_else(|| {
-                            resolve_companion(self.lib, internal, name, args).map(Symbol::Companion)
+                            resolve_companion_name(self.lib, internal, name, args)
+                                .map(Symbol::Companion)
                         })
                 }
             }
@@ -863,7 +878,7 @@ impl<'a> SymbolResolver<'a> {
                 crate::trace_compiler!(
                     "resolve",
                     "top-level {name} args={args:?} -> {}.{}{} default inline={:?}",
-                    c.owner,
+                    c.owner.render(),
                     c.name,
                     c.descriptor,
                     c.inline
@@ -876,7 +891,7 @@ impl<'a> SymbolResolver<'a> {
             crate::trace_compiler!(
                 "resolve",
                 "top-level {name} args={args:?} -> {}.{}{} inline-only",
-                c.owner,
+                c.owner.render(),
                 c.name,
                 c.descriptor
             );
@@ -885,7 +900,10 @@ impl<'a> SymbolResolver<'a> {
 
         let (o, params, ret) = pick?;
         let c = &o.callable;
-        if ret.obj_internal() == Some("kotlin/reflect/KType") {
+        if ret
+            .obj_internal()
+            .is_some_and(|n| n.matches("kotlin/reflect/KType"))
+        {
             return None;
         }
 
@@ -929,7 +947,7 @@ impl<'a> SymbolResolver<'a> {
         crate::trace_compiler!(
             "resolve",
             "top-level {name} args={args:?} -> {}.{}{} inline={:?}",
-            c.owner,
+            c.owner.render(),
             c.name,
             c.descriptor,
             c.inline
@@ -973,7 +991,7 @@ impl<'a> SymbolResolver<'a> {
             crate::trace_compiler!(
                 "resolve",
                 "bind_extension_callable {}.{} gsig={} type_args={type_args:?} ret_ty={ret_ty:?} -> {ret_ty2:?}",
-                c.owner,
+                c.owner.render(),
                 c.name,
                 o.generic_sig.is_some()
             );
@@ -997,7 +1015,7 @@ impl<'a> SymbolResolver<'a> {
             crate::trace_compiler!(
                 "resolve",
                 "extension defaulted ($default) {name} recv={receiver:?} args={args:?} -> {}.{}{} ret={ret_ty:?}",
-                c.owner,
+                c.owner.render(),
                 c.name,
                 c.descriptor
             );
@@ -1009,7 +1027,7 @@ impl<'a> SymbolResolver<'a> {
             crate::trace_compiler!(
                 "resolve",
                 "extension defaulted (inline) {name} recv={receiver:?} args={args:?} -> {}.{}{} ret={ret_ty:?}",
-                callable.owner,
+                callable.owner.render(),
                 callable.name,
                 callable.descriptor
             );
@@ -1049,7 +1067,7 @@ impl<'a> SymbolResolver<'a> {
             crate::trace_compiler!(
                 "resolve",
                 "extension defaulted slots ($default) {name} recv={receiver:?} slots={slots:?} -> {}.{}{} ret={ret_ty:?}",
-                c.owner,
+                c.owner.render(),
                 c.name,
                 c.descriptor
             );
@@ -1352,12 +1370,12 @@ fn value_erased_args(lib: &dyn SemanticPlatform, args: &[Ty]) -> Vec<Ty> {
 }
 
 /// Resolve a constructor on a library type by argument types (with the type's own widening).
-fn resolve_constructor(
+fn resolve_constructor_name(
     lib: &dyn SemanticPlatform,
-    internal: &str,
+    internal: TypeName,
     args: &[Ty],
 ) -> Option<LibraryMember> {
-    let Some(t) = lib.resolve_type(internal) else {
+    let Some(t) = lib.resolve_type_name(internal) else {
         crate::trace_compiler!(
             "value_classes",
             "resolve_constructor {internal} resolve_type=None args={args:?}"
@@ -1434,11 +1452,7 @@ fn resolve_constructor(
         // ONLY when that synthetic exists on the classpath, AND the underlying is a REFERENCE: the lowering
         // passes `null` for the dummy underlying slot, which fits only a reference (a scalar would need a
         // typed zero). A mandatory-param value class stays unresolved (no synthetic → no phantom call).
-        let all_default = args.is_empty()
-            && underlying.is_reference()
-            && lib
-                .resolve_type(internal)
-                .is_some_and(|t| t.value_ctor_has_default);
+        let all_default = args.is_empty() && underlying.is_reference() && t.value_ctor_has_default;
         crate::trace_compiler!(
             "value_classes",
             "resolve_constructor {internal} value-class underlying={underlying:?} args={args:?} fits={fits} all_default={all_default}"
@@ -1449,7 +1463,7 @@ fn resolve_constructor(
             return Some(LibraryMember::new(
                 "<init>".to_string(),
                 vec![underlying],
-                Ty::obj(internal),
+                Ty::obj_name(internal),
                 String::new(),
             ));
         }
@@ -1457,7 +1471,7 @@ fn resolve_constructor(
             return Some(LibraryMember::new(
                 "<init>".to_string(),
                 vec![],
-                Ty::obj(internal),
+                Ty::obj_name(internal),
                 String::new(),
             ));
         }
@@ -1491,12 +1505,12 @@ pub struct SyntheticCtorCall {
 /// sibling — is required because a class with a VALUE-CLASS parameter has a PRIVATE primary constructor
 /// (absent from the public `constructors`) and ALSO a separate value-class marker overload
 /// `<init>(<params…>, marker)` (no mask); only the `arity + 2` shape is the default synthetic.
-pub(crate) fn synthetic_default_ctor(
+pub(crate) fn synthetic_default_ctor_name(
     source: &dyn SymbolSource,
-    internal: &str,
+    internal: TypeName,
     arity: usize,
 ) -> Option<(String, Vec<Ty>)> {
-    let t = source.resolve_type(internal)?;
+    let t = source.resolve_type_name(internal)?;
     let m = t
         .constructors
         .iter()
@@ -1537,10 +1551,9 @@ pub(crate) fn synthetic_default_member(
     // continuation in place; the coroutine pass threads the value there (see `append_continuation`).
     let m = t.companion.iter().find(|m| {
         m.name == dname
-            && m.params
-                .get(arity + 1)
-                .copied()
-                .is_some_and(|p| matches!(p, Ty::Obj("kotlin/coroutines/Continuation", _)))
+            && m.params.get(arity + 1).copied().is_some_and(
+                |p| matches!(p, Ty::Obj(n, _) if n.matches("kotlin/coroutines/Continuation")),
+            )
             && has_default_tail(&m.params, arity + 2, Ty::is_reference)
     })?;
     Some((
@@ -1554,12 +1567,12 @@ pub(crate) fn synthetic_default_member(
 /// Resolve a classpath construction that a plain [`resolve_constructor`] can't match because it needs a
 /// synthetic `DefaultConstructorMarker` overload (a value-class param, or omitted defaults). See
 /// [`SyntheticCtorCall`]. `None` when no marker overload fits.
-fn resolve_synthetic_constructor(
+fn resolve_synthetic_constructor_name(
     lib: &dyn SemanticPlatform,
-    internal: &str,
+    internal: TypeName,
     args: &[Ty],
 ) -> Option<SyntheticCtorCall> {
-    let t = lib.resolve_type(internal)?;
+    let t = lib.resolve_type_name(internal)?;
     let erased = value_erased_args(lib, args);
     for m in &t.constructors {
         if m.params
@@ -1621,13 +1634,13 @@ fn resolve_synthetic_constructor(
 }
 
 /// Resolve a companion member `Type.name(args)` (the receiver type must be public).
-fn resolve_companion(
+fn resolve_companion_name(
     lib: &dyn SemanticPlatform,
-    internal: &str,
+    internal: TypeName,
     name: &str,
     args: &[Ty],
 ) -> Option<LibraryMember> {
-    let t = lib.resolve_type(internal)?;
+    let t = lib.resolve_type_name(internal)?;
     if !t.is_public {
         return None;
     }
@@ -1654,13 +1667,13 @@ fn resolve_companion(
 /// member may be inherited from a (possibly non-public) supertype. Candidates come from the consolidated
 /// `functions` query, whose Member overloads carry the breadth-first `receiver_rank`; the closest rung's
 /// best overload wins (most-derived first), exactly the inherited-member walk this used to do by hand.
-fn resolve_instance(
+fn resolve_instance_name(
     lib: &dyn SemanticPlatform,
-    internal: &str,
+    internal: TypeName,
     name: &str,
     args: &[Ty],
 ) -> Option<LibraryMember> {
-    select_instance_info(lib, Ty::obj(internal), name, args).map(|o| {
+    select_instance_info(lib, Ty::obj_name(internal), name, args).map(|o| {
         let ret = o.ret.apply(o.callable.ret);
         o.member_with_return(ret)
     })
@@ -1686,7 +1699,7 @@ fn resolve_instance_ref(lib: &dyn SemanticPlatform, recv: Ty, name: &str) -> Opt
     // null-guards for a nullable/type-parameter receiver (`null::toString` yields "null"); a direct
     // `invokevirtual` on a captured null would NPE. The erased receiver (an unbounded `T`) reads as a
     // non-null `Any` here, so the receiver-type guard cannot catch it — reject on the resolved OWNER.
-    if o.callable.owner.as_str() == crate::types::wk::java_object() {
+    if o.callable.owner_type() == crate::types::wk::java_object() {
         return None;
     }
     let ret = o.ret.apply(o.callable.ret);
@@ -1699,7 +1712,7 @@ fn resolve_instance_ref(lib: &dyn SemanticPlatform, recv: Ty, name: &str) -> Opt
 /// value-class-ness, interface-ness, or property-vs-function from the platform themselves.
 #[derive(Clone, Debug)]
 pub struct BoundPropertyRef {
-    pub owner: String,
+    pub owner: TypeName,
     pub getter_name: String,
     pub prop_ty: Ty,
 }
@@ -1730,8 +1743,10 @@ fn resolve_property_ref(
     }
     let owner = m.member.owner?;
     if m.member.name.contains('-')
-        || lib.is_value(&owner)
-        || lib.resolve_type(&owner).is_some_and(|t| t.is_interface())
+        || lib.is_value_name(owner)
+        || lib
+            .resolve_type_name(owner)
+            .is_some_and(|t| t.is_interface())
     {
         return None;
     }
@@ -1834,7 +1849,7 @@ fn resolve_property_member(
             // the plain lookups above miss it. Recover the mangled getter + logical value-class type.
             let internal = recv.kotlin_class_internal()?;
             let member = lib
-                .resolve_type(internal)?
+                .resolve_type_name(internal)?
                 .value_class_property(property)
                 .cloned()?;
             let ret = member.ret;
@@ -1961,27 +1976,22 @@ pub(crate) fn source_receiver_rank(src: &dyn SymbolSource, recv: Ty, decl_recv: 
     }
     let want = decl_recv.erased_recv().kotlin_class_internal();
     if let (Some(want), Some(start)) = (want, recv.erased_recv().kotlin_class_internal()) {
-        let mut seen = crate::types::NameWalkSet::new();
-        let (start_id, _) = seen.insert(start.to_string());
-        let mut frontier = vec![start_id];
+        let mut seen = std::collections::HashSet::new();
+        let mut frontier = vec![start];
         let mut rung = 0u32;
         while !frontier.is_empty() {
-            if frontier
-                .iter()
-                .any(|&t| seen.get(t).is_some_and(|t| t == want))
-            {
+            if frontier.contains(&want) {
                 return Some(rung);
             }
             let mut next = Vec::new();
-            for &t in &frontier {
-                let supertypes = seen
-                    .get(t)
-                    .and_then(|t| src.resolve_type(t).map(|lt| lt.supertypes));
-                if let Some(supertypes) = supertypes {
-                    for supertype in supertypes {
-                        let (id, inserted) = seen.insert(supertype);
-                        if inserted {
-                            next.push(id);
+            for &ty in &frontier {
+                if !seen.insert(ty) {
+                    continue;
+                }
+                if let Some(shape) = src.resolve_type_name(ty) {
+                    for supertype in shape.supertypes.iter_ids() {
+                        if !seen.contains(&supertype) {
+                            next.push(supertype);
                         }
                     }
                 }
@@ -1992,37 +2002,33 @@ pub(crate) fn source_receiver_rank(src: &dyn SymbolSource, recv: Ty, decl_recv: 
     }
     // A universal `Any`-receiver extension (`<T> T.let`) applies to every receiver — arrays included — at
     // lowest precedence.
-    (want == Some("kotlin/Any")).then_some(u32::MAX - 1)
+    (want.is_some_and(|n| n.matches("kotlin/Any"))).then_some(u32::MAX - 1)
 }
 
 pub(crate) fn resolve_symbols_in_scope(
     src: &dyn SymbolSource,
     name: &str,
-    packages: &[String],
-) -> Vec<(String, crate::libraries::ResolvedSymbols)> {
+    packages: &[TypeName],
+) -> Vec<(TypeName, std::rc::Rc<crate::libraries::ResolvedSymbols>)> {
     let lib = src;
     packages
         .iter()
         .filter_map(|pkg| {
-            let fqn = if pkg.is_empty() {
-                name.to_string()
-            } else {
-                format!("{pkg}/{name}")
-            };
-            let r = lib.resolve_symbols(&fqn);
+            let fqn = crate::types::type_name_child(*pkg, name);
+            let r = lib.resolve_symbols_name(fqn);
             (!r.is_empty()).then_some((fqn, r))
         })
         .collect()
 }
 
 fn function_set_from_symbols(
-    symbols: impl IntoIterator<Item = (String, crate::libraries::ResolvedSymbols)>,
+    symbols: impl IntoIterator<Item = (TypeName, std::rc::Rc<crate::libraries::ResolvedSymbols>)>,
 ) -> FunctionSet {
     FunctionSet {
         overloads: symbols
             .into_iter()
-            .flat_map(|(_, r)| match r.callables {
-                crate::libraries::Callables::Functions(f) => f.overloads,
+            .flat_map(|(_, r)| match &r.callables {
+                crate::libraries::Callables::Functions(f) => f.overloads.clone(),
                 _ => Vec::new(),
             })
             .collect(),
@@ -2034,16 +2040,15 @@ fn function_set_from_symbols(
 /// visibility is resolved separately, and its facade owner may be package-less. Only a CLASSPATH
 /// ([`Origin::Library`]) callable must have its facade's package imported (same-package / star / explicit
 /// / default), matching kotlinc. `None` scope keeps everything (a context with no import scope).
-fn fn_in_scope(o: &FunctionInfo, fn_scope: Option<&[String]>) -> bool {
+fn fn_in_scope(o: &FunctionInfo, fn_scope: Option<&[TypeName]>) -> bool {
     if !matches!(o.callable.origin, Origin::Library) {
         return true;
     }
     match fn_scope {
         None => true,
-        Some(scope) => {
-            let pkg = o.callable.owner.rsplit_once('/').map_or("", |(p, _)| p);
-            scope.iter().any(|p| p == pkg)
-        }
+        Some(scope) => scope
+            .iter()
+            .any(|&p| o.callable.owner_package_matches_name(p)),
     }
 }
 
@@ -2053,7 +2058,7 @@ fn fn_in_scope(o: &FunctionInfo, fn_scope: Option<&[String]>) -> bool {
 #[derive(Clone, Copy)]
 struct ExtCtx<'a> {
     allow_must_inline: bool,
-    fn_scope: Option<&'a [String]>,
+    fn_scope: Option<&'a [TypeName]>,
 }
 
 /// The single call-overload selector for a receiver call `recv.name(args)`. It is parameterized by
@@ -2076,7 +2081,7 @@ fn select_overload(
     // type variables, nullable types) that may have no `resolve_type` entry, so gate only members.
     if kind == FnKind::Member {
         let internal = recv.kotlin_class_internal()?;
-        if !lib.resolve_type(internal)?.is_public {
+        if !lib.resolve_type_name(internal)?.is_public {
             return None;
         }
     }
@@ -2106,7 +2111,7 @@ fn select_overload(
     crate::trace_compiler!(
         "resolve",
         "select_overload name={name} recv={recv:?} kind={kind:?} scope={:?} cands={}",
-        ext.fn_scope.map(<[String]>::len),
+        ext.fn_scope.map(|scope| scope.len()),
         fs.overloads.len(),
     );
     for o in &fs.overloads {
@@ -2118,7 +2123,7 @@ fn select_overload(
             o.public(),
             o.receiver_rank,
             o.callable.origin,
-            o.callable.owner,
+            o.callable.owner.render(),
         );
     }
     // Candidates as `(overload, logical value params)`, grouped by receiver rank. An extension admits only
@@ -2158,7 +2163,7 @@ fn select_overload(
         crate::trace_compiler!(
             "resolve",
             "  cand {name} rank={rank} logical_params={lp:?} owner={}",
-            o.callable.owner
+            o.callable.owner.render()
         );
         by_rank.entry(rank).or_default().push((o, lp));
     }
@@ -2325,9 +2330,8 @@ fn fun_arg_matches(lib: &dyn SemanticPlatform, param: &Ty, arg: &Ty) -> bool {
     let arity_ok = param.fun_arity().is_some_and(|pn| pn == arg_arity)
         || param
             .obj_internal()
-            .and_then(|p| p.strip_prefix("kotlin/jvm/functions/Function"))
-            .and_then(|d| d.parse::<u8>().ok())
-            == Some(arg_arity);
+            .and_then(|p| p.unsigned_suffix_after_prefix("kotlin/jvm/functions/Function"))
+            == Some(usize::from(arg_arity));
     arity_ok && fun_return_compatible(lib, param, *arg)
 }
 
@@ -2342,7 +2346,10 @@ fn fun_return_compatible(lib: &dyn SemanticPlatform, param: Ty, arg: Ty) -> bool
         return true;
     };
     if matches!(pr, Ty::TyParam(..) | Ty::Error)
-        || pr.non_null().obj_internal() == Some("kotlin/Any")
+        || pr
+            .non_null()
+            .obj_internal()
+            .is_some_and(|n| n.matches("kotlin/Any"))
     {
         return true;
     }
@@ -2361,7 +2368,7 @@ fn fun_return_compatible(lib: &dyn SemanticPlatform, param: Ty, arg: Ty) -> bool
         ar.non_null().kotlin_class_internal(),
     ) {
         if pr.is_reference() && ar.is_reference() {
-            return platform_subtype(lib, Ty::obj(a), Ty::obj(p));
+            return platform_subtype(lib, Ty::obj_name(a), Ty::obj_name(p));
         }
     }
     false
@@ -2372,6 +2379,7 @@ mod tests {
     use super::*;
     use crate::libraries::{CallSig, FunctionSet, LibraryCallable, Origin, TypeKind};
     use crate::symbol_source::SymbolSource;
+    use crate::types::type_name;
 
     struct FakeSource {
         name: &'static str,
@@ -2415,7 +2423,7 @@ mod tests {
             Some(crate::libraries::LibraryType {
                 is_public: true,
                 kind: TypeKind::Class,
-                supertypes,
+                supertypes: supertypes.into(),
                 constructors: vec![],
                 members: vec![],
                 companion: vec![],
@@ -2426,7 +2434,7 @@ mod tests {
                 value_underlying: (internal == "kotlin/UInt").then_some(Ty::Int),
                 alias_target: None,
                 type_params: Vec::new(),
-                sealed_subclasses: Vec::new(),
+                sealed_subclasses: crate::types::TypeNameList::new(),
                 enum_entries: Vec::new(),
                 value_ctor_has_default: false,
                 ctor_named_params: Vec::new(),
@@ -2438,13 +2446,13 @@ mod tests {
 
     impl crate::libraries::SemanticPlatform for FakeSource {
         fn value_underlying(&self, ty: Ty) -> Option<Ty> {
-            self.resolve_type(ty.obj_internal()?)
+            self.resolve_type_name(ty.obj_internal()?)
                 .and_then(|t| t.value_underlying)
         }
 
         fn library_value_form(&self, ty: Ty) -> Ty {
             ty.obj_internal()
-                .and_then(crate::jvm::jvm_class_map::kotlin_builtin_to_jvm)
+                .and_then(|n| crate::jvm::jvm_class_map::kotlin_builtin_to_jvm(&n.render()))
                 .map(Ty::obj)
                 .unwrap_or(ty)
         }
@@ -2454,7 +2462,7 @@ mod tests {
 
     fn top_level_default_uint_info() -> FunctionInfo {
         let callable = LibraryCallable {
-            owner: "kotlin/UIntKt".to_string(),
+            owner: "kotlin/UIntKt".into(),
             name: "make$default".to_string(),
             params: vec![Ty::Int],
             ret: Ty::Int,
@@ -2558,38 +2566,33 @@ mod tests {
     }
 
     #[test]
-    fn platform_oracle_canonicalizes_map_entry_spellings() {
+    fn platform_type_names_match_nested_spellings_without_rendering() {
+        let dotted = crate::types::type_name("lib/Flex.Inner.Deep");
+        let dollar = crate::types::type_name("lib/Flex$Inner$Deep");
+        let other_pkg = crate::types::type_name("other/Flex$Inner$Deep");
+        let other_tail = crate::types::type_name("lib/Flex$Inner$Other");
+        assert!(platform_type_names_match(dotted, dollar));
+        assert!(!platform_type_names_match(dotted, other_pkg));
+        assert!(!platform_type_names_match(dotted, other_tail));
+    }
+
+    #[test]
+    fn platform_oracle_compares_map_entry_spellings_by_type_name() {
         let src = FakeSource {
             name: "unused",
             receiver: None,
             info: top_level_nullable_string_info(),
         };
         let oracle = PlatformOracle(&src);
-        assert_eq!(
-            crate::assignable::TypeOracle::canonical_class(&oracle, "kotlin/collections/Map.Entry")
-                .as_ref(),
-            "java/util/Map$Entry"
-        );
-        assert!(matches!(
-            crate::assignable::TypeOracle::canonical_class(&oracle, "kotlin/collections/Map.Entry"),
-            std::borrow::Cow::Borrowed("java/util/Map$Entry")
-        ));
-        assert_eq!(
-            crate::assignable::TypeOracle::canonical_class(&oracle, "kotlin/collections/Map$Entry"),
-            crate::assignable::TypeOracle::canonical_class(&oracle, "kotlin/collections/Map.Entry")
-        );
-        assert!(crate::assignable::TypeOracle::same_class(
+        assert!(crate::assignable::TypeOracle::same_class_name(
             &oracle,
-            "lib/Flex.FMap",
-            "lib/Flex$FMap"
+            crate::types::type_name("kotlin/collections/Map.Entry"),
+            crate::types::type_name("kotlin/collections/Map$Entry"),
         ));
-        let nested_target =
-            crate::assignable::TypeOracle::canonical_class(&oracle, "lib/Flex$FMap");
-        assert!(crate::assignable::TypeOracle::matches_class(
+        assert!(crate::assignable::TypeOracle::same_class_name(
             &oracle,
-            "lib/Flex.FMap",
-            "lib/Flex$FMap",
-            nested_target.as_ref()
+            crate::types::type_name("lib/Flex.FMap"),
+            crate::types::type_name("lib/Flex$FMap"),
         ));
     }
 
@@ -2635,7 +2638,7 @@ mod tests {
             receiver: None,
             info: top_level_default_uint_info(),
         };
-        let scope = vec![String::new()];
+        let scope = vec![type_name("")];
         let resolver = SymbolResolver::new_scoped(&source, &scope);
         let call = resolver
             .resolve_symbol(SymRecv::TopLevel, "make", &[], &[])
@@ -2653,7 +2656,7 @@ mod tests {
             receiver: None,
             info: top_level_nullable_string_info(),
         };
-        let scope = vec![String::new()];
+        let scope = vec![type_name("")];
         let resolver = SymbolResolver::new_scoped(&source, &scope);
         let call = resolver
             .resolve_symbol(SymRecv::TopLevel, "maybe", &[], &[])
@@ -2670,7 +2673,7 @@ mod tests {
             receiver: Some(Ty::String),
             info: extension_nullable_string_info(),
         };
-        let scope = vec![String::new()];
+        let scope = vec![type_name("")];
         let resolver = SymbolResolver::new_scoped(&source, &scope);
         let call = resolver
             .resolve_symbol(SymRecv::Value(Ty::String), "maybeSuffix", &[], &[])

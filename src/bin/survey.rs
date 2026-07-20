@@ -156,14 +156,16 @@ fn first_error_with_coroutine_helpers(src: &str, cp: &Rc<Classpath>, stem: &str)
         for &decl in &file.decls {
             match file.decl(decl) {
                 krusty::ast::Decl::Fun(f) if f.receiver.is_none() && !f.is_inline => {
+                    let facade_name = krusty::types::type_name(&facade);
                     syms.fn_facades_by_decl
-                        .insert((i as u32, decl.0), facade.clone());
-                    syms.fn_facades.insert(f.name.clone(), facade.clone());
+                        .insert((i as u32, decl.0), facade_name);
+                    syms.fn_facades.insert(f.name.clone(), facade_name);
                 }
                 krusty::ast::Decl::Property(p) if p.receiver.is_none() => {
                     if let Some(&(ty, is_var, is_const)) = syms.props.get(&p.name) {
+                        let facade_name = krusty::types::type_name(&facade);
                         syms.prop_facades
-                            .insert(p.name.clone(), (facade.clone(), ty, is_var, is_const));
+                            .insert(p.name.clone(), (facade_name, ty, is_var, is_const));
                     }
                 }
                 _ => {}

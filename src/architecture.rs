@@ -57,6 +57,7 @@ mod tests {
             "lru",
             "metadata",
             "module_symbols",
+            "name_tree",
             "names",
             "plugins",
             "runtime",
@@ -152,7 +153,7 @@ mod tests {
 
     #[test]
     fn semantic_library_contract_uses_only_symbol_source_and_type_dependencies() {
-        assert_allowed_crate_modules("src/libraries.rs", &["symbol_source", "types"]);
+        assert_allowed_crate_modules("src/libraries.rs", &["name_tree", "symbol_source", "types"]);
     }
 
     #[test]
@@ -209,6 +210,7 @@ mod tests {
                 "lexer",
                 "parser",
                 "toolchain",
+                "types",
             ],
         );
     }

@@ -1,12 +1,61 @@
 //! Type model: Kotlin scalar, object, array, function, nullable, and type-parameter shapes.
 //! Backend-specific names and descriptors are kept out of this module.
 
-use std::collections::{HashMap, HashSet};
-use std::hash::{DefaultHasher, Hash, Hasher};
+use crate::name_tree::{NameId, NameTree};
+use std::collections::HashSet;
+use std::fmt;
 use std::sync::{Mutex, OnceLock};
 
-/// Intern a class internal-name to a `&'static str` so `Ty` stays `Copy`. The compiler is
-/// short-lived and the number of distinct class names is small, so leaking interned names is fine.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TypeName(NameId);
+
+#[derive(Clone, Default)]
+pub struct TypeNameList {
+    names: Vec<TypeName>,
+}
+
+// The tree is concurrent (lock-free reads, internally-locked inserts), so the global interner is a
+// bare shared instance.
+static TYPE_NAMES: OnceLock<NameTree> = OnceLock::new();
+
+fn type_names() -> &'static NameTree {
+    TYPE_NAMES.get_or_init(NameTree::default)
+}
+
+pub fn type_name(internal: &str) -> TypeName {
+    TypeName(type_names().insert(internal))
+}
+
+pub fn type_name_from(names: &NameTree, id: NameId) -> TypeName {
+    TypeName(type_names().insert_from(names, id))
+}
+
+/// `parent/segment` as a `TypeName` without rendering `parent` — one child step in the name tree.
+/// `segment` must be a single path segment; a multi-segment suffix falls back to the full insert.
+pub fn type_name_child(parent: TypeName, segment: &str) -> TypeName {
+    if segment.contains('/') {
+        let mut full = parent.render();
+        if !full.is_empty() {
+            full.push('/');
+        }
+        full.push_str(segment);
+        return type_name(&full);
+    }
+    TypeName(type_names().child_of(parent.0, segment))
+}
+
+pub fn existing_type_name(internal: &str) -> Option<TypeName> {
+    type_names().get(internal).map(TypeName)
+}
+
+impl From<&String> for TypeName {
+    fn from(internal: &String) -> Self {
+        type_name(internal)
+    }
+}
+
+/// Intern a generic type-parameter name. This must not be used for class/FQN storage; class names live
+/// in the type name tree as [`TypeName`].
 pub fn intern(name: &str) -> &'static str {
     static I: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
     let set = I.get_or_init(|| Mutex::new(HashSet::new()));
@@ -19,86 +68,247 @@ pub fn intern(name: &str) -> &'static str {
     leaked
 }
 
-enum WalkBucket {
-    One(usize),
-    Many(Vec<usize>),
+impl TypeName {
+    pub fn matches(self, internal: &str) -> bool {
+        type_names().get(internal) == Some(self.0)
+    }
+
+    pub fn starts_with(self, prefix: &str) -> bool {
+        type_names().starts_with(self.0, prefix)
+    }
+
+    pub fn contains(self, needle: &str) -> bool {
+        type_names().contains(self.0, needle)
+    }
+
+    pub fn qualifier_matches(self, qualifier: &str) -> bool {
+        type_names().qualifier_matches(self.0, qualifier)
+    }
+
+    pub fn package_matches(self, package: &str) -> bool {
+        type_names().package_matches(self.0, package)
+    }
+
+    pub fn package(self) -> String {
+        type_names().package(self.0)
+    }
+
+    pub fn parent(self) -> Option<TypeName> {
+        type_names().parent(self.0).map(TypeName)
+    }
+
+    pub fn segment(self) -> String {
+        type_names().segment(self.0).to_string()
+    }
+
+    pub fn nested_separator_matches(self, other: TypeName) -> bool {
+        type_names().nested_separator_matches(self.0, other.0)
+    }
+
+    pub fn strip_prefix(self, prefix: &str) -> Option<String> {
+        type_names().strip_prefix(self.0, prefix)
+    }
+
+    pub fn unsigned_suffix_after_prefix(self, prefix: &str) -> Option<usize> {
+        type_names().unsigned_suffix_after_prefix(self.0, prefix)
+    }
+
+    pub fn replace(self, from: char, to: &str) -> String {
+        self.render().replace(from, to)
+    }
+
+    pub fn render(self) -> String {
+        type_names().render(self.0)
+    }
 }
 
-/// A per-walk class-name set. It gives hierarchy traversals compact local indices while storing each
-/// visited string once, avoiding both global interning and the old `seen`/`frontier` string clone.
-pub(crate) struct NameWalkSet {
-    names: Vec<String>,
-    by_hash: HashMap<u64, WalkBucket>,
+impl TypeNameList {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push(&mut self, internal: &str) {
+        self.names.push(type_name(internal));
+    }
+
+    pub fn push_name(&mut self, internal: TypeName) {
+        self.names.push(internal);
+    }
+
+    pub fn iter_ids(&self) -> impl Iterator<Item = TypeName> + '_ {
+        self.names.iter().copied()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = TypeName> + '_ {
+        self.iter_ids()
+    }
+
+    pub fn iter_rendered(&self) -> impl Iterator<Item = String> + '_ {
+        self.iter_ids().map(TypeName::render)
+    }
+
+    pub fn contains(&self, internal: &str) -> bool {
+        self.names.iter().any(|name| name.matches(internal))
+    }
+
+    pub fn contains_name(&self, internal: TypeName) -> bool {
+        self.names.contains(&internal)
+    }
+
+    pub fn to_vec(&self) -> Vec<String> {
+        self.iter_rendered().collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.names.len()
+    }
 }
 
-impl NameWalkSet {
-    pub(crate) fn new() -> Self {
-        NameWalkSet {
-            names: Vec::new(),
-            by_hash: HashMap::new(),
+impl fmt::Debug for TypeNameList {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.iter_rendered()).finish()
+    }
+}
+
+impl From<Vec<String>> for TypeNameList {
+    fn from(names: Vec<String>) -> Self {
+        TypeNameList {
+            names: names.into_iter().map(|name| type_name(&name)).collect(),
         }
     }
+}
 
-    pub(crate) fn insert(&mut self, name: String) -> (usize, bool) {
-        let hash = hash_name(&name);
-        if let Some(bucket) = self.by_hash.get(&hash) {
-            match bucket {
-                WalkBucket::One(id) if self.names[*id] == name => return (*id, false),
-                WalkBucket::One(_) => {}
-                WalkBucket::Many(ids) => {
-                    if let Some(&id) = ids.iter().find(|&&id| self.names[id] == name) {
-                        return (id, false);
-                    }
-                }
-            }
+impl From<Vec<&str>> for TypeNameList {
+    fn from(names: Vec<&str>) -> Self {
+        TypeNameList {
+            names: names.into_iter().map(type_name).collect(),
         }
-
-        let id = self.names.len();
-        self.names.push(name);
-        self.by_hash
-            .entry(hash)
-            .and_modify(|bucket| match bucket {
-                WalkBucket::One(prev) => {
-                    let prev = *prev;
-                    *bucket = WalkBucket::Many(vec![prev, id]);
-                }
-                WalkBucket::Many(ids) => ids.push(id),
-            })
-            .or_insert(WalkBucket::One(id));
-        (id, true)
-    }
-
-    pub(crate) fn get(&self, id: usize) -> Option<&str> {
-        self.names.get(id).map(String::as_str)
     }
 }
 
-fn hash_name(name: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    name.hash(&mut hasher);
-    hasher.finish()
+impl From<Vec<TypeName>> for TypeNameList {
+    fn from(names: Vec<TypeName>) -> Self {
+        TypeNameList { names }
+    }
 }
 
-/// Identity comparison of two INTERNED names. Both operands MUST come from [`intern`] (or [`wk`]); then
-/// equal content ⇒ one shared allocation ⇒ this is an O(1) pointer compare instead of a byte-wise `==`.
-/// Do NOT use on a raw (un-interned) string — it would report distinct for equal content.
+impl IntoIterator for TypeNameList {
+    type Item = String;
+    type IntoIter = std::vec::IntoIter<String>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.to_vec().into_iter()
+    }
+}
+
+impl fmt::Debug for TypeName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("TypeName").field(&self.render()).finish()
+    }
+}
+
+impl fmt::Display for TypeName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.render())
+    }
+}
+
+impl From<&str> for TypeName {
+    fn from(name: &str) -> Self {
+        type_name(name)
+    }
+}
+
+impl From<String> for TypeName {
+    fn from(name: String) -> Self {
+        type_name(&name)
+    }
+}
+
+impl PartialEq<&str> for TypeName {
+    fn eq(&self, other: &&str) -> bool {
+        self.matches(other)
+    }
+}
+
+impl PartialEq<TypeName> for &str {
+    fn eq(&self, other: &TypeName) -> bool {
+        other.matches(self)
+    }
+}
+
+impl PartialEq<String> for TypeName {
+    fn eq(&self, other: &String) -> bool {
+        self.matches(other)
+    }
+}
+
+impl PartialEq<TypeName> for String {
+    fn eq(&self, other: &TypeName) -> bool {
+        other.matches(self)
+    }
+}
+
+impl PartialEq<&str> for &TypeName {
+    fn eq(&self, other: &&str) -> bool {
+        self.matches(other)
+    }
+}
+
+impl PartialEq<&TypeName> for &str {
+    fn eq(&self, other: &&TypeName) -> bool {
+        other.matches(self)
+    }
+}
+
+pub trait InternalName {
+    fn internal_matches(&self, internal: &str) -> bool;
+}
+
+impl InternalName for TypeName {
+    fn internal_matches(&self, internal: &str) -> bool {
+        self.matches(internal)
+    }
+}
+
+impl InternalName for &TypeName {
+    fn internal_matches(&self, internal: &str) -> bool {
+        self.matches(internal)
+    }
+}
+
+impl InternalName for &str {
+    fn internal_matches(&self, internal: &str) -> bool {
+        *self == internal
+    }
+}
+
+impl InternalName for &String {
+    fn internal_matches(&self, internal: &str) -> bool {
+        self.as_str() == internal
+    }
+}
+
 #[inline]
-pub fn same(a: &str, b: &str) -> bool {
-    std::ptr::eq(a.as_ptr(), b.as_ptr())
+pub fn same(a: TypeName, b: TypeName) -> bool {
+    a == b
 }
 
-/// Well-known class internal names, each interned ONCE on first use and reused for identity comparison
-/// ([`same`]) against other interned names — so a hot check like "is this `Continuation`?" is a pointer
-/// compare, and the literal is interned a single time rather than re-scanned per call.
+/// Well-known class internal names, each inserted ONCE into the type-name tree and reused for id
+/// comparison against other object type names.
 pub mod wk {
-    use super::intern;
+    use super::{type_name, TypeName};
     use std::sync::OnceLock;
     macro_rules! names {
         ($($f:ident => $lit:literal),* $(,)?) => { $(
             #[inline]
-            pub fn $f() -> &'static str {
-                static S: OnceLock<&'static str> = OnceLock::new();
-                S.get_or_init(|| intern($lit))
+            pub fn $f() -> TypeName {
+                static S: OnceLock<TypeName> = OnceLock::new();
+                *S.get_or_init(|| type_name($lit))
             }
         )* };
     }
@@ -169,20 +379,30 @@ pub fn intern_fnsig(s: FnSig) -> &'static FnSig {
 /// value-class identity survives; they still erase to the signed primitive array descriptor (`[I`).
 /// The single canonical table — [`Ty::array_elem`], the constructor, and the backend descriptor logic
 /// all route through it rather than each carrying their own copy.
-pub fn prim_array_element(internal: &str) -> Option<Ty> {
-    Some(match internal {
-        "kotlin/IntArray" => Ty::Int,
-        "kotlin/LongArray" => Ty::Long,
-        "kotlin/ShortArray" => Ty::Short,
-        "kotlin/ByteArray" => Ty::Byte,
-        "kotlin/BooleanArray" => Ty::Boolean,
-        "kotlin/CharArray" => Ty::Char,
-        "kotlin/FloatArray" => Ty::Float,
-        "kotlin/DoubleArray" => Ty::Double,
-        "kotlin/UIntArray" => Ty::UInt,
-        "kotlin/ULongArray" => Ty::ULong,
-        _ => return None,
-    })
+pub fn prim_array_element(internal: impl InternalName) -> Option<Ty> {
+    if internal.internal_matches("kotlin/IntArray") {
+        Some(Ty::Int)
+    } else if internal.internal_matches("kotlin/LongArray") {
+        Some(Ty::Long)
+    } else if internal.internal_matches("kotlin/ShortArray") {
+        Some(Ty::Short)
+    } else if internal.internal_matches("kotlin/ByteArray") {
+        Some(Ty::Byte)
+    } else if internal.internal_matches("kotlin/BooleanArray") {
+        Some(Ty::Boolean)
+    } else if internal.internal_matches("kotlin/CharArray") {
+        Some(Ty::Char)
+    } else if internal.internal_matches("kotlin/FloatArray") {
+        Some(Ty::Float)
+    } else if internal.internal_matches("kotlin/DoubleArray") {
+        Some(Ty::Double)
+    } else if internal.internal_matches("kotlin/UIntArray") {
+        Some(Ty::UInt)
+    } else if internal.internal_matches("kotlin/ULongArray") {
+        Some(Ty::ULong)
+    } else {
+        None
+    }
 }
 
 /// The primitive specialized array class name for a primitive element (`Int` → `kotlin/IntArray`), or
@@ -251,7 +471,7 @@ pub enum Ty {
     /// (`List<Int>` → `Obj("kotlin/collections/List", [Int])`). Arguments are interned (`intern_tys`)
     /// so equal instantiations share a pointer and the front end can recover element/member types.
     /// Empty for a non-generic class.
-    Obj(&'static str, &'static [Ty]),
+    Obj(TypeName, &'static [Ty]),
     /// The type of the `null` literal — assignable to any reference type.
     Null,
     /// The bottom type (`Nothing`): the type of `throw`/`return` expressions. Assignable to every
@@ -275,12 +495,21 @@ pub enum Ty {
 impl Ty {
     /// A class reference type from an internal name (no generic arguments).
     pub fn obj(internal: &str) -> Ty {
-        Ty::Obj(intern(internal), &[])
+        Ty::Obj(type_name(internal), &[])
+    }
+
+    /// A class reference type from an existing tree-backed internal name.
+    pub fn obj_name(internal: TypeName) -> Ty {
+        Ty::Obj(internal, &[])
     }
 
     /// A generic class reference type — `internal<args…>`.
     pub fn obj_args(internal: &str, args: &[Ty]) -> Ty {
-        Ty::Obj(intern(internal), intern_tys(args))
+        Ty::Obj(type_name(internal), intern_tys(args))
+    }
+
+    pub fn obj_args_name(internal: TypeName, args: &[Ty]) -> Ty {
+        Ty::Obj(internal, intern_tys(args))
     }
 
     /// The generic type arguments of a reference type (empty for non-generic / non-`Obj`).
@@ -309,7 +538,7 @@ impl Ty {
     /// `Array<Int>`; the wrapper boxing is the backend's concern, not the type's).
     pub fn array_elem(self) -> Option<Ty> {
         match self {
-            Ty::Obj("kotlin/Array", args) => args.first().copied(),
+            Ty::Obj(n, args) if n.matches("kotlin/Array") => args.first().copied(),
             Ty::Obj(n, _) => prim_array_element(n),
             Ty::TyParam(_, b) => b.array_elem(),
             _ => None,
@@ -320,14 +549,14 @@ impl Ty {
     /// `Array<T>` (`Obj("kotlin/Array", [T])`). The single array-ness predicate; consumers must use this
     /// instead of pattern-matching a specific spelling so the representation can migrate under them.
     pub fn is_array(self) -> bool {
-        matches!(self, Ty::Obj(n, _) if n == "kotlin/Array" || prim_array_element(n).is_some())
+        matches!(self, Ty::Obj(n, _) if n.matches("kotlin/Array") || prim_array_element(n).is_some())
     }
 
     /// Whether this is a boxed `Array<T>` (`aaload`/`aastore`, elements stored as objects) as opposed to
     /// a primitive specialized array (`IntArray` → `iaload`/`iastore`). The only bit the backend needs to
     /// pick array opcodes; a reference array boxes primitive [`array_elem`]s at the store boundary.
     pub fn is_reference_array(self) -> bool {
-        matches!(self, Ty::Obj("kotlin/Array", _))
+        matches!(self, Ty::Obj(n, _) if n.matches("kotlin/Array"))
     }
 
     /// The nullable form `T?` of a type. Idempotent (Kotlin has no `T??`), and degenerate inputs
@@ -358,20 +587,20 @@ impl Ty {
     /// This is not a JVM descriptor mapping: it returns Kotlin internal names (`kotlin/Int`,
     /// `kotlin/String`, user class names), and deliberately ignores backend wrapper/internal names.
     /// Nullable and type-parameter forms delegate to their non-null/bound class identity.
-    pub fn kotlin_class_internal(self) -> Option<&'static str> {
+    pub fn kotlin_class_internal(self) -> Option<TypeName> {
         match self {
             Ty::Obj(i, _) => Some(i),
-            Ty::String => Some("kotlin/String"),
-            Ty::Boolean => Some("kotlin/Boolean"),
-            Ty::Byte => Some("kotlin/Byte"),
-            Ty::Short => Some("kotlin/Short"),
-            Ty::Int => Some("kotlin/Int"),
-            Ty::Long => Some("kotlin/Long"),
-            Ty::Char => Some("kotlin/Char"),
-            Ty::Float => Some("kotlin/Float"),
-            Ty::Double => Some("kotlin/Double"),
-            Ty::UInt => Some("kotlin/UInt"),
-            Ty::ULong => Some("kotlin/ULong"),
+            Ty::String => Some(type_name("kotlin/String")),
+            Ty::Boolean => Some(type_name("kotlin/Boolean")),
+            Ty::Byte => Some(type_name("kotlin/Byte")),
+            Ty::Short => Some(type_name("kotlin/Short")),
+            Ty::Int => Some(type_name("kotlin/Int")),
+            Ty::Long => Some(type_name("kotlin/Long")),
+            Ty::Char => Some(type_name("kotlin/Char")),
+            Ty::Float => Some(type_name("kotlin/Float")),
+            Ty::Double => Some(type_name("kotlin/Double")),
+            Ty::UInt => Some(type_name("kotlin/UInt")),
+            Ty::ULong => Some(type_name("kotlin/ULong")),
             Ty::Nullable(inner) => inner.kotlin_class_internal(),
             Ty::TyParam(_, bound) => bound.kotlin_class_internal(),
             _ => None,
@@ -431,7 +660,7 @@ impl Ty {
             // `Array<List>`) — an array receiver keys per element class. Use `obj_args` (NOT `Ty::array`,
             // which collapses a bare-primitive element to a `IntArray` = `[I`, breaking the boxed
             // `Array<Int>` = `[Integer;` receiver) so the boxed array form is preserved.
-            Ty::Obj("kotlin/Array", args) => {
+            Ty::Obj(n, args) if n.matches("kotlin/Array") => {
                 let e = args
                     .first()
                     .copied()
@@ -452,7 +681,7 @@ impl Ty {
     /// keep their precise erased key first so concrete overloads still win.
     pub fn erased_recv_candidates(self) -> Vec<Ty> {
         let mut keys = vec![self.erased_recv()];
-        if let Ty::Obj("kotlin/Array", _) = keys[0] {
+        if matches!(keys[0], Ty::Obj(n, _) if n.matches("kotlin/Array")) {
             keys.push(Ty::obj_args("kotlin/Array", &[Ty::obj("kotlin/Any")]));
         }
         keys.push(Ty::obj("kotlin/Any"));
@@ -626,44 +855,44 @@ impl Ty {
     /// `Array<Int>`, carried as `Obj("kotlin/Int")`), the underlying primitive `Ty`. `None` otherwise.
     pub fn unboxed_primitive(self) -> Option<Ty> {
         Some(match self {
-            Ty::Obj("kotlin/Int", _) => Ty::Int,
-            Ty::Obj("kotlin/Byte", _) => Ty::Byte,
-            Ty::Obj("kotlin/Short", _) => Ty::Short,
-            Ty::Obj("kotlin/Long", _) => Ty::Long,
-            Ty::Obj("kotlin/Float", _) => Ty::Float,
-            Ty::Obj("kotlin/Double", _) => Ty::Double,
-            Ty::Obj("kotlin/Boolean", _) => Ty::Boolean,
-            Ty::Obj("kotlin/Char", _) => Ty::Char,
+            Ty::Obj(n, _) if n.matches("kotlin/Int") => Ty::Int,
+            Ty::Obj(n, _) if n.matches("kotlin/Byte") => Ty::Byte,
+            Ty::Obj(n, _) if n.matches("kotlin/Short") => Ty::Short,
+            Ty::Obj(n, _) if n.matches("kotlin/Long") => Ty::Long,
+            Ty::Obj(n, _) if n.matches("kotlin/Float") => Ty::Float,
+            Ty::Obj(n, _) if n.matches("kotlin/Double") => Ty::Double,
+            Ty::Obj(n, _) if n.matches("kotlin/Boolean") => Ty::Boolean,
+            Ty::Obj(n, _) if n.matches("kotlin/Char") => Ty::Char,
             _ => return None,
         })
     }
 
-    pub fn name(self) -> &'static str {
+    pub fn name(self) -> String {
         match self {
-            Ty::Int => "Int",
-            Ty::Byte => "Byte",
-            Ty::Short => "Short",
-            Ty::Long => "Long",
-            Ty::Float => "Float",
-            Ty::Double => "Double",
-            Ty::Boolean => "Boolean",
-            Ty::Char => "Char",
-            Ty::UInt => "UInt",
-            Ty::ULong => "ULong",
-            Ty::String => "String",
-            Ty::Unit => "Unit",
-            Ty::Obj(n, _) => n,
-            Ty::Null => "Null",
-            Ty::Nothing => "Nothing",
-            Ty::Error => "<error>",
-            Ty::Fun(_) => "Function",
+            Ty::Int => "Int".to_string(),
+            Ty::Byte => "Byte".to_string(),
+            Ty::Short => "Short".to_string(),
+            Ty::Long => "Long".to_string(),
+            Ty::Float => "Float".to_string(),
+            Ty::Double => "Double".to_string(),
+            Ty::Boolean => "Boolean".to_string(),
+            Ty::Char => "Char".to_string(),
+            Ty::UInt => "UInt".to_string(),
+            Ty::ULong => "ULong".to_string(),
+            Ty::String => "String".to_string(),
+            Ty::Unit => "Unit".to_string(),
+            Ty::Obj(n, _) => n.render(),
+            Ty::Null => "Null".to_string(),
+            Ty::Nothing => "Nothing".to_string(),
+            Ty::Error => "<error>".to_string(),
+            Ty::Fun(_) => "Function".to_string(),
             Ty::Nullable(inner) => inner.name(),
-            Ty::TyParam(n, _) => n,
+            Ty::TyParam(n, _) => n.to_string(),
         }
     }
 
     /// Internal class name if this is an object type.
-    pub fn obj_internal(self) -> Option<&'static str> {
+    pub fn obj_internal(self) -> Option<TypeName> {
         match self {
             Ty::Obj(n, _) => Some(n),
             // A type parameter follows its bound for object identity queries.
@@ -912,19 +1141,21 @@ mod tests {
 
     #[test]
     fn kotlin_class_internal_is_source_class_identity() {
-        assert_eq!(Ty::Int.kotlin_class_internal(), Some("kotlin/Int"));
-        assert_eq!(Ty::String.kotlin_class_internal(), Some("kotlin/String"));
-        assert_eq!(
-            Ty::obj_args("demo/Box", &[Ty::Int]).kotlin_class_internal(),
-            Some("demo/Box")
-        );
-        assert_eq!(
-            Ty::nullable(Ty::UInt).kotlin_class_internal(),
-            Some("kotlin/UInt")
-        );
+        assert!(Ty::Int
+            .kotlin_class_internal()
+            .is_some_and(|n| n.matches("kotlin/Int")));
+        assert!(Ty::String
+            .kotlin_class_internal()
+            .is_some_and(|n| n.matches("kotlin/String")));
+        assert!(Ty::obj_args("demo/Box", &[Ty::Int])
+            .kotlin_class_internal()
+            .is_some_and(|n| n.matches("demo/Box")));
+        assert!(Ty::nullable(Ty::UInt)
+            .kotlin_class_internal()
+            .is_some_and(|n| n.matches("kotlin/UInt")));
         assert_eq!(
             Ty::ty_param("T", Ty::obj("kotlin/CharSequence")).kotlin_class_internal(),
-            Some("kotlin/CharSequence")
+            Some(type_name("kotlin/CharSequence"))
         );
         assert_eq!(Ty::Null.kotlin_class_internal(), None);
     }
