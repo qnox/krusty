@@ -53,6 +53,12 @@ impl FnMeta {
 /// operator member) and `copy` (public final member). Reverse-engineered from kotlinc 1.9.24.
 pub const COMPONENT_FN_FLAGS: u64 = 454;
 pub const COPY_FN_FLAGS: u64 = 198;
+/// `Function.flags` for the data-class-synthesized `equals`/`hashCode`/`toString` (public final member,
+/// overriding a supertype member — hence the higher bits). From kotlinc 2.4.0.
+pub const EQUALS_FN_FLAGS: u64 = 0x101d6;
+pub const HASHCODE_TOSTRING_FN_FLAGS: u64 = 0x100d6;
+/// `Class.flags` (f1) for a `public final data class` (IS_DATA + public + final). From kotlinc 2.4.0.
+pub const DATA_CLASS_FLAGS: u64 = 0x406;
 /// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE`.
 const DECLARES_DEFAULT_VALUE: u64 = 2;
 
@@ -142,12 +148,38 @@ impl StringTable {
     }
 }
 
+/// `predefinedIndex` of a builtin fq-NAME (used when a builtin arrives as `Ty::Obj`, e.g. `kotlin/Any`
+/// as an `equals` param) — kotlinc encodes these via `builtin`, NOT a class-id descriptor.
+fn builtin_name_index(internal: &str) -> Option<u64> {
+    match internal {
+        "kotlin/Any" => Some(0),
+        "kotlin/Nothing" => Some(1),
+        "kotlin/Unit" => Some(2),
+        "kotlin/Int" => Some(8),
+        "kotlin/Long" => Some(9),
+        "kotlin/Boolean" => Some(11),
+        "kotlin/String" => Some(14),
+        _ => None,
+    }
+}
+
 fn type_pb(st: &mut StringTable, t: Ty) -> Pb {
     let mut p = Pb::new();
-    let class_name = match t {
-        Ty::Obj(internal, _) => st.class_id_from_desc(&format!("L{internal};")),
-        _ => st.builtin(predefined_index(t)),
+    // `T?` sets `Type.nullable` (f3) and encodes the underlying type's class-name.
+    let (nullable, base) = match t {
+        Ty::Nullable(inner) => (true, *inner),
+        other => (false, other),
     };
+    let class_name = match base {
+        Ty::Obj(internal, _) => match builtin_name_index(internal) {
+            Some(idx) => st.builtin(idx),
+            None => st.class_id_from_desc(&format!("L{internal};")),
+        },
+        _ => st.builtin(predefined_index(base)),
+    };
+    if nullable {
+        p.field_varint(3, 1); // Type.nullable = 3 (written before class_name, matching kotlinc)
+    }
     p.field_varint(6, class_name as u64); // Type.class_name = 6
     p
 }
@@ -206,47 +238,63 @@ pub fn build_class(
     ctor.field_message(100, &ctor_sig); // JvmProtoBuf.constructorSignature = 100
     class.repeated_message(8, &ctor);
 
-    // f9 = member functions (name f2, return_type f3, value_parameter f6, flags f9; JVM sig derivable).
-    for m in methods {
-        let mut func = Pb::new();
-        func.field_varint(2, st.local(&m.name) as u64);
-        let ret = type_pb(&mut st, m.ret);
-        func.field_message(3, &ret);
-        for (pname, pty) in &m.params {
-            let mut vp = Pb::new();
-            if m.params_have_defaults {
-                vp.field_varint(1, DECLARES_DEFAULT_VALUE); // ValueParameter.flags = 1
+    // kotlinc interns strings in member-DECLARATION order — property JVM signatures (getX/getY/setY…)
+    // BEFORE function names — even though the proto writes functions (f9) before properties (f10). So
+    // build the property messages first (to intern their strings), then the function messages, then
+    // write them in proto field order. (For a class with no methods the order is irrelevant.)
+    let prop_msgs: Vec<Pb> = props
+        .iter()
+        .map(|p| {
+            let mut prop = Pb::new();
+            prop.field_varint(2, st.local(&p.name) as u64); // Property.name = 2
+            let ty = type_pb(&mut st, p.ty);
+            prop.field_message(3, &ty); // Property.return_type = 3
+            if p.is_var {
+                prop.field_varint(11, VAR_PROPERTY_FLAGS); // Property flags (var only)
             }
-            vp.field_varint(2, st.local(pname) as u64);
-            let ty = type_pb(&mut st, *pty);
-            vp.field_message(3, &ty);
-            func.repeated_message(6, &vp); // Function.value_parameter = 6
-        }
-        if m.flags != 0 {
-            func.field_varint(9, m.flags); // Function.flags = 9
-        }
-        class.repeated_message(9, &func); // Class.function = 9
-    }
+            let mut jvm = Pb::new();
+            jvm.field_message(1, &Pb::new()); // field (empty → derive backing field)
+            let getter = jvm_method_sig(&mut st, Some(&p.getter.0), &p.getter.1);
+            jvm.field_message(3, &getter); // JvmPropertySignature.getter = 3
+            if let Some((sn, sd)) = &p.setter {
+                let setter = jvm_method_sig(&mut st, Some(sn), sd);
+                jvm.field_message(4, &setter); // JvmPropertySignature.setter = 4
+            }
+            prop.field_message(100, &jvm); // JvmProtoBuf.propertySignature = 100
+            prop
+        })
+        .collect();
 
-    // f10 = properties.
-    for p in props {
-        let mut prop = Pb::new();
-        prop.field_varint(2, st.local(&p.name) as u64); // Property.name = 2
-        let ty = type_pb(&mut st, p.ty);
-        prop.field_message(3, &ty); // Property.return_type = 3
-        if p.is_var {
-            prop.field_varint(11, VAR_PROPERTY_FLAGS); // Property flags (var only)
-        }
-        let mut jvm = Pb::new();
-        jvm.field_message(1, &Pb::new()); // field (empty → derive backing field)
-        let getter = jvm_method_sig(&mut st, Some(&p.getter.0), &p.getter.1);
-        jvm.field_message(3, &getter); // JvmPropertySignature.getter = 3
-        if let Some((sn, sd)) = &p.setter {
-            let setter = jvm_method_sig(&mut st, Some(sn), sd);
-            jvm.field_message(4, &setter); // JvmPropertySignature.setter = 4
-        }
-        prop.field_message(100, &jvm); // JvmProtoBuf.propertySignature = 100
-        class.repeated_message(10, &prop);
+    // Member functions (name f2, return_type f3, value_parameter f6, flags f9; JVM sig derivable).
+    let func_msgs: Vec<Pb> = methods
+        .iter()
+        .map(|m| {
+            let mut func = Pb::new();
+            func.field_varint(2, st.local(&m.name) as u64);
+            let ret = type_pb(&mut st, m.ret);
+            func.field_message(3, &ret);
+            for (pname, pty) in &m.params {
+                let mut vp = Pb::new();
+                if m.params_have_defaults {
+                    vp.field_varint(1, DECLARES_DEFAULT_VALUE); // ValueParameter.flags = 1
+                }
+                vp.field_varint(2, st.local(pname) as u64);
+                let ty = type_pb(&mut st, *pty);
+                vp.field_message(3, &ty);
+                func.repeated_message(6, &vp); // Function.value_parameter = 6
+            }
+            if m.flags != 0 {
+                func.field_varint(9, m.flags); // Function.flags = 9
+            }
+            func
+        })
+        .collect();
+
+    for func in &func_msgs {
+        class.repeated_message(9, func); // Class.function = 9
+    }
+    for prop in &prop_msgs {
+        class.repeated_message(10, prop); // Class.property = 10
     }
 
     // f13 = enum entries (`EnumEntry { name = f1 }`).
@@ -330,6 +378,104 @@ mod tests {
                 0x12, 0x06, 0x10, 0x02, 0x1a, 0x02, 0x30, 0x03, 0xa2, 0x06, 0x04, 0x08, 0x04, 0x10,
                 0x05, 0x52, 0x11, 0x10, 0x02, 0x1a, 0x02, 0x30, 0x03, 0xa2, 0x06, 0x08, 0x0a, 0x00,
                 0x1a, 0x04, 0x08, 0x06, 0x10, 0x07,
+            ],
+            "d1 protobuf",
+        );
+    }
+
+    // Ground truth: kotlinc 2.4.0 `package demo; data class Point(val x: Int, var y: String)` — the
+    // full data-class shape (6 synthesized methods + IS_DATA flag + a var property).
+    #[test]
+    fn data_class_metadata_byte_matches_kotlinc() {
+        let any_q = Ty::nullable(Ty::obj("kotlin/Any"));
+        let methods = vec![
+            FnMeta {
+                name: "component1".into(),
+                params: vec![],
+                ret: Ty::Int,
+                flags: COMPONENT_FN_FLAGS,
+                params_have_defaults: false,
+            },
+            FnMeta {
+                name: "component2".into(),
+                params: vec![],
+                ret: Ty::String,
+                flags: COMPONENT_FN_FLAGS,
+                params_have_defaults: false,
+            },
+            FnMeta {
+                name: "copy".into(),
+                params: vec![("x".into(), Ty::Int), ("y".into(), Ty::String)],
+                ret: Ty::obj("demo/Point"),
+                flags: COPY_FN_FLAGS,
+                params_have_defaults: true,
+            },
+            FnMeta {
+                name: "equals".into(),
+                params: vec![("other".into(), any_q)],
+                ret: Ty::Boolean,
+                flags: EQUALS_FN_FLAGS,
+                params_have_defaults: false,
+            },
+            FnMeta {
+                name: "hashCode".into(),
+                params: vec![],
+                ret: Ty::Int,
+                flags: HASHCODE_TOSTRING_FN_FLAGS,
+                params_have_defaults: false,
+            },
+            FnMeta {
+                name: "toString".into(),
+                params: vec![],
+                ret: Ty::String,
+                flags: HASHCODE_TOSTRING_FN_FLAGS,
+                params_have_defaults: false,
+            },
+        ];
+        let props = vec![
+            PropMeta {
+                name: "x".into(),
+                ty: Ty::Int,
+                is_var: false,
+                getter: ("getX".into(), "()I".into()),
+                setter: None,
+            },
+            PropMeta {
+                name: "y".into(),
+                ty: Ty::String,
+                is_var: true,
+                getter: ("getY".into(), "()Ljava/lang/String;".into()),
+                setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
+            },
+        ];
+        let (d1, _d2) = build_class(
+            "demo/Point",
+            &[("x".into(), Ty::Int), ("y".into(), Ty::String)],
+            "(ILjava/lang/String;)V",
+            &props,
+            &methods,
+            &[],
+            DATA_CLASS_FLAGS,
+        );
+        assert_eq!(
+            d1,
+            vec![
+                0x00, 0x20, 0x0a, 0x02, 0x18, 0x02, 0x0a, 0x02, 0x10, 0x00, 0x0a, 0x00, 0x0a, 0x02,
+                0x10, 0x08, 0x0a, 0x00, 0x0a, 0x02, 0x10, 0x0e, 0x0a, 0x02, 0x08, 0x0c, 0x0a, 0x02,
+                0x10, 0x0b, 0x0a, 0x02, 0x08, 0x03, 0x08, 0x86, 0x08, 0x18, 0x00, 0x32, 0x02, 0x30,
+                0x01, 0x42, 0x17, 0x12, 0x06, 0x10, 0x02, 0x1a, 0x02, 0x30, 0x03, 0x12, 0x06, 0x10,
+                0x04, 0x1a, 0x02, 0x30, 0x05, 0xa2, 0x06, 0x04, 0x08, 0x06, 0x10, 0x07, 0x4a, 0x09,
+                0x10, 0x0e, 0x1a, 0x02, 0x30, 0x03, 0x48, 0xc6, 0x03, 0x4a, 0x09, 0x10, 0x0f, 0x1a,
+                0x02, 0x30, 0x05, 0x48, 0xc6, 0x03, 0x4a, 0x1d, 0x10, 0x10, 0x1a, 0x02, 0x30, 0x00,
+                0x32, 0x08, 0x08, 0x02, 0x10, 0x02, 0x1a, 0x02, 0x30, 0x03, 0x32, 0x08, 0x08, 0x02,
+                0x10, 0x04, 0x1a, 0x02, 0x30, 0x05, 0x48, 0xc6, 0x01, 0x4a, 0x14, 0x10, 0x11, 0x1a,
+                0x02, 0x30, 0x12, 0x32, 0x08, 0x10, 0x13, 0x1a, 0x04, 0x18, 0x01, 0x30, 0x01, 0x48,
+                0xd6, 0x83, 0x04, 0x4a, 0x0a, 0x10, 0x14, 0x1a, 0x02, 0x30, 0x03, 0x48, 0xd6, 0x81,
+                0x04, 0x4a, 0x0a, 0x10, 0x15, 0x1a, 0x02, 0x30, 0x05, 0x48, 0xd6, 0x81, 0x04, 0x52,
+                0x11, 0x10, 0x02, 0x1a, 0x02, 0x30, 0x03, 0xa2, 0x06, 0x08, 0x0a, 0x00, 0x1a, 0x04,
+                0x08, 0x08, 0x10, 0x09, 0x52, 0x1a, 0x10, 0x04, 0x1a, 0x02, 0x30, 0x05, 0x58, 0x86,
+                0x0e, 0xa2, 0x06, 0x0e, 0x0a, 0x00, 0x1a, 0x04, 0x08, 0x0a, 0x10, 0x0b, 0x22, 0x04,
+                0x08, 0x0c, 0x10, 0x0d,
             ],
             "d1 protobuf",
         );
