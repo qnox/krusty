@@ -26,8 +26,12 @@ fn classpath_class_companion_object_is_detected() {
     let random = libs
         .resolve_type("kotlin/random/Random")
         .expect("kotlin/random/Random resolves on the stdlib classpath");
+    let random_companion = random
+        .companion_object
+        .clone()
+        .map(|(field, ty)| (field, ty.render()));
     assert_eq!(
-        random.companion_object,
+        random_companion,
         Some((
             "Default".to_string(),
             "kotlin/random/Random$Default".to_string()
@@ -40,8 +44,8 @@ fn classpath_class_companion_object_is_detected() {
     let pair = libs
         .resolve_type("kotlin/Pair")
         .expect("kotlin/Pair resolves");
-    assert_eq!(
-        pair.companion_object, None,
+    assert!(
+        pair.companion_object.is_none(),
         "kotlin/Pair has no companion object"
     );
 
@@ -54,10 +58,11 @@ fn classpath_class_companion_object_is_detected() {
         .expect("Random has a companion object");
     use krusty::symbol_resolver::{SymRecv, Symbol};
     let nextint = krusty::symbol_resolver::SymbolResolver::new(&libs)
-        .resolve_symbol(SymRecv::Type(&cty), "nextInt", &[Ty::Int], &[])
+        .resolve_symbol(SymRecv::Type(&cty.render()), "nextInt", &[Ty::Int], &[])
         .and_then(Symbol::instance);
     assert!(
         nextint.is_some(),
-        "nextInt(Int) resolves as an instance method on the companion type {cty}"
+        "nextInt(Int) resolves as an instance method on the companion type {}",
+        cty.render()
     );
 }

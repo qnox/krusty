@@ -13,6 +13,9 @@
 //! `*TypeAliasesKt` `@Metadata` and are read from the classpath by `classpath::scan_types`). They
 //! are intrinsic to the compiler, so they are seeded unconditionally.
 
+use crate::name_tree::FxHashMap;
+use crate::types::TypeName;
+
 /// Every simple name handled by [`kotlin_builtin_to_jvm`], used to seed the resolver's class map.
 pub const BUILTIN_MAPPED_NAMES: &[&str] = &[
     "Any",
@@ -169,6 +172,10 @@ pub fn jvm_to_kotlin_builtin_with_members(internal: &str) -> Option<&'static str
     })
 }
 
+pub fn jvm_to_kotlin_builtin_with_members_name(internal: TypeName) -> Option<TypeName> {
+    builtin_ids().with_members.get(&internal).copied()
+}
+
 /// Whether a JVM-mapped Kotlin built-in is a JVM **interface** (so a member dispatches via
 /// `invokeinterface`, not `invokevirtual`). A reliable answer for the curated mapped types — matching
 /// kotlinc's `JavaToKotlinClassMap` — for when the classpath `.class` reader can't be consulted (e.g. a
@@ -179,6 +186,13 @@ pub fn jvm_mapped_builtin_is_interface(jvm_internal: &str) -> Option<bool> {
         "java/lang/Number" | "java/lang/Object" | "java/lang/String" | "java/lang/Enum" => false,
         _ => return None,
     })
+}
+
+pub fn jvm_mapped_builtin_is_interface_name(jvm_internal: TypeName) -> Option<bool> {
+    builtin_ids()
+        .mapped_is_interface
+        .get(&jvm_internal)
+        .copied()
 }
 
 /// Whether a resolved JVM internal name denotes a `Throwable` subtype, recognised structurally by
@@ -247,6 +261,10 @@ pub fn wrapper_to_kotlin_prim(internal: &str) -> Option<&'static str> {
     })
 }
 
+pub fn wrapper_to_kotlin_prim_name(internal: TypeName) -> Option<&'static str> {
+    builtin_ids().wrapper_prim.get(&internal).copied()
+}
+
 /// Map a Kotlin built-in type's internal name to its JVM name (`kotlin/Any` → `java/lang/Object`).
 /// Any other name — a user class, a JDK class already named in JVM form, a Kotlin stdlib class with
 /// no JVM-builtin counterpart — passes through unchanged. Applied at the Ty→bytecode boundary.
@@ -276,6 +294,200 @@ pub fn to_jvm_internal(internal: &str) -> &str {
         .unwrap_or(internal)
 }
 
+/// The JVM-erasure identity groups: each group's Kotlin internal names plus the single JVM internal
+/// name they erase to. Group index is the erasure identity used by the id-keyed comparisons below.
+const ERASURE_GROUPS: &[(&[&str], &str)] = &[
+    (&["kotlin/Any"], "java/lang/Object"),
+    (&["kotlin/String"], "java/lang/String"),
+    (&["kotlin/CharSequence"], "java/lang/CharSequence"),
+    (&["kotlin/Throwable"], "java/lang/Throwable"),
+    (&["kotlin/Cloneable"], "java/lang/Cloneable"),
+    (&["kotlin/Number"], "java/lang/Number"),
+    (&["kotlin/Comparable"], "java/lang/Comparable"),
+    (&["kotlin/Enum"], "java/lang/Enum"),
+    (&["kotlin/Annotation"], "java/lang/annotation/Annotation"),
+    (&["kotlin/Nothing"], "java/lang/Void"),
+    (
+        &[
+            "kotlin/collections/Iterable",
+            "kotlin/collections/MutableIterable",
+        ],
+        "java/lang/Iterable",
+    ),
+    (
+        &[
+            "kotlin/collections/Iterator",
+            "kotlin/collections/MutableIterator",
+        ],
+        "java/util/Iterator",
+    ),
+    (
+        &[
+            "kotlin/collections/ListIterator",
+            "kotlin/collections/MutableListIterator",
+        ],
+        "java/util/ListIterator",
+    ),
+    (
+        &[
+            "kotlin/collections/Collection",
+            "kotlin/collections/MutableCollection",
+        ],
+        "java/util/Collection",
+    ),
+    (
+        &["kotlin/collections/List", "kotlin/collections/MutableList"],
+        "java/util/List",
+    ),
+    (
+        &["kotlin/collections/Set", "kotlin/collections/MutableSet"],
+        "java/util/Set",
+    ),
+    (
+        &["kotlin/collections/Map", "kotlin/collections/MutableMap"],
+        "java/util/Map",
+    ),
+    (
+        &[
+            "kotlin/collections/Map.Entry",
+            "kotlin/collections/Map$Entry",
+            "kotlin/collections/MutableMap.MutableEntry",
+            "kotlin/collections/MutableMap$MutableEntry",
+        ],
+        "java/util/Map$Entry",
+    ),
+];
+
+/// Id-keyed views of the curated builtin tables, interned once. Hot resolution paths compare
+/// `TypeName` ids through these maps instead of locking the global name tree per string compare.
+struct BuiltinIds {
+    erasure_group: FxHashMap<TypeName, u8>,
+    /// Any builtin (Kotlin or JVM spelling, primitives included) → its canonical JVM internal.
+    jvm_builtin: FxHashMap<TypeName, (&'static str, TypeName)>,
+    /// Groups whose JVM face is a `java/util/*` collection interface, as a bitmask by group index.
+    collection_groups: u32,
+    coll_to_kotlin: FxHashMap<TypeName, TypeName>,
+    coll_to_kotlin_mutable: FxHashMap<TypeName, TypeName>,
+    wrapper_prim: FxHashMap<TypeName, &'static str>,
+    with_members: FxHashMap<TypeName, TypeName>,
+    mapped_is_interface: FxHashMap<TypeName, bool>,
+}
+
+fn builtin_ids() -> &'static BuiltinIds {
+    static IDS: std::sync::OnceLock<BuiltinIds> = std::sync::OnceLock::new();
+    IDS.get_or_init(|| {
+        let tn = crate::types::type_name;
+        let mut erasure_group = FxHashMap::default();
+        let mut jvm_builtin = FxHashMap::default();
+        let mut collection_groups = 0u32;
+        let mut coll_to_kotlin = FxHashMap::default();
+        let mut coll_to_kotlin_mutable = FxHashMap::default();
+        let mut with_members = FxHashMap::default();
+        let mut mapped_is_interface = FxHashMap::default();
+        for (group, (kotlin_names, jvm_name)) in ERASURE_GROUPS.iter().enumerate() {
+            let g = u8::try_from(group).expect("erasure group count fits u8");
+            let jvm_id = tn(jvm_name);
+            for kotlin_name in *kotlin_names {
+                let id = tn(kotlin_name);
+                erasure_group.insert(id, g);
+                jvm_builtin.insert(id, (*jvm_name, jvm_id));
+            }
+            erasure_group.insert(jvm_id, g);
+            jvm_builtin.insert(jvm_id, (*jvm_name, jvm_id));
+            if jvm_name.starts_with("java/util/") {
+                collection_groups |= 1 << group;
+            }
+            if let Some(kotlin) = jvm_collection_to_kotlin(jvm_name) {
+                coll_to_kotlin.insert(jvm_id, tn(kotlin));
+            }
+            if let Some(kotlin) = jvm_collection_to_kotlin_mutable(jvm_name) {
+                coll_to_kotlin_mutable.insert(jvm_id, tn(kotlin));
+            }
+            if let Some(kotlin) = jvm_to_kotlin_builtin_with_members(jvm_name) {
+                with_members.insert(jvm_id, tn(kotlin));
+            }
+            if let Some(is_interface) = jvm_mapped_builtin_is_interface(jvm_name) {
+                mapped_is_interface.insert(jvm_id, is_interface);
+            }
+        }
+        let mut wrapper_prim = FxHashMap::default();
+        for wrapper in [
+            "java/lang/Integer",
+            "java/lang/Long",
+            "java/lang/Short",
+            "java/lang/Byte",
+            "java/lang/Double",
+            "java/lang/Float",
+            "java/lang/Boolean",
+            "java/lang/Character",
+        ] {
+            let prim = wrapper_to_kotlin_prim(wrapper).expect("wrapper table covers JVM boxes");
+            let wrapper_id = tn(wrapper);
+            wrapper_prim.insert(wrapper_id, prim);
+            jvm_builtin.insert(wrapper_id, (wrapper, wrapper_id));
+            jvm_builtin.insert(tn(prim), (wrapper, wrapper_id));
+        }
+        BuiltinIds {
+            erasure_group,
+            jvm_builtin,
+            collection_groups,
+            coll_to_kotlin,
+            coll_to_kotlin_mutable,
+            wrapper_prim,
+            with_members,
+            mapped_is_interface,
+        }
+    })
+}
+
+/// Compare a semantic Kotlin/internal class name with a JVM-erased internal name without rendering the
+/// semantic name first.
+pub fn type_name_maps_to_jvm_internal(internal: TypeName, jvm_internal: &str) -> bool {
+    match ERASURE_GROUPS.iter().position(|(_, j)| *j == jvm_internal) {
+        Some(group) => {
+            jvm_erasure_group(internal) == Some(u8::try_from(group).expect("group fits u8"))
+        }
+        None => internal.matches(jvm_internal),
+    }
+}
+
+fn jvm_erasure_group(internal: TypeName) -> Option<u8> {
+    builtin_ids().erasure_group.get(&internal).copied()
+}
+
+/// Compare two id-backed class names by their JVM erasure identity without materializing either name.
+pub fn type_names_map_to_same_jvm_internal(left: TypeName, right: TypeName) -> bool {
+    left == right
+        || jvm_erasure_group(left)
+            .zip(jvm_erasure_group(right))
+            .is_some_and(|(left, right)| left == right)
+}
+
+pub fn type_name_maps_to_jvm_collection_interface(internal: TypeName) -> bool {
+    let ids = builtin_ids();
+    jvm_erasure_group(internal).is_some_and(|g| ids.collection_groups & (1 << g) != 0)
+        || internal.starts_with("java/util/")
+}
+
+pub fn jvm_collection_to_kotlin_type_name(internal: TypeName) -> Option<TypeName> {
+    builtin_ids().coll_to_kotlin.get(&internal).copied()
+}
+
+pub fn jvm_collection_to_kotlin_mutable_type_name(internal: TypeName) -> Option<TypeName> {
+    builtin_ids().coll_to_kotlin_mutable.get(&internal).copied()
+}
+
+pub fn type_name_to_jvm_builtin_internal(internal: TypeName) -> Option<&'static str> {
+    builtin_ids().jvm_builtin.get(&internal).map(|(s, _)| *s)
+}
+
+pub fn to_jvm_type_name(internal: TypeName) -> TypeName {
+    builtin_ids()
+        .jvm_builtin
+        .get(&internal)
+        .map_or(internal, |(_, id)| *id)
+}
+
 /// Inverse of [`to_jvm_internal`]: normalize a JVM built-in name read from the classpath/descriptors
 /// to its Kotlin identity (`java/lang/Object` → `kotlin/Any`), mirroring how the reference compiler
 /// maps Java types into Kotlin ones at the front-end boundary. Passes other names through unchanged.
@@ -293,13 +505,17 @@ pub fn wrapper_internal(t: Ty) -> Option<&'static str> {
     // Route through the single primitive→wrapper table: `boxed_ref` carries a primitive as its Kotlin
     // internal name (`Ty::Int` → `Obj("kotlin/Int")`, `Ty::UInt` → `Obj("kotlin/UInt")`), which
     // `kotlin_prim_to_wrapper` boxes (`kotlin/Int` → `java/lang/Integer`, `kotlin/UInt` → `kotlin/UInt`).
-    kotlin_prim_to_wrapper(t.boxed_ref()?.obj_internal()?)
+    let boxed = t.boxed_ref()?.obj_internal()?;
+    kotlin_prim_to_wrapper(&boxed.render())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{kotlin_prim_to_wrapper, to_jvm_internal, wrapper_internal};
-    use crate::types::Ty;
+    use super::{
+        jvm_collection_to_kotlin_type_name, kotlin_prim_to_wrapper, to_jvm_internal,
+        to_jvm_type_name, wrapper_internal, wrapper_to_kotlin_prim_name,
+    };
+    use crate::types::{type_name, Ty};
 
     #[test]
     fn primitive_wrapper_table_is_single_source() {
@@ -316,8 +532,13 @@ mod tests {
         ];
         for (internal, wrapper, prim) in pairs {
             assert_eq!(kotlin_prim_to_wrapper(internal), Some(wrapper));
+            assert_eq!(
+                wrapper_to_kotlin_prim_name(type_name(wrapper)),
+                Some(internal)
+            );
             // The emit-only boxing in `to_jvm_internal` and the `Ty`-keyed `wrapper_internal` agree.
             assert_eq!(to_jvm_internal(internal), wrapper);
+            assert_eq!(to_jvm_type_name(type_name(internal)), type_name(wrapper));
             assert_eq!(wrapper_internal(prim), Some(wrapper));
         }
         // Unsigned boxes to its own inline-class wrapper (`kotlin/UInt`), not a `java/lang/*`.
@@ -351,5 +572,17 @@ mod tests {
         // A user/JDK class passes through unchanged.
         assert_eq!(to_jvm_internal("demo/Foo"), "demo/Foo");
         assert_eq!(to_jvm_internal("java/util/List"), "java/util/List");
+        assert_eq!(
+            jvm_collection_to_kotlin_type_name(type_name("java/util/List")),
+            Some(type_name("kotlin/collections/List"))
+        );
+        assert_eq!(
+            jvm_collection_to_kotlin_type_name(type_name("java/util/Map$Entry")),
+            Some(type_name("kotlin/collections/Map.Entry"))
+        );
+        assert_eq!(
+            jvm_collection_to_kotlin_type_name(type_name("demo/Foo")),
+            None
+        );
     }
 }

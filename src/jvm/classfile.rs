@@ -577,6 +577,7 @@ impl ClassWriter {
             },
             AnnoValue::Enum(ty, name) => {
                 out.push(b'e');
+                let ty = ty.render();
                 let ti = self.cp.utf8(&format!("L{ty};"));
                 u2(out, ti);
                 let ni = self.cp.utf8(name);
@@ -584,6 +585,7 @@ impl ClassWriter {
             }
             AnnoValue::Class(internal) => {
                 out.push(b'c');
+                let internal = internal.render();
                 let ci = self.cp.utf8(&format!("L{internal};"));
                 u2(out, ci);
             }
@@ -603,7 +605,8 @@ impl ClassWriter {
 
     /// Encode an `annotation` structure: the type descriptor index + its `element_value_pairs`.
     fn ev_annotation(&mut self, out: &mut Vec<u8>, a: &crate::ir::AppliedAnnotation) {
-        let ti = self.cp.utf8(&format!("L{};", a.internal));
+        let internal = a.internal.render();
+        let ti = self.cp.utf8(&format!("L{internal};"));
         u2(out, ti);
         u2(out, a.values.len() as u16);
         for (name, v) in &a.values {
