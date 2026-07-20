@@ -83,6 +83,37 @@ pub struct EmitOptions {
     pub source_file: Option<String>,
 }
 
+/// Register the file's nested-class `InnerClasses` candidates on `cw`; the writer's `finish` keeps only
+/// the entries it references as a class constant (kotlinc's rule). Covers the `@Serializable` model
+/// shape — a class's `$$serializer` (inner name `$serializer`) and its `Companion`, both `public static
+/// final` — emitted in kotlinc's order ($serializer before Companion). Anonymous nested classes (the
+/// suspend continuations) are not yet registered (they also need an `EnclosingMethod` attribute).
+fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
+    use crate::jvm::classfile::InnerClassSpec;
+    const ACC_PSF: u16 = 0x0019; // ACC_PUBLIC | ACC_STATIC | ACC_FINAL
+    for c in &ir.classes {
+        let fq = c.fq_name();
+        if let Some(outer) = fq.strip_suffix("$$serializer") {
+            cw.add_inner_class(InnerClassSpec {
+                inner: fq.clone(),
+                outer: Some(outer.to_string()),
+                name: Some("$serializer".to_string()),
+                access: ACC_PSF,
+            });
+        }
+    }
+    for c in &ir.classes {
+        if let Some(comp) = c.companion_class() {
+            cw.add_inner_class(InnerClassSpec {
+                inner: comp,
+                outer: Some(c.fq_name()),
+                name: Some("Companion".to_string()),
+                access: ACC_PSF,
+            });
+        }
+    }
+}
+
 /// Construct a `ClassWriter` with the per-file [`EmitOptions`] stamped on — the single place emission
 /// builds a writer, so class version + `SourceFile` reach every class (incl. synthetics) explicitly.
 fn new_writer(internal: &str, super_internal: &str, opts: &EmitOptions) -> ClassWriter {
@@ -970,6 +1001,7 @@ fn emit_class(
     let fq_name = c.fq_name();
     let superclass = c.superclass();
     let mut cw = new_writer(&fq_name, &superclass, opts);
+    register_inner_classes(&mut cw, ir);
     // Access: an extended or abstract class must not be `final`; a class with an abstract method
     // (body `None`) is `ACC_ABSTRACT`.
     let extended = ir.classes.iter().any(|o| o.superclass_matches(&fq_name));
