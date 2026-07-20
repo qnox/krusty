@@ -13,6 +13,7 @@
 //! `*TypeAliasesKt` `@Metadata` and are read from the classpath by `classpath::scan_types`). They
 //! are intrinsic to the compiler, so they are seeded unconditionally.
 
+use crate::name_tree::FxHashMap;
 use crate::types::TypeName;
 
 /// Every simple name handled by [`kotlin_builtin_to_jvm`], used to seed the resolver's class map.
@@ -360,30 +361,29 @@ const ERASURE_GROUPS: &[(&[&str], &str)] = &[
 /// Id-keyed views of the curated builtin tables, interned once. Hot resolution paths compare
 /// `TypeName` ids through these maps instead of locking the global name tree per string compare.
 struct BuiltinIds {
-    erasure_group: std::collections::HashMap<TypeName, u8>,
+    erasure_group: FxHashMap<TypeName, u8>,
     /// Any builtin (Kotlin or JVM spelling, primitives included) → its canonical JVM internal.
-    jvm_builtin: std::collections::HashMap<TypeName, (&'static str, TypeName)>,
+    jvm_builtin: FxHashMap<TypeName, (&'static str, TypeName)>,
     /// Groups whose JVM face is a `java/util/*` collection interface, as a bitmask by group index.
     collection_groups: u32,
-    coll_to_kotlin: std::collections::HashMap<TypeName, TypeName>,
-    coll_to_kotlin_mutable: std::collections::HashMap<TypeName, TypeName>,
-    wrapper_prim: std::collections::HashMap<TypeName, &'static str>,
-    with_members: std::collections::HashMap<TypeName, TypeName>,
-    mapped_is_interface: std::collections::HashMap<TypeName, bool>,
+    coll_to_kotlin: FxHashMap<TypeName, TypeName>,
+    coll_to_kotlin_mutable: FxHashMap<TypeName, TypeName>,
+    wrapper_prim: FxHashMap<TypeName, &'static str>,
+    with_members: FxHashMap<TypeName, TypeName>,
+    mapped_is_interface: FxHashMap<TypeName, bool>,
 }
 
 fn builtin_ids() -> &'static BuiltinIds {
-    use std::collections::HashMap;
     static IDS: std::sync::OnceLock<BuiltinIds> = std::sync::OnceLock::new();
     IDS.get_or_init(|| {
         let tn = crate::types::type_name;
-        let mut erasure_group = HashMap::new();
-        let mut jvm_builtin = HashMap::new();
+        let mut erasure_group = FxHashMap::default();
+        let mut jvm_builtin = FxHashMap::default();
         let mut collection_groups = 0u32;
-        let mut coll_to_kotlin = HashMap::new();
-        let mut coll_to_kotlin_mutable = HashMap::new();
-        let mut with_members = HashMap::new();
-        let mut mapped_is_interface = HashMap::new();
+        let mut coll_to_kotlin = FxHashMap::default();
+        let mut coll_to_kotlin_mutable = FxHashMap::default();
+        let mut with_members = FxHashMap::default();
+        let mut mapped_is_interface = FxHashMap::default();
         for (group, (kotlin_names, jvm_name)) in ERASURE_GROUPS.iter().enumerate() {
             let g = u8::try_from(group).expect("erasure group count fits u8");
             let jvm_id = tn(jvm_name);
@@ -410,7 +410,7 @@ fn builtin_ids() -> &'static BuiltinIds {
                 mapped_is_interface.insert(jvm_id, is_interface);
             }
         }
-        let mut wrapper_prim = HashMap::new();
+        let mut wrapper_prim = FxHashMap::default();
         for wrapper in [
             "java/lang/Integer",
             "java/lang/Long",

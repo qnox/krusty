@@ -78,9 +78,9 @@ pub(super) fn kotlin_type_name_to_ty(name: TypeName) -> Ty {
 /// Interned ids for the names the hot `@Metadata` alignment paths test against, so per-parameter
 /// checks are id compares instead of per-string name-tree walks.
 struct MetaNameIds {
-    prim: HashMap<crate::types::TypeName, Ty>,
-    prim_array: HashMap<crate::types::TypeName, &'static str>,
-    fn_arity: HashMap<crate::types::TypeName, usize>,
+    prim: crate::name_tree::FxHashMap<crate::types::TypeName, Ty>,
+    prim_array: crate::name_tree::FxHashMap<crate::types::TypeName, &'static str>,
+    fn_arity: crate::name_tree::FxHashMap<crate::types::TypeName, usize>,
     array: crate::types::TypeName,
     any: crate::types::TypeName,
     object: crate::types::TypeName,
