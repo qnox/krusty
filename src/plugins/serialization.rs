@@ -850,8 +850,10 @@ fn builtin_element_key(ty: &Ty) -> Option<&'static str> {
             "kotlin/Byte"
         } else if fq.matches("kotlin/Short") || fq.matches("java/lang/Short") {
             "kotlin/Short"
-        } else if fq.matches("java/lang/String") {
+        } else if fq.matches("kotlin/String") || fq.matches("java/lang/String") {
             "kotlin/String"
+        } else if fq.matches("kotlin/uuid/Uuid") {
+            "kotlin/uuid/Uuid"
         } else {
             return None;
         },
