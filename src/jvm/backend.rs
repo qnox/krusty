@@ -244,16 +244,18 @@ impl Backend for JvmBackend {
             }
         });
         // `emit_all` returns `None` when the IR uses a JVM-unsupported construct. Inline splice failures
-        // are reported separately: selected inline calls are required to splice, so those are backend
-        // errors to fix rather than silent skips.
+        // are reported separately (via `run.inline_bail`): selected inline calls are required to splice,
+        // so those are backend errors to fix rather than silent skips.
+        let run = crate::jvm::ir_emit::EmitRun::default();
         let Some(classes) = crate::jvm::ir_emit::emit_all_with_opts(
             &ir,
             &facade_name,
             &*self.cp,
             metadata.as_ref(),
             &emit_opts,
+            &run,
         ) else {
-            if let Some(reason) = crate::jvm::ir_emit::inline_bail_reason() {
+            if let Some(reason) = run.inline_bail() {
                 diags.error(
                     crate::diag::Span::new(0, 0),
                     format!("krusty: JVM backend inline error: {reason}"),

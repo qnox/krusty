@@ -20,24 +20,42 @@ struct InlineStaticTarget<'a> {
     splice_desc: &'a str,
 }
 
-thread_local! {
-    static INLINE_BAIL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
-    /// Set when a `GetValue`/`SetValue` references a value slot that was never allocated (a lowering
-    /// produced malformed IR — e.g. an unsupported suspend shape). The emitter does NOT panic on this:
-    /// it sets the flag and `emit_all` drops the whole file (returns `None`), so the file is skipped,
-    /// never miscompiled. A compiler must never crash on its own IR.
-    static EMIT_BAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Lambda impl `FunId`s that got a REAL `invokedynamic` during emission. A lambda spliced by the
-    /// inliner (a `require { … }` message, an inlined `flatMap { … }` body) never emits one, so its
-    /// standalone `$lambda$N` method is dead — kotlinc emits neither the method nor (for an otherwise
-    /// class-only file) the facade holding it. `emit_all_with_class_meta` runs a discovery pass, then
-    /// re-emits without the dead facade impls.
-    static USED_LAMBDAS: std::cell::RefCell<std::collections::HashSet<u32>> =
-        std::cell::RefCell::new(std::collections::HashSet::new());
+/// Mutable per-emit-run accumulators, owned by the caller and shared (by `&`, via interior mutability)
+/// down the emit callgraph — formerly three thread-locals. The caller reads `inline_bail`/`emit_bail`
+/// after `emit_all_with_opts` returns `None` to distinguish an inline-splice failure (a backend bug to
+/// fix) from an unsupported construct (skip the file).
+#[derive(Default)]
+pub struct EmitRun {
+    /// The reason an inline splice failed during emission (a required stdlib-inline call the backend
+    /// could not splice), else `None`.
+    inline_bail: std::cell::RefCell<Option<String>>,
+    /// Set when a `GetValue`/`SetValue` references a value slot that was never allocated (malformed IR
+    /// from an unsupported lowering). The emitter never panics: it sets this and the file is dropped —
+    /// a compiler must never crash on its own IR.
+    emit_bail: std::cell::Cell<bool>,
+    /// Lambda impl `FunId`s that got a REAL `invokedynamic` this pass. A lambda spliced by the inliner
+    /// (a `require { … }` message, an inlined `flatMap { … }` body) never emits one, so its standalone
+    /// `$lambda$N` method is dead — dropped on the re-emit (kotlinc emits neither it nor its facade).
+    used_lambdas: std::cell::RefCell<std::collections::HashSet<u32>>,
 }
 
-pub fn inline_bail_reason() -> Option<String> {
-    INLINE_BAIL.with(|b| b.borrow().clone())
+impl EmitRun {
+    /// The inline-splice failure reason recorded this run, if any (read by the caller after `None`).
+    pub fn inline_bail(&self) -> Option<String> {
+        self.inline_bail.borrow().clone()
+    }
+    fn set_inline_bail(&self, reason: String) {
+        *self.inline_bail.borrow_mut() = Some(reason);
+    }
+}
+
+/// The emit environment threaded (by `&`) through the whole emit callgraph in place of the bare
+/// `bodies` provider: the bytecode provider plus the mutable run accumulators, so the deep `Emitter`
+/// records a used lambda / an emit-or-inline bail without an ambient thread-local. Replacing `bodies`
+/// keeps every function's argument count unchanged.
+pub struct EmitEnv<'a> {
+    bodies: &'a dyn MethodBodies,
+    run: &'a EmitRun,
 }
 
 /// A built `@kotlin.Metadata` annotation for a file facade: the `k`/`mv`/`xi` ints and the `d1` (the
@@ -224,18 +242,17 @@ pub fn emit_all(
     // Default: no per-class `@Metadata` — krusty-core emit is byte-identical to before (the
     // `bytecode_parity_e2e` gate compares classes byte-for-byte vs kotlinc, so the default path must
     // stay untouched). A caller that needs cross-module class metadata (krusty-compose's LibraryBinary
-    // modules) uses [`emit_all_with_class_meta`].
-    emit_all_with_class_meta(
-        ir,
-        facade,
-        bodies,
-        metadata,
-        &EmitOptions::default(),
-        &|_| None,
-    )
+    // modules) uses [`emit_all_with_class_meta`]. The run accumulators are discarded here (callers that
+    // need the inline-bail reason use `emit_all_with_opts` with their own `EmitRun`).
+    let run = EmitRun::default();
+    let env = EmitEnv { bodies, run: &run };
+    emit_all_with_class_meta(ir, facade, &env, metadata, &EmitOptions::default(), &|_| {
+        None
+    })
 }
 
-/// Like [`emit_all`], but with explicit per-file [`EmitOptions`] (class version, source name). The CLI
+/// Like [`emit_all`], but with explicit per-file [`EmitOptions`] (class version, source name) and a
+/// caller-owned [`EmitRun`] the caller inspects after a `None` return (the inline-bail reason). The CLI
 /// backend uses this so `-jvm-target` and the `SourceFile` name reach every emitted class.
 pub fn emit_all_with_opts(
     ir: &IrFile,
@@ -243,8 +260,10 @@ pub fn emit_all_with_opts(
     bodies: &dyn MethodBodies,
     metadata: Option<&KotlinMetadata>,
     opts: &EmitOptions,
+    run: &EmitRun,
 ) -> Option<Vec<(String, Vec<u8>)>> {
-    emit_all_with_class_meta(ir, facade, bodies, metadata, opts, &|_| None)
+    let env = EmitEnv { bodies, run };
+    emit_all_with_class_meta(ir, facade, &env, metadata, opts, &|_| None)
 }
 
 /// Like [`emit_all`], but `class_meta` may supply a per-class `@kotlin.Metadata` (keyed by the class's
@@ -255,20 +274,20 @@ pub fn emit_all_with_opts(
 pub fn emit_all_with_class_meta(
     ir: &IrFile,
     facade: &str,
-    bodies: &dyn MethodBodies,
+    env: &EmitEnv,
     metadata: Option<&KotlinMetadata>,
     opts: &EmitOptions,
     class_meta: &dyn Fn(&str) -> Option<KotlinMetadata>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     // Pass 1 (discovery): emit everything, recording which lambda impls actually get an `invokedynamic`
-    // (`USED_LAMBDAS`). A lambda spliced by the inliner never emits one — its standalone `$lambda$N` is
-    // dead, and kotlinc emits neither the method nor (for a class-only file) the facade holding it.
-    USED_LAMBDAS.with(|u| u.borrow_mut().clear());
+    // (`run.used_lambdas`). A lambda spliced by the inliner never emits one — its standalone `$lambda$N`
+    // is dead, and kotlinc emits neither the method nor (for a class-only file) the facade holding it.
+    env.run.used_lambdas.borrow_mut().clear();
     let empty = std::collections::HashSet::new();
     let first = emit_pass(
         ir,
         facade,
-        bodies,
+        env,
         metadata,
         opts,
         class_meta,
@@ -277,7 +296,7 @@ pub fn emit_all_with_class_meta(
             rescued: &empty,
         },
     )?;
-    let used = USED_LAMBDAS.with(|u| u.borrow().clone());
+    let used = env.run.used_lambdas.borrow().clone();
     // A MUST-INLINE message lambda whose call-site splice FELL BACK to a real `invokedynamic`
     // (pass 1 recorded the use): its impl was pre-marked `inline_only` on the assumption the splice
     // always succeeds — emitting the reference without the method would be a broken class
@@ -321,7 +340,7 @@ pub fn emit_all_with_class_meta(
     emit_pass(
         ir,
         facade,
-        bodies,
+        env,
         metadata,
         opts,
         class_meta,
@@ -342,7 +361,7 @@ struct LambdaSelection<'a> {
 fn emit_pass(
     ir: &IrFile,
     facade: &str,
-    bodies: &dyn MethodBodies,
+    env: &EmitEnv,
     metadata: Option<&KotlinMetadata>,
     opts: &EmitOptions,
     class_meta: &dyn Fn(&str) -> Option<KotlinMetadata>,
@@ -351,8 +370,8 @@ fn emit_pass(
     if !jvm_can_emit(ir) {
         return None;
     }
-    INLINE_BAIL.with(|b| *b.borrow_mut() = None);
-    EMIT_BAIL.with(|b| b.set(false));
+    *env.run.inline_bail.borrow_mut() = None;
+    env.run.emit_bail.set(false);
     let mut out = Vec::new();
     // Facade: the static top-level functions (those with no dispatch receiver). A function that BELONGS
     // to a class — including a `static` member like the serialization plugin's `serializer()` accessor,
@@ -441,9 +460,7 @@ fn emit_pass(
         {
             continue;
         }
-        emit_method_maybe_rescued(
-            ir, i as u32, facade, facade, &mut cw, false, bodies, rescued,
-        );
+        emit_method_maybe_rescued(ir, i as u32, facade, facade, &mut cw, false, env, rescued);
         facade_has_method = true;
         if facade_access_bridges.contains(&(i as u32)) {
             let param_tys = jvm_tys(&f.params);
@@ -483,12 +500,12 @@ fn emit_pass(
                 facade,
                 &mut cw,
                 defaults,
-                bodies,
+                env,
                 Ty::obj("java/lang/Object"),
             );
         }
     }
-    emit_statics(ir, facade, &mut cw, bodies);
+    emit_statics(ir, facade, &mut cw, env);
     // kotlinc emits the `<File>Kt` facade class ONLY when the file has top-level callables/properties
     // (or a facade `@Metadata` payload). A file of only classes/objects gets no facade — emitting an
     // empty one is an ABI divergence (spurious extra class). A facade static is owner-less.
@@ -506,15 +523,15 @@ fn emit_pass(
         let mut extra: Vec<(String, Vec<u8>)> = Vec::new();
         out.push((
             c.fq_name.clone(),
-            emit_class(ir, c, facade, bodies, opts, cm.as_ref(), &mut extra),
+            emit_class(ir, c, facade, env, opts, cm.as_ref(), &mut extra),
         ));
         // An interface's `$DefaultImpls` holder (its `name$default` synthetics), when any exist.
         out.extend(extra);
     }
-    if INLINE_BAIL.with(|b| b.borrow().is_some()) {
+    if env.run.inline_bail.borrow().is_some() {
         return None;
     }
-    if EMIT_BAIL.with(|b| b.get()) {
+    if env.run.emit_bail.get() {
         return None; // a value slot was never allocated (malformed IR) — skip, never miscompile
     }
     Some(out)
@@ -722,7 +739,8 @@ fn const_value_idx_peek(ir: &IrFile, init: crate::ir::ExprId) -> bool {
     matches!(ir.expr(init), crate::ir::IrExpr::Const(c) if !matches!(c, crate::ir::IrConst::Null))
 }
 
-fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn MethodBodies) {
+fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env: &EmitEnv) {
+    let bodies = env.bodies;
     // Statics OWNED by a specific class (a companion `const val`) are emitted on that class, not the
     // facade — see `emit_owned_consts`.
     let facade_statics: Vec<&crate::ir::IrStatic> =
@@ -885,6 +903,7 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, bodies: &dyn Me
         ir,
         cw,
         bodies,
+        run: env.run,
         owner: facade.to_string(),
         facade: facade.to_string(),
         slots: HashMap::new(),
@@ -920,13 +939,14 @@ fn emit_class(
     ir: &IrFile,
     c: &crate::ir::IrClass,
     facade: &str,
-    bodies: &dyn MethodBodies,
+    env: &EmitEnv,
     opts: &EmitOptions,
     class_meta: Option<&KotlinMetadata>,
     extra: &mut Vec<(String, Vec<u8>)>,
 ) -> Vec<u8> {
+    let bodies = env.bodies;
     if !c.enum_entries.is_empty() {
-        return emit_enum_class(ir, c, facade, bodies, opts);
+        return emit_enum_class(ir, c, facade, env, opts);
     }
     if let Some(iface) = &c.annotation_impl_of {
         return emit_annotation_impl_class(c, iface, opts);
@@ -935,10 +955,10 @@ fn emit_class(
         return emit_annotation_class(c, opts, class_meta);
     }
     if c.is_interface {
-        return emit_interface_class(ir, c, facade, bodies, opts, class_meta, extra);
+        return emit_interface_class(ir, c, facade, env, opts, class_meta, extra);
     }
     if let Some(user_tys) = &c.enum_entry_of {
-        return emit_enum_entry_subclass(ir, c, facade, bodies, opts, user_tys);
+        return emit_enum_entry_subclass(ir, c, facade, env, opts, user_tys);
     }
     if c.prop_ref.is_some() {
         return emit_prop_ref_class(c, facade, opts);
@@ -1106,6 +1126,7 @@ fn emit_class(
                 ir,
                 cw: &mut cw,
                 bodies,
+                run: env.run,
                 owner: c.fq_name.clone(),
                 facade: facade.to_string(),
                 slots: HashMap::new(),
@@ -1265,7 +1286,7 @@ fn emit_class(
         // `<init>(params…, int mask, DefaultConstructorMarker)` overload (fills the masked slots from the
         // defaults, then `invokespecial` the real `<init>`).
         if let Some(defaults) = ir.class_ctor_defaults.get(&c.fq_name) {
-            emit_ctor_default_stub(ir, &c.fq_name, &param_tys, defaults, &mut cw, bodies);
+            emit_ctor_default_stub(ir, &c.fq_name, &param_tys, defaults, &mut cw, env);
             // EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
             // (`AuditFilters()` in Java/reflection), delegating to the `$default` overload with a
             // full mask.
@@ -1328,6 +1349,7 @@ fn emit_class(
                 ir,
                 cw: &mut cw,
                 bodies,
+                run: env.run,
                 owner: c.fq_name.clone(),
                 facade: facade.to_string(),
                 slots: HashMap::new(),
@@ -1482,6 +1504,7 @@ fn emit_class(
                 ir,
                 cw: &mut cw,
                 bodies,
+                run: env.run,
                 owner: c.fq_name.clone(),
                 facade: facade.to_string(),
                 slots: HashMap::new(),
@@ -1543,7 +1566,7 @@ fn emit_class(
         if f.body.is_some() {
             // A `static` member (e.g. a value class's `box-impl`/`constructor-impl`) emits with no
             // `this` slot; an ordinary member is an instance method.
-            emit_method(ir, fid, &c.fq_name, facade, &mut cw, !f.is_static, bodies);
+            emit_method(ir, fid, &c.fq_name, facade, &mut cw, !f.is_static, env);
         } else {
             cw.add_abstract_method(0x0001 | 0x0400, &f.name, &ir_method_desc(&f.params, &f.ret));
         }
@@ -1561,13 +1584,11 @@ fn emit_class(
                     &c.fq_name,
                     &mut cw,
                     defaults,
-                    bodies,
+                    env,
                     Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"),
                 );
             } else {
-                emit_default_stub(
-                    ir, fid, &c.fq_name, facade, &mut cw, defaults, bodies, false,
-                );
+                emit_default_stub(ir, fid, &c.fq_name, facade, &mut cw, defaults, env, false);
             }
         }
     }
@@ -1587,10 +1608,11 @@ fn emit_enum_entry_subclass(
     ir: &IrFile,
     c: &crate::ir::IrClass,
     facade: &str,
-    bodies: &dyn MethodBodies,
+    env: &EmitEnv,
     opts: &EmitOptions,
     user_tys: &[Ty],
 ) -> Vec<u8> {
+    let bodies = env.bodies;
     let mut cw = new_writer(&c.fq_name, &c.superclass, opts);
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER (package-private)
 
@@ -1628,6 +1650,7 @@ fn emit_enum_entry_subclass(
             ir,
             cw: &mut cw,
             bodies,
+            run: env.run,
             owner: c.fq_name.clone(),
             facade: facade.to_string(),
             slots: HashMap::new(),
@@ -1652,7 +1675,7 @@ fn emit_enum_entry_subclass(
 
     // The overriding methods + synthesized property getters.
     for &fid in &c.methods {
-        emit_method(ir, fid, &c.fq_name, facade, &mut cw, true, bodies);
+        emit_method(ir, fid, &c.fq_name, facade, &mut cw, true, env);
     }
     cw.finish()
 }
@@ -2895,11 +2918,12 @@ fn emit_interface_class(
     ir: &IrFile,
     c: &crate::ir::IrClass,
     facade: &str,
-    bodies: &dyn MethodBodies,
+    env: &EmitEnv,
     opts: &EmitOptions,
     class_meta: Option<&KotlinMetadata>,
     extra: &mut Vec<(String, Vec<u8>)>,
 ) -> Vec<u8> {
+    let bodies = env.bodies;
     let mut cw = new_writer(&c.fq_name, "java/lang/Object", opts);
     cw.set_access(0x0001 | 0x0200 | 0x0400); // PUBLIC | INTERFACE | ABSTRACT
     for itf in &c.interfaces {
@@ -2910,7 +2934,7 @@ fn emit_interface_class(
         let f = &ir.functions[fid as usize];
         if f.body.is_some() {
             // A default method — concrete instance method on the interface.
-            emit_method(ir, fid, &c.fq_name, facade, &mut cw, !f.is_static, bodies);
+            emit_method(ir, fid, &c.fq_name, facade, &mut cw, !f.is_static, env);
         } else {
             cw.add_abstract_method(0x0001 | 0x0400, &f.name, &ir_method_desc(&f.params, &f.ret));
             // PUBLIC | ABSTRACT
@@ -2920,7 +2944,7 @@ fn emit_interface_class(
         // to the abstract method via `invokeinterface`. kotlinc emits it ON THE INTERFACE (call sites use
         // it) AND a compatibility copy on the `<Iface>$DefaultImpls` holder class (`public final`).
         if let Some(defaults) = ir.param_defaults(fid) {
-            emit_default_stub(ir, fid, &c.fq_name, facade, &mut cw, defaults, bodies, true);
+            emit_default_stub(ir, fid, &c.fq_name, facade, &mut cw, defaults, env, true);
             let di = default_impls.get_or_insert_with(|| {
                 let mut w = new_writer(
                     &format!("{}$DefaultImpls", c.fq_name),
@@ -2930,7 +2954,7 @@ fn emit_interface_class(
                 w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
                 w
             });
-            emit_default_stub(ir, fid, &c.fq_name, facade, di, defaults, bodies, true);
+            emit_default_stub(ir, fid, &c.fq_name, facade, di, defaults, env, true);
         }
     }
     if let Some(di) = default_impls {
@@ -2969,6 +2993,7 @@ fn emit_interface_class(
             ir,
             cw: &mut cw,
             bodies,
+            run: env.run,
             owner: c.fq_name.clone(),
             facade: facade.to_string(),
             slots: HashMap::new(),
@@ -3018,9 +3043,10 @@ fn emit_enum_class(
     ir: &IrFile,
     c: &crate::ir::IrClass,
     facade: &str,
-    bodies: &dyn MethodBodies,
+    env: &EmitEnv,
     opts: &EmitOptions,
 ) -> Vec<u8> {
+    let bodies = env.bodies;
     const ACC_ENUM: u16 = 0x4000;
     const ACC_SYNTHETIC: u16 = 0x1000;
     let fq = c.fq_name.clone();
@@ -3139,6 +3165,7 @@ fn emit_enum_class(
             ir,
             cw: &mut cw,
             bodies,
+            run: env.run,
             owner: c.fq_name.clone(),
             facade: facade.to_string(),
             slots: HashMap::new(),
@@ -3201,6 +3228,7 @@ fn emit_enum_class(
             ir,
             cw: &mut cw,
             bodies,
+            run: env.run,
             owner: fq.clone(),
             facade: facade.to_string(),
             slots: HashMap::new(),
@@ -3346,7 +3374,7 @@ fn emit_enum_class(
             // Honor `is_static` (an extension-synthesized `static` member like serialization's
             // `serializer()` accessor) — emitting it as an instance method breaks an `E.serializer()`
             // static call (`IncompatibleClassChangeError`).
-            emit_method(ir, fid, &fq, facade, &mut cw, !f.is_static, bodies);
+            emit_method(ir, fid, &fq, facade, &mut cw, !f.is_static, env);
         } else {
             // An abstract enum member (`abstract fun t(): String`) — declared `ACC_ABSTRACT`, the
             // entry subclasses override it.
@@ -3396,15 +3424,15 @@ fn emit_method_maybe_rescued(
     facade: &str,
     cw: &mut ClassWriter,
     instance: bool,
-    bodies: &dyn MethodBodies,
+    env: &EmitEnv,
     rescued: bool,
 ) {
     if rescued {
         // A rescued must-inline impl IS emitted despite its `inline_only` mark (see
         // `emit_all_with_class_meta`) — bypass the early return.
-        emit_method_inner(ir, fid, owner, facade, cw, instance, bodies);
+        emit_method_inner(ir, fid, owner, facade, cw, instance, env);
     } else {
-        emit_method(ir, fid, owner, facade, cw, instance, bodies);
+        emit_method(ir, fid, owner, facade, cw, instance, env);
     }
 }
 
@@ -3415,7 +3443,7 @@ fn emit_method(
     facade: &str,
     cw: &mut ClassWriter,
     instance: bool,
-    bodies: &dyn MethodBodies,
+    env: &EmitEnv,
 ) {
     // An inline-only lambda impl (its body has a non-local `return`) is never a real callable method —
     // it exists only to be spliced via its `inline_body`. Emitting it would produce an invalid, dead
@@ -3423,7 +3451,7 @@ fn emit_method(
     if ir.inline_only_fns.contains(&fid) {
         return;
     }
-    emit_method_inner(ir, fid, owner, facade, cw, instance, bodies);
+    emit_method_inner(ir, fid, owner, facade, cw, instance, env);
 }
 
 fn emit_method_inner(
@@ -3433,8 +3461,9 @@ fn emit_method_inner(
     facade: &str,
     cw: &mut ClassWriter,
     instance: bool,
-    bodies: &dyn MethodBodies,
+    env: &EmitEnv,
 ) {
+    let bodies = env.bodies;
     let f = &ir.functions[fid as usize];
     let body = f.body.unwrap();
     let param_tys = jvm_tys(&f.params);
@@ -3443,6 +3472,7 @@ fn emit_method_inner(
         ir,
         cw,
         bodies,
+        run: env.run,
         owner: owner.to_string(),
         facade: facade.to_string(),
         slots: HashMap::new(),
@@ -3678,9 +3708,10 @@ fn emit_default_stub(
     facade: &str,
     cw: &mut ClassWriter,
     defaults: &[Option<u32>],
-    bodies: &dyn MethodBodies,
+    env: &EmitEnv,
     is_interface: bool,
 ) {
+    let bodies = env.bodies;
     let f = &ir.functions[fid as usize];
     let method_name = f.name.clone();
     // The REAL (base-method) param types unbox every value class. `stub_param_tys` is the `$default`
@@ -3704,6 +3735,7 @@ fn emit_default_stub(
         ir,
         cw,
         bodies,
+        run: env.run,
         owner: owner.to_string(),
         facade: facade.to_string(),
         slots: HashMap::new(),
@@ -3887,9 +3919,10 @@ fn emit_facade_default_stub(
     facade: &str,
     cw: &mut ClassWriter,
     defaults: &[Option<u32>],
-    bodies: &dyn MethodBodies,
+    env: &EmitEnv,
     marker: Ty,
 ) {
+    let bodies = env.bodies;
     let f = &ir.functions[fid as usize];
     let method_name = f.name.clone();
     let real_params = jvm_tys(&f.params);
@@ -3899,6 +3932,7 @@ fn emit_facade_default_stub(
         ir,
         cw,
         bodies,
+        run: env.run,
         owner: facade.to_string(),
         facade: facade.to_string(),
         slots: HashMap::new(),
@@ -3975,13 +4009,15 @@ fn emit_ctor_default_stub(
     real_params: &[Ty],
     defaults: &[Option<u32>],
     cw: &mut ClassWriter,
-    bodies: &dyn MethodBodies,
+    env: &EmitEnv,
 ) {
+    let bodies = env.bodies;
     let n = real_params.len();
     let mut e = Emitter {
         ir,
         cw,
         bodies,
+        run: env.run,
         owner: owner.to_string(),
         facade: owner.to_string(),
         slots: HashMap::new(),
@@ -4121,6 +4157,9 @@ struct Emitter<'a> {
     /// The narrow bytecode provider — lets the emitter read a cross-module `inline fun`'s compiled
     /// body (`bodies.body`) to splice it at the call site (the bytecode inliner).
     bodies: &'a dyn MethodBodies,
+    /// The per-emit-run accumulators — the deep sites record a used lambda / an emit-or-inline bail
+    /// here (formerly thread-locals).
+    run: &'a EmitRun,
     owner: String,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,
@@ -4983,7 +5022,7 @@ impl<'a> Emitter<'a> {
             }
             IrExpr::SetValue { var, value } => {
                 let Some(&(slot, jt)) = self.slots.get(&var) else {
-                    EMIT_BAIL.with(|b| b.set(true));
+                    self.run.emit_bail.set(true);
                     return;
                 };
                 // `i = i + k` / `i = k + i` / `i = i - k` on an `Int` local with a small constant `k`
@@ -5270,7 +5309,7 @@ impl<'a> Emitter<'a> {
                         self.owner,
                         self.slots.keys().collect::<Vec<_>>()
                     );
-                    EMIT_BAIL.with(|b| b.set(true));
+                    self.run.emit_bail.set(true);
                     return;
                 };
                 load(jt, slot, code);
@@ -5631,11 +5670,9 @@ impl<'a> Emitter<'a> {
                             return;
                         }
                         if inline.must_inline() {
-                            INLINE_BAIL.with(|b| {
-                                *b.borrow_mut() = Some(format!(
-                                    "inline splice failed for {owner}.{name}{descriptor}"
-                                ));
-                            });
+                            self.run.set_inline_bail(format!(
+                                "inline splice failed for {owner}.{name}{descriptor}"
+                            ));
                         }
                     }
                     self.emit_operands(&args, code);
@@ -6008,9 +6045,7 @@ impl<'a> Emitter<'a> {
             } => {
                 // This lambda becomes a REAL closure (`invokedynamic` referencing its impl method) — record
                 // it so the dead-lambda pass keeps the impl. An INLINED lambda never reaches this arm.
-                USED_LAMBDAS.with(|u| {
-                    u.borrow_mut().insert(*impl_fn);
-                });
+                self.run.used_lambdas.borrow_mut().insert(*impl_fn);
                 let f = &self.ir.functions[*impl_fn as usize];
                 let impl_name = f.name.clone();
                 let impl_params = jvm_tys(&f.params);

@@ -3,7 +3,6 @@ use krusty::frontend::{check_file, collect_signatures_with_cp, FrontendSymbols};
 use krusty::ir::IrFile;
 use krusty::ir_lower::lower_file;
 use krusty::jvm::classpath::Classpath;
-use krusty::jvm::ir_emit::emit_all;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::jvm::names::file_class_name;
 use krusty::lexer::lex;
@@ -104,10 +103,18 @@ fn emit_checked_ir(
         }
         Ok(()) => {}
     }
-    match emit_all(ir, facade, &**cp, None) {
+    let run = krusty::jvm::ir_emit::EmitRun::default();
+    match krusty::jvm::ir_emit::emit_all_with_opts(
+        ir,
+        facade,
+        &**cp,
+        None,
+        &krusty::jvm::ir_emit::EmitOptions::default(),
+        &run,
+    ) {
         Some(o) if !o.is_empty() => None,
         _ => Some(
-            krusty::jvm::ir_emit::inline_bail_reason()
+            run.inline_bail()
                 .map(|r| format!("emit: {r}"))
                 .unwrap_or_else(|| "emit: emit_all bailed (unsupported codegen)".into()),
         ),
