@@ -1976,24 +1976,14 @@ impl SymbolSource for JvmLibraries {
             }
             // Extension PROPERTIES declared by the facade — `arr.lastIndex`, `list.indices`. Metadata
             // records the property with its REAL accessor names (`JvmPropertySignature`), so the getter
-            // name is authoritative, never a `getX` guess. A multifile FACADE holds no property metadata of
-            // its own — its `d1` names the PART classes that do; merge them (mirrors the `meta_functions`
-            // part merge). A single-file facade carries its properties directly.
-            let Some(fci) = self.cp.find_name(facade) else {
-                continue;
-            };
-            let mut mprops = metadata::package_properties(&fci);
-            if mprops.is_empty() {
-                for part in &fci.kotlin_d1 {
-                    if let Some(pci) = self.cp.find(part) {
-                        mprops.extend(metadata::package_properties(&pci));
-                    }
-                }
-            }
-            for mp in mprops {
+            // name is authoritative, never a `getX` guess. Facade parts are merged in the shared cached
+            // decode (`meta_properties_name`), the property analogue of `meta_functions_name`.
+            let mprops = self.cp.meta_properties_name(facade);
+            for mp in mprops.iter() {
                 if mp.name != name || mp.receiver_class.is_none() {
                     continue; // this property name, extension only
                 }
+                let mp = mp.clone();
                 let Some(getter_sig) = mp.getter else {
                     continue;
                 };

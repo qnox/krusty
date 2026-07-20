@@ -75,36 +75,86 @@ pub(super) fn kotlin_type_name_to_ty(name: TypeName) -> Ty {
     }
 }
 
+/// Interned ids for the names the hot `@Metadata` alignment paths test against, so per-parameter
+/// checks are id compares instead of per-string name-tree walks.
+struct MetaNameIds {
+    prim: HashMap<crate::types::TypeName, Ty>,
+    prim_array: HashMap<crate::types::TypeName, &'static str>,
+    fn_arity: HashMap<crate::types::TypeName, usize>,
+    array: crate::types::TypeName,
+    any: crate::types::TypeName,
+    object: crate::types::TypeName,
+    string_kotlin: crate::types::TypeName,
+    string_java: crate::types::TypeName,
+    unit: crate::types::TypeName,
+    nothing: crate::types::TypeName,
+}
+
+fn meta_ids() -> &'static MetaNameIds {
+    static IDS: std::sync::OnceLock<MetaNameIds> = std::sync::OnceLock::new();
+    IDS.get_or_init(|| {
+        let tn = crate::types::type_name;
+        let prim = [
+            ("kotlin/Int", Ty::Int),
+            ("kotlin/Char", Ty::Char),
+            ("kotlin/Boolean", Ty::Boolean),
+            ("kotlin/Long", Ty::Long),
+            ("kotlin/Double", Ty::Double),
+            ("kotlin/Float", Ty::Float),
+            ("kotlin/Byte", Ty::Byte),
+            ("kotlin/Short", Ty::Short),
+            ("kotlin/UInt", Ty::UInt),
+            ("kotlin/ULong", Ty::ULong),
+        ]
+        .into_iter()
+        .map(|(name, ty)| (tn(name), ty))
+        .collect();
+        let prim_array = [
+            ("kotlin/BooleanArray", "[Z"),
+            ("kotlin/ByteArray", "[B"),
+            ("kotlin/ShortArray", "[S"),
+            ("kotlin/IntArray", "[I"),
+            ("kotlin/LongArray", "[J"),
+            ("kotlin/ULongArray", "[J"),
+            ("kotlin/CharArray", "[C"),
+            ("kotlin/FloatArray", "[F"),
+            ("kotlin/DoubleArray", "[D"),
+            ("kotlin/UIntArray", "[I"),
+        ]
+        .into_iter()
+        .map(|(name, desc)| (tn(name), desc))
+        .collect();
+        let fn_arity = (0..=42)
+            .map(|arity| (tn(&format!("kotlin/Function{arity}")), arity))
+            .collect();
+        MetaNameIds {
+            prim,
+            prim_array,
+            fn_arity,
+            array: tn("kotlin/Array"),
+            any: tn("kotlin/Any"),
+            object: tn("java/lang/Object"),
+            string_kotlin: tn("kotlin/String"),
+            string_java: tn("java/lang/String"),
+            unit: tn("kotlin/Unit"),
+            nothing: tn("kotlin/Nothing"),
+        }
+    })
+}
+
 fn meta_function_arity_name(name: TypeName) -> Option<usize> {
+    if let Some(&arity) = meta_ids().fn_arity.get(&name) {
+        return Some(arity);
+    }
     name.unsigned_suffix_after_prefix("kotlin/Function")
 }
 
 fn primitive_array_descriptor_name(internal: TypeName) -> Option<&'static str> {
-    Some(if internal.matches("kotlin/BooleanArray") {
-        "[Z"
-    } else if internal.matches("kotlin/ByteArray") {
-        "[B"
-    } else if internal.matches("kotlin/ShortArray") {
-        "[S"
-    } else if internal.matches("kotlin/IntArray") {
-        "[I"
-    } else if internal.matches("kotlin/LongArray") || internal.matches("kotlin/ULongArray") {
-        "[J"
-    } else if internal.matches("kotlin/CharArray") {
-        "[C"
-    } else if internal.matches("kotlin/FloatArray") {
-        "[F"
-    } else if internal.matches("kotlin/DoubleArray") {
-        "[D"
-    } else if internal.matches("kotlin/UIntArray") {
-        "[I"
-    } else {
-        return None;
-    })
+    meta_ids().prim_array.get(&internal).copied()
 }
 
 fn ty_erases_to_object(desc: Ty) -> bool {
-    matches!(desc, Ty::Obj(n, _) if n.matches("kotlin/Any") || n.matches("java/lang/Object"))
+    matches!(desc, Ty::Obj(n, _) if n == meta_ids().any || n == meta_ids().object)
 }
 
 /// Whether a `@Metadata` source value-parameter class name aligns with a JVM-descriptor parameter `Ty`.
@@ -115,40 +165,28 @@ fn meta_param_compat(name: Option<TypeName>, desc: &Ty) -> bool {
     let Some(name) = name else {
         return desc.is_reference();
     };
+    let ids = meta_ids();
     if let Some(arity) = meta_function_arity_name(name) {
         return matches!(desc, Ty::Fun(sig) if sig.params.len() == arity);
     }
-    if name.matches("kotlin/Array") || primitive_array_descriptor_name(name).is_some() {
+    if name == ids.array || ids.prim_array.contains_key(&name) {
         return desc.is_array();
     }
-    if name.matches("kotlin/Int") {
-        *desc == Ty::Int
-    } else if name.matches("kotlin/Char") {
-        *desc == Ty::Char
-    } else if name.matches("kotlin/Boolean") {
-        *desc == Ty::Boolean
-    } else if name.matches("kotlin/Long") {
-        *desc == Ty::Long
-    } else if name.matches("kotlin/Double") {
-        *desc == Ty::Double
-    } else if name.matches("kotlin/Float") {
-        *desc == Ty::Float
-    } else if name.matches("kotlin/Byte") {
-        *desc == Ty::Byte
-    } else if name.matches("kotlin/Short") {
-        *desc == Ty::Short
-    } else if name.matches("kotlin/UInt") {
-        matches!(*desc, Ty::UInt | Ty::Int)
-    } else if name.matches("kotlin/ULong") {
-        matches!(*desc, Ty::ULong | Ty::Long)
-    } else if name.matches("kotlin/Unit") {
+    if let Some(prim) = ids.prim.get(&name) {
+        return match prim {
+            Ty::UInt => matches!(*desc, Ty::UInt | Ty::Int),
+            Ty::ULong => matches!(*desc, Ty::ULong | Ty::Long),
+            prim => desc == prim,
+        };
+    }
+    if name == ids.unit {
         *desc == Ty::Unit
-    } else if name.matches("kotlin/Nothing") {
+    } else if name == ids.nothing {
         *desc == Ty::Nothing
-    } else if name.matches("kotlin/Any") && desc.is_reference() {
+    } else if name == ids.any && desc.is_reference() {
         true
     } else if matches!(*desc, Ty::String) {
-        name.matches("kotlin/String") || name.matches("java/lang/String")
+        name == ids.string_kotlin || name == ids.string_java
     } else if desc.obj_internal().is_some_and(|desc_internal| {
         crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(desc_internal, name)
     }) {
@@ -162,12 +200,13 @@ fn meta_param_exact(name: Option<TypeName>, desc: &Ty) -> bool {
     let Some(name) = name else {
         return ty_erases_to_object(*desc);
     };
+    let ids = meta_ids();
     if let Some(arity) = meta_function_arity_name(name) {
         return matches!(desc, Ty::Fun(sig) if sig.params.len() == arity);
     }
-    if name.matches("kotlin/Array") {
+    if name == ids.array {
         return matches!(desc, Ty::Obj(n, args)
-            if n.matches("kotlin/Array") && args.first().copied().is_some_and(ty_erases_to_object));
+            if *n == ids.array && args.first().copied().is_some_and(ty_erases_to_object));
     }
     if let Some(meta_desc) = primitive_array_descriptor_name(name) {
         return desc
@@ -175,32 +214,19 @@ fn meta_param_exact(name: Option<TypeName>, desc: &Ty) -> bool {
             .and_then(primitive_array_descriptor_name)
             == Some(meta_desc);
     }
-    if name.matches("kotlin/Int") {
-        *desc == Ty::Int
-    } else if name.matches("kotlin/Char") {
-        *desc == Ty::Char
-    } else if name.matches("kotlin/Boolean") {
-        *desc == Ty::Boolean
-    } else if name.matches("kotlin/Long") {
-        *desc == Ty::Long
-    } else if name.matches("kotlin/Double") {
-        *desc == Ty::Double
-    } else if name.matches("kotlin/Float") {
-        *desc == Ty::Float
-    } else if name.matches("kotlin/Byte") {
-        *desc == Ty::Byte
-    } else if name.matches("kotlin/Short") {
-        *desc == Ty::Short
-    } else if name.matches("kotlin/UInt") {
-        matches!(*desc, Ty::UInt | Ty::Int)
-    } else if name.matches("kotlin/ULong") {
-        matches!(*desc, Ty::ULong | Ty::Long)
-    } else if name.matches("kotlin/Unit") {
+    if let Some(prim) = ids.prim.get(&name) {
+        return match prim {
+            Ty::UInt => matches!(*desc, Ty::UInt | Ty::Int),
+            Ty::ULong => matches!(*desc, Ty::ULong | Ty::Long),
+            prim => desc == prim,
+        };
+    }
+    if name == ids.unit {
         *desc == Ty::Unit
-    } else if name.matches("kotlin/Nothing") {
+    } else if name == ids.nothing {
         *desc == Ty::Nothing
     } else if matches!(*desc, Ty::String) {
-        name.matches("kotlin/String") || name.matches("java/lang/String")
+        name == ids.string_kotlin || name == ids.string_java
     } else {
         desc.obj_internal().is_some_and(|desc_internal| {
             crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(desc_internal, name)
@@ -701,6 +727,8 @@ struct ClassMeta {
     /// name, receiver-function params) rather than one of the maps above, so they share THIS decode
     /// instead of re-decoding + re-merging the `d1` themselves.
     fns: std::rc::Rc<[super::metadata::MetaFn]>,
+    /// The facade-merged `@Metadata` properties, decoded alongside `fns` from the same `d1`.
+    props: std::rc::Rc<[super::metadata::MetaProp]>,
 }
 
 #[derive(Default)]
@@ -1217,10 +1245,26 @@ impl Classpath {
         for (i, f) in fns.iter().enumerate() {
             by_jvm_name.entry(f.jvm_name.clone()).or_default().push(i);
         }
+        // Properties from the same facade `d1`, part-merged like the functions, so property lookups
+        // share this cached decode instead of re-decoding the facade per query.
+        let mut props = ci
+            .as_ref()
+            .map(|c| super::metadata::package_properties(c))
+            .unwrap_or_default();
+        if props.is_empty() {
+            if let Some(ci) = &ci {
+                for part in &ci.kotlin_d1 {
+                    if let Some(pci) = self.find(part) {
+                        props.append(&mut super::metadata::package_properties(&pci));
+                    }
+                }
+            }
+        }
         let meta = std::rc::Rc::new(ClassMeta {
             by_jvm_name,
             suspend_names,
             fns: fns.into(),
+            props: props.into(),
         });
         self.meta_fns.borrow_mut().insert(internal_id, meta.clone());
         meta
@@ -1238,6 +1282,15 @@ impl Classpath {
         internal: TypeName,
     ) -> std::rc::Rc<[super::metadata::MetaFn]> {
         self.class_meta_name(internal).fns.clone()
+    }
+
+    /// The facade-merged `@Metadata` properties of `internal`, from the same cached decode as
+    /// [`Self::meta_functions_name`].
+    pub fn meta_properties_name(
+        &self,
+        internal: TypeName,
+    ) -> std::rc::Rc<[super::metadata::MetaProp]> {
+        self.class_meta_name(internal).props.clone()
     }
 
     /// The metadata-primary [`GenericSig`] for the `internal.jvm_name` overload corresponding to the JVM
