@@ -57,6 +57,7 @@ mod tests {
             "lru",
             "metadata",
             "module_symbols",
+            "name_tree",
             "names",
             "plugins",
             "runtime",
@@ -209,6 +210,7 @@ mod tests {
                 "lexer",
                 "parser",
                 "toolchain",
+                "types",
             ],
         );
     }
