@@ -481,6 +481,35 @@ mod tests {
         );
     }
 
+    // Ground truth: kotlinc 2.4.0 `package demo; class S { fun f(n: Int): Int = n }` — a regular
+    // (non-synthesized) member function. A plain public-final member has metadata flags omitted (0).
+    #[test]
+    fn regular_method_class_metadata_byte_matches_kotlinc() {
+        let (d1, _d2) = build_class(
+            "demo/S",
+            &[],
+            "()V",
+            &[],
+            &[FnMeta::plain(
+                "f".into(),
+                vec![("n".into(), Ty::Int)],
+                Ty::Int,
+            )],
+            &[],
+            0,
+        );
+        assert_eq!(
+            d1,
+            vec![
+                0x00, 0x12, 0x0a, 0x02, 0x18, 0x02, 0x0a, 0x02, 0x10, 0x00, 0x0a, 0x02, 0x08, 0x03,
+                0x0a, 0x02, 0x10, 0x08, 0x0a, 0x00, 0x18, 0x00, 0x32, 0x02, 0x30, 0x01, 0x42, 0x07,
+                0xa2, 0x06, 0x04, 0x08, 0x02, 0x10, 0x03, 0x4a, 0x0e, 0x10, 0x04, 0x1a, 0x02, 0x30,
+                0x05, 0x32, 0x06, 0x10, 0x06, 0x1a, 0x02, 0x30, 0x05,
+            ],
+            "d1 protobuf",
+        );
+    }
+
     #[test]
     fn class_metadata_has_expected_strings() {
         let (_d1, d2) = build_class(
