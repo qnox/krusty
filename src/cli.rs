@@ -27,6 +27,9 @@ pub struct Options {
     pub jdk_home: Option<PathBuf>,
     /// `-no-jdk`: do NOT add the platform JDK to the classpath (kotlinc semantics).
     pub no_jdk: bool,
+    /// `-jvm-target <v>`: the emitted class-file major version (kotlinc maps `1.8`→52, `9`→53, …,
+    /// `25`→69). `None` keeps krusty's default (Java 8 / major 52), which runs on the test JDK.
+    pub jvm_target_major: Option<u16>,
 }
 
 impl Default for Options {
@@ -42,13 +45,28 @@ impl Default for Options {
             print_help: false,
             jdk_home: None,
             no_jdk: false,
+            jvm_target_major: None,
         }
+    }
+}
+
+/// Map a kotlinc `-jvm-target` value to the class-file major version it produces. `1.6`/`1.8` are the
+/// legacy dotted spellings; `9`+ are bare. Unknown values yield `None` (krusty keeps its default).
+pub fn jvm_target_to_major(v: &str) -> Option<u16> {
+    match v {
+        "1.6" | "6" => Some(50),
+        "1.7" | "7" => Some(51),
+        "1.8" | "8" => Some(52),
+        _ => v
+            .parse::<u16>()
+            .ok()
+            .filter(|&n| (9..=99).contains(&n))
+            .map(|n| n + 44),
     }
 }
 
 /// kotlinc flags that take a following value but which krusty ignores (accept + drop the value).
 const IGNORED_WITH_VALUE: &[&str] = &[
-    "-jvm-target",
     "-language-version",
     "-api-version",
     "-kotlin-home",
@@ -137,6 +155,17 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
                 }
             }
             "-no-jdk" => opts.no_jdk = true,
+            "-jvm-target" => {
+                // Honor the target: it sets the emitted class-file version. An unrecognized value is
+                // reported like any other ignored option rather than silently defaulting.
+                match it.next() {
+                    Some(v) => match jvm_target_to_major(&v) {
+                        Some(major) => opts.jvm_target_major = Some(major),
+                        None => opts.ignored.push(format!("-jvm-target {v}")),
+                    },
+                    None => opts.ignored.push("-jvm-target".to_string()),
+                }
+            }
             "-version" => opts.print_version = true,
             "-help" | "-h" | "-X" => opts.print_help = true,
             flag if IGNORED_WITH_VALUE.contains(&flag) => {
@@ -221,7 +250,7 @@ Common options (kotlinc-compatible):
   -classpath / -cp <p>  classpath entries (dirs and .jars), ':'-separated
   -module-name <name>   name of the generated <name>.kotlin_module (default: main)
   -include-runtime      accepted (no-op: krusty does not bundle the stdlib)
-  -jvm-target <v>        accepted (no-op: krusty currently emits v50 class files)
+  -jvm-target <v>        class-file version to emit (1.8→v52, 9→v53, …, 25→v69; default v52)
   -version              print version and exit
   -help                 print this help and exit
 
@@ -260,16 +289,36 @@ mod tests {
     fn ignores_unsupported_with_and_without_value() {
         let o = parse_args(&[
             "-include-runtime",
-            "-jvm-target",
-            "1.8",
+            "-language-version",
+            "2.0",
             "-Xsomething",
             "f.kt",
         ]);
-        // -jvm-target consumed its value (1.8), not treated as a source.
+        // -language-version consumed its value (2.0), not treated as a source.
         assert_eq!(o.sources, vec!["f.kt".to_string()]);
         assert!(o.ignored.contains(&"-include-runtime".to_string()));
-        assert!(o.ignored.contains(&"-jvm-target".to_string()));
+        assert!(o.ignored.contains(&"-language-version".to_string()));
         assert!(o.ignored.contains(&"-Xsomething".to_string()));
+    }
+
+    #[test]
+    fn jvm_target_sets_class_major_version() {
+        assert_eq!(jvm_target_to_major("1.8"), Some(52));
+        assert_eq!(jvm_target_to_major("8"), Some(52));
+        assert_eq!(jvm_target_to_major("9"), Some(53));
+        assert_eq!(jvm_target_to_major("21"), Some(65));
+        assert_eq!(jvm_target_to_major("25"), Some(69));
+        assert_eq!(jvm_target_to_major("banana"), None);
+
+        // The parsed option carries the mapped major; an unknown value is reported, not applied.
+        let o = parse_args(&["-jvm-target", "25", "f.kt"]);
+        assert_eq!(o.jvm_target_major, Some(69));
+        assert_eq!(o.sources, vec!["f.kt".to_string()]);
+
+        let bad = parse_args(&["-jvm-target", "banana", "f.kt"]);
+        assert_eq!(bad.jvm_target_major, None);
+        assert!(bad.ignored.contains(&"-jvm-target banana".to_string()));
+        assert_eq!(bad.sources, vec!["f.kt".to_string()]);
     }
 
     #[test]

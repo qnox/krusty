@@ -1,9 +1,7 @@
 use krusty::diag::DiagSink;
 use krusty::frontend::{check_file, collect_signatures_with_cp, FrontendSymbols};
 use krusty::ir::IrFile;
-use krusty::ir_lower::lower_file;
 use krusty::jvm::classpath::Classpath;
-use krusty::jvm::ir_emit::emit_all;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::jvm::names::file_class_name;
 use krusty::lexer::lex;
@@ -79,9 +77,16 @@ fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
     }
     let facade = file_class_name(stem, files[0].package.as_deref());
     let runtime = JvmLibraries::new(cp.clone());
-    let mut ir = match lower_file(&files[0], &info, &syms, &runtime) {
+    let lower_bail = std::cell::RefCell::new(String::new());
+    let mut ir = match krusty::ir_lower::lower_file_reporting(
+        &files[0],
+        &info,
+        &syms,
+        &runtime,
+        &lower_bail,
+    ) {
         Some(ir) => ir,
-        None => return Some(format!("lower: {}", krusty::ir_lower::lower_bail_reason())),
+        None => return Some(format!("lower: {}", lower_bail.borrow())),
     };
     emit_checked_ir(&mut ir, &files[0], &facade, &syms, cp)
 }
@@ -104,10 +109,18 @@ fn emit_checked_ir(
         }
         Ok(()) => {}
     }
-    match emit_all(ir, facade, &**cp, None) {
+    let run = krusty::jvm::ir_emit::EmitRun::default();
+    match krusty::jvm::ir_emit::emit_all_with_opts(
+        ir,
+        facade,
+        &**cp,
+        None,
+        &krusty::jvm::ir_emit::EmitOptions::default(),
+        &run,
+    ) {
         Some(o) if !o.is_empty() => None,
         _ => Some(
-            krusty::jvm::ir_emit::inline_bail_reason()
+            run.inline_bail()
                 .map(|r| format!("emit: {r}"))
                 .unwrap_or_else(|| "emit: emit_all bailed (unsupported codegen)".into()),
         ),
@@ -166,9 +179,17 @@ fn first_error_with_coroutine_helpers(src: &str, cp: &Rc<Classpath>, stem: &str)
         }
         let facade = file_class_name(&blocks[i].0, file.package.as_deref());
         let runtime = JvmLibraries::new(cp.clone());
-        let mut ir = match krusty::ir_lower::lower_file_at(file, i as u32, &info, &syms, &runtime) {
+        let lower_bail = std::cell::RefCell::new(String::new());
+        let mut ir = match krusty::ir_lower::lower_file_at_reporting(
+            file,
+            i as u32,
+            &info,
+            &syms,
+            &runtime,
+            &lower_bail,
+        ) {
             Some(ir) => ir,
-            None => return Some(format!("lower: {}", krusty::ir_lower::lower_bail_reason())),
+            None => return Some(format!("lower: {}", lower_bail.borrow())),
         };
         if let Some(err) = emit_checked_ir(&mut ir, file, &facade, &syms, cp) {
             return Some(err);

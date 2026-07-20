@@ -31,19 +31,10 @@ use crate::types::Ty;
 // --- Lower-bail diagnostics ----------------------------------------------------------------------
 // `lower_file` returns `None` (silently skips a file) for any construct outside the IR subset. That is
 // correct for the compiler, but opaque for the box-corpus `survey` — the roadmap of what to grow next.
-// So lowering records WHY it last bailed in a thread-local: a coarse phase (`gate:class`, `deep:fun`)
-// plus the innermost unsupported expr/stmt variant (`expr Lambda`, `call StringBuilder`). The compiler
-// never reads this; only the `survey` binary does (via `lower_bail_reason`). Zero behavioural effect.
-thread_local! {
-    static BAIL_REASON: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
-}
-fn set_bail(reason: &str) {
-    BAIL_REASON.with(|r| *r.borrow_mut() = reason.to_string());
-}
-/// The reason `lower_file` last returned `None` — a diagnostic for the box-corpus survey only.
-pub fn lower_bail_reason() -> String {
-    BAIL_REASON.with(|r| r.borrow().clone())
-}
+// So lowering records WHY it last bailed in a caller-owned `bail` sink (on `Lower`): a coarse phase
+// (`gate:class`, `deep:fun`) plus the innermost unsupported expr/stmt variant (`expr Lambda`, `call
+// StringBuilder`). The compiler proper ignores it; the `survey` binary reads it (via the `_reporting`
+// entry points) to map what to grow next. Set through `Lower::set_bail`.
 
 fn default_mask_count(param_count: usize) -> usize {
     param_count.div_ceil(32).max(1)
@@ -93,6 +84,18 @@ pub fn lower_file(
     lower_file_at(file, 0, info, syms, runtime)
 }
 
+/// [`lower_file`] with a caller-owned `bail` sink: on a `None` return, `bail` holds the reason (the
+/// coarse phase + innermost unsupported variant). The `survey`/box-corpus diagnostics use this.
+pub fn lower_file_reporting(
+    file: &ast::File,
+    info: &FrontendTypeInfo,
+    syms: &FrontendSymbols,
+    runtime: &dyn TargetRuntime,
+    bail: &std::cell::RefCell<String>,
+) -> Option<IrFile> {
+    lower_file_at_reporting(file, 0, info, syms, runtime, bail)
+}
+
 /// Lower a checked file with its module file index. Multi-file drivers must use this so declaration ids
 /// can be paired with their source file when selecting already-collected signatures.
 pub fn lower_file_at(
@@ -102,12 +105,26 @@ pub fn lower_file_at(
     syms: &FrontendSymbols,
     runtime: &dyn TargetRuntime,
 ) -> Option<IrFile> {
+    let bail = std::cell::RefCell::new(String::new());
+    lower_file_at_reporting(file, file_index, info, syms, runtime, &bail)
+}
+
+/// [`lower_file_at`] with a caller-owned `bail` sink (see [`lower_file_reporting`]).
+pub fn lower_file_at_reporting(
+    file: &ast::File,
+    file_index: u32,
+    info: &FrontendTypeInfo,
+    syms: &FrontendSymbols,
+    runtime: &dyn TargetRuntime,
+    bail: &std::cell::RefCell<String>,
+) -> Option<IrFile> {
     let mut lo = Lower {
         afile: file,
         file_index,
         info,
         syms,
         runtime,
+        bail,
         ir: IrFile {
             package: file.package.clone(),
             ..Default::default()
@@ -193,8 +210,8 @@ pub fn lower_file_at(
         }
     }
 
-    set_bail("deep"); // refined below as lowering progresses (survey diagnostic only)
-                      // Only files of top-level functions + *simple* classes take the IR path.
+    lo.set_bail("deep"); // refined below as lowering progresses (survey diagnostic only)
+                         // Only files of top-level functions + *simple* classes take the IR path.
     for &d in &file.decls {
         match file.decl(d) {
             Decl::Fun(_) => {} // top-level function, extension function, or `inline fun` (expanded at call sites)
@@ -220,7 +237,7 @@ pub fn lower_file_at(
                     || p.delegate.is_some()
                     || p.receiver.is_some() => {}
             other => {
-                set_bail(match other {
+                lo.set_bail(match other {
                     Decl::Class(c) if c.is_object() => "gate:object",
                     Decl::Class(c) if c.is_interface() => "gate:interface",
                     Decl::Class(c) if c.is_enum() => "gate:enum",
@@ -1888,7 +1905,7 @@ pub fn lower_file_at(
         match file.decl(d) {
             Decl::Fun(f) if f.is_inline => {} // inline functions are expanded at call sites, not emitted
             Decl::Fun(f) => {
-                set_bail("deep:fun");
+                lo.set_bail("deep:fun");
                 lo.scope.clear();
                 lo.boxed_elem.clear();
                 lo.next_value = 0;
@@ -2009,7 +2026,7 @@ pub fn lower_file_at(
                 }
             }
             Decl::Class(c) => {
-                set_bail("deep:class");
+                lo.set_bail("deep:class");
                 let internal = class_internal(file, &c.name);
                 // A method that overrides a base method with a *different erased signature* (a
                 // generic/covariant override) needs a synthetic JVM bridge that krusty doesn't emit
@@ -3603,7 +3620,7 @@ pub fn lower_file_at(
                 }
             }
             Decl::Property(p) => {
-                set_bail("deep:property");
+                lo.set_bail("deep:property");
                 lo.scope.clear();
                 lo.boxed_elem.clear();
                 lo.next_value = 0;
@@ -4495,6 +4512,9 @@ pub(crate) struct Lower<'a> {
     info: &'a FrontendTypeInfo,
     syms: &'a FrontendSymbols,
     runtime: &'a dyn TargetRuntime,
+    /// Caller-owned sink for the reason `lower_file_at` last returned `None` — a survey/box-corpus
+    /// diagnostic, plus the internal `deep*`-phase refinement (formerly the `BAIL_REASON` thread-local).
+    bail: &'a std::cell::RefCell<String>,
     ir: IrFile,
     /// Top-level function ids keyed by (name, parameter types) so overloads (same name,
     /// different params) each map to their own compiled method.
@@ -4674,6 +4694,12 @@ pub(crate) struct Lower<'a> {
 }
 
 impl<'a> Lower<'a> {
+    /// Record why lowering last bailed, into the caller-owned `bail` sink (a survey diagnostic + the
+    /// internal `deep*`-phase refinement). Replaces the former free `set_bail` thread-local write.
+    fn set_bail(&self, reason: &str) {
+        *self.bail.borrow_mut() = reason.to_string();
+    }
+
     fn arg_tys(&self, args: &[AstExprId]) -> Vec<Ty> {
         args.iter().map(|&a| self.info.ty(a)).collect()
     }
@@ -6114,17 +6140,17 @@ impl<'a> Lower<'a> {
         let spread = match args {
             [spread] if self.afile.is_spread_arg(*spread) => *spread,
             _ => {
-                set_bail("call spread: not single spread arg");
+                self.set_bail("call spread: not single spread arg");
                 return None;
             }
         };
         // kotlinc loads the spread twice; only a simple reusable name is safe without a temp.
         if !matches!(self.afile.expr(spread), ast::Expr::Name(_)) {
-            set_bail("call spread: non-reusable spread expression");
+            self.set_bail("call spread: non-reusable spread expression");
             return None;
         }
         let ast::Expr::Name(fname) = self.afile.expr(callee).clone() else {
-            set_bail("call spread: non-name callee");
+            self.set_bail("call spread: non-name callee");
             return None;
         };
         let target = self
@@ -6135,7 +6161,7 @@ impl<'a> Lower<'a> {
             })
             .cloned();
         let Some(target) = target else {
-            set_bail("call spread: no resolved single-vararg module target");
+            self.set_bail("call spread: no resolved single-vararg module target");
             return None;
         };
         let Some(fid) = target
@@ -6144,11 +6170,11 @@ impl<'a> Lower<'a> {
             .and(target.source_decl)
             .and_then(|decl| self.fun_ids_by_decl.get(&decl).copied())
         else {
-            set_bail("call spread: resolved target not in current file");
+            self.set_bail("call spread: resolved target not in current file");
             return None;
         };
         let Some(elem) = target.params[0].array_elem() else {
-            set_bail("call spread: selected vararg param is not array");
+            self.set_bail("call spread: selected vararg param is not array");
             return None;
         };
         // A primitive element uses the matching platform array-copy overload and needs no checkcast
@@ -12042,7 +12068,7 @@ impl<'a> Lower<'a> {
         // miscompile). The common tail forms (an elvis RHS, a `when` arm) compile.
         if let FunBody::Expr(be) | FunBody::Block(be) = body {
             if !break_continue_tail_only(self.afile, *be, true) {
-                set_bail("break/continue in non-tail expression position");
+                self.set_bail("break/continue in non-tail expression position");
                 return None;
             }
         }
@@ -12446,8 +12472,8 @@ impl<'a> Lower<'a> {
 
     fn stmt(&mut self, s: crate::ast::StmtId) -> Option<u32> {
         let r = self.stmt_inner(s);
-        if r.is_none() && lower_bail_reason().starts_with("deep") {
-            set_bail(&format!(
+        if r.is_none() && self.bail.borrow().starts_with("deep") {
+            self.set_bail(&format!(
                 "stmt {}",
                 bail_variant(&format!("{:?}", self.afile.stmt(s)))
             ));
@@ -13153,7 +13179,7 @@ impl<'a> Lower<'a> {
                     if let Some((v, _)) = self.lower_stmt_op_call(s, recv_v, rt, "set", &set_args) {
                         return Some(v);
                     }
-                    set_bail("stmt AssignIndex(multi)");
+                    self.set_bail("stmt AssignIndex(multi)");
                     return None;
                 };
                 // A compound index-assign (`a[i] op= v`) desugars (in the parser) to `value = a[i] op v`,
@@ -14954,7 +14980,7 @@ impl<'a> Lower<'a> {
         // Survey diagnostic: tag the innermost unsupported expression that caused the bail (the first
         // `None` to bubble up wins, since deeper frames run first and a tag is only refined from a
         // coarse `deep*` phase). A `Call` is tagged by its callee name — the single most useful signal.
-        if r.is_none() && lower_bail_reason().starts_with("deep") {
+        if r.is_none() && self.bail.borrow().starts_with("deep") {
             let reason = match self.afile.expr(e).clone() {
                 Expr::Call { callee, .. } => {
                     let name = match self.afile.expr(callee) {
@@ -14966,7 +14992,7 @@ impl<'a> Lower<'a> {
                 }
                 o => format!("expr {}", bail_variant(&format!("{o:?}"))),
             };
-            set_bail(&reason);
+            self.set_bail(&reason);
         }
         r
     }
@@ -16132,7 +16158,7 @@ impl<'a> Lower<'a> {
                 if let Some((v, ret)) = self.lower_op_call(recv_v, at, "get", &indices, e) {
                     return Some(self.coerce_generic_read(v, e, ret));
                 }
-                set_bail("expr Index");
+                self.set_bail("expr Index");
                 return None;
             }
             Expr::Member { receiver, name } => {
@@ -19323,7 +19349,7 @@ impl<'a> Lower<'a> {
                                     let non_suspend_fun =
                                         matches!(self.info.ty(arg), Ty::Fun(s) if !s.suspend);
                                     if non_suspend_fun && self.ast_body_suspends(*body) {
-                                        set_bail("suspend-inline HOF lambda suspends");
+                                        self.set_bail("suspend-inline HOF lambda suspends");
                                         return None;
                                     }
                                 }
@@ -19424,7 +19450,7 @@ impl<'a> Lower<'a> {
                         // A private `@InlineOnly` extension (scope fn / `String.uppercase()`) is recorded
                         // as an [`Extension`] by the checker and handled by the general branch above (its
                         // `inline` metadata makes the backend splice). Nothing left to resolve here.
-                        set_bail("unrecorded qualified call target");
+                        self.set_bail("unrecorded qualified call target");
                         return None;
                     }
                 }

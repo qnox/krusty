@@ -1322,14 +1322,14 @@ pub fn collect_signatures_with_cp(
                                         )]
                                     })
                                     .unwrap_or_default();
-                                let t = infer_lit_ty_p(
+                                let t = infer_lit_ty_scoped(
                                     file,
                                     *e,
                                     &class_names,
                                     &fun_rets,
                                     &this_scope,
                                     &*libraries,
-                                    &|ci, cn| table.prop_of(ci, cn).map(|(pt, _)| pt),
+                                    &table,
                                 );
                                 if t != Ty::Error {
                                     t
@@ -1644,14 +1644,14 @@ pub fn collect_signatures_with_cp(
                             match &bp.ty {
                                 Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
                                 None => {
-                                    let dt = infer_lit_ty_p(
+                                    let dt = infer_lit_ty_scoped(
                                         file,
                                         de,
                                         &class_names,
                                         &fun_rets,
                                         &init_scope,
                                         &*libraries,
-                                        &|ci, cn| table.prop_of(ci, cn).map(|(pt, _)| pt),
+                                        &table,
                                     );
                                     delegated_getvalue_ret_for_signature(
                                         file,
@@ -1665,15 +1665,17 @@ pub fn collect_signatures_with_cp(
                         } else {
                             match (&bp.ty, &bp.getter) {
                                 (Some(r), _) => ty_of_ref(r, &class_names, &ctp, diags),
-                                (None, Some(FunBody::Expr(g))) if !c.is_value => infer_lit_ty_p(
-                                    file,
-                                    *g,
-                                    &class_names,
-                                    &fun_rets,
-                                    &init_scope,
-                                    &*libraries,
-                                    &|ci, cn| table.prop_of(ci, cn).map(|(pt, _)| pt),
-                                ),
+                                (None, Some(FunBody::Expr(g))) if !c.is_value => {
+                                    infer_lit_ty_scoped(
+                                        file,
+                                        *g,
+                                        &class_names,
+                                        &fun_rets,
+                                        &init_scope,
+                                        &*libraries,
+                                        &table,
+                                    )
+                                }
                                 (None, Some(FunBody::Expr(g))) => {
                                     let locals: HashMap<&str, Ty> = init_scope
                                         .iter()
@@ -1684,14 +1686,14 @@ pub fn collect_signatures_with_cp(
                                 (None, _) => bp
                                     .init
                                     .map(|i| {
-                                        infer_lit_ty_p(
+                                        infer_lit_ty_scoped(
                                             file,
                                             i,
                                             &class_names,
                                             &fun_rets,
                                             &init_scope,
                                             &*libraries,
-                                            &|ci, cn| table.prop_of(ci, cn).map(|(pt, _)| pt),
+                                            &table,
                                         )
                                     })
                                     .unwrap_or(Ty::Error),
@@ -1768,14 +1770,14 @@ pub fn collect_signatures_with_cp(
                                 None => bp
                                     .init
                                     .map(|i| {
-                                        infer_lit_ty_p(
+                                        infer_lit_ty_scoped(
                                             file,
                                             i,
                                             &class_names,
                                             &fun_rets,
                                             &[],
                                             &*libraries,
-                                            &|ci, cn| table.prop_of(ci, cn).map(|(pt, _)| pt),
+                                            &table,
                                         )
                                     })
                                     .unwrap_or(Ty::Error),
@@ -1882,14 +1884,14 @@ pub fn collect_signatures_with_cp(
                                             })
                                             .collect();
                                         scope.extend(props.iter().cloned());
-                                        let t = infer_lit_ty_p(
+                                        let t = infer_lit_ty_scoped(
                                             file,
                                             *e,
                                             &class_names,
                                             &local_rets,
                                             &scope,
                                             &*libraries,
-                                            &|ci, cn| table.prop_of(ci, cn).map(|(pt, _)| pt),
+                                            &table,
                                         );
                                         if t != Ty::Error {
                                             return t;
@@ -2383,14 +2385,14 @@ pub fn collect_signatures_with_cp(
                                         .iter()
                                         .map(|(n, (t, v, _))| (n.clone(), *t, *v))
                                         .collect();
-                                    infer_lit_ty_p(
+                                    infer_lit_ty_scoped(
                                         file,
                                         i,
                                         &class_names,
                                         &fun_rets,
                                         &props,
                                         &*libraries,
-                                        &|ci, cn| table.prop_of(ci, cn).map(|(pt, _)| pt),
+                                        &table,
                                     )
                                 })
                                 .unwrap_or(Ty::Error),
@@ -3183,7 +3185,12 @@ fn infer_lit_ty(
     fun_rets: &HashMap<String, Ty>,
     src: &dyn SemanticPlatform,
 ) -> Ty {
-    infer_lit_ty_p(file, e, class_names, fun_rets, &[], src, &|_, _| None)
+    let inferring = std::cell::RefCell::new(std::collections::HashSet::new());
+    let env = InferEnv {
+        up: &|_, _| None,
+        inferring: &inferring,
+    };
+    infer_lit_ty_p(file, e, class_names, fun_rets, &[], src, &env)
 }
 
 fn delegated_getvalue_ret_for_signature(
@@ -3259,6 +3266,38 @@ fn common_lit_ty(a: Ty, b: Ty) -> Ty {
     }
 }
 
+/// Cross-call environment for [`infer_lit_ty_p`]: the module-class property resolver (`up`) plus the
+/// cycle-guard set of expression bodies currently being inferred. Passed explicitly (formerly two of
+/// these were an ambient thread-local) so the guard is per-inference and cannot leak across calls.
+struct InferEnv<'a> {
+    /// Resolve a property of a module class currently being collected. The library source cannot see
+    /// module-local classes, so a `param.member` initializer needs this to infer its type.
+    up: &'a dyn Fn(&str, &str) -> Option<Ty>,
+    /// Expression-body ids currently on the inference stack — a companion method whose inferred return
+    /// recurses back to itself (`a()=C.b(); b()=C.a()`) yields `Error` (skip) instead of looping.
+    inferring: &'a std::cell::RefCell<std::collections::HashSet<u32>>,
+}
+
+/// Infer a declaration initializer's type with a fresh cycle-guard, using `table` to resolve
+/// module-local class properties — the common entry used by signature collection.
+fn infer_lit_ty_scoped(
+    file: &File,
+    e: ExprId,
+    class_names: &ClassNames,
+    fun_rets: &HashMap<String, Ty>,
+    props: &[(String, Ty, bool)],
+    src: &dyn SemanticPlatform,
+    table: &SymbolTable,
+) -> Ty {
+    let up = |ci: &str, cn: &str| table.prop_of(ci, cn).map(|(pt, _)| pt);
+    let inferring = std::cell::RefCell::new(std::collections::HashSet::new());
+    let env = InferEnv {
+        up: &up,
+        inferring: &inferring,
+    };
+    infer_lit_ty_p(file, e, class_names, fun_rets, props, src, &env)
+}
+
 fn infer_lit_ty_p(
     file: &File,
     e: ExprId,
@@ -3266,9 +3305,7 @@ fn infer_lit_ty_p(
     fun_rets: &HashMap<String, Ty>,
     props: &[(String, Ty, bool)],
     src: &dyn SemanticPlatform,
-    // Resolve a property of a module class currently being collected. The library source cannot see
-    // module-local classes, so a `param.member` initializer needs this to infer its type.
-    up: &dyn Fn(&str, &str) -> Option<Ty>,
+    env: &InferEnv,
 ) -> Ty {
     // Resolve the return type of `name` through the same scoped source the checker uses. This
     // lightweight pass accepts only unambiguous overload sets; otherwise it leaves inference to checking.
@@ -3340,7 +3377,7 @@ fn infer_lit_ty_p(
             }
             // Property read (`s.length`, `list.size`, `vc.value`). Use the scoped resolver so an
             // imported extension property such as `Char.code` can resolve through its getter.
-            let rt = infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src, up);
+            let rt = infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src, env);
             if let Some(m) = resolver
                 .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
                 .and_then(crate::symbol_resolver::Symbol::property)
@@ -3355,7 +3392,7 @@ fn infer_lit_ty_p(
             }
             // A property of a module class being collected, invisible to the library source.
             if let Some(internal) = rt.obj_internal() {
-                if let Some(t) = up(internal, name) {
+                if let Some(t) = (env.up)(internal, name) {
                     return t;
                 }
             }
@@ -3364,13 +3401,13 @@ fn infer_lit_ty_p(
         Expr::Unary { op, operand } => match op {
             UnOp::Not => Ty::Boolean,
             UnOp::Neg | UnOp::Plus => {
-                infer_lit_ty_p(file, *operand, class_names, fun_rets, props, src, up)
+                infer_lit_ty_p(file, *operand, class_names, fun_rets, props, src, env)
             }
         },
         Expr::Binary { op, lhs, rhs } => {
             let (lt, rt) = (
-                infer_lit_ty_p(file, *lhs, class_names, fun_rets, props, src, up),
-                infer_lit_ty_p(file, *rhs, class_names, fun_rets, props, src, up),
+                infer_lit_ty_p(file, *lhs, class_names, fun_rets, props, src, env),
+                infer_lit_ty_p(file, *rhs, class_names, fun_rets, props, src, env),
             );
             match op {
                 BinOp::Lt
@@ -3441,7 +3478,7 @@ fn infer_lit_ty_p(
                     // reached when the simpler probe returned `None`, so it never overrides an inference.
                     let arg_tys: Vec<Ty> = args
                         .iter()
-                        .map(|a| infer_lit_ty_p(file, *a, class_names, fun_rets, props, src, up))
+                        .map(|a| infer_lit_ty_p(file, *a, class_names, fun_rets, props, src, env))
                         .collect();
                     // Array-creation builtins (`arrayOf`, `intArrayOf`, …) are `@InlineOnly` intrinsics
                     // the federated probe doesn't surface as a return type — infer the element here,
@@ -3496,14 +3533,10 @@ fn infer_lit_ty_p(
                             } else if let FunBody::Expr(be) = &cm.body {
                                 // Guard against a companion method whose inferred return recurses back to
                                 // itself (directly or mutually, `a()=C.b(); b()=C.a()`) — track the bodies
-                                // being inferred in a thread-local set so a cycle yields `Error` (skip)
+                                // being inferred in `env.inferring` so a cycle yields `Error` (skip)
                                 // instead of unbounded recursion. Real recursive functions require an
                                 // explicit return type anyway (kotlinc rejects an inferred one).
-                                thread_local! {
-                                    static INFERRING: std::cell::RefCell<std::collections::HashSet<u32>> =
-                                        std::cell::RefCell::new(std::collections::HashSet::new());
-                                }
-                                let fresh = INFERRING.with(|s| s.borrow_mut().insert(be.0));
+                                let fresh = env.inferring.borrow_mut().insert(be.0);
                                 if fresh {
                                     let t = infer_lit_ty_p(
                                         file,
@@ -3512,9 +3545,9 @@ fn infer_lit_ty_p(
                                         fun_rets,
                                         props,
                                         src,
-                                        up,
+                                        env,
                                     );
-                                    INFERRING.with(|s| s.borrow_mut().remove(&be.0));
+                                    env.inferring.borrow_mut().remove(&be.0);
                                     if t != Ty::Error {
                                         return t;
                                     }
@@ -3523,7 +3556,7 @@ fn infer_lit_ty_p(
                         }
                     }
                     let recv_ty =
-                        infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src, up);
+                        infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src, env);
                     if recv_ty != Ty::Error {
                         if let Some(t) = builtin_bitwise_ret(recv_ty, name, args.len()) {
                             return t;
@@ -3537,7 +3570,7 @@ fn infer_lit_ty_p(
                         let arg_tys: Vec<Ty> = args
                             .iter()
                             .map(|a| {
-                                infer_lit_ty_p(file, *a, class_names, fun_rets, props, src, up)
+                                infer_lit_ty_p(file, *a, class_names, fun_rets, props, src, env)
                             })
                             .collect();
                         // Only select an overload when every argument's type is known — an `Error` arg is
@@ -3578,8 +3611,8 @@ fn infer_lit_ty_p(
             else_branch: Some(eb),
             ..
         } => {
-            let t = infer_lit_ty_p(file, *then_branch, class_names, fun_rets, props, src, up);
-            let e = infer_lit_ty_p(file, *eb, class_names, fun_rets, props, src, up);
+            let t = infer_lit_ty_p(file, *then_branch, class_names, fun_rets, props, src, env);
+            let e = infer_lit_ty_p(file, *eb, class_names, fun_rets, props, src, env);
             common_lit_ty(t, e)
         }
         // A `when` expression body — the common type of all arm bodies. Requires an explicit `else` arm
@@ -3590,7 +3623,7 @@ fn infer_lit_ty_p(
             }
             let mut acc: Option<Ty> = None;
             for a in arms {
-                let bt = infer_lit_ty_p(file, a.body, class_names, fun_rets, props, src, up);
+                let bt = infer_lit_ty_p(file, a.body, class_names, fun_rets, props, src, env);
                 if bt == Ty::Error {
                     return Ty::Error;
                 }
@@ -3605,12 +3638,12 @@ fn infer_lit_ty_p(
         // tracked here, so a trailing referring to a local infers `Error` (safe skip).
         Expr::Block {
             trailing: Some(t), ..
-        } => infer_lit_ty_p(file, *t, class_names, fun_rets, props, src, up),
+        } => infer_lit_ty_p(file, *t, class_names, fun_rets, props, src, env),
         // A range value (`val r = 1..10`, `0 until n`, `4 downTo 1`) — the matching stdlib range type
         // (mirrors the checker's `RangeTo` typing), so a range-typed property's type infers.
         Expr::RangeTo { lo, hi, .. } => {
-            let lt = infer_lit_ty_p(file, *lo, class_names, fun_rets, props, src, up);
-            let rt = infer_lit_ty_p(file, *hi, class_names, fun_rets, props, src, up);
+            let lt = infer_lit_ty_p(file, *lo, class_names, fun_rets, props, src, env);
+            let rt = infer_lit_ty_p(file, *hi, class_names, fun_rets, props, src, env);
             Ty::range_value_type(lt, rt).unwrap_or(Ty::Error)
         }
         // A top-level property initialized from an unambiguous classpath function reference.

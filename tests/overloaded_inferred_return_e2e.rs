@@ -23,12 +23,8 @@ fn overload_e2e_env(label: &str) -> Option<(PathBuf, PathBuf)> {
 fn compile_overload_case(src: &str, label: &str, expect_msg: &str) -> Option<String> {
     let (stdlib, jdk) = overload_e2e_env(label)?;
     Some(
-        common::compile_and_run_box(src, "F", &[stdlib], Some(&jdk)).unwrap_or_else(|| {
-            panic!(
-                "{expect_msg}; lower bail: {}",
-                krusty::ir_lower::lower_bail_reason()
-            )
-        }),
+        common::compile_and_run_box(src, "F", &[stdlib], Some(&jdk))
+            .unwrap_or_else(|| panic!("{expect_msg}")),
     )
 }
 
