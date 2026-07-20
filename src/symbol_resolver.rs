@@ -14,7 +14,7 @@ use crate::libraries::{
     LibraryMember, Origin, PropKind, SemanticPlatform,
 };
 use crate::symbol_source::SymbolSource;
-use crate::types::{type_name, Ty, TypeName};
+use crate::types::{Ty, TypeName};
 
 #[derive(Clone, Debug, Default)]
 pub struct TopLevelLambdaShape {
@@ -2007,12 +2007,7 @@ pub(crate) fn resolve_symbols_in_scope(
     packages
         .iter()
         .filter_map(|pkg| {
-            let fqn = if pkg.matches("") {
-                name.to_string()
-            } else {
-                format!("{}/{name}", pkg.render())
-            };
-            let fqn = type_name(&fqn);
+            let fqn = crate::types::type_name_child(*pkg, name);
             let r = lib.resolve_symbols_name(fqn);
             (!r.is_empty()).then_some((fqn, r))
         })
@@ -2377,6 +2372,7 @@ mod tests {
     use super::*;
     use crate::libraries::{CallSig, FunctionSet, LibraryCallable, Origin, TypeKind};
     use crate::symbol_source::SymbolSource;
+    use crate::types::type_name;
 
     struct FakeSource {
         name: &'static str,

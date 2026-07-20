@@ -1006,23 +1006,26 @@ fn wildcard_candidate(pkg: &str, name: &str) -> String {
 /// AND `java.lang.*`) binds to the Kotlin one, exactly as kotlinc, rather than looking ambiguous. The
 /// leveled form the spec's name resolution walks — the single source both the signature pass and the
 /// [`Checker`] build their import set from.
-fn import_levels(file: &File, platform_defaults: &[&str]) -> [Vec<String>; 4] {
+fn import_levels(file: &File, platform_defaults: &[&str]) -> [Vec<TypeName>; 4] {
     let own = match &file.package {
-        Some(p) => p.replace('.', "/"),
-        None => String::new(),
+        Some(p) => type_name(&p.replace('.', "/")),
+        None => type_name(""),
     };
-    let explicit_star: Vec<String> = file
+    let explicit_star: Vec<TypeName> = file
         .imports
         .iter()
-        .filter_map(|fq| fq.strip_suffix(".*").map(|p| p.replace('.', "/")))
+        .filter_map(|fq| {
+            fq.strip_suffix(".*")
+                .map(|p| type_name(&p.replace('.', "/")))
+        })
         .collect();
-    let kotlin_defaults: Vec<String> = KOTLIN_DEFAULT_IMPORT_PACKAGES
+    let kotlin_defaults: Vec<TypeName> = KOTLIN_DEFAULT_IMPORT_PACKAGES
         .iter()
-        .map(|s| s.replace('.', "/"))
+        .map(|s| type_name(&s.replace('.', "/")))
         .collect();
-    let platform: Vec<String> = platform_defaults
+    let platform: Vec<TypeName> = platform_defaults
         .iter()
-        .map(|s| s.replace('.', "/"))
+        .map(|s| type_name(&s.replace('.', "/")))
         .collect();
     [vec![own], explicit_star, kotlin_defaults, platform]
 }
@@ -1039,7 +1042,7 @@ fn import_levels(file: &File, platform_defaults: &[&str]) -> [Vec<String>; 4] {
 fn resolve_name_against_imports_name(
     name: &str,
     explicit: &HashMap<String, String>,
-    levels: &[Vec<String>],
+    levels: &[Vec<TypeName>],
     source: &dyn SymbolSource,
 ) -> Option<TypeName> {
     if let Some(fq) = explicit.get(name) {
@@ -1054,9 +1057,7 @@ fn resolve_name_against_imports_name(
         // level-precedence + within-level ambiguity is applied HERE (the caller's own rule), the record
         // keeping classifier separate from callables so a coexisting `fun`/`val` never perturbs it.
         let mut hits: Vec<TypeName> = Vec::new();
-        let level_names: Vec<TypeName> = level.iter().map(|pkg| type_name(pkg)).collect();
-        for (fqn, r) in crate::symbol_resolver::resolve_symbols_in_scope(source, name, &level_names)
-        {
+        for (fqn, r) in crate::symbol_resolver::resolve_symbols_in_scope(source, name, level) {
             if let Some(t) = r.classifier {
                 let internal = t.alias_target.unwrap_or(fqn);
                 if !hits.contains(&internal) {
@@ -4839,11 +4840,7 @@ pub(crate) fn function_scope_packages_with(
 ) -> Vec<TypeName> {
     let imports = import_map(file);
     let import_levels = import_levels(file, platform_defaults);
-    let mut fn_scope: Vec<TypeName> = import_levels
-        .iter()
-        .flatten()
-        .map(|pkg| type_name(pkg))
-        .collect();
+    let mut fn_scope: Vec<TypeName> = import_levels.iter().flatten().copied().collect();
     for fq in imports.values() {
         if let Some((pkg, _)) = fq.rsplit_once('/') {
             let pkg = type_name(pkg);
@@ -5794,7 +5791,7 @@ struct Checker<'a> {
     imports: HashMap<String, String>,
     /// Star/implicit import packages by kotlinc precedence level (same-package, explicit stars, Kotlin
     /// defaults, platform defaults) — the import set [`Self::imported_type_internal`] resolves against.
-    import_levels: [Vec<String>; 4],
+    import_levels: [Vec<TypeName>; 4],
     /// The packages in scope for TOP-LEVEL function resolution: every `import_levels` package PLUS the
     /// package of each explicit import (`import a.b.foo` scopes `a/b`). A top-level call resolves only to
     /// a function whose facade is in this set (kotlinc), passed to the [`SymbolResolver`].
