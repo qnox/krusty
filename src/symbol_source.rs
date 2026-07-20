@@ -64,11 +64,12 @@ pub trait SymbolSource {
         ResolvedSymbols::default()
     }
 
-    /// Id-backed namespace lookup. Providers that already carry class/internal names as ids should
-    /// override this; the default keeps legacy string-backed sources working while callers stop rendering
-    /// names at each use site.
-    fn resolve_symbols_name(&self, fqn: TypeName) -> ResolvedSymbols {
-        self.resolve_symbols(&fqn.render())
+    /// Id-backed namespace lookup, returning a SHARED record: a memo hit is a refcount bump, and a
+    /// classifier-only consumer (a type position) never clones the callable vectors. Providers that
+    /// already carry class/internal names as ids should override this; the default keeps legacy
+    /// string-backed sources working while callers stop rendering names at each use site.
+    fn resolve_symbols_name(&self, fqn: TypeName) -> std::rc::Rc<ResolvedSymbols> {
+        std::rc::Rc::new(self.resolve_symbols(&fqn.render()))
     }
 
     /// The MEMBER-property declarations named `name` on receiver `recv` (own + inherited), each with its
@@ -146,37 +147,51 @@ impl SymbolSource for CompositeSource<'_> {
     }
 
     fn resolve_symbols(&self, fqn: &str) -> ResolvedSymbols {
-        self.resolve_symbols_name(crate::types::type_name(fqn))
+        (*self.resolve_symbols_name(crate::types::type_name(fqn))).clone()
     }
 
-    fn resolve_symbols_name(&self, fqn: TypeName) -> ResolvedSymbols {
+    fn resolve_symbols_name(&self, fqn: TypeName) -> std::rc::Rc<ResolvedSymbols> {
         use crate::libraries::Callables;
         // Classifier: first source wins (user shadows library). Callables: concatenate in precedence
         // order (each overload keeps its origin) — functions XOR a property, so take whichever appears.
-        let mut classifier = None;
-        let mut fns = Vec::new();
-        let mut props = Vec::new();
+        // The common case is a single contributing source; pass its record through untouched so the
+        // federation layer adds no clone of its own.
+        let mut records: Vec<std::rc::Rc<ResolvedSymbols>> = Vec::new();
         for c in &self.children {
             let r = c.resolve_symbols_name(fqn);
-            if classifier.is_none() {
-                classifier = r.classifier;
-            }
-            match r.callables {
-                Callables::Functions(f) => fns.extend(f.overloads),
-                Callables::Properties(p) => props.extend(p.overloads),
-                Callables::None => {}
+            if !r.is_empty() {
+                records.push(r);
             }
         }
-        let callables = if !fns.is_empty() {
-            Callables::Functions(FunctionSet { overloads: fns })
-        } else if !props.is_empty() {
-            Callables::Properties(PropertySet { overloads: props })
-        } else {
-            Callables::None
-        };
-        ResolvedSymbols {
-            classifier,
-            callables,
+        match records.len() {
+            0 => std::rc::Rc::new(ResolvedSymbols::default()),
+            1 => records.pop().expect("one record"),
+            _ => {
+                let mut classifier = None;
+                let mut fns = Vec::new();
+                let mut props = Vec::new();
+                for r in &records {
+                    if classifier.is_none() {
+                        classifier = r.classifier.clone();
+                    }
+                    match &r.callables {
+                        Callables::Functions(f) => fns.extend(f.overloads.iter().cloned()),
+                        Callables::Properties(p) => props.extend(p.overloads.iter().cloned()),
+                        Callables::None => {}
+                    }
+                }
+                let callables = if !fns.is_empty() {
+                    Callables::Functions(FunctionSet { overloads: fns })
+                } else if !props.is_empty() {
+                    Callables::Properties(PropertySet { overloads: props })
+                } else {
+                    Callables::None
+                };
+                std::rc::Rc::new(ResolvedSymbols {
+                    classifier,
+                    callables,
+                })
+            }
         }
     }
 

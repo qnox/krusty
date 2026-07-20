@@ -1058,7 +1058,7 @@ fn resolve_name_against_imports_name(
         // keeping classifier separate from callables so a coexisting `fun`/`val` never perturbs it.
         let mut hits: Vec<TypeName> = Vec::new();
         for (fqn, r) in crate::symbol_resolver::resolve_symbols_in_scope(source, name, level) {
-            if let Some(t) = r.classifier {
+            if let Some(t) = &r.classifier {
                 let internal = t.alias_target.unwrap_or(fqn);
                 if !hits.contains(&internal) {
                     hits.push(internal);

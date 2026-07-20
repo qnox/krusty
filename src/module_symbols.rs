@@ -351,10 +351,13 @@ fn fn_info(
 
 impl SymbolSource for ModuleSymbols<'_> {
     fn resolve_symbols(&self, fqn: &str) -> crate::libraries::ResolvedSymbols {
-        self.resolve_symbols_name(type_name(fqn))
+        (*self.resolve_symbols_name(type_name(fqn))).clone()
     }
 
-    fn resolve_symbols_name(&self, fqn: TypeName) -> crate::libraries::ResolvedSymbols {
+    fn resolve_symbols_name(
+        &self,
+        fqn: TypeName,
+    ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
         use crate::libraries::{Callables, ResolvedSymbols};
         // Classifier: a module class at the fqn. Callables: `functions(name, receiver)` — members (always
         // visible on their type) plus the module's top-level/extension functions when the fqn's package is
@@ -398,10 +401,10 @@ impl SymbolSource for ModuleSymbols<'_> {
         } else {
             Callables::Functions(FunctionSet { overloads })
         };
-        ResolvedSymbols {
+        std::rc::Rc::new(ResolvedSymbols {
             classifier,
             callables,
-        }
+        })
     }
 
     fn member_overloads(&self, recv: Ty, name: &str) -> FunctionSet {

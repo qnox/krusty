@@ -656,7 +656,10 @@ impl<'a> SymbolResolver<'a> {
     /// candidate fqn `pkg/name` over the federated source. THE way to resolve an unqualified name: the
     /// caller extracts `classifier`, `callables.functions` (∪ classifier constructors, then `invoke`), or
     /// `callables.properties` from the records. Empty when there is no import scope (caller falls back).
-    fn symbols_in_scope(&self, name: &str) -> Vec<(TypeName, crate::libraries::ResolvedSymbols)> {
+    fn symbols_in_scope(
+        &self,
+        name: &str,
+    ) -> Vec<(TypeName, std::rc::Rc<crate::libraries::ResolvedSymbols>)> {
         self.fn_scope
             .map(|scope| resolve_symbols_in_scope(&self.src, name, scope))
             .unwrap_or_default()
@@ -725,8 +728,8 @@ impl<'a> SymbolResolver<'a> {
                 let extension_property_getter = self
                     .symbols_in_scope(name)
                     .into_iter()
-                    .flat_map(|(_, r)| match r.callables {
-                        crate::libraries::Callables::Properties(p) => p.overloads,
+                    .flat_map(|(_, r)| match &r.callables {
+                        crate::libraries::Callables::Properties(p) => p.overloads.clone(),
                         _ => Vec::new(),
                     })
                     .filter(|p| p.kind == PropKind::Extension)
@@ -2006,7 +2009,7 @@ pub(crate) fn resolve_symbols_in_scope(
     src: &dyn SymbolSource,
     name: &str,
     packages: &[TypeName],
-) -> Vec<(TypeName, crate::libraries::ResolvedSymbols)> {
+) -> Vec<(TypeName, std::rc::Rc<crate::libraries::ResolvedSymbols>)> {
     let lib = src;
     packages
         .iter()
@@ -2019,13 +2022,13 @@ pub(crate) fn resolve_symbols_in_scope(
 }
 
 fn function_set_from_symbols(
-    symbols: impl IntoIterator<Item = (TypeName, crate::libraries::ResolvedSymbols)>,
+    symbols: impl IntoIterator<Item = (TypeName, std::rc::Rc<crate::libraries::ResolvedSymbols>)>,
 ) -> FunctionSet {
     FunctionSet {
         overloads: symbols
             .into_iter()
-            .flat_map(|(_, r)| match r.callables {
-                crate::libraries::Callables::Functions(f) => f.overloads,
+            .flat_map(|(_, r)| match &r.callables {
+                crate::libraries::Callables::Functions(f) => f.overloads.clone(),
                 _ => Vec::new(),
             })
             .collect(),
