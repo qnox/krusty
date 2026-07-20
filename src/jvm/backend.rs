@@ -80,11 +80,22 @@ fn jvm_plugin_type_descriptor(ty: Ty) -> Option<String> {
 /// can read inline-function bodies for the bytecode inliner.
 pub struct JvmBackend {
     cp: std::rc::Rc<crate::jvm::classpath::Classpath>,
+    /// Class-file major version to emit (`-jvm-target`), or `None` for krusty's default (v52).
+    class_major: Option<u16>,
 }
 
 impl JvmBackend {
     pub fn new(cp: std::rc::Rc<crate::jvm::classpath::Classpath>) -> JvmBackend {
-        JvmBackend { cp }
+        JvmBackend {
+            cp,
+            class_major: None,
+        }
+    }
+
+    /// Set the class-file version subsequent emits target (from the CLI's `-jvm-target`).
+    pub fn with_class_major(mut self, major: Option<u16>) -> JvmBackend {
+        self.class_major = major;
+        self
     }
 }
 
@@ -145,10 +156,13 @@ impl Backend for JvmBackend {
         let syms = checked.symbols;
         let module_name = checked.module_name;
 
-        // Every class this file emits carries a `SourceFile` attribute naming the origin `.kt` — set
-        // it now so `ClassWriter::new` (incl. synthetics) picks it up. kotlinc uses the simple file
-        // name; krusty reconstructs it from the stem (directories already stripped).
-        crate::jvm::classfile::set_source_file(Some(format!("{stem}.kt")));
+        // Per-file emit config: the class version (`-jvm-target`) and the `SourceFile` name (the origin
+        // `.kt`; kotlinc uses the simple name, reconstructed from the stem — directories already
+        // stripped). Threaded explicitly into emission so every class (incl. synthetics) carries it.
+        let emit_opts = crate::jvm::ir_emit::EmitOptions {
+            class_major: self.class_major,
+            source_file: Some(format!("{stem}.kt")),
+        };
 
         // Lower the checked file to the backend-agnostic IR, then emit JVM bytecode from it.
         // (The legacy direct AST emitter has been removed — IR is the sole JVM codegen path.)
@@ -232,9 +246,13 @@ impl Backend for JvmBackend {
         // `emit_all` returns `None` when the IR uses a JVM-unsupported construct. Inline splice failures
         // are reported separately: selected inline calls are required to splice, so those are backend
         // errors to fix rather than silent skips.
-        let Some(classes) =
-            crate::jvm::ir_emit::emit_all(&ir, &facade_name, &*self.cp, metadata.as_ref())
-        else {
+        let Some(classes) = crate::jvm::ir_emit::emit_all_with_opts(
+            &ir,
+            &facade_name,
+            &*self.cp,
+            metadata.as_ref(),
+            &emit_opts,
+        ) else {
             if let Some(reason) = crate::jvm::ir_emit::inline_bail_reason() {
                 diags.error(
                     crate::diag::Span::new(0, 0),

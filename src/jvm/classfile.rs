@@ -13,34 +13,7 @@ pub const ACC_INTERFACE: u16 = 0x0200;
 pub const ACC_ABSTRACT: u16 = 0x0400;
 
 // Major 52 = Java 8, matching kotlinc's default JVM target.
-const MAJOR_JAVA8: u16 = 52;
-
-thread_local! {
-    /// The class-file major version new `ClassWriter`s emit. Defaults to Java 8 (v52), which runs on
-    /// the test JDK; the CLI's `-jvm-target` sets it (kotlinc's `jvmToolchain(25)` ⇒ v69). Read at
-    /// `ClassWriter::new` so every writer — including synthetic serializer/companion/DefaultImpls
-    /// classes created deep in emission — picks it up without threading a version through the callgraph.
-    static CLASS_MAJOR: std::cell::Cell<u16> = const { std::cell::Cell::new(MAJOR_JAVA8) };
-}
-
-/// Set the class-file major version subsequent `ClassWriter`s emit (see [`CLASS_MAJOR`]). The CLI
-/// driver calls this once from the parsed `-jvm-target`; tests and the default path leave it at v52.
-pub fn set_class_major(major: u16) {
-    CLASS_MAJOR.with(|m| m.set(major));
-}
-
-thread_local! {
-    /// The source-file simple name (e.g. `Foo.kt`) new `ClassWriter`s record in a `SourceFile`
-    /// attribute — kotlinc emits one on every class (including synthetics) naming the origin `.kt`.
-    /// Set per-file during emission; `None` (the default) suppresses the attribute, as in older krusty.
-    static SOURCE_FILE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Set (or clear) the source-file name subsequent `ClassWriter`s record in `SourceFile`. The backend
-/// calls this once per compiled file with its `.kt` basename; tests leave it `None` (no attribute).
-pub fn set_source_file(name: Option<String>) {
-    SOURCE_FILE.with(|s| *s.borrow_mut() = name);
-}
+pub const MAJOR_JAVA8: u16 = 52;
 
 /// JVM verification type for StackMapTable entries (JVMS §4.7.4).
 #[derive(Clone, PartialEq)]
@@ -333,10 +306,21 @@ impl ClassWriter {
             bootstrap_methods: Vec::new(),
             class_deprecated: false,
             deprecated_methods: std::collections::HashSet::new(),
-            major: CLASS_MAJOR.with(|m| m.get()),
-            source_file: SOURCE_FILE.with(|s| s.borrow().clone()),
+            major: MAJOR_JAVA8,
+            source_file: None,
             internal_name: internal_name.to_string(),
         }
+    }
+
+    /// Set the class-file major version to emit (kotlinc maps `-jvm-target 25` ⇒ v69). Default v52.
+    pub fn set_major(&mut self, major: u16) {
+        self.major = major;
+    }
+
+    /// Set the source-file simple name for the `SourceFile` attribute (e.g. `Foo.kt`). `None` (the
+    /// default) emits no attribute.
+    pub fn set_source_file(&mut self, name: Option<String>) {
+        self.source_file = name;
     }
 
     /// Mark the class itself as carrying a `Deprecated` attribute (kotlinc emits this for a `@Deprecated`
@@ -1657,18 +1641,18 @@ mod tests {
 
     #[test]
     fn jvm_target_sets_class_major_version() {
-        set_class_major(69); // -jvm-target 25
-        let bytes = ClassWriter::new("FooKt", "java/lang/Object").finish();
-        set_class_major(MAJOR_JAVA8); // reset (thread-local would bleed into sibling tests)
+        let mut cw = ClassWriter::new("FooKt", "java/lang/Object");
+        cw.set_major(69); // -jvm-target 25
+        let bytes = cw.finish();
         assert_eq!(u16::from_be_bytes([bytes[6], bytes[7]]), 69);
     }
 
     #[test]
     fn source_file_attribute_emitted_and_ordered() {
-        set_source_file(Some("Foo.kt".to_string()));
-        let bytes = ClassWriter::new("FooKt", "java/lang/Object").finish();
-        set_source_file(None); // reset
-                               // The `SourceFile` name and the source basename are both interned.
+        let mut cw = ClassWriter::new("FooKt", "java/lang/Object");
+        cw.set_source_file(Some("Foo.kt".to_string()));
+        let bytes = cw.finish();
+        // The `SourceFile` name and the source basename are both interned.
         let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
         assert!(has(b"SourceFile"));
         assert!(has(b"Foo.kt"));

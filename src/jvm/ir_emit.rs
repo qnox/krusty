@@ -53,6 +53,29 @@ pub struct KotlinMetadata {
     pub d2: Vec<String>,
 }
 
+/// Per-file emission configuration passed explicitly down the emit callgraph and stamped onto every
+/// `ClassWriter` (via [`new_writer`]) so synthetic serializer/companion/DefaultImpls classes inherit
+/// it too. The `Default` (v52, no `SourceFile`) keeps [`emit_all`]'s output byte-identical to before —
+/// only the CLI-driven backend path overrides it (`-jvm-target`, the source `.kt` name).
+#[derive(Clone, Default)]
+pub struct EmitOptions {
+    /// Class-file major version to emit (default v52; `-jvm-target 25` ⇒ v69).
+    pub class_major: Option<u16>,
+    /// Source-file simple name for the `SourceFile` attribute (e.g. `Foo.kt`); `None` ⇒ no attribute.
+    pub source_file: Option<String>,
+}
+
+/// Construct a `ClassWriter` with the per-file [`EmitOptions`] stamped on — the single place emission
+/// builds a writer, so class version + `SourceFile` reach every class (incl. synthetics) explicitly.
+fn new_writer(internal: &str, super_internal: &str, opts: &EmitOptions) -> ClassWriter {
+    let mut cw = ClassWriter::new(internal, super_internal);
+    if let Some(major) = opts.class_major {
+        cw.set_major(major);
+    }
+    cw.set_source_file(opts.source_file.clone());
+    cw
+}
+
 /// Emit a whole IR file: the facade class of top-level `static` functions, plus one `.class` per
 /// `IrClass`. Returns `(internal_name, bytes)` for each, or `None` when the IR uses a construct the
 /// JVM backend can't represent (so every emission path skips it rather than miscompiling).
@@ -202,7 +225,26 @@ pub fn emit_all(
     // `bytecode_parity_e2e` gate compares classes byte-for-byte vs kotlinc, so the default path must
     // stay untouched). A caller that needs cross-module class metadata (krusty-compose's LibraryBinary
     // modules) uses [`emit_all_with_class_meta`].
-    emit_all_with_class_meta(ir, facade, bodies, metadata, &|_| None)
+    emit_all_with_class_meta(
+        ir,
+        facade,
+        bodies,
+        metadata,
+        &EmitOptions::default(),
+        &|_| None,
+    )
+}
+
+/// Like [`emit_all`], but with explicit per-file [`EmitOptions`] (class version, source name). The CLI
+/// backend uses this so `-jvm-target` and the `SourceFile` name reach every emitted class.
+pub fn emit_all_with_opts(
+    ir: &IrFile,
+    facade: &str,
+    bodies: &dyn MethodBodies,
+    metadata: Option<&KotlinMetadata>,
+    opts: &EmitOptions,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    emit_all_with_class_meta(ir, facade, bodies, metadata, opts, &|_| None)
 }
 
 /// Like [`emit_all`], but `class_meta` may supply a per-class `@kotlin.Metadata` (keyed by the class's
@@ -215,20 +257,25 @@ pub fn emit_all_with_class_meta(
     facade: &str,
     bodies: &dyn MethodBodies,
     metadata: Option<&KotlinMetadata>,
+    opts: &EmitOptions,
     class_meta: &dyn Fn(&str) -> Option<KotlinMetadata>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     // Pass 1 (discovery): emit everything, recording which lambda impls actually get an `invokedynamic`
     // (`USED_LAMBDAS`). A lambda spliced by the inliner never emits one — its standalone `$lambda$N` is
     // dead, and kotlinc emits neither the method nor (for a class-only file) the facade holding it.
     USED_LAMBDAS.with(|u| u.borrow_mut().clear());
+    let empty = std::collections::HashSet::new();
     let first = emit_pass(
         ir,
         facade,
         bodies,
         metadata,
+        opts,
         class_meta,
-        &std::collections::HashSet::new(),
-        &std::collections::HashSet::new(),
+        &LambdaSelection {
+            dead: &empty,
+            rescued: &empty,
+        },
     )?;
     let used = USED_LAMBDAS.with(|u| u.borrow().clone());
     // A MUST-INLINE message lambda whose call-site splice FELL BACK to a real `invokedynamic`
@@ -271,7 +318,25 @@ pub fn emit_all_with_class_meta(
     // Pass 2: re-emit without the dead facade impls, plus any rescued must-inline impls
     // (deterministic — identical decisions, minus the dead methods, plus the rescued ones; the
     // facade itself drops when the dead impls were its only members).
-    emit_pass(ir, facade, bodies, metadata, class_meta, &dead, &rescued)
+    emit_pass(
+        ir,
+        facade,
+        bodies,
+        metadata,
+        opts,
+        class_meta,
+        &LambdaSelection {
+            dead: &dead,
+            rescued: &rescued,
+        },
+    )
+}
+
+/// Which facade-owned lambda impls a pass drops (`dead`) or keeps despite a pre-marked inline
+/// (`rescued`) — the only state that differs between emit pass 1 (both empty) and pass 2.
+struct LambdaSelection<'a> {
+    dead: &'a std::collections::HashSet<u32>,
+    rescued: &'a std::collections::HashSet<u32>,
 }
 
 fn emit_pass(
@@ -279,9 +344,9 @@ fn emit_pass(
     facade: &str,
     bodies: &dyn MethodBodies,
     metadata: Option<&KotlinMetadata>,
+    opts: &EmitOptions,
     class_meta: &dyn Fn(&str) -> Option<KotlinMetadata>,
-    dead_lambdas: &std::collections::HashSet<u32>,
-    rescued_lambdas: &std::collections::HashSet<u32>,
+    lambdas: &LambdaSelection,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     if !jvm_can_emit(ir) {
         return None;
@@ -298,7 +363,7 @@ fn emit_pass(
         .iter()
         .flat_map(|c| c.methods.iter().copied())
         .collect();
-    let mut cw = ClassWriter::new(facade, "java/lang/Object");
+    let mut cw = new_writer(facade, "java/lang/Object", opts);
     // PRIVATE facade functions a CLASS body calls (`Callee::Local` from a lambda impl, a
     // continuation class, or any class member): a cross-class private invokestatic is illegal, so
     // kotlinc emits a `public static final synthetic access$<name>` forwarding bridge on the facade
@@ -370,9 +435,9 @@ fn emit_pass(
         // An inline-only lambda impl is never emitted (it's spliced) — don't count it as a facade method,
         // else an otherwise class-only file emits an empty facade kotlinc omits. A DEAD lambda impl
         // (inlined at every use — pass-1 discovery) is dropped the same way.
-        let rescued = rescued_lambdas.contains(&(i as u32));
+        let rescued = lambdas.rescued.contains(&(i as u32));
         if (ir.inline_only_fns.contains(&(i as u32)) && !rescued)
-            || dead_lambdas.contains(&(i as u32))
+            || lambdas.dead.contains(&(i as u32))
         {
             continue;
         }
@@ -441,7 +506,7 @@ fn emit_pass(
         let mut extra: Vec<(String, Vec<u8>)> = Vec::new();
         out.push((
             c.fq_name.clone(),
-            emit_class(ir, c, facade, bodies, cm.as_ref(), &mut extra),
+            emit_class(ir, c, facade, bodies, opts, cm.as_ref(), &mut extra),
         ));
         // An interface's `$DefaultImpls` holder (its `name$default` synthetics), when any exist.
         out.extend(extra);
@@ -856,31 +921,32 @@ fn emit_class(
     c: &crate::ir::IrClass,
     facade: &str,
     bodies: &dyn MethodBodies,
+    opts: &EmitOptions,
     class_meta: Option<&KotlinMetadata>,
     extra: &mut Vec<(String, Vec<u8>)>,
 ) -> Vec<u8> {
     if !c.enum_entries.is_empty() {
-        return emit_enum_class(ir, c, facade, bodies);
+        return emit_enum_class(ir, c, facade, bodies, opts);
     }
     if let Some(iface) = &c.annotation_impl_of {
-        return emit_annotation_impl_class(c, iface);
+        return emit_annotation_impl_class(c, iface, opts);
     }
     if c.is_annotation {
-        return emit_annotation_class(c, class_meta);
+        return emit_annotation_class(c, opts, class_meta);
     }
     if c.is_interface {
-        return emit_interface_class(ir, c, facade, bodies, class_meta, extra);
+        return emit_interface_class(ir, c, facade, bodies, opts, class_meta, extra);
     }
     if let Some(user_tys) = &c.enum_entry_of {
-        return emit_enum_entry_subclass(ir, c, facade, bodies, user_tys);
+        return emit_enum_entry_subclass(ir, c, facade, bodies, opts, user_tys);
     }
     if c.prop_ref.is_some() {
-        return emit_prop_ref_class(c, facade);
+        return emit_prop_ref_class(c, facade, opts);
     }
     if c.func_ref.is_some() {
-        return emit_func_ref_class(ir, c, facade);
+        return emit_func_ref_class(ir, c, facade, opts);
     }
-    let mut cw = ClassWriter::new(&c.fq_name, &c.superclass);
+    let mut cw = new_writer(&c.fq_name, &c.superclass, opts);
     // Access: an extended or abstract class must not be `final`; a class with an abstract method
     // (body `None`) is `ACC_ABSTRACT`.
     let extended = ir.classes.iter().any(|o| o.superclass == c.fq_name);
@@ -1522,9 +1588,10 @@ fn emit_enum_entry_subclass(
     c: &crate::ir::IrClass,
     facade: &str,
     bodies: &dyn MethodBodies,
+    opts: &EmitOptions,
     user_tys: &[Ty],
 ) -> Vec<u8> {
-    let mut cw = ClassWriter::new(&c.fq_name, &c.superclass);
+    let mut cw = new_writer(&c.fq_name, &c.superclass, opts);
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER (package-private)
 
     // Entry-body PROPERTIES are private backing fields (read via synthesized getters, like kotlinc).
@@ -1595,17 +1662,17 @@ fn emit_enum_entry_subclass(
 /// `super(owner.class, name, "getName()desc", 0)`, a `get(Object)Object` override that reads
 /// `((Owner) it).getName()` (boxing a primitive), and a `<clinit>` that builds the singleton. `.name`
 /// is inherited from `PropertyReference1Impl` (returns the constructor's name argument).
-fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
+fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str, opts: &EmitOptions) -> Vec<u8> {
     let pr = c.prop_ref.as_ref().unwrap();
     if pr.static_dispatch {
-        return emit_toplevel_prop_ref_class(c, pr, facade);
+        return emit_toplevel_prop_ref_class(c, pr, facade, opts);
     }
     if pr.bound {
-        return emit_bound_prop_ref_class(c, pr, facade);
+        return emit_bound_prop_ref_class(c, pr, facade, opts);
     }
     let fq = c.fq_name.clone();
     let self_desc = format!("L{fq};");
-    let mut cw = ClassWriter::new(&fq, &c.superclass);
+    let mut cw = new_writer(&fq, &c.superclass, opts);
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER (package-private)
     cw.add_field(0x0019, "INSTANCE", &self_desc); // PUBLIC | STATIC | FINAL
 
@@ -1702,9 +1769,10 @@ fn emit_bound_prop_ref_class(
     c: &crate::ir::IrClass,
     pr: &crate::ir::PropRef,
     facade: &str,
+    opts: &EmitOptions,
 ) -> Vec<u8> {
     let fq = c.fq_name.clone();
-    let mut cw = ClassWriter::new(&fq, &c.superclass);
+    let mut cw = new_writer(&fq, &c.superclass, opts);
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER
 
     let prop_jvm = ir_ty_to_jvm(&pr.prop_ty);
@@ -1798,11 +1866,12 @@ fn emit_toplevel_prop_ref_class(
     c: &crate::ir::IrClass,
     pr: &crate::ir::PropRef,
     facade: &str,
+    opts: &EmitOptions,
 ) -> Vec<u8> {
     let owner = facade_sentinel(&pr.owner_internal, facade);
     let fq = c.fq_name.clone();
     let self_desc = format!("L{fq};");
-    let mut cw = ClassWriter::new(&fq, &c.superclass);
+    let mut cw = new_writer(&fq, &c.superclass, opts);
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER
     cw.add_field(0x0019, "INSTANCE", &self_desc); // PUBLIC | STATIC | FINAL
 
@@ -1893,7 +1962,12 @@ fn private_facade_fn(ir: &IrFile, name: &str, arity: usize) -> bool {
     })
 }
 
-fn emit_func_ref_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec<u8> {
+fn emit_func_ref_class(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    facade: &str,
+    opts: &EmitOptions,
+) -> Vec<u8> {
     use crate::ir::FrDispatch;
     let fr = c.func_ref.as_ref().unwrap();
     // An empty `owner_class`/`call_owner` is the facade sentinel (a top-level function lives on the
@@ -1902,7 +1976,7 @@ fn emit_func_ref_class(ir: &IrFile, c: &crate::ir::IrClass, facade: &str) -> Vec
     let call_owner = facade_sentinel(&fr.call_owner, facade);
     let fq = c.fq_name.clone();
     let self_desc = format!("L{fq};");
-    let mut cw = ClassWriter::new(&fq, &c.superclass);
+    let mut cw = new_writer(&fq, &c.superclass, opts);
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER
     cw.add_interface(&format!("kotlin/jvm/functions/Function{}", fr.arity));
 
@@ -2443,8 +2517,12 @@ fn unbox_prim(cw: &mut ClassWriter, code: &mut CodeBuilder, t: Ty) {
 /// ACC_ANNOTATION`, extending `java/lang/annotation/Annotation`, with one `public abstract` accessor per
 /// member (`int x()`, `String s()`) named after the property and returning its type — kotlinc's shape.
 /// Members come from `fields`. Instances are built by the synthetic impl ([`emit_annotation_impl_class`]).
-fn emit_annotation_class(c: &crate::ir::IrClass, class_meta: Option<&KotlinMetadata>) -> Vec<u8> {
-    let mut cw = ClassWriter::new(&c.fq_name, "java/lang/Object");
+fn emit_annotation_class(
+    c: &crate::ir::IrClass,
+    opts: &EmitOptions,
+    class_meta: Option<&KotlinMetadata>,
+) -> Vec<u8> {
+    let mut cw = new_writer(&c.fq_name, "java/lang/Object", opts);
     cw.set_access(0x0001 | 0x0200 | 0x0400 | 0x2000); // PUBLIC | INTERFACE | ABSTRACT | ANNOTATION
     cw.add_interface("java/lang/annotation/Annotation");
     for field in &c.fields {
@@ -2503,14 +2581,14 @@ fn java_string_hash(s: &str) -> i32 {
 /// contract — private final fields, a constructor, per-member accessors (`x()`/`s()`), `annotationType()`,
 /// and content-correct `equals`/`hashCode`/`toString` (arrays via `java.util.Arrays`, `float`/`double` via
 /// their wrappers' `equals`/`hashCode` for NaN/`-0.0` semantics). `c.fields` are the members in order.
-fn emit_annotation_impl_class(c: &crate::ir::IrClass, iface: &str) -> Vec<u8> {
+fn emit_annotation_impl_class(c: &crate::ir::IrClass, iface: &str, opts: &EmitOptions) -> Vec<u8> {
     let fq = c.fq_name.clone();
     let members: Vec<(String, Ty)> = c
         .fields
         .iter()
         .map(|f| (f.name.clone(), ir_ty_to_jvm(&f.ty)))
         .collect();
-    let mut cw = ClassWriter::new(&fq, "java/lang/Object");
+    let mut cw = new_writer(&fq, "java/lang/Object", opts);
     cw.set_access(0x0001 | 0x0010 | 0x1000); // PUBLIC | FINAL | SYNTHETIC
     cw.add_interface(iface);
     for (name, jt) in &members {
@@ -2818,10 +2896,11 @@ fn emit_interface_class(
     c: &crate::ir::IrClass,
     facade: &str,
     bodies: &dyn MethodBodies,
+    opts: &EmitOptions,
     class_meta: Option<&KotlinMetadata>,
     extra: &mut Vec<(String, Vec<u8>)>,
 ) -> Vec<u8> {
-    let mut cw = ClassWriter::new(&c.fq_name, "java/lang/Object");
+    let mut cw = new_writer(&c.fq_name, "java/lang/Object", opts);
     cw.set_access(0x0001 | 0x0200 | 0x0400); // PUBLIC | INTERFACE | ABSTRACT
     for itf in &c.interfaces {
         cw.add_interface(itf);
@@ -2843,8 +2922,11 @@ fn emit_interface_class(
         if let Some(defaults) = ir.param_defaults(fid) {
             emit_default_stub(ir, fid, &c.fq_name, facade, &mut cw, defaults, bodies, true);
             let di = default_impls.get_or_insert_with(|| {
-                let mut w =
-                    ClassWriter::new(&format!("{}$DefaultImpls", c.fq_name), "java/lang/Object");
+                let mut w = new_writer(
+                    &format!("{}$DefaultImpls", c.fq_name),
+                    "java/lang/Object",
+                    opts,
+                );
                 w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
                 w
             });
@@ -2937,13 +3019,14 @@ fn emit_enum_class(
     c: &crate::ir::IrClass,
     facade: &str,
     bodies: &dyn MethodBodies,
+    opts: &EmitOptions,
 ) -> Vec<u8> {
     const ACC_ENUM: u16 = 0x4000;
     const ACC_SYNTHETIC: u16 = 0x1000;
     let fq = c.fq_name.clone();
     let self_desc = format!("L{fq};");
     let arr_desc = format!("[{self_desc}");
-    let mut cw = ClassWriter::new(&fq, "java/lang/Enum");
+    let mut cw = new_writer(&fq, "java/lang/Enum", opts);
     // An enum with an abstract member is `ACC_ABSTRACT`; one with any bodied entry (so a subclass
     // extends it) must not be `final`. A plain enum stays `final`.
     let has_abstract = c
