@@ -593,11 +593,13 @@ fn global_ext_candidates(key: &[PathBuf]) -> ExtCandCache {
         .clone()
 }
 
-/// Process-global cache of parsed `ClassInfo` (internal-name id → parsed class, `None` if absent), keyed
-/// by the classpath. The conformance harness compiles on several rayon worker threads, EACH with its
-/// own `Classpath`; without sharing, every common class (`kotlin/collections/List`, …) was parsed once
-/// per thread. Sharing this — like the type/ext/jimage indexes — parses each class once per process.
-/// `RwLock` because reads (cache hits) dominate; a parse on a miss takes the write lock briefly.
+/// Process-global cache of parsed `ClassInfo` (internal-name id → parsed class, `None` if absent from
+/// THIS entry), keyed per classpath ENTRY (one jar/dir/jimage). The conformance harness compiles on
+/// several rayon worker threads, EACH with its own `Classpath`, and some tests compose per-test
+/// classpaths (a module output dir + the same stdlib jars); keying per entry — not per classpath set —
+/// means the stdlib jars' parses are shared across ALL of those, so each class is parsed once per
+/// process, period. `RwLock` because reads (cache hits) dominate; a parse on a miss takes the write
+/// lock briefly.
 struct ClassCacheData {
     classes: std::sync::RwLock<HashMap<TypeName, Option<std::sync::Arc<ClassInfo>>>>,
 }
@@ -617,12 +619,12 @@ impl ClassCacheData {
 }
 
 type ClassCache = std::sync::Arc<ClassCacheData>;
-fn global_class_cache(key: &[PathBuf]) -> ClassCache {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Vec<PathBuf>, ClassCache>>> =
+fn global_entry_class_cache(path: &Path) -> ClassCache {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, ClassCache>>> =
         std::sync::OnceLock::new();
     let m = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     let mut g = m.lock().unwrap();
-    g.entry(key.to_vec())
+    g.entry(path.to_path_buf())
         .or_insert_with(|| std::sync::Arc::new(ClassCacheData::default()))
         .clone()
 }
@@ -946,11 +948,13 @@ type MetaOverloadCache =
 #[derive(Default)]
 pub struct Classpath {
     entries: Vec<Entry>,
-    // Two-level parsed-class cache: `local` is a per-thread L1 (cheap `RefCell`, no lock — serves the
-    // hot repeated lookups), backed by `shared` — a process-global L2 (`RwLock`) so a class is PARSED
-    // once across all rayon worker threads, not once per thread. L1 miss → L2 → parse.
+    // Two-level parsed-class cache: `local_cache` is a per-thread L1 (cheap `RefCell`, no lock —
+    // serves the hot repeated lookups) holding the whole-classpath search result. Backing it,
+    // `entry_caches` (parallel to `entries`) are process-global PER-ENTRY L2 caches (`RwLock`), so a
+    // class is PARSED once per process — shared across worker threads AND across classpaths that
+    // include the same jar. L1 miss → per-entry L2 walk in classpath order → parse.
     local_cache: RefCell<crate::lru::LruCache<TypeName, Option<std::sync::Arc<ClassInfo>>>>,
-    cache: ClassCache,
+    entry_caches: Vec<ClassCache>,
     /// Open `ZipArchive` per jar path, so reading an entry is a central-directory hash lookup + inflate
     /// — NOT a re-parse of the whole central directory (which `zip::ZipArchive::new` does, thousands of
     /// entries for kotlin-stdlib). This is the classloader/javac strategy: parse each jar's directory
@@ -1062,7 +1066,10 @@ impl Classpath {
         Classpath {
             entries,
             local_cache: RefCell::new(crate::lru::LruCache::new(CLASS_CAP)),
-            cache: global_class_cache(&cache_key),
+            entry_caches: cache_key
+                .iter()
+                .map(|p| global_entry_class_cache(p))
+                .collect(),
             archives: RefCell::new(HashMap::new()),
             ext: RefCell::new(None),
             types: RefCell::new(None),
@@ -1117,7 +1124,7 @@ impl Classpath {
              jimage={} type={} ext={} pkgtree={}",
             self.id,
             self.local_cache.borrow().len(),
-            self.cache.len(),
+            self.entry_caches.iter().map(|c| c.len()).sum::<usize>(),
             self.meta_fns.borrow().len(),
             self.meta_overloads.borrow().len(),
             self.bodies.borrow().len(),
@@ -1909,25 +1916,10 @@ impl Classpath {
             return hit.clone();
         }
         cache_stat!(l1_class, false);
-        // L2: process-global, shared across threads — a class parsed by ANY thread is reused here.
-        if let Some(hit) = self
-            .cache
-            .classes
-            .read()
-            .unwrap()
-            .get(&internal_id)
-            .cloned()
-        {
-            cache_stat!(l2_class, true);
-            self.local_cache
-                .borrow_mut()
-                .insert(internal_id, hit.clone());
-            return hit;
-        }
-        cache_stat!(l2_class, false);
         let internal = internal_id.render();
         let name = format!("{internal}.class");
         let mut found = None;
+        let mut all_cached = true;
         // Search only the entries the package tree says declare this class's package, in classpath order
         // (the spec's qualified-name step: search `node.jars`). The tree lists EVERY jar/dir/jimage that
         // declares the package, so the result is identical to scanning all entries — just fewer reads
@@ -1941,9 +1933,21 @@ impl Classpath {
             .map(|n| n.jars.clone());
         let indices = scoped.unwrap_or_else(|| (0..self.entries.len()).collect());
         for i in indices {
-            let Some(e) = self.entries.get(i) else {
+            let (Some(e), Some(l2)) = (self.entries.get(i), self.entry_caches.get(i)) else {
                 continue;
             };
+            // L2: process-global per-entry cache — a class parsed from this jar/dir by ANY thread
+            // (under ANY classpath that includes it) is reused; `None` records "absent from this
+            // entry", so the classpath-order walk still stops at the first entry that owns the class.
+            match l2.classes.read().unwrap().get(&internal_id).cloned() {
+                Some(Some(hit)) => {
+                    found = Some(hit);
+                    break;
+                }
+                Some(None) => continue,
+                None => {}
+            }
+            all_cached = false;
             let bytes = match e {
                 Entry::Dir(d) => std::fs::read(d.join(&name)).ok(),
                 Entry::Jar(j) => self.jar_entry(j, &name),
@@ -1951,24 +1955,23 @@ impl Classpath {
                 // name→(offset,size) index so JDK type members (String, collections, …) resolve.
                 Entry::Jimage(_) => self.jimage_bytes(&internal),
             };
-            if let Some(b) = bytes {
-                if let Ok(ci) = parse_class(&b) {
-                    // A DIRECTORY entry on a case-INSENSITIVE filesystem (macOS APFS) happily serves
-                    // `java/lang/error.class` for `Error.class` — verify the parsed class IS the
-                    // requested one (JVM names are case-sensitive; `error` must not resolve to `Error`).
-                    if !ci.this_class_matches(&internal) {
-                        continue;
-                    }
-                    found = Some(std::sync::Arc::new(ci));
-                    break;
-                }
+            // A DIRECTORY entry on a case-INSENSITIVE filesystem (macOS APFS) happily serves
+            // `java/lang/error.class` for `Error.class` — verify the parsed class IS the
+            // requested one (JVM names are case-sensitive; `error` must not resolve to `Error`).
+            let parsed = bytes
+                .and_then(|b| parse_class(&b).ok())
+                .filter(|ci| ci.this_class_matches(&internal))
+                .map(std::sync::Arc::new);
+            l2.classes
+                .write()
+                .unwrap()
+                .insert(internal_id, parsed.clone());
+            if let Some(ci) = parsed {
+                found = Some(ci);
+                break;
             }
         }
-        self.cache
-            .classes
-            .write()
-            .unwrap()
-            .insert(internal_id, found.clone());
+        cache_stat!(l2_class, all_cached);
         self.local_cache
             .borrow_mut()
             .insert(internal_id, found.clone());
@@ -3437,6 +3440,27 @@ mod fq_tests {
         assert_ne!(id_a, b.id(), "a reallocated Classpath must not reuse an id");
         let c = Classpath::new(vec![PathBuf::from("/nonexistent/c")]);
         assert_ne!(b.id(), c.id(), "distinct live Classpaths have distinct ids");
+    }
+
+    // The parsed-class L2 is keyed per ENTRY, not per classpath set: two classpaths that differ only
+    // by an extra entry (a per-test module output dir) share the stdlib jar's cache, so its classes
+    // are parsed once per process — not once per distinct classpath vector.
+    #[test]
+    fn entry_class_caches_are_shared_across_classpath_sets() {
+        let shared = PathBuf::from("/nonexistent/shared.jar");
+        let a = Classpath::new(vec![shared.clone()]);
+        let b = Classpath::new(vec![
+            PathBuf::from("/nonexistent/module-out"),
+            shared.clone(),
+        ]);
+        assert!(std::sync::Arc::ptr_eq(
+            &a.entry_caches[0],
+            &b.entry_caches[1]
+        ));
+        assert!(!std::sync::Arc::ptr_eq(
+            &a.entry_caches[0],
+            &b.entry_caches[0]
+        ));
     }
 
     fn jar_packages(pkgs: &[(&str, PkgEntry)]) -> std::sync::Arc<JarPackages> {
