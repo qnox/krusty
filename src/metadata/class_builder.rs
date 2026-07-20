@@ -78,38 +78,65 @@ const VAR_PROPERTY_FLAGS: u64 = 1798;
 struct StringTable {
     strings: Vec<String>,
     records: Vec<Pb>,
+    /// Dedup by (d2 string, record bytes) — kotlinc reuses an existing entry when the same string with
+    /// the same record (verbatim / builtin-index / class-id operation) is interned again.
+    dedup: std::collections::HashMap<(String, Vec<u8>), u32>,
 }
 
 impl StringTable {
+    /// Intern `(string, record)`, returning an existing index for an identical prior entry (kotlinc's
+    /// `JvmStringTable` dedup) or appending a new one.
+    fn intern(&mut self, s: String, record: Pb) -> u32 {
+        let key = (s.clone(), record.as_bytes().to_vec());
+        if let Some(&i) = self.dedup.get(&key) {
+            return i;
+        }
+        let i = self.strings.len() as u32;
+        self.strings.push(s);
+        self.records.push(record);
+        self.dedup.insert(key, i);
+        i
+    }
     /// A verbatim source string (empty `Record` → use the d2 entry as-is).
     fn local(&mut self, s: &str) -> u32 {
-        let i = self.strings.len() as u32;
-        self.strings.push(s.to_string());
-        self.records.push(Pb::new());
-        i
+        self.intern(s.to_string(), Pb::new())
     }
     /// A builtin fq-name via predefinedIndex (Record.f2). The d2 slot is empty.
     fn builtin(&mut self, predefined: u64) -> u32 {
-        let i = self.strings.len() as u32;
-        self.strings.push(String::new());
         let mut r = Pb::new();
         r.field_varint(2, predefined);
-        self.records.push(r);
-        i
+        self.intern(String::new(), r)
     }
     /// A class id from a type descriptor `Lpkg/Name;` via operation DESC_TO_CLASS_ID (Record.f3=2).
     fn class_id_from_desc(&mut self, descriptor: &str) -> u32 {
-        let i = self.strings.len() as u32;
-        self.strings.push(descriptor.to_string());
         let mut r = Pb::new();
         r.field_varint(3, 2); // operation = DESC_TO_CLASS_ID
-        self.records.push(r);
-        i
+        self.intern(descriptor.to_string(), r)
     }
     fn serialize_types(&self) -> Pb {
+        // kotlinc's `JvmStringTable` COALESCES a run of consecutive verbatim strings (no operation /
+        // predefinedIndex) into ONE `Record` with `range` (field 1) = the run length; a single verbatim
+        // string is an empty record (range defaults to 1). Records that carry an operation or a
+        // predefined index (class-id, builtin) are never coalesced. Matching this is required for a
+        // byte-identical d1.
         let mut p = Pb::new();
-        for r in &self.records {
-            p.repeated_message(1, r);
+        let mut i = 0;
+        while i < self.records.len() {
+            if self.records[i].is_empty() {
+                let mut run = 1;
+                while i + run < self.records.len() && self.records[i + run].is_empty() {
+                    run += 1;
+                }
+                let mut rec = Pb::new();
+                if run > 1 {
+                    rec.field_varint(1, run as u64); // Record.range = 1
+                }
+                p.repeated_message(1, &rec);
+                i += run;
+            } else {
+                p.repeated_message(1, &self.records[i]);
+                i += 1;
+            }
         }
         p
     }
@@ -173,7 +200,9 @@ pub fn build_class(
         vp.field_message(3, &ty); // ValueParameter.type = 3
         ctor.repeated_message(2, &vp); // Constructor.value_parameter = 2
     }
-    let ctor_sig = jvm_method_sig(&mut st, None, ctor_desc); // name omitted → <init>
+    // kotlinc emits the ctor's JVM name `<init>` explicitly (not omitted) — matching it keeps the d2
+    // string table + d1 byte-identical.
+    let ctor_sig = jvm_method_sig(&mut st, Some("<init>"), ctor_desc);
     ctor.field_message(100, &ctor_sig); // JvmProtoBuf.constructorSignature = 100
     class.repeated_message(8, &ctor);
 
@@ -240,6 +269,71 @@ pub fn build_class(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Ground truth: kotlinc 2.4.0 `package demo; class E` → @Metadata mv=[2,4,0] k=1 xi=48, and this
+    // exact d1 protobuf (mUTF-8-decoded to raw bytes) + d2 string table. Drives byte-for-byte parity.
+    #[test]
+    fn empty_class_metadata_byte_matches_kotlinc() {
+        let (d1, d2) = build_class("demo/E", &[], "()V", &[], &[], &[], 0);
+        assert_eq!(
+            d2,
+            vec![
+                "Ldemo/E;".to_string(),
+                "".to_string(),
+                "<init>".to_string(),
+                "()V".to_string(),
+            ],
+            "d2 string table",
+        );
+        assert_eq!(
+            d1,
+            vec![
+                0x00, 0x0c, 0x0a, 0x02, 0x18, 0x02, 0x0a, 0x02, 0x10, 0x00, 0x0a, 0x02, 0x08, 0x02,
+                0x18, 0x00, 0x32, 0x02, 0x30, 0x01, 0x42, 0x07, 0xa2, 0x06, 0x04, 0x08, 0x02, 0x10,
+                0x03,
+            ],
+            "d1 protobuf",
+        );
+    }
+
+    // Ground truth: kotlinc 2.4.0 `package demo; class C(val x: Int)` — one ctor-param property.
+    #[test]
+    fn one_property_class_metadata_byte_matches_kotlinc() {
+        let (d1, d2) = build_class(
+            "demo/C",
+            &[("x".into(), Ty::Int)],
+            "(I)V",
+            &[PropMeta {
+                name: "x".into(),
+                ty: Ty::Int,
+                is_var: false,
+                getter: ("getX".into(), "()I".into()),
+                setter: None,
+            }],
+            &[],
+            &[],
+            0,
+        );
+        assert_eq!(
+            d2,
+            vec!["Ldemo/C;", "", "x", "", "<init>", "(I)V", "getX", "()I"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+            "d2 string table",
+        );
+        assert_eq!(
+            d1,
+            vec![
+                0x00, 0x12, 0x0a, 0x02, 0x18, 0x02, 0x0a, 0x02, 0x10, 0x00, 0x0a, 0x00, 0x0a, 0x02,
+                0x10, 0x08, 0x0a, 0x02, 0x08, 0x04, 0x18, 0x00, 0x32, 0x02, 0x30, 0x01, 0x42, 0x0f,
+                0x12, 0x06, 0x10, 0x02, 0x1a, 0x02, 0x30, 0x03, 0xa2, 0x06, 0x04, 0x08, 0x04, 0x10,
+                0x05, 0x52, 0x11, 0x10, 0x02, 0x1a, 0x02, 0x30, 0x03, 0xa2, 0x06, 0x08, 0x0a, 0x00,
+                0x1a, 0x04, 0x08, 0x06, 0x10, 0x07,
+            ],
+            "d1 protobuf",
+        );
+    }
 
     #[test]
     fn class_metadata_has_expected_strings() {
