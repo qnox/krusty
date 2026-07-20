@@ -4,10 +4,8 @@ pub struct NameId(pub(crate) u32);
 #[derive(Clone, Debug)]
 struct NameNode {
     parent: Option<NameId>,
-    first_child: Option<NameId>,
-    next_sibling: Option<NameId>,
     sep: u8,
-    segment: String,
+    segment: std::sync::Arc<str>,
 }
 
 /// A compact internal-name tree. Names are inserted as slash-separated segments and retained structures
@@ -15,6 +13,10 @@ struct NameNode {
 #[derive(Clone, Debug)]
 pub struct NameTree {
     nodes: Vec<NameNode>,
+    /// Child lookup: parent → segment → child. The keys share the nodes' `Arc<str>` segments. A node's
+    /// separator is implied by its parent (none below ROOT, `/` otherwise), so it is not part of the key.
+    children:
+        std::collections::HashMap<NameId, std::collections::HashMap<std::sync::Arc<str>, NameId>>,
 }
 
 impl Default for NameTree {
@@ -22,11 +24,10 @@ impl Default for NameTree {
         NameTree {
             nodes: vec![NameNode {
                 parent: None,
-                first_child: None,
-                next_sibling: None,
                 sep: 0,
-                segment: String::new(),
+                segment: std::sync::Arc::from(""),
             }],
+            children: std::collections::HashMap::new(),
         }
     }
 }
@@ -60,12 +61,18 @@ impl NameTree {
         Some(parent)
     }
 
+    /// One child step below `parent`; `segment` must not contain `/`.
+    pub fn child_of(&mut self, parent: NameId, segment: &str) -> NameId {
+        let sep = if parent == Self::ROOT { 0 } else { b'/' };
+        self.child_or_insert(parent, sep, segment)
+    }
+
     pub fn insert_from(&mut self, other: &NameTree, id: NameId) -> NameId {
         let mut parts = Vec::new();
         let mut cur = id;
         while cur != Self::ROOT {
             let node = other.node(cur);
-            parts.push((node.sep, node.segment.as_str()));
+            parts.push((node.sep, &*node.segment));
             cur = node.parent.expect("non-root name node has a parent");
         }
         let mut parent = Self::ROOT;
@@ -85,7 +92,7 @@ impl NameTree {
         while cur != Self::ROOT {
             let node = self.node(cur);
             len += node.segment.len() + usize::from(node.sep != 0);
-            parts.push((node.sep, node.segment.as_str()));
+            parts.push((node.sep, &*node.segment));
             cur = node.parent.expect("non-root name node has a parent");
         }
         let mut out = String::with_capacity(len);
@@ -191,7 +198,7 @@ impl NameTree {
     }
 
     pub fn qualifier_matches(&self, id: NameId, qualifier: &str) -> bool {
-        self.get(qualifier) == Some(id) || self.node(id).segment == qualifier
+        self.get(qualifier) == Some(id) || &*self.node(id).segment == qualifier
     }
 
     pub fn package_matches(&self, id: NameId, package: &str) -> bool {
@@ -250,28 +257,18 @@ impl NameTree {
         let id = NameId(
             u32::try_from(self.nodes.len()).expect("name tree node count exceeded u32 capacity"),
         );
-        let next_sibling = self.nodes[parent.0 as usize].first_child;
+        let segment: std::sync::Arc<str> = std::sync::Arc::from(segment);
         self.nodes.push(NameNode {
             parent: Some(parent),
-            first_child: None,
-            next_sibling,
             sep,
-            segment: segment.to_string(),
+            segment: segment.clone(),
         });
-        self.nodes[parent.0 as usize].first_child = Some(id);
+        self.children.entry(parent).or_default().insert(segment, id);
         id
     }
 
-    fn child(&self, parent: NameId, sep: u8, segment: &str) -> Option<NameId> {
-        let mut cur = self.node(parent).first_child;
-        while let Some(id) = cur {
-            let node = self.node(id);
-            if node.sep == sep && node.segment == segment {
-                return Some(id);
-            }
-            cur = node.next_sibling;
-        }
-        None
+    fn child(&self, parent: NameId, _sep: u8, segment: &str) -> Option<NameId> {
+        self.children.get(&parent)?.get(segment).copied()
     }
 
     fn path_eq(&self, id: NameId, path: &str) -> bool {

@@ -4,7 +4,7 @@
 use crate::name_tree::{NameId, NameTree};
 use std::collections::HashSet;
 use std::fmt;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeName(NameId);
@@ -14,22 +14,36 @@ pub struct TypeNameList {
     names: Vec<TypeName>,
 }
 
-static TYPE_NAMES: OnceLock<Mutex<NameTree>> = OnceLock::new();
+static TYPE_NAMES: OnceLock<RwLock<NameTree>> = OnceLock::new();
 
-fn type_names() -> &'static Mutex<NameTree> {
-    TYPE_NAMES.get_or_init(|| Mutex::new(NameTree::default()))
+fn type_names() -> &'static RwLock<NameTree> {
+    TYPE_NAMES.get_or_init(|| RwLock::new(NameTree::default()))
 }
 
 pub fn type_name(internal: &str) -> TypeName {
-    TypeName(type_names().lock().unwrap().insert(internal))
+    TypeName(type_names().write().unwrap().insert(internal))
 }
 
 pub fn type_name_from(names: &NameTree, id: NameId) -> TypeName {
-    TypeName(type_names().lock().unwrap().insert_from(names, id))
+    TypeName(type_names().write().unwrap().insert_from(names, id))
+}
+
+/// `parent/segment` as a `TypeName` without rendering `parent` — one child step in the name tree.
+/// `segment` must be a single path segment; a multi-segment suffix falls back to the full insert.
+pub fn type_name_child(parent: TypeName, segment: &str) -> TypeName {
+    if segment.contains('/') {
+        let mut full = parent.render();
+        if !full.is_empty() {
+            full.push('/');
+        }
+        full.push_str(segment);
+        return type_name(&full);
+    }
+    TypeName(type_names().write().unwrap().child_of(parent.0, segment))
 }
 
 pub fn existing_type_name(internal: &str) -> Option<TypeName> {
-    type_names().lock().unwrap().get(internal).map(TypeName)
+    type_names().read().unwrap().get(internal).map(TypeName)
 }
 
 impl From<&String> for TypeName {
@@ -54,57 +68,57 @@ pub fn intern(name: &str) -> &'static str {
 
 impl TypeName {
     pub fn matches(self, internal: &str) -> bool {
-        type_names().lock().unwrap().get(internal) == Some(self.0)
+        type_names().read().unwrap().get(internal) == Some(self.0)
     }
 
     pub fn starts_with(self, prefix: &str) -> bool {
-        type_names().lock().unwrap().starts_with(self.0, prefix)
+        type_names().read().unwrap().starts_with(self.0, prefix)
     }
 
     pub fn contains(self, needle: &str) -> bool {
-        type_names().lock().unwrap().contains(self.0, needle)
+        type_names().read().unwrap().contains(self.0, needle)
     }
 
     pub fn qualifier_matches(self, qualifier: &str) -> bool {
         type_names()
-            .lock()
+            .read()
             .unwrap()
             .qualifier_matches(self.0, qualifier)
     }
 
     pub fn package_matches(self, package: &str) -> bool {
         type_names()
-            .lock()
+            .read()
             .unwrap()
             .package_matches(self.0, package)
     }
 
     pub fn package(self) -> String {
-        type_names().lock().unwrap().package(self.0)
+        type_names().read().unwrap().package(self.0)
     }
 
     pub fn parent(self) -> Option<TypeName> {
-        type_names().lock().unwrap().parent(self.0).map(TypeName)
+        type_names().read().unwrap().parent(self.0).map(TypeName)
     }
 
     pub fn segment(self) -> String {
-        type_names().lock().unwrap().segment(self.0).to_string()
+        type_names().read().unwrap().segment(self.0).to_string()
     }
 
     pub fn nested_separator_matches(self, other: TypeName) -> bool {
         type_names()
-            .lock()
+            .read()
             .unwrap()
             .nested_separator_matches(self.0, other.0)
     }
 
     pub fn strip_prefix(self, prefix: &str) -> Option<String> {
-        type_names().lock().unwrap().strip_prefix(self.0, prefix)
+        type_names().read().unwrap().strip_prefix(self.0, prefix)
     }
 
     pub fn unsigned_suffix_after_prefix(self, prefix: &str) -> Option<usize> {
         type_names()
-            .lock()
+            .read()
             .unwrap()
             .unsigned_suffix_after_prefix(self.0, prefix)
     }
@@ -114,7 +128,7 @@ impl TypeName {
     }
 
     pub fn render(self) -> String {
-        type_names().lock().unwrap().render(self.0)
+        type_names().read().unwrap().render(self.0)
     }
 }
 
