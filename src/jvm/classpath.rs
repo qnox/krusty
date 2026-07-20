@@ -317,6 +317,8 @@ struct CacheStats {
     ext_l1: CacheCounter,
     ext_l2: CacheCounter,
     meta_fns: CacheCounter,
+    resolved_types: CacheCounter,
+    symbols_memo: CacheCounter,
     bodies: CacheCounter,
     builtin_members: CacheCounter,
 }
@@ -336,12 +338,14 @@ pub fn trace_cache_stats() {
         let s = cache_stats();
         crate::trace_compiler!(
             "cache",
-            "class L1 {} · L2 {} | ext L1 {} · L2 {} | meta_fns {} | bodies {} | builtin {}",
+            "class L1 {} · L2 {} | ext L1 {} · L2 {} | meta_fns {} | types {} | symbols {} | bodies {} | builtin {}",
             s.l1_class.line("hits"),
             s.l2_class.line("hits"),
             s.ext_l1.line("hits"),
             s.ext_l2.line("hits"),
             s.meta_fns.line("hits"),
+            s.resolved_types.line("hits"),
+            s.symbols_memo.line("hits"),
             s.bodies.line("hits"),
             s.builtin_members.line("hits"),
         );
@@ -1049,10 +1053,13 @@ impl Classpath {
         // Per-cache LRU caps (entry counts). Sized so the warm working set of common stdlib/JDK classes
         // and their call queries stays resident across compiles, while one-off classes evict — bounding
         // per-thread memory instead of growing toward the full JDK. Override all at once with
-        // `KRUSTY_CACHE_CAP`. `CLASS_CAP`/`FN_CAP` are the two large ones (parsed classes, function sets).
-        const CLASS_CAP: usize = 4096;
-        const FN_CAP: usize = 8192;
-        const META_CAP: usize = 4096;
+        // `KRUSTY_CACHE_CAP`. The caps are deliberately ABOVE the box-corpus working set: at 4k/8k the
+        // full conformance run thrashed (evict-recompose churn was ~30% of compile thread-time — sigs
+        // 85s→26s, check 278s→212s at 64k) for only +56 MiB peak RSS; the caches are Rc-shared records,
+        // so entries are cheap and the real bound is the queried vocabulary.
+        const CLASS_CAP: usize = 65536;
+        const FN_CAP: usize = 65536;
+        const META_CAP: usize = 65536;
         const BODY_CAP: usize = 2048;
         Classpath {
             entries,
@@ -1168,7 +1175,9 @@ impl Classpath {
         &self,
         internal: TypeName,
     ) -> Option<Option<std::rc::Rc<crate::libraries::LibraryType>>> {
-        self.resolved_types.borrow_mut().get(&internal).cloned()
+        let hit = self.resolved_types.borrow_mut().get(&internal).cloned();
+        cache_stat!(resolved_types, hit.is_some());
+        hit
     }
 
     pub fn cache_library_type(
@@ -2459,7 +2468,9 @@ impl Classpath {
         &self,
         fqn: TypeName,
     ) -> Option<std::rc::Rc<crate::libraries::ResolvedSymbols>> {
-        self.symbols_memo.borrow_mut().get(&fqn).cloned()
+        let hit = self.symbols_memo.borrow_mut().get(&fqn).cloned();
+        cache_stat!(symbols_memo, hit.is_some());
+        hit
     }
 
     /// Store the composed namespace record for `fqn` in the top-level memo, returning the shared `Rc` the
