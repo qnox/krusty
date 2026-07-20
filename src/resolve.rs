@@ -11124,7 +11124,7 @@ impl<'a> Checker<'a> {
         let mut conflicted: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for (i, p) in f.params.iter().enumerate() {
             let at = &arg_tys[i];
-            if p.ty.fun_params.is_empty() {
+            if p.ty.fun_params.is_empty() && p.ty.name != "<fun>" {
                 // A plain value parameter typed as a bare type parameter (`x: T`).
                 if tparams.contains(p.ty.name.as_str()) {
                     bind_or_conflict(&mut binds, &mut conflicted, p.ty.name.as_str(), *at);
