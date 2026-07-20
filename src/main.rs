@@ -49,7 +49,9 @@ fn main() {
     let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
     krusty::jvm::prepare_module_symbols(&files, &stems, &mut syms);
 
-    let backend = krusty::jvm::JvmBackend::new(cp);
+    // A `-jvm-target` sets the emitted class-file version (kotlinc's `jvmToolchain(25)` ⇒ v69).
+    // Absent, the backend keeps krusty's v52 default.
+    let backend = krusty::jvm::JvmBackend::new(cp).with_class_major(opts.jvm_target_major);
     let outputs = krusty::compiler::compile(
         &files,
         &stems,

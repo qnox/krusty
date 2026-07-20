@@ -13,7 +13,7 @@ pub const ACC_INTERFACE: u16 = 0x0200;
 pub const ACC_ABSTRACT: u16 = 0x0400;
 
 // Major 52 = Java 8, matching kotlinc's default JVM target.
-const MAJOR_JAVA8: u16 = 52;
+pub const MAJOR_JAVA8: u16 = 52;
 
 /// JVM verification type for StackMapTable entries (JVMS §4.7.4).
 #[derive(Clone, PartialEq)]
@@ -281,6 +281,10 @@ pub struct ClassWriter {
     class_deprecated: bool,
     /// `(name_index, desc_index)` of methods carrying a `Deprecated` attribute (from `@Deprecated`).
     deprecated_methods: std::collections::HashSet<(u16, u16)>,
+    /// Class-file major version to emit (captured from [`CLASS_MAJOR`] at construction).
+    major: u16,
+    /// Source-file simple name for the `SourceFile` attribute (captured from [`SOURCE_FILE`]).
+    source_file: Option<String>,
     pub internal_name: String,
 }
 
@@ -302,8 +306,21 @@ impl ClassWriter {
             bootstrap_methods: Vec::new(),
             class_deprecated: false,
             deprecated_methods: std::collections::HashSet::new(),
+            major: MAJOR_JAVA8,
+            source_file: None,
             internal_name: internal_name.to_string(),
         }
+    }
+
+    /// Set the class-file major version to emit (kotlinc maps `-jvm-target 25` ⇒ v69). Default v52.
+    pub fn set_major(&mut self, major: u16) {
+        self.major = major;
+    }
+
+    /// Set the source-file simple name for the `SourceFile` attribute (e.g. `Foo.kt`). `None` (the
+    /// default) emits no attribute.
+    pub fn set_source_file(&mut self, name: Option<String>) {
+        self.source_file = name;
     }
 
     /// Mark the class itself as carrying a `Deprecated` attribute (kotlinc emits this for a `@Deprecated`
@@ -704,7 +721,11 @@ impl ClassWriter {
         // Build the `BootstrapMethods` attribute body before serializing the pool (its name + any
         // remaining indices must already be interned). All handle/argument indices were interned
         // when `add_bootstrap` ran during code emission.
-        if !self.bootstrap_methods.is_empty() {
+        // Each optional class attribute is BUILT here (interning its name/values before the pool is
+        // serialized) but held in a local, then written in kotlinc's fixed class-attribute order below:
+        //   InnerClasses, Signature, SourceFile, Deprecated, RuntimeVisibleAnnotations, BootstrapMethods.
+        // (krusty does not yet emit InnerClasses / class-level Signature.)
+        let bootstrap_attr = if !self.bootstrap_methods.is_empty() {
             let name = self.cp.utf8("BootstrapMethods");
             let mut body = Vec::new();
             u2(&mut body, self.bootstrap_methods.len() as u16);
@@ -715,22 +736,39 @@ impl ClassWriter {
                     u2(&mut body, a);
                 }
             }
-            self.class_attributes.push((name, body));
-        }
+            Some((name, body))
+        } else {
+            None
+        };
         // ONE `RuntimeVisibleAnnotations` attribute for all queued annotations (`@Metadata` + user ones).
-        if !self.runtime_annotations.is_empty() {
+        let rva_attr = if !self.runtime_annotations.is_empty() {
             let name = self.cp.utf8("RuntimeVisibleAnnotations");
             let mut body = Vec::new();
             u2(&mut body, self.runtime_annotations.len() as u16);
             for a in &self.runtime_annotations {
                 body.extend_from_slice(a);
             }
-            self.class_attributes.push((name, body));
-        }
+            Some((name, body))
+        } else {
+            None
+        };
+        // `SourceFile`: name_index + a 2-byte body = the CP index of the source-file UTF8. kotlinc emits
+        // this on every class naming the origin `.kt`.
+        let sourcefile_attr = self.source_file.clone().map(|src| {
+            let name = self.cp.utf8("SourceFile");
+            let file_idx = self.cp.utf8(&src);
+            let mut body = Vec::new();
+            u2(&mut body, file_idx);
+            (name, body)
+        });
+        // Class-level `Deprecated` (zero-length). Its name was interned above with the method one.
+        let deprecated_attr = self
+            .class_deprecated
+            .then(|| (deprecated_attr_name.unwrap(), Vec::new()));
         let mut out = Vec::new();
         u4(&mut out, 0xCAFEBABE);
         u2(&mut out, 0); // minor
-        u2(&mut out, MAJOR_JAVA8);
+        u2(&mut out, self.major);
         self.cp.serialize(&mut out);
         u2(&mut out, self.access);
         u2(&mut out, self.this_class);
@@ -820,13 +858,16 @@ impl ClassWriter {
                 u4(&mut out, 0);
             }
         }
-        // Class-level `Deprecated` attribute (zero-length) — appended to the class attribute table.
-        if self.class_deprecated {
-            let name = deprecated_attr_name.unwrap();
-            self.class_attributes.push((name, Vec::new()));
-        }
-        u2(&mut out, self.class_attributes.len() as u16);
-        for (name, bytes) in &self.class_attributes {
+        // Assemble the class attribute table in kotlinc's fixed order. `self.class_attributes` is empty
+        // in practice (nothing pushes to it outside `finish`); it is prepended to preserve the API.
+        let mut ordered: Vec<(u16, Vec<u8>)> = std::mem::take(&mut self.class_attributes);
+        ordered.extend(
+            [sourcefile_attr, deprecated_attr, rva_attr, bootstrap_attr]
+                .into_iter()
+                .flatten(),
+        );
+        u2(&mut out, ordered.len() as u16);
+        for (name, bytes) in &ordered {
             u2(&mut out, *name);
             u4(&mut out, bytes.len() as u32);
             out.extend_from_slice(bytes);
@@ -1596,6 +1637,29 @@ mod tests {
         let bytes = cw.finish();
         assert_eq!(&bytes[0..4], &[0xCA, 0xFE, 0xBA, 0xBE]);
         assert_eq!(u16::from_be_bytes([bytes[6], bytes[7]]), MAJOR_JAVA8);
+    }
+
+    #[test]
+    fn jvm_target_sets_class_major_version() {
+        let mut cw = ClassWriter::new("FooKt", "java/lang/Object");
+        cw.set_major(69); // -jvm-target 25
+        let bytes = cw.finish();
+        assert_eq!(u16::from_be_bytes([bytes[6], bytes[7]]), 69);
+    }
+
+    #[test]
+    fn source_file_attribute_emitted_and_ordered() {
+        let mut cw = ClassWriter::new("FooKt", "java/lang/Object");
+        cw.set_source_file(Some("Foo.kt".to_string()));
+        let bytes = cw.finish();
+        // The `SourceFile` name and the source basename are both interned.
+        let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+        assert!(has(b"SourceFile"));
+        assert!(has(b"Foo.kt"));
+
+        // Default (no source set) emits no SourceFile.
+        let plain = ClassWriter::new("FooKt", "java/lang/Object").finish();
+        assert!(!plain.windows(6).any(|w| w == b"Foo.kt"));
     }
 
     #[test]
