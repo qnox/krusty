@@ -1592,7 +1592,15 @@ pub fn lower_value_classes(
                         && !unbox_receiver_casts.contains(&id)
                     {
                         strip.push((id, *arg));
-                    } else if !to_self && is_ref(type_operand) {
+                    } else if (!to_self && is_ref(type_operand))
+                        // `is X` on the unboxed value itself: the underlying is not an `X` instance, so
+                        // the `instanceof X` must run on the box, like the supertype case.
+                        || (to_self
+                            && matches!(
+                                op,
+                                crate::ir::IrTypeOp::InstanceOf | crate::ir::IrTypeOp::NotInstanceOf
+                            ))
+                    {
                         ops.push((*arg, repr_ctx.box_op(*arg, x)));
                     }
                 }
