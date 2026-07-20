@@ -3220,7 +3220,7 @@ mod fq_tests {
 
     #[test]
     fn name_tree_shares_segments_and_renders_internal_names() {
-        let mut tree = NameTree::default();
+        let tree = NameTree::default();
         let collections = tree.insert("kotlin/collections/CollectionsKt");
         let maps = tree.insert("kotlin/collections/MapsKt");
         let duplicate = tree.insert("kotlin/collections/CollectionsKt");
@@ -3233,7 +3233,7 @@ mod fq_tests {
 
     #[test]
     fn name_tree_copies_between_indexes_without_render_dedup() {
-        let mut entry_names = NameTree::default();
+        let entry_names = NameTree::default();
         let collections = entry_names.insert("kotlin/collections/CollectionsKt");
         let maps = entry_names.insert("kotlin/collections/MapsKt");
 

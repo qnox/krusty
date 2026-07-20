@@ -54,6 +54,11 @@ impl std::hash::Hasher for FxHasher {
 pub type FxBuildHasher = std::hash::BuildHasherDefault<FxHasher>;
 pub type FxHashMap<K, V> = std::collections::HashMap<K, V, FxBuildHasher>;
 
+use std::cell::UnsafeCell;
+use std::mem::MaybeUninit;
+use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub struct NameId(pub(crate) u32);
 
@@ -64,33 +69,224 @@ struct NameNode {
     segment: std::sync::Arc<str>,
 }
 
-/// A compact internal-name tree. Names are inserted as slash-separated segments and retained structures
-/// store `NameId` (`u32`) handles instead of cloning full internal-name strings.
-#[derive(Clone, Debug)]
-pub struct NameTree {
-    nodes: Vec<NameNode>,
-    /// Child lookup: parent → segment → child. The keys share the nodes' `Arc<str>` segments. A node's
-    /// separator is implied by its parent (none below ROOT, `/` otherwise), so it is not part of the key.
-    children: FxHashMap<NameId, FxHashMap<std::sync::Arc<str>, NameId>>,
+/// Chunked append-only node storage. A node is written exactly once (by the single writer, before its
+/// id is published through a child-table slot or returned to the caller) and never moves — chunks are
+/// allocated up front per size class, so readers index without any lock or reallocation hazard.
+const BASE_LOG2: u32 = 6;
+const BASE: u32 = 1 << BASE_LOG2; // chunk 0 holds 64 nodes; chunk k holds 64 << k
+const CHUNKS: usize = 26; // total capacity 64 * (2^26 - 1) > u32::MAX
+
+struct Chunk(Box<[UnsafeCell<MaybeUninit<NameNode>>]>);
+
+// The per-slot data is only written before the slot's id is published (release/acquire via the child
+// table or the arena len) and is immutable afterwards.
+unsafe impl Sync for Chunk {}
+unsafe impl Send for Chunk {}
+
+struct Arena {
+    chunks: [OnceLock<Chunk>; CHUNKS],
+    /// Number of initialized nodes. `Release`-published after the node is written; readers that index
+    /// by an id obtained from a published slot need no check at all.
+    len: AtomicU32,
 }
+
+/// chunk index + offset within the chunk for a node id.
+#[inline]
+fn locate(id: u32) -> (usize, usize) {
+    let n = (id >> BASE_LOG2) + 1;
+    let k = 31 - n.leading_zeros();
+    let start = (BASE << k) - BASE;
+    (k as usize, (id - start) as usize)
+}
+
+impl Arena {
+    fn new() -> Self {
+        Arena {
+            chunks: std::array::from_fn(|_| OnceLock::new()),
+            len: AtomicU32::new(0),
+        }
+    }
+
+    #[inline]
+    fn get(&self, id: u32) -> &NameNode {
+        let (k, off) = locate(id);
+        let chunk = self.chunks[k].get().expect("published node id has a chunk");
+        // SAFETY: `id` was published (returned from `push` / read from a table slot), so the slot was
+        // fully initialized before the publishing release store, and node slots are never mutated.
+        unsafe { (*chunk.0[off].get()).assume_init_ref() }
+    }
+
+    /// Caller must be the unique writer (holds the tree's writer lock, or has exclusive access during
+    /// construction).
+    fn push(&self, node: NameNode) -> u32 {
+        let id = self.len.load(Ordering::Relaxed);
+        assert!(id < u32::MAX, "name tree node count exceeded u32 capacity");
+        let (k, off) = locate(id);
+        let chunk = self.chunks[k].get_or_init(|| {
+            Chunk(
+                (0..(BASE << k) as usize)
+                    .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
+                    .collect(),
+            )
+        });
+        // SAFETY: single writer; slot `off` in chunk `k` is uninitialized (len == id) and unaliased.
+        unsafe { (*chunk.0[off].get()).write(node) };
+        self.len.store(id + 1, Ordering::Release);
+        id
+    }
+
+    fn len(&self) -> u32 {
+        self.len.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for Arena {
+    fn drop(&mut self) {
+        for id in 0..self.len.load(Ordering::Acquire) {
+            let (k, off) = locate(id);
+            let chunk = self.chunks[k]
+                .get_mut()
+                .expect("initialized node has a chunk");
+            // SAFETY: ids below len are initialized, dropped exactly once here.
+            unsafe { (*chunk.0[off].get()).assume_init_drop() };
+        }
+    }
+}
+
+/// Open-addressing child index: `(parent, segment) → child id`. A slot packs `(child id + 1) << 32 |
+/// hash tag` in one atomic word — zero means empty. Readers probe lock-free; the single writer (under
+/// the tree's writer lock) installs entries with a release store and grows by publishing a rehashed
+/// copy through the tree's `current` pointer (retired tables stay alive, so a reader holding the old
+/// pointer sees a valid — merely stale — subset and falls into the writer path on a miss).
+struct Table {
+    mask: usize,
+    slots: Box<[AtomicU64]>,
+}
+
+impl Table {
+    fn new(cap: usize) -> Self {
+        debug_assert!(cap.is_power_of_two());
+        Table {
+            mask: cap - 1,
+            slots: (0..cap).map(|_| AtomicU64::new(0)).collect(),
+        }
+    }
+
+    #[inline]
+    fn probe(&self, arena: &Arena, parent: NameId, segment: &str, h: u64) -> Option<NameId> {
+        let tag = h as u32;
+        let mut i = (h >> 32) as usize & self.mask;
+        loop {
+            let slot = self.slots[i].load(Ordering::Acquire);
+            if slot == 0 {
+                return None;
+            }
+            if slot as u32 == tag {
+                let id = ((slot >> 32) - 1) as u32;
+                let node = arena.get(id);
+                if node.parent == Some(parent) && &*node.segment == segment {
+                    return Some(NameId(id));
+                }
+            }
+            i = (i + 1) & self.mask;
+        }
+    }
+
+    /// Writer-only: install `child` at the first empty slot of its probe chain.
+    fn install(&self, h: u64, child: u32) {
+        let value = (u64::from(child) + 1) << 32 | u64::from(h as u32);
+        let mut i = (h >> 32) as usize & self.mask;
+        loop {
+            if self.slots[i].load(Ordering::Relaxed) == 0 {
+                self.slots[i].store(value, Ordering::Release);
+                return;
+            }
+            i = (i + 1) & self.mask;
+        }
+    }
+}
+
+#[inline]
+fn child_hash(parent: NameId, segment: &str) -> u64 {
+    use std::hash::Hasher;
+    let mut h = FxHasher::default();
+    h.write_u32(parent.0);
+    h.write(segment.as_bytes());
+    h.finish()
+}
+
+struct WriterState {
+    /// Every table ever published, oldest first; the last is the live one. Retired tables are kept so
+    /// readers holding a stale `current` pointer stay valid. The boxes are required, not an
+    /// indirection nicety: `current` aliases a table by raw pointer, so a table must never move when
+    /// this vector reallocates.
+    #[allow(clippy::vec_box)]
+    tables: Vec<Box<Table>>,
+    /// Number of installed children (across live entries; retirement never removes entries).
+    count: usize,
+}
+
+/// A compact internal-name tree. Names are inserted as slash-separated segments and retained structures
+/// store `NameId` (`u32`) handles instead of cloning full internal-name strings. All reads — id walks
+/// (`render`, `starts_with`, …) and child probes (`get`, `existing_child_of`) — are lock-free; only a
+/// genuinely new insertion takes the writer lock.
+pub struct NameTree {
+    arena: Arena,
+    current: AtomicPtr<Table>,
+    writer: Mutex<WriterState>,
+}
+
+// SAFETY: readers only follow published data (acquire loads of table slots / the table pointer pairing
+// with the writer's release stores); all mutation is serialized by the writer lock.
+unsafe impl Sync for NameTree {}
+unsafe impl Send for NameTree {}
 
 impl Default for NameTree {
     fn default() -> Self {
+        let arena = Arena::new();
+        arena.push(NameNode {
+            parent: None,
+            sep: 0,
+            segment: std::sync::Arc::from(""),
+        });
+        let table = Box::new(Table::new(BASE as usize));
+        let current = AtomicPtr::new(&*table as *const Table as *mut Table);
         NameTree {
-            nodes: vec![NameNode {
-                parent: None,
-                sep: 0,
-                segment: std::sync::Arc::from(""),
-            }],
-            children: FxHashMap::default(),
+            arena,
+            current,
+            writer: Mutex::new(WriterState {
+                tables: vec![table],
+                count: 0,
+            }),
         }
+    }
+}
+
+impl Clone for NameTree {
+    fn clone(&self) -> Self {
+        // Nodes are inserted parents-first, so replaying them in id order reproduces identical ids.
+        let out = NameTree::default();
+        for id in 1..self.arena.len() {
+            let node = self.arena.get(id);
+            let parent = node.parent.expect("non-root name node has a parent");
+            out.child_or_insert(parent, node.sep, &node.segment);
+        }
+        out
+    }
+}
+
+impl std::fmt::Debug for NameTree {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NameTree")
+            .field("len", &self.arena.len())
+            .finish_non_exhaustive()
     }
 }
 
 impl NameTree {
     pub const ROOT: NameId = NameId(0);
 
-    pub fn insert(&mut self, internal: &str) -> NameId {
+    pub fn insert(&self, internal: &str) -> NameId {
         if internal.is_empty() {
             return Self::ROOT;
         }
@@ -108,27 +304,24 @@ impl NameTree {
             return Some(Self::ROOT);
         }
         let mut parent = Self::ROOT;
-        let mut sep = 0;
         for segment in internal.split('/') {
-            parent = self.child(parent, sep, segment)?;
-            sep = b'/';
+            parent = self.child(parent, segment)?;
         }
         Some(parent)
     }
 
     /// One child step below `parent`; `segment` must not contain `/`.
-    pub fn child_of(&mut self, parent: NameId, segment: &str) -> NameId {
+    pub fn child_of(&self, parent: NameId, segment: &str) -> NameId {
         let sep = if parent == Self::ROOT { 0 } else { b'/' };
         self.child_or_insert(parent, sep, segment)
     }
 
     /// The already-interned child of `parent` for `segment`, without inserting.
     pub fn existing_child_of(&self, parent: NameId, segment: &str) -> Option<NameId> {
-        let sep = if parent == Self::ROOT { 0 } else { b'/' };
-        self.child(parent, sep, segment)
+        self.child(parent, segment)
     }
 
-    pub fn insert_from(&mut self, other: &NameTree, id: NameId) -> NameId {
+    pub fn insert_from(&self, other: &NameTree, id: NameId) -> NameId {
         let mut parts = Vec::new();
         let mut cur = id;
         while cur != Self::ROOT {
@@ -298,38 +491,69 @@ impl NameTree {
 
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.nodes.len()
+        self.arena.len() as usize
     }
 
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
+        self.arena.len() == 0
     }
 
     fn node(&self, id: NameId) -> &NameNode {
-        &self.nodes[id.0 as usize]
+        self.arena.get(id.0)
     }
 
-    fn child_or_insert(&mut self, parent: NameId, sep: u8, segment: &str) -> NameId {
-        if let Some(id) = self.child(parent, sep, segment) {
+    fn child_or_insert(&self, parent: NameId, sep: u8, segment: &str) -> NameId {
+        let h = child_hash(parent, segment);
+        // Lock-free fast path: probe the live table.
+        // SAFETY: `current` always points at a table owned by `writer.tables`, which never drops one
+        // while the tree is alive.
+        let table = unsafe { &*self.current.load(Ordering::Acquire) };
+        if let Some(id) = table.probe(&self.arena, parent, segment, h) {
             return id;
         }
-
-        let id = NameId(
-            u32::try_from(self.nodes.len()).expect("name tree node count exceeded u32 capacity"),
-        );
+        let mut w = self.writer.lock().unwrap();
+        // Re-probe the (possibly newer) live table: another writer may have inserted this child, or
+        // grown the table, between the fast-path probe and taking the lock.
+        let mut table = unsafe { &*self.current.load(Ordering::Relaxed) };
+        if let Some(id) = table.probe(&self.arena, parent, segment, h) {
+            return id;
+        }
+        // Grow at 7/8 load, BEFORE installing, so the probe chains stay short and an empty slot always
+        // exists. The rehashed copy is fully built and then published; retired tables stay alive for
+        // readers still holding the old pointer.
+        if (w.count + 1) * 8 > (table.mask + 1) * 7 {
+            let grown = Box::new(Table::new((table.mask + 1) * 2));
+            for slot in table.slots.iter() {
+                let s = slot.load(Ordering::Relaxed);
+                if s != 0 {
+                    let id = ((s >> 32) - 1) as u32;
+                    let node = self.arena.get(id);
+                    let parent = node.parent.expect("child entries have a parent");
+                    grown.install(child_hash(parent, &node.segment), id);
+                }
+            }
+            self.current
+                .store(&*grown as *const Table as *mut Table, Ordering::Release);
+            w.tables.push(grown);
+            table = unsafe { &*self.current.load(Ordering::Relaxed) };
+        }
         let segment: std::sync::Arc<str> = std::sync::Arc::from(segment);
-        self.nodes.push(NameNode {
+        let id = self.arena.push(NameNode {
             parent: Some(parent),
             sep,
-            segment: segment.clone(),
+            segment,
         });
-        self.children.entry(parent).or_default().insert(segment, id);
-        id
+        table.install(h, id);
+        w.count += 1;
+        NameId(id)
     }
 
-    fn child(&self, parent: NameId, _sep: u8, segment: &str) -> Option<NameId> {
-        self.children.get(&parent)?.get(segment).copied()
+    fn child(&self, parent: NameId, segment: &str) -> Option<NameId> {
+        let h = child_hash(parent, segment);
+        // SAFETY: see `child_or_insert`.
+        let table = unsafe { &*self.current.load(Ordering::Acquire) };
+        table.probe(&self.arena, parent, segment, h)
     }
 
     fn path_eq(&self, id: NameId, path: &str) -> bool {
@@ -377,7 +601,7 @@ mod tests {
 
     #[test]
     fn compares_paths_without_rendering() {
-        let mut names = NameTree::default();
+        let names = NameTree::default();
         let map = names.insert("kotlin/collections/Map");
         let entry = names.insert("kotlin/collections/Map$Entry");
 
@@ -408,5 +632,44 @@ mod tests {
         assert!(names.package_matches(map, "kotlin/collections"));
         assert!(!names.package_matches(entry, "kotlin"));
         assert_eq!(names.package(entry), "kotlin/collections");
+    }
+
+    #[test]
+    fn grows_past_the_initial_table_and_chunks() {
+        let names = NameTree::default();
+        let ids: Vec<_> = (0..3000)
+            .map(|i| names.insert(&format!("pkg{}/Class{}", i % 7, i)))
+            .collect();
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(names.render(*id), format!("pkg{}/Class{}", i % 7, i));
+        }
+        let again = names.insert("pkg3/Class10");
+        assert_eq!(ids[10], again);
+    }
+
+    #[test]
+    fn concurrent_insert_and_read() {
+        let names = std::sync::Arc::new(NameTree::default());
+        let mut handles = Vec::new();
+        for t in 0..8 {
+            let names = names.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in 0..2000 {
+                    // Half the names are shared across threads, half unique — exercises racing
+                    // insert-vs-probe on the same (parent, segment) pairs and table growth.
+                    let name = if i % 2 == 0 {
+                        format!("shared/pkg{}/Class{}", i % 5, i)
+                    } else {
+                        format!("thread{t}/pkg/Class{i}")
+                    };
+                    let id = names.insert(&name);
+                    assert_eq!(names.render(id), name);
+                    assert_eq!(names.get(&name), Some(id));
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
     }
 }

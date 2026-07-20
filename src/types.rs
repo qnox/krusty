@@ -4,7 +4,7 @@
 use crate::name_tree::{NameId, NameTree};
 use std::collections::HashSet;
 use std::fmt;
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeName(NameId);
@@ -14,36 +14,20 @@ pub struct TypeNameList {
     names: Vec<TypeName>,
 }
 
-static TYPE_NAMES: OnceLock<RwLock<NameTree>> = OnceLock::new();
+// The tree itself is concurrent (lock-free reads, internally-locked inserts), so the global interner
+// is just a shared instance — no outer lock and no per-thread memo.
+static TYPE_NAMES: OnceLock<NameTree> = OnceLock::new();
 
-fn type_names() -> &'static RwLock<NameTree> {
-    TYPE_NAMES.get_or_init(|| RwLock::new(NameTree::default()))
+fn type_names() -> &'static NameTree {
+    TYPE_NAMES.get_or_init(NameTree::default)
 }
 
 pub fn type_name(internal: &str) -> TypeName {
-    // Ids are global and stable, so a per-thread memo of already-interned strings is always valid; it
-    // turns the repeated interning of hot names (metadata decode re-reads the same FQNs constantly)
-    // into a lock-free lookup instead of a write-lock walk of the shared tree.
-    thread_local! {
-        static INTERNED: std::cell::RefCell<crate::name_tree::FxHashMap<Box<str>, TypeName>> =
-            std::cell::RefCell::new(crate::name_tree::FxHashMap::default());
-    }
-    INTERNED.with(|memo| {
-        if let Some(&t) = memo.borrow().get(internal) {
-            return t;
-        }
-        let t = TypeName(type_names().write().unwrap().insert(internal));
-        let mut memo = memo.borrow_mut();
-        if memo.len() >= 16_384 {
-            memo.clear();
-        }
-        memo.insert(internal.into(), t);
-        t
-    })
+    TypeName(type_names().insert(internal))
 }
 
 pub fn type_name_from(names: &NameTree, id: NameId) -> TypeName {
-    TypeName(type_names().write().unwrap().insert_from(names, id))
+    TypeName(type_names().insert_from(names, id))
 }
 
 /// `parent/segment` as a `TypeName` without rendering `parent` — one child step in the name tree.
@@ -57,20 +41,11 @@ pub fn type_name_child(parent: TypeName, segment: &str) -> TypeName {
         full.push_str(segment);
         return type_name(&full);
     }
-    // Probes repeat the same (parent, segment) pairs constantly; answer from the read side and take
-    // the write lock only for a genuinely new child.
-    if let Some(id) = type_names()
-        .read()
-        .unwrap()
-        .existing_child_of(parent.0, segment)
-    {
-        return TypeName(id);
-    }
-    TypeName(type_names().write().unwrap().child_of(parent.0, segment))
+    TypeName(type_names().child_of(parent.0, segment))
 }
 
 pub fn existing_type_name(internal: &str) -> Option<TypeName> {
-    type_names().read().unwrap().get(internal).map(TypeName)
+    type_names().get(internal).map(TypeName)
 }
 
 impl From<&String> for TypeName {
@@ -95,59 +70,47 @@ pub fn intern(name: &str) -> &'static str {
 
 impl TypeName {
     pub fn matches(self, internal: &str) -> bool {
-        type_names().read().unwrap().get(internal) == Some(self.0)
+        type_names().get(internal) == Some(self.0)
     }
 
     pub fn starts_with(self, prefix: &str) -> bool {
-        type_names().read().unwrap().starts_with(self.0, prefix)
+        type_names().starts_with(self.0, prefix)
     }
 
     pub fn contains(self, needle: &str) -> bool {
-        type_names().read().unwrap().contains(self.0, needle)
+        type_names().contains(self.0, needle)
     }
 
     pub fn qualifier_matches(self, qualifier: &str) -> bool {
-        type_names()
-            .read()
-            .unwrap()
-            .qualifier_matches(self.0, qualifier)
+        type_names().qualifier_matches(self.0, qualifier)
     }
 
     pub fn package_matches(self, package: &str) -> bool {
-        type_names()
-            .read()
-            .unwrap()
-            .package_matches(self.0, package)
+        type_names().package_matches(self.0, package)
     }
 
     pub fn package(self) -> String {
-        type_names().read().unwrap().package(self.0)
+        type_names().package(self.0)
     }
 
     pub fn parent(self) -> Option<TypeName> {
-        type_names().read().unwrap().parent(self.0).map(TypeName)
+        type_names().parent(self.0).map(TypeName)
     }
 
     pub fn segment(self) -> String {
-        type_names().read().unwrap().segment(self.0).to_string()
+        type_names().segment(self.0).to_string()
     }
 
     pub fn nested_separator_matches(self, other: TypeName) -> bool {
-        type_names()
-            .read()
-            .unwrap()
-            .nested_separator_matches(self.0, other.0)
+        type_names().nested_separator_matches(self.0, other.0)
     }
 
     pub fn strip_prefix(self, prefix: &str) -> Option<String> {
-        type_names().read().unwrap().strip_prefix(self.0, prefix)
+        type_names().strip_prefix(self.0, prefix)
     }
 
     pub fn unsigned_suffix_after_prefix(self, prefix: &str) -> Option<usize> {
-        type_names()
-            .read()
-            .unwrap()
-            .unsigned_suffix_after_prefix(self.0, prefix)
+        type_names().unsigned_suffix_after_prefix(self.0, prefix)
     }
 
     pub fn replace(self, from: char, to: &str) -> String {
@@ -155,7 +118,7 @@ impl TypeName {
     }
 
     pub fn render(self) -> String {
-        type_names().read().unwrap().render(self.0)
+        type_names().render(self.0)
     }
 }
 
