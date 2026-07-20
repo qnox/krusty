@@ -252,8 +252,8 @@ impl JvmLibraries {
         };
         let prop_rets: std::collections::HashMap<_, _> =
             super::metadata::class_properties(&companion)
-                .into_iter()
-                .filter_map(|p| p.ret_class.map(|ret| (p.name, ret)))
+                .iter()
+                .filter_map(|p| p.ret_class.map(|ret| (p.name.clone(), ret)))
                 .collect();
         Self::const_fields(&ci.fields, |f| {
             prop_rets
@@ -626,7 +626,7 @@ impl JvmLibraries {
             return Vec::new();
         };
         metadata::class_functions(&comp_ci)
-            .into_iter()
+            .iter()
             .filter(|m| m.is_public)
             .filter_map(|m| {
                 let descriptor = m.jvm_desc?;
@@ -642,7 +642,7 @@ impl JvmLibraries {
                         inline: InlineKind::MustInline,
                         ..LibraryCallable::library(
                             type_name(&companion_internal),
-                            m.jvm_name,
+                            m.jvm_name.clone(),
                             params,
                             Ty::obj(&internal),
                             Ty::obj("kotlin/Any"),
@@ -696,7 +696,7 @@ impl JvmLibraries {
     ) -> Vec<(String, LibraryMember)> {
         let internal = ci.this_class();
         metadata::class_properties(ci)
-            .into_iter()
+            .iter()
             .filter_map(|p| {
                 let logical = p.ret_class?;
                 // Only a value-class-typed property (mangled getter); an ordinary property keeps its
@@ -727,7 +727,7 @@ impl JvmLibraries {
                     m.descriptor.clone(),
                 );
                 member.owner = Some(type_name(&internal));
-                Some((p.name, member))
+                Some((p.name.clone(), member))
             })
             .collect()
     }
@@ -865,7 +865,7 @@ impl JvmLibraries {
             // `Vid` argument. Recover the SOURCE name + logical (value-class) parameter types from `@Metadata`
             // and expose the member under the source name — keeping the mangled JVM name as `physical_name`
             // and the erased descriptor for emit (the value-classes pass unboxes the `Vid` argument).
-            for mf in &meta_fns {
+            for mf in meta_fns {
                 if !mf.is_public || mf.is_extension || mf.jvm_name == mf.kotlin_name {
                     continue;
                 }
@@ -1056,7 +1056,7 @@ impl JvmLibraries {
                 }
             });
             let value_class_metadata_members =
-                self.value_class_metadata_members_for_class(&ci, inline.is_some(), &meta_fns);
+                self.value_class_metadata_members_for_class(&ci, inline.is_some(), meta_fns);
             // The class's own formal type parameters (`Pair` → `[A, B]`), for constructor type-argument
             // inference; empty for a non-generic type.
             let type_params = ci
@@ -1678,7 +1678,9 @@ impl SymbolSource for JvmLibraries {
                         continue;
                     }
                     // Need the real accessor to emit anything; skip a property whose metadata omits it.
-                    let Some(getter) = mp.getter else { continue };
+                    let Some(getter) = mp.getter.clone() else {
+                        continue;
+                    };
                     let ret_ty = mp
                         .ret_class
                         .map_or(Ty::obj("kotlin/Any"), kotlin_type_name_to_ty);
@@ -1691,7 +1693,7 @@ impl SymbolSource for JvmLibraries {
                         ret_ty,
                         getter.desc,
                     );
-                    let setter = mp.setter.map(|s| {
+                    let setter = mp.setter.clone().map(|s| {
                         LibraryCallable::library(
                             cn,
                             s.name,

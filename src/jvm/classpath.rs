@@ -730,9 +730,9 @@ struct ClassMeta {
     /// [`Classpath::meta_functions`] for the lookups that need a whole `MetaFn` (return class by JVM
     /// name, receiver-function params) rather than one of the maps above, so they share THIS decode
     /// instead of re-decoding + re-merging the `d1` themselves.
-    fns: std::rc::Rc<[super::metadata::MetaFn]>,
+    fns: std::sync::Arc<[super::metadata::MetaFn]>,
     /// The facade-merged `@Metadata` properties, decoded alongside `fns` from the same `d1`.
-    props: std::rc::Rc<[super::metadata::MetaProp]>,
+    props: std::sync::Arc<[super::metadata::MetaProp]>,
 }
 
 #[derive(Default)]
@@ -1050,13 +1050,11 @@ impl Classpath {
             })
             .collect();
         let cache_key: Vec<PathBuf> = entries.iter().map(|e| e.path().to_path_buf()).collect();
-        // Per-cache LRU caps (entry counts). Sized so the warm working set of common stdlib/JDK classes
-        // and their call queries stays resident across compiles, while one-off classes evict — bounding
-        // per-thread memory instead of growing toward the full JDK. Override all at once with
-        // `KRUSTY_CACHE_CAP`. The caps are deliberately ABOVE the box-corpus working set: at 4k/8k the
-        // full conformance run thrashed (evict-recompose churn was ~30% of compile thread-time — sigs
-        // 85s→26s, check 278s→212s at 64k) for only +56 MiB peak RSS; the caches are Rc-shared records,
-        // so entries are cheap and the real bound is the queried vocabulary.
+        // Per-cache LRU caps (entry counts). Sized ABOVE the conformance working set: entries are
+        // Rc-shared records, so the practical bound is the queried vocabulary, and an undersized cap
+        // thrashes (every eviction re-composes a type/namespace record or re-decodes metadata). The
+        // caps still bound per-thread memory against a pathological vocabulary. Override all at once
+        // with `KRUSTY_CACHE_CAP`.
         const CLASS_CAP: usize = 65536;
         const FN_CAP: usize = 65536;
         const META_CAP: usize = 65536;
@@ -1209,30 +1207,32 @@ impl Classpath {
         }
         cache_stat!(meta_fns, false);
         let ci = self.find_name(internal_id);
-        let mut fns = ci
-            .as_ref()
-            .map(|c| super::metadata::package_functions(c))
-            .unwrap_or_default();
-        let mut suspend_names: HashSet<String> = fns
+        // The common case shares the class's decoded slice by refcount; only a multifile facade (whose
+        // functions live in its PART classes) materializes a merged copy.
+        let mut shared_fns: Option<std::sync::Arc<[super::metadata::MetaFn]>> =
+            ci.as_ref().map(|c| c.meta.package_functions.clone());
+        let mut fns: Vec<super::metadata::MetaFn> = Vec::new();
+        let mut suspend_names: HashSet<String> = shared_fns
             .iter()
+            .flat_map(|f| f.iter())
             .filter(|f| f.is_suspend)
             .map(|f| f.kotlin_name.clone())
             .collect();
         if let Some(ci) = &ci {
             suspend_names.extend(
                 super::metadata::class_functions(ci)
-                    .into_iter()
+                    .iter()
                     .filter(|f| f.is_suspend)
-                    .map(|f| f.kotlin_name),
+                    .map(|f| f.kotlin_name.clone()),
             );
         }
         // A multifile FACADE has no function metadata of its own — its `d1` lists the PART class names,
         // which hold the functions; merge them in (the parts' `d1` is decoded once here, not per lookup).
-        if fns.is_empty() {
+        if shared_fns.as_ref().is_none_or(|f| f.is_empty()) {
             if let Some(ci) = &ci {
-                for part in &ci.kotlin_d1 {
+                for part in &ci.meta.multifile_parts {
                     if let Some(pci) = self.find(part) {
-                        let mut part_fns = super::metadata::package_functions(&pci);
+                        let part_fns = super::metadata::package_functions(&pci);
                         suspend_names.extend(
                             part_fns
                                 .iter()
@@ -1241,39 +1241,49 @@ impl Classpath {
                         );
                         suspend_names.extend(
                             super::metadata::class_functions(&pci)
-                                .into_iter()
+                                .iter()
                                 .filter(|f| f.is_suspend)
-                                .map(|f| f.kotlin_name),
+                                .map(|f| f.kotlin_name.clone()),
                         );
-                        fns.append(&mut part_fns);
+                        fns.extend_from_slice(part_fns);
                     }
                 }
             }
+            if !fns.is_empty() {
+                shared_fns = None;
+            }
         }
+        let fns: std::sync::Arc<[super::metadata::MetaFn]> = match shared_fns {
+            Some(shared) if fns.is_empty() => shared,
+            _ => fns.into(),
+        };
         let mut by_jvm_name: HashMap<String, Vec<usize>> = HashMap::new();
         for (i, f) in fns.iter().enumerate() {
             by_jvm_name.entry(f.jvm_name.clone()).or_default().push(i);
         }
         // Properties from the same facade `d1`, part-merged like the functions, so property lookups
         // share this cached decode instead of re-decoding the facade per query.
-        let mut props = ci
-            .as_ref()
-            .map(|c| super::metadata::package_properties(c))
-            .unwrap_or_default();
-        if props.is_empty() {
+        let shared_props: Option<std::sync::Arc<[super::metadata::MetaProp]>> =
+            ci.as_ref().map(|c| c.meta.package_properties.clone());
+        let mut merged_props: Vec<super::metadata::MetaProp> = Vec::new();
+        if shared_props.as_ref().is_none_or(|p| p.is_empty()) {
             if let Some(ci) = &ci {
-                for part in &ci.kotlin_d1 {
+                for part in &ci.meta.multifile_parts {
                     if let Some(pci) = self.find(part) {
-                        props.append(&mut super::metadata::package_properties(&pci));
+                        merged_props.extend_from_slice(super::metadata::package_properties(&pci));
                     }
                 }
             }
         }
+        let props: std::sync::Arc<[super::metadata::MetaProp]> = match shared_props {
+            Some(shared) if merged_props.is_empty() => shared,
+            _ => merged_props.into(),
+        };
         let meta = std::rc::Rc::new(ClassMeta {
             by_jvm_name,
             suspend_names,
-            fns: fns.into(),
-            props: props.into(),
+            fns,
+            props,
         });
         self.meta_fns.borrow_mut().insert(internal_id, meta.clone());
         meta
@@ -1282,14 +1292,14 @@ impl Classpath {
     /// Every `@Metadata` function of `internal` (a facade's PART classes merged), decoded once and
     /// cached — the single source the metadata-primary `MetaFn` lookups share. Use this instead of
     /// re-calling `package_functions` + re-merging the facade parts at each call site.
-    pub fn meta_functions(&self, internal: &str) -> std::rc::Rc<[super::metadata::MetaFn]> {
+    pub fn meta_functions(&self, internal: &str) -> std::sync::Arc<[super::metadata::MetaFn]> {
         self.class_meta(internal).fns.clone()
     }
 
     pub fn meta_functions_name(
         &self,
         internal: TypeName,
-    ) -> std::rc::Rc<[super::metadata::MetaFn]> {
+    ) -> std::sync::Arc<[super::metadata::MetaFn]> {
         self.class_meta_name(internal).fns.clone()
     }
 
@@ -1298,7 +1308,7 @@ impl Classpath {
     pub fn meta_properties_name(
         &self,
         internal: TypeName,
-    ) -> std::rc::Rc<[super::metadata::MetaProp]> {
+    ) -> std::sync::Arc<[super::metadata::MetaProp]> {
         self.class_meta_name(internal).props.clone()
     }
 
@@ -1405,7 +1415,7 @@ impl Classpath {
             return MetadataCallFacts::fallback(CallSig::metadata_plain(arity));
         };
         let Some(f) = super::metadata::class_functions(&ci)
-            .into_iter()
+            .iter()
             .find(|f| f.jvm_name == jvm_name && f.value_params.len() == arity)
         else {
             return MetadataCallFacts::fallback(CallSig::metadata_plain(arity));
@@ -2929,13 +2939,13 @@ fn collect_class_bytes(bytes: &[u8], names: &mut NameTree, all: &mut HashMap<Nam
     let mut toplevel_names = std::collections::HashSet::new();
     let mut ext_names = std::collections::HashSet::new();
     for mf in super::metadata::package_functions(&ci)
-        .into_iter()
-        .chain(super::metadata::class_functions(&ci))
+        .iter()
+        .chain(super::metadata::class_functions(&ci).iter())
     {
         if mf.is_extension {
-            ext_names.insert(mf.jvm_name);
+            ext_names.insert(mf.jvm_name.clone());
         } else {
-            toplevel_names.insert(mf.jvm_name);
+            toplevel_names.insert(mf.jvm_name.clone());
         }
     }
     all.insert(
@@ -3044,7 +3054,7 @@ fn parse_aliases_from_bytes(bytes: &[u8], idx: &mut TypeIndex) {
     let Ok(ci) = parse_class(bytes) else { return };
     for (alias, internal) in super::metadata::package_type_aliases(&ci) {
         idx.type_aliases
-            .insert(type_name(&alias), type_name(&internal));
+            .insert(type_name(alias), type_name(internal));
     }
 }
 

@@ -6,13 +6,14 @@
 //! and untested; this pins the round-trip before it is wired into emit.
 
 use krusty::jvm::classreader::ClassInfo;
-use krusty::jvm::metadata::{class_functions, package_functions};
+use krusty::jvm::metadata::{class_functions, decode_metadata, package_functions};
 use krusty::metadata::class_builder::{build_class, FnMeta};
 use krusty::types::{type_name, Ty};
 
 /// Wrap built `(d1_bytes, d2)` into a `ClassInfo` the reader consumes. `d1` is the protobuf payload with
 /// one byte per `char` (the constant pool writes it as modified-UTF-8, the reader decodes it back).
 fn class_info(internal: &str, d1: Vec<u8>, d2: Vec<String>) -> ClassInfo {
+    let d1_strings = vec![d1.iter().map(|&b| b as char).collect()];
     ClassInfo {
         major: 52,
         access: 0,
@@ -21,8 +22,7 @@ fn class_info(internal: &str, d1: Vec<u8>, d2: Vec<String>) -> ClassInfo {
         interfaces: Vec::<String>::new().into(),
         fields: Vec::new(),
         methods: Vec::new(),
-        kotlin_d1: vec![d1.iter().map(|&b| b as char).collect()],
-        kotlin_d2: d2,
+        meta: decode_metadata(&d1_strings, &d2, None, internal, &[]),
         signature: None,
         retention: None,
     }
@@ -124,7 +124,7 @@ fn package_extension_receiver_round_trips() {
     let ci = class_info("com/example/NavGraphBuilderKt", d1, d2);
 
     let f = package_functions(&ci)
-        .into_iter()
+        .iter()
         .find(|f| f.kotlin_name == "composable")
         .expect("the decoded package metadata must list `composable`");
     assert!(
@@ -164,7 +164,7 @@ fn package_receiver_function_type_param_round_trips() {
     let ci = class_info("com/example/NavHostKt", d1, d2);
 
     let f = package_functions(&ci)
-        .into_iter()
+        .iter()
         .find(|f| f.kotlin_name == "NavHost")
         .expect("the decoded package metadata must list `NavHost`");
     assert_eq!(

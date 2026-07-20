@@ -985,18 +985,130 @@ pub struct MetaProp {
     pub receiver_class: Option<TypeName>,
 }
 
+/// The FULLY-decoded `@kotlin.Metadata` of one classfile — every projection the compiler consumes,
+/// materialized in ONE decode at class-parse time. The packed `d1`/`d2` strings are dropped after this
+/// decode: nothing downstream re-reads the protobuf, and the raw metadata never lives in a cache. A
+/// plain-Java class (no `@Metadata`) is the `Default` (all projections empty) — consumers need not
+/// distinguish the sources.
+#[derive(Clone, Debug)]
+pub struct KotlinMeta {
+    /// `Class.function` (field 9) — member/extension functions of a class kind. `Arc` slices so a
+    /// consumer cache shares the decode instead of copying it.
+    pub class_functions: std::sync::Arc<[MetaFn]>,
+    /// `Package.function` (field 3) — top-level/extension functions of a file-facade/part kind.
+    pub package_functions: std::sync::Arc<[MetaFn]>,
+    /// `Class.property` (field 10).
+    pub class_properties: std::sync::Arc<[MetaProp]>,
+    /// `Package.property` (field 4).
+    pub package_properties: std::sync::Arc<[MetaProp]>,
+    /// `Package.typeAlias` (field 5): `(full alias internal name, expanded class internal name)`.
+    pub type_aliases: Vec<(String, String)>,
+    /// `Class.constructor` (field 8): named-parameter lists in declaration order.
+    pub constructor_params: Vec<ParamList>,
+    /// `Class.companionObjectName` (field 4).
+    pub companion_name: Option<String>,
+    /// `Class.sealedSubclassFqName` (field 16), as JVM internal names.
+    pub sealed_subclasses: Vec<String>,
+    /// The `@JvmInline value class` shape (fields 17-19), if this is one.
+    pub inline: Option<InlineClass>,
+    /// For a MULTI-FILE FACADE (`@Metadata(k = 4)`): the part class internal names its `d1` lists —
+    /// the facade has no declarations of its own. Empty for every other kind.
+    pub multifile_parts: Vec<String>,
+}
+
+impl Default for KotlinMeta {
+    fn default() -> Self {
+        KotlinMeta {
+            class_functions: std::sync::Arc::from([]),
+            package_functions: std::sync::Arc::from([]),
+            class_properties: std::sync::Arc::from([]),
+            package_properties: std::sync::Arc::from([]),
+            type_aliases: Vec::new(),
+            constructor_params: Vec::new(),
+            companion_name: None,
+            sealed_subclasses: Vec::new(),
+            inline: None,
+            multifile_parts: Vec::new(),
+        }
+    }
+}
+
+impl KotlinMeta {
+    /// Whether this classfile carried any Kotlin metadata at all.
+    pub fn is_present(&self) -> bool {
+        !(self.class_functions.is_empty()
+            && self.package_functions.is_empty()
+            && self.class_properties.is_empty()
+            && self.package_properties.is_empty()
+            && self.type_aliases.is_empty()
+            && self.constructor_params.is_empty()
+            && self.companion_name.is_none()
+            && self.sealed_subclasses.is_empty()
+            && self.inline.is_none()
+            && self.multifile_parts.is_empty())
+    }
+}
+
+/// Shared decode context: the protobuf message body plus the resolved string table — built once per
+/// classfile, consumed by every projection.
+struct MetaCtx<'a> {
+    msg: &'a [u8],
+    records: &'a [Rec],
+    d2: &'a [String],
+    /// The classfile's bytecode methods — the descriptor fallback when metadata omits a
+    /// `method_signature` extension.
+    methods: &'a [super::classreader::MethodSig],
+}
+
+/// Decode a classfile's `@Metadata` into [`KotlinMeta`] — the ONE place the packed representation is
+/// read. `k` is the header kind: a multi-file facade (`k = 4`) lists its part class names in `d1`
+/// verbatim (no protobuf); every other kind carries the BitEncoded proto.
+pub fn decode_metadata(
+    d1: &[String],
+    d2: &[String],
+    k: Option<i32>,
+    this_class: &str,
+    methods: &[super::classreader::MethodSig],
+) -> KotlinMeta {
+    if k == Some(4) {
+        return KotlinMeta {
+            multifile_parts: d1.to_vec(),
+            ..KotlinMeta::default()
+        };
+    }
+    if d1.is_empty() {
+        return KotlinMeta::default();
+    }
+    let bytes = decode_d1(d1);
+    let (st_body, msg) = split_d1(&bytes);
+    let records = parse_string_table(st_body);
+    let ctx = MetaCtx {
+        msg,
+        records: &records,
+        d2,
+        methods,
+    };
+    KotlinMeta {
+        class_functions: decode_functions(&ctx, 9).into(),
+        package_functions: decode_functions(&ctx, 3).into(),
+        class_properties: decode_properties(&ctx, 10).into(),
+        package_properties: decode_properties(&ctx, 4).into(),
+        type_aliases: type_aliases(&ctx, this_class),
+        constructor_params: ctor_params(&ctx),
+        companion_name: companion_name(&ctx),
+        sealed_subclasses: sealed_subclasses(&ctx),
+        inline: inline_class(&ctx),
+        multifile_parts: Vec::new(),
+    }
+}
+
 /// Decode every `Function` (proto field `fn_field`: 9 in a `Class`, 3 in a `Package`) of this class's
 /// `@Metadata` message into [`MetaFn`]s. The single metadata-primary function reader.
-fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
+fn decode_functions(ctx: &MetaCtx, fn_field: u64) -> Vec<MetaFn> {
     let mut out = Vec::new();
-    if ci.kotlin_d1.is_empty() {
-        return out;
-    }
-    let bytes = decode_d1(&ci.kotlin_d1);
-    let (st_body, msg_body) = split_d1(&bytes);
-    let records = parse_string_table(st_body);
-    let d2 = &ci.kotlin_d2;
-    let mut pb = Pb { b: msg_body, i: 0 };
+    let records = ctx.records;
+    let d2 = ctx.d2;
+    let mut pb = Pb { b: ctx.msg, i: 0 };
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -1013,9 +1125,9 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                     // kotlinc's `getString` does (predefined/d2 + substring/replace), NOT as class names.
                     let (mut jvm_name, mut jvm_desc) = match pf.jvm_sig {
                         Some((nid, did)) => (
-                            resolve_string(&records, d2, nid as usize)
+                            resolve_string(records, d2, nid as usize)
                                 .unwrap_or_else(|| kotlin_name.clone()),
-                            resolve_string(&records, d2, did as usize),
+                            resolve_string(records, d2, did as usize),
                         ),
                         None => (kotlin_name.clone(), None),
                     };
@@ -1024,7 +1136,7 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                     // `sumOf` overload carries `@JvmName("sumOfInt")`/`@JvmName("sumOfLong")`. The
                     // `method_signature` extension may omit it, so read it from the annotation directly.
                     // Absent → the Kotlin name stands.
-                    if let Some(n) = annotation_jvm_name(&pf.annotation_bodies, &records, d2) {
+                    if let Some(n) = annotation_jvm_name(&pf.annotation_bodies, records, d2) {
                         jvm_name = n;
                     }
                     // Metadata omits the JVM descriptor for a function whose signature isn't `@JvmName`-
@@ -1032,7 +1144,7 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                     // exactly one method of this JVM name exists, take its descriptor — covers `inline`
                     // value-class members (`Result.Companion.success`) erased to `(Object)Object`.
                     if jvm_desc.is_none() {
-                        let mut same: Vec<&str> = ci
+                        let mut same: Vec<&str> = ctx
                             .methods
                             .iter()
                             .filter(|m| m.name == jvm_name)
@@ -1045,10 +1157,10 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                     }
                     let receiver_class = pf
                         .recv_class
-                        .and_then(|id| resolve_class_name(&records, d2, id as usize));
+                        .and_then(|id| resolve_class_name(records, d2, id as usize));
                     let ret_class = pf
                         .ret_class
-                        .and_then(|id| resolve_class_name(&records, d2, id as usize));
+                        .and_then(|id| resolve_class_name(records, d2, id as usize));
                     let value_params: Vec<MetaValueParam> = pf
                         .value_params
                         .iter()
@@ -1056,17 +1168,17 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                             let recv_fun_ty = p
                                 .recv_fun
                                 .0
-                                .and_then(|id| resolve_class_name(&records, d2, id as usize))
+                                .and_then(|id| resolve_class_name(records, d2, id as usize))
                                 .map(|name| type_name(&name));
                             let recv_fun = recv_fun_ty
                                 .is_some_and(|name| name.matches("kotlin/ExtensionFunctionType"));
                             MetaValueParam {
                                 ty: p
                                     .class_id
-                                    .and_then(|id| resolve_class_name(&records, d2, id as usize))
+                                    .and_then(|id| resolve_class_name(records, d2, id as usize))
                                     .map(|name| type_name(&name)),
                                 // Param names are plain string-table entries (like the JVM name/desc), not class names.
-                                name: resolve_string(&records, d2, p.name_id as usize)
+                                name: resolve_string(records, d2, p.name_id as usize)
                                     .unwrap_or_default(),
                                 has_default: p.has_default,
                                 materialized: p.materialized,
@@ -1074,9 +1186,7 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                                 recv_fun_receiver: if recv_fun {
                                     p.recv_fun
                                         .1
-                                        .and_then(|id| {
-                                            resolve_class_name(&records, d2, id as usize)
-                                        })
+                                        .and_then(|id| resolve_class_name(records, d2, id as usize))
                                         .map(|name| type_name(&name))
                                 } else {
                                     None
@@ -1088,7 +1198,7 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
                     // `Signature`-derived gsig (extension: receiver at `params[0]`; member/top-level: value
                     // params only) so it is a drop-in replacement; the uniform member-receiver synthesis is
                     // a later step (`class_receiver = None` here keeps a member's params value-only).
-                    let generic_sig = build_generic_sig(&pf, &records, d2, None);
+                    let generic_sig = build_generic_sig(&pf, records, d2, None);
                     out.push(MetaFn {
                         kotlin_name,
                         jvm_name,
@@ -1116,13 +1226,46 @@ fn decode_functions(ci: &ClassInfo, fn_field: u64) -> Vec<MetaFn> {
 }
 
 /// Functions declared in a `Class`'s `@Metadata` (member + companion functions live in their own class).
-pub fn class_functions(ci: &ClassInfo) -> Vec<MetaFn> {
-    decode_functions(ci, 9)
+pub fn class_functions(ci: &ClassInfo) -> &[MetaFn] {
+    &ci.meta.class_functions
 }
 
 /// Top-level / extension functions declared in a file facade's `Package` `@Metadata`.
-pub fn package_functions(ci: &ClassInfo) -> Vec<MetaFn> {
-    decode_functions(ci, 3)
+pub fn package_functions(ci: &ClassInfo) -> &[MetaFn] {
+    &ci.meta.package_functions
+}
+
+/// Type aliases declared in a file facade's `Package` `@Metadata`.
+pub fn package_type_aliases(ci: &ClassInfo) -> &[(String, String)] {
+    &ci.meta.type_aliases
+}
+
+/// Named-parameter lists of the class's constructors, from its `@Metadata`.
+pub fn class_constructor_params(ci: &ClassInfo) -> Vec<ParamList> {
+    ci.meta.constructor_params.clone()
+}
+
+/// The class's companion object name (`Companion`, or a custom one), from its `@Metadata`.
+pub fn class_companion_name(ci: &ClassInfo) -> Option<String> {
+    ci.meta.companion_name.clone()
+}
+
+/// The direct subclasses of a `sealed` class, from its `@Metadata`, as JVM internal names.
+pub fn class_sealed_subclasses(ci: &ClassInfo) -> Vec<String> {
+    ci.meta.sealed_subclasses.clone()
+}
+
+pub fn class_properties(ci: &ClassInfo) -> &[MetaProp] {
+    &ci.meta.class_properties
+}
+
+/// Top-level / extension properties declared in a file facade's `Package` `@Metadata`.
+pub fn package_properties(ci: &ClassInfo) -> &[MetaProp] {
+    &ci.meta.package_properties
+}
+
+pub fn class_inline(ci: &ClassInfo) -> Option<&InlineClass> {
+    ci.meta.inline.as_ref()
 }
 
 /// Type aliases declared in a file facade's `Package` `@Metadata` (`typealias Alias = Real` →
@@ -1132,16 +1275,11 @@ pub fn package_functions(ci: &ClassInfo) -> Vec<MetaFn> {
 /// underlying type, field 4). This is robust where the older `d2` `$annotations` heuristic was not — a
 /// file facade also carries annotated top-level properties whose `$annotations` markers that heuristic
 /// would misread as aliases.
-pub fn package_type_aliases(ci: &ClassInfo) -> Vec<(String, String)> {
+fn type_aliases(ctx: &MetaCtx, this_class: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    if ci.kotlin_d1.is_empty() {
-        return out;
-    }
-    let bytes = decode_d1(&ci.kotlin_d1);
-    let (st_body, msg_body) = split_d1(&bytes);
-    let records = parse_string_table(st_body);
-    let d2 = &ci.kotlin_d2;
-    let mut pb = Pb { b: msg_body, i: 0 };
+    let records = ctx.records;
+    let d2 = ctx.d2;
+    let mut pb = Pb { b: ctx.msg, i: 0 };
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -1151,11 +1289,10 @@ pub fn package_type_aliases(ci: &ClassInfo) -> Vec<(String, String)> {
                 let Some(body) = pb.bytes(len as usize) else {
                     break;
                 };
-                if let Some((name, internal)) = parse_type_alias(body, &records, d2) {
+                if let Some((name, internal)) = parse_type_alias(body, records, d2) {
                     // Key the alias by its FULL internal name — its declaring package (the facade's) plus
                     // the alias's simple name — so `kotlin/collections/ArrayList` is distinct from any other
                     // package's `ArrayList`. `resolve_type` looks it up by that full name.
-                    let this_class = ci.this_class();
                     let pkg = this_class.rsplit_once('/').map_or("", |(p, _)| p);
                     let full = if pkg.is_empty() {
                         name
@@ -1206,16 +1343,11 @@ fn parse_type_alias(body: &[u8], records: &[Rec], d2: &[String]) -> Option<(Stri
 }
 
 /// Constructor source parameter names/default flags from `Class` `@Metadata`, in declaration order.
-pub fn class_constructor_params(ci: &ClassInfo) -> Vec<ParamList> {
+fn ctor_params(ctx: &MetaCtx) -> Vec<ParamList> {
     let mut out = Vec::new();
-    if ci.kotlin_d1.is_empty() {
-        return out;
-    }
-    let bytes = decode_d1(&ci.kotlin_d1);
-    let (st_body, msg_body) = split_d1(&bytes);
-    let records = parse_string_table(st_body);
-    let d2 = &ci.kotlin_d2;
-    let mut pb = Pb { b: msg_body, i: 0 };
+    let records = ctx.records;
+    let d2 = ctx.d2;
+    let mut pb = Pb { b: ctx.msg, i: 0 };
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -1253,7 +1385,7 @@ pub fn class_constructor_params(ci: &ClassInfo) -> Vec<ParamList> {
                                 }
                             }
                             names.push(
-                                resolve_string(&records, d2, nid as usize).unwrap_or_default(),
+                                resolve_string(records, d2, nid as usize).unwrap_or_default(),
                             );
                             defaults.push(vflags & DECLARES_DEFAULT_VALUE_BIT != 0);
                         }
@@ -1278,21 +1410,16 @@ pub fn class_constructor_params(ci: &ClassInfo) -> Vec<ParamList> {
 
 /// The simple name of a class's companion object (`Class.companion_object_name = 4`), e.g. `Companion`.
 /// `None` if the class has no companion.
-pub fn class_companion_name(ci: &ClassInfo) -> Option<String> {
-    if ci.kotlin_d1.is_empty() {
-        return None;
-    }
-    let bytes = decode_d1(&ci.kotlin_d1);
-    let (st_body, msg_body) = split_d1(&bytes);
-    let records = parse_string_table(st_body);
-    let d2 = &ci.kotlin_d2;
-    let mut pb = Pb { b: msg_body, i: 0 };
+fn companion_name(ctx: &MetaCtx) -> Option<String> {
+    let records = ctx.records;
+    let d2 = ctx.d2;
+    let mut pb = Pb { b: ctx.msg, i: 0 };
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
             (4, 0) => {
                 let id = pb.varint()?;
-                return resolve_class_name(&records, d2, id as usize);
+                return resolve_class_name(records, d2, id as usize);
             }
             (_, w) => {
                 if pb.skip(w).is_none() {
@@ -1308,17 +1435,12 @@ pub fn class_companion_name(ci: &ClassInfo) -> Option<String> {
 /// 16, a repeated `QualifiedName` index). Returned as JVM internal names (`lib/D$A`), so an exhaustive
 /// `when` over a CLASSPATH sealed subject can be proven exhaustive the same way a same-module one is. Only
 /// a sealed class records these, so a non-empty result also implies `is_sealed`.
-pub fn class_sealed_subclasses(ci: &ClassInfo) -> Vec<String> {
-    if ci.kotlin_d1.is_empty() {
-        return Vec::new();
-    }
-    let bytes = decode_d1(&ci.kotlin_d1);
-    let (st_body, msg_body) = split_d1(&bytes);
-    let records = parse_string_table(st_body);
-    let d2 = &ci.kotlin_d2;
+fn sealed_subclasses(ctx: &MetaCtx) -> Vec<String> {
+    let records = ctx.records;
+    let d2 = ctx.d2;
     let mut out = Vec::new();
     let push_id = |id: usize, out: &mut Vec<String>| {
-        if let Some(name) = resolve_class_name(&records, d2, id) {
+        if let Some(name) = resolve_class_name(records, d2, id) {
             // A metadata class name spells a nested type with `.` (`lib/D.A`) and the package with `/`;
             // the JVM internal name uses `$` for nesting (`lib/D$A`). Convert only after the last `/`.
             let internal = match name.rfind('/') {
@@ -1332,7 +1454,7 @@ pub fn class_sealed_subclasses(ci: &ClassInfo) -> Vec<String> {
             }
         }
     };
-    let mut pb = Pb { b: msg_body, i: 0 };
+    let mut pb = Pb { b: ctx.msg, i: 0 };
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -1399,32 +1521,16 @@ fn parse_jvm_property_signature(body: &[u8]) -> (JvmSig, JvmSig) {
     (getter, setter)
 }
 
-/// Member properties declared in a class's `@Metadata` (`Class.property` = field 10).
-pub fn class_properties(ci: &ClassInfo) -> Vec<MetaProp> {
-    decode_properties(ci, 10)
-}
-
-/// Top-level / extension properties declared in a file facade's `Package` `@Metadata`
-/// (`Package.property` = field 4). An extension property carries a non-`None` `receiver_class`.
-pub fn package_properties(ci: &ClassInfo) -> Vec<MetaProp> {
-    decode_properties(ci, 4)
-}
-
 /// Decode every `Property` (`prop_field`: 10 in a `Class`, 4 in a `Package`) of this metadata message
 /// into [`MetaProp`]s — the property analogue of [`decode_functions`]. Carries the REAL getter/setter
 /// JVM names from the `JvmPropertySignature`, so a resolver reads the accessor instead of guessing `getX`.
-fn decode_properties(ci: &ClassInfo, prop_field: u64) -> Vec<MetaProp> {
+fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
     let mut out = Vec::new();
-    if ci.kotlin_d1.is_empty() {
-        return out;
-    }
-    let bytes = decode_d1(&ci.kotlin_d1);
-    let (st_body, msg_body) = split_d1(&bytes);
-    let records = parse_string_table(st_body);
-    let d2 = &ci.kotlin_d2;
+    let records = ctx.records;
+    let d2 = ctx.d2;
     let mut types: Vec<&[u8]> = Vec::new();
     let mut props: Vec<&[u8]> = Vec::new();
-    let mut pb = Pb { b: msg_body, i: 0 };
+    let mut pb = Pb { b: ctx.msg, i: 0 };
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -1465,7 +1571,7 @@ fn decode_properties(ci: &ClassInfo, prop_field: u64) -> Vec<MetaProp> {
     let type_of_id = |tid: u64| -> Option<TypeName> {
         let tb = types.get(tid as usize)?;
         let cn = parse_type_class_name(tb)?;
-        resolve_class_name(&records, d2, cn as usize).map(|name| type_name(&name))
+        resolve_class_name(records, d2, cn as usize).map(|name| type_name(&name))
     };
     // `Property.flags`: HAS_ANNOTATIONS(0) · VISIBILITY(1..3) · MODALITY(4..5) · IS_VAR(6) ·
     // HAS_GETTER(7) · HAS_SETTER(8) · IS_CONST(9) · …
@@ -1487,7 +1593,7 @@ fn decode_properties(ci: &ClassInfo, prop_field: u64) -> Vec<MetaProp> {
                     let Some(n) = p.varint() else { break };
                     let Some(tb) = p.bytes(n as usize) else { break };
                     ret = parse_type_class_name(tb)
-                        .and_then(|cn| resolve_class_name(&records, d2, cn as usize))
+                        .and_then(|cn| resolve_class_name(records, d2, cn as usize))
                         .map(|name| type_name(&name));
                 }
                 (9, 0) => ret = p.varint().and_then(type_of_id),
@@ -1497,7 +1603,7 @@ fn decode_properties(ci: &ClassInfo, prop_field: u64) -> Vec<MetaProp> {
                     let Some(n) = p.varint() else { break };
                     let Some(tb) = p.bytes(n as usize) else { break };
                     receiver_class = parse_type_class_name(tb)
-                        .and_then(|cn| resolve_class_name(&records, d2, cn as usize))
+                        .and_then(|cn| resolve_class_name(records, d2, cn as usize))
                         .map(|name| type_name(&name));
                 }
                 (10, 0) => receiver_class = p.varint().and_then(type_of_id),
@@ -1516,14 +1622,14 @@ fn decode_properties(ci: &ClassInfo, prop_field: u64) -> Vec<MetaProp> {
             }
         }
         let Some(name_id) = name_id else { continue };
-        let Some(name) = resolve_string(&records, d2, name_id as usize) else {
+        let Some(name) = resolve_string(records, d2, name_id as usize) else {
             continue;
         };
         let (getter, setter) = sig;
         let resolve_sig = |(nid, did): (u64, u64)| {
             Some(MetaJvmMethodSig {
-                name: resolve_string(&records, d2, nid as usize)?,
-                desc: resolve_string(&records, d2, did as usize)?,
+                name: resolve_string(records, d2, nid as usize)?,
+                desc: resolve_string(records, d2, did as usize)?,
             })
         };
         let is_var = setter.is_some() || flags & IS_VAR_BIT != 0;
@@ -1561,15 +1667,10 @@ pub struct InlineClass {
 
 /// If `ci` is a Kotlin `@JvmInline value class`, its decoded [`InlineClass`] (presence of the
 /// `inline_class_underlying_type` proto field is the marker); `None` for an ordinary class.
-pub fn class_inline(ci: &ClassInfo) -> Option<InlineClass> {
-    if ci.kotlin_d1.is_empty() {
-        return None;
-    }
-    let bytes = decode_d1(&ci.kotlin_d1);
-    let (st_body, msg_body) = split_d1(&bytes);
-    let records = parse_string_table(st_body);
-    let d2 = &ci.kotlin_d2;
-    let mut pb = Pb { b: msg_body, i: 0 };
+fn inline_class(ctx: &MetaCtx) -> Option<InlineClass> {
+    let records = ctx.records;
+    let d2 = ctx.d2;
+    let mut pb = Pb { b: ctx.msg, i: 0 };
     let mut is_value = false;
     let mut underlying_class = None;
     let mut underlying_nullable = None;
@@ -1583,7 +1684,7 @@ pub fn class_inline(ci: &ClassInfo) -> Option<InlineClass> {
                 // inline_class_underlying_property_name (name id in table)
                 let id = pb.varint()?;
                 is_value = true;
-                property_name = resolve_string(&records, d2, id as usize);
+                property_name = resolve_string(records, d2, id as usize);
             }
             (18, 2) => {
                 // inline_class_underlying_type (inline Type message)
@@ -1591,7 +1692,7 @@ pub fn class_inline(ci: &ClassInfo) -> Option<InlineClass> {
                 let tbody = pb.bytes(n)?;
                 is_value = true;
                 let (cls, nullable) = parse_type_class_and_nullable(tbody);
-                underlying_class = cls.and_then(|id| resolve_class_name(&records, d2, id as usize));
+                underlying_class = cls.and_then(|id| resolve_class_name(records, d2, id as usize));
                 underlying_nullable = Some(nullable);
             }
             (19, 0) => {
@@ -1620,7 +1721,7 @@ pub fn class_inline(ci: &ClassInfo) -> Option<InlineClass> {
             if let Some((tbody, table_nullable)) = type_table_entry(tt, id as usize) {
                 let (cls, own_nullable) = parse_type_class_and_nullable(tbody);
                 underlying_class =
-                    cls.and_then(|cid| resolve_class_name(&records, d2, cid as usize));
+                    cls.and_then(|cid| resolve_class_name(records, d2, cid as usize));
                 underlying_nullable = Some(own_nullable || table_nullable);
             }
         }
@@ -1631,7 +1732,7 @@ pub fn class_inline(ci: &ClassInfo) -> Option<InlineClass> {
     // (inline `Type`) or `returnTypeId` = 9 (a TypeTable id; 7 is the RECEIVER type id).
     if is_value && underlying_class.is_none() {
         if let Some(pname) = &property_name {
-            let mut pb = Pb { b: msg_body, i: 0 };
+            let mut pb = Pb { b: ctx.msg, i: 0 };
             while !pb.at_end() {
                 let Some(tag) = pb.varint() else { break };
                 match (tag >> 3, tag & 7) {
@@ -1643,20 +1744,20 @@ pub fn class_inline(ci: &ClassInfo) -> Option<InlineClass> {
                         let Some((nid, rt, rtid)) = parse_property_name_and_return(prop) else {
                             continue;
                         };
-                        if resolve_string(&records, d2, nid as usize).as_deref() != Some(pname) {
+                        if resolve_string(records, d2, nid as usize).as_deref() != Some(pname) {
                             continue;
                         }
                         if let Some(tbody) = rt {
                             let (cls, nullable) = parse_type_class_and_nullable(tbody);
                             underlying_class =
-                                cls.and_then(|cid| resolve_class_name(&records, d2, cid as usize));
+                                cls.and_then(|cid| resolve_class_name(records, d2, cid as usize));
                             underlying_nullable = Some(nullable);
                         } else if let (Some(id), Some(tt)) = (rtid, type_table) {
                             if let Some((tbody, table_nullable)) = type_table_entry(tt, id as usize)
                             {
                                 let (cls, own_nullable) = parse_type_class_and_nullable(tbody);
                                 underlying_class = cls
-                                    .and_then(|cid| resolve_class_name(&records, d2, cid as usize));
+                                    .and_then(|cid| resolve_class_name(records, d2, cid as usize));
                                 underlying_nullable = Some(own_nullable || table_nullable);
                             }
                         }

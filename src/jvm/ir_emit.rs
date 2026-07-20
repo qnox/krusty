@@ -2958,11 +2958,8 @@ fn emit_interface_class(
         if let Some(defaults) = ir.param_defaults(fid) {
             emit_default_stub(ir, fid, &fq_name, facade, &mut cw, defaults, env, true);
             let di = default_impls.get_or_insert_with(|| {
-                let mut w = new_writer(
-                    &format!("{fq_name}$DefaultImpls"),
-                    "java/lang/Object",
-                    opts,
-                );
+                let mut w =
+                    new_writer(&format!("{fq_name}$DefaultImpls"), "java/lang/Object", opts);
                 w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
                 w
             });
