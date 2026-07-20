@@ -106,6 +106,15 @@ impl ConstPool {
         let n = self.utf8(s);
         self.intern(Const::String(n))
     }
+    /// Whether a `CONSTANT_Class` for `internal_name` is already in the pool (WITHOUT interning it).
+    /// kotlinc emits an `InnerClasses` entry for a nested class only when it appears as a class
+    /// constant (a `new`/`checkcast`/owner ref), not merely inside a descriptor string.
+    fn has_class(&self, internal_name: &str) -> bool {
+        let mapped = super::jvm_class_map::to_jvm_internal(internal_name);
+        self.dedup
+            .get(&Const::Utf8(mapped.to_string()))
+            .is_some_and(|&u| self.dedup.contains_key(&Const::Class(u)))
+    }
     fn integer(&mut self, v: i32) -> u16 {
         self.intern(Const::Integer(v))
     }
@@ -281,11 +290,24 @@ pub struct ClassWriter {
     class_deprecated: bool,
     /// `(name_index, desc_index)` of methods carrying a `Deprecated` attribute (from `@Deprecated`).
     deprecated_methods: std::collections::HashSet<(u16, u16)>,
-    /// Class-file major version to emit (captured from [`CLASS_MAJOR`] at construction).
+    /// Candidate `InnerClasses` entries (the file's nested classes). `finish` emits only those whose
+    /// `inner` is actually referenced as a class constant — kotlinc's rule.
+    inner_class_candidates: Vec<InnerClassSpec>,
+    /// Class-file major version to emit (default v52; set via [`ClassWriter::set_major`]).
     major: u16,
-    /// Source-file simple name for the `SourceFile` attribute (captured from [`SOURCE_FILE`]).
+    /// Source-file simple name for the `SourceFile` attribute (set via [`ClassWriter::set_source_file`]).
     source_file: Option<String>,
     pub internal_name: String,
+}
+
+/// One candidate `InnerClasses` entry: the nested class, its enclosing class (`None` for an anonymous
+/// local), its simple name (`None` when anonymous), and the entry's access flags.
+#[derive(Clone)]
+pub struct InnerClassSpec {
+    pub inner: String,
+    pub outer: Option<String>,
+    pub name: Option<String>,
+    pub access: u16,
 }
 
 impl ClassWriter {
@@ -306,6 +328,7 @@ impl ClassWriter {
             bootstrap_methods: Vec::new(),
             class_deprecated: false,
             deprecated_methods: std::collections::HashSet::new(),
+            inner_class_candidates: Vec::new(),
             major: MAJOR_JAVA8,
             source_file: None,
             internal_name: internal_name.to_string(),
@@ -321,6 +344,13 @@ impl ClassWriter {
     /// default) emits no attribute.
     pub fn set_source_file(&mut self, name: Option<String>) {
         self.source_file = name;
+    }
+
+    /// Register a candidate `InnerClasses` entry (a nested class in this file). `finish` emits it only
+    /// if `inner` is referenced as a class constant. Register the whole file's nest on every writer —
+    /// the per-class filter then yields exactly the entries kotlinc emits for that class.
+    pub fn add_inner_class(&mut self, spec: InnerClassSpec) {
+        self.inner_class_candidates.push(spec);
     }
 
     /// Mark the class itself as carrying a `Deprecated` attribute (kotlinc emits this for a `@Deprecated`
@@ -765,6 +795,33 @@ impl ClassWriter {
         let deprecated_attr = self
             .class_deprecated
             .then(|| (deprecated_attr_name.unwrap(), Vec::new()));
+        // `InnerClasses` (kotlinc's first class attribute): one entry per registered nested class that
+        // this class actually references as a class constant (the `has_class` filter), in registration
+        // order. `inner` is already interned (that is why it passed the filter); `outer`/`name` intern
+        // here — before the pool is serialized.
+        let inner_classes_attr = {
+            let referenced: Vec<InnerClassSpec> = self
+                .inner_class_candidates
+                .iter()
+                .filter(|s| self.cp.has_class(&s.inner))
+                .cloned()
+                .collect();
+            (!referenced.is_empty()).then(|| {
+                let name = self.cp.utf8("InnerClasses");
+                let mut body = Vec::new();
+                u2(&mut body, referenced.len() as u16);
+                for s in &referenced {
+                    let inner_idx = self.cp.class(&s.inner);
+                    let outer_idx = s.outer.as_deref().map_or(0, |o| self.cp.class(o));
+                    let name_idx = s.name.as_deref().map_or(0, |n| self.cp.utf8(n));
+                    u2(&mut body, inner_idx);
+                    u2(&mut body, outer_idx);
+                    u2(&mut body, name_idx);
+                    u2(&mut body, s.access);
+                }
+                (name, body)
+            })
+        };
         let mut out = Vec::new();
         u4(&mut out, 0xCAFEBABE);
         u2(&mut out, 0); // minor
@@ -862,9 +919,15 @@ impl ClassWriter {
         // in practice (nothing pushes to it outside `finish`); it is prepended to preserve the API.
         let mut ordered: Vec<(u16, Vec<u8>)> = std::mem::take(&mut self.class_attributes);
         ordered.extend(
-            [sourcefile_attr, deprecated_attr, rva_attr, bootstrap_attr]
-                .into_iter()
-                .flatten(),
+            [
+                inner_classes_attr,
+                sourcefile_attr,
+                deprecated_attr,
+                rva_attr,
+                bootstrap_attr,
+            ]
+            .into_iter()
+            .flatten(),
         );
         u2(&mut out, ordered.len() as u16);
         for (name, bytes) in &ordered {
@@ -1630,6 +1693,35 @@ impl ClassWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inner_classes_emitted_only_when_referenced() {
+        // A registered nested class that is NOT referenced as a class constant emits no entry.
+        let mut unref = ClassWriter::new("C", "java/lang/Object");
+        unref.add_inner_class(InnerClassSpec {
+            inner: "C$Companion".to_string(),
+            outer: Some("C".to_string()),
+            name: Some("Companion".to_string()),
+            access: ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+        });
+        let bytes = unref.finish();
+        assert!(!bytes.windows(12).any(|w| w == b"InnerClasses"));
+
+        // Once referenced (a class constant for the nested class exists), the entry appears.
+        let mut refd = ClassWriter::new("C", "java/lang/Object");
+        refd.add_inner_class(InnerClassSpec {
+            inner: "C$Companion".to_string(),
+            outer: Some("C".to_string()),
+            name: Some("Companion".to_string()),
+            access: ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+        });
+        let _ = refd.class_ref("C$Companion"); // reference it as a class constant
+        let bytes = refd.finish();
+        let has = |n: &[u8]| bytes.windows(n.len()).any(|w| w == n);
+        assert!(has(b"InnerClasses"));
+        assert!(has(b"C$Companion"));
+        assert!(has(b"Companion"));
+    }
 
     #[test]
     fn header_and_version() {
