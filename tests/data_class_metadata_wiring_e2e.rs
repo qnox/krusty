@@ -118,6 +118,19 @@ fn multi_property_mixed_nullability_is_byte_identical() {
     );
 }
 
+/// A non-null reference param pushed PAST slot 3 (four wide `Long`s first put the `String` at slot 9) —
+/// its `checkNotNullParameter` guard uses the 2-byte `aload <u1>` (not the 1-byte `aload_0..3`), so the
+/// constructor's `LineNumberTable` start_pc is the larger post-prologue offset. Pins the slot-dependent
+/// prologue length.
+#[test]
+fn nonnull_ref_param_past_slot3_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C(val a: Long, val b: Long, val c: Long, val d: Long, val e: String)\n",
+        "demo/C",
+        &[],
+    );
+}
+
 /// A nullable PRIMITIVE property (`Double?`, `Int?`) — boxed backing field (`Ljava/lang/Double;`),
 /// so `@Metadata` records an explicit `JvmFieldSignature.desc` (interned after the getter/setter, as
 /// kotlinc does). A nullable reference (`String?`) leaves the field derived; this pins the difference.
@@ -221,13 +234,48 @@ fn data_class_custom_class_field_is_byte_identical() {
     );
 }
 
+/// A multi-property data class over NON-`Int` primitives (`Boolean`, `Char`) — `hashCode`'s own `()I`
+/// descriptor must be seeded right after the `hashCode` name (a `Boolean`/`Char` `componentN` returns
+/// `()Z`/`()C`, so `()I` is not interned earlier as it is for an `Int` field).
+#[test]
+fn data_class_boolean_char_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ndata class C(val x: Boolean, val y: Char)\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// A `Double` + `Float` data class — `equals` compares each via the IEEE-aware `<Box>.compare` (kotlinc's
+/// `NaN`/`-0.0` semantics), seeded in field order before the `other`/`Object` LVT names.
+#[test]
+fn data_class_double_float_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ndata class C(val x: Double, val y: Float)\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// Every primitive category plus a reference in one data class — pins the per-field `hashCode` refs
+/// (boxing-class statics), the per-field `equals` comparisons (`Double`/`Float` via `<Box>.compare`,
+/// reference via `Intrinsics.areEqual`, others direct), and the `toString` appends, all in field order.
+#[test]
+fn data_class_all_primitive_kinds_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ndata class C(val a: Int, val b: Boolean, val c: Long, val d: Char, val e: Double, val f: Float, val g: String)\n",
+        "demo/C",
+        &[],
+    );
+}
+
 // ---- @Metadata-level checks for shapes not yet FULLY byte-identical (data classes) ----------------
 
 /// A `data class` (metadata on): its IR → `build_class_metadata` yields the synthesized
 /// `componentN`/`copy`/`equals`/`hashCode`/`toString` in kotlinc's order, and the synthesized methods
 /// carry kotlinc's debug tables (LocalVariableTable) + nullability annotations (`copy`/`toString`
-/// return `@NotNull`, `equals` param `@Nullable`). Full byte-identity for a data class also needs its
-/// pool seeding (the constant-pool interning order still differs) — tracked separately.
+/// return `@NotNull`, `equals` param `@Nullable`). Decode-level companion to the byte-identity tests
+/// above — pins the parsed shape, so a byte-level divergence localizes faster.
 #[test]
 fn data_class_emits_metadata_debug_tables_and_annotations() {
     let src = "package demo\ndata class Point(val x: Int, var y: String)\n";
