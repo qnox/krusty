@@ -269,6 +269,41 @@ fn data_class_all_primitive_kinds_is_byte_identical() {
     );
 }
 
+/// A data class with a CONCRETE same-file-class field (`val x: D`) — FULLY byte-identical (metadata,
+/// debug tables, pool). The synthesized `hashCode` calls `D.hashCode()` (kotlinc's shape) and the pool
+/// seeder already seeds that same ref, so body and metadata agree. A common real-world shape (a data
+/// class holding another class).
+#[test]
+fn data_class_concrete_class_field_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass D\ndata class C(val x: D)\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// A data class with a NULLABLE concrete-class field (`val x: D?`) — fully byte-identical; `hashCode` is
+/// the null-guarded `x != null ? x.hashCode() : 0` ternary, and the rest matches kotlinc.
+#[test]
+fn data_class_nullable_concrete_class_field_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass D\ndata class C(val x: D?)\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// A multi-property data class mixing a primitive, a `String`, and a concrete-class field — the general
+/// real-world domain-record shape, fully byte-identical.
+#[test]
+fn data_class_mixed_primitive_string_class_field_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass D\ndata class C(val a: Int, val b: String, val d: D)\n",
+        "demo/C",
+        &[],
+    );
+}
+
 // ---- Real-world data-class shapes (grounding) ----------------------------------------------------
 // These mirror the shapes of real domain types (a small all-`Int` result, a many-`Int` aggregate, a
 // single-`String` holder) whose fields are all primitives/`String`, anchoring the synthetic coverage
