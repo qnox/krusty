@@ -85,6 +85,19 @@ fn data_class_generic_collection_field_is_byte_identical() {
     );
 }
 
+/// A `data class` with a bare-interface builtin field (`CharSequence`) — its `@Metadata` property type
+/// must encode via the `predefinedIndex` (13) kotlinc uses for the mapped Kotlin builtin, NOT a
+/// class-id `Lkotlin/CharSequence;` descriptor (which leaves an orphan d2 string + a divergent d1).
+#[test]
+fn data_class_charsequence_field_is_byte_identical() {
+    let cp: Vec<PathBuf> = common::stdlib_jar().into_iter().collect();
+    assert_byte_identical(
+        "package demo\ndata class D(val cs: CharSequence)\n",
+        "demo/D",
+        &cp,
+    );
+}
+
 /// A `data class` with a two-argument generic field (`Map<String, Int>`) — the `Signature` nests both
 /// type arguments (`Ljava/util/Map<Ljava/lang/String;Ljava/lang/Integer;>;`, the `Int` boxed) and the
 /// same deferred-interning path keeps `copy$default` orphan-free.
