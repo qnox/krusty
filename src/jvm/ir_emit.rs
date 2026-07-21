@@ -425,7 +425,13 @@ fn attach_synth_debug_tables(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
                 ("other".to_string(), "Ljava/lang/Object;".to_string(), 1),
             ],
         );
-        cw.set_method_debug("hashCode", "()I", None, &this_only);
+        // hashCode: a ≥2-field data class folds into a `result` accumulator local — kotlinc lists it
+        // (partial live-range) before `this`. A single-field hashCode is a bare `return h(f0)` (this only).
+        if c.fields.len() >= 2 {
+            cw.set_hashcode_result_debug(&this_desc);
+        } else {
+            cw.set_method_debug("hashCode", "()I", None, &this_only);
+        }
         cw.set_method_debug("toString", "()Ljava/lang/String;", None, &this_only);
     }
 }
@@ -499,7 +505,10 @@ fn attach_synth_nullability(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
             "({}){self_ref}",
             c.fields.iter().map(|f| desc(f.ty)).collect::<String>()
         );
-        cw.set_method_nullability("copy", &copy_desc, Some(not_null), &[]);
+        // `copy`'s parameters mirror the primary-constructor properties, so each reference param takes
+        // the SAME `@NotNull`/`@Nullable` annotation kotlinc puts on the constructor's.
+        let copy_params: Vec<Option<&str>> = c.fields.iter().map(|f| ann(f.ty)).collect();
+        cw.set_method_nullability("copy", &copy_desc, Some(not_null), &copy_params);
         cw.set_method_nullability("toString", "()Ljava/lang/String;", Some(not_null), &[]);
         cw.set_method_nullability(
             "equals",

@@ -255,10 +255,12 @@ struct MethodInfo {
     /// this for every method; krusty currently fills it only for synthesized members (one entry at
     /// pc 0 → the class declaration line).
     lnt: Vec<(u16, u16)>,
-    /// `LocalVariableTable` entries `(name_index, descriptor_index, slot)`; `start_pc` is 0 and
-    /// `length` is the whole code length (filled at write time) — the shape of every synthesized
-    /// member's locals (`this` + params, all live for the whole method).
-    lvt: Vec<(u16, u16, u16)>,
+    /// `LocalVariableTable` entries `(name_index, descriptor_index, slot, start_pc)`. `start_pc` is
+    /// `None` for a local live for the whole method (the shape of every synthesized member's `this` +
+    /// params) — written as `start_pc=0, length=code_len`. `Some(pc)` is a local that becomes live
+    /// mid-method (e.g. a `hashCode` `result` accumulator, live from its first store) — written as
+    /// `start_pc=pc, length=code_len-pc`.
+    lvt: Vec<(u16, u16, u16, Option<u16>)>,
     /// Method-level `RuntimeInvisibleAnnotations` (each entry a pre-encoded annotation) — e.g. the
     /// `@org.jetbrains.annotations.NotNull` kotlinc puts on a non-null reference RETURN.
     invisible_anns: Vec<Vec<u8>>,
@@ -838,18 +840,28 @@ impl ClassWriter {
                 }
                 None if is_ref(desc) => {
                     let cls = &desc[1..desc.len() - 1];
+                    // kotlinc interns the `()I` descriptor BEFORE the receiver class for a reference
+                    // field's virtual `hashCode()` call — pre-seed the descriptor to match.
+                    self.cp.utf8("()I");
                     self.cp.methodref(cls, "hashCode", "()I");
                 }
                 None => {}
             }
         }
-        // equals — name, descriptor, @Nullable (param), the `other` LVT name, then per-reference-field
-        // `Intrinsics.areEqual`.
+        // A ≥2-field `hashCode` folds into a `result` accumulator local (kotlinc names it in the LVT,
+        // typed `I`); a single-field `hashCode` is a bare `return h(f0)` with no local. Intern the name
+        // and its descriptor here, right after the hash refs and before `equals`, to match kotlinc's
+        // first-use position.
+        if fields.len() >= 2 {
+            self.cp.utf8("result");
+            self.cp.utf8("I");
+        }
+        // equals — name, descriptor, @Nullable (param). kotlinc interns the equals BODY's
+        // `Intrinsics.areEqual` (for reference fields) BEFORE the `other`/`Object` LVT names, so seed it
+        // in that order.
         self.cp.utf8("equals");
         self.cp.utf8("(Ljava/lang/Object;)Z");
         self.cp.utf8("Lorg/jetbrains/annotations/Nullable;");
-        self.cp.utf8("other");
-        self.cp.utf8("Ljava/lang/Object;");
         if fields.iter().any(|(_, d)| is_ref(d)) {
             self.cp.methodref(
                 "kotlin/jvm/internal/Intrinsics",
@@ -857,6 +869,8 @@ impl ClassWriter {
                 "(Ljava/lang/Object;Ljava/lang/Object;)Z",
             );
         }
+        self.cp.utf8("other");
+        self.cp.utf8("Ljava/lang/Object;");
     }
 
     pub fn const_string(&mut self, s: &str) -> u16 {
@@ -1091,9 +1105,9 @@ impl ClassWriter {
     ) {
         let n = self.cp.utf8(name);
         let d = self.cp.utf8(desc);
-        let lvt: Vec<(u16, u16, u16)> = locals
+        let lvt: Vec<(u16, u16, u16, Option<u16>)> = locals
             .iter()
-            .map(|(nm, ds, slot)| (self.cp.utf8(nm), self.cp.utf8(ds), *slot))
+            .map(|(nm, ds, slot)| (self.cp.utf8(nm), self.cp.utf8(ds), *slot, None))
             .collect();
         if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
             m.lnt = lnt
@@ -1101,6 +1115,36 @@ impl ClassWriter {
                 .into_iter()
                 .collect();
             m.lvt = lvt;
+        }
+    }
+
+    /// A ≥2-field data class's `hashCode` LocalVariableTable: the `result` accumulator (`I`, slot 1,
+    /// live from its first store to method end) listed BEFORE `this` (slot 0, whole method) — kotlinc's
+    /// exact shape. No LineNumberTable (a synthesized data-class method gets none). `result`'s start is
+    /// found by walking the emitted body to the first store into slot 1 (the `istore_1` that folds the
+    /// first field's hash into the accumulator), so it is correct regardless of the first field's type.
+    pub fn set_hashcode_result_debug(&mut self, this_desc: &str) {
+        let hn = self.cp.utf8("hashCode");
+        let hd = self.cp.utf8("()I");
+        let result_n = self.cp.utf8("result");
+        let result_d = self.cp.utf8("I");
+        let this_n = self.cp.utf8("this");
+        let this_d = self.cp.utf8(this_desc);
+        if let Some(m) = self
+            .methods
+            .iter_mut()
+            .find(|m| m.name == hn && m.desc == hd)
+        {
+            let start = m
+                .code
+                .as_deref()
+                .and_then(|c| first_store_end(c, 1))
+                .unwrap_or(0) as u16;
+            m.lnt = Vec::new();
+            m.lvt = vec![
+                (result_n, result_d, 1, Some(start)),
+                (this_n, this_d, 0, None),
+            ];
         }
     }
 
@@ -1398,9 +1442,12 @@ impl ClassWriter {
                         u2(&mut out, lvt_attr_name.unwrap());
                         u4(&mut out, (2 + m.lvt.len() * 10) as u32);
                         u2(&mut out, m.lvt.len() as u16);
-                        for &(name_idx, desc_idx, slot) in &m.lvt {
-                            u2(&mut out, 0); // start_pc
-                            u2(&mut out, code_len as u16); // length = whole method
+                        for &(name_idx, desc_idx, slot, start) in &m.lvt {
+                            // A whole-method local (`None`) spans `[0, code_len)`; a mid-method one
+                            // (`Some(pc)`) spans `[pc, code_len)`.
+                            let start_pc = start.unwrap_or(0);
+                            u2(&mut out, start_pc);
+                            u2(&mut out, code_len as u16 - start_pc); // length to method end
                             u2(&mut out, name_idx);
                             u2(&mut out, desc_idx);
                             u2(&mut out, slot);
@@ -1471,6 +1518,83 @@ fn u2(out: &mut Vec<u8>, v: u16) {
 }
 fn u4(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_be_bytes());
+}
+
+/// Byte length of the JVM instruction at `code[pc]`, including the opcode and its operands (handles the
+/// variable-length `wide`/`tableswitch`/`lookupswitch` forms). Returns `None` on a truncated/unknown
+/// stream so a caller can stop walking rather than desync.
+fn insn_len(code: &[u8], pc: usize) -> Option<usize> {
+    let op = *code.get(pc)?;
+    Some(match op {
+        // Fixed multi-byte forms.
+        0x10 | 0x12 => 2,                             // bipush, ldc
+        0x15..=0x19 | 0x36..=0x3a => 2,               // *load/*store <index>
+        0xa9 | 0xbc => 2,                             // ret, newarray
+        0x11 | 0x13 | 0x14 => 3,                      // sipush, ldc_w, ldc2_w
+        0x84 => 3,                                    // iinc
+        0x99..=0xa8 => 3,                             // if*/goto/jsr (2-byte branch)
+        0xb2..=0xb8 => 3, // get/put static/field, invokevirtual/special/static
+        0xbb | 0xbd | 0xc0 | 0xc1 | 0xc6 | 0xc7 => 3, // new, anewarray, checkcast, instanceof, ifnull/nonnull
+        0xc5 => 4,                                    // multianewarray
+        0xb9 | 0xba | 0xc8 | 0xc9 => 5, // invokeinterface, invokedynamic, goto_w, jsr_w
+        0xc4 => {
+            // wide: `wide <opcode> <u2 index>`, or `wide iinc <u2 index> <u2 const>`.
+            if *code.get(pc + 1)? == 0x84 {
+                6
+            } else {
+                4
+            }
+        }
+        0xaa => {
+            // tableswitch: opcode, 0-3 pad to a 4-byte boundary, default(4), low(4), high(4), jumps.
+            let base = pc + 1;
+            let pad = (4 - (base % 4)) % 4;
+            let p = base + pad;
+            let low = i32::from_be_bytes(code.get(p + 4..p + 8)?.try_into().ok()?);
+            let high = i32::from_be_bytes(code.get(p + 8..p + 12)?.try_into().ok()?);
+            let n = (high - low + 1).max(0) as usize;
+            (p + 12 + n * 4) - pc
+        }
+        0xab => {
+            // lookupswitch: opcode, pad, default(4), npairs(4), npairs*(match(4)+offset(4)).
+            let base = pc + 1;
+            let pad = (4 - (base % 4)) % 4;
+            let p = base + pad;
+            let npairs =
+                i32::from_be_bytes(code.get(p + 4..p + 8)?.try_into().ok()?).max(0) as usize;
+            (p + 8 + npairs * 8) - pc
+        }
+        _ => 1, // every remaining opcode is a bare single byte
+    })
+}
+
+/// The pc just past the FIRST store instruction that writes local `slot` — i.e. where a variable stored
+/// there becomes live. Walks the bytecode opcode-by-opcode (so an operand byte that happens to equal a
+/// store opcode is skipped). `None` if no such store exists. Covers both the compact (`istore_1`) and
+/// indexed (`istore <slot>`, `wide istore <slot>`) store forms.
+fn first_store_end(code: &[u8], slot: u16) -> Option<usize> {
+    let mut pc = 0usize;
+    while pc < code.len() {
+        let op = code[pc];
+        let len = insn_len(code, pc)?;
+        let stored = match op {
+            // Indexed stores: `istore/lstore/fstore/dstore/astore <u1 index>`.
+            0x36..=0x3a => u16::from(code[pc + 1]) == slot,
+            // Compact stores: istore_0..3 (0x3b-0x3e), lstore_0..3 (0x3f-0x42), fstore_0..3 (0x43-0x46),
+            // dstore_0..3 (0x47-0x4a), astore_0..3 (0x4b-0x4e) — slot = (op - base) % 4.
+            0x3b..=0x4e => u16::from((op - 0x3b) % 4) == slot,
+            // Wide store: `wide <istore..astore> <u2 index>`.
+            0xc4 if matches!(code.get(pc + 1), Some(0x36..=0x3a)) => {
+                u16::from_be_bytes(code.get(pc + 2..pc + 4)?.try_into().ok()?) == slot
+            }
+            _ => false,
+        };
+        if stored {
+            return Some(pc + len);
+        }
+        pc += len;
+    }
+    None
 }
 
 /// Write a `Runtime[In]VisibleAnnotations` attribute: `name_index`, `length`, `num_annotations`, then
