@@ -478,6 +478,42 @@ fn data_class_collection_field_hashes_via_object_hashcode() {
     );
 }
 
+/// A value-class data-class field goes through the value class's OWN static ABI in every
+/// synthesized member, matching kotlinc: `hashCode` via `hashCode-impl(U)I` (never `box-impl` +
+/// `Objects.hashCode`) and `equals` via `equals-impl0(U, U)Z` fused to a single `ifne`/`ifeq`
+/// (never `Intrinsics.areEqual` on the underlyings).
+#[test]
+fn data_class_value_class_field_uses_impl_statics() {
+    let Some((dir, jh)) = krusty_compile(
+        "dcvcimpl",
+        "@JvmInline\nvalue class Id(val v: String)\ndata class C(val id: Id, val n: Int)\nfun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let text = javap(&jh, &dir.join("C.class"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let hc = &text[text.find("int hashCode").expect("hashCode")..];
+    let hc = &hc[..hc[1..].find("\n\n").map(|p| p + 1).unwrap_or(hc.len())];
+    assert!(
+        hc.contains("hashCode-impl"),
+        "value-class field must hash via its static hashCode-impl:\n{hc}"
+    );
+    assert!(
+        !hc.contains("box-impl") && !hc.contains("Objects.hashCode"),
+        "value-class field must NOT box then Objects.hashCode:\n{hc}"
+    );
+    let eq = &text[text.find("boolean equals").expect("equals")..];
+    let eq = &eq[..eq[1..].find("\n\n").map(|p| p + 1).unwrap_or(eq.len())];
+    assert!(
+        eq.contains("equals-impl0"),
+        "value-class field must compare via its static equals-impl0:\n{eq}"
+    );
+    assert!(
+        !eq.contains("Intrinsics.areEqual"),
+        "value-class field must NOT compare via Intrinsics.areEqual:\n{eq}"
+    );
+}
+
 #[test]
 fn data_class_hash_shapes_match_kotlinc_per_field_kind() {
     // kotlinc's per-field-kind hash dispatch, shape-for-shape: an ARRAY content-hashes via
