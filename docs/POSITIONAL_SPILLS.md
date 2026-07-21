@@ -1,7 +1,7 @@
 # Positional continuation spills (kotlinc parity) — design
 
-The last mission-core RED_ABI family (10 files) is continuation **field-count** divergence.
-Decoded from `IdentityLinkService.link` bytecode (kotlinc 2.4):
+The last downstream RED_ABI family (10 files) is continuation **field-count** divergence.
+Decoded from a production service's `link` method bytecode (kotlinc 2.4):
 
 ## kotlinc's model
 
@@ -13,7 +13,7 @@ Decoded from `IdentityLinkService.link` bytecode (kotlinc 2.4):
   There is no loop-top restore-all.
 - Field count = **max in-scope count over suspensions** (per kind). Different variables REUSE the
   same `L$N` in different states: `link()` s1 = 4 params → `L$0..3`; s2 = params + `existing` +
-  `updated` → `L$4`,`L$5`; s3 = params + `existing` + `identityLink` → `L$4`,`L$5` again.
+  `updated` → `L$4`,`L$5`; s3 = params + `existing` + `linked` → `L$4`,`L$5` again.
   kotlinc: 6 fields; krusty's one-field-per-variable union: 7 → RED_ABI.
 
 ## krusty refactor plan (src/jvm/suspend.rs, both machines: named fn ~1300-1620, lambda ~1700-1900)
@@ -45,11 +45,11 @@ Decoded from `IdentityLinkService.link` bytecode (kotlinc 2.4):
 
 ## Verification loop
 
-- Repro: `IdentityLinkService.kt` → `$link$1` must have exactly `L$0..L$5` (see
-  `/tmp/abidiff.py` in the infragnite worktree, or javap field diff).
+- Repro: the link-service file → `$link$1` must have exactly `L$0..L$5` (see
+  `/tmp/abidiff.py` in the downstream worktree, or javap field diff).
 - `./run-tests.sh --test conformance kotlin_codegen_box_conformance -- --test-threads=1`
   (JAVA_HOME required) after every stage — the corpus is the never-miscompile detector.
-- Gate: `./gradlew :mission:mission-core:krustyVerify -Pkrusty.binary=…` in the infragnite
+- Gate: `./gradlew <module>:krustyVerify -Pkrusty.binary=…` in the downstream
   worktree; target 96 → 106 GREEN.
 
 ## Endgame (remaining 7 files, ±1-3 slots)
@@ -67,11 +67,10 @@ unnamed stack temps never get slots. krusty should therefore:
    inclusion in `ScopeWalk::snapshot`) — kotlinc-shaped code has no crossing temps once the splice
    locals are named; a krusty-only crossing temp would then fail loudly in the box corpus rather
    than silently diverge.
-3. MissionChangeService is a different shape: private ctor-properties in a class WITH a companion
+3. One service is a different shape: private ctor-properties in a class WITH a companion
    keep public getters (kt504 guard); kotlinc emits instance `access$get<X>$p` bridges instead —
    extend the existing facade-bridge machinery to instance properties.
 
 Verify per file against the kc `putfield L$*` dumps (javap -c) before/after each site change;
-files: WorkspaceService, MissionBackupService, ResourceAggregationService, MissionActionService
-(over-spill), MissionDriftService, MissionDeploymentOptionsService (under-spill),
-MissionChangeService (getters).
+files: the seven remaining downstream services (a mix of over-spill, under-spill, and the
+getter-bridge shape above).

@@ -905,8 +905,8 @@ public class M {\n\
 #[test]
 fn suspend_receiver_of_elvis_safecall_chain() {
     // An expression-body suspend fn whose suspension is the leftmost receiver of a chain feeding an
-    // elvis / safe-call (`getConfig().instances[id]?.let { … } ?: -1` — the shape mission-core's
-    // requireInstance uses). The elvis/safe-call subject lowers to a value-position `Block` binding a
+    // elvis / safe-call (`getConfig().instances[id]?.let { … } ?: -1` — a production
+    // require-instance shape). The elvis/safe-call subject lowers to a value-position `Block` binding a
     // temp; the hoister can't see into a value block, so without `splice_return_blocks` (which lifts
     // `return { s…; v }` / `val x = { s…; v }` to `s…; return v` / `s…; val x = v`) the suspension
     // hides there and the flattener bails. Values match kotlinc: pick("a") = 1 + 100 = 101; pick("z")
@@ -966,7 +966,7 @@ public class M {\n\
 fn suspend_try_catch_with_branch_in_nonsuspending_catch_runs() {
     // A BRANCH (`?.`/elvis/`if`) in a suspend try's NON-suspending CATCH body: the catch emits
     // entirely inside its handler state, so its branch temps are ordinary state-local declarations
-    // (the shape mission-core's MissionDriftService.startDriftCheck uses). It must compile AND run —
+    // (the shape a production service's drift-check method uses). It must compile AND run —
     // loading the class verifies the handler frames. (A branchy catch that itself SUSPENDS is still
     // skipped — its branch temps would span resume states.)
     let _jh = match java_home() {
@@ -1022,7 +1022,7 @@ public class M {\n\
 #[test]
 fn suspend_in_try_catch_with_spilled_locals() {
     // A `suspend fun` with a suspension point INSIDE a `try { … } catch { … }`, plus a suspension
-    // BEFORE the try and locals spilled across both (the shape mission-core's MissionActionService
+    // BEFORE the try and locals spilled across both (the shape a production action service
     // uses). The try body's second suspension (`risky`) may throw; the catch supplies a fallback. The
     // CPS state machine wraps its dispatch so an exception thrown while a try-region state is active
     // routes to the catch state. Definite-assignment-gated spilling keeps the body-only local `r`
@@ -1097,7 +1097,7 @@ fn suspend_unit_fn_bare_early_return() {
     // A `suspend fun` returning Unit with an EARLY BARE `return` (a guard `if (skip) return`) BEFORE a
     // later suspension point. In the CPS state machine the method returns `Object`, so a bare `return`
     // must `areturn Unit.INSTANCE` — emitting a void `return` (as the bare `Return(None)` did) yields
-    // "Method expects a return value" at load. Mission-core hit: `UserManagementService.acceptInvitation`
+    // "Method expects a return value" at load. Production hit: an invitation-accepting service method
     // (`… ?: return`, `if (status != PENDING) return`). proc(b,true) leaves v=0; proc(b,false) sets v=1.
     if common::stdlib_jar().is_none()
         || common::coroutines_jar().is_none()
@@ -1127,7 +1127,7 @@ fn suspend_unit_fn_bare_early_return() {
 #[test]
 fn suspend_in_catch_body_spills_exception() {
     // A `suspend fun` whose CATCH body itself contains a suspension point AND reads the caught
-    // exception both BEFORE and AFTER that suspension (mission-core's MissionChangeService.approveChange
+    // exception both BEFORE and AFTER that suspension (a production approval method's shape
     // shape: `catch (e) { log(e); repo.updateStatus(...); throw e }`). The exception cannot be read from
     // `r_v` after the catch's own suspend call clobbers it — so it is spilled to a dedicated continuation
     // field and restored per-state, exactly like any local live across a suspension. compute(sb,false) =
@@ -1175,7 +1175,7 @@ fn suspend_in_catch_body_spills_exception() {
 #[test]
 fn suspend_return_when_with_suspending_branches() {
     // A `suspend fun` whose EXPRESSION body is `= when (k) { … }` with suspensions in the BRANCH
-    // VALUES/bodies (not the condition) — mission-core's MissionChangeService.applyOperation shape,
+    // VALUES/bodies (not the condition) — a production apply-operation shape,
     // including an `else -> throw` divergent arm. Desugars to `val tmp; when (k) { … tmp = v }; return
     // tmp`, each branch flattened as a suspending `when`-statement arm. handle(0) = "a5" with sb "A!";
     // handle(1) = null with sb "B"; handle(2) = "c" with sb "C".

@@ -1,7 +1,7 @@
 //! A class with a `suspend` member that overrides a NON-GENERIC supertype method (an interface impl /
 //! suspend decorator). No generic erasure is involved, so the CPS override directly implements the
 //! supertype method — no bridge is needed, and it must compile + verify + dispatch correctly through the
-//! supertype. Mission-core hit: `ChangeAwareEngine : ThrusterEngine` (~20 `override suspend fun`).
+//! supertype. Production hit: an engine class implementing a ~20-method suspend interface.
 //! Needs the JVM toolchain + kotlin-stdlib + coroutines; skips otherwise.
 use super::common;
 

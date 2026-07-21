@@ -2,8 +2,8 @@
 //! operand. The lambda's body is a separate method (`make$lambda$0`) with its own value-index numbering;
 //! the per-function value-class box/unbox analysis must NOT reach into it from the enclosing `make`
 //! (whose slot for the same index holds the value class `Id`), or it mis-boxes the OTHER interpolation
-//! operand with `Id.box-impl` → "Bad type on operand stack" at load. Mission-core hit:
-//! `MissionChangeService.approveChange`'s `logger.info { "…${id.value}… $scheduledAt" }`.
+//! operand with `Id.box-impl` → "Bad type on operand stack" at load. Production hit: a service's
+//! `logger.info { "…${id.value}… $scheduledAt" }` template over a value-class id.
 //! Needs the JVM toolchain + kotlin-stdlib; skips otherwise.
 use super::common;
 

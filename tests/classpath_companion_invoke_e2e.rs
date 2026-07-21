@@ -1,7 +1,7 @@
 //! A `Type(args)` factory call where `Type` is a CLASSPATH type whose companion object declares
 //! `operator fun invoke(args)` — kotlinc lowers this to `Type.Companion.invoke(args)`. An interface has
-//! no constructor, so this is the only way to "construct" it. Mission-core hit:
-//! `InstanceInternalId(Base58Uuid.generate())` in `MissionApplicationCatalogService`.
+//! no constructor, so this is the only way to "construct" it. Production hit: a value-class id wrapper
+//! constructed as `Wrapped(Generator.generate())` inside a catalog service.
 //! Needs the JVM toolchain + real kotlinc; skips otherwise.
 use super::common;
 

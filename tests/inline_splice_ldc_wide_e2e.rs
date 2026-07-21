@@ -1,6 +1,6 @@
 //! Splicing a stdlib inline body (`require(cond) { lazyMessage }`) into a host whose class constant pool
 //! is LARGE pushes a relocated `ldc` (1-byte pool index) past 255 — the emergent whole-file failure that
-//! blocked mission-core's RbacService / MissionDriftService (the require/check inline splice compiled in
+//! blocked two production services (the require/check inline splice compiled in
 //! isolation but not in the full file). `relocate_insns` now widens such an `ldc` to `ldc_w` (0x13, the
 //! 2-byte-index form, identical semantics) instead of bailing. This test forces a >255-entry pool with
 //! ~300 distinct string constants in the same facade, then exercises an inlined `require { … }`, and RUNS

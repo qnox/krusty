@@ -4301,7 +4301,7 @@ pub enum ResolvedCall {
     Member(crate::symbol_resolver::ResolvedMember),
     /// A receiver-less top-level library call → `invokestatic` on the facade.
     TopLevel(crate::libraries::LibraryCallable),
-    /// A `@JvmStatic`/companion `object` member (`Base58Uuid.of(x)`) → STATIC call, never virtual.
+    /// A `@JvmStatic`/companion `object` member (`UuidGen.of(x)`) → STATIC call, never virtual.
     Companion(crate::libraries::LibraryMember),
     /// A library EXTENSION call `recv.name(args)` → `invokestatic facade.name(recv, args)`. The checker
     /// is the sole resolver: the lowerer READS this callable and emits it (never re-resolving).
@@ -13962,7 +13962,7 @@ impl<'a> Checker<'a> {
                 {
                     return Ty::Unit;
                 }
-                // A `@JvmStatic` member of a classpath `object` (`Base58Uuid.of(x)`): kotlinc emits a
+                // A `@JvmStatic` member of a classpath `object` (`UuidGen.of(x)`): kotlinc emits a
                 // static method on the object class, so it lands in the type's `companion` (static) list —
                 // not an instance member. Resolve it there as a static call on the receiver's type.
                 if let Some(internal) = rt.obj_internal() {
@@ -15219,7 +15219,7 @@ impl<'a> Checker<'a> {
                 // carries an `operator fun invoke(args)`: evaluate `Type` as its companion INSTANCE (a
                 // `getstatic Type.Companion` value) and dispatch as an invoke-operator on it — exactly
                 // kotlinc's `Type.Companion.invoke(args)`. An interface has no constructor, so a factory
-                // `invoke` is the only way to "construct" it (`InstanceInternalId(uuid)` in mission-core).
+                // `invoke` is the only way to "construct" it (`Wrapped(uuid)` in production code).
                 if !self.value_root_shadows_classifier(&fname) {
                     if let Some(ct) = self.classpath_companion_ty(&fname) {
                         let has_invoke = self

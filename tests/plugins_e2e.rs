@@ -258,7 +258,7 @@ fn deser_ctor_appends_marker_for_value_class_field() {
 fn value_class_serializer_omits_write_self() {
     // A `@JvmInline value class` serializes its sole underlying value inline — kotlinc emits NO
     // `write$Self` helper for it (unlike a plain data class). krusty must match: emitting one is a
-    // spurious extra member the infragnite ABI gate flags.
+    // spurious extra member the downstream ABI gate flags.
     let Some((_file, mut ir)) = lower("@JvmInline value class V(val s: String)") else {
         eprintln!("skipping: no stdlib jar / class outside IR subset");
         return;

@@ -2597,7 +2597,7 @@ mod tests {
 
     /// A method/class marked deprecated must carry the zero-length `Deprecated` attribute — kotlinc
     /// emits it for a `@Serializable` class's `$$serializer` object and `get<Prop>$annotations()`
-    /// markers, and ASM surfaces it as `ACC_DEPRECATED` (0x20000), which the infragnite ABI gate compares.
+    /// markers, and ASM surfaces it as `ACC_DEPRECATED` (0x20000), which the downstream ABI gate compares.
     #[test]
     fn deprecated_attribute_emitted_on_marked_method_and_class() {
         fn contains(hay: &[u8], needle: &[u8]) -> bool {

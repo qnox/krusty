@@ -1,7 +1,7 @@
 //! build.775 ii1: a `suspend` call inside a `for` loop body. `while` loops already lower through the
 //! coroutine state machine, but a `for (x in xs) { r.del(x) }` with a suspend call in the body bailed
 //! with "this suspend-function shape is not yet supported by the IR backend". Real hit:
-//! `UserManagementService.offboard`.
+//! a production offboarding service method.
 use super::common;
 
 const LIB: &str = "package lib\n\
