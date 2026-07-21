@@ -1109,44 +1109,66 @@ impl ClassWriter {
         // before the Code-attribute names, then the `SourceFile` attribute NAME later, and
         // `RuntimeVisibleAnnotations` last. Intern the value up front to match.
         let sourcefile_value = self.source_file.clone().map(|src| self.cp.utf8(&src));
-        // kotlinc interns the method-level `RuntimeInvisibleAnnotations` name BEFORE `Code` (shared UTF8
-        // with the field-level one via dedup); `RuntimeInvisibleParameterAnnotations` after the debug
-        // tables. Intern both here to match, so they land ahead of `Code`/after `LocalVariableTable`.
-        let invis_ann_name = if self.methods.iter().any(|m| !m.invisible_anns.is_empty())
-            || self.fields.iter().any(|f| !f.invisible_anns.is_empty())
-        {
-            Some(self.cp.utf8("RuntimeInvisibleAnnotations"))
-        } else {
-            None
-        };
-        let method_invis_ann_name = invis_ann_name;
+        // Code-related attribute NAMES intern in kotlinc's real first-use order, which is driven by
+        // its field-then-method visiting — NOT a fixed order. kotlinc visits fields first, so a field
+        // annotation interns `RuntimeInvisibleAnnotations` BEFORE `Code`; then each method, in emit
+        // order, contributes `LineNumberTable`, `LocalVariableTable`, its own method-level
+        // `RuntimeInvisibleAnnotations`, `StackMapTable`, and `RuntimeInvisibleParameterAnnotations` on
+        // first use. Two shapes make the difference visible:
+        //   * plain `class C(val x: Int, var y: String)` — the `String` field carries `@NotNull`, so RIA
+        //     interns first (before `Code`), and no method branches ⇒ no `StackMapTable`.
+        //   * `data class D(val x: Int)` — only the synthesized methods carry annotations, so RIA interns
+        //     AFTER the debug tables (from `copy`/`toString`), and `equals` (branchy) interns
+        //     `StackMapTable` last.
+        // A hard-coded order matches one shape and diverges on the other; walk the real first-use
+        // sequence so both come out byte-identical.
+        #[derive(PartialEq)]
+        enum An {
+            Lnt,
+            Lvt,
+            Ria,
+            Smt,
+            Ripa,
+        }
+        let field_has_invis = self.fields.iter().any(|f| !f.invisible_anns.is_empty());
+        // Field-level RIA, if any field is annotated: interns before `Code` (fields precede methods).
+        let field_ria = field_has_invis.then(|| self.cp.utf8("RuntimeInvisibleAnnotations"));
         let code_attr_name = self.cp.utf8("Code");
-        // Intern `StackMapTable` only if a method actually needs one — an unused pool entry would
-        // diverge from kotlinc for branch-free classes.
-        let stackmap_attr_name = self
-            .methods
-            .iter()
-            .any(|m| m.stackmap.is_some())
-            .then(|| self.cp.utf8("StackMapTable"));
-        // Intern the debug-table attribute names only if a method carries them (unused pool entries
-        // would diverge from kotlinc for classes emitted without debug info).
-        let lnt_attr_name = self
-            .methods
-            .iter()
-            .any(|m| !m.lnt.is_empty())
-            .then(|| self.cp.utf8("LineNumberTable"));
-        let lvt_attr_name = self
-            .methods
-            .iter()
-            .any(|m| !m.lvt.is_empty())
-            .then(|| self.cp.utf8("LocalVariableTable"));
-        // `RuntimeInvisibleParameterAnnotations` name interns right after the debug tables (kotlinc's
-        // order for a class with annotated method parameters).
-        let ripa_attr_name = self
-            .methods
-            .iter()
-            .any(|m| !m.param_anns.is_empty())
-            .then(|| self.cp.utf8("RuntimeInvisibleParameterAnnotations"));
+        // First-use order of the per-method attribute names, in method emit order.
+        let mut seq: Vec<An> = Vec::new();
+        for m in &self.methods {
+            if !m.lnt.is_empty() && !seq.contains(&An::Lnt) {
+                seq.push(An::Lnt);
+            }
+            if !m.lvt.is_empty() && !seq.contains(&An::Lvt) {
+                seq.push(An::Lvt);
+            }
+            if !m.invisible_anns.is_empty() && !seq.contains(&An::Ria) {
+                seq.push(An::Ria);
+            }
+            if m.stackmap.is_some() && !seq.contains(&An::Smt) {
+                seq.push(An::Smt);
+            }
+            if !m.param_anns.is_empty() && !seq.contains(&An::Ripa) {
+                seq.push(An::Ripa);
+            }
+        }
+        let (mut lnt_attr_name, mut lvt_attr_name, mut stackmap_attr_name, mut ripa_attr_name) =
+            (None, None, None, None);
+        // A method-level RIA first use dedups onto the field-level index when both are present.
+        let mut invis_ann_name = field_ria;
+        for k in &seq {
+            match k {
+                An::Lnt => lnt_attr_name = Some(self.cp.utf8("LineNumberTable")),
+                An::Lvt => lvt_attr_name = Some(self.cp.utf8("LocalVariableTable")),
+                An::Ria => invis_ann_name = Some(self.cp.utf8("RuntimeInvisibleAnnotations")),
+                An::Smt => stackmap_attr_name = Some(self.cp.utf8("StackMapTable")),
+                An::Ripa => {
+                    ripa_attr_name = Some(self.cp.utf8("RuntimeInvisibleParameterAnnotations"))
+                }
+            }
+        }
+        let method_invis_ann_name = invis_ann_name;
         // Intern the `Signature` attribute name only if a method actually carries one — an unused
         // constant-pool entry would diverge from kotlinc's output for non-generic classes.
         let signature_attr_name = if self.methods.iter().any(|m| m.signature.is_some())

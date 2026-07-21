@@ -142,6 +142,18 @@ fn all_primitive_types_class_is_byte_identical() {
     );
 }
 
+/// A single-property `data class` — the first FULLY byte-identical data class. Exercises the
+/// synthesized `component1`/`copy`/`copy$default`/`equals`/`hashCode`/`toString` pool seeding AND the
+/// data-class attribute-NAME interning order: kotlinc visits fields then methods, so with only a
+/// primitive field (no field `@NotNull`) the names appear `Code`, `LineNumberTable`,
+/// `LocalVariableTable`, then `RuntimeInvisibleAnnotations` (from `copy`/`toString`), then
+/// `StackMapTable` (from the branchy `equals`) LAST — the opposite of a plain class with an annotated
+/// field, which interns RIA before `Code`. A hard-coded order gets one shape wrong; this pins both.
+#[test]
+fn data_class_single_primitive_is_byte_identical() {
+    assert_byte_identical("package demo\ndata class D(val x: Int)\n", "demo/D", &[]);
+}
+
 // ---- @Metadata-level checks for shapes not yet FULLY byte-identical (data classes) ----------------
 
 /// A `data class` (metadata on): its IR → `build_class_metadata` yields the synthesized
