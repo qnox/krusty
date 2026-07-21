@@ -454,6 +454,31 @@ fn data_class_concrete_ref_field_hashes_via_own_hashcode() {
     }
 }
 
+/// A NULLABLE value-class data-class field (`Id?`) hashes via kotlinc's null-guarded ternary
+/// `n != null ? Id.hashCode-impl(n) : 0` — an `ifnonnull` branch to the static `hashCode-impl` on the raw
+/// underlying, NOT `box-impl` + `Objects.hashCode`.
+#[test]
+fn data_class_nullable_value_class_field_hashes_via_hashcode_impl_ternary() {
+    let Some((dir, jh)) = krusty_compile_stdlib(
+        "dcvcn",
+        "@JvmInline\nvalue class Id(val v: String)\ndata class C(val n: Id?)\nfun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let text = javap(&jh, &dir.join("C.class"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let hc = &text[text.find("int hashCode").expect("hashCode")..];
+    let hc = &hc[..hc[1..].find("\n\n").map(|p| p + 1).unwrap_or(hc.len())];
+    assert!(
+        hc.contains("hashCode-impl") && hc.contains("ifnonnull"),
+        "nullable value-class field must null-guard (ifnonnull) then hashCode-impl:\n{hc}"
+    );
+    assert!(
+        !hc.contains("box-impl") && !hc.contains("Objects.hashCode"),
+        "nullable value-class field must NOT box then Objects.hashCode:\n{hc}"
+    );
+}
+
 /// A collection/library-interface data-class field (`List`/`Map`) hashes via `Object.hashCode` (kotlinc's
 /// shape for an interface-typed field), not the null-safe static `Objects.hashCode`.
 #[test]
