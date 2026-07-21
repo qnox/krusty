@@ -7585,8 +7585,10 @@ impl<'a> Lower<'a> {
                 Some(self.emit_when(vec![(Some(isnull), zero), (None, hc)]))
             }
             Ty::Long | Ty::Double | Ty::Float => self.runtime_call(RuntimeOp::HashCode, t, vec![v]),
-            // An array/reference property hashes by reference identity/null-safe object hash, matching
-            // kotlinc — a data class does NOT content-hash arrays.
+            // A data class CONTENT-hashes an array property via `java.util.Arrays.hashCode([X)I` (kotlinc's
+            // shape), not the array's identity `Object`/`Objects.hashCode`.
+            t if t.non_null().is_array() => self.runtime_call(RuntimeOp::ArrayHashCode, t, vec![v]),
+            // Any other reference property hashes by the null-safe object hash, matching kotlinc.
             _ => self.runtime_call(RuntimeOp::HashCode, t, vec![v]),
         }
     }

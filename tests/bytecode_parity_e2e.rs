@@ -387,6 +387,30 @@ fn data_class_nonnull_string_hashes_via_string_hashcode() {
     );
 }
 
+/// A data-class array field CONTENT-hashes via `java.util.Arrays.hashCode([X)I` (kotlinc's shape), not
+/// the array's identity `Objects.hashCode`.
+#[test]
+fn data_class_array_field_hashes_via_arrays_hashcode() {
+    let Some((dir, jh)) = krusty_compile(
+        "dcarrhash",
+        "data class C(val x: IntArray)\nfun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let text = javap(&jh, &dir.join("C.class"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let hc = &text[text.find("int hashCode").expect("hashCode")..];
+    let hc = &hc[..hc[1..].find("\n\n").map(|p| p + 1).unwrap_or(hc.len())];
+    assert!(
+        hc.contains("Arrays.hashCode"),
+        "array field must content-hash via Arrays.hashCode:\n{hc}"
+    );
+    assert!(
+        !hc.contains("Objects.hashCode"),
+        "array field must NOT use the identity Objects.hashCode:\n{hc}"
+    );
+}
+
 // ---- safe-call + elvis primitive fusion (no boxing) -----------------------------------------
 
 #[test]

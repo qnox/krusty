@@ -2798,6 +2798,30 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
                     desc.to_string(),
                 )
             }
+            RuntimeOp::ArrayHashCode => {
+                // A data class CONTENT-hashes an array field via `java.util.Arrays.hashCode([X)I`
+                // (kotlinc's shape), not the array's identity `Object.hashCode`.
+                let desc = match array_kotlin_fq(ty.non_null())? {
+                    "kotlin/BooleanArray" => "([Z)I",
+                    "kotlin/CharArray" => "([C)I",
+                    "kotlin/ByteArray" => "([B)I",
+                    "kotlin/ShortArray" => "([S)I",
+                    "kotlin/IntArray" => "([I)I",
+                    "kotlin/LongArray" => "([J)I",
+                    "kotlin/FloatArray" => "([F)I",
+                    "kotlin/DoubleArray" => "([D)I",
+                    "kotlin/Array" => "([Ljava/lang/Object;)I",
+                    _ => return None,
+                };
+                callable(
+                    "java/util/Arrays",
+                    "hashCode",
+                    vec![ty],
+                    Ty::Int,
+                    Ty::Int,
+                    desc.to_string(),
+                )
+            }
             RuntimeOp::ArrayCopyOf => {
                 let desc = match array_kotlin_fq(ty.non_null())? {
                     "kotlin/BooleanArray" => "([ZI)[Z",
