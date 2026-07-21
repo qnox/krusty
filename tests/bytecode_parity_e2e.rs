@@ -455,6 +455,30 @@ fn data_class_concrete_ref_field_hashes_via_own_hashcode() {
     }
 }
 
+/// A non-null value-class data-class field hashes via the value class's static `hashCode-impl(underlying)`
+/// on the RAW underlying (kotlinc's shape), NOT `box-impl` + the null-safe `Objects.hashCode`.
+#[test]
+fn data_class_value_class_field_hashes_via_hashcode_impl() {
+    let Some((dir, jh)) = krusty_compile_stdlib(
+        "dcvc",
+        "@JvmInline\nvalue class Id(val v: String)\ndata class C(val id: Id)\nfun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let text = javap(&jh, &dir.join("C.class"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let hc = &text[text.find("int hashCode").expect("hashCode")..];
+    let hc = &hc[..hc[1..].find("\n\n").map(|p| p + 1).unwrap_or(hc.len())];
+    assert!(
+        hc.contains("hashCode-impl"),
+        "value-class field must hash via its static hashCode-impl:\n{hc}"
+    );
+    assert!(
+        !hc.contains("box-impl") && !hc.contains("Objects.hashCode"),
+        "value-class field must NOT box then Objects.hashCode:\n{hc}"
+    );
+}
+
 /// A collection/library-interface data-class field (`List`/`Map`) hashes via `Object.hashCode` (kotlinc's
 /// shape for an interface-typed field), not the null-safe static `Objects.hashCode`.
 #[test]

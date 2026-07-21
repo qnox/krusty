@@ -7645,6 +7645,28 @@ impl<'a> Lower<'a> {
                 Some(self.emit_external_call(sym, Some(v), vec![]))
             };
         }
+        // A NON-null value-class field hashes via the value class's static `hashCode-impl(underlying)I`
+        // on the RAW underlying value (kotlinc's shape), NOT `box-impl` + the null-safe `Objects.hashCode`.
+        // (A nullable value-class field boxes/null-guards — left on the fallback for now.)
+        if !nullable {
+            if let Some(vc) = t.non_null().obj_internal() {
+                let vc_name = vc.render();
+                if let Some((_, under)) = self
+                    .syms
+                    .class_by_internal(&vc_name)
+                    .and_then(|c| c.value_field.clone())
+                {
+                    let desc = self.runtime.method_descriptor(&[under], Ty::Int)?;
+                    return Some(self.emit_static_call(
+                        vc_name,
+                        "hashCode-impl".to_string(),
+                        desc,
+                        InlineKind::None,
+                        vec![v],
+                    ));
+                }
+            }
+        }
         // Any other reference property hashes by the null-safe object hash, matching kotlinc.
         self.runtime_call(RuntimeOp::HashCode, t, vec![v])
     }
