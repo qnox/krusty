@@ -7595,7 +7595,7 @@ impl<'a> Lower<'a> {
                 };
             }
             if t.is_array() {
-                return s.runtime_call(RuntimeOp::HashCode, t, vec![v]);
+                return s.runtime_call(RuntimeOp::ArrayHashCode, t, vec![v]);
             }
             match t.non_null().kotlin_class_internal() {
                 Some(cls) => Some(s.emit_virtual_call(

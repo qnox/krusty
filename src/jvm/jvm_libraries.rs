@@ -2752,30 +2752,6 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
             }
             RuntimeOp::PrimitiveCompare => None,
             RuntimeOp::HashCode => {
-                // An ARRAY content-hashes via `java.util.Arrays.hashCode` — kotlinc's data-class
-                // shape (even though data-class `equals` compares arrays by reference).
-                if let Some(fq) = array_kotlin_fq(ty.non_null()) {
-                    let desc = match fq {
-                        "kotlin/BooleanArray" => "([Z)I",
-                        "kotlin/CharArray" => "([C)I",
-                        "kotlin/ByteArray" => "([B)I",
-                        "kotlin/ShortArray" => "([S)I",
-                        "kotlin/IntArray" => "([I)I",
-                        "kotlin/LongArray" => "([J)I",
-                        "kotlin/FloatArray" => "([F)I",
-                        "kotlin/DoubleArray" => "([D)I",
-                        "kotlin/Array" => "([Ljava/lang/Object;)I",
-                        _ => unreachable!("array_kotlin_fq returns only the names above"),
-                    };
-                    return callable(
-                        "java/util/Arrays",
-                        "hashCode",
-                        vec![ty],
-                        Ty::Int,
-                        Ty::Int,
-                        desc.to_string(),
-                    );
-                }
                 let (owner, desc, param) = match ty {
                     Ty::Int => ("java/lang/Integer", "(I)I", Ty::Int),
                     Ty::Short => ("java/lang/Short", "(S)I", Ty::Short),
@@ -2819,6 +2795,56 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
                     vec![ty],
                     Ty::String,
                     Ty::String,
+                    desc.to_string(),
+                )
+            }
+            RuntimeOp::ArrayHashCode => {
+                // A data class CONTENT-hashes an array field via `java.util.Arrays.hashCode([X)I`
+                // (kotlinc's shape), not the array's identity `Object.hashCode`. An UNSIGNED array
+                // is a stdlib value class over the signed carrier — kotlinc routes its hash through
+                // the class's own static `hashCode-impl(<carrier>)I` instead of `Arrays`.
+                let internal = ty.non_null().obj_internal();
+                if let Some(n) = internal {
+                    let unsigned = if n.matches("kotlin/UIntArray") {
+                        Some(("kotlin/UIntArray", "([I)I"))
+                    } else if n.matches("kotlin/ULongArray") {
+                        Some(("kotlin/ULongArray", "([J)I"))
+                    } else if n.matches("kotlin/UByteArray") {
+                        Some(("kotlin/UByteArray", "([B)I"))
+                    } else if n.matches("kotlin/UShortArray") {
+                        Some(("kotlin/UShortArray", "([S)I"))
+                    } else {
+                        None
+                    };
+                    if let Some((owner, desc)) = unsigned {
+                        return callable(
+                            owner,
+                            "hashCode-impl",
+                            vec![ty],
+                            Ty::Int,
+                            Ty::Int,
+                            desc.to_string(),
+                        );
+                    }
+                }
+                let desc = match array_kotlin_fq(ty.non_null())? {
+                    "kotlin/BooleanArray" => "([Z)I",
+                    "kotlin/CharArray" => "([C)I",
+                    "kotlin/ByteArray" => "([B)I",
+                    "kotlin/ShortArray" => "([S)I",
+                    "kotlin/IntArray" => "([I)I",
+                    "kotlin/LongArray" => "([J)I",
+                    "kotlin/FloatArray" => "([F)I",
+                    "kotlin/DoubleArray" => "([D)I",
+                    "kotlin/Array" => "([Ljava/lang/Object;)I",
+                    _ => return None,
+                };
+                callable(
+                    "java/util/Arrays",
+                    "hashCode",
+                    vec![ty],
+                    Ty::Int,
+                    Ty::Int,
                     desc.to_string(),
                 )
             }
