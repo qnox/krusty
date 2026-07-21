@@ -387,6 +387,35 @@ fn data_class_nonnull_string_hashes_via_string_hashcode() {
     );
 }
 
+/// A nullable BOXED-primitive data-class field (`Int?`) hashes via kotlinc's null-guarded ternary
+/// `x != null ? x.hashCode() : 0` — an `ifnonnull` branch to the RAW virtual `Object.hashCode()`, NOT
+/// the null-safe `Objects.hashCode` (nor the wrapper's static `Integer.hashCode(I)`).
+#[test]
+fn data_class_nullable_primitive_hashes_via_object_hashcode_ternary() {
+    let Some((dir, jh)) = krusty_compile(
+        "dcnullprimhash",
+        "data class C(val x: Int?)\nfun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let text = javap(&jh, &dir.join("C.class"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let hc = &text[text.find("int hashCode").expect("hashCode")..];
+    let hc = &hc[..hc[1..].find("\n\n").map(|p| p + 1).unwrap_or(hc.len())];
+    assert!(
+        hc.contains("ifnonnull"),
+        "nullable Int? field must be null-guarded inline (ifnonnull):\n{hc}"
+    );
+    assert!(
+        hc.contains("Object.hashCode"),
+        "nullable Int? field must hash via the raw virtual Object.hashCode:\n{hc}"
+    );
+    assert!(
+        !hc.contains("Objects.hashCode"),
+        "nullable Int? field must NOT route through the null-safe Objects.hashCode:\n{hc}"
+    );
+}
+
 /// A data-class array field CONTENT-hashes via `java.util.Arrays.hashCode([X)I` (kotlinc's shape), not
 /// the array's identity `Objects.hashCode`.
 #[test]

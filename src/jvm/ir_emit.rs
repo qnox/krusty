@@ -7017,6 +7017,16 @@ impl<'a> Emitter<'a> {
                 let m = self.cw.methodref("java/lang/String", "hashCode", "()I");
                 code.invokevirtual(m, 0, 1);
             }
+            // RAW virtual `Object.hashCode()I` (no null-safety) — a nullable BOXED primitive data-class
+            // field (`Int?` ⇒ boxed `Integer`) hashes via `x.hashCode()` resolved against `Object` inside
+            // its own null-guarded ternary (kotlinc emits `invokevirtual java/lang/Object.hashCode`, NOT
+            // the wrapper's own, and NOT the null-safe `Objects.hashCode` — the ternary handles null).
+            // Distinct from `kotlin/Any.hashCode` above, which is the null-safe `Any?.hashCode()`.
+            "java/lang/Object.hashCode" => {
+                self.emit_value(recv.unwrap(), code);
+                let m = self.cw.methodref("java/lang/Object", "hashCode", "()I");
+                code.invokevirtual(m, 0, 1);
+            }
             // `s[i]` → `String.charAt(i)`.
             "kotlin/String.get" => {
                 self.emit_value(recv.unwrap(), code);

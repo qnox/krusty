@@ -7568,19 +7568,37 @@ impl<'a> Lower<'a> {
             t if !nullable && is_string(&t) => {
                 Some(self.emit_external_call("kotlin/String.hashCode", Some(v), vec![]))
             }
-            // A NULLABLE `String?` uses kotlinc's null-guarded ternary `d != null ? d.hashCode() : 0`
-            // (an `ifnonnull` branch, NOT `Objects.hashCode`) — matching the virtual `String.hashCode`
-            // ref the data-class pool seeder lays down. The field is loaded twice (no `dup`), as kotlinc
-            // does. Other nullable references still fall through to the null-safe `Objects.hashCode`.
-            t if nullable && is_string(&t) => {
-                // Phrase it as `if (d == null) 0 else d.hashCode()` so the When lowers to kotlinc's exact
-                // layout: the `d == null` test's false-branch is an `ifnonnull` to the hashCode arm, the
-                // `0` is the fall-through, then the hashCode arm — matching `ifnonnull; iconst_0; goto;
-                // aload_0; getfield; invokevirtual`.
+            // A NULLABLE `String?` or a nullable BOXED PRIMITIVE (`Int?` ⇒ boxed `Integer`) uses kotlinc's
+            // null-guarded ternary `x != null ? x.hashCode() : 0` (an `ifnonnull` branch, NOT
+            // `Objects.hashCode`). The inner virtual call is `String.hashCode` for a `String?` and
+            // `Object.hashCode` for a boxed primitive (kotlinc resolves the boxed receiver against
+            // `Object`). Phrased `if (x == null) 0 else x.hashCode()` so the When lowers to kotlinc's exact
+            // layout (the `x == null` false-branch is an `ifnonnull` to the hashCode arm, `0` falls
+            // through). The field is loaded twice (no `dup`), as kotlinc does. Other nullable references
+            // still fall through to the null-safe `Objects.hashCode`.
+            t if nullable
+                && (is_string(&t)
+                    || matches!(
+                        t.non_null(),
+                        Ty::Int
+                            | Ty::Long
+                            | Ty::Short
+                            | Ty::Byte
+                            | Ty::Char
+                            | Ty::Boolean
+                            | Ty::Double
+                            | Ty::Float
+                    )) =>
+            {
+                let sym = if is_string(&t) {
+                    "kotlin/String.hashCode"
+                } else {
+                    "java/lang/Object.hashCode"
+                };
                 let nullc = self.emit_const(IrConst::Null);
                 let isnull = self.emit_primitive_bin_op(IrBinOp::RefEq, v, nullc);
                 let v2 = self.this_field(class_id, idx);
-                let hc = self.emit_external_call("kotlin/String.hashCode", Some(v2), vec![]);
+                let hc = self.emit_external_call(sym, Some(v2), vec![]);
                 let zero = self.emit_const(IrConst::Int(0));
                 Some(self.emit_when(vec![(Some(isnull), zero), (None, hc)]))
             }
