@@ -205,6 +205,9 @@ pub struct ClassTail<'a> {
     pub flags: u64,
     pub companion: Option<&'a str>,
     pub nested: &'a [&'a str],
+    /// The `-module-name` value → `Class.classModuleName` (f101, a JvmProtoBuf extension). kotlinc
+    /// omits it for the default module `main`; infragnite always sets `-module-name`.
+    pub module_name: Option<&'a str>,
 }
 
 pub fn build_class(
@@ -307,6 +310,8 @@ pub fn build_class(
     // Companion + nested class names intern LAST (kotlinc's d2 places them after all members).
     let companion_idx = companion_name.map(|c| st.local(c));
     let nested_idxs: Vec<u32> = nested_class_names.iter().map(|n| st.local(n)).collect();
+    // The module name (f101) interns LAST — kotlinc places it at the end of d2.
+    let module_idx = tail.module_name.map(|m| st.local(m));
 
     // Assemble the `Class` message in FIELD order: f1 flags, f3 fq_name, f4 companionObjectName,
     // f6 supertype, f7 nestedClassName (packed repeated int32), f8 ctors, f9 functions, f10 properties,
@@ -336,6 +341,9 @@ pub fn build_class(
     }
     for ee in &enum_msgs {
         class.repeated_message(13, ee); // Class.enum_entry = 13
+    }
+    if let Some(mi) = module_idx {
+        class.field_varint(101, mi as u64); // JvmProtoBuf.classModuleName = 101
     }
 
     let stt = st.serialize_types();
@@ -579,6 +587,49 @@ mod tests {
                 0x00, 0x0c, 0x0a, 0x02, 0x18, 0x02, 0x0a, 0x02, 0x10, 0x00, 0x0a, 0x02, 0x08, 0x03,
                 0x18, 0x00, 0x20, 0x04, 0x32, 0x02, 0x30, 0x01, 0x3a, 0x01, 0x04, 0x42, 0x07, 0xa2,
                 0x06, 0x04, 0x08, 0x02, 0x10, 0x03,
+            ],
+            "d1 protobuf",
+        );
+    }
+
+    // Ground truth: kotlinc 2.4.0 `class C(val x: Int)` compiled with `-module-name mymod`. Adds
+    // `classModuleName` (f101) = the module name, interned last.
+    #[test]
+    fn module_name_metadata_byte_matches_kotlinc() {
+        let (d1, d2) = build_class(
+            "demo/C",
+            &[("x".into(), Ty::Int)],
+            "(I)V",
+            &[PropMeta {
+                name: "x".into(),
+                ty: Ty::Int,
+                is_var: false,
+                getter: ("getX".into(), "()I".into()),
+                setter: None,
+            }],
+            &[],
+            &[],
+            &ClassTail {
+                module_name: Some("mymod"),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            d2,
+            vec!["Ldemo/C;", "", "x", "", "<init>", "(I)V", "getX", "()I", "mymod"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+            "d2",
+        );
+        assert_eq!(
+            d1,
+            vec![
+                0x00, 0x12, 0x0a, 0x02, 0x18, 0x02, 0x0a, 0x02, 0x10, 0x00, 0x0a, 0x00, 0x0a, 0x02,
+                0x10, 0x08, 0x0a, 0x02, 0x08, 0x05, 0x18, 0x00, 0x32, 0x02, 0x30, 0x01, 0x42, 0x0f,
+                0x12, 0x06, 0x10, 0x02, 0x1a, 0x02, 0x30, 0x03, 0xa2, 0x06, 0x04, 0x08, 0x04, 0x10,
+                0x05, 0x52, 0x11, 0x10, 0x02, 0x1a, 0x02, 0x30, 0x03, 0xa2, 0x06, 0x08, 0x0a, 0x00,
+                0x1a, 0x04, 0x08, 0x06, 0x10, 0x07, 0xa8, 0x06, 0x08,
             ],
             "d1 protobuf",
         );
