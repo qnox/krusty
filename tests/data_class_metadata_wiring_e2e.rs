@@ -87,22 +87,16 @@ fn var_reference_class_is_byte_identical() {
     );
 }
 
-/// A `var Long` + `val Int`: exercises the wide (2-slot) `Long`/`Double` `slot_size` branch and a
-/// primitive `var` setter (no null-check guard). Its emitted class is structurally identical to
-/// kotlinc (same disassembly, 879 B) but the constant-pool interning order still differs for the
-/// 2-slot shape, so this asserts the structure (not yet full byte-identity — tracked separately).
+/// A `var Long` + `val Int`: the wide (2-slot) `Long`/`Double` `slot_size` branch and a primitive
+/// `var` setter (no null-check guard, but its LVT still names the value `<set-?>`). Exercises the
+/// per-setter `<set-?>` interning that a non-last setter needs (`setA` precedes `getB`).
 #[test]
-fn var_long_class_emits_setter_and_debug_tables() {
-    let src = "package demo\nclass C(var a: Long, val b: Int)\n";
-    let bytes = krusty_bytes(src, "demo/C", &[]).expect("krusty compiles class C");
-    let info = parse_class(&bytes).expect("parses back");
-    assert!(
-        info.methods.iter().any(|m| m.name == "setA"),
-        "a `var` property emits a setter (setA)",
+fn var_long_class_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C(var a: Long, val b: Int)\n",
+        "demo/C",
+        &[],
     );
-    let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
-    assert!(has(b"LineNumberTable"), "emits a LineNumberTable");
-    assert!(has(b"LocalVariableTable"), "emits a LocalVariableTable");
 }
 
 // ---- @Metadata-level checks for shapes not yet FULLY byte-identical (data classes) ----------------

@@ -286,23 +286,24 @@ fn seed_plain_class_pool(
         .iter()
         .map(|f| (f.name.clone(), desc(f.ty), is_nonnull_ref(f.ty)))
         .collect();
-    let mut accessors: Vec<(String, String)> = Vec::new();
-    let mut has_nonnull_ref_setter = false;
+    // (name, descriptor, setter_kind): 0 getter, 1 primitive setter, 2 non-null reference setter.
+    let mut accessors: Vec<(String, String, u8)> = Vec::new();
     for f in &c.fields {
-        accessors.push((format!("get{}", cap(&f.name)), format!("(){}", desc(f.ty))));
+        accessors.push((
+            format!("get{}", cap(&f.name)),
+            format!("(){}", desc(f.ty)),
+            0,
+        ));
         if !f.is_final {
-            accessors.push((format!("set{}", cap(&f.name)), format!("({})V", desc(f.ty))));
-            has_nonnull_ref_setter |= is_nonnull_ref(f.ty);
+            let kind = if is_nonnull_ref(f.ty) { 2 } else { 1 };
+            accessors.push((
+                format!("set{}", cap(&f.name)),
+                format!("({})V", desc(f.ty)),
+                kind,
+            ));
         }
     }
-    cw.seed_plain_class_pool(
-        fq_name,
-        superclass,
-        &ctor_desc,
-        &fields,
-        &accessors,
-        has_nonnull_ref_setter,
-    );
+    cw.seed_plain_class_pool(fq_name, superclass, &ctor_desc, &fields, &accessors);
 }
 
 fn attach_synth_debug_tables(c: &crate::ir::IrClass, cw: &mut ClassWriter) {

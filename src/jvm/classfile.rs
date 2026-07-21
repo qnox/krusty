@@ -670,8 +670,9 @@ impl ClassWriter {
         super_internal: &str,
         ctor_desc: &str,
         fields: &[(String, String, bool)],
-        accessors: &[(String, String)],
-        has_nonnull_ref_setter: bool,
+        // (name, descriptor, setter_kind): 0 = getter, 1 = primitive/other setter, 2 = non-null
+        // reference setter (its `checkNotNullParameter` guard also interns a `<set-?>` String constant).
+        accessors: &[(String, String, u8)],
     ) {
         // Primary constructor: name + descriptor are interned at method entry, before its body.
         self.cp.utf8("<init>");
@@ -712,16 +713,20 @@ impl ClassWriter {
         // field name/descriptor entries interned just above.
         self.cp.utf8("this");
         self.cp.utf8(&format!("L{this_internal};"));
-        // Each accessor: name + descriptor at entry (its body reuses the field Fieldref above).
-        for (name, desc) in accessors {
+        // Each accessor: name + descriptor at entry (its body reuses the field Fieldref above). A setter
+        // then interns `<set-?>` right after — its LocalVariableTable value-parameter name (kotlinc's
+        // synthetic name), plus a `<set-?>` String constant for a non-null reference setter's
+        // `checkNotNullParameter` guard. Interleaved per-setter (deduped) so it lands before the next
+        // accessor, as kotlinc does — not batched at the end.
+        for (name, desc, setter_kind) in accessors {
             self.cp.utf8(name);
             self.cp.utf8(desc);
-        }
-        // A `var` non-null reference setter guards its value with `checkNotNullParameter(v, "<set-?>")`
-        // — its `<set-?>` name + String constant intern after the accessors (kotlinc's order).
-        if has_nonnull_ref_setter {
-            self.cp.utf8("<set-?>");
-            self.cp.string("<set-?>");
+            if *setter_kind >= 1 {
+                self.cp.utf8("<set-?>");
+            }
+            if *setter_kind == 2 {
+                self.cp.string("<set-?>");
+            }
         }
     }
 
