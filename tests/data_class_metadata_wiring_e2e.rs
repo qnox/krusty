@@ -286,6 +286,29 @@ fn data_class_mixed_primitive_string_class_field_is_byte_identical() {
     );
 }
 
+/// A data class holding another DATA class (`val d: D` where `D` is itself a `data class`) — the pervasive
+/// real-world "record holding a record" shape (a domain aggregate holding a sub-record). Fully
+/// byte-identical: `D`'s own `hashCode()` is called on the nested field, matching kotlinc + the seeder.
+#[test]
+fn data_class_nested_data_class_field_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ndata class D(val v: Int)\ndata class C(val d: D)\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// A data class with TWO concrete-class fields (`val x: D, val y: E`) — the seeding/hashCode machinery
+/// generalizes across multiple class-typed properties.
+#[test]
+fn data_class_two_class_fields_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass D\nclass E\ndata class C(val x: D, val y: E)\n",
+        "demo/C",
+        &[],
+    );
+}
+
 // ---- Real-world data-class shapes (grounding) ----------------------------------------------------
 // These mirror the shapes of real domain types (a small all-`Int` result, a many-`Int` aggregate, a
 // single-`String` holder) whose fields are all primitives/`String`, anchoring the synthetic coverage
