@@ -81,6 +81,107 @@ pub struct EmitOptions {
     pub class_major: Option<u16>,
     /// Source-file simple name for the `SourceFile` attribute (e.g. `Foo.kt`); `None` ⇒ no attribute.
     pub source_file: Option<String>,
+    /// `-module-name` value, recorded in each class's `@Metadata` (`classModuleName`). kotlinc omits it
+    /// for the default module `main`; `None` here matches that.
+    pub module_name: Option<String>,
+    /// Emit a computed `@kotlin.Metadata` for supported class shapes (WIP — [`build_class_metadata`]).
+    /// OFF by default: the metadata is byte-verified only for a plain `val`-property class, and emitting
+    /// an unverified payload for other shapes breaks kotlin-reflect (a box-corpus case caught this). The
+    /// default emit therefore stays unchanged until `build_class` covers a shape end-to-end.
+    pub emit_class_metadata: bool,
+}
+
+/// Compute a class's `@kotlin.Metadata` from its IR — WIRING [`crate::metadata::class_builder::build_class`]
+/// into emission. Bounded (for now) to a PLAIN class with a primary constructor of `val`/`var` properties
+/// and NO user methods — the shape whose metadata is byte-verified against kotlinc. Returns `None` for
+/// any other shape (object/enum/interface/annotation/companion/data-class-with-methods/…), so those
+/// classes emit no `@Metadata` yet (unchanged). Broader shapes follow as `build_class` grows.
+fn build_class_metadata(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    opts: &EmitOptions,
+) -> Option<KotlinMetadata> {
+    use crate::metadata::class_builder::{build_class, ClassTail, PropMeta};
+    if c.is_object
+        || c.is_companion
+        || c.is_interface
+        || c.is_annotation
+        || c.is_value
+        || !c.enum_entries.is_empty()
+        || c.enum_entry_of.is_some()
+        || c.prop_ref.is_some()
+        || c.func_ref.is_some()
+        || c.companion_class.is_some()
+        || !c.secondary_ctors.is_empty()
+        || !c.has_primary_ctor
+        || c.fields.len() != c.ctor_param_count as usize
+    {
+        return None;
+    }
+    let cap = |s: &str| {
+        let mut c = s.chars();
+        c.next()
+            .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+            .unwrap_or_default()
+    };
+    // The only methods allowed in this bounded shape are the properties' own accessors (`getX`/`setX`);
+    // any real user method means a shape whose metadata isn't computed yet.
+    let accessor_names: std::collections::HashSet<String> = c
+        .fields
+        .iter()
+        .flat_map(|f| {
+            let cn = cap(&f.name);
+            [format!("get{cn}"), format!("set{cn}")]
+        })
+        .collect();
+    if c.methods
+        .iter()
+        .any(|&fid| !accessor_names.contains(&ir.functions[fid as usize].name))
+    {
+        return None;
+    }
+    let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
+    let props: Vec<PropMeta> = c
+        .fields
+        .iter()
+        .map(|f| PropMeta {
+            name: f.name.clone(),
+            ty: f.ty,
+            is_var: !f.is_final,
+            getter: (format!("get{}", cap(&f.name)), format!("(){}", desc(f.ty))),
+            setter: (!f.is_final)
+                .then(|| (format!("set{}", cap(&f.name)), format!("({})V", desc(f.ty)))),
+        })
+        .collect();
+    let ctor_params: Vec<(String, Ty)> = c.fields.iter().map(|f| (f.name.clone(), f.ty)).collect();
+    let ctor_desc = format!(
+        "({})V",
+        ctor_params
+            .iter()
+            .map(|(_, t)| desc(*t))
+            .collect::<String>()
+    );
+    let (d1_bytes, d2) = build_class(
+        &c.fq_name(),
+        &ctor_params,
+        &ctor_desc,
+        &props,
+        &[],
+        &[],
+        &ClassTail {
+            module_name: opts.module_name.as_deref(),
+            ..Default::default()
+        },
+    );
+    // d1 is the protobuf payload as one `char` per byte (the constant pool writes it as modified-UTF-8).
+    let d1 = vec![d1_bytes.iter().map(|&b| b as char).collect()];
+    Some(KotlinMetadata {
+        k: 1,
+        mv: vec![2, 4, 0],
+        xi: 48,
+        d1,
+        d2,
+    })
 }
 
 /// Register the file's nested-class `InnerClasses` candidates on `cw`; the writer's `finish` keeps only
@@ -1622,7 +1723,11 @@ fn emit_class(
     }
     emit_bridges(c, &mut cw);
     cw.set_runtime_annotations(&c.applied_annotations);
-    if let Some(m) = class_meta {
+    // A cross-module provider's `@Metadata` wins; otherwise compute one from the IR (bounded shapes).
+    let computed = (class_meta.is_none() && opts.emit_class_metadata)
+        .then(|| build_class_metadata(ir, c, opts))
+        .flatten();
+    if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
     cw.finish()
