@@ -525,6 +525,10 @@ pub struct IrField {
     /// `val t: T? = null` → `Some(Null)`), else `None` (no default, or a non-constant one). Later
     /// compiler passes may use it; the core backend ignores it.
     pub default: Option<IrConst>,
+    /// Whether the primary-constructor parameter declared ANY default (constant or not, e.g.
+    /// `routes: List<String> = emptyList()`). Distinct from `default` (constant-only) — the `@Metadata`
+    /// emitter needs this to set the `DECLARES_DEFAULT_VALUE` value-parameter flag as kotlinc does.
+    pub has_default: bool,
     /// The backing field is immutable (`val`) — emitted `final`.
     pub is_final: bool,
     /// Private backing field — the Kotlin default (reached via accessors). `false` for a non-private
@@ -546,6 +550,7 @@ impl IrField {
             ty,
             type_param: None,
             default: None,
+            has_default: false,
             is_final: false,
             is_private: true,
             is_lateinit: false,

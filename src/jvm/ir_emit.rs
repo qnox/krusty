@@ -169,6 +169,7 @@ fn build_class_metadata(
         })
         .collect();
     let ctor_params: Vec<(String, Ty)> = c.fields.iter().map(|f| (f.name.clone(), f.ty)).collect();
+    let ctor_param_defaults: Vec<bool> = c.fields.iter().map(|f| f.has_default).collect();
     let ctor_desc = format!(
         "({})V",
         ctor_params
@@ -233,6 +234,7 @@ fn build_class_metadata(
         &ClassTail {
             flags: if c.is_data { DATA_CLASS_FLAGS } else { 0 },
             module_name: opts.module_name.as_deref(),
+            ctor_param_defaults: &ctor_param_defaults,
             ..Default::default()
         },
     );

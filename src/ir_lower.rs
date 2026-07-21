@@ -783,6 +783,7 @@ pub fn lower_file_at_reporting(
                         ty: ir,
                         type_param: field_type_params[i].clone(),
                         default,
+                        has_default: c.props.iter().any(|p| &p.name == n && p.default.is_some()),
                         // `field_finals` covers up to the `x$delegate` fields; the trailing
                         // interface-delegation fields (`$$delegate_N`/`$$delegate_e<j>`) default to
                         // non-final, matching the prior `field_final.get(i).unwrap_or(false)`.

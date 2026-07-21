@@ -159,6 +159,19 @@ fn builtin_name_index(internal: &str) -> Option<u64> {
         "kotlin/Long" => Some(9),
         "kotlin/Boolean" => Some(11),
         "kotlin/String" => Some(14),
+        // Common collection interfaces from `JvmNameResolverBase.PREDEFINED_STRINGS` (kotlinc encodes
+        // these via `predefinedIndex`, an EMPTY d2 slot — not a class-id descriptor). Indices verified
+        // against kotlinc's emitted record (List = 32).
+        "kotlin/collections/Iterable" => Some(28),
+        "kotlin/collections/MutableIterable" => Some(29),
+        "kotlin/collections/Collection" => Some(30),
+        "kotlin/collections/MutableCollection" => Some(31),
+        "kotlin/collections/List" => Some(32),
+        "kotlin/collections/MutableList" => Some(33),
+        "kotlin/collections/Set" => Some(34),
+        "kotlin/collections/MutableSet" => Some(35),
+        "kotlin/collections/Map" => Some(36),
+        "kotlin/collections/MutableMap" => Some(37),
         _ => None,
     }
 }
@@ -170,6 +183,13 @@ fn type_pb(st: &mut StringTable, t: Ty) -> Pb {
         Ty::Nullable(inner) => (true, *inner),
         other => (false, other),
     };
+    // Generic arguments (`List<String>` → one `Type.argument`). A boxed `Array<T>`/primitive-array
+    // encodes its element in the class-name descriptor and carries NO proto argument (matching kotlinc).
+    let args: &[Ty] = match base {
+        Ty::Obj(n, _) if n.matches("kotlin/Array") => &[],
+        Ty::Obj(_, a) => a,
+        _ => &[],
+    };
     let class_name = match base {
         Ty::Obj(internal, _) => {
             let internal = internal.render();
@@ -180,6 +200,19 @@ fn type_pb(st: &mut StringTable, t: Ty) -> Pb {
         }
         _ => st.builtin(predefined_index(base)),
     };
+    // `Type.Argument` (each interning its own type). An INVARIANT projection is the proto default and
+    // omitted, so an argument is just `{ type = f2 }`. `Type.argument` and `Argument.type` are both f2.
+    let arg_pbs: Vec<Pb> = args
+        .iter()
+        .map(|a| {
+            let mut arg = Pb::new();
+            arg.field_message(2, &type_pb(st, *a)); // Type.Argument.type = 2
+            arg
+        })
+        .collect();
+    for arg in &arg_pbs {
+        p.field_message(2, arg); // Type.argument = 2 (repeated), before nullable/class_name
+    }
     if nullable {
         p.field_varint(3, 1); // Type.nullable = 3 (written before class_name, matching kotlinc)
     }
@@ -189,13 +222,24 @@ fn type_pb(st: &mut StringTable, t: Ty) -> Pb {
 
 /// Build one `Class.constructor` message: `flags` (f1, omitted if 0), value parameters (f2), and the
 /// JvmProtoBuf constructor signature (f100, name `<init>` + `desc`).
-fn build_ctor(st: &mut StringTable, params: &[(String, Ty)], desc: &str, flags: u64) -> Pb {
+fn build_ctor(
+    st: &mut StringTable,
+    params: &[(String, Ty)],
+    desc: &str,
+    flags: u64,
+    param_defaults: &[bool],
+) -> Pb {
     let mut ctor = Pb::new();
     if flags != 0 {
         ctor.field_varint(1, flags); // Constructor.flags = 1
     }
-    for (pname, pty) in params {
+    for (i, (pname, pty)) in params.iter().enumerate() {
         let mut vp = Pb::new();
+        // `ValueParameter.flags` (f1) with DECLARES_DEFAULT_VALUE for a param that declares a default —
+        // written before the name, matching kotlinc.
+        if param_defaults.get(i).copied().unwrap_or(false) {
+            vp.field_varint(1, DECLARES_DEFAULT_VALUE);
+        }
         vp.field_varint(2, st.local(pname) as u64); // ValueParameter.name = 2
         let ty = type_pb(st, *pty);
         vp.field_message(3, &ty); // ValueParameter.type = 3
@@ -241,6 +285,10 @@ pub struct ClassTail<'a> {
     /// Secondary constructors (after the primary), each `Class.constructor` (f8). They intern their
     /// strings right after the primary ctor, before properties/functions.
     pub secondary_ctors: &'a [CtorMeta<'a>],
+    /// Per-primary-ctor-parameter `DECLARES_DEFAULT_VALUE` flags (parallel to `ctor_params`). A param
+    /// with a default (`routes: List<String> = emptyList()`) gets the flag, as kotlinc emits. Empty ⇒
+    /// no param has a default.
+    pub ctor_param_defaults: &'a [bool],
 }
 
 pub fn build_class(
@@ -271,9 +319,15 @@ pub fn build_class(
 
     // f8 = constructors: the primary (flags 0), then any secondary constructors — each interning in
     // order (kotlinc emits the ctor JVM name `<init>` explicitly, not omitted).
-    let mut ctor_msgs = vec![build_ctor(&mut st, ctor_params, ctor_desc, 0)];
+    let mut ctor_msgs = vec![build_ctor(
+        &mut st,
+        ctor_params,
+        ctor_desc,
+        0,
+        tail.ctor_param_defaults,
+    )];
     for sc in tail.secondary_ctors {
-        ctor_msgs.push(build_ctor(&mut st, sc.params, sc.desc, sc.flags));
+        ctor_msgs.push(build_ctor(&mut st, sc.params, sc.desc, sc.flags, &[]));
     }
 
     // Properties BEFORE functions (kotlinc interns property JVM signatures before function names).
@@ -553,6 +607,45 @@ mod tests {
                 0x08, 0x0c, 0x10, 0x0d,
             ],
             "d1 protobuf",
+        );
+    }
+
+    // A generic property (`List<String>`) + a defaulted ctor param — the shape real infragnite models
+    // use. Verified byte-identical to kotlinc 2.4.0 on `mission-core/domain/IfaceConfig`; this pins the
+    // pieces it needs: `List` encoded as a `predefinedIndex` builtin (NOT a class-id descriptor), the
+    // `Type.argument` (String), and the `DECLARES_DEFAULT_VALUE` ctor-param flag.
+    #[test]
+    fn generic_property_and_default_ctor_param() {
+        let list_string = Ty::obj_args("kotlin/collections/List", &[Ty::String]);
+        let (_d1, d2) = build_class(
+            "demo/D",
+            &[("r".into(), list_string)],
+            "(Ljava/util/List;)V",
+            &[PropMeta {
+                name: "r".into(),
+                ty: list_string,
+                is_var: false,
+                getter: ("getR".into(), "()Ljava/util/List;".into()),
+                setter: None,
+            }],
+            &[],
+            &[],
+            &ClassTail {
+                ctor_param_defaults: &[true],
+                ..Default::default()
+            },
+        );
+        // `List` is a builtin (predefinedIndex 32) → an EMPTY d2 slot, never the literal descriptor.
+        assert!(
+            !d2.iter()
+                .any(|s| s == "Ljava/util/List;" || s == "Lkotlin/collections/List;"),
+            "List must encode as a builtin predefinedIndex, not a class-id descriptor: {d2:?}",
+        );
+        // The ctor value parameter carries `DECLARES_DEFAULT_VALUE` (f1=2) — the `08 02` prefix inside
+        // the constructor's value_parameter, before its name. Its absence would drop the flag.
+        assert!(
+            _d1.windows(2).any(|w| w == [0x08, 0x02]),
+            "the defaulted ctor param must encode DECLARES_DEFAULT_VALUE",
         );
     }
 
