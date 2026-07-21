@@ -341,13 +341,25 @@ fn attach_synth_debug_tables(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
             .map(|f| f.to_uppercase().collect::<String>() + ch.as_str())
             .unwrap_or_default()
     };
-    // A non-null reference param carries a `checkNotNullParameter` guard (aload+ldc+invokestatic = 6
-    // bytes) before the body; kotlinc's LineNumberTable maps the decl line to the post-prologue offset.
+    // A non-null reference param carries a `checkNotNullParameter` guard (`aload <slot>; ldc <name>;
+    // invokestatic`) before the body; kotlinc's LineNumberTable maps the decl line to the post-prologue
+    // offset. The guard's length is SLOT-dependent: `aload_0..3` is 1 byte but `aload <u1>` (slot ≥ 4)
+    // is 2, so a class with enough (or wide) ctor params pushes a non-null-ref param past slot 3 and its
+    // guard grows — the fixed-6 assumption was wrong there.
     let is_nonnull_ref = |t: Ty| -> bool {
         let d = desc(t);
         (d.starts_with('L') || d.starts_with('[')) && !matches!(t, Ty::Nullable(_))
     };
-    const GUARD_LEN: u16 = 6;
+    // `aload <slot>` byte length: 1 (aload_0..3), 2 (aload u1), or 4 (wide aload u2).
+    let aload_len = |slot: u16| -> u16 {
+        if slot <= 3 {
+            1
+        } else if slot <= 255 {
+            2
+        } else {
+            4
+        }
+    };
     let this_desc = format!("L{};", c.fq_name());
     // Primary constructor: `this` + one local per ctor parameter (a property-backed param).
     let ctor_desc = format!(
@@ -356,11 +368,15 @@ fn attach_synth_debug_tables(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     );
     let mut ctor_locals = vec![("this".to_string(), this_desc.clone(), 0u16)];
     let mut slot = 1u16;
+    let mut ctor_pc = 0u16;
     for f in &c.fields {
         ctor_locals.push((f.name.clone(), desc(f.ty), slot));
+        if is_nonnull_ref(f.ty) {
+            // guard = aload(slot) + ldc(name)=2 + invokestatic checkNotNullParameter=3.
+            ctor_pc += aload_len(slot) + 5;
+        }
         slot += slot_size(f.ty);
     }
-    let ctor_pc = c.fields.iter().filter(|f| is_nonnull_ref(f.ty)).count() as u16 * GUARD_LEN;
     let this_only = [("this".to_string(), this_desc.clone(), 0u16)];
     cw.set_method_debug("<init>", &ctor_desc, Some((ctor_pc, line)), &ctor_locals);
     // Property accessors: getter has only `this`; a `var` setter also has its value parameter (named
@@ -376,7 +392,12 @@ fn attach_synth_debug_tables(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
         if !f.is_final {
             let s = format!("set{}", cap(&f.name));
             let pd = desc(f.ty);
-            let set_pc = if is_nonnull_ref(f.ty) { GUARD_LEN } else { 0 };
+            // The setter's value param is always slot 1 (`this`=0), so its guard is `aload_1`(1)+5 = 6.
+            let set_pc = if is_nonnull_ref(f.ty) {
+                aload_len(1) + 5
+            } else {
+                0
+            };
             cw.set_method_debug(
                 &s,
                 &format!("({pd})V"),

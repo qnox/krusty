@@ -832,7 +832,12 @@ impl ClassWriter {
             "()Ljava/lang/String;",
         );
         // hashCode — per-field hash (boxing-class static for a primitive; virtual for a reference).
+        // kotlinc interns `hashCode`'s OWN descriptor `()I` right after the name (a data class always has
+        // a `hashCode()I`). It is often already present — a primitive-`Int` `componentN` returns `()I` too
+        // — but a `Boolean`/`Char`/`Double`/reference class has no earlier `()I`, so seed it here. (Also
+        // the `()I` a reference field's virtual `hashCode()` needs, interned before its receiver class.)
         self.cp.utf8("hashCode");
+        self.cp.utf8("()I");
         for (_, desc) in fields {
             match hashcode_ref(desc) {
                 Some((cls, d)) => {
@@ -840,9 +845,6 @@ impl ClassWriter {
                 }
                 None if is_ref(desc) => {
                     let cls = &desc[1..desc.len() - 1];
-                    // kotlinc interns the `()I` descriptor BEFORE the receiver class for a reference
-                    // field's virtual `hashCode()` call — pre-seed the descriptor to match.
-                    self.cp.utf8("()I");
                     self.cp.methodref(cls, "hashCode", "()I");
                 }
                 None => {}
@@ -856,18 +858,30 @@ impl ClassWriter {
             self.cp.utf8("result");
             self.cp.utf8("I");
         }
-        // equals — name, descriptor, @Nullable (param). kotlinc interns the equals BODY's
-        // `Intrinsics.areEqual` (for reference fields) BEFORE the `other`/`Object` LVT names, so seed it
-        // in that order.
+        // equals — name, descriptor, @Nullable (param). kotlinc interns the equals BODY's per-field
+        // comparison refs BEFORE the `other`/`Object` LVT names, in field order: a `Double`/`Float` field
+        // compares via the IEEE-aware `<Box>.compare` (so `NaN`/`-0.0` match kotlinc), a reference via
+        // `Intrinsics.areEqual`; the other primitives compare directly (`if_icmp*`/`lcmp`, no ref).
         self.cp.utf8("equals");
         self.cp.utf8("(Ljava/lang/Object;)Z");
         self.cp.utf8("Lorg/jetbrains/annotations/Nullable;");
-        if fields.iter().any(|(_, d)| is_ref(d)) {
-            self.cp.methodref(
-                "kotlin/jvm/internal/Intrinsics",
-                "areEqual",
-                "(Ljava/lang/Object;Ljava/lang/Object;)Z",
-            );
+        for (_, desc) in fields {
+            match desc.as_str() {
+                "D" => {
+                    self.cp.methodref("java/lang/Double", "compare", "(DD)I");
+                }
+                "F" => {
+                    self.cp.methodref("java/lang/Float", "compare", "(FF)I");
+                }
+                d if is_ref(d) => {
+                    self.cp.methodref(
+                        "kotlin/jvm/internal/Intrinsics",
+                        "areEqual",
+                        "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+                    );
+                }
+                _ => {}
+            }
         }
         self.cp.utf8("other");
         self.cp.utf8("Ljava/lang/Object;");
