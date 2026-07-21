@@ -1345,6 +1345,14 @@ pub fn lower_value_classes(
         enum Rw {
             Ctor(IrExpr),
             Prop(ExprId, TypeName),
+            /// Same-value-class `==`/`!=` → `equals-impl0(U, U)Z` compared against 0 (kotlinc's ABI).
+            VcEq {
+                ne: bool,
+                lhs: ExprId,
+                rhs: ExprId,
+                owner: TypeName,
+                descriptor: String,
+            },
         }
         let rw = match &ir.exprs[i] {
             // `new X(args)` → `X.constructor-impl(args): U`. The return is the underlying `U`; the
@@ -1453,6 +1461,32 @@ pub fn lower_value_classes(
                     args: vec![*receiver],
                 }))
             }
+            // `a == b` / `a != b` where BOTH operands are the same UNBOXED value class → the class's
+            // static `equals-impl0(U, U)Z` compared against 0 (kotlinc's value-class equality ABI;
+            // the underlying-level `areEqual`/`icmp` was semantically right but not kotlinc's shape).
+            // Identity `===`/`!==` (RefEq/RefNe) is untouched, as are boxed/mixed/null operands —
+            // those keep the step-5 boxing decisions.
+            IrExpr::PrimitiveBinOp {
+                op: op @ (crate::ir::IrBinOp::Eq | crate::ir::IrBinOp::Ne),
+                lhs,
+                rhs,
+            } => {
+                let (l, r) = (*lhs, *rhs);
+                match (repr_ctx.repr(l), repr_ctx.repr(r)) {
+                    (Repr::Unboxed(x), Repr::Unboxed(y)) if x == y => {
+                        let u = under.get(&x).map(|t| erase(t, &under)).unwrap_or(Ty::Error);
+                        let ud = desc(&u);
+                        Some(Rw::VcEq {
+                            ne: matches!(op, crate::ir::IrBinOp::Ne),
+                            lhs: l,
+                            rhs: r,
+                            owner: x,
+                            descriptor: format!("({ud}{ud})Z"),
+                        })
+                    }
+                    _ => None,
+                }
+            }
             // `x.getV()` getter: identity on an unboxed value, `unbox-impl()` on a boxed one.
             IrExpr::MethodCall {
                 class,
@@ -1487,6 +1521,36 @@ pub fn lower_value_classes(
                 &field_getters,
                 boxed_this,
             )),
+            Some(Rw::VcEq {
+                ne,
+                lhs,
+                rhs,
+                owner,
+                descriptor,
+            }) => {
+                let call = ir.add_expr(IrExpr::Call {
+                    callee: Callee::Static {
+                        owner,
+                        name: "equals-impl0".to_string(),
+                        descriptor,
+                        inline: InlineKind::None,
+                    },
+                    dispatch_receiver: None,
+                    args: vec![lhs, rhs],
+                });
+                let zero = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
+                // `a == b` ⇒ `equals-impl0(a, b) != 0`; `a != b` ⇒ `== 0`. Both fuse to a single
+                // `ifne`/`ifeq` on the call result in branch position — kotlinc's exact shape.
+                Some(IrExpr::PrimitiveBinOp {
+                    op: if ne {
+                        crate::ir::IrBinOp::Eq
+                    } else {
+                        crate::ir::IrBinOp::Ne
+                    },
+                    lhs: call,
+                    rhs: zero,
+                })
+            }
             None => None,
         };
         if let Some(r) = rewrite {
