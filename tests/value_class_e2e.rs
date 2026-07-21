@@ -209,3 +209,44 @@ fun box(): String {
         Some("OK")
     );
 }
+
+#[test]
+fn covariant_override_unboxed_return_is_check() {
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(java_home) = common::java_home() else {
+        return;
+    };
+    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
+    // `t.bar()` resolves to the MANGLED interface method (value-class return convention), so `tBar`
+    // is the unboxed underlying; `tBar is X` must box before `instanceof X`.
+    let src = r#"
+@JvmInline
+value class X(val x: Any)
+
+interface IBar {
+    fun bar(): Any
+}
+
+interface IFoo : IBar {
+    override fun bar(): X
+}
+
+class TestX : IFoo {
+    override fun bar(): X = X("K")
+}
+
+fun box(): String {
+    val t: IFoo = TestX()
+    val tBar = t.bar()
+    if (tBar !is X) return "f1:$tBar"
+    return "OK"
+}
+"#;
+    assert_eq!(
+        common::compile_and_run_box(src, "CovariantOverrideUnboxedIs", &[stdlib], Some(&jdk))
+            .as_deref(),
+        Some("OK")
+    );
+}

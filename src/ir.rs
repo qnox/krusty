@@ -15,7 +15,7 @@
 //! consuming IR are the next phases; today this module defines the node set + a builder + a printer.
 
 use crate::libraries::InlineKind;
-use crate::types::Ty;
+use crate::types::{Ty, TypeName, TypeNameList};
 
 pub type ExprId = u32;
 pub type FunId = u32;
@@ -43,7 +43,7 @@ pub enum Callee {
     /// (the JVM backend builds the descriptor), so `ir_lower` needn't know JVM descriptors. Distinct
     /// from `Local` (same IrFile, by index) and `Static` (a resolved classpath/library method).
     CrossFile {
-        facade: String,
+        facade: TypeName,
         name: String,
         params: Vec<Ty>,
         ret: Ty,
@@ -53,7 +53,7 @@ pub enum Callee {
     /// Like `Virtual` but carries `Ty`s (the JVM backend builds the descriptor), so `ir_lower` needs
     /// no JVM descriptor for a sibling-file user class (resolved from its `ClassSig`).
     CrossFileVirtual {
-        owner: String,
+        owner: TypeName,
         name: String,
         params: Vec<Ty>,
         ret: Ty,
@@ -69,7 +69,7 @@ pub enum Callee {
     /// backend MUST splice the body (a body it can't splice — e.g. branchy on a non-empty operand stack —
     /// skips the whole file, never miscompiled).
     Static {
-        owner: String,
+        owner: TypeName,
         name: String,
         descriptor: String,
         inline: InlineKind,
@@ -77,7 +77,7 @@ pub enum Callee {
     /// A resolved classpath *instance* method — `invokevirtual`/`invokeinterface owner.name:descriptor`
     /// on the `dispatch_receiver`. `owner` is the receiver's static type; `interface` ⇒ `invokeinterface`.
     Virtual {
-        owner: String,
+        owner: TypeName,
         name: String,
         descriptor: String,
         interface: bool,
@@ -86,7 +86,7 @@ pub enum Callee {
     /// Used for `super.method(…)`, which dispatches to the named base-class method directly (skipping the
     /// receiver's override). `owner` is the base class declaring the method.
     Special {
-        owner: String,
+        owner: TypeName,
         name: String,
         descriptor: String,
         /// `owner` is an INTERFACE (a diamond `super.f()` dispatched to a superinterface's DEFAULT method):
@@ -132,10 +132,10 @@ impl IrConst {
 pub enum IrExpr {
     Const(IrConst),
     /// A class-literal constant — `ldc class <internal>` (a `java.lang.Class`). Used e.g. for the
-    /// `PropertyReference0Impl(Class, …)` argument in delegated-property setup. `internal` is the JVM
-    /// internal name (mapped through the backend's kotlin→java table at emit).
+    /// `PropertyReference0Impl(Class, …)` argument in delegated-property setup. `internal = None`
+    /// is the current-facade sentinel for places lowered before the facade name is known.
     ClassConst {
-        internal: String,
+        internal: Option<TypeName>,
     },
     /// Read a value parameter / variable by its declaration index.
     GetValue(u32),
@@ -156,7 +156,7 @@ pub enum IrExpr {
     /// A placeholder a compiler-extension plugin must specialize before emit. Core lowering produces
     /// it generically, without plugin-specific ABI details, and the plugin rewrites this arena slot into
     /// concrete IR in its body phase. `exprs` are already-lowered operands, `data` carries resolved
-    /// names; the meaning of both is private to the named plugin. A node that survives to emit is
+    /// name ids; the meaning of both is private to the named plugin. A node that survives to emit is
     /// declined by `jvm_can_emit`.
     PluginPlaceholder {
         /// Which plugin specializes this node.
@@ -165,8 +165,8 @@ pub enum IrExpr {
         kind: &'static str,
         /// Already-lowered operand expressions, in a plugin-defined order.
         exprs: Vec<ExprId>,
-        /// Resolved names the plugin needs.
-        data: Vec<String>,
+        /// Resolved name ids the plugin needs.
+        data: Vec<TypeName>,
     },
     /// `IrReturn` from the enclosing function.
     Return(Option<ExprId>),
@@ -290,7 +290,7 @@ pub enum IrExpr {
     /// EmptyCoroutineContext.INSTANCE:Lkotlin/coroutines/EmptyCoroutineContext;`). Unlike `StaticInstance`
     /// (a user `ClassId`) and `GetStatic` (a facade statics index), this names an external owner directly.
     ExternalStaticField {
-        owner: String,
+        owner: TypeName,
         name: String,
         descriptor: String,
     },
@@ -350,7 +350,7 @@ pub enum IrExpr {
     /// Construct an instance of a classpath (non-IR) class — `RuntimeException("x")`, `StringBuilder()`.
     /// `internal` is the JVM internal name, `ctor_desc` the `(…)V` constructor descriptor.
     NewExternal {
-        internal: String,
+        internal: TypeName,
         ctor_desc: String,
         args: Vec<ExprId>,
     },
@@ -358,8 +358,8 @@ pub enum IrExpr {
     /// class with no `IrClass`): `getstatic <owner>.<field>:L<ty>;`. Like `StaticInstance` but the owner
     /// and field type are given by internal name directly, not resolved through `ir.classes`.
     ExternalStaticInstance {
-        owner: String,
-        ty: String,
+        owner: TypeName,
+        ty: TypeName,
         field: String,
     },
     /// Construct a class defined in ANOTHER file of the same compilation — `new internal; dup; <args>;
@@ -367,7 +367,7 @@ pub enum IrExpr {
     /// as `Ty`s (the JVM backend builds the descriptor) since it's a sibling-file user class, not a
     /// classpath one with a library-provided descriptor.
     NewCrossFile {
-        internal: String,
+        internal: TypeName,
         params: Vec<Ty>,
         args: Vec<ExprId>,
     },
@@ -430,7 +430,7 @@ pub struct IrCatch {
     /// Value index the caught exception is bound to.
     pub var: u32,
     /// JVM internal name of the caught exception type.
-    pub exc_internal: String,
+    pub exc_internal: TypeName,
     pub body: ExprId,
 }
 
@@ -487,8 +487,8 @@ pub struct IrFunction {
     /// The body expression (typically an `IrBlock`), or `None` for abstract/external.
     pub body: Option<ExprId>,
     pub is_static: bool,
-    /// `Some(class fq_name)` for an instance method — `this` is value index 0, params follow.
-    pub dispatch_receiver: Option<String>,
+    /// `Some(class internal)` for an instance method — `this` is value index 0, params follow.
+    pub dispatch_receiver: Option<TypeName>,
     /// Per-parameter `Some(name)` when the backend should guard it with a non-null assertion at method
     /// entry (`Intrinsics.checkNotNullParameter` on the JVM) — non-null reference parameters of a
     /// visible (non-private) function. Empty for synthesized methods (no guards). Parallel to `params`.
@@ -505,10 +505,10 @@ pub struct IrEnumEntry {
     /// Lowered constructor-argument value ids (`RED(0xFF0000)`); empty for an arg-less entry. Filled in a
     /// later lowering pass — built empty when the entry list is first created.
     pub args: Vec<ExprId>,
-    /// `Some(subclass_fq)` when the entry has a body and is constructed as an instance of a synthesized
+    /// `Some(subclass_internal)` when the entry has a body and is constructed as an instance of a synthesized
     /// anonymous subclass (`new Enum$ENTRY(name, ordinal, args)`); `None` when constructed as the enum
     /// itself.
-    pub subclass: Option<String>,
+    pub subclass: Option<TypeName>,
 }
 
 /// One instance field of an [`IrClass`]. Groups what were parallel `Vec`s keyed by field index, so a
@@ -575,7 +575,7 @@ pub struct IrCtorArg {
 /// constructor's `val`/`var` parameters (in order); the constructor stores each.
 #[derive(Clone, Debug)]
 pub struct IrClass {
-    pub fq_name: String,
+    pub fq_name: TypeName,
     /// `@JvmInline value class` — a single-field class represented unboxed (as its one field's type) by
     /// the JVM `jvm::value_classes` IR pass. The IR otherwise treats it as a plain class.
     pub is_value: bool,
@@ -621,7 +621,7 @@ pub struct IrClass {
     /// `java.lang.annotation.Annotation` contract (per-member accessors + content `equals`/`hashCode`/
     /// `toString`/`annotationType`), so `A(args)` can construct an annotation instance. `fields` are the
     /// members in order. The backend emits the whole contract from `fields`.
-    pub annotation_impl_of: Option<String>,
+    pub annotation_impl_of: Option<TypeName>,
     /// `true` for a `sealed class`/`sealed interface`.
     pub is_sealed: bool,
     /// `true` for an `abstract class` (not `sealed`).
@@ -632,7 +632,7 @@ pub struct IrClass {
     /// Semantic superclass internal name (`kotlin/Any` normally, or a user base class for
     /// `class B : A(args)`). Target-specific representation classes such as JVM enum bases are chosen by
     /// the backend.
-    pub superclass: String,
+    pub superclass: TypeName,
     /// Arguments to the base-class constructor (`: A(args)`) — lowered IR value ids, evaluated with
     /// `this`=value 0 and the primary-constructor params as values `1..=ctor_param_count`. Empty
     /// unless `superclass` is a user base class.
@@ -662,7 +662,7 @@ pub struct IrClass {
     pub bridges: Vec<Bridge>,
     /// Implemented interface internal names (`class C : I, J`). The class file lists them as
     /// `implements`; an interface declaration lists its super-interfaces here.
-    pub interfaces: Vec<String>,
+    pub interfaces: TypeNameList,
     /// `object Foo` — a singleton: a `public static final Foo INSTANCE` field, a private no-arg
     /// constructor, and a `<clinit>` that constructs the instance.
     pub is_object: bool,
@@ -671,7 +671,7 @@ pub struct IrClass {
     pub is_companion: bool,
     /// `Some(companion_fq)` on a class with a `companion object`: emit a `public static final
     /// <companion> Companion` field, initialized in this class's `<clinit>`.
-    pub companion_class: Option<String>,
+    pub companion_class: Option<TypeName>,
     /// Secondary constructors — each an extra `<init>(params)` that delegates to the primary
     /// constructor (`constructor(…) : this(args)`) then runs its body. Empty for most classes.
     pub secondary_ctors: Vec<IrSecondaryCtor>,
@@ -699,9 +699,9 @@ pub enum AnnoValue {
     /// A primitive/`String` constant (encoded by tag `B`/`C`/`D`/`F`/`I`/`J`/`S`/`Z`/`s`).
     Const(IrConst),
     /// An enum constant `(enum_type_internal, const_name)` — tag `e`.
-    Enum(String, String),
+    Enum(TypeName, String),
     /// A class literal `T::class` `(type_internal)` — tag `c` (its type descriptor).
-    Class(String),
+    Class(TypeName),
     /// A nested annotation instance `A(...)` — tag `@`.
     Annotation(AppliedAnnotation),
     /// An array `[…]` — tag `[`.
@@ -721,7 +721,7 @@ pub struct FieldAnnotations {
 #[derive(Clone, Debug)]
 pub struct AppliedAnnotation {
     /// The annotation type's internal name (`Anno`).
-    pub internal: String,
+    pub internal: TypeName,
     /// `element_value_pairs`: `(element_name, value)` in declaration order.
     pub values: Vec<(String, AnnoValue)>,
 }
@@ -750,13 +750,13 @@ pub enum FrDispatch {
 pub struct FuncRef {
     pub bound: bool,
     pub arity: u8,
-    /// Class passed to `super(...)` (the reference's declaring class); empty = the file facade.
-    pub owner_class: String,
+    /// Class passed to `super(...)` (the reference's declaring class); `None` = the file facade.
+    pub owner_class: Option<TypeName>,
     pub fn_name: String,
     pub flags: i32,
     pub dispatch: FrDispatch,
-    /// Class the target method is invoked on; empty = the file facade.
-    pub call_owner: String,
+    /// Class the target method is invoked on; `None` = the file facade.
+    pub call_owner: Option<TypeName>,
     pub call_name: String,
     /// The target method is declared on an INTERFACE (`invokeinterface`, not `invokevirtual`).
     pub call_interface: bool,
@@ -771,16 +771,16 @@ pub struct FuncRef {
     pub target_ret_ty: Ty,
     /// Per logical invoke parameter: `Some(value_class_internal)` means the erased Object argument is a
     /// boxed value-class instance and must be unboxed before the physical target call.
-    pub unbox_params: Vec<Option<String>>,
+    pub unbox_params: Vec<Option<TypeName>>,
     /// Parallel to `unbox_params`: nullable value-class parameters unbox `null` to a null underlying.
     pub unbox_param_nullable: Vec<bool>,
     /// `Some(value_class_internal)` means the physical target returns the value-class underlying and the
     /// function-reference `invoke` must box it back before returning Object.
-    pub box_ret: Option<String>,
+    pub box_ret: Option<TypeName>,
     /// `StaticBound` only: `Some(value_class_internal)` when the CAPTURED receiver is a value class
     /// (`Z(42)::ext`). The receiver is stored boxed as `Object`; the emitter `checkcast`s it to the box
     /// class then `unbox-impl`s it to the underlying before the mangled `invokestatic ext-<hash>(under)`.
-    pub staticbound_recv_unbox: Option<String>,
+    pub staticbound_recv_unbox: Option<TypeName>,
 }
 
 /// A synthesized property-reference class's metadata (`Type::prop` → `Type$prop$N`): the referenced
@@ -788,7 +788,8 @@ pub struct FuncRef {
 /// subclass from this.
 #[derive(Clone, Debug)]
 pub struct PropRef {
-    pub owner_internal: String,
+    /// Referenced property's owner class; `None` = the file facade.
+    pub owner_internal: Option<TypeName>,
     pub prop_name: String,
     pub getter_name: String,
     pub prop_ty: Ty,
@@ -798,7 +799,7 @@ pub struct PropRef {
     pub bound: bool,
     /// A top-level property reference `::foo` (a `(Mutable)PropertyReference0Impl` singleton): the
     /// getter/setter are STATIC on the file facade, so `get`/`set` dispatch via `invokestatic`
-    /// (`owner_internal` empty = the facade sentinel, resolved at emit). No receiver is captured.
+    /// (`owner_internal = None` is resolved at emit). No receiver is captured.
     pub static_dispatch: bool,
     /// The referenced property is a `var` — emit a `set(Object)` override (calls `setName`). Only
     /// meaningful with `static_dispatch` (a `MutablePropertyReference0Impl`).
@@ -807,7 +808,90 @@ pub struct PropRef {
     /// are STATIC methods on this facade taking the receiver as the first argument (`getExt(Recv)` /
     /// `setExt(Recv, v)`), unlike a member reference's instance `getExt()`. `None` for member/top-level
     /// references. The reference's receiver-class metadata still lives in `owner_internal`.
-    pub ext_facade: Option<String>,
+    pub ext_facade: Option<Option<TypeName>>,
+}
+
+impl FuncRef {
+    pub fn owner_class_or_facade(&self, facade: &str) -> String {
+        self.owner_class
+            .map(TypeName::render)
+            .unwrap_or_else(|| facade.to_string())
+    }
+
+    pub fn call_owner_or_facade(&self, facade: &str) -> String {
+        self.call_owner
+            .map(TypeName::render)
+            .unwrap_or_else(|| facade.to_string())
+    }
+
+    pub fn call_owner_key(&self) -> String {
+        self.call_owner.map(TypeName::render).unwrap_or_default()
+    }
+
+    pub fn call_owner_is_facade(&self) -> bool {
+        self.call_owner.is_none()
+    }
+}
+
+impl PropRef {
+    pub fn owner_or_facade(&self, facade: &str) -> String {
+        self.owner_internal
+            .map(TypeName::render)
+            .unwrap_or_else(|| facade.to_string())
+    }
+
+    pub fn owner(&self) -> Option<String> {
+        self.owner_internal.map(TypeName::render)
+    }
+
+    pub fn ext_facade_or_facade(&self, facade: &str) -> Option<String> {
+        self.ext_facade.as_ref().map(|f| {
+            f.as_ref()
+                .map(|facade| facade.render())
+                .unwrap_or_else(|| facade.to_string())
+        })
+    }
+}
+
+impl IrClass {
+    pub fn fq_name_id(&self) -> TypeName {
+        self.fq_name
+    }
+
+    pub fn fq_name(&self) -> String {
+        self.fq_name.render()
+    }
+
+    pub fn fq_name_matches(&self, internal: &str) -> bool {
+        self.fq_name.matches(internal)
+    }
+
+    pub fn superclass(&self) -> String {
+        self.superclass.render()
+    }
+
+    pub fn superclass_matches(&self, internal: &str) -> bool {
+        self.superclass.matches(internal)
+    }
+
+    pub fn has_non_top_superclass(&self) -> bool {
+        !self.superclass.matches("")
+            && !self.superclass.matches("java/lang/Object")
+            && !self.superclass.matches("kotlin/Any")
+    }
+
+    pub fn annotation_impl_of(&self) -> Option<String> {
+        self.annotation_impl_of.map(TypeName::render)
+    }
+
+    pub fn companion_class(&self) -> Option<String> {
+        self.companion_class.map(TypeName::render)
+    }
+
+    pub fn companion_class_matches(&self, internal: &str) -> bool {
+        self.companion_class
+            .is_some_and(|name| name.matches(internal))
+    }
 }
 
 /// A secondary constructor: `<init>(params)` evaluates `delegate_args`, calls the delegate target
@@ -855,13 +939,13 @@ pub struct Bridge {
     pub target_name: Option<String>,
     /// When set, the bridge boxes its (unboxed value-class) result with `<owner>.box-impl` before
     /// returning — a value-class-returning override seen through a supertype hands back a boxed `X`.
-    pub box_ret: Option<String>,
+    pub box_ret: Option<TypeName>,
     /// Per concrete parameter, the boxed value class to `checkcast` + `unbox-impl` before the target
     /// call — a generic supertype method (`B.f(T,U)` → erased `f(Object,Object)`) delegates to a
     /// mangled concrete override taking the value class's UNDERLYING, while the incoming arg is a
     /// boxed `X`. Empty (or all-`None`) ⇒ plain checkcast/convert (the common case). JVM/value-class
     /// concern, populated by the value-class pass; the front end leaves it empty.
-    pub unbox_params: Vec<Option<String>>,
+    pub unbox_params: Vec<Option<TypeName>>,
 }
 
 /// A top-level (module) property: a static field on the file facade, initialized in `<clinit>`.
@@ -879,7 +963,7 @@ pub struct IrStatic {
     /// The class this static field belongs to. `None` = the file facade (a top-level property). `Some`
     /// = a specific class — a `companion object`'s `const val` lives on the OUTER class (kotlinc emits
     /// `public static final` + `ConstantValue` there), not the facade.
-    pub owner: Option<String>,
+    pub owner: Option<TypeName>,
     /// Declaration visibility (`public` by default). A PRIVATE top-level property gets NO public
     /// accessors; cross-class reads inside the file go through a synthesized `access$get<X>$p` bridge
     /// (kotlinc's shape).
@@ -889,6 +973,18 @@ pub struct IrStatic {
     /// auto-generated here — the custom `getX`/`setX` are emitted as ordinary facade methods (their
     /// bodies lowered with `field` bound to this static). Prevents a duplicate-accessor collision.
     pub custom_accessor: bool,
+}
+
+impl IrStatic {
+    pub fn is_facade_owned(&self) -> bool {
+        self.owner.is_none()
+    }
+
+    pub fn owner_matches(&self, internal: &str) -> bool {
+        self.owner
+            .as_ref()
+            .is_some_and(|owner| owner.matches(internal))
+    }
 }
 
 #[derive(Clone, Default, Debug)]
@@ -936,12 +1032,12 @@ pub struct IrFile {
     /// Lowered in the STATIC `constructor-impl` frame (the sole param is value-index 0, no `this`); the
     /// value-class JVM pass registers it as `constructor-impl`'s param default so the backend emits the
     /// synthetic `constructor-impl$default(U, int, DefaultConstructorMarker)` kotlinc requires.
-    pub value_ctor_defaults: std::collections::HashMap<String, u32>,
+    value_ctor_defaults: std::collections::HashMap<TypeName, u32>,
     /// Regular (non-value) class internal name → per-primary-constructor-parameter default expression
     /// (`None` = required), when ANY parameter has a default (`data class Wk(val n: String, val s: Int = 5)`).
     /// Lowered in the INSTANCE `<init>` frame (`this` = value 0, params = 1..=n); the backend emits the
     /// synthetic `<init>(params…, int mask, DefaultConstructorMarker)` overload kotlinc requires.
-    pub class_ctor_defaults: std::collections::HashMap<String, Vec<Option<u32>>>,
+    class_ctor_defaults: std::collections::HashMap<TypeName, Vec<Option<u32>>>,
     /// Instance methods kotlinc leaves NON-`final` even in a final class — currently the data-class
     /// `Object`-overrides (`toString`/`hashCode`/`equals`), which kotlinc emits `public` (open) rather
     /// than `public final`. The JVM backend omits `ACC_FINAL` for a `FunId` in this set.
@@ -975,20 +1071,20 @@ pub struct IrFile {
     pub default_stub_boxed_params: std::collections::HashMap<u32, Vec<(usize, crate::types::Ty)>>,
     /// Internal names of classes kotlinc marks `ACC_SYNTHETIC` (0x1000) on the class itself — e.g. a
     /// `@Serializable` class's generated `$$serializer` object.
-    pub synthetic_classes: std::collections::HashSet<String>,
+    synthetic_classes: std::collections::HashSet<TypeName>,
     /// `FunId`s of methods carrying a `Deprecated` classfile attribute (from `@Deprecated`) — e.g. a
     /// `@Serializable` class's `get<Prop>$annotations()` markers, which kotlinc deprecates HIDDEN. ASM
     /// surfaces the attribute as `ACC_DEPRECATED` (0x20000) in the access int, so the ABI gate compares it.
     pub deprecated_methods: std::collections::HashSet<u32>,
     /// Internal names of classes carrying a `Deprecated` classfile attribute (from `@Deprecated`) — e.g. a
     /// `@Serializable` class's generated `$$serializer` object, which kotlinc deprecates HIDDEN.
-    pub deprecated_classes: std::collections::HashSet<String>,
+    deprecated_classes: std::collections::HashSet<TypeName>,
     /// Internal names of classes whose primary constructor has a value-class-typed parameter (a
     /// `data class Server(val id: ServerId, …)`). kotlinc makes such a primary `<init>` PRIVATE and adds a
     /// PUBLIC|SYNTHETIC accessor `<init>(…args, DefaultConstructorMarker)` that delegates to it — its ABI
     /// for a constructor mentioning an inline class. Recorded by the value-class pass BEFORE it erases the
     /// parameter types (which lose the value-class identity).
-    pub value_param_ctors: std::collections::HashSet<String>,
+    value_param_ctors: std::collections::HashSet<TypeName>,
     /// Lambda impl functions that are INLINE-ONLY — their body has a non-local `return` (returning from
     /// the enclosing function), which is valid only when the lambda is spliced at the call site, never as
     /// a standalone closure method (a non-local return can't compile to a separate method — its `areturn`
@@ -1022,21 +1118,21 @@ pub struct IrFile {
     pub signatures: std::collections::HashMap<u32, IrGenericSig>,
     /// Class fq-internal-name → its generic-signature SHAPE (type parameters + bounds), for a generic
     /// class. The JVM backend formats it into the class `Signature` attribute.
-    pub class_signatures: std::collections::HashMap<String, IrGenericSig>,
+    class_signatures: std::collections::HashMap<TypeName, IrGenericSig>,
     /// Class fq-internal-name → `(field name, type-parameter name)` for each field whose declared type
     /// is a bare type parameter (`class Pair<A, B>(val a: A)` → `[("a", "A")]`). The JVM backend formats
     /// each into a field `Signature` (`TA;`). Backend-agnostic: only the type-parameter name is stored.
-    pub field_signatures: std::collections::HashMap<String, Vec<(String, String)>>,
+    field_signatures: std::collections::HashMap<TypeName, Vec<(String, String)>>,
     /// Classpath `@JvmInline value class` (fq-internal-name → erased underlying `Ty`) REFERENCED in
     /// this file — `kotlin/Result` → `Object`. The JVM value-class pass merges these into its erasure map
     /// so a classpath value-class type unboxes exactly like a user value class. Populated by ir_lower
     /// (which has the classpath); only REFERENCE-underlying ones are recorded (a primitive-underlying
     /// `UInt`/`ULong` keeps its existing dedicated handling).
-    pub external_value_classes: std::collections::HashMap<String, Ty>,
+    external_value_classes: std::collections::HashMap<TypeName, Ty>,
     /// Getter method name (`getV`) for each classpath `@JvmInline value class` in
     /// [`Self::external_value_classes`] — lets the value-class pass recognize a sole-property read emitted
     /// as `invokevirtual X.getV()` and rewrite it to identity (the receiver IS the unboxed underlying).
-    pub external_value_class_getters: std::collections::HashMap<String, String>,
+    external_value_class_getters: std::collections::HashMap<TypeName, String>,
     /// Call `ExprId` → reified-type substitution for a `<reified T>` CLASSPATH inline extension whose
     /// compiled body the backend must splice: `[(type-parameter name, concrete JVM internal name)]`
     /// (`[("T", "lib/Prov")]`). The bytecode splicer feeds this to `substitute_reified` so a
@@ -1081,6 +1177,166 @@ pub struct IrGenericSig {
 }
 
 impl IrFile {
+    pub fn with_package(package: Option<String>) -> Self {
+        IrFile {
+            package,
+            ..Default::default()
+        }
+    }
+
+    pub fn class_const(&mut self, internal: Option<&str>) -> ExprId {
+        let internal = internal.map(crate::types::type_name);
+        self.add_expr(IrExpr::ClassConst { internal })
+    }
+
+    pub fn external_static_field(
+        &mut self,
+        owner: &str,
+        name: impl Into<String>,
+        descriptor: impl Into<String>,
+    ) -> ExprId {
+        let owner = crate::types::type_name(owner);
+        self.add_expr(IrExpr::ExternalStaticField {
+            owner,
+            name: name.into(),
+            descriptor: descriptor.into(),
+        })
+    }
+
+    pub fn external_static_instance(
+        &mut self,
+        owner: &str,
+        ty: &str,
+        field: impl Into<String>,
+    ) -> ExprId {
+        let owner = crate::types::type_name(owner);
+        let ty = crate::types::type_name(ty);
+        self.add_expr(IrExpr::ExternalStaticInstance {
+            owner,
+            ty,
+            field: field.into(),
+        })
+    }
+
+    pub fn new_external(
+        &mut self,
+        internal: &str,
+        ctor_desc: impl Into<String>,
+        args: Vec<ExprId>,
+    ) -> ExprId {
+        let internal = crate::types::type_name(internal);
+        self.add_expr(IrExpr::NewExternal {
+            internal,
+            ctor_desc: ctor_desc.into(),
+            args,
+        })
+    }
+
+    pub fn new_cross_file(&mut self, internal: &str, params: Vec<Ty>, args: Vec<ExprId>) -> ExprId {
+        let internal = crate::types::type_name(internal);
+        self.add_expr(IrExpr::NewCrossFile {
+            internal,
+            params,
+            args,
+        })
+    }
+
+    pub fn mark_synthetic_class(&mut self, internal: &str) {
+        self.synthetic_classes
+            .insert(crate::types::type_name(internal));
+    }
+
+    pub fn is_synthetic_class(&self, internal: &str) -> bool {
+        self.synthetic_classes
+            .contains(&crate::types::type_name(internal))
+    }
+
+    pub fn mark_deprecated_class(&mut self, internal: &str) {
+        self.deprecated_classes
+            .insert(crate::types::type_name(internal));
+    }
+
+    pub fn is_deprecated_class(&self, internal: &str) -> bool {
+        self.deprecated_classes
+            .contains(&crate::types::type_name(internal))
+    }
+
+    pub fn mark_value_param_ctor(&mut self, internal: &str) {
+        self.mark_value_param_ctor_name(crate::types::type_name(internal));
+    }
+
+    pub fn mark_value_param_ctor_name(&mut self, internal: TypeName) {
+        self.value_param_ctors.insert(internal);
+    }
+
+    pub fn has_value_param_ctor(&self, internal: &str) -> bool {
+        self.value_param_ctors
+            .contains(&crate::types::type_name(internal))
+    }
+
+    pub fn insert_value_ctor_default(&mut self, internal: &str, expr: u32) {
+        self.value_ctor_defaults
+            .insert(crate::types::type_name(internal), expr);
+    }
+
+    pub fn value_ctor_default(&self, internal: &str) -> Option<u32> {
+        self.value_ctor_defaults
+            .get(&crate::types::type_name(internal))
+            .copied()
+    }
+
+    pub fn insert_class_ctor_defaults(&mut self, internal: &str, defaults: Vec<Option<u32>>) {
+        self.class_ctor_defaults
+            .insert(crate::types::type_name(internal), defaults);
+    }
+
+    pub fn class_ctor_defaults(&self, internal: &str) -> Option<&Vec<Option<u32>>> {
+        self.class_ctor_defaults
+            .get(&crate::types::type_name(internal))
+    }
+
+    pub fn insert_class_signature(&mut self, internal: &str, sig: IrGenericSig) {
+        self.class_signatures
+            .insert(crate::types::type_name(internal), sig);
+    }
+
+    pub fn class_signature(&self, internal: &str) -> Option<&IrGenericSig> {
+        self.class_signatures
+            .get(&crate::types::type_name(internal))
+    }
+
+    pub fn insert_field_signatures(&mut self, internal: &str, sigs: Vec<(String, String)>) {
+        self.field_signatures
+            .insert(crate::types::type_name(internal), sigs);
+    }
+
+    pub fn field_signatures(&self, internal: &str) -> Option<&Vec<(String, String)>> {
+        self.field_signatures
+            .get(&crate::types::type_name(internal))
+    }
+
+    pub fn insert_external_value_class_name(&mut self, internal: TypeName, underlying: Ty) {
+        self.external_value_classes.insert(internal, underlying);
+    }
+
+    pub fn external_value_class_name(&self, internal: TypeName) -> Option<&Ty> {
+        self.external_value_classes.get(&internal)
+    }
+
+    pub fn has_external_value_class_name(&self, internal: TypeName) -> bool {
+        self.external_value_class_name(internal).is_some()
+    }
+
+    pub fn insert_external_value_class_getter_name(&mut self, internal: TypeName, getter: String) {
+        self.external_value_class_getters.insert(internal, getter);
+    }
+
+    pub fn external_value_class_getters(&self) -> impl Iterator<Item = (TypeName, &str)> + '_ {
+        self.external_value_class_getters
+            .iter()
+            .map(|(&internal, getter)| (internal, getter.as_str()))
+    }
+
     pub fn param_defaults(&self, fid: u32) -> Option<&Vec<Option<ExprId>>> {
         self.fn_params.get(&fid)?.defaults.as_ref()
     }
@@ -1264,7 +1520,7 @@ fn default_expr_stub_safe(ir: &IrFile, e: ExprId, n: u32) -> bool {
             return false
         }
         IrExpr::NewExternal { internal, .. } | IrExpr::NewCrossFile { internal, .. }
-            if ir.external_value_classes.contains_key(internal) =>
+            if ir.has_external_value_class_name(*internal) =>
         {
             return false
         }
@@ -1440,11 +1696,11 @@ mod tests {
         });
         assert_eq!(fid, 0);
         let cid = f.add_class(IrClass {
-            fq_name: "demo/C".to_string(),
+            fq_name: "demo/C".into(),
             ..blank_class("demo/C")
         });
         assert_eq!(cid, 0);
-        assert_eq!(f.classes[cid as usize].fq_name, "demo/C");
+        assert!(f.classes[cid as usize].fq_name_matches("demo/C"));
     }
 
     #[test]
@@ -1479,7 +1735,7 @@ mod tests {
     /// A minimal well-formed `IrClass` for tests that only exercise fields/functions on the file.
     fn blank_class(fq: &str) -> IrClass {
         IrClass {
-            fq_name: fq.to_string(),
+            fq_name: fq.into(),
             is_value: false,
             type_param_bounds: Vec::new(),
             type_params: Vec::new(),
@@ -1497,14 +1753,14 @@ mod tests {
             is_sealed: false,
             is_abstract: false,
             is_open: false,
-            superclass: "kotlin/Any".to_string(),
+            superclass: "kotlin/Any".into(),
             super_args: Vec::new(),
             enum_entries: Vec::new(),
             enum_entry_of: None,
             prop_ref: None,
             func_ref: None,
             bridges: Vec::new(),
-            interfaces: Vec::new(),
+            interfaces: Default::default(),
             is_object: false,
             is_companion: false,
             companion_class: None,

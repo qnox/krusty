@@ -171,10 +171,13 @@ fn type_pb(st: &mut StringTable, t: Ty) -> Pb {
         other => (false, other),
     };
     let class_name = match base {
-        Ty::Obj(internal, _) => match builtin_name_index(internal) {
-            Some(idx) => st.builtin(idx),
-            None => st.class_id_from_desc(&format!("L{internal};")),
-        },
+        Ty::Obj(internal, _) => {
+            let internal = internal.render();
+            match builtin_name_index(&internal) {
+                Some(idx) => st.builtin(idx),
+                None => st.class_id_from_desc(&format!("L{internal};")),
+            }
+        }
         _ => st.builtin(predefined_index(base)),
     };
     if nullable {

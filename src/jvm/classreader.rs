@@ -6,6 +6,8 @@
 //! Also reads the `@kotlin.Metadata` annotation (RuntimeVisibleAnnotations) to extract the `d2`
 //! string table, which contains type-alias targets used by `classpath.rs` for type resolution.
 
+use crate::types::{TypeName, TypeNameList};
+
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PROTECTED: u16 = 0x0004;
 pub const ACC_STATIC: u16 = 0x0008;
@@ -63,17 +65,16 @@ pub struct ClassInfo {
     /// class access flags (`ACC_PUBLIC`, …)
     pub access: u16,
     /// internal name, e.g. `java/lang/String`
-    pub this_class: String,
-    pub super_class: Option<String>,
+    pub this_class: TypeName,
+    pub super_class: Option<TypeName>,
     /// Directly-implemented interface internal names (e.g. `String` → `[java/lang/CharSequence, …]`).
-    pub interfaces: Vec<String>,
+    pub interfaces: TypeNameList,
     pub fields: Vec<FieldSig>,
     pub methods: Vec<MethodSig>,
-    /// Strings from the `@kotlin.Metadata` `d1` annotation element — the BitEncoded protobuf carrying
-    /// declaration metadata (function flags incl. `inline`, signatures). Empty if absent.
-    pub kotlin_d1: Vec<String>,
-    /// Strings from the `@kotlin.Metadata` `d2` annotation element, if present.
-    pub kotlin_d2: Vec<String>,
+    /// The class's `@kotlin.Metadata`, FULLY decoded at parse time — the packed `d1`/`d2` strings are
+    /// not retained. [`crate::jvm::metadata::KotlinMeta::default`] (all-empty) for a plain Java class,
+    /// so consumers read one model regardless of the class's source language.
+    pub meta: crate::jvm::metadata::KotlinMeta,
     /// The class-level generic `Signature` attribute (JVM generics), e.g.
     /// `Lkotlin/ranges/IntProgression;Ljava/lang/Iterable<Ljava/lang/Integer;>;`. `None` if absent.
     pub signature: Option<String>,
@@ -86,6 +87,22 @@ pub struct ClassInfo {
 }
 
 impl ClassInfo {
+    pub fn this_class(&self) -> String {
+        self.this_class.render()
+    }
+
+    pub fn this_class_matches(&self, internal: &str) -> bool {
+        self.this_class.matches(internal)
+    }
+
+    pub fn super_class(&self) -> Option<String> {
+        self.super_class.map(TypeName::render)
+    }
+
+    pub fn interfaces(&self) -> Vec<String> {
+        self.interfaces.to_vec()
+    }
+
     pub fn is_public(&self) -> bool {
         self.access & ACC_PUBLIC != 0
     }
@@ -376,7 +393,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             },
         )
         .collect();
-    let methods = read_members(&mut r)?
+    let methods: Vec<MethodSig> = read_members(&mut r)?
         .into_iter()
         .map(|(access, name, descriptor, signature, _)| MethodSig {
             access,
@@ -390,16 +407,22 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
     // (for an annotation class) its `@Retention` policy.
     let attrs = read_class_attrs(&mut r, &cp);
 
+    let meta = crate::jvm::metadata::decode_metadata(
+        &attrs.d1.unwrap_or_default(),
+        &attrs.d2.unwrap_or_default(),
+        attrs.k,
+        &this_class,
+        &methods,
+    );
     Ok(ClassInfo {
         major,
         access,
-        this_class,
-        super_class,
-        interfaces,
+        this_class: this_class.into(),
+        super_class: super_class.map(Into::into),
+        interfaces: interfaces.into(),
         fields,
         methods,
-        kotlin_d1: attrs.d1.unwrap_or_default(),
-        kotlin_d2: attrs.d2.unwrap_or_default(),
+        meta,
         signature: attrs.signature,
         retention: attrs.retention,
     })
@@ -410,6 +433,9 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
 struct ClassAttrs {
     d1: Option<Vec<String>>,
     d2: Option<Vec<String>>,
+    /// The `@kotlin.Metadata` `k` (kind) element: 1 class, 2 file facade, 4 multi-file facade,
+    /// 5 multi-file part.
+    k: Option<i32>,
     signature: Option<String>,
     retention: Option<String>,
 }
@@ -469,6 +495,22 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
                         let _ = r.u2(); // enum type descriptor index
                         if let Ok(ci) = r.u2() {
                             out.retention = Some(utf8(ci).to_string());
+                        }
+                    } else {
+                        // Unexpected shape — stop parsing this class's attributes rather than desync.
+                        return out;
+                    }
+                    continue;
+                }
+                // `@Metadata`'s `k` (kind) is an Int element (`I` tag, Integer constant) — it decides
+                // how `d1` is read (protobuf vs a multi-file facade's part-name list).
+                if is_kotlin_meta && ename == "k" {
+                    let Ok(tag) = r.u1() else { break };
+                    if tag == b'I' {
+                        if let Ok(vi) = r.u2() {
+                            if let Some(C::Integer(v)) = cp.get(vi as usize) {
+                                out.k = Some(*v);
+                            }
                         }
                     } else {
                         // Unexpected shape — stop parsing this class's attributes rather than desync.
@@ -664,7 +706,7 @@ mod tests {
         cw.add_method(0x0001 | 0x0008 | 0x0010, "add", "(II)I", &code);
         let bytes = cw.finish();
         let ci = parse_class(&bytes).unwrap();
-        assert_eq!(ci.this_class, "demo/RKt");
+        assert!(ci.this_class_matches("demo/RKt"));
         assert_eq!(ci.methods.len(), 1);
         assert_eq!(ci.methods[0].name, "add");
         assert_eq!(ci.methods[0].descriptor, "(II)I");

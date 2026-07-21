@@ -1,6 +1,6 @@
 //! Small, backend-agnostic JVM naming/descriptor helpers (relocated out of the retired AST emitter).
 
-use crate::types::Ty;
+use crate::types::{InternalName, Ty};
 
 /// The file-facade class internal name for a source file: `Foo.kt` → `FooKt` (package-qualified).
 pub fn file_class_name(file_stem: &str, package: Option<&str>) -> String {
@@ -58,22 +58,30 @@ pub fn params_descriptor(params: &[Ty]) -> String {
 }
 
 /// The JVM array descriptor for a primitive-array class name (`kotlin/IntArray` → `[I`), or `None`.
-fn primitive_array_descriptor(internal: &str) -> Option<&'static str> {
-    Some(match internal {
-        "kotlin/IntArray" => "[I",
-        "kotlin/LongArray" => "[J",
-        "kotlin/ShortArray" => "[S",
-        "kotlin/ByteArray" => "[B",
-        "kotlin/BooleanArray" => "[Z",
-        "kotlin/CharArray" => "[C",
-        "kotlin/FloatArray" => "[F",
-        "kotlin/DoubleArray" => "[D",
-        // The unsigned specialized arrays are `inline class`es over the signed primitive array, so they
-        // erase to the same JVM descriptor (`UIntArray` = `[I`); only their `@Metadata` element differs.
-        "kotlin/UIntArray" => "[I",
-        "kotlin/ULongArray" => "[J",
-        _ => return None,
-    })
+fn primitive_array_descriptor(internal: impl InternalName) -> Option<&'static str> {
+    if internal.internal_matches("kotlin/IntArray") {
+        Some("[I")
+    } else if internal.internal_matches("kotlin/LongArray")
+        || internal.internal_matches("kotlin/ULongArray")
+    {
+        Some("[J")
+    } else if internal.internal_matches("kotlin/ShortArray") {
+        Some("[S")
+    } else if internal.internal_matches("kotlin/ByteArray") {
+        Some("[B")
+    } else if internal.internal_matches("kotlin/BooleanArray") {
+        Some("[Z")
+    } else if internal.internal_matches("kotlin/CharArray") {
+        Some("[C")
+    } else if internal.internal_matches("kotlin/FloatArray") {
+        Some("[F")
+    } else if internal.internal_matches("kotlin/DoubleArray") {
+        Some("[D")
+    } else if internal.internal_matches("kotlin/UIntArray") {
+        Some("[I")
+    } else {
+        None
+    }
 }
 
 /// A JVM field/type descriptor from a krusty `Ty`.
@@ -96,7 +104,7 @@ pub fn type_descriptor(ty: Ty) -> String {
         // A boxed `Array<T>` (`Obj("kotlin/Array", [T])`) is `[<boxed T>` (`Array<Int>` = `[Ljava/lang/Integer;`),
         // and a primitive array class name (`kotlin/IntArray`) is its JVM array descriptor (`[I`) — without
         // this they would descriptor to a bogus `Lkotlin/Array;`/`Lkotlin/IntArray;` class.
-        Ty::Obj("kotlin/Array", args) => {
+        Ty::Obj(n, args) if n.matches("kotlin/Array") => {
             let e = args
                 .first()
                 .copied()
@@ -106,7 +114,7 @@ pub fn type_descriptor(ty: Ty) -> String {
         Ty::Obj(n, _) if primitive_array_descriptor(n).is_some() => {
             primitive_array_descriptor(n).unwrap().into()
         }
-        Ty::Obj(n, _) => obj_desc(n),
+        Ty::Obj(n, _) => obj_desc(&n.render()),
         Ty::Null | Ty::Nothing | Ty::Error => obj_desc("kotlin/Any"),
         Ty::Fun(s) => format!(
             "Lkotlin/jvm/functions/Function{};",
