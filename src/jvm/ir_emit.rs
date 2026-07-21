@@ -260,9 +260,11 @@ fn build_class_metadata(
 /// kotlinc's interning order (see [`ClassWriter::seed_plain_class_pool`]). Mirrors the descriptors that
 /// `attach_synth_debug_tables` and the natural emission produce, so the seeded entries are reused.
 fn seed_plain_class_pool(
+    ir: &IrFile,
     c: &crate::ir::IrClass,
     fq_name: &str,
     superclass: &str,
+    ctor_signature: Option<&str>,
     cw: &mut ClassWriter,
 ) {
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
@@ -311,7 +313,39 @@ fn seed_plain_class_pool(
             ));
         }
     }
-    cw.seed_plain_class_pool(fq_name, superclass, &ctor_desc, &fields, &accessors);
+    // Generic `Signature`s for PARAMETERIZED-type members (`List<String>` → `Ljava/util/List<Ljava/lang/String;>;`).
+    // Only for a class with NO bare type-parameter fields — a generic class's bare-`T` members are handled by
+    // the existing tparam path, left untouched. Seeded here so the natural emission (add_field_sig/
+    // add_method_sig) dedupes to kotlinc's interning positions.
+    let no_tparam_fields = ir.field_signatures(fq_name).is_none();
+    let ctor_sig = no_tparam_fields.then_some(ctor_signature).flatten();
+    let field_sigs: Vec<Option<String>> = if no_tparam_fields {
+        c.fields.iter().map(|f| parameterized_sig(&f.ty)).collect()
+    } else {
+        Vec::new()
+    };
+    let mut accessor_sigs: Vec<Option<String>> = Vec::new();
+    if no_tparam_fields {
+        for f in &c.fields {
+            let g = parameterized_sig(&f.ty);
+            accessor_sigs.push(g.as_ref().map(|s| format!("(){s}"))); // getter → `()<sig>`
+            if !f.is_final {
+                accessor_sigs.push(g.as_ref().map(|s| format!("({s})V"))); // setter → `(<sig>)V`
+            }
+        }
+    }
+    cw.seed_plain_class_pool(
+        fq_name,
+        superclass,
+        &ctor_desc,
+        &fields,
+        &accessors,
+        &crate::jvm::classfile::MemberSignatures {
+            ctor: ctor_sig,
+            accessors: &accessor_sigs,
+            fields: &field_sigs,
+        },
+    );
     if c.is_data {
         let simple = fq_name.rsplit('/').next().unwrap_or(fq_name);
         let data_fields: Vec<(String, String)> = c
@@ -1479,8 +1513,20 @@ fn emit_class(
     // A cross-module `class_meta` PROVIDER record (none exists today) deliberately does NOT seed:
     // provider metadata makes the class correct, not byte-identical — byte identity is only claimed
     // for the computed path this gate mirrors.
+    // For a generic class, the `<init>` carries a `Signature` whose type-parameter params read `T<tp>;`
+    // (`class Box<T>(var a: T)` → `(TT;)V`); a PARAMETERIZED concrete-type param reads its full generic
+    // signature (`List<String>` → `Ljava/util/List<Ljava/lang/String;>;`). `None` when no param needs it.
+    // Computed once here: the pool seeder interns it and the `<init>` emission attaches it.
+    let ctor_signature: Option<String> = class_ctor_generic_sig(ir, c, &fq_name);
     if opts.emit_class_metadata && build_class_metadata(ir, c, opts).is_some() {
-        seed_plain_class_pool(c, &fq_name, &superclass, &mut cw);
+        seed_plain_class_pool(
+            ir,
+            c,
+            &fq_name,
+            &superclass,
+            ctor_signature.as_deref(),
+            &mut cw,
+        );
     }
     // Access: an extended or abstract class must not be `final`; a class with an abstract method
     // (body `None`) is `ACC_ABSTRACT`.
@@ -1552,11 +1598,14 @@ fn emit_class(
         } else {
             (if private { 0x0002 } else { 0x0001 }) | if field.is_final { 0x0010 } else { 0 }
         };
-        // A field typed by a bare type parameter (`val a: A`) carries a `Signature` (`TA;`), like kotlinc.
+        // A field typed by a bare type parameter (`val a: A`) carries a `Signature` (`TA;`); a
+        // PARAMETERIZED concrete type (`val xs: List<String>`) carries its full generic signature. Both
+        // like kotlinc; disjoint (a field is one or the other).
         let field_sig = ir
             .field_signatures(&fq_name)
             .and_then(|fs| fs.iter().find(|(fname, _)| fname == name))
-            .map(|(_, tp)| format!("T{tp};"));
+            .map(|(_, tp)| format!("T{tp};"))
+            .or_else(|| parameterized_sig(ty));
         cw.add_field_sig(acc, name, &ir_type_desc(ty), field_sig.as_deref());
     }
     // A `companion object`'s `const val`s live on THIS (outer) class as `public static final` +
@@ -1583,35 +1632,6 @@ fn emit_class(
     // params back a field, plain params are arguments only. (Synthesized classes have empty `ctor_args`
     // and fall back to the leading `ctor_param_count` fields.)
     let param_tys = class_ctor_jvm_tys(c);
-    // For a generic class, the `<init>` carries a `Signature` whose type-parameter params read `T<tp>;`
-    // (`class Box<T>(var a: T)` → `(TT;)V`) — kotlinc does the same. No `<…>` prefix: the constructor
-    // uses the class's type parameters, declares none. `None` (no attr) when no param is type-parameter-typed.
-    let ctor_signature: Option<String> = ir.field_signatures(&fq_name).and_then(|ftp| {
-        let is_field: Vec<bool> = if c.ctor_args.is_empty() {
-            vec![true; param_tys.len()]
-        } else {
-            c.ctor_args.iter().map(|a| a.is_field).collect()
-        };
-        let mut sig = String::from("(");
-        let mut any = false;
-        let mut field_i = 0usize;
-        for (i, t) in param_tys.iter().enumerate() {
-            if is_field.get(i).copied().unwrap_or(true) {
-                let fname = c.fields.get(field_i).map(|f| f.name.as_str()).unwrap_or("");
-                if let Some((_, tp)) = ftp.iter().find(|(f, _)| f == fname) {
-                    sig.push_str(&format!("T{tp};"));
-                    any = true;
-                } else {
-                    sig.push_str(&type_descriptor(*t));
-                }
-                field_i += 1;
-            } else {
-                sig.push_str(&type_descriptor(*t));
-            }
-        }
-        sig.push_str(")V");
-        any.then_some(sig)
-    });
     // A class with NO primary constructor emits no primary `<init>` — every `<init>` comes from a
     // secondary constructor (below). Otherwise emit the primary `<init>` here.
     if c.has_primary_ctor {
@@ -4107,10 +4127,15 @@ fn emit_method_inner(
         } else {
             0
         };
+    // A method with own type parameters (`fun <T> …`) → the tparam-based signature; otherwise a method
+    // whose concrete param/return type is PARAMETERIZED (`getXs(): List<String>`, `copy(List<String>)`)
+    // → its generic signature. `f.params`/`f.ret` are the SOURCE types (retain `<…>` args); `param_tys`/
+    // `ret` are erased.
     let signature = ir
         .signatures
         .get(&fid)
-        .and_then(|g| jvm_method_signature(g, f));
+        .and_then(|g| jvm_method_signature(g, f))
+        .or_else(|| method_parameterized_sig(&f.params, &f.ret));
     let desc = method_descriptor(&param_tys, ret);
     e.cw.add_method_sig(access, &f.name, &desc, &code, signature.as_deref());
     if ir.deprecated_methods.contains(&fid) {
@@ -4181,6 +4206,100 @@ fn ty_generic_sig(t: &Ty) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// The generic `Signature` element for a parameterized concrete type (`List<String>` →
+/// `Ljava/util/List<Ljava/lang/String;>;`); `None` when erasure loses nothing. `T?` unwraps (generics
+/// survive nullability). Bare type parameters are handled separately via `field_signatures`.
+fn parameterized_sig(ty: &Ty) -> Option<String> {
+    let inner = match ty {
+        Ty::Nullable(t) => t,
+        t => t,
+    };
+    match inner {
+        Ty::Obj(_, args) if !args.is_empty() => {
+            let sig = ty_generic_sig(inner)?;
+            (sig != ir_type_desc(inner)).then_some(sig)
+        }
+        _ => None,
+    }
+}
+
+/// A method's generic `Signature` when a concrete param/return type is parameterized (`getXs()` →
+/// `()Ljava/util/List<Ljava/lang/String;>;`); non-generic positions keep their erased descriptor,
+/// `None` when none are parameterized.
+fn method_parameterized_sig(params: &[Ty], ret: &Ty) -> Option<String> {
+    // Runs for every emitted method — bail before building any string when no position can carry one.
+    let is_parameterized = |t: &Ty| {
+        let inner = match t {
+            Ty::Nullable(t) => t,
+            t => t,
+        };
+        matches!(inner, Ty::Obj(_, args) if !args.is_empty())
+    };
+    if !params
+        .iter()
+        .chain(std::iter::once(ret))
+        .any(is_parameterized)
+    {
+        return None;
+    }
+    let mut any = false;
+    let mut s = String::from("(");
+    for p in params {
+        match parameterized_sig(p) {
+            Some(ps) => {
+                s.push_str(&ps);
+                any = true;
+            }
+            None => s.push_str(&ir_type_desc(p)),
+        }
+    }
+    s.push(')');
+    match parameterized_sig(ret) {
+        Some(ps) => {
+            s.push_str(&ps);
+            any = true;
+        }
+        None => s.push_str(&ir_type_desc(ret)),
+    }
+    any.then_some(s)
+}
+
+/// The primary constructor's generic `Signature` — bare type-parameter params (`(TT;)V`) and
+/// parameterized concrete params (`(Ljava/util/List<Ljava/lang/String;>;)V`), others erased; `None` when
+/// none need generics. Shared by the pool seeder and the attribute emitter so both produce one string.
+fn class_ctor_generic_sig(ir: &IrFile, c: &crate::ir::IrClass, fq_name: &str) -> Option<String> {
+    let param_tys = class_ctor_jvm_tys(c);
+    let ftp = ir.field_signatures(fq_name);
+    let is_field: Vec<bool> = if c.ctor_args.is_empty() {
+        vec![true; param_tys.len()]
+    } else {
+        c.ctor_args.iter().map(|a| a.is_field).collect()
+    };
+    let mut sig = String::from("(");
+    let mut any = false;
+    let mut field_i = 0usize;
+    for (i, t) in param_tys.iter().enumerate() {
+        if is_field.get(i).copied().unwrap_or(true) {
+            let f = c.fields.get(field_i);
+            let fname = f.map(|f| f.name.as_str()).unwrap_or("");
+            if let Some((_, tp)) = ftp.and_then(|ftp| ftp.iter().find(|(fp, _)| fp == fname)) {
+                sig.push_str(&format!("T{tp};"));
+                any = true;
+            } else if let Some(ps) = f.and_then(|f| parameterized_sig(&f.ty)) {
+                sig.push_str(&ps);
+                any = true;
+            } else {
+                sig.push_str(&type_descriptor(*t));
+            }
+            field_i += 1;
+        } else {
+            sig.push_str(&type_descriptor(*t));
+        }
+    }
+    sig.push_str(")V");
+    any.then_some(sig)
 }
 
 /// The shared `<T:bound…>` type-parameter DECLARATION section, or `""` when there are no own type

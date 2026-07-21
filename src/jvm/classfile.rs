@@ -44,6 +44,19 @@ fn write_verif_type(vt: &VerifType, out: &mut Vec<u8>) {
     }
 }
 
+/// Per-member JVM generic `Signature` strings for a plain class, in kotlinc's interning positions, passed
+/// to [`ClassWriter::seed_plain_class_pool`]. `None`/empty entries mean "no `Signature`" (a member whose
+/// erased descriptor already captures its type). `accessors` and `fields` are index-parallel to the
+/// `seed_plain_class_pool` arguments of the same name.
+pub struct MemberSignatures<'a> {
+    /// The primary constructor's generic `Signature` (`(Ljava/util/List<Ljava/lang/String;>;)V`).
+    pub ctor: Option<&'a str>,
+    /// Per-accessor generic `Signature` (a getter/setter of a parameterized-type property).
+    pub accessors: &'a [Option<String>],
+    /// Per-field generic `Signature` (a parameterized-type backing field).
+    pub fields: &'a [Option<String>],
+}
+
 #[derive(PartialEq, Eq, Hash, Clone)]
 enum Const {
     Utf8(String),
@@ -690,10 +703,16 @@ impl ClassWriter {
         // (name, descriptor, setter_kind): 0 = getter, 1 = primitive/other setter, 2 = non-null
         // reference setter (its `checkNotNullParameter` guard also interns a `<set-?>` String constant).
         accessors: &[(String, String, u8)],
+        // Per-member generic `Signature`s (parameterized-type ctor/accessor/field members).
+        sigs: &MemberSignatures,
     ) {
         // Primary constructor: name + descriptor are interned at method entry, before its body.
         self.cp.utf8("<init>");
         self.cp.utf8(ctor_desc);
+        // The ctor's generic Signature (`(Ljava/util/List<Ljava/lang/String;>;)V`) — right after the desc.
+        if let Some(s) = sigs.ctor {
+            self.cp.utf8(s);
+        }
         // The `@NotNull`/`@Nullable` annotation type(s), interned at the constructor's PARAMETER
         // annotations (kotlinc visits these before the body) in first-use order over the reference
         // parameters. Reused by every getter return / setter parameter annotation and guard.
@@ -742,15 +761,26 @@ impl ClassWriter {
         // synthetic name), plus a `<set-?>` String constant for a non-null reference setter's
         // `checkNotNullParameter` guard. Interleaved per-setter (deduped) so it lands before the next
         // accessor, as kotlinc does — not batched at the end.
-        for (name, desc, setter_kind) in accessors {
+        for (i, (name, desc, setter_kind)) in accessors.iter().enumerate() {
             self.cp.utf8(name);
             self.cp.utf8(desc);
+            // A getter/setter of a parameterized-type property carries a generic Signature, interned
+            // right after its descriptor (kotlinc's order).
+            if let Some(Some(s)) = sigs.accessors.get(i) {
+                self.cp.utf8(s);
+            }
             if *setter_kind >= 1 {
                 self.cp.utf8("<set-?>");
             }
             if *setter_kind == 2 {
                 self.cp.string("<set-?>");
             }
+        }
+        // Each parameterized-type FIELD's `Signature` value, in field order — kotlinc interns these after
+        // all accessors, right before the class's `@Metadata` (a field's Signature attribute serializes
+        // after the methods but its Utf8 lands here).
+        for s in sigs.fields.iter().flatten() {
+            self.cp.utf8(s);
         }
     }
 
@@ -1290,6 +1320,15 @@ impl ClassWriter {
             Smt,
             Ripa,
         }
+        // A field's `Signature` attribute name interns BEFORE its `RuntimeInvisibleAnnotations` and before
+        // `Code` — kotlinc visits fields first, and a field's `Signature` attribute precedes its
+        // annotations (`class C(val xs: List<String>)` pool: `Signature`, `RuntimeInvisibleAnnotations`,
+        // `Code`). The later `signature_attr_name` intern dedups onto this index.
+        let field_sig_name = self
+            .fields
+            .iter()
+            .any(|f| f.signature.is_some())
+            .then(|| self.cp.utf8("Signature"));
         let field_has_invis = self.fields.iter().any(|f| !f.invisible_anns.is_empty());
         // Field-level RIA, if any field is annotated: interns before `Code` (fields precede methods).
         let field_ria = field_has_invis.then(|| self.cp.utf8("RuntimeInvisibleAnnotations"));
@@ -1329,15 +1368,15 @@ impl ClassWriter {
             }
         }
         let method_invis_ann_name = invis_ann_name;
-        // Intern the `Signature` attribute name only if a method actually carries one — an unused
-        // constant-pool entry would diverge from kotlinc's output for non-generic classes.
-        let signature_attr_name = if self.methods.iter().any(|m| m.signature.is_some())
-            || self.fields.iter().any(|f| f.signature.is_some())
-        {
-            Some(self.cp.utf8("Signature"))
-        } else {
-            None
-        };
+        // The `Signature` attribute name: reuse the early field-Signature index when a field carries one
+        // (interned before `Code`), else intern here if a METHOD carries a signature. Only interned when
+        // actually used — an unused entry would diverge from kotlinc's output for non-generic classes.
+        let signature_attr_name = field_sig_name.or_else(|| {
+            self.methods
+                .iter()
+                .any(|m| m.signature.is_some())
+                .then(|| self.cp.utf8("Signature"))
+        });
         // Intern `ConstantValue` only if a `const val` field carries one.
         let constval_attr_name = if self.fields.iter().any(|f| f.const_value.is_some()) {
             Some(self.cp.utf8("ConstantValue"))

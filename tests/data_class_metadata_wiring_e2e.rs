@@ -70,6 +70,22 @@ fn assert_byte_identical(src: &str, class_internal: &str, cp: &[PathBuf]) {
 
 // ---- Byte-identity (the end-to-end goal) ----------------------------------------------------------
 
+/// A plain (non-`data`) class with a PARAMETERIZED-type property (`List<String>`) — the generic
+/// `Signature` machinery: the field, its getter, and the constructor each carry a `Signature`
+/// attribute (`Ljava/util/List<Ljava/lang/String;>;` and the `(…)V`/`()…` method forms), interned in
+/// kotlinc's exact positions (method sigs right after each erased descriptor; the field sig after the
+/// accessors, before `@Metadata`; the `Signature` attribute NAME before the field's `@NotNull`). Needs
+/// the kotlin stdlib on the classpath so `List<String>` resolves.
+#[test]
+fn plain_generic_collection_property_is_byte_identical() {
+    let cp: Vec<PathBuf> = common::stdlib_jar().into_iter().collect();
+    assert_byte_identical(
+        "package demo\nclass C(val xs: List<String>)\n",
+        "demo/C",
+        &cp,
+    );
+}
+
 /// A single `val Int` property: the minimal shape — @Metadata, debug tables, constant-pool order.
 #[test]
 fn val_int_class_is_byte_identical() {
