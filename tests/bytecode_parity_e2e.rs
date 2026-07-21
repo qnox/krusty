@@ -42,6 +42,29 @@ fn krusty_compile(name: &str, src: &str) -> Option<(std::path::PathBuf, String)>
     Some((dir, jh))
 }
 
+/// Like [`krusty_compile`] but with the kotlin stdlib on the classpath (for collection/library types).
+/// `None` if javap/`JAVA_HOME`/the stdlib jar is unavailable — the test then skips.
+fn krusty_compile_stdlib(name: &str, src: &str) -> Option<(std::path::PathBuf, String)> {
+    let jh = java_home()?;
+    if !std::path::Path::new(&format!("{jh}/bin/javap")).exists() {
+        return None;
+    }
+    let stdlib = common::stdlib_jar()?;
+    let dir = std::env::temp_dir().join(format!("krusty_bcp_{name}_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let classes = common::compile_in_process(src, "B", &[stdlib], None)
+        .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
+    for (internal, bytes) in &classes {
+        let path = dir.join(format!("{internal}.class"));
+        if let Some(p) = path.parent() {
+            fs::create_dir_all(p).ok();
+        }
+        fs::write(&path, bytes).unwrap();
+    }
+    Some((dir, jh))
+}
+
 /// `javap -c -p` of one class file.
 fn javap(jh: &str, class_file: &std::path::Path) -> String {
     let out = Command::new(format!("{jh}/bin/javap"))
@@ -384,6 +407,74 @@ fn data_class_nonnull_string_hashes_via_string_hashcode() {
     assert!(
         !hc.contains("Objects.hashCode"),
         "nullable String? field must NOT route through Objects.hashCode:\n{hc}"
+    );
+}
+
+/// Reference-field hash owners across nullability: a concrete class keeps its OWN class as the
+/// owner (guarded when nullable); a source interface — nullable or not — takes `Object`.
+#[test]
+fn data_class_concrete_ref_field_hashes_via_own_hashcode() {
+    for (name, src, want) in [
+        (
+            "dcrefnn",
+            "class D\ndata class C(val x: D)\nfun box() = \"OK\"\n",
+            "D.hashCode",
+        ),
+        (
+            "dcrefnull",
+            "class D\ndata class C(val x: D?)\nfun box() = \"OK\"\n",
+            "D.hashCode",
+        ),
+        (
+            "dcifacenn",
+            "interface I\ndata class C(val x: I)\nfun box() = \"OK\"\n",
+            "java/lang/Object.hashCode",
+        ),
+        (
+            "dcifacenull",
+            "interface I\ndata class C(val x: I?)\nfun box() = \"OK\"\n",
+            "java/lang/Object.hashCode",
+        ),
+    ] {
+        let Some((dir, jh)) = krusty_compile(name, src) else {
+            return;
+        };
+        let text = javap(&jh, &dir.join("C.class"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let hc = &text[text.find("int hashCode").expect("hashCode")..];
+        let hc = &hc[..hc[1..].find("\n\n").map(|p| p + 1).unwrap_or(hc.len())];
+        assert!(
+            hc.contains(want),
+            "{name}: reference field must hash via {want}:\n{hc}"
+        );
+        assert!(
+            !hc.contains("Objects.hashCode"),
+            "{name}: reference field must NOT use the null-safe Objects.hashCode:\n{hc}"
+        );
+    }
+}
+
+/// A collection/library-interface data-class field (`List`/`Map`) hashes via `Object.hashCode` (kotlinc's
+/// shape for an interface-typed field), not the null-safe static `Objects.hashCode`.
+#[test]
+fn data_class_collection_field_hashes_via_object_hashcode() {
+    let Some((dir, jh)) = krusty_compile_stdlib(
+        "dccoll",
+        "data class C(val x: List<String>, val y: Map<String, Int>?)\nfun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let text = javap(&jh, &dir.join("C.class"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let hc = &text[text.find("int hashCode").expect("hashCode")..];
+    let hc = &hc[..hc[1..].find("\n\n").map(|p| p + 1).unwrap_or(hc.len())];
+    assert!(
+        hc.contains("Object.hashCode"),
+        "collection field must hash via Object.hashCode:\n{hc}"
+    );
+    assert!(
+        !hc.contains("Objects.hashCode"),
+        "collection field must NOT use the null-safe Objects.hashCode:\n{hc}"
     );
 }
 
