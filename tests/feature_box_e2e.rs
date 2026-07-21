@@ -59,6 +59,25 @@ fun box(): String {
 
 /// `(class-stem, source)` — the file is written as `<stem>.kt`, whose facade class is `<stem>Kt`.
 const SNIPPETS: &[(&str, &str)] = &[
+    // An INTERFACE-typed data-class field must hash via `Object.hashCode()` — a Methodref naming the
+    // interface as the owner passes the verifier but throws IncompatibleClassChangeError at the
+    // first hashCode() call ("Found interface, but class was expected"), so this must RUN, not just
+    // load. Also covers equals/toString over the same field.
+    (
+        "DataClassInterfaceFieldHash",
+        r#"interface Marker
+class M : Marker
+data class D(val m: Marker, val n: Int)
+fun box(): String {
+    val m = M()
+    val d = D(m, 1)
+    if (d.hashCode() != d.copy().hashCode()) return "h"
+    if (d != D(m, 1)) return "e"
+    if (!d.toString().startsWith("D(")) return "s=$d"
+    return "OK"
+}
+"#,
+    ),
     // Data-class hashCode/toString SEMANTICS per field kind, matching kotlinc: an array field
     // CONTENT-hashes (`java.util.Arrays.hashCode`) and content-prints (`Arrays.toString`) — the old
     // `Objects.hashCode` identity hash silently diverged from kotlinc; a nullable field hashes 0 for
