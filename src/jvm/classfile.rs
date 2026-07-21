@@ -914,6 +914,88 @@ impl ClassWriter {
     }
 
     /// Like [`add_method`], plus an optional generic `Signature` attribute string.
+    /// Append the StackMapTable verification type of each parameter in `desc` to `out` (a `long`/
+    /// `double` occupies one verification-type slot here, matching the StackMapTable encoding).
+    ///
+    /// Returns `false` on a malformed descriptor WITHOUT completing `out` — the caller must then
+    /// compress against no baseline (all `full_frame`s) rather than a silently wrong initial frame:
+    /// a frame that falsely compared "same" against a mis-derived baseline would make the verifier
+    /// (which derives the real one from the descriptor) reject the class.
+    #[must_use]
+    fn append_param_verif_types(&mut self, desc: &str, out: &mut Vec<VerifType>) -> bool {
+        let (Some(stripped), Some(end)) = (desc.strip_prefix('('), desc.find(')')) else {
+            return false;
+        };
+        let params = &stripped.as_bytes()[..end - 1];
+        let mut i = 0;
+        while i < params.len() {
+            match params[i] {
+                b'I' | b'S' | b'B' | b'C' | b'Z' => {
+                    out.push(VerifType::Integer);
+                    i += 1;
+                }
+                b'J' => {
+                    out.push(VerifType::Long);
+                    i += 1;
+                }
+                b'F' => {
+                    out.push(VerifType::Float);
+                    i += 1;
+                }
+                b'D' => {
+                    out.push(VerifType::Double);
+                    i += 1;
+                }
+                b'L' => {
+                    let start = i;
+                    while i < params.len() && params[i] != b';' {
+                        i += 1;
+                    }
+                    if i == params.len() {
+                        return false; // unterminated `L…;`
+                    }
+                    let Ok(name) = std::str::from_utf8(&params[start + 1..i]) else {
+                        return false;
+                    };
+                    let idx = self.cp.class(name);
+                    out.push(VerifType::Object(idx));
+                    i += 1; // skip ';'
+                }
+                b'[' => {
+                    let start = i;
+                    while i < params.len() && params[i] == b'[' {
+                        i += 1;
+                    }
+                    if i < params.len() && params[i] == b'L' {
+                        while i < params.len() && params[i] != b';' {
+                            i += 1;
+                        }
+                        if i == params.len() {
+                            return false; // unterminated `[L…;`
+                        }
+                        i += 1;
+                    } else if i < params.len() {
+                        i += 1; // primitive array element (`[I`, `[[Z`, …)
+                    } else {
+                        return false; // bare `[` with no element type
+                    }
+                    // An array type is a REFERENCE; its StackMapTable verification type is
+                    // `Object_variable_info` referencing a `CONSTANT_Class` whose name is the array
+                    // DESCRIPTOR itself (`[I`, `[Ljava/lang/String;`) — JVMS §4.7.4 / §4.4.1. `cp.class`
+                    // interns it verbatim (`to_jvm_internal` leaves descriptors untouched), so this is
+                    // correct for both primitive and reference arrays.
+                    let Ok(descriptor) = std::str::from_utf8(&params[start..i]) else {
+                        return false;
+                    };
+                    let idx = self.cp.class(descriptor);
+                    out.push(VerifType::Object(idx));
+                }
+                _ => return false, // not a JVM type descriptor character
+            }
+        }
+        true
+    }
+
     pub fn add_method_sig(
         &mut self,
         access: u16,
@@ -925,7 +1007,27 @@ impl ClassWriter {
         let n = self.cp.utf8(name);
         let d = self.cp.utf8(desc);
         let sig = signature.map(|s| self.cp.utf8(s));
-        let stackmap = code.build_stackmap();
+        // The method-entry frame (StackMapTable frames are deltas from it): `this` (unless static;
+        // `<init>` is UninitializedThis until super() runs) followed by each parameter's type. Only
+        // computed when the method actually has frames — `append_param_verif_types` interns the
+        // parameters' class types, which would otherwise perturb the pool of a branch-free method.
+        let stackmap = if code.has_frames() {
+            const ACC_STATIC: u16 = 0x0008;
+            let mut initial_locals: Vec<VerifType> = Vec::new();
+            if access & ACC_STATIC == 0 {
+                initial_locals.push(if name == "<init>" {
+                    VerifType::UninitializedThis
+                } else {
+                    VerifType::Object(self.this_class)
+                });
+            }
+            let baseline = self
+                .append_param_verif_types(desc, &mut initial_locals)
+                .then_some(initial_locals);
+            code.build_stackmap(baseline.as_deref())
+        } else {
+            None
+        };
         self.methods.push(MethodInfo {
             access,
             name: n,
@@ -1030,44 +1132,66 @@ impl ClassWriter {
         // before the Code-attribute names, then the `SourceFile` attribute NAME later, and
         // `RuntimeVisibleAnnotations` last. Intern the value up front to match.
         let sourcefile_value = self.source_file.clone().map(|src| self.cp.utf8(&src));
-        // kotlinc interns the method-level `RuntimeInvisibleAnnotations` name BEFORE `Code` (shared UTF8
-        // with the field-level one via dedup); `RuntimeInvisibleParameterAnnotations` after the debug
-        // tables. Intern both here to match, so they land ahead of `Code`/after `LocalVariableTable`.
-        let invis_ann_name = if self.methods.iter().any(|m| !m.invisible_anns.is_empty())
-            || self.fields.iter().any(|f| !f.invisible_anns.is_empty())
-        {
-            Some(self.cp.utf8("RuntimeInvisibleAnnotations"))
-        } else {
-            None
-        };
-        let method_invis_ann_name = invis_ann_name;
+        // Code-related attribute NAMES intern in kotlinc's real first-use order, which is driven by
+        // its field-then-method visiting — NOT a fixed order. kotlinc visits fields first, so a field
+        // annotation interns `RuntimeInvisibleAnnotations` BEFORE `Code`; then each method, in emit
+        // order, contributes `LineNumberTable`, `LocalVariableTable`, its own method-level
+        // `RuntimeInvisibleAnnotations`, `StackMapTable`, and `RuntimeInvisibleParameterAnnotations` on
+        // first use. Two shapes make the difference visible:
+        //   * plain `class C(val x: Int, var y: String)` — the `String` field carries `@NotNull`, so RIA
+        //     interns first (before `Code`), and no method branches ⇒ no `StackMapTable`.
+        //   * `data class D(val x: Int)` — only the synthesized methods carry annotations, so RIA interns
+        //     AFTER the debug tables (from `copy`/`toString`), and `equals` (branchy) interns
+        //     `StackMapTable` last.
+        // A hard-coded order matches one shape and diverges on the other; walk the real first-use
+        // sequence so both come out byte-identical.
+        #[derive(PartialEq)]
+        enum An {
+            Lnt,
+            Lvt,
+            Ria,
+            Smt,
+            Ripa,
+        }
+        let field_has_invis = self.fields.iter().any(|f| !f.invisible_anns.is_empty());
+        // Field-level RIA, if any field is annotated: interns before `Code` (fields precede methods).
+        let field_ria = field_has_invis.then(|| self.cp.utf8("RuntimeInvisibleAnnotations"));
         let code_attr_name = self.cp.utf8("Code");
-        // Intern `StackMapTable` only if a method actually needs one — an unused pool entry would
-        // diverge from kotlinc for branch-free classes.
-        let stackmap_attr_name = self
-            .methods
-            .iter()
-            .any(|m| m.stackmap.is_some())
-            .then(|| self.cp.utf8("StackMapTable"));
-        // Intern the debug-table attribute names only if a method carries them (unused pool entries
-        // would diverge from kotlinc for classes emitted without debug info).
-        let lnt_attr_name = self
-            .methods
-            .iter()
-            .any(|m| !m.lnt.is_empty())
-            .then(|| self.cp.utf8("LineNumberTable"));
-        let lvt_attr_name = self
-            .methods
-            .iter()
-            .any(|m| !m.lvt.is_empty())
-            .then(|| self.cp.utf8("LocalVariableTable"));
-        // `RuntimeInvisibleParameterAnnotations` name interns right after the debug tables (kotlinc's
-        // order for a class with annotated method parameters).
-        let ripa_attr_name = self
-            .methods
-            .iter()
-            .any(|m| !m.param_anns.is_empty())
-            .then(|| self.cp.utf8("RuntimeInvisibleParameterAnnotations"));
+        // First-use order of the per-method attribute names, in method emit order.
+        let mut seq: Vec<An> = Vec::new();
+        for m in &self.methods {
+            if !m.lnt.is_empty() && !seq.contains(&An::Lnt) {
+                seq.push(An::Lnt);
+            }
+            if !m.lvt.is_empty() && !seq.contains(&An::Lvt) {
+                seq.push(An::Lvt);
+            }
+            if !m.invisible_anns.is_empty() && !seq.contains(&An::Ria) {
+                seq.push(An::Ria);
+            }
+            if m.stackmap.is_some() && !seq.contains(&An::Smt) {
+                seq.push(An::Smt);
+            }
+            if !m.param_anns.is_empty() && !seq.contains(&An::Ripa) {
+                seq.push(An::Ripa);
+            }
+        }
+        let (mut lnt_attr_name, mut lvt_attr_name, mut stackmap_attr_name, mut ripa_attr_name) =
+            (None, None, None, None);
+        // A method-level RIA first use dedups onto the field-level index when both are present.
+        let mut invis_ann_name = field_ria;
+        for k in &seq {
+            match k {
+                An::Lnt => lnt_attr_name = Some(self.cp.utf8("LineNumberTable")),
+                An::Lvt => lvt_attr_name = Some(self.cp.utf8("LocalVariableTable")),
+                An::Ria => invis_ann_name = Some(self.cp.utf8("RuntimeInvisibleAnnotations")),
+                An::Smt => stackmap_attr_name = Some(self.cp.utf8("StackMapTable")),
+                An::Ripa => {
+                    ripa_attr_name = Some(self.cp.utf8("RuntimeInvisibleParameterAnnotations"))
+                }
+            }
+        }
+        let method_invis_ann_name = invis_ann_name;
         // Intern the `Signature` attribute name only if a method actually carries one — an unused
         // constant-pool entry would diverge from kotlinc's output for non-generic classes.
         let signature_attr_name = if self.methods.iter().any(|m| m.signature.is_some())
@@ -1277,8 +1401,13 @@ impl ClassWriter {
                         u2(&mut out, catch_type);
                     }
                     u2(&mut out, num_code_attrs);
-                    // kotlinc's Code sub-attribute order: LineNumberTable, LocalVariableTable, then
-                    // StackMapTable. (For a synthesized member there is no StackMapTable.)
+                    // kotlinc's Code sub-attribute order: StackMapTable, then LineNumberTable, then
+                    // LocalVariableTable. (A synthesized branch-free member has no StackMapTable.)
+                    if let Some(sm) = &m.stackmap {
+                        u2(&mut out, stackmap_attr_name.unwrap());
+                        u4(&mut out, sm.len() as u32);
+                        out.extend_from_slice(sm);
+                    }
                     if !m.lnt.is_empty() {
                         u2(&mut out, lnt_attr_name.unwrap());
                         u4(&mut out, (2 + m.lnt.len() * 4) as u32);
@@ -1299,11 +1428,6 @@ impl ClassWriter {
                             u2(&mut out, desc_idx);
                             u2(&mut out, slot);
                         }
-                    }
-                    if let Some(sm) = &m.stackmap {
-                        u2(&mut out, stackmap_attr_name.unwrap());
-                        u4(&mut out, sm.len() as u32);
-                        out.extend_from_slice(sm);
                     }
                 }
             }
@@ -1432,6 +1556,11 @@ impl CodeBuilder {
         self.needs_stackmap = true;
     }
 
+    /// Whether this method has any registered StackMapTable frames (⇒ `build_stackmap` emits one).
+    pub fn has_frames(&self) -> bool {
+        !self.frames.is_empty()
+    }
+
     /// The recorded frames resolved to byte offsets: `(offset, locals, stack)` for each bound label.
     /// Used to relocate a spliced lambda body's own frames into the host method. Unbound labels (offset
     /// `usize::MAX`) are dropped.
@@ -1461,8 +1590,12 @@ impl CodeBuilder {
     }
 
     /// Build the StackMapTable attribute body. Returns `None` when no frames are needed.
-    /// Emits a `full_frame` entry for every registered label, sorted by bytecode offset.
-    pub fn build_stackmap(&self) -> Option<Vec<u8>> {
+    ///
+    /// `initial_locals` is the method-entry frame the first entry compresses against; `None` means
+    /// the baseline could not be derived (malformed descriptor) — then the first entry is written
+    /// as a `full_frame`, which is always verifiable, instead of risking a false "same" match
+    /// against a wrong baseline.
+    pub fn build_stackmap(&self, initial_locals: Option<&[VerifType]>) -> Option<Vec<u8>> {
         if self.frames.is_empty() {
             return None;
         }
@@ -1485,25 +1618,73 @@ impl CodeBuilder {
         let mut body = Vec::new();
         u2(&mut body, entries.len() as u16);
 
-        // Offset deltas: the first entry's delta = offset; subsequent = offset - prev_offset - 1.
-        let mut prev: i64 = -1;
+        // Emit each frame in kotlinc's COMPRESSED form vs the previous frame (initial frame = the
+        // method-entry locals): same/same_extended, same_locals_1_stack_item[/extended], chop, append,
+        // or full_frame. Offset deltas: first = offset; subsequent = offset - prev_offset - 1.
+        // The `as u16` delta casts cannot truncate: a `Code` attribute's code array is capped at
+        // 65535 bytes (JVMS §4.7.3) and every entry offset was filtered to `< code_len` above.
+        let mut prev_off: i64 = -1;
+        // `None` = no usable baseline yet: the first frame is forced to `full_frame`.
+        let mut prev_locals: Option<Vec<VerifType>> = initial_locals.map(|s| s.to_vec());
+        let full = |body: &mut Vec<u8>, delta: u16, locals: &[VerifType], stack: &[VerifType]| {
+            body.push(255);
+            u2(body, delta);
+            u2(body, locals.len() as u16);
+            for vt in locals {
+                write_verif_type(vt, body);
+            }
+            u2(body, stack.len() as u16);
+            for vt in stack {
+                write_verif_type(vt, body);
+            }
+        };
         for (offset, locals, stack) in entries {
-            let delta = if prev < 0 {
+            let delta = if prev_off < 0 {
                 offset
             } else {
-                offset - prev as u32 - 1
+                offset - prev_off as u32 - 1
+            } as u16;
+            prev_off = offset as i64;
+            let (same_locals, shares_prefix, p) = match &prev_locals {
+                Some(prev) => {
+                    let common = locals.len().min(prev.len());
+                    (
+                        **locals == *prev,
+                        locals[..common] == prev[..common],
+                        prev.len(),
+                    )
+                }
+                None => (false, false, 0),
             };
-            prev = offset as i64;
-            body.push(255u8); // full_frame
-            u2(&mut body, delta as u16);
-            u2(&mut body, locals.len() as u16);
-            for vt in locals {
-                write_verif_type(vt, &mut body);
+            let n = locals.len();
+            if stack.is_empty() && same_locals {
+                if delta <= 63 {
+                    body.push(delta as u8); // same_frame
+                } else {
+                    body.push(251); // same_frame_extended
+                    u2(&mut body, delta);
+                }
+            } else if stack.is_empty() && shares_prefix && n > p && n - p <= 3 {
+                body.push((251 + (n - p)) as u8); // append_frame
+                u2(&mut body, delta);
+                for vt in &locals[p..] {
+                    write_verif_type(vt, &mut body);
+                }
+            } else if stack.is_empty() && shares_prefix && p > n && p - n <= 3 {
+                body.push((251 - (p - n)) as u8); // chop_frame
+                u2(&mut body, delta);
+            } else if stack.len() == 1 && same_locals {
+                if delta <= 63 {
+                    body.push(64 + delta as u8); // same_locals_1_stack_item
+                } else {
+                    body.push(247); // same_locals_1_stack_item_frame_extended
+                    u2(&mut body, delta);
+                }
+                write_verif_type(&stack[0], &mut body);
+            } else {
+                full(&mut body, delta, locals, stack);
             }
-            u2(&mut body, stack.len() as u16);
-            for vt in stack {
-                write_verif_type(vt, &mut body);
-            }
+            prev_locals = Some(locals.clone());
         }
         Some(body)
     }
