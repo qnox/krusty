@@ -2114,17 +2114,34 @@ fn select_overload(
     // in-scope packages (scope-pruned, tree-driven), so an unqualified extension binds only when its
     // facade's package is imported. No import scope → the whole-classpath `functions()` fallback
     // (removed once every consumer is scoped — task A). MEMBERS are always visible on their type.
-    let fs = match kind {
-        // A MEMBER's return can be RECEIVER-COUPLED (`Repo<Cfg>.byId(): Cfg`, a suspend `Continuation<T>`
-        // bound from the receiver's type argument) — recovery the receiver-agnostic `resolve_type` cannot
-        // do — so member candidates come from the platform's receiver-aware member query. EXTENSIONS come
-        // from the scope-pruned `resolve_symbols` seam (empty when there is no import scope).
+    // A MEMBER's return can be RECEIVER-COUPLED (`Repo<Cfg>.byId(): Cfg`, a suspend `Continuation<T>`
+    // bound from the receiver's type argument) — recovery the receiver-agnostic `resolve_type` cannot
+    // do — so member candidates come from the platform's receiver-aware member query. EXTENSIONS come
+    // from the scope-pruned `resolve_symbols` seam (empty when there is no import scope). Extension
+    // candidates are BORROWED from the `Rc`-shared namespace records (kept alive in `ext_records`) —
+    // deep-cloning every overload's `FunctionInfo` (params, call-sig vecs, generic sig) per call site
+    // only to discard all but the winner dominated selection; only the selected overload is cloned.
+    let member_set = match kind {
         FnKind::Member => lib.member_overloads(recv, name),
-        FnKind::Extension => ext
-            .fn_scope
-            .map(|scope| function_set_from_symbols(resolve_symbols_in_scope(lib, name, scope)))
-            .unwrap_or_default(),
-        FnKind::TopLevel => FunctionSet::default(),
+        _ => FunctionSet::default(),
+    };
+    let ext_records = match (kind, ext.fn_scope) {
+        (FnKind::Extension, Some(scope)) => resolve_symbols_in_scope(lib, name, scope),
+        _ => Vec::new(),
+    };
+    let overloads: Vec<&FunctionInfo> = match kind {
+        FnKind::Member => member_set.overloads.iter().collect(),
+        FnKind::Extension => ext_records
+            .iter()
+            .flat_map(|(_, r)| {
+                let fns: &[FunctionInfo] = match &r.callables {
+                    crate::libraries::Callables::Functions(f) => &f.overloads,
+                    _ => &[],
+                };
+                fns.iter()
+            })
+            .collect(),
+        FnKind::TopLevel => Vec::new(),
     };
     // Candidates from the scoped query are IN-SCOPE by construction: each came from a `resolve_symbols`
     // over an imported package, so its declared package is in scope even when `@JvmPackageName` relocated
@@ -2136,9 +2153,9 @@ fn select_overload(
         "resolve",
         "select_overload name={name} recv={recv:?} kind={kind:?} scope={:?} cands={}",
         ext.fn_scope.map(|scope| scope.len()),
-        fs.overloads.len(),
+        overloads.len(),
     );
-    for o in &fs.overloads {
+    for o in &overloads {
         crate::trace_compiler!(
             "resolve",
             "  raw {name} kind={:?} recv={:?} pub={} rank={} origin={:?} owner={}",
@@ -2153,11 +2170,11 @@ fn select_overload(
     // Candidates as `(overload, logical value params)`, grouped by receiver rank. An extension admits only
     // public overloads unless the caller is the bytecode inliner (which splices non-public `@InlineOnly`).
     // The receiver's supertype closure is BFS-walked once here and probed per candidate below.
-    let recv_mro = (kind == FnKind::Extension && !fs.overloads.is_empty())
-        .then(|| ReceiverMro::new(lib, recv));
+    let recv_mro =
+        (kind == FnKind::Extension && !overloads.is_empty()).then(|| ReceiverMro::new(lib, recv));
     let mut by_rank: std::collections::BTreeMap<u32, Vec<(&FunctionInfo, Vec<Ty>)>> =
         std::collections::BTreeMap::new();
-    for o in fs.overloads.iter().filter(|o| {
+    for o in overloads.iter().copied().filter(|&o| {
         o.kind == kind
             && (kind != FnKind::Extension
                 || (o.receiver_rank != u32::MAX
