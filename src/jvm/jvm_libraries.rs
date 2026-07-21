@@ -68,20 +68,16 @@ impl JvmLibraries {
     /// `listOf`/`run`/`println`/… each with its inline/`@InlineOnly` flags and logical
     /// (continuation-stripped) suspend signature. The building block `resolve_symbols` uses so a
     /// top-level name resolves through the ONE fqn seam without the removed receiver-indexed
-    /// `functions()` query. The package filter runs BEFORE the per-candidate decoration
-    /// (metadata alignment, generic-signature parse, suspend/inline probes) — the index returns
-    /// `name`'s candidates across every package, and decorating the out-of-package ones only to
-    /// throw them away dominated namespace-record composition. `find_top_level` also surfaces an
-    /// extension's compiled form; each is classified honestly by its metadata receiver, so the
-    /// caller filters by `FnKind` as needed.
+    /// `functions()` query. Candidates come from the per-(jar, package) SOURCE-keyed member index
+    /// (`functions_in_scope`) — only the queried package's facades are consulted (never a whole-
+    /// classpath name index), the source-name keying finds a `@JvmName`-mangled declaration under
+    /// the name a caller writes, and a `$default`/synthetic static (absent from `@Metadata`) is
+    /// keyed by its literal JVM name. The index also surfaces an extension's compiled form; each
+    /// candidate is classified honestly by its metadata receiver, so the caller filters by
+    /// `FnKind` as needed.
     fn top_level_overloads(&self, name: &str, pkg: TypeName) -> Vec<FunctionInfo> {
         let mut overloads = Vec::new();
-        // Top-level (receiver-less) functions of this name — `listOf`, `run`, `println`, … — each with
-        // its inline/`@InlineOnly` flags in one place.
-        for c in self.cp.find_top_level(name) {
-            if c.owner.parent() != Some(pkg) {
-                continue;
-            }
+        for c in self.cp.functions_in_scope(name, &[pkg]) {
             let is_default = c.name.ends_with("$default");
             let meta_name = c.name.strip_suffix("$default").unwrap_or(&c.name);
             // Suspend-ness lives on the SOURCE function's `@Metadata`; a `$default` synthetic is not in
