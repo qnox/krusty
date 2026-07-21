@@ -187,6 +187,25 @@ fn type_pb(st: &mut StringTable, t: Ty) -> Pb {
     p
 }
 
+/// Build one `Class.constructor` message: `flags` (f1, omitted if 0), value parameters (f2), and the
+/// JvmProtoBuf constructor signature (f100, name `<init>` + `desc`).
+fn build_ctor(st: &mut StringTable, params: &[(String, Ty)], desc: &str, flags: u64) -> Pb {
+    let mut ctor = Pb::new();
+    if flags != 0 {
+        ctor.field_varint(1, flags); // Constructor.flags = 1
+    }
+    for (pname, pty) in params {
+        let mut vp = Pb::new();
+        vp.field_varint(2, st.local(pname) as u64); // ValueParameter.name = 2
+        let ty = type_pb(st, *pty);
+        vp.field_message(3, &ty); // ValueParameter.type = 3
+        ctor.repeated_message(2, &vp); // Constructor.value_parameter = 2
+    }
+    let sig = jvm_method_sig(st, Some("<init>"), desc);
+    ctor.field_message(100, &sig); // JvmProtoBuf.constructorSignature = 100
+    ctor
+}
+
 fn jvm_method_sig(st: &mut StringTable, name: Option<&str>, desc: &str) -> Pb {
     let mut p = Pb::new();
     if let Some(n) = name {
@@ -203,6 +222,14 @@ fn jvm_method_sig(st: &mut StringTable, name: Option<&str>, desc: &str) -> Pb {
 /// Class-level metadata beyond the members: the `Class.flags`, the companion object's simple name (if
 /// any), and the nested class simple names — kept in one struct so [`build_class`] stays within the
 /// argument-count limit.
+/// A secondary constructor for class metadata (`Class.constructor` = f8, repeated after the primary).
+pub struct CtorMeta<'a> {
+    pub params: &'a [(String, Ty)],
+    pub desc: &'a str,
+    /// `Constructor.flags` (f8's f1) — e.g. 22 for a plain secondary ctor. 0 ⇒ omitted (the primary).
+    pub flags: u64,
+}
+
 #[derive(Default)]
 pub struct ClassTail<'a> {
     pub flags: u64,
@@ -211,6 +238,9 @@ pub struct ClassTail<'a> {
     /// The `-module-name` value → `Class.classModuleName` (f101, a JvmProtoBuf extension). kotlinc
     /// omits it for the default module `main`; infragnite always sets `-module-name`.
     pub module_name: Option<&'a str>,
+    /// Secondary constructors (after the primary), each `Class.constructor` (f8). They intern their
+    /// strings right after the primary ctor, before properties/functions.
+    pub secondary_ctors: &'a [CtorMeta<'a>],
 }
 
 pub fn build_class(
@@ -239,17 +269,12 @@ pub fn build_class(
     let mut supertype = Pb::new();
     supertype.field_varint(6, st.builtin(ANY_PREDEFINED) as u64);
 
-    // f8 = primary constructor. kotlinc emits the ctor's JVM name `<init>` explicitly (not omitted).
-    let mut ctor = Pb::new();
-    for (pname, pty) in ctor_params {
-        let mut vp = Pb::new();
-        vp.field_varint(2, st.local(pname) as u64); // Constructor.ValueParameter.name = 2
-        let ty = type_pb(&mut st, *pty);
-        vp.field_message(3, &ty); // ValueParameter.type = 3
-        ctor.repeated_message(2, &vp); // Constructor.value_parameter = 2
+    // f8 = constructors: the primary (flags 0), then any secondary constructors — each interning in
+    // order (kotlinc emits the ctor JVM name `<init>` explicitly, not omitted).
+    let mut ctor_msgs = vec![build_ctor(&mut st, ctor_params, ctor_desc, 0)];
+    for sc in tail.secondary_ctors {
+        ctor_msgs.push(build_ctor(&mut st, sc.params, sc.desc, sc.flags));
     }
-    let ctor_sig = jvm_method_sig(&mut st, Some("<init>"), ctor_desc);
-    ctor.field_message(100, &ctor_sig); // JvmProtoBuf.constructorSignature = 100
 
     // Properties BEFORE functions (kotlinc interns property JVM signatures before function names).
     let prop_msgs: Vec<Pb> = props
@@ -335,7 +360,9 @@ pub fn build_class(
         }
         class.field_bytes(7, packed.as_bytes()); // Class.nested_class_name = 7 (packed)
     }
-    class.repeated_message(8, &ctor);
+    for ctor in &ctor_msgs {
+        class.repeated_message(8, ctor); // Class.constructor = 8
+    }
     for func in &func_msgs {
         class.repeated_message(9, func); // Class.function = 9
     }
@@ -633,6 +660,54 @@ mod tests {
                 0x12, 0x06, 0x10, 0x02, 0x1a, 0x02, 0x30, 0x03, 0xa2, 0x06, 0x04, 0x08, 0x04, 0x10,
                 0x05, 0x52, 0x11, 0x10, 0x02, 0x1a, 0x02, 0x30, 0x03, 0xa2, 0x06, 0x08, 0x0a, 0x00,
                 0x1a, 0x04, 0x08, 0x06, 0x10, 0x07, 0xa8, 0x06, 0x08,
+            ],
+            "d1 protobuf",
+        );
+    }
+
+    // Ground truth: kotlinc 2.4.0 `class C(val x: Int) { constructor() : this(0) }` — a second
+    // (secondary) constructor. `Class.constructor` (f8) is repeated; the secondary carries flags 22.
+    #[test]
+    fn secondary_ctor_metadata_byte_matches_kotlinc() {
+        let (d1, d2) = build_class(
+            "demo/C",
+            &[("x".into(), Ty::Int)],
+            "(I)V",
+            &[PropMeta {
+                name: "x".into(),
+                ty: Ty::Int,
+                is_var: false,
+                getter: ("getX".into(), "()I".into()),
+                setter: None,
+            }],
+            &[],
+            &[],
+            &ClassTail {
+                secondary_ctors: &[CtorMeta {
+                    params: &[],
+                    desc: "()V",
+                    flags: 22,
+                }],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            d2,
+            vec!["Ldemo/C;", "", "x", "", "<init>", "(I)V", "()V", "getX", "()I"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+            "d2",
+        );
+        assert_eq!(
+            d1,
+            vec![
+                0x00, 0x12, 0x0a, 0x02, 0x18, 0x02, 0x0a, 0x02, 0x10, 0x00, 0x0a, 0x00, 0x0a, 0x02,
+                0x10, 0x08, 0x0a, 0x02, 0x08, 0x05, 0x18, 0x00, 0x32, 0x02, 0x30, 0x01, 0x42, 0x0f,
+                0x12, 0x06, 0x10, 0x02, 0x1a, 0x02, 0x30, 0x03, 0xa2, 0x06, 0x04, 0x08, 0x04, 0x10,
+                0x05, 0x42, 0x09, 0x08, 0x16, 0xa2, 0x06, 0x04, 0x08, 0x04, 0x10, 0x06, 0x52, 0x11,
+                0x10, 0x02, 0x1a, 0x02, 0x30, 0x03, 0xa2, 0x06, 0x08, 0x0a, 0x00, 0x1a, 0x04, 0x08,
+                0x07, 0x10, 0x08,
             ],
             "d1 protobuf",
         );
