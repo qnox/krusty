@@ -409,6 +409,10 @@ fn data_class_hash_shapes_match_kotlinc_per_field_kind() {
         "array field must content-hash via Arrays.hashCode:\n{hc}"
     );
     assert!(
+        hc.contains("ifnonnull"),
+        "boxed Int? field must be null-guarded inline (ifnonnull):\n{hc}"
+    );
+    assert!(
         hc.contains("Object.hashCode"),
         "boxed Int? field must dispatch Object.hashCode:\n{hc}"
     );
@@ -425,6 +429,33 @@ fn data_class_hash_shapes_match_kotlinc_per_field_kind() {
     assert!(
         ts.contains("Arrays.toString"),
         "array field must content-print via Arrays.toString:\n{ts}"
+    );
+}
+
+/// An INTERFACE-typed data-class field hashes via `Object.hashCode()` (kotlinc's owner) — `hashCode`
+/// is not an interface member, so a Methodref on the interface owner would throw
+/// `IncompatibleClassChangeError` at runtime ("Found interface, but class was expected"). Runnable:
+/// the box() call would die with that error under the old owner.
+#[test]
+fn data_class_interface_field_hashes_via_object_hashcode() {
+    let Some((dir, jh)) = krusty_compile(
+        "dcifacehash",
+        "interface Marker\nclass M : Marker\ndata class D(val m: Marker, val n: Int)\n\
+         fun box(): String { val d = D(M(), 1); return if (d.hashCode() == d.hashCode()) \"OK\" else \"ne\" }\n",
+    ) else {
+        return;
+    };
+    let text = javap(&jh, &dir.join("D.class"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let hc = &text[text.find("int hashCode").expect("hashCode")..];
+    let hc = &hc[..hc[1..].find("\n\n").map(|p| p + 1).unwrap_or(hc.len())];
+    assert!(
+        hc.contains("Object.hashCode"),
+        "interface-typed field must dispatch Object.hashCode:\n{hc}"
+    );
+    assert!(
+        !hc.contains("Marker.hashCode"),
+        "interface-typed field must NOT name the interface as the owner:\n{hc}"
     );
 }
 
