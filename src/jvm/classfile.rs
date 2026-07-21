@@ -914,6 +914,67 @@ impl ClassWriter {
     }
 
     /// Like [`add_method`], plus an optional generic `Signature` attribute string.
+    /// Append the StackMapTable verification type of each parameter in `desc` to `out` (a `long`/
+    /// `double` occupies one verification-type slot here, matching the StackMapTable encoding).
+    fn append_param_verif_types(&mut self, desc: &str, out: &mut Vec<VerifType>) {
+        let end = desc.rfind(')').unwrap_or(0);
+        let params = &desc.as_bytes()[1..end.max(1)];
+        let mut i = 0;
+        while i < params.len() {
+            match params[i] {
+                b'I' | b'S' | b'B' | b'C' | b'Z' => {
+                    out.push(VerifType::Integer);
+                    i += 1;
+                }
+                b'J' => {
+                    out.push(VerifType::Long);
+                    i += 1;
+                }
+                b'F' => {
+                    out.push(VerifType::Float);
+                    i += 1;
+                }
+                b'D' => {
+                    out.push(VerifType::Double);
+                    i += 1;
+                }
+                b'L' => {
+                    let start = i;
+                    while i < params.len() && params[i] != b';' {
+                        i += 1;
+                    }
+                    let name = std::str::from_utf8(&params[start + 1..i]).unwrap_or("");
+                    let idx = self.cp.class(name);
+                    out.push(VerifType::Object(idx));
+                    i += 1; // skip ';'
+                }
+                b'[' => {
+                    let start = i;
+                    while i < params.len() && params[i] == b'[' {
+                        i += 1;
+                    }
+                    if i < params.len() && params[i] == b'L' {
+                        while i < params.len() && params[i] != b';' {
+                            i += 1;
+                        }
+                        i += 1;
+                    } else {
+                        i += 1; // primitive array element (`[I`, `[[Z`, …)
+                    }
+                    // An array type is a REFERENCE; its StackMapTable verification type is
+                    // `Object_variable_info` referencing a `CONSTANT_Class` whose name is the array
+                    // DESCRIPTOR itself (`[I`, `[Ljava/lang/String;`) — JVMS §4.7.4 / §4.4.1. `cp.class`
+                    // interns it verbatim (`to_jvm_internal` leaves descriptors untouched), so this is
+                    // correct for both primitive and reference arrays.
+                    let descriptor = std::str::from_utf8(&params[start..i]).unwrap_or("");
+                    let idx = self.cp.class(descriptor);
+                    out.push(VerifType::Object(idx));
+                }
+                _ => i += 1,
+            }
+        }
+    }
+
     pub fn add_method_sig(
         &mut self,
         access: u16,
@@ -925,7 +986,25 @@ impl ClassWriter {
         let n = self.cp.utf8(name);
         let d = self.cp.utf8(desc);
         let sig = signature.map(|s| self.cp.utf8(s));
-        let stackmap = code.build_stackmap();
+        // The method-entry frame (StackMapTable frames are deltas from it): `this` (unless static;
+        // `<init>` is UninitializedThis until super() runs) followed by each parameter's type. Only
+        // computed when the method actually has frames — `append_param_verif_types` interns the
+        // parameters' class types, which would otherwise perturb the pool of a branch-free method.
+        let stackmap = if code.has_frames() {
+            const ACC_STATIC: u16 = 0x0008;
+            let mut initial_locals: Vec<VerifType> = Vec::new();
+            if access & ACC_STATIC == 0 {
+                initial_locals.push(if name == "<init>" {
+                    VerifType::UninitializedThis
+                } else {
+                    VerifType::Object(self.this_class)
+                });
+            }
+            self.append_param_verif_types(desc, &mut initial_locals);
+            code.build_stackmap(&initial_locals)
+        } else {
+            None
+        };
         self.methods.push(MethodInfo {
             access,
             name: n,
@@ -1277,8 +1356,13 @@ impl ClassWriter {
                         u2(&mut out, catch_type);
                     }
                     u2(&mut out, num_code_attrs);
-                    // kotlinc's Code sub-attribute order: LineNumberTable, LocalVariableTable, then
-                    // StackMapTable. (For a synthesized member there is no StackMapTable.)
+                    // kotlinc's Code sub-attribute order: StackMapTable, then LineNumberTable, then
+                    // LocalVariableTable. (A synthesized branch-free member has no StackMapTable.)
+                    if let Some(sm) = &m.stackmap {
+                        u2(&mut out, stackmap_attr_name.unwrap());
+                        u4(&mut out, sm.len() as u32);
+                        out.extend_from_slice(sm);
+                    }
                     if !m.lnt.is_empty() {
                         u2(&mut out, lnt_attr_name.unwrap());
                         u4(&mut out, (2 + m.lnt.len() * 4) as u32);
@@ -1299,11 +1383,6 @@ impl ClassWriter {
                             u2(&mut out, desc_idx);
                             u2(&mut out, slot);
                         }
-                    }
-                    if let Some(sm) = &m.stackmap {
-                        u2(&mut out, stackmap_attr_name.unwrap());
-                        u4(&mut out, sm.len() as u32);
-                        out.extend_from_slice(sm);
                     }
                 }
             }
@@ -1432,6 +1511,11 @@ impl CodeBuilder {
         self.needs_stackmap = true;
     }
 
+    /// Whether this method has any registered StackMapTable frames (⇒ `build_stackmap` emits one).
+    pub fn has_frames(&self) -> bool {
+        !self.frames.is_empty()
+    }
+
     /// The recorded frames resolved to byte offsets: `(offset, locals, stack)` for each bound label.
     /// Used to relocate a spliced lambda body's own frames into the host method. Unbound labels (offset
     /// `usize::MAX`) are dropped.
@@ -1462,7 +1546,7 @@ impl CodeBuilder {
 
     /// Build the StackMapTable attribute body. Returns `None` when no frames are needed.
     /// Emits a `full_frame` entry for every registered label, sorted by bytecode offset.
-    pub fn build_stackmap(&self) -> Option<Vec<u8>> {
+    pub fn build_stackmap(&self, initial_locals: &[VerifType]) -> Option<Vec<u8>> {
         if self.frames.is_empty() {
             return None;
         }
@@ -1485,25 +1569,63 @@ impl CodeBuilder {
         let mut body = Vec::new();
         u2(&mut body, entries.len() as u16);
 
-        // Offset deltas: the first entry's delta = offset; subsequent = offset - prev_offset - 1.
-        let mut prev: i64 = -1;
+        // Emit each frame in kotlinc's COMPRESSED form vs the previous frame (initial frame = the
+        // method-entry locals): same/same_extended, same_locals_1_stack_item[/extended], chop, append,
+        // or full_frame. Offset deltas: first = offset; subsequent = offset - prev_offset - 1.
+        let mut prev_off: i64 = -1;
+        let mut prev_locals: Vec<VerifType> = initial_locals.to_vec();
+        let full = |body: &mut Vec<u8>, delta: u16, locals: &[VerifType], stack: &[VerifType]| {
+            body.push(255);
+            u2(body, delta);
+            u2(body, locals.len() as u16);
+            for vt in locals {
+                write_verif_type(vt, body);
+            }
+            u2(body, stack.len() as u16);
+            for vt in stack {
+                write_verif_type(vt, body);
+            }
+        };
         for (offset, locals, stack) in entries {
-            let delta = if prev < 0 {
+            let delta = if prev_off < 0 {
                 offset
             } else {
-                offset - prev as u32 - 1
-            };
-            prev = offset as i64;
-            body.push(255u8); // full_frame
-            u2(&mut body, delta as u16);
-            u2(&mut body, locals.len() as u16);
-            for vt in locals {
-                write_verif_type(vt, &mut body);
+                offset - prev_off as u32 - 1
+            } as u16;
+            prev_off = offset as i64;
+            let same_locals = **locals == prev_locals;
+            let n = locals.len();
+            let p = prev_locals.len();
+            let common_prefix = n.min(p);
+            let shares_prefix = locals[..common_prefix] == prev_locals[..common_prefix];
+            if stack.is_empty() && same_locals {
+                if delta <= 63 {
+                    body.push(delta as u8); // same_frame
+                } else {
+                    body.push(251); // same_frame_extended
+                    u2(&mut body, delta);
+                }
+            } else if stack.is_empty() && shares_prefix && n > p && n - p <= 3 {
+                body.push((251 + (n - p)) as u8); // append_frame
+                u2(&mut body, delta);
+                for vt in &locals[p..] {
+                    write_verif_type(vt, &mut body);
+                }
+            } else if stack.is_empty() && shares_prefix && p > n && p - n <= 3 {
+                body.push((251 - (p - n)) as u8); // chop_frame
+                u2(&mut body, delta);
+            } else if stack.len() == 1 && same_locals {
+                if delta <= 63 {
+                    body.push(64 + delta as u8); // same_locals_1_stack_item
+                } else {
+                    body.push(247); // same_locals_1_stack_item_frame_extended
+                    u2(&mut body, delta);
+                }
+                write_verif_type(&stack[0], &mut body);
+            } else {
+                full(&mut body, delta, locals, stack);
             }
-            u2(&mut body, stack.len() as u16);
-            for vt in stack {
-                write_verif_type(vt, &mut body);
-            }
+            prev_locals = locals.clone();
         }
         Some(body)
     }
