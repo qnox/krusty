@@ -154,6 +154,42 @@ fn data_class_single_primitive_is_byte_identical() {
     assert_byte_identical("package demo\ndata class D(val x: Int)\n", "demo/D", &[]);
 }
 
+/// A multi-property ALL-PRIMITIVE data class — `hashCode` folds into a `result` accumulator local
+/// (kotlinc names it in the LVT with a partial live-range, listed before `this`), and each synthesized
+/// method generalizes past two fields. Pins the `result` pool seeding + LVT range.
+#[test]
+fn data_class_multi_primitive_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ndata class T(val a: Int, val b: Int, val c: Int)\n",
+        "demo/T",
+        &[],
+    );
+}
+
+/// A multi-property ALL-REFERENCE data class — each `hashCode` is a virtual `String.hashCode()` (kotlinc
+/// interns the `()I` descriptor before the receiver class), `equals` compares via `Intrinsics.areEqual`
+/// (seeded before the `other`/`Object` LVT names), and `copy`'s reference params carry `@NotNull`.
+#[test]
+fn data_class_multi_reference_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ndata class M(val a: String, val b: String)\n",
+        "demo/M",
+        &[],
+    );
+}
+
+/// A multi-property MIXED primitive+reference data class (`Int` + non-null `String`) — the full
+/// combination: `result` accumulator, a primitive and a reference `hashCode`, a `@NotNull` `copy` param,
+/// and the `var` reference setter's `checkNotNullParameter` guard.
+#[test]
+fn data_class_multi_mixed_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ndata class Point(val x: Int, var y: String)\n",
+        "demo/Point",
+        &[],
+    );
+}
+
 // ---- @Metadata-level checks for shapes not yet FULLY byte-identical (data classes) ----------------
 
 /// A `data class` (metadata on): its IR → `build_class_metadata` yields the synthesized
