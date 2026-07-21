@@ -1322,6 +1322,43 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   module names + classpath probe) — an unresolvable type aborts stub generation (skip, never guess).
   Tests: `jvm::java_stub::tests` (unit), `java_source_interop_e2e::java_extends_kotlin_via_stub_pipeline`.
 
+- **Member overloads with different erased signatures (`listIterator()` / `listIterator(Int)`).**
+  `ClassSig.methods` (and the lowerer's `ClassInfo.methods`) hold per-name overload LISTS in
+  declaration order; call sites select by argument types (`method_matching` mirrors the top-level
+  `pick_overload`; `module_symbols` feeds every overload into the `SymbolResolver`; the lowerer
+  pairs the i-th same-name AST decl with the i-th signature and resolves this-calls by arity with a
+  base-chain walk). Sound-skip rules where erasure defeats selection: TRUE SIBLINGS (same owner)
+  differing at a position where either side is an erased type variable resolve to nothing (kotlinc
+  selects on the SUBSTITUTED types krusty erased away — `foo(x: T)` vs `foo(x: A<T>)`); an
+  erased-`Any` ARGUMENT at a differing position likewise. Override CHAINS across owners keep
+  most-derived-first order, erasure differences and all. Exact erased duplicates stay rejected
+  (`ClassFormatError`). Tests: `member_overloads_e2e`; corpus
+  `bridges/substitutionInSuperClass/*` stay sound skips.
+
+- **`override` must override something (module-closed hierarchies).** With overloads, a same-name
+  sibling of a different arity no longer pairs with a supertype method, so an `override` modifier
+  is checked explicitly: it must match a supertype member by name + arity, else
+  "'f' overrides nothing" (kotlinc's rejection). Enforced only when the hierarchy is MODULE-closed
+  (`hierarchy_is_module_closed`) — a classpath supertype's members are invisible to the walk —
+  with `kotlin/Any`'s `toString`/`hashCode`/`equals` exempt. Test:
+  `resolver_errors_coverage_e2e::override_with_wrong_signature`.
+
+- **Interface bridges have exactly two legitimate directions.** GENERIC-IFACE: the interface param
+  is the erased `Object`, the impl concrete (`A<String>.foo(Object)` → `foo(String)`).
+  FAKE-OVERRIDE: an ABSTRACT interface member with a concrete param satisfied by an inherited
+  erased-generic impl (`Tr.hello(String)` over `Foo<T>.hello(Object)`, kt1939) — the bridge boxes
+  a scalar param where needed (`emit_bridges` scalar→reference `valueOf`). But an interface method
+  WITH A DEFAULT whose concrete param the impl merely erases (`B.foo(int)` next to `foo(t: T)`)
+  is NOT overridden by it — the default stays live (kotlinc; KT-78321) — so no bridge may shadow
+  it. Corpus: `bridges/kt1939.kt`, `defaultArguments/implementedByFake*.kt`,
+  `reified/overrideResolution*.kt` all PASS.
+
+- **A type parameter with multiple FUNCTION-TYPE bounds is rejected** (`where T : () -> Unit,
+  T : (Boolean) -> Unit`): a `T` value would be convertible to several SAM shapes, and krusty's
+  SAM conversion adapts lambda literals, not values behind an erased `T` — kotlinc synthesizes a
+  wrapper krusty doesn't. Rejected in `parse_where_clause` (where-clause bounds are otherwise
+  erased/discarded). Corpus: `funInterface/intersectionTypeToFunInterfaceConversion.kt` skips.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

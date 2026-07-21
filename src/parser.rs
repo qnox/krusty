@@ -1754,6 +1754,7 @@ impl<'a> Parser<'a> {
                     );
                     d.visibility = visibility_of(&mods);
                     d.is_open = !d.is_final && mods.iter().any(|m| m == "open" || m == "override");
+                    d.is_override = mods.iter().any(|m| m == "override");
                     methods.push(d);
                 }
                 TokenKind::KwVal | TokenKind::KwVar => {
@@ -1985,6 +1986,7 @@ impl<'a> Parser<'a> {
                         f.visibility = visibility_of(&emods);
                         f.is_open =
                             !f.is_final && emods.iter().any(|m| m == "open" || m == "override");
+                        f.is_override = emods.iter().any(|m| m == "override");
                         methods.push(f);
                     }
                     // A body member property (`enum class C { A; val x = … }`): a field + accessor on
@@ -2106,13 +2108,31 @@ impl<'a> Parser<'a> {
             return;
         }
         self.bump(); // 'where'
+                     // Track per-name FUNCTION-TYPE bounds: an intersection (`where T : () -> Unit,
+                     // T : (Boolean) -> Unit`) makes a `T` value convertible to several SAM shapes, and krusty's
+                     // SAM conversion adapts lambda literals, not values behind an erased `T` — a call would
+                     // pass the raw value where kotlinc synthesizes a wrapper (`ClassCastException`). Reject.
+        let mut fn_bounds: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
         loop {
             self.skip_newlines();
+            let mut tp_name = String::new();
             if self.at(TokenKind::Ident) {
+                tp_name = self.text().to_string();
                 self.bump(); // type-parameter name
             }
             if self.eat(TokenKind::Colon) {
                 let bound = self.parse_type();
+                if !bound.fun_params.is_empty() || bound.name == "<fun>" {
+                    let n = fn_bounds.entry(tp_name.clone()).or_default();
+                    *n += 1;
+                    if *n > 1 {
+                        self.diags.error(
+                            bound.span,
+                            format!("krusty: type parameter '{tp_name}' with multiple function-type bounds is not supported"),
+                        );
+                    }
+                }
                 if crate::types::Ty::from_name(&bound.name).is_some_and(|t| {
                     matches!(
                         t,
@@ -2204,6 +2224,7 @@ impl<'a> Parser<'a> {
                 is_inline: false,
                 is_final: false,
                 is_open: false,
+                is_override: false,
                 is_abstract: false,
                 visibility: Visibility::Public,
                 is_suspend: false,
@@ -2352,6 +2373,7 @@ impl<'a> Parser<'a> {
             is_inline,
             is_final,
             is_open: false,
+            is_override: false,
             is_abstract,
             visibility: Visibility::Public,
             is_suspend,
@@ -2707,6 +2729,7 @@ impl<'a> Parser<'a> {
                         f.visibility = visibility_of(&mods);
                         f.is_open =
                             !f.is_final && mods.iter().any(|m| m == "open" || m == "override");
+                        f.is_override = mods.iter().any(|m| m == "override");
                         methods.push(f);
                     }
                     TokenKind::KwVal | TokenKind::KwVar => {
@@ -3312,6 +3335,7 @@ impl<'a> Parser<'a> {
                         f.visibility = visibility_of(&mods);
                         f.is_open =
                             !f.is_final && mods.iter().any(|m| m == "open" || m == "override");
+                        f.is_override = mods.iter().any(|m| m == "override");
                         methods.push(f);
                     }
                     TokenKind::KwVal | TokenKind::KwVar => {
@@ -3467,6 +3491,7 @@ impl<'a> Parser<'a> {
                         f.visibility = visibility_of(&mods);
                         f.is_open =
                             !f.is_final && mods.iter().any(|m| m == "open" || m == "override");
+                        f.is_override = mods.iter().any(|m| m == "override");
                         methods.push(f);
                     }
                     TokenKind::KwVal | TokenKind::KwVar => {
