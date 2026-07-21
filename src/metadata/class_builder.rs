@@ -23,8 +23,9 @@ pub struct PropMeta {
     pub setter: Option<(String, String)>, // present iff `var`
 }
 
-/// Member-function descriptor for class metadata (`Class.function` = f9). The JVM name/descriptor
-/// are derivable, so no signature extension is emitted (matching kotlinc).
+/// Member-function descriptor for class metadata (`Class.function` = f9). The JVM signature is usually
+/// derivable, so no extension is emitted — EXCEPT when a param/return is a boxed nullable primitive
+/// (`Int?` → `Integer`), where kotlinc records the descriptor via a `JvmMethodSignature` (f100).
 pub struct FnMeta {
     pub name: String,
     pub params: Vec<(String, Ty)>,
@@ -34,6 +35,10 @@ pub struct FnMeta {
     /// Mark every value parameter `DECLARES_DEFAULT_VALUE` (so a Kotlin caller may omit it) — used
     /// for the synthesized `copy`.
     pub params_have_defaults: bool,
+    /// The JVM method descriptor for a `JvmMethodSignature` (f100), emitted (name omitted, derivable)
+    /// only when the signature is not derivable from the proto types — a boxed nullable-primitive
+    /// param/return on a synthesized `componentN`/`copy`. `None` ⇒ no extension.
+    pub jvm_sig: Option<String>,
 }
 
 impl FnMeta {
@@ -45,6 +50,7 @@ impl FnMeta {
             ret,
             flags: 0,
             params_have_defaults: false,
+            jvm_sig: None,
         }
     }
 }
@@ -408,6 +414,11 @@ pub fn build_class(
             if m.flags != 0 {
                 func.field_varint(9, m.flags); // Function.flags = 9
             }
+            if let Some(sig) = &m.jvm_sig {
+                // `JvmMethodSignature` (f100), desc only (name derivable) — a boxed nullable-primitive
+                // signature kotlinc records because the proto types alone don't pin the JVM descriptor.
+                func.field_message(100, &jvm_method_sig(&mut st, None, sig));
+            }
             func
         })
         .collect();
@@ -554,6 +565,7 @@ mod tests {
                 ret: Ty::Int,
                 flags: COMPONENT_FN_FLAGS,
                 params_have_defaults: false,
+                jvm_sig: None,
             },
             FnMeta {
                 name: "component2".into(),
@@ -561,6 +573,7 @@ mod tests {
                 ret: Ty::String,
                 flags: COMPONENT_FN_FLAGS,
                 params_have_defaults: false,
+                jvm_sig: None,
             },
             FnMeta {
                 name: "copy".into(),
@@ -568,6 +581,7 @@ mod tests {
                 ret: Ty::obj("demo/Point"),
                 flags: COPY_FN_FLAGS,
                 params_have_defaults: true,
+                jvm_sig: None,
             },
             FnMeta {
                 name: "equals".into(),
@@ -575,6 +589,7 @@ mod tests {
                 ret: Ty::Boolean,
                 flags: EQUALS_FN_FLAGS,
                 params_have_defaults: false,
+                jvm_sig: None,
             },
             FnMeta {
                 name: "hashCode".into(),
@@ -582,6 +597,7 @@ mod tests {
                 ret: Ty::Int,
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
                 params_have_defaults: false,
+                jvm_sig: None,
             },
             FnMeta {
                 name: "toString".into(),
@@ -589,6 +605,7 @@ mod tests {
                 ret: Ty::String,
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
                 params_have_defaults: false,
+                jvm_sig: None,
             },
         ];
         let props = vec![
