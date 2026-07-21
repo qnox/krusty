@@ -359,7 +359,7 @@ pub fn lower_file_at_reporting(
         // needed ONLY when generics are involved: if the class has NO type parameters AND every supertype
         // is a RAW (non-parameterized) type, the override's erased signature equals the supertype method's,
         // so the single CPS method directly implements it — no bridge (the common suspend-decorator /
-        // interface-impl shape, e.g. `ChangeAwareEngine : ThrusterEngine`). Bail only for the generic
+        // interface-impl shape: a class implementing a large suspend interface). Bail only for the generic
         // shape, which still can't be modeled.
         // Whether a supertype's transitive closure contains a GENERIC type — a generic ancestor could carry
         // a suspend method that, when overridden concretely, needs an erasure bridge the coroutine pass can't
@@ -19406,7 +19406,7 @@ impl<'a> Lower<'a> {
                         // more specific (`List<Int>.get` → `Int`) gets the unbox/checkcast kotlinc emits.
                         self.coerce_to_static(call, ret, physical_ret)
                     } else if let Some((internal, m)) = {
-                        // A `@JvmStatic` member of a classpath `object` (`Base58Uuid.of(x)`) → a static
+                        // A `@JvmStatic` member of a classpath `object` (`UuidGen.of(x)`) → a static
                         // method on the object class (`invokestatic`), found in the type's static list.
                         rt.obj_internal()
                             .zip(self.info.resolved_companion(e).cloned())

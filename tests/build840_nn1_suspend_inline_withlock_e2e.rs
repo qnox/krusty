@@ -3,7 +3,7 @@
 //! `action: () -> T` lambda. The call omits `owner` and passes the lambda. It failed as
 //! `unresolved method 'withLock' on Mutex` — an `inline` function has no `$default` synthetic, so the
 //! trailing-default extension path missed it, and the whole locked block then typed `Any`
-//! (`WorkspaceService`/`MissionDriftService`'s `member … on Any`). The metadata generic signature
+//! (a production service's `member … on Any`). The metadata generic signature
 //! drops the synthetic `Continuation`, so the logical shape is `Mutex.withLock(Any?, () -> T): T`;
 //! resolution omits the defaulted `owner`, binds `T` from the lambda, and the body is spliced.
 use super::common;

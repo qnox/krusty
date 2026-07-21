@@ -1,5 +1,5 @@
 //! An IMPLICIT-receiver call to a same-class member that OMITS a CONSTANT-default argument
-//! (`resolveRoles(id)` on `resolveRoles(id, filter = null)` — the shape mission-core's RbacService uses).
+//! (`resolveRoles(id)` on `resolveRoles(id, filter = null)` — the shape a production role-management service uses).
 //! Two coupled gaps:
 //!
 //!  1. `lower_this_member_call` only handled exact arity / vararg — an omitted default made the bare-name

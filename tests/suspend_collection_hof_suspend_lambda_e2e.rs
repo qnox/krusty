@@ -2,8 +2,8 @@
 //! collection HOF lowers its lambda to a `FunctionN` impl that cannot suspend, so krusty inlines it into
 //! an accumulating loop (kotlinc's own inline expansion) — the suspension then lives in an ordinary
 //! for-loop the coroutine pass models. Also covers `list.addAll(repo.get())` inside a `for` (a suspend
-//! call buried in a call argument, hoisted to a temp). Mission-core hit:
-//! `MissionDeploymentOptionsService` (`getServices<T>(id).flatMap { it.getDeployables(session) }`,
+//! call buried in a call argument, hoisted to a temp). Production hit: a deployment-options
+//! service (`getServices<T>(id).flatMap { it.getDeployables(session) }`,
 //! nested `for { options.addAll(deployer.getDeploymentOptions(x)) }`).
 //! Needs the JVM toolchain + kotlin-stdlib + coroutines + real kotlinc; skips otherwise.
 use super::common;

@@ -286,7 +286,7 @@ pub struct ClassTail<'a> {
     pub companion: Option<&'a str>,
     pub nested: &'a [&'a str],
     /// The `-module-name` value → `Class.classModuleName` (f101, a JvmProtoBuf extension). kotlinc
-    /// omits it for the default module `main`; infragnite always sets `-module-name`.
+    /// omits it for the default module `main`; downstream builds always set `-module-name`.
     pub module_name: Option<&'a str>,
     /// Secondary constructors (after the primary), each `Class.constructor` (f8). They intern their
     /// strings right after the primary ctor, before properties/functions.
@@ -642,8 +642,8 @@ mod tests {
         );
     }
 
-    // A generic property (`List<String>`) + a defaulted ctor param — the shape real infragnite models
-    // use. Verified byte-identical to kotlinc 2.4.0 on `mission-core/domain/IfaceConfig`; this pins the
+    // A generic property (`List<String>`) + a defaulted ctor param — the shape real production domain
+    // models use. Verified byte-identical to kotlinc 2.4.0 on a real config data class; this pins the
     // pieces it needs: `List` encoded as a `predefinedIndex` builtin (NOT a class-id descriptor), the
     // `Type.argument` (String), and the `DECLARES_DEFAULT_VALUE` ctor-param flag.
     #[test]
