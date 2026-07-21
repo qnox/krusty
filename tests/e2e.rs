@@ -458,6 +458,8 @@ mod is_nullable_primitive_e2e;
 mod is_primitive_smartcast_e2e;
 #[path = "java_instance_e2e.rs"]
 mod java_instance_e2e;
+#[path = "java_source_interop_e2e.rs"]
+mod java_source_interop_e2e;
 #[path = "jimage_compressed_e2e.rs"]
 mod jimage_compressed_e2e;
 #[path = "js_backend_coverage_e2e.rs"]

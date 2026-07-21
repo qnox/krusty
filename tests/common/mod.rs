@@ -110,7 +110,11 @@ fn sweep_stale_temp_dirs() {
             let name = e.file_name();
             let Some(pid) = name
                 .to_str()
-                .filter(|n| n.starts_with("krusty_lib_") || n.starts_with("krusty_node_"))
+                .filter(|n| {
+                    n.starts_with("krusty_lib_")
+                        || n.starts_with("krusty_node_")
+                        || n.starts_with("krusty_javasrc_")
+                })
                 .and_then(|n| n.rsplit('_').next())
                 .and_then(|p| p.parse::<i32>().ok())
             else {
@@ -1473,10 +1477,17 @@ public class JavaRunner {
             try {
                 ByteArrayOutputStream jerr = new ByteArrayOutputStream();
                 JavaCompiler jc = ToolProvider.getSystemJavaCompiler();
-                int rc = jc.run(null, null, new PrintStream(jerr, true, "UTF-8"),
-                        "-cp", cp, "-d", outdir, driver);
+                // `driver` is one or more `.java` paths joined by the platform path separator.
+                String[] srcs = driver.split(File.pathSeparator);
+                String[] jargs = new String[4 + srcs.length];
+                jargs[0] = "-cp"; jargs[1] = cp; jargs[2] = "-d"; jargs[3] = outdir;
+                System.arraycopy(srcs, 0, jargs, 4, srcs.length);
+                int rc = jc.run(null, null, new PrintStream(jerr, true, "UTF-8"), jargs);
                 if (rc != 0) {
                     result = "ERROR:javac:" + jerr.toString("UTF-8");
+                } else if (mainClass.isEmpty()) {
+                    // Compile-only mode: the caller just wants the `.class` files in `outdir`.
+                    result = "OK";
                 } else {
                     // Classpath for running: outdir + the given cp entries.
                     String[] parts = cp.split(File.pathSeparator);
@@ -1633,4 +1644,75 @@ pub fn javac_run(driver_path: &str, cp: &str, outdir: &str, main_class: &str) ->
             runner.try_run(driver_path, cp, outdir, main_class).ok()
         }
     }
+}
+
+/// A javac compile's output: the class directory (a valid krusty classpath entry: loose `.class`
+/// files) plus every emitted class as `(binary-name-with-slashes, bytes)`.
+pub type JavacOutput = (PathBuf, Vec<(String, Vec<u8>)>);
+
+/// Compile a set of Java sources `(file_name, source)` against `cp` with the persistent JavaRunner's
+/// in-process javac (no `javac` process spawn — the same JVM the Java-driver e2e suites reuse).
+/// The classes come back both as a classpath dir and as bytes so callers can also hand them to
+/// BoxRunner's in-memory classloader. `None` if the JDK is unavailable or javac rejects the sources
+/// — for the conformance harness that is a SKIP, not a failure.
+#[allow(dead_code)]
+pub fn javac_compile(sources: &[(String, String)], cp_jars: &[PathBuf]) -> Option<JavacOutput> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static UID: AtomicU64 = AtomicU64::new(0);
+    if sources.is_empty() {
+        return None;
+    }
+    let uid = UID.fetch_add(1, Ordering::Relaxed);
+    // Pid LAST: `sweep_stale_temp_dirs` parses the trailing `_<pid>` to reap dirs of dead runs.
+    let root = std::env::temp_dir().join(format!("krusty_javasrc_{uid}_{}", std::process::id()));
+    let srcdir = root.join("src");
+    let outdir = root.join("classes");
+    std::fs::create_dir_all(&srcdir).ok()?;
+    std::fs::create_dir_all(&outdir).ok()?;
+    let mut paths: Vec<String> = Vec::new();
+    for (name, text) in sources {
+        // Leaf name only — javac requires the file name to match the public class it declares.
+        let leaf = name.rsplit('/').next().unwrap_or(name);
+        let p = srcdir.join(leaf);
+        std::fs::write(&p, text).ok()?;
+        paths.push(p.to_string_lossy().into_owned());
+    }
+    let joined = paths.join(":");
+    let cp = if cp_jars.is_empty() {
+        ".".to_string()
+    } else {
+        cp_jars
+            .iter()
+            .map(|j| j.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(":")
+    };
+    // Empty main class = compile-only (no run) in the JavaRunner protocol.
+    let res = javac_run(&joined, &cp, &outdir.to_string_lossy(), "")?;
+    if res != "OK" {
+        let _ = std::fs::remove_dir_all(&root);
+        return None;
+    }
+    let mut classes: Vec<(String, Vec<u8>)> = Vec::new();
+    collect_class_files(&outdir, &outdir, &mut classes)?;
+    Some((outdir, classes))
+}
+
+/// Recursively gather `.class` files under `dir`, naming each by its path relative to `root` minus
+/// the extension (JVM binary name with `/` separators).
+fn collect_class_files(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Option<()> {
+    for entry in std::fs::read_dir(dir).ok()? {
+        let path = entry.ok()?.path();
+        if path.is_dir() {
+            collect_class_files(root, &path, out)?;
+        } else if path.extension().is_some_and(|e| e == "class") {
+            let rel = path.strip_prefix(root).ok()?;
+            let name = rel
+                .with_extension("")
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            out.push((name, std::fs::read(&path).ok()?));
+        }
+    }
+    Some(())
 }
