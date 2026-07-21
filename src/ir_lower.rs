@@ -7645,26 +7645,37 @@ impl<'a> Lower<'a> {
                 Some(self.emit_external_call(sym, Some(v), vec![]))
             };
         }
-        // A NON-null value-class field hashes via the value class's static `hashCode-impl(underlying)I`
-        // on the RAW underlying value (kotlinc's shape), NOT `box-impl` + the null-safe `Objects.hashCode`.
-        // (A nullable value-class field boxes/null-guards — left on the fallback for now.)
-        if !nullable {
-            if let Some(vc) = t.non_null().obj_internal() {
-                let vc_name = vc.render();
-                if let Some((_, under)) = self
-                    .syms
-                    .class_by_internal(&vc_name)
-                    .and_then(|c| c.value_field.clone())
-                {
-                    let desc = self.runtime.method_descriptor(&[under], Ty::Int)?;
-                    return Some(self.emit_static_call(
-                        vc_name,
+        // A value-class field hashes via the value class's static `hashCode-impl(underlying)I` on the RAW
+        // underlying value (kotlinc's shape), NOT `box-impl` + the null-safe `Objects.hashCode`. A nullable
+        // VC field is null-guarded by kotlinc's ternary `if (x == null) 0 else hashCode-impl(x)` (an
+        // `ifnonnull` to the hashCode arm, `0` the fall-through), the field loaded twice as kotlinc does.
+        if let Some(vc) = t.non_null().obj_internal() {
+            let vc_name = vc.render();
+            if let Some((_, under)) = self
+                .syms
+                .class_by_internal(&vc_name)
+                .and_then(|c| c.value_field.clone())
+            {
+                let desc = self.runtime.method_descriptor(&[under], Ty::Int)?;
+                let impl_call = |lo: &mut Self, arg: u32| {
+                    lo.emit_static_call(
+                        vc_name.clone(),
                         "hashCode-impl".to_string(),
-                        desc,
+                        desc.clone(),
                         InlineKind::None,
-                        vec![v],
-                    ));
-                }
+                        vec![arg],
+                    )
+                };
+                return if nullable {
+                    let nullc = self.emit_const(IrConst::Null);
+                    let isnull = self.emit_primitive_bin_op(IrBinOp::RefEq, v, nullc);
+                    let v2 = self.this_field(class_id, idx);
+                    let hc = impl_call(self, v2);
+                    let zero = self.emit_const(IrConst::Int(0));
+                    Some(self.emit_when(vec![(Some(isnull), zero), (None, hc)]))
+                } else {
+                    Some(impl_call(self, v))
+                };
             }
         }
         // Any other reference property hashes by the null-safe object hash, matching kotlinc.
