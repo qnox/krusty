@@ -11,7 +11,7 @@
 //! This replaces the former scatter (`reference_subtype`, `is_classpath_subtype`, `obj_is_subtype`,
 //! `arg_subtype_assignable`, `ref_subtype_fits`, `arg_assignable`, `descriptor_arg_subtype_of_param`,
 //! `array_covariant_assignable`, `elem_covariant_assignable`, the receiver-argument covariance in
-//! `source_receiver_rank`), each of which re-implemented one slice — usually erased (dropping type
+//! `ReceiverMro`), each of which re-implemented one slice — usually erased (dropping type
 //! arguments and nullability) and without a type-variable context.
 
 use crate::types::{Ty, TypeName};
