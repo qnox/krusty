@@ -99,6 +99,25 @@ fn var_long_class_is_byte_identical() {
     );
 }
 
+/// A nullable reference property (`String?`): `@Nullable` on the field/getter/return, and NO
+/// `checkNotNullParameter` guard (unlike a non-null reference). Verifies the `@Nullable` annotation
+/// type is seeded into the constant pool in kotlinc's order.
+#[test]
+fn nullable_reference_class_is_byte_identical() {
+    assert_byte_identical("package demo\nclass C(val x: String?)\n", "demo/C", &[]);
+}
+
+/// A multi-property class with mixed nullable + non-null references and primitives — the property-class
+/// machinery (seeding, debug tables, annotations) must generalize beyond two properties.
+#[test]
+fn multi_property_mixed_nullability_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C(val a: Int, val b: String, val c: String?)\n",
+        "demo/C",
+        &[],
+    );
+}
+
 // ---- @Metadata-level checks for shapes not yet FULLY byte-identical (data classes) ----------------
 
 /// A `data class` (metadata on): its IR → `build_class_metadata` yields the synthesized

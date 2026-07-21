@@ -669,7 +669,9 @@ impl ClassWriter {
         this_internal: &str,
         super_internal: &str,
         ctor_desc: &str,
-        fields: &[(String, String, bool)],
+        // (name, descriptor, ann_kind): 0 = primitive, 1 = non-null reference (@NotNull + a
+        // `checkNotNullParameter` guard), 2 = nullable reference (@Nullable, no guard).
+        fields: &[(String, String, u8)],
         // (name, descriptor, setter_kind): 0 = getter, 1 = primitive/other setter, 2 = non-null
         // reference setter (its `checkNotNullParameter` guard also interns a `<set-?>` String constant).
         accessors: &[(String, String, u8)],
@@ -677,18 +679,25 @@ impl ClassWriter {
         // Primary constructor: name + descriptor are interned at method entry, before its body.
         self.cp.utf8("<init>");
         self.cp.utf8(ctor_desc);
-        // The `@NotNull` annotation type, interned at the constructor's first non-null reference PARAMETER
-        // annotation (kotlinc visits parameter annotations before the body). Reused by every getter
-        // return / setter parameter annotation and every `checkNotNullParameter` guard.
-        let any_nonnull_ref = fields.iter().any(|(_, _, nn)| *nn);
-        if any_nonnull_ref {
-            self.cp.utf8("Lorg/jetbrains/annotations/NotNull;");
+        // The `@NotNull`/`@Nullable` annotation type(s), interned at the constructor's PARAMETER
+        // annotations (kotlinc visits these before the body) in first-use order over the reference
+        // parameters. Reused by every getter return / setter parameter annotation and guard.
+        let mut seeded_notnull = false;
+        let mut seeded_nullable = false;
+        for (_, _, kind) in fields {
+            if *kind == 1 && !seeded_notnull {
+                self.cp.utf8("Lorg/jetbrains/annotations/NotNull;");
+                seeded_notnull = true;
+            } else if *kind == 2 && !seeded_nullable {
+                self.cp.utf8("Lorg/jetbrains/annotations/Nullable;");
+                seeded_nullable = true;
+            }
         }
         // Constructor body — a `checkNotNullParameter(param, "name")` guard per non-null reference param
         // (its name + a String constant), then, at the FIRST guard, the shared `Intrinsics` machinery.
         let mut seeded_intrinsics = false;
-        for (name, _, nn) in fields {
-            if *nn {
+        for (name, _, kind) in fields {
+            if *kind == 1 {
                 self.cp.utf8(name);
                 self.cp.string(name);
                 if !seeded_intrinsics {

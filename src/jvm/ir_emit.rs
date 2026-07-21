@@ -272,19 +272,27 @@ fn seed_plain_class_pool(
             .map(|f| f.to_uppercase().collect::<String>() + ch.as_str())
             .unwrap_or_default()
     };
-    // A non-null reference type gets kotlinc's `@NotNull` + `checkNotNullParameter` guard.
-    let is_nonnull_ref = |t: Ty| -> bool {
+    // Reference-type annotation kind: 0 = primitive (no annotation), 1 = non-null reference (@NotNull +
+    // a `checkNotNullParameter` guard), 2 = nullable reference (@Nullable, no guard).
+    let ann_kind = |t: Ty| -> u8 {
         let d = desc(t);
-        (d.starts_with('L') || d.starts_with('[')) && !matches!(t, Ty::Nullable(_))
+        if !(d.starts_with('L') || d.starts_with('[')) {
+            0
+        } else if matches!(t, Ty::Nullable(_)) {
+            2
+        } else {
+            1
+        }
     };
+    let is_nonnull_ref = |t: Ty| ann_kind(t) == 1;
     let ctor_desc = format!(
         "({})V",
         c.fields.iter().map(|f| desc(f.ty)).collect::<String>()
     );
-    let fields: Vec<(String, String, bool)> = c
+    let fields: Vec<(String, String, u8)> = c
         .fields
         .iter()
-        .map(|f| (f.name.clone(), desc(f.ty), is_nonnull_ref(f.ty)))
+        .map(|f| (f.name.clone(), desc(f.ty), ann_kind(f.ty)))
         .collect();
     // (name, descriptor, setter_kind): 0 getter, 1 primitive setter, 2 non-null reference setter.
     let mut accessors: Vec<(String, String, u8)> = Vec::new();
