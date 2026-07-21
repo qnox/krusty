@@ -739,6 +739,126 @@ impl ClassWriter {
         }
     }
 
+    /// Seed a `data class`'s synthesized-method constant-pool entries in kotlinc's first-use order,
+    /// AFTER [`seed_plain_class_pool`] (which seeds `<init>`/fields/accessors). `fields` is
+    /// `(name, jvm_descriptor)` in declaration order. Mirrors the bodies kotlinc emits for
+    /// `componentN`/`copy`/`copy$default`/`toString`/`hashCode`/`equals` so the natural emission reuses
+    /// these indices. `simple` is the class's simple name (for the `toString` prefix `Simple(field=`).
+    pub fn seed_data_class_pool(
+        &mut self,
+        this_internal: &str,
+        ctor_desc: &str,
+        simple: &str,
+        fields: &[(String, String)],
+    ) {
+        let self_ref = format!("L{this_internal};");
+        // The primary-ctor parameter descriptors (between the parens of `ctor_desc`).
+        let params = &ctor_desc[1..ctor_desc.rfind(')').unwrap_or(1)];
+        // The StringBuilder.append overload + the boxing-class hashCode for a field JVM descriptor.
+        let append_desc = |d: &str| -> &'static str {
+            match d {
+                "I" | "S" | "B" => "(I)Ljava/lang/StringBuilder;",
+                "J" => "(J)Ljava/lang/StringBuilder;",
+                "F" => "(F)Ljava/lang/StringBuilder;",
+                "D" => "(D)Ljava/lang/StringBuilder;",
+                "Z" => "(Z)Ljava/lang/StringBuilder;",
+                "C" => "(C)Ljava/lang/StringBuilder;",
+                "Ljava/lang/String;" => "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+                _ => "(Ljava/lang/Object;)Ljava/lang/StringBuilder;",
+            }
+        };
+        // The `x.hashCode()` for a primitive field is `<Box>.hashCode(prim)`; for a reference it is a
+        // virtual `hashCode()` on the field's own class.
+        let hashcode_ref = |d: &str| -> Option<(&'static str, &'static str)> {
+            match d {
+                "I" => Some(("java/lang/Integer", "(I)I")),
+                "J" => Some(("java/lang/Long", "(J)I")),
+                "D" => Some(("java/lang/Double", "(D)I")),
+                "F" => Some(("java/lang/Float", "(F)I")),
+                "Z" => Some(("java/lang/Boolean", "(Z)I")),
+                "C" => Some(("java/lang/Character", "(C)I")),
+                "B" => Some(("java/lang/Byte", "(B)I")),
+                "S" => Some(("java/lang/Short", "(S)I")),
+                _ => None, // reference: `field.hashCode()` interned via its own class below
+            }
+        };
+        let is_ref = |d: &str| d.starts_with('L') || d.starts_with('[');
+
+        // componentN — each body is a field read; only the method name is new.
+        for i in 1..=fields.len() {
+            self.cp.utf8(&format!("component{i}"));
+        }
+        // copy — name, descriptor, @NotNull (return), then `new <self>(...)` (Methodref on the ctor).
+        self.cp.utf8("copy");
+        let copy_desc = format!("({}){self_ref}", params);
+        self.cp.utf8(&copy_desc);
+        self.cp.utf8("Lorg/jetbrains/annotations/NotNull;");
+        self.cp.methodref(this_internal, "<init>", ctor_desc);
+        // copy$default — its descriptor, then the Methodref back to `copy`.
+        self.cp.utf8("copy$default");
+        let copy_default_desc = format!("({self_ref}{}ILjava/lang/Object;){self_ref}", params);
+        self.cp.utf8(&copy_default_desc);
+        self.cp.methodref(this_internal, "copy", &copy_desc);
+        // toString — StringBuilder chain: `"Simple(f0="` append, each field append, then `)` + toString.
+        self.cp.utf8("toString");
+        self.cp.utf8("()Ljava/lang/String;");
+        self.cp
+            .methodref("java/lang/StringBuilder", "<init>", "()V");
+        for (i, (name, desc)) in fields.iter().enumerate() {
+            let prefix = if i == 0 {
+                format!("{simple}({name}=")
+            } else {
+                format!(", {name}=")
+            };
+            self.cp.string(&prefix);
+            self.cp.methodref(
+                "java/lang/StringBuilder",
+                "append",
+                append_desc("Ljava/lang/String;"),
+            );
+            self.cp
+                .methodref("java/lang/StringBuilder", "append", append_desc(desc));
+        }
+        self.cp.methodref(
+            "java/lang/StringBuilder",
+            "append",
+            "(C)Ljava/lang/StringBuilder;",
+        );
+        self.cp.methodref(
+            "java/lang/StringBuilder",
+            "toString",
+            "()Ljava/lang/String;",
+        );
+        // hashCode — per-field hash (boxing-class static for a primitive; virtual for a reference).
+        self.cp.utf8("hashCode");
+        for (_, desc) in fields {
+            match hashcode_ref(desc) {
+                Some((cls, d)) => {
+                    self.cp.methodref(cls, "hashCode", d);
+                }
+                None if is_ref(desc) => {
+                    let cls = &desc[1..desc.len() - 1];
+                    self.cp.methodref(cls, "hashCode", "()I");
+                }
+                None => {}
+            }
+        }
+        // equals — name, descriptor, @Nullable (param), the `other` LVT name, then per-reference-field
+        // `Intrinsics.areEqual`.
+        self.cp.utf8("equals");
+        self.cp.utf8("(Ljava/lang/Object;)Z");
+        self.cp.utf8("Lorg/jetbrains/annotations/Nullable;");
+        self.cp.utf8("other");
+        self.cp.utf8("Ljava/lang/Object;");
+        if fields.iter().any(|(_, d)| is_ref(d)) {
+            self.cp.methodref(
+                "kotlin/jvm/internal/Intrinsics",
+                "areEqual",
+                "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+            );
+        }
+    }
+
     pub fn const_string(&mut self, s: &str) -> u16 {
         self.cp.string(s)
     }

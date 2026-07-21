@@ -312,6 +312,15 @@ fn seed_plain_class_pool(
         }
     }
     cw.seed_plain_class_pool(fq_name, superclass, &ctor_desc, &fields, &accessors);
+    if c.is_data {
+        let simple = fq_name.rsplit('/').next().unwrap_or(fq_name);
+        let data_fields: Vec<(String, String)> = c
+            .fields
+            .iter()
+            .map(|f| (f.name.clone(), desc(f.ty)))
+            .collect();
+        cw.seed_data_class_pool(fq_name, &ctor_desc, simple, &data_fields);
+    }
 }
 
 fn attach_synth_debug_tables(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
@@ -1436,7 +1445,7 @@ fn emit_class(
     // A cross-module `class_meta` PROVIDER record (none exists today) deliberately does NOT seed:
     // provider metadata makes the class correct, not byte-identical — byte identity is only claimed
     // for the computed path this gate mirrors.
-    if opts.emit_class_metadata && !c.is_data && build_class_metadata(ir, c, opts).is_some() {
+    if opts.emit_class_metadata && build_class_metadata(ir, c, opts).is_some() {
         seed_plain_class_pool(c, &fq_name, &superclass, &mut cw);
     }
     // Access: an extended or abstract class must not be `final`; a class with an abstract method
