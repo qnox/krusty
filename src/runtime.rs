@@ -72,6 +72,7 @@ pub enum RuntimeOp {
     PrimitiveCompare,
     HashCode,
     ArrayToString,
+    ArrayHashCode,
     ArrayCopyOf,
     StartCoroutine,
     ThrowOnFailure,
