@@ -7583,15 +7583,26 @@ impl<'a> Lower<'a> {
             } else if !nn.is_array() {
                 nn.obj_internal().and_then(|internal| {
                     let name = internal.render();
-                    let cs = self.syms.class_by_internal(&name)?;
-                    if cs.value_field.is_some() || cs.is_annotation {
-                        // A value class hashes its underlying; an annotation isn't a field type here.
-                        None
-                    } else if cs.is_interface {
-                        // kotlinc hashes an interface-typed field via `Object.hashCode` (NOT invokeinterface).
+                    if let Some(cs) = self.syms.class_by_internal(&name) {
+                        if cs.value_field.is_some() || cs.is_annotation {
+                            // A value class hashes its underlying; an annotation isn't a field type.
+                            None
+                        } else if cs.is_interface {
+                            // An interface-typed field hashes via `Object.hashCode` (NOT invokeinterface).
+                            Some("java/lang/Object.hashCode".into())
+                        } else {
+                            Some(format!("{name}.hashCode"))
+                        }
+                    } else if self
+                        .syms
+                        .libraries
+                        .resolve_type_name(internal)
+                        .is_some_and(|t| t.is_interface())
+                    {
+                        // A library interface field (`List`/`Set`/`Map`/…) also hashes via `Object.hashCode`.
                         Some("java/lang/Object.hashCode".into())
                     } else {
-                        Some(format!("{name}.hashCode"))
+                        None
                     }
                 })
             } else {
