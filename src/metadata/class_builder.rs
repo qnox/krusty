@@ -348,12 +348,38 @@ pub fn build_class(
                 prop.field_varint(11, VAR_PROPERTY_FLAGS); // Property flags (var only)
             }
             let mut jvm = Pb::new();
-            jvm.field_message(1, &Pb::new()); // field (empty → derive backing field)
+            // A nullable PRIMITIVE property (`Int?`, `Double?`, …) has a BOXED backing field
+            // (`Ljava/lang/Integer;`, `Ljava/lang/Double;`), which the reader can't derive from the
+            // nullable-primitive return type — so kotlinc records an explicit `JvmFieldSignature.desc`
+            // (the boxed descriptor = the getter's return type). Every other property leaves the field
+            // empty (the reader derives it). kotlinc interns the getter/setter strings BEFORE the field
+            // descriptor (even though the proto writes `field` (f1) first), so build them in that order.
             let getter = jvm_method_sig(&mut st, Some(&p.getter.0), &p.getter.1);
+            let setter = p
+                .setter
+                .as_ref()
+                .map(|(sn, sd)| jvm_method_sig(&mut st, Some(sn), sd));
+            let boxed_field_desc = match p.ty {
+                Ty::Nullable(
+                    Ty::Int
+                    | Ty::Long
+                    | Ty::Double
+                    | Ty::Float
+                    | Ty::Byte
+                    | Ty::Short
+                    | Ty::Char
+                    | Ty::Boolean,
+                ) => p.getter.1.rsplit(')').next().map(str::to_string),
+                _ => None,
+            };
+            let mut field = Pb::new();
+            if let Some(d) = &boxed_field_desc {
+                field.field_varint(2, st.local(d) as u64); // JvmFieldSignature.desc = 2
+            }
+            jvm.field_message(1, &field); // field (empty → derived; boxed primitive → explicit desc)
             jvm.field_message(3, &getter); // JvmPropertySignature.getter = 3
-            if let Some((sn, sd)) = &p.setter {
-                let setter = jvm_method_sig(&mut st, Some(sn), sd);
-                jvm.field_message(4, &setter); // JvmPropertySignature.setter = 4
+            if let Some(setter) = &setter {
+                jvm.field_message(4, setter); // JvmPropertySignature.setter = 4
             }
             prop.field_message(100, &jvm); // JvmProtoBuf.propertySignature = 100
             prop

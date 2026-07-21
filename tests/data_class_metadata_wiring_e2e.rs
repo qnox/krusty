@@ -118,6 +118,18 @@ fn multi_property_mixed_nullability_is_byte_identical() {
     );
 }
 
+/// A nullable PRIMITIVE property (`Double?`, `Int?`) — boxed backing field (`Ljava/lang/Double;`),
+/// so `@Metadata` records an explicit `JvmFieldSignature.desc` (interned after the getter/setter, as
+/// kotlinc does). A nullable reference (`String?`) leaves the field derived; this pins the difference.
+#[test]
+fn nullable_primitive_class_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C(val a: Int?, var b: Double?, val c: String?)\n",
+        "demo/C",
+        &[],
+    );
+}
+
 /// Every primitive property type — pins the `@Metadata` builtin `predefinedIndex` for each
 /// (Byte=5, Float=7, Short=10, Char=12, plus Int/Long/Double/Boolean). A wrong index would fall back
 /// to `kotlin/Any` and diverge.
