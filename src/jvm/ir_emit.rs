@@ -344,7 +344,8 @@ fn attach_synth_debug_tables(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
         slot += slot_size(f.ty);
     }
     let ctor_pc = c.fields.iter().filter(|f| is_nonnull_ref(f.ty)).count() as u16 * GUARD_LEN;
-    cw.set_method_debug("<init>", &ctor_desc, line, ctor_pc, &ctor_locals);
+    let this_only = [("this".to_string(), this_desc.clone(), 0u16)];
+    cw.set_method_debug("<init>", &ctor_desc, Some((ctor_pc, line)), &ctor_locals);
     // Property accessors: getter has only `this`; a `var` setter also has its value parameter (named
     // `<set-?>` by kotlinc), guarded when the property type is a non-null reference.
     for f in &c.fields {
@@ -352,9 +353,8 @@ fn attach_synth_debug_tables(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
         cw.set_method_debug(
             &g,
             &format!("(){}", desc(f.ty)),
-            line,
-            0,
-            &[("this".to_string(), this_desc.clone(), 0)],
+            Some((0, line)),
+            &this_only,
         );
         if !f.is_final {
             let s = format!("set{}", cap(&f.name));
@@ -363,14 +363,53 @@ fn attach_synth_debug_tables(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
             cw.set_method_debug(
                 &s,
                 &format!("({pd})V"),
-                line,
-                set_pc,
+                Some((set_pc, line)),
                 &[
                     ("this".to_string(), this_desc.clone(), 0),
                     ("<set-?>".to_string(), pd, 1),
                 ],
             );
         }
+    }
+    // A `data class`'s synthesized methods carry a LocalVariableTable (this + params) but NO
+    // LineNumberTable (kotlinc gives them none). componentN/hashCode/toString/equals have only `this`
+    // (equals also `other`); `copy` has the ctor parameters.
+    if c.is_data {
+        let self_ref = format!("L{};", c.fq_name());
+        for (i, f) in c.fields.iter().enumerate() {
+            cw.set_method_debug(
+                &format!("component{}", i + 1),
+                &format!("(){}", desc(f.ty)),
+                None,
+                &this_only,
+            );
+        }
+        let mut copy_locals = vec![("this".to_string(), this_desc.clone(), 0u16)];
+        let mut slot = 1u16;
+        for f in &c.fields {
+            copy_locals.push((f.name.clone(), desc(f.ty), slot));
+            slot += slot_size(f.ty);
+        }
+        cw.set_method_debug(
+            "copy",
+            &format!(
+                "{ctor_desc_no_v}{self_ref}",
+                ctor_desc_no_v = &ctor_desc[..ctor_desc.len() - 1]
+            ),
+            None,
+            &copy_locals,
+        );
+        cw.set_method_debug(
+            "equals",
+            "(Ljava/lang/Object;)Z",
+            None,
+            &[
+                ("this".to_string(), this_desc.clone(), 0),
+                ("other".to_string(), "Ljava/lang/Object;".to_string(), 1),
+            ],
+        );
+        cw.set_method_debug("hashCode", "()I", None, &this_only);
+        cw.set_method_debug("toString", "()Ljava/lang/String;", None, &this_only);
     }
 }
 
@@ -431,6 +470,35 @@ fn attach_synth_nullability(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
                 None,
                 &[Some(a)],
             );
+        }
+    }
+    // Data-class synthesized methods: `copy` returns the class (`@NotNull`), `toString` returns
+    // `String` (`@NotNull`), `equals`' `other` param is `@Nullable`, and a reference-typed `componentN`
+    // return is `@NotNull`.
+    if c.is_data {
+        let not_null = "Lorg/jetbrains/annotations/NotNull;";
+        let self_ref = format!("L{};", c.fq_name());
+        let copy_desc = format!(
+            "({}){self_ref}",
+            c.fields.iter().map(|f| desc(f.ty)).collect::<String>()
+        );
+        cw.set_method_nullability("copy", &copy_desc, Some(not_null), &[]);
+        cw.set_method_nullability("toString", "()Ljava/lang/String;", Some(not_null), &[]);
+        cw.set_method_nullability(
+            "equals",
+            "(Ljava/lang/Object;)Z",
+            None,
+            &[Some("Lorg/jetbrains/annotations/Nullable;")],
+        );
+        for (i, f) in c.fields.iter().enumerate() {
+            if let Some(a) = ann(f.ty) {
+                cw.set_method_nullability(
+                    &format!("component{}", i + 1),
+                    &format!("(){}", desc(f.ty)),
+                    Some(a),
+                    &[],
+                );
+            }
         }
     }
 }
@@ -1987,9 +2055,11 @@ fn emit_class(
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
         .then(|| build_class_metadata(ir, c, opts))
         .flatten();
-    // Debug tables (opt-in with metadata): only for a plain property class that qualified for a
-    // computed `@Metadata`. Interned before the annotation so pool order matches kotlinc.
-    if computed.is_some() && !c.is_data {
+    // Debug tables + nullability annotations (opt-in with metadata) for any class that qualified for a
+    // computed `@Metadata` — including data classes (their synthesized methods get a LocalVariableTable
+    // + @NotNull/@Nullable). NOTE: the constant-pool seeding (above) is still plain-class only, so a
+    // data class is not yet FULLY byte-identical (its pool order differs) — but the attributes match.
+    if computed.is_some() {
         attach_synth_debug_tables(c, &mut cw);
         attach_synth_nullability(c, &mut cw);
     }
