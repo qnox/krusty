@@ -53,7 +53,10 @@ impl<'a> ModuleSymbols<'a> {
         let members = c
             .methods
             .iter()
-            .map(|(n, s)| lib_member(n, s, c.internal_name(), c.is_interface))
+            .flat_map(|(n, sigs)| {
+                sigs.iter()
+                    .map(move |s| lib_member(n, s, c.internal_name(), c.is_interface))
+            })
             .collect();
         let companion = c
             .static_methods
@@ -147,7 +150,7 @@ impl<'a> ModuleSymbols<'a> {
         let Some(c) = self.class_by_type_name(internal) else {
             return; // a classpath supertype — not owned by the module source
         };
-        if let Some(sig) = c.methods.get(name) {
+        for sig in c.methods_named(name) {
             out.push(lib_member(name, sig, c.internal_name(), c.is_interface));
         }
         for i in c.interfaces.iter_ids() {
@@ -263,7 +266,7 @@ impl<'a> ModuleSymbols<'a> {
         };
         let here = *rung;
         *rung += 1;
-        if let Some(sig) = c.methods.get(name) {
+        for sig in c.methods_named(name) {
             out.push(fn_info(
                 FnKind::Member,
                 sig,
@@ -558,10 +561,11 @@ mod tests {
     fn members_walk_user_hierarchy_depth_first_with_rank() {
         let mut st = FrontendSymbols::default();
         let mut base = class("demo/Base");
-        base.methods.insert("greet".into(), sig(vec![], Ty::String));
+        base.methods
+            .insert("greet".into(), vec![sig(vec![], Ty::String)]);
         let mut sub = class("demo/Sub");
         sub.super_internal = Some(crate::types::type_name("demo/Base"));
-        sub.methods.insert("own".into(), sig(vec![], Ty::Int));
+        sub.methods.insert("own".into(), vec![sig(vec![], Ty::Int)]);
         st.insert_class("Base".into(), base);
         st.insert_class("Sub".into(), sub);
         let m = ModuleSymbols::new(&st);
@@ -606,7 +610,7 @@ mod tests {
         let mut st = FrontendSymbols::default();
         let mut c = class("demo/Point");
         c.ctor_params = vec![Ty::Int, Ty::Int];
-        c.methods.insert("sum".into(), sig(vec![], Ty::Int));
+        c.methods.insert("sum".into(), vec![sig(vec![], Ty::Int)]);
         c.interfaces = vec![crate::types::type_name("demo/Shape")].into();
         st.insert_class("Point".into(), c);
         let m = ModuleSymbols::new(&st);

@@ -68,8 +68,9 @@ struct ClassInfo {
     id: ClassId,
     internal: TypeName,
     fields: Vec<(String, Ty)>,
-    /// method name → (index into the class's `methods`, FunId, return Ty).
-    methods: HashMap<String, (u32, u32, Ty)>,
+    /// method name → overloads in declaration order: (index into the class's `methods`, FunId,
+    /// return Ty). Synthesized members (accessors, componentN, …) are single-entry.
+    methods: HashMap<String, Vec<(u32, u32, Ty)>>,
     /// Base class internal name (`class B : A(…)`), for inherited field/method resolution.
     super_internal: Option<TypeName>,
 }
@@ -896,10 +897,17 @@ pub fn lower_file_at_reporting(
                 impl_class.methods = vec![];
                 lo.ir.add_class(impl_class);
             }
-            let mut methods = HashMap::new();
+            let mut methods: HashMap<String, Vec<(u32, u32, Ty)>> = HashMap::new();
             let mut method_fids = Vec::new();
             for (mi, m) in c.methods.iter().enumerate() {
-                let sig = syms.classes.get(&c.name)?.methods.get(&m.name)?;
+                // Overloads: the signature Vec preserves declaration order per name, so the i-th
+                // same-name AST decl pairs with the i-th signature.
+                let overload_idx = c.methods[..mi].iter().filter(|x| x.name == m.name).count();
+                let sig = syms
+                    .classes
+                    .get(&c.name)?
+                    .methods_named(&m.name)
+                    .get(overload_idx)?;
                 let ret = sig.ret;
                 let params = tys_to_ir(&sig.params);
                 let class_nonnull_tps: std::collections::HashSet<String> = c
@@ -1041,7 +1049,10 @@ pub fn lower_file_at_reporting(
                 if let Some(s) = fn_generic_sig(file, m, &*lo.syms.libraries) {
                     lo.ir.signatures.insert(fid, s);
                 }
-                methods.insert(m.name.clone(), (mi as u32, fid, ret));
+                methods
+                    .entry(m.name.clone())
+                    .or_default()
+                    .push((mi as u32, fid, ret));
                 method_fids.push(fid);
             }
             // Computed body properties → `getX()` instance methods (no backing field).
@@ -1058,7 +1069,7 @@ pub fn lower_file_at_reporting(
                     dispatch_receiver: Some(type_name(&internal)),
                     param_checks: vec![],
                 });
-                methods.insert(gname, (mi, fid, ty));
+                methods.entry(gname).or_default().push((mi, fid, ty));
                 method_fids.push(fid);
             }
             // Delegated body properties (`val/var x by Del()`) → a `getX()` (and `setX()` for a `var`)
@@ -1084,7 +1095,7 @@ pub fn lower_file_at_reporting(
                     dispatch_receiver: Some(type_name(&internal)),
                     param_checks: vec![],
                 });
-                methods.insert(gname, (mi, fid, prop_ty));
+                methods.entry(gname).or_default().push((mi, fid, prop_ty));
                 method_fids.push(fid);
                 if p.is_var {
                     let sname = property_setter_name(&p.name);
@@ -1098,7 +1109,7 @@ pub fn lower_file_at_reporting(
                         dispatch_receiver: Some(type_name(&internal)),
                         param_checks: vec![],
                     });
-                    methods.insert(sname, (mi, fid, Ty::Unit));
+                    methods.entry(sname).or_default().push((mi, fid, Ty::Unit));
                     method_fids.push(fid);
                 }
             }
@@ -1147,7 +1158,7 @@ pub fn lower_file_at_reporting(
                             dispatch_receiver: Some(type_name(&internal)),
                             param_checks: vec![],
                         });
-                        methods.insert(gname, (mi, fid, ty));
+                        methods.entry(gname).or_default().push((mi, fid, ty));
                         method_fids.push(fid);
                     }
                     if p.is_var {
@@ -1163,7 +1174,7 @@ pub fn lower_file_at_reporting(
                                 dispatch_receiver: Some(type_name(&internal)),
                                 param_checks: vec![],
                             });
-                            methods.insert(sname, (mi, fid, Ty::Unit));
+                            methods.entry(sname).or_default().push((mi, fid, Ty::Unit));
                             method_fids.push(fid);
                         }
                     }
@@ -1243,7 +1254,7 @@ pub fn lower_file_at_reporting(
                                 },
                             );
                         }
-                        methods.insert(gname, (mi, fid, fty));
+                        methods.entry(gname).or_default().push((mi, fid, fty));
                         method_fids.push(fid);
                     }
                     if *is_var {
@@ -1292,7 +1303,7 @@ pub fn lower_file_at_reporting(
                                     },
                                 );
                             }
-                            methods.insert(sname, (mi, fid, Ty::Unit));
+                            methods.entry(sname).or_default().push((mi, fid, Ty::Unit));
                             method_fids.push(fid);
                         }
                     }
@@ -1402,7 +1413,7 @@ pub fn lower_file_at_reporting(
                     let iface_internal = class_internal(file, st);
                     if let Some(isig) = syms.class_by_internal(&iface_internal) {
                         for (mname, cm) in &csig0.static_methods {
-                            if let Some(im) = isig.methods.get(mname) {
+                            if let Some(im) = isig.method(mname) {
                                 let im_params: Option<Vec<_>> = im
                                     .params
                                     .iter()
@@ -1510,7 +1521,7 @@ pub fn lower_file_at_reporting(
                     runtime_retained: false,
                 });
                 let csig = syms.classes.get(&c.name)?;
-                let mut cmethods = HashMap::new();
+                let mut cmethods: HashMap<String, Vec<(u32, u32, Ty)>> = HashMap::new();
                 let mut cmethod_fids = Vec::new();
                 for (mi, m) in c.companion_methods.iter().enumerate() {
                     let sig = csig.static_methods.get(&m.name)?;
@@ -1528,7 +1539,10 @@ pub fn lower_file_at_reporting(
                         dispatch_receiver: Some(type_name(&comp_fq)),
                         param_checks,
                     });
-                    cmethods.insert(m.name.clone(), (mi as u32, fid, ret));
+                    cmethods
+                        .entry(m.name.clone())
+                        .or_default()
+                        .push((mi as u32, fid, ret));
                     cmethod_fids.push(fid);
                 }
                 lo.ir.classes[comp_id as usize].methods = cmethod_fids;
@@ -2056,7 +2070,7 @@ pub fn lower_file_at_reporting(
                 // generic/covariant override) needs a synthetic JVM bridge that krusty doesn't emit
                 // yet — bail rather than miscompile (the erased call wouldn't reach the override).
                 if let Some(super_int) = lo.class_info(&internal)?.super_internal {
-                    for m in &c.methods {
+                    for (mi, m) in c.methods.iter().enumerate() {
                         if let Some((_, _, base_fid, _)) =
                             lo.resolve_method_name(super_int, &m.name)
                         {
@@ -2076,11 +2090,19 @@ pub fn lower_file_at_reporting(
                             {
                                 return None;
                             }
-                            let own_fid = lo.class_info(&internal)?.methods[&m.name].1;
+                            let own_idx =
+                                c.methods[..mi].iter().filter(|x| x.name == m.name).count();
+                            let own_fid =
+                                lo.class_info(&internal)?.methods[&m.name].get(own_idx)?.1;
                             let bp = lo.ir.functions[base_fid as usize].params.clone();
                             let br = lo.ir.functions[base_fid as usize].ret.clone();
                             let op = lo.ir.functions[own_fid as usize].params.clone();
                             let or = lo.ir.functions[own_fid as usize].ret.clone();
+                            // A different ARITY means this is a sibling OVERLOAD of the base
+                            // method, not an override — nothing to bridge.
+                            if bp.len() != op.len() {
+                                continue;
+                            }
                             if bp != op || br != or {
                                 // A suspend override needing an erasure bridge can't be modeled (the
                                 // coroutine pass rewrites the concrete method to CPS afterwards but never
@@ -2167,11 +2189,13 @@ pub fn lower_file_at_reporting(
                                     let super_ret = lo
                                         .class_info_name(sup)
                                         .and_then(|ci| ci.methods.get(&gname))
+                                        .and_then(|v| v.first())
                                         .map(|(_, fid, _)| lo.ir.functions[*fid as usize].ret)
                                         .unwrap_or_else(|| ty_to_ir(sty));
                                     let own_ret = lo
                                         .class_info_name(internal_name)
                                         .and_then(|ci| ci.methods.get(&gname))
+                                        .and_then(|v| v.first())
                                         .map(|(_, fid, _)| lo.ir.functions[*fid as usize].ret)
                                         .unwrap_or_else(|| ty_to_ir(own_ty));
                                     let already = lo.ir.classes[cid as usize]
@@ -2301,6 +2325,35 @@ pub fn lower_file_at_reporting(
                                 let ir_ = lo.ir.functions[ifid as usize].ret.clone();
                                 let cp = lo.ir.functions[impl_fid as usize].params.clone();
                                 let cr = lo.ir.functions[impl_fid as usize].ret.clone();
+                                // A bridge is an OVERRIDE adapter — legit in two shapes:
+                                //  * GENERIC-IFACE direction: the interface param is the erased
+                                //    `Object`, the impl concrete (`A<String>.foo(Object)` bridged
+                                //    to `foo(String)`).
+                                //  * FAKE-OVERRIDE direction: an ABSTRACT interface member with a
+                                //    concrete param satisfied by an INHERITED erased-generic impl
+                                //    (`Tr.hello(String)` over `Foo<T>.hello(Object)`, kt1939) —
+                                //    kotlinc synthesizes exactly this bridge.
+                                // But an interface method WITH A DEFAULT whose concrete param the
+                                // impl merely erases (`B.foo(int)` next to `foo(t: T)`) is NOT
+                                // overridden by it — the default stays live (KT-78321) — so no
+                                // bridge must shadow it.
+                                if ip.len() != cp.len() {
+                                    continue;
+                                }
+                                let generic_iface_dir = ip
+                                    .iter()
+                                    .zip(&cp)
+                                    .all(|(&e, &c)| e == c || e.is_erased_top());
+                                let fake_override_dir = ip
+                                    .iter()
+                                    .zip(&cp)
+                                    .all(|(&e, &c)| e == c || c.is_erased_top());
+                                if !generic_iface_dir
+                                    && (!fake_override_dir
+                                        || lo.iface_method_is_default_name(itf, &mname))
+                                {
+                                    continue;
+                                }
                                 if ip != cp || ir_ != cr {
                                     // A generic-erasure bridge for a SUSPEND override can't be modeled: the
                                     // coroutine pass rewrites the concrete method to CPS (a trailing
@@ -2388,13 +2441,15 @@ pub fn lower_file_at_reporting(
                 {
                     continue;
                 }
-                for m in &c.methods {
+                for (mi, m) in c.methods.iter().enumerate() {
                     // A `tailrec` MEMBER method isn't loop-transformed (only top-level functions are) —
                     // skip the file rather than emit stack-overflowing recursion.
                     if m.is_tailrec && !matches!(m.body, FunBody::None) {
                         return None;
                     }
-                    let (_, fid, _) = lo.class_info(&internal)?.methods[&m.name];
+                    let overload_idx = c.methods[..mi].iter().filter(|x| x.name == m.name).count();
+                    let (_, fid, _) =
+                        *lo.class_info(&internal)?.methods[&m.name].get(overload_idx)?;
                     lo.scope.clear();
                     lo.boxed_elem.clear();
                     lo.next_value = 0;
@@ -2421,7 +2476,13 @@ pub fn lower_file_at_reporting(
                     let this_v = lo.fresh_value();
                     lo.scope
                         .push(("this".to_string(), this_v, Ty::obj(&internal)));
-                    let sig = syms.classes.get(&c.name)?.methods.get(&m.name)?.clone();
+                    let overload_idx = c.methods[..mi].iter().filter(|x| x.name == m.name).count();
+                    let sig = syms
+                        .classes
+                        .get(&c.name)?
+                        .methods_named(&m.name)
+                        .get(overload_idx)?
+                        .clone();
                     for (p, t) in m.params.iter().zip(&sig.params) {
                         let v = lo.fresh_value();
                         lo.scope.push((p.name.clone(), v, *t));
@@ -2467,7 +2528,7 @@ pub fn lower_file_at_reporting(
                 // Computed body-property getter bodies → `getX()` methods on the class.
                 for p in c.body_props.iter().filter(|p| is_computed_prop(p)) {
                     let gname = property_getter_name(&p.name);
-                    let (_, fid, _) = lo.class_info(&internal)?.methods[&gname];
+                    let (_, fid, _) = lo.class_info(&internal)?.methods[&gname][0];
                     lo.scope.clear();
                     lo.boxed_elem.clear();
                     lo.next_value = 0;
@@ -2496,7 +2557,7 @@ pub fn lower_file_at_reporting(
                         .clone();
                     if let Some(getter) = p.getter.clone() {
                         let gname = property_getter_name(&p.name);
-                        let (_, fid, _) = lo.class_info(&internal)?.methods[&gname];
+                        let (_, fid, _) = lo.class_info(&internal)?.methods[&gname][0];
                         lo.scope.clear();
                         lo.boxed_elem.clear();
                         lo.next_value = 0;
@@ -2517,7 +2578,7 @@ pub fn lower_file_at_reporting(
                             p.setter.as_ref().filter(|s| s.body.is_some()).cloned()
                         {
                             let sname = property_setter_name(&p.name);
-                            let (_, fid, _) = lo.class_info(&internal)?.methods[&sname];
+                            let (_, fid, _) = lo.class_info(&internal)?.methods[&sname][0];
                             let pty = body_prop_ty(file, info, p, &*syms.libraries);
                             lo.scope.clear();
                             lo.boxed_elem.clear();
@@ -2556,7 +2617,7 @@ pub fn lower_file_at_reporting(
                         .expect("delegate field") as u32;
                     // Build a fresh `PropertyReference1Impl(A::class, "x", "getX()<ret>", 0)`.
                     let gname = property_getter_name(&p.name);
-                    let (_, get_fid, prop_ty) = lo.class_info(&internal)?.methods[&gname];
+                    let (_, get_fid, prop_ty) = lo.class_info(&internal)?.methods[&gname][0];
                     let prop_sig = lo.property_reference_signature(&gname, prop_ty)?;
                     let propref_impl = lo.property_reference_impl(1, false)?;
                     let make_propref = |lo: &mut Lower| {
@@ -2604,7 +2665,7 @@ pub fn lower_file_at_reporting(
                     // setX(value): this.x$delegate.setValue(this, propref, value)
                     if p.is_var {
                         let sname = property_setter_name(&p.name);
-                        let (_, set_fid, _) = lo.class_info(&internal)?.methods[&sname];
+                        let (_, set_fid, _) = lo.class_info(&internal)?.methods[&sname][0];
                         let sv = lo.syms.method_of_name(delegate_internal, "setValue")?;
                         let sv_desc = lo.runtime.method_descriptor(&sv.params, sv.ret)?;
                         let this_e = lo.emit_get_value(0);
@@ -2643,7 +2704,7 @@ pub fn lower_file_at_reporting(
                 // Companion method bodies — lowered on the synthesized `C$Companion` class.
                 if let Some(comp_name) = lo.companions.get(&type_name(&internal)).copied() {
                     let comp_fq = comp_name.render();
-                    for m in &c.companion_methods {
+                    for (cmi, m) in c.companion_methods.iter().enumerate() {
                         if matches!(m.body, FunBody::None) {
                             continue;
                         }
@@ -2653,7 +2714,12 @@ pub fn lower_file_at_reporting(
                         if m.is_tailrec {
                             return None;
                         }
-                        let (_, fid, _) = lo.class_info(&comp_fq)?.methods[&m.name];
+                        let overload_idx = c.companion_methods[..cmi]
+                            .iter()
+                            .filter(|x| x.name == m.name)
+                            .count();
+                        let (_, fid, _) =
+                            *lo.class_info(&comp_fq)?.methods[&m.name].get(overload_idx)?;
                         lo.scope.clear();
                         lo.boxed_elem.clear();
                         lo.next_value = 0;
@@ -3591,7 +3657,7 @@ pub fn lower_file_at_reporting(
                             let sig = match syms
                                 .classes
                                 .get(&c.name)
-                                .and_then(|cs| cs.methods.get(&bm.name))
+                                .and_then(|cs| cs.method(&bm.name))
                             {
                                 Some(s) => s.clone(),
                                 None => syms
@@ -6854,8 +6920,8 @@ impl<'a> Lower<'a> {
             let method_suspends = |internal: TypeName, name: &str| {
                 self.syms
                     .class_by_type_name(internal)
-                    .and_then(|c| c.methods.get(name))
-                    .is_some_and(|s| s.is_suspend)
+                    .map(|c| c.methods_named(name))
+                    .is_some_and(|sigs| sigs.iter().any(|s| s.is_suspend))
             };
             // The checker's `Invoke` lowering carries suspend-ness reliably (the receiver's static
             // type may be `Error` at the call site): a suspend function VALUE, or a suspend `invoke`
@@ -7333,7 +7399,10 @@ impl<'a> Lower<'a> {
         let idx = self.ir.classes[class_id as usize].methods.len() as u32;
         self.ir.classes[class_id as usize].methods.push(fid);
         if let Some(ci) = self.class_info_mut(internal) {
-            ci.methods.insert(name.to_string(), (idx, fid, ret));
+            ci.methods
+                .entry(name.to_string())
+                .or_default()
+                .push((idx, fid, ret));
         }
         Some(fid)
     }
@@ -7479,9 +7548,11 @@ impl<'a> Lower<'a> {
             // enumerated here, so its forwarders would be missing — bail (skip the file) rather than
             // emit a class with un-forwarded abstract methods (an `AbstractMethodError` at runtime).
             let cs = self.syms.class_by_type_name(cur)?;
-            for (n, s) in &cs.methods {
-                if !methods.iter().any(|(on, op, _)| on == n && *op == s.params) {
-                    methods.push((n.clone(), s.params.clone(), s.ret));
+            for (n, sigs) in &cs.methods {
+                for s in sigs {
+                    if !methods.iter().any(|(on, op, _)| on == n && *op == s.params) {
+                        methods.push((n.clone(), s.params.clone(), s.ret));
+                    }
                 }
             }
             // Super-interfaces (and any base) are stored by internal name; the module table is keyed by
@@ -8967,8 +9038,10 @@ impl<'a> Lower<'a> {
                 continue;
             }
             if let Some(ci) = self.class_info_name(i) {
-                for (name, &(_, fid, _)) in &ci.methods {
-                    out.push((name.clone(), fid));
+                for (name, overloads) in &ci.methods {
+                    for &(_, fid, _) in overloads {
+                        out.push((name.clone(), fid));
+                    }
                 }
                 stack.extend(self.ir.classes[ci.id as usize].interfaces.iter_ids());
             }
@@ -9957,7 +10030,10 @@ impl<'a> Lower<'a> {
         let idx = self.ir.classes[cid as usize].methods.len() as u32;
         self.ir.classes[cid as usize].methods.push(acc_fid);
         if let Some(ci) = self.class_info_name_mut(internal) {
-            ci.methods.insert(accessor.clone(), (idx, acc_fid, ret));
+            ci.methods
+                .entry(accessor.clone())
+                .or_default()
+                .push((idx, acc_fid, ret));
         }
         Some(accessor)
     }
@@ -10206,6 +10282,44 @@ impl<'a> Lower<'a> {
         self.resolve_method_name(existing_type_name(internal)?, name)
     }
 
+    /// Overload-aware companion to [`Self::resolve_method_name`]: walk the base chain and select
+    /// the overload of `name` whose parameter COUNT matches `nargs`. Exactly one fit resolves;
+    /// zero or several (same-arity overloads — those need parameter types) return `None` so the
+    /// caller bails (skip, never misdispatch).
+    fn resolve_method_by_arity(
+        &self,
+        internal: TypeName,
+        name: &str,
+        nargs: usize,
+    ) -> Option<(ClassId, u32, u32, Ty)> {
+        let mut seen = std::collections::HashSet::new();
+        let mut cur = Some(internal);
+        while let Some(ci_name) = cur {
+            if !seen.insert(ci_name) {
+                break; // supertype cycle (ill-formed source) — stop
+            }
+            let Some(ci) = self.class_info_name(ci_name) else {
+                break;
+            };
+            if let Some(overloads) = ci.methods.get(name) {
+                let mut fits = overloads
+                    .iter()
+                    .filter(|&&(_, fid, _)| self.ir.functions[fid as usize].params.len() == nargs);
+                match (fits.next(), fits.next()) {
+                    // Exactly one arity fit on this rung: the most-derived match wins.
+                    (Some(&(idx, fid, ret)), None) => return Some((ci.id, idx, fid, ret)),
+                    // Several same-arity overloads: needs parameter types — bail (skip, not guess).
+                    (Some(_), Some(_)) => return None,
+                    // No fit on this rung (`Derived.f(Int)` next to an inherited `f()`): keep
+                    // walking — the fitting overload may live on a base class.
+                    (None, _) => {}
+                }
+            }
+            cur = ci.super_internal;
+        }
+        None
+    }
+
     fn resolve_method_name(
         &self,
         internal: TypeName,
@@ -10218,8 +10332,13 @@ impl<'a> Lower<'a> {
             let Some(ci) = self.class_info_name(ci_name) else {
                 break;
             };
-            if let Some(&(idx, fid, ret)) = ci.methods.get(name) {
-                return Some((ci.id, idx, fid, ret));
+            if let Some(overloads) = ci.methods.get(name) {
+                // Sole overload only: this lookup carries no argument types, so an overloaded
+                // name cannot be resolved here (callers bail → skip, never misdispatch).
+                return match overloads.as_slice() {
+                    &[(idx, fid, ret)] => Some((ci.id, idx, fid, ret)),
+                    _ => None,
+                };
             }
             cur = ci.super_internal;
         }
@@ -10255,7 +10374,7 @@ impl<'a> Lower<'a> {
                     // unimplemented method (`AbstractMethodError`). Check the AST (order-independent; the
                     // IR body is set later in pass 2).
                     if self.iface_method_is_default_name(itf, name) {
-                        if let Some(&(idx, fid, ret)) = ici.methods.get(name) {
+                        if let Some(&[(idx, fid, ret)]) = ici.methods.get(name).map(Vec::as_slice) {
                             return Some((ici.id, idx, fid, ret));
                         }
                     }
@@ -10273,9 +10392,10 @@ impl<'a> Lower<'a> {
         params: &[Ty],
     ) -> Option<(ClassId, u32, u32, Ty)> {
         let ci = self.class_info(owner)?;
-        let &(idx, fid, ret) = ci.methods.get(name)?;
-        let found_params = &self.ir.functions[fid as usize].params;
-        (found_params.as_slice() == params).then_some((ci.id, idx, fid, ret))
+        ci.methods.get(name)?.iter().find_map(|&(idx, fid, ret)| {
+            (self.ir.functions[fid as usize].params.as_slice() == params)
+                .then_some((ci.id, idx, fid, ret))
+        })
     }
 
     /// Whether a same-file interface's method is a DEFAULT method (declared with a body) — checked on
@@ -11774,7 +11894,15 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         // A user instance method on the receiver's class — `this.m(args)`.
         if let Some(internal) = this_ty.obj_internal() {
-            if let Some((class, index, mfid, ret)) = self.resolve_method_name(internal, name) {
+            // Arity-aware resolution first — with overloads split across the hierarchy the plain
+            // name walk stops at the most-derived rung and can return a sibling of the wrong arity
+            // (`Derived.f(Int)` for a `f()` call). Fall back to the name walk for its extra
+            // fallbacks (interface defaults) and for the omitted-default-argument shape, where the
+            // call's arg count is legitimately below the method's arity.
+            if let Some((class, index, mfid, ret)) = self
+                .resolve_method_by_arity(internal, name, args.len())
+                .or_else(|| self.resolve_method_name(internal, name))
+            {
                 let params = self.ir.functions[mfid as usize].params.clone();
                 let vararg = self.syms.method_is_vararg_name(internal, name);
                 if let Some(n_fixed) = vararg_arity(vararg, params.len(), args.len()) {
@@ -17997,6 +18125,9 @@ impl<'a> Lower<'a> {
                             && (self.info.resolved_member(e).is_some()
                                 || self.cur_class.as_ref().is_some_and(|cur| {
                                     self.resolve_method_name(*cur, &fname).is_some()
+                                        || self
+                                            .resolve_method_by_arity(*cur, &fname, args.len())
+                                            .is_some()
                                 }))
                         {
                             self.lookup("this").and_then(|(this_v, this_ty)| {
