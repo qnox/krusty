@@ -2,7 +2,7 @@
 //! backing field is pushed onto `ir.statics` first, so a top-level property's `GetStatic` index must be
 //! OFFSET past it — otherwise the property read resolves to the const's slot and emits a wrong-field
 //! `getstatic` (e.g. reading a `String` property as the `Int` const → "Bad type on operand stack" at
-//! load). Mission-core hit: `MissionChangeService`'s top-level `private val logger` read as the
+//! load). Production hit: a service file's top-level `private val logger` read as the
 //! companion's `const val HEX_RADIX` in every `logger.info { … }`.
 //! Needs the JVM toolchain + kotlin-stdlib; skips otherwise.
 use super::common;

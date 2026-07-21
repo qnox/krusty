@@ -388,7 +388,7 @@ fn desugar_tail_suspend(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, 
 /// `var tmp = <default>; try { … tmp = <body value> } catch { … tmp = <catch value> }; return tmp`. A
 /// suspending branch value is bound to a fresh `Variable` first (the flattener's `stmt_suspension` handles
 /// a suspend `Variable` init, not a `SetValue`), then copied to `tmp`. Only `return <try>` is rewritten
-/// (the shape mission-core uses); a `val`/assignment of a suspending `try` is left to skip the file.
+/// (the production shape); a `val`/assignment of a suspending `try` is left to skip the file.
 fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret_ty: &Ty) {
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
         return;
@@ -456,7 +456,7 @@ fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret
 /// a temp: `return when (x) { a -> v0; else -> v1 }` becomes `var tmp = <default>; when (x) { a -> { …
 /// tmp = v0 }; else -> { … tmp = v1 } }; return tmp`. The flattener models a `when` STATEMENT with
 /// suspending branch bodies (`emit_when_stmt`), so each branch's suspension surfaces there. Only
-/// `return <when>` is rewritten (the shape mission-core's `applyOperation` uses); a `val`/assignment of a
+/// `return <when>` is rewritten (the production apply-operation shape); a `val`/assignment of a
 /// suspending value-`when` is left to the flattener's `stmt_cond_suspension` / a skip.
 fn desugar_value_when(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret_ty: &Ty) {
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {

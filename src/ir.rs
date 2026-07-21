@@ -1039,7 +1039,7 @@ pub struct IrFile {
     /// `FunId` → source parameter names and, when present, default-value expressions.
     pub fn_params: std::collections::HashMap<u32, FnParamInfo>,
     /// Value-class internal name → the lowered default expression of its single primary-constructor
-    /// property, when it has one (`value class ServerId(val value: String = Base58Uuid.generate())`).
+    /// property, when it has one (`value class ServerId(val value: String = UuidGen.generate())`).
     /// Lowered in the STATIC `constructor-impl` frame (the sole param is value-index 0, no `this`); the
     /// value-class JVM pass registers it as `constructor-impl`'s param default so the backend emits the
     /// synthetic `constructor-impl$default(U, int, DefaultConstructorMarker)` kotlinc requires.
