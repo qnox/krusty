@@ -179,7 +179,17 @@ fn build_class_metadata(
     );
     // kotlinc's synthesized data-class methods, in declaration order: componentN, copy, equals,
     // hashCode, toString. Their shapes come entirely from the primary-ctor properties.
+    // A boxed nullable primitive (`Int?` → `Ljava/lang/Integer;`): its JVM descriptor is not derivable
+    // from the proto type alone, so kotlinc records a `JvmMethodSignature` on any synthesized method
+    // whose param/return is one. The descriptor (name derivable) is emitted only when needed.
+    let is_boxed_prim = |t: Ty| t.is_nullable() && t.non_null().is_jvm_scalar();
+    let boxed_fn_sig = |params: &[Ty], ret: Ty| -> Option<String> {
+        (is_boxed_prim(ret) || params.iter().copied().any(is_boxed_prim))
+            .then(|| method_descriptor(params, ret))
+    };
     let methods: Vec<FnMeta> = if c.is_data {
+        let class_ty = Ty::obj(&c.fq_name());
+        let field_tys: Vec<Ty> = c.fields.iter().map(|f| f.ty).collect();
         let mut m: Vec<FnMeta> = c
             .fields
             .iter()
@@ -190,14 +200,16 @@ fn build_class_metadata(
                 ret: f.ty,
                 flags: COMPONENT_FN_FLAGS,
                 params_have_defaults: false,
+                jvm_sig: boxed_fn_sig(&[], f.ty),
             })
             .collect();
         m.push(FnMeta {
             name: "copy".into(),
             params: c.fields.iter().map(|f| (f.name.clone(), f.ty)).collect(),
-            ret: Ty::obj(&c.fq_name()),
+            ret: class_ty,
             flags: COPY_FN_FLAGS,
             params_have_defaults: true,
+            jvm_sig: boxed_fn_sig(&field_tys, class_ty),
         });
         m.push(FnMeta {
             name: "equals".into(),
@@ -205,6 +217,7 @@ fn build_class_metadata(
             ret: Ty::Boolean,
             flags: EQUALS_FN_FLAGS,
             params_have_defaults: false,
+            jvm_sig: None,
         });
         m.push(FnMeta {
             name: "hashCode".into(),
@@ -212,6 +225,7 @@ fn build_class_metadata(
             ret: Ty::Int,
             flags: HASHCODE_TOSTRING_FN_FLAGS,
             params_have_defaults: false,
+            jvm_sig: None,
         });
         m.push(FnMeta {
             name: "toString".into(),
@@ -219,6 +233,7 @@ fn build_class_metadata(
             ret: Ty::String,
             flags: HASHCODE_TOSTRING_FN_FLAGS,
             params_have_defaults: false,
+            jvm_sig: None,
         });
         m
     } else {
