@@ -200,9 +200,15 @@ pub fn compile_in_process(
 /// keeps it off — see [`krusty::jvm::ir_emit::EmitOptions::emit_class_metadata`]). Lets a test decode
 /// the metadata krusty computes from IR (the wiring), independent of the CLI env-var flag.
 #[allow(dead_code)]
-pub fn compile_in_process_with_class_metadata(
+/// Compile `src` in-process with krusty's opt-in class metadata ON and a classpath (for sources that
+/// reference the kotlin stdlib or other jars), stamping the `SourceFile` (`<stem>.kt`) exactly as the
+/// CLI backend does, so the emitted bytes match a `krusty -d …` (and thus kotlinc) run WITHOUT spawning
+/// a subprocess. This is the in-process path the byte-identity tests use, so their whole codepath is
+/// coverage-instrumented (a spawned CLI is not) and pays no per-run cold classpath scan.
+pub fn compile_in_process_metadata_cp(
     src: &str,
     stem: &str,
+    cp_jars: &[PathBuf],
 ) -> Option<Vec<(String, Vec<u8>)>> {
     use krusty::diag::DiagSink;
     use krusty::frontend::{check_file, collect_signatures_with_cp};
@@ -219,7 +225,7 @@ pub fn compile_in_process_with_class_metadata(
     if diags.has_errors() {
         return None;
     }
-    let cp = std::rc::Rc::new(Classpath::new(vec![]));
+    let cp = std::rc::Rc::new(Classpath::new(cp_jars.to_vec()));
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
     let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
     if diags.has_errors() {
@@ -236,6 +242,8 @@ pub fn compile_in_process_with_class_metadata(
     krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms).ok()?;
     let opts = EmitOptions {
         emit_class_metadata: true,
+        // Match the CLI backend (`{stem}.kt`) so the bytes equal a `krusty -d …` run.
+        source_file: Some(format!("{stem}.kt")),
         ..Default::default()
     };
     let run = EmitRun::default();
