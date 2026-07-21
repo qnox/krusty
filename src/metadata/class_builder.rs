@@ -164,6 +164,7 @@ fn builtin_name_index(internal: &str) -> Option<u64> {
         "kotlin/Int" => Some(8),
         "kotlin/Long" => Some(9),
         "kotlin/Boolean" => Some(11),
+        "kotlin/CharSequence" => Some(13),
         "kotlin/String" => Some(14),
         // Common collection interfaces from `JvmNameResolverBase.PREDEFINED_STRINGS` (kotlinc encodes
         // these via `predefinedIndex`, an EMPTY d2 slot — not a class-id descriptor). Indices verified
