@@ -101,11 +101,13 @@ fn var_long_class_is_byte_identical() {
 
 // ---- @Metadata-level checks for shapes not yet FULLY byte-identical (data classes) ----------------
 
-/// A `data class`'s IR → `build_class_metadata` produces the synthesized `componentN`/`copy`/`equals`/
-/// `hashCode`/`toString` in kotlinc's declaration order. (Full byte-identity for data classes also
-/// needs their debug tables/annotations — tracked separately.)
+/// A `data class` (metadata on): its IR → `build_class_metadata` yields the synthesized
+/// `componentN`/`copy`/`equals`/`hashCode`/`toString` in kotlinc's order, and the synthesized methods
+/// carry kotlinc's debug tables (LocalVariableTable) + nullability annotations (`copy`/`toString`
+/// return `@NotNull`, `equals` param `@Nullable`). Full byte-identity for a data class also needs its
+/// pool seeding (the constant-pool interning order still differs) — tracked separately.
 #[test]
-fn data_class_metadata_function_shape() {
+fn data_class_emits_metadata_debug_tables_and_annotations() {
     let src = "package demo\ndata class Point(val x: Int, var y: String)\n";
     let bytes = krusty_bytes(src, "demo/Point", &[]).expect("krusty compiles the data class");
     let info = parse_class(&bytes).expect("parses back");
@@ -126,6 +128,19 @@ fn data_class_metadata_function_shape() {
             "toString"
         ],
         "data-class synthesized functions, in kotlinc declaration order",
+    );
+    let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+    assert!(
+        has(b"LocalVariableTable"),
+        "synthesized methods carry a LocalVariableTable"
+    );
+    assert!(
+        has(b"Lorg/jetbrains/annotations/NotNull;"),
+        "copy/toString returns get @NotNull",
+    );
+    assert!(
+        has(b"Lorg/jetbrains/annotations/Nullable;"),
+        "equals' `other` param gets @Nullable",
     );
 }
 

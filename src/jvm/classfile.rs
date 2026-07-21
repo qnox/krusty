@@ -875,8 +875,10 @@ impl ClassWriter {
         &mut self,
         name: &str,
         desc: &str,
-        decl_line: u32,
-        line_pc: u16,
+        // `Some((start_pc, line))` emits a LineNumberTable; `None` emits none — kotlinc gives a
+        // LineNumberTable to `<init>`/accessors but NOT to a data class's synthesized methods
+        // (component/copy/equals/hashCode/toString), which carry a LocalVariableTable only.
+        lnt: Option<(u16, u32)>,
         locals: &[(String, String, u16)],
     ) {
         let n = self.cp.utf8(name);
@@ -886,9 +888,10 @@ impl ClassWriter {
             .map(|(nm, ds, slot)| (self.cp.utf8(nm), self.cp.utf8(ds), *slot))
             .collect();
         if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
-            // kotlinc maps the declaration line to the first instruction AFTER any
-            // `checkNotNullParameter` prologue (`line_pc`), not always pc 0.
-            m.lnt = vec![(line_pc, decl_line as u16)];
+            m.lnt = lnt
+                .map(|(pc, line)| (pc, line as u16))
+                .into_iter()
+                .collect();
             m.lvt = lvt;
         }
     }
