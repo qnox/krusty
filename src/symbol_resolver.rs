@@ -27,7 +27,7 @@ type GSigBinds = std::collections::HashMap<String, Ty>;
 
 /// [`crate::assignable::TypeOracle`] over a federated [`SymbolSource`] (module ∪ classpath): the class
 /// hierarchy walk the one assignability relation needs. Kotlin-name supertypes, no JVM canonicalization —
-/// source-type space, as `source_receiver_rank` uses.
+/// source-type space, as `ReceiverMro` uses.
 pub(crate) struct SourceOracle<'a>(pub &'a dyn SymbolSource);
 
 impl crate::assignable::TypeOracle for SourceOracle<'_> {
@@ -326,7 +326,7 @@ fn arg_fits_platform(lib: &dyn SemanticPlatform, param: &Ty, arg: &Ty) -> bool {
 }
 
 /// Extension overloads of a receiver-filtered set, ordered most-specific-first by the SOURCE receiver rank
-/// (the same `source_receiver_rank` the overload selector uses) rather than the provider's baked
+/// (the same `ReceiverMro` ranking the overload selector uses) rather than the provider's baked
 /// `receiver_rank`. The provider ranks a primitive-array family by enumeration order — every `IntArray`/
 /// `CharArray`/… overload ties at the array rung — so `IntArray.any`'s block parameter would tie with
 /// `CharArray.any`'s and the wrong one (`(Char)->…`) could win. Ranking by the actual receiver drops the
@@ -338,6 +338,7 @@ pub(crate) fn ranked_extension_overloads_by_recv<'a>(
     fs: &'a FunctionSet,
     allow_must_inline: bool,
 ) -> Vec<&'a FunctionInfo> {
+    let mro = ReceiverMro::new(src, receiver);
     let mut out: Vec<(u32, &FunctionInfo)> = fs
         .overloads
         .iter()
@@ -351,7 +352,7 @@ pub(crate) fn ranked_extension_overloads_by_recv<'a>(
             // dropped (both callers gate on `generic_sig` anyway). This drops the non-applicable
             // primitive-array siblings that `o.receiver` would falsely tie at rung 0.
             let decl = o.generic_sig.as_ref().and_then(|g| g.receiver)?;
-            source_receiver_rank(src, receiver, decl).map(|r| (r, o))
+            mro.rank(src, decl).map(|r| (r, o))
         })
         .collect();
     out.sort_by_key(|(r, _)| *r);
@@ -725,6 +726,8 @@ impl<'a> SymbolResolver<'a> {
                 .and_then(|o| self.build_extension_callable(name, ty, args, type_args, &o));
                 // The getter of an in-scope classpath extension PROPERTY `recv.name` — its `@Metadata`
                 // accessor at the most-specific applicable receiver rung, read-value results only.
+                // ONE receiver-closure BFS ranks every property AND extension candidate below.
+                let recv_mro = ReceiverMro::new(&self.src, ty);
                 let extension_property_getter = self
                     .symbols_in_scope(name)
                     .into_iter()
@@ -735,7 +738,7 @@ impl<'a> SymbolResolver<'a> {
                     .filter(|p| p.kind == PropKind::Extension)
                     .filter_map(|p| {
                         let decl_recv = ty_subst(p.receiver?, &std::collections::HashMap::new());
-                        let rank = source_receiver_rank(&self.src, ty, decl_recv)?;
+                        let rank = recv_mro.rank(&self.src, decl_recv)?;
                         Some((rank, p))
                     })
                     .min_by_key(|(rank, _)| *rank)
@@ -756,7 +759,7 @@ impl<'a> SymbolResolver<'a> {
                             .filter(|o| {
                                 o.is_extension()
                                     && o.receiver
-                                        .and_then(|dr| source_receiver_rank(&self.src, ty, dr))
+                                        .and_then(|dr| recv_mro.rank(&self.src, dr))
                                         .is_some()
                             }),
                     );
@@ -1927,13 +1930,13 @@ fn select_instance_info(
 /// because the erased `I`/`Object` descriptors tied distinct value classes together.
 /// Whether the declared receiver's type arguments are consistent with the actual receiver's, position by
 /// position, under Kotlin's COVARIANT reading of a receiver position: each actual argument must be
-/// assignable to the declared one (`source_receiver_rank` reaching from actual to declared). A declared
+/// assignable to the declared one (`ReceiverMro::rank` reaching from actual to declared). A declared
 /// argument that is a type variable or `Any`/`Object` is a wildcard (an `Iterable<T>` / erased
 /// `Iterable<Any>` extension binds any element). This rejects the `@JvmName` reduction variant whose
 /// element does not match (`Iterable<Byte>.averageOfByte` against a `List<Double>` — `Double` is not
 /// assignable to `Byte`) while accepting a nested-generic supertype (`Iterable<Iterable<T>>.flatten`
 /// against `List<List<Int>>` — `List<Int>` IS assignable to `Iterable<Any>`). The erased supertype walk
-/// in `source_receiver_rank` alone keys on the outer class only, so it would tie the reduction variants.
+/// in `ReceiverMro` alone keys on the outer class only, so it would tie the reduction variants.
 fn receiver_type_args_match(src: &dyn SymbolSource, decl_recv: Ty, recv: Ty) -> bool {
     // Each actual argument must be assignable to the declared one under Kotlin's covariant receiver
     // reading. A declared argument that is a type variable or erased `Any` is a WILDCARD — the metadata
@@ -1957,52 +1960,73 @@ fn receiver_type_args_match(src: &dyn SymbolSource, decl_recv: Ty, recv: Ty) -> 
         })
 }
 
-pub(crate) fn source_receiver_rank(src: &dyn SymbolSource, recv: Ty, decl_recv: Ty) -> Option<u32> {
-    // Same source type — rung 0. Plain `Ty` equality (interned, NO erasure): the exact receiver an
-    // extension is declared on. This is the ONLY rank an ARRAY receiver (`IntArray.sum()`) can carry
-    // besides the universal `Any` — an array has no class-name key for the supertype walk below, and its
-    // element type must be matched exactly (an `IntArray` extension must not bind an `Array<String>`).
-    if recv.non_null() == decl_recv.non_null() {
-        return Some(0);
-    }
-    // A concrete type argument on the declared receiver must match the actual receiver's — the
-    // `@JvmName` reduction families (`average`/`sum`) declare one overload per element (`averageOfByte`
-    // on `Iterable<Byte>`, `…OfDouble` on `Iterable<Double>`), all erasing to the same class, so the
-    // supertype walk below would tie them and pick the first. `Iterable<Double>` binds a `List<Double>`
-    // receiver; `Iterable<Byte>` does not. A type-variable argument (`Iterable<T>.map`, projected to
-    // `Any`) matches anything, so generic extensions are untouched.
-    if !receiver_type_args_match(src, decl_recv, recv) {
-        return None;
-    }
-    let want = decl_recv.erased_recv().kotlin_class_internal();
-    if let (Some(want), Some(start)) = (want, recv.erased_recv().kotlin_class_internal()) {
-        let mut seen = std::collections::HashSet::new();
-        let mut frontier = vec![start];
-        let mut rung = 0u32;
-        while !frontier.is_empty() {
-            if frontier.contains(&want) {
-                return Some(rung);
-            }
-            let mut next = Vec::new();
-            for &ty in &frontier {
-                if !seen.insert(ty) {
-                    continue;
-                }
-                if let Some(shape) = src.resolve_type_name(ty) {
-                    for supertype in shape.supertypes.iter_ids() {
-                        if !seen.contains(&supertype) {
-                            next.push(supertype);
+/// The receiver's erased supertype closure with its BFS rungs, computed ONCE per receiver and probed
+/// per candidate. Every rank query used to run a fresh supertype BFS (hash-set churn included) per
+/// candidate even though the receiver is FIXED across a call site's whole candidate set. The closure
+/// is small (a handful of supertypes), so a `Vec` probe beats hashing.
+pub(crate) struct ReceiverMro {
+    recv: Ty,
+    /// `(erased class, BFS rung)` in first-seen (breadth-first) order — each class's MINIMAL rung.
+    /// Empty for a receiver with no class-name key (an array): such a receiver ranks only by exact
+    /// `Ty` equality or the universal `Any` fallback, exactly as the per-candidate BFS did.
+    ranks: Vec<(crate::types::TypeName, u32)>,
+}
+
+impl ReceiverMro {
+    pub(crate) fn new(src: &dyn SymbolSource, recv: Ty) -> ReceiverMro {
+        let mut ranks: Vec<(crate::types::TypeName, u32)> = Vec::new();
+        if let Some(start) = recv.erased_recv().kotlin_class_internal() {
+            let mut frontier = vec![start];
+            let mut rung = 0u32;
+            while !frontier.is_empty() {
+                let mut next = Vec::new();
+                for &ty in &frontier {
+                    if ranks.iter().any(|&(t, _)| t == ty) {
+                        continue;
+                    }
+                    ranks.push((ty, rung));
+                    if let Some(shape) = src.resolve_type_name(ty) {
+                        for supertype in shape.supertypes.iter_ids() {
+                            if !ranks.iter().any(|&(t, _)| t == supertype) {
+                                next.push(supertype);
+                            }
                         }
                     }
                 }
+                frontier = next;
+                rung += 1;
             }
-            frontier = next;
-            rung += 1;
         }
+        ReceiverMro { recv, ranks }
     }
-    // A universal `Any`-receiver extension (`<T> T.let`) applies to every receiver — arrays included — at
-    // lowest precedence.
-    (want.is_some_and(|n| n.matches("kotlin/Any"))).then_some(u32::MAX - 1)
+
+    pub(crate) fn rank(&self, src: &dyn SymbolSource, decl_recv: Ty) -> Option<u32> {
+        // Same source type — rung 0. Plain `Ty` equality (interned, NO erasure): the exact receiver an
+        // extension is declared on. This is the ONLY rank an ARRAY receiver (`IntArray.sum()`) can carry
+        // besides the universal `Any` — an array has no class-name key in the closure, and its
+        // element type must be matched exactly (an `IntArray` extension must not bind an `Array<String>`).
+        if self.recv.non_null() == decl_recv.non_null() {
+            return Some(0);
+        }
+        // A concrete type argument on the declared receiver must match the actual receiver's — the
+        // `@JvmName` reduction families (`average`/`sum`) declare one overload per element (`averageOfByte`
+        // on `Iterable<Byte>`, `…OfDouble` on `Iterable<Double>`), all erasing to the same class, so the
+        // closure probe below would tie them and pick the first. `Iterable<Double>` binds a `List<Double>`
+        // receiver; `Iterable<Byte>` does not. A type-variable argument (`Iterable<T>.map`, projected to
+        // `Any`) matches anything, so generic extensions are untouched.
+        if !receiver_type_args_match(src, decl_recv, self.recv) {
+            return None;
+        }
+        let want = decl_recv.erased_recv().kotlin_class_internal();
+        if let Some(want) = want {
+            if let Some(&(_, rung)) = self.ranks.iter().find(|&&(t, _)| t == want) {
+                return Some(rung);
+            }
+        }
+        // A universal `Any`-receiver extension (`<T> T.let`) applies to every receiver — arrays included
+        // — at lowest precedence.
+        (want.is_some_and(|n| n.matches("kotlin/Any"))).then_some(u32::MAX - 1)
+    }
 }
 
 pub(crate) fn resolve_symbols_in_scope(
@@ -2090,17 +2114,34 @@ fn select_overload(
     // in-scope packages (scope-pruned, tree-driven), so an unqualified extension binds only when its
     // facade's package is imported. No import scope → the whole-classpath `functions()` fallback
     // (removed once every consumer is scoped — task A). MEMBERS are always visible on their type.
-    let fs = match kind {
-        // A MEMBER's return can be RECEIVER-COUPLED (`Repo<Cfg>.byId(): Cfg`, a suspend `Continuation<T>`
-        // bound from the receiver's type argument) — recovery the receiver-agnostic `resolve_type` cannot
-        // do — so member candidates come from the platform's receiver-aware member query. EXTENSIONS come
-        // from the scope-pruned `resolve_symbols` seam (empty when there is no import scope).
+    // A MEMBER's return can be RECEIVER-COUPLED (`Repo<Cfg>.byId(): Cfg`, a suspend `Continuation<T>`
+    // bound from the receiver's type argument) — recovery the receiver-agnostic `resolve_type` cannot
+    // do — so member candidates come from the platform's receiver-aware member query. EXTENSIONS come
+    // from the scope-pruned `resolve_symbols` seam (empty when there is no import scope). Extension
+    // candidates are BORROWED from the `Rc`-shared namespace records (kept alive in `ext_records`) —
+    // deep-cloning every overload's `FunctionInfo` (params, call-sig vecs, generic sig) per call site
+    // only to discard all but the winner dominated selection; only the selected overload is cloned.
+    let member_set = match kind {
         FnKind::Member => lib.member_overloads(recv, name),
-        FnKind::Extension => ext
-            .fn_scope
-            .map(|scope| function_set_from_symbols(resolve_symbols_in_scope(lib, name, scope)))
-            .unwrap_or_default(),
-        FnKind::TopLevel => FunctionSet::default(),
+        _ => FunctionSet::default(),
+    };
+    let ext_records = match (kind, ext.fn_scope) {
+        (FnKind::Extension, Some(scope)) => resolve_symbols_in_scope(lib, name, scope),
+        _ => Vec::new(),
+    };
+    let overloads: Vec<&FunctionInfo> = match kind {
+        FnKind::Member => member_set.overloads.iter().collect(),
+        FnKind::Extension => ext_records
+            .iter()
+            .flat_map(|(_, r)| {
+                let fns: &[FunctionInfo] = match &r.callables {
+                    crate::libraries::Callables::Functions(f) => &f.overloads,
+                    _ => &[],
+                };
+                fns.iter()
+            })
+            .collect(),
+        FnKind::TopLevel => Vec::new(),
     };
     // Candidates from the scoped query are IN-SCOPE by construction: each came from a `resolve_symbols`
     // over an imported package, so its declared package is in scope even when `@JvmPackageName` relocated
@@ -2112,9 +2153,9 @@ fn select_overload(
         "resolve",
         "select_overload name={name} recv={recv:?} kind={kind:?} scope={:?} cands={}",
         ext.fn_scope.map(|scope| scope.len()),
-        fs.overloads.len(),
+        overloads.len(),
     );
-    for o in &fs.overloads {
+    for o in &overloads {
         crate::trace_compiler!(
             "resolve",
             "  raw {name} kind={:?} recv={:?} pub={} rank={} origin={:?} owner={}",
@@ -2128,9 +2169,12 @@ fn select_overload(
     }
     // Candidates as `(overload, logical value params)`, grouped by receiver rank. An extension admits only
     // public overloads unless the caller is the bytecode inliner (which splices non-public `@InlineOnly`).
+    // The receiver's supertype closure is BFS-walked once here and probed per candidate below.
+    let recv_mro =
+        (kind == FnKind::Extension && !overloads.is_empty()).then(|| ReceiverMro::new(lib, recv));
     let mut by_rank: std::collections::BTreeMap<u32, Vec<(&FunctionInfo, Vec<Ty>)>> =
         std::collections::BTreeMap::new();
-    for o in fs.overloads.iter().filter(|o| {
+    for o in overloads.iter().copied().filter(|&o| {
         o.kind == kind
             && (kind != FnKind::Extension
                 || (o.receiver_rank != u32::MAX
@@ -2142,10 +2186,7 @@ fn select_overload(
         // one) still holds. A candidate whose declared receiver is NOT in the receiver's supertype closure
         // does not apply — drop it. Members and lambda-return (`u32::MAX`) keep their provider rank.
         let rank = if kind == FnKind::Extension {
-            match o
-                .receiver
-                .and_then(|dr| source_receiver_rank(lib, recv, dr))
-            {
+            match o.receiver.and_then(|dr| recv_mro.as_ref()?.rank(lib, dr)) {
                 Some(r) => r,
                 None => {
                     crate::trace_compiler!(
@@ -2519,16 +2560,16 @@ mod tests {
     }
 
     #[test]
-    fn source_receiver_rank_walks_supertypes() {
+    fn receiver_mro_walks_supertypes() {
         let src = FakeSource {
             name: "unused",
             receiver: None,
             info: top_level_nullable_string_info(),
         };
-        assert_eq!(
-            source_receiver_rank(&src, Ty::obj("demo/Leaf"), Ty::obj("demo/Base")),
-            Some(2)
-        );
+        let mro = ReceiverMro::new(&src, Ty::obj("demo/Leaf"));
+        assert_eq!(mro.rank(&src, Ty::obj("demo/Base")), Some(2));
+        assert_eq!(mro.rank(&src, Ty::obj("demo/Leaf")), Some(0));
+        assert_eq!(mro.rank(&src, Ty::obj("demo/Unrelated")), None);
     }
 
     #[test]

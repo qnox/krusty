@@ -202,58 +202,7 @@ impl Backend for JvmBackend {
             );
             return outputs;
         }
-        // `@kotlin.Metadata` for the facade: each top-level `suspend fun` is recorded with `IS_SUSPEND`
-        // and its LOGICAL signature, so another krusty/kotlinc compilation resolves a call to it (a
-        // suspend fn's physical method is `Object foo(…, Continuation)` — only `@Metadata` distinguishes
-        // it). Emitted only when the file has top-level suspend functions; non-suspend facades resolve
-        // fine from their physical descriptors, so they keep emitting no `@Metadata` (unchanged).
-        let susp_metas: Vec<crate::metadata::builder::FnMeta> = file
-            .decls
-            .iter()
-            .filter_map(|&d| {
-                let Decl::Fun(f) = file.decl(d) else {
-                    return None;
-                };
-                if !f.is_suspend || f.receiver.is_some() || f.is_inline {
-                    return None;
-                }
-                let sig = syms.funs.get(&f.name)?.iter().find(|s| s.is_suspend)?;
-                let params: Vec<_> = sig
-                    .param_names
-                    .iter()
-                    .cloned()
-                    .zip(sig.params.iter().copied())
-                    .collect();
-                // Physical CPS descriptor: the logical params then a trailing `Continuation`, returning
-                // the erased `Object`.
-                let pdescs: String = sig.params.iter().map(|t| type_descriptor(*t)).collect();
-                let jvm_desc =
-                    format!("({pdescs}Lkotlin/coroutines/Continuation;)Ljava/lang/Object;");
-                Some(crate::metadata::builder::FnMeta {
-                    name: f.name.clone(),
-                    params,
-                    ret: sig.ret,
-                    receiver: None,
-                    param_fun_recvs: Vec::new(),
-                    param_defaults: Vec::new(),
-                    suspend: true,
-                    jvm_desc: Some(jvm_desc),
-                })
-            })
-            .collect();
-        let metadata = (!susp_metas.is_empty()).then(|| {
-            let (d1_bytes, d2) = crate::metadata::builder::build_package(&susp_metas, &[]);
-            // `d1` is the protobuf payload with one byte per `char` (the constant pool writes it as
-            // modified-UTF-8, which the reader decodes back to the same bytes).
-            let d1: String = d1_bytes.iter().map(|&b| b as char).collect();
-            crate::jvm::ir_emit::KotlinMetadata {
-                k: 2,
-                mv: vec![2, 4, 0],
-                xi: 48,
-                d1: vec![d1],
-                d2,
-            }
-        });
+        let metadata = facade_package_metadata(file, checked.file_index, syms);
         // `emit_all` returns `None` when the IR uses a JVM-unsupported construct. Inline splice failures
         // are reported separately (via `run.inline_bail`): selected inline calls are required to splice,
         // so those are backend errors to fix rather than silent skips.
@@ -317,6 +266,153 @@ impl Backend for JvmBackend {
             module_bytes,
         )]
     }
+}
+
+/// The facade's `@kotlin.Metadata` (`k = 2`, file facade), recording every NON-INLINE top-level
+/// function — plain and EXTENSION, suspend included — with its LOGICAL source signature. The physical
+/// descriptor alone cannot express an extension's receiver (it is just the first JVM parameter) or a
+/// suspend fn's source shape (the CPS form appends a `Continuation`), so a SEPARATE compilation
+/// reading this facade from the classpath needs the metadata to resolve those calls — kotlinc always
+/// writes it. Inline functions stay unrecorded: the builder carries no `IS_INLINE` flag yet, and
+/// advertising an inline fn as a plain callable would mis-resolve it. `None` when the file declares
+/// no recordable top-level function (the facade is emitted bare, as before).
+pub fn facade_package_metadata(
+    file: &File,
+    file_index: u32,
+    syms: &FrontendSymbols,
+) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
+    let mut metas: Vec<crate::metadata::builder::FnMeta> = Vec::new();
+    for &d in &file.decls {
+        let Decl::Fun(f) = file.decl(d) else { continue };
+        if f.is_inline {
+            continue;
+        }
+        // The decl's collected signature: a plain fn under `funs[name]`, an extension under
+        // `ext_funs[(erased receiver, name)]` — matched by source decl id so overloads can't mix.
+        let (sig, receiver) = if f.receiver.is_some() {
+            let Some((recv, sig)) = syms.ext_funs.iter().find_map(|((recv, name), sigs)| {
+                (*name == f.name)
+                    .then(|| {
+                        sigs.iter()
+                            .find(|s| s.source_decl == Some(d) && s.source_file == Some(file_index))
+                            .map(|s| (*recv, s))
+                    })
+                    .flatten()
+            }) else {
+                continue;
+            };
+            (sig, Some(recv))
+        } else {
+            let Some(sig) = syms.funs.get(&f.name).and_then(|sigs| {
+                sigs.iter()
+                    .find(|s| s.source_decl == Some(d) && s.source_file == Some(file_index))
+            }) else {
+                continue;
+            };
+            (sig, None)
+        };
+        let params: Vec<_> = sig
+            .param_names
+            .iter()
+            .cloned()
+            .zip(sig.params.iter().copied())
+            .collect();
+        // Per-parameter receiver function types (`Recv.(…) -> R`): the reader recovers lambda `this`
+        // binding from the `@kotlin.ExtensionFunctionType` mark this drives.
+        let param_fun_recvs: Vec<Option<Ty>> = sig
+            .lambda_recv
+            .iter()
+            .enumerate()
+            .map(|(i, &is_recv)| {
+                is_recv
+                    .then(|| {
+                        sig.lambda_param_types
+                            .get(i)
+                            .and_then(|t| t.first())
+                            .copied()
+                    })
+                    .flatten()
+            })
+            .collect();
+        // A `suspend fun`'s PHYSICAL method appends a `Continuation` and erases the return; record
+        // the emit handle so a reader aligns the logical signature with the CPS method. A normal
+        // fn's method is name + logical descriptor — recoverable without a recorded handle.
+        let jvm_desc = f.is_suspend.then(|| {
+            let mut p = String::new();
+            if let Some(r) = receiver {
+                p.push_str(&crate::jvm::names::type_descriptor(r));
+            }
+            for t in &sig.params {
+                p.push_str(&crate::jvm::names::type_descriptor(*t));
+            }
+            format!("({p}Lkotlin/coroutines/Continuation;)Ljava/lang/Object;")
+        });
+        metas.push(crate::metadata::builder::FnMeta {
+            name: f.name.clone(),
+            params,
+            ret: sig.ret,
+            receiver,
+            param_fun_recvs,
+            param_defaults: sig.param_defaults.clone(),
+            suspend: f.is_suspend,
+            jvm_desc,
+        });
+    }
+    // Extension PROPERTIES (`val String.doubled`): the accessor is a static `getName(Recv)` whose
+    // descriptor cannot mark receiver-ness — only `Property.receiver_type` in the metadata does.
+    // Plain top-level properties keep resolving through the facade's static fields (unrecorded, as
+    // before).
+    let mut prop_metas: Vec<crate::metadata::builder::PropMeta> = Vec::new();
+    for &d in &file.decls {
+        let Decl::Property(p) = file.decl(d) else {
+            continue;
+        };
+        if p.receiver.is_none() {
+            continue;
+        }
+        // Match by the SOURCE declaration, not the name — two extension properties may share a name
+        // on different receivers (`val String.x` / `val Int.x`); the source key picks this decl's.
+        let Some(((recv, _), prop_sig)) = syms
+            .ext_props
+            .iter()
+            .find(|(_, sig)| sig.source == (file_index, d.0))
+        else {
+            continue;
+        };
+        let (ty, is_var) = (prop_sig.ty, prop_sig.is_var);
+        let recv = *recv;
+        let cap = {
+            let mut c = p.name.chars();
+            c.next()
+                .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                .unwrap_or_default()
+        };
+        let recv_desc = crate::jvm::names::type_descriptor(recv);
+        let ty_desc = crate::jvm::names::type_descriptor(ty);
+        let getter = (format!("get{cap}"), format!("({recv_desc}){ty_desc}"));
+        let setter = is_var.then(|| (format!("set{cap}"), format!("({recv_desc}{ty_desc})V")));
+        prop_metas.push(crate::metadata::builder::PropMeta {
+            name: p.name.clone(),
+            ty,
+            is_var,
+            receiver: Some(recv),
+            getter,
+            setter,
+        });
+    }
+    (!metas.is_empty() || !prop_metas.is_empty()).then(|| {
+        let (d1_bytes, d2) = crate::metadata::builder::build_package(&metas, &prop_metas);
+        // `d1` is the protobuf payload with one byte per `char` (the constant pool writes it as
+        // modified-UTF-8, which the reader decodes back to the same bytes).
+        let d1: String = d1_bytes.iter().map(|&b| b as char).collect();
+        crate::jvm::ir_emit::KotlinMetadata {
+            k: 2,
+            mv: vec![2, 4, 0],
+            xi: 48,
+            d1: vec![d1],
+            d2,
+        }
+    })
 }
 
 #[cfg(test)]

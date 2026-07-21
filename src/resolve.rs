@@ -358,6 +358,15 @@ impl ClassNames {
     }
 }
 
+/// A collected TOP-LEVEL extension property: its declared type, mutability, and the source
+/// declaration key (file index, decl id) — how the backend's facade-metadata builder matches a
+/// declaration to its record without guessing by name (same-name properties may differ by receiver).
+pub struct ExtPropSig {
+    pub ty: Ty,
+    pub is_var: bool,
+    pub source: (u32, u32),
+}
+
 pub struct SymbolTable {
     /// Top-level functions by name. A name maps to ALL its overloads (Kotlin allows same-name functions
     /// distinguished by parameter signature); a call selects one via [`pick_overload`]. Most names have
@@ -387,7 +396,7 @@ pub struct SymbolTable {
     pub ext_funs: HashMap<(Ty, String), Vec<Signature>>,
     /// Top-level extension properties: (erased receiver, prop_name) → (type, is_var). The
     /// getter/setter are emitted as static `getName(Recv)`/`setName(Recv, T)` methods.
-    pub ext_props: HashMap<(Ty, String), (Ty, bool)>,
+    pub ext_props: HashMap<(Ty, String), ExtPropSig>,
     /// Simple type name → JVM internal name: every resolvable reference type — user/classpath
     /// classes, classpath `TypeAliasesKt` aliases, and the ported `JavaToKotlinClassMap`
     /// built-ins. The single source of truth for "does this type name resolve, and to what".
@@ -447,7 +456,8 @@ impl SymbolTable {
     pub fn ext_prop(&self, recv: Ty, name: &str) -> Option<(Ty, bool)> {
         recv.erased_recv_candidates()
             .into_iter()
-            .find_map(|k| self.ext_props.get(&(k, name.to_string())).copied())
+            .find_map(|k| self.ext_props.get(&(k, name.to_string())))
+            .map(|s| (s.ty, s.is_var))
     }
 
     pub fn single_fun(&self, name: &str) -> Option<Signature> {
@@ -2450,7 +2460,14 @@ pub fn collect_signatures_with_cp(
                             if table.ext_props.contains_key(&key) {
                                 diags.error(p.span, format!("krusty: conflicting extension property '{}' (same erased receiver)", p.name));
                             }
-                            table.ext_props.insert(key, (ty, p.is_var));
+                            table.ext_props.insert(
+                                key,
+                                ExtPropSig {
+                                    ty,
+                                    is_var: p.is_var,
+                                    source: (i as u32, d.0),
+                                },
+                            );
                         }
                         continue;
                     }
@@ -5607,7 +5624,7 @@ pub fn check_file_at(
                                 c.syms
                                     .ext_props
                                     .get(&(rt.erased_recv(), p.name.clone()))
-                                    .map(|&(t, _)| t)
+                                    .map(|s| s.ty)
                             })
                         })
                         .unwrap_or(Ty::Error);
@@ -6046,6 +6063,7 @@ impl<'a> Checker<'a> {
             return None;
         }
         let src = self.fed_source();
+        let mro = crate::symbol_resolver::ReceiverMro::new(&src, receiver);
         self.resolver()
             .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
             .map(crate::symbol_resolver::Symbol::overloads)
@@ -6056,9 +6074,9 @@ impl<'a> Checker<'a> {
                     && !matches!(o.callable.origin, crate::libraries::Origin::Module { .. })
                     && o.callable.ret == lambda_ret
                     && match o.kind {
-                        crate::libraries::FnKind::Extension => o.receiver.is_none_or(|dr| {
-                            crate::symbol_resolver::source_receiver_rank(&src, receiver, dr).is_some()
-                        }),
+                        crate::libraries::FnKind::Extension => {
+                            o.receiver.is_none_or(|dr| mro.rank(&src, dr).is_some())
+                        }
                         _ => true,
                     }
             })
@@ -6080,16 +6098,14 @@ impl<'a> Checker<'a> {
     /// (`Iterable<T>.sumOf { … }`), read from the selected overload family.
     fn lambda_return_overload_param_types(&self, receiver: Ty, name: &str) -> Option<Vec<Ty>> {
         let src = self.fed_source();
+        let mro = crate::symbol_resolver::ReceiverMro::new(&src, receiver);
         self.resolver()
             .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
             .map(crate::symbol_resolver::Symbol::overloads)
             .unwrap_or_default()
             .iter()
             .filter(|o| {
-                o.is_extension()
-                    && o.receiver.is_none_or(|dr| {
-                        crate::symbol_resolver::source_receiver_rank(&src, receiver, dr).is_some()
-                    })
+                o.is_extension() && o.receiver.is_none_or(|dr| mro.rank(&src, dr).is_some())
             })
             .find_map(|o| {
                 let gsig = o.generic_sig.as_ref()?;

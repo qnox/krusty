@@ -374,18 +374,6 @@ fn global_jimage_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, std::sync
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-/// Process-global extension/top-level-function index, keyed by the classpath path set. Scanning every
-/// jar's static methods is identical for a given classpath, so it happens once per process rather than
-/// once per worker thread (the box harness compiles thousands of files across all cores against the
-/// same stdlib classpath) — the same sharing as [`global_type_cache`]/[`global_jimage_cache`].
-fn global_ext_cache() -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<ExtIndex>>>
-{
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<ExtIndex>>>,
-    > = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-
 /// A process-global cache of a value derived from a SINGLE classpath entry (jar / dir / jimage), keyed
 /// by that entry's path. A jar's classes, extension statics, and type aliases are identical wherever the
 /// jar appears, so its contribution is built ONCE and shared by every classpath that includes it — a
@@ -423,19 +411,8 @@ fn push_id_dedup(m: &mut HashMap<String, Vec<NameId>>, key: &str, id: NameId) {
     }
 }
 
-fn push_name_from_dedup(
-    names: &mut NameTree,
-    m: &mut HashMap<String, Vec<NameId>>,
-    key: &str,
-    source_names: &NameTree,
-    source_id: NameId,
-) {
-    let id = names.insert_from(source_names, source_id);
-    push_id_dedup(m, key, id);
-}
-
-/// Per-ENTRY extension-index contributions (one per jar/dir), composed per classpath by
-/// [`Classpath::ensure_ext_index`]. See [`EntryCache`].
+/// Per-ENTRY extension-index contributions (one per jar/dir), unioned per queried name by
+/// [`Classpath::ext_parts`]'s consumers. See [`EntryCache`].
 fn global_entry_ext() -> &'static EntryCache<EntryExt> {
     static CACHE: std::sync::OnceLock<EntryCache<EntryExt>> = std::sync::OnceLock::new();
     CACHE.get_or_init(EntryCache::new)
@@ -646,29 +623,13 @@ pub struct ExtCandidate {
     pub public: bool,
 }
 
-/// Lazy index of static methods grouped by `(first_param_descriptor, method_name)`. Built on
-/// first use from all entries in the classpath.
-/// A LAZY index of the classpath's static (top-level + extension) functions. Only the small "where" map
-/// is retained — `name → the facade/part ROOT classes that declare a static of that name`; the full
-/// candidate records (descriptors, signatures) are REBUILT on query from each root's `ClassInfo` (which
-/// the L1/L2 caches already hold), via [`Classpath::rebuild_ext_candidate_records`]. This keeps ~a few MB
-/// of name/owner strings resident instead of materializing every stdlib static twice (the old eager index
-/// was the single largest retained allocation — ~195 MB — per heap profiling).
-#[derive(Default)]
-struct ExtIndex {
-    owner_names: NameTree,
-    /// method name → facade/part ROOT class names whose super-walk declares a static of that name.
-    by_name: HashMap<String, Vec<NameId>>,
-    /// receiver descriptor → the owner facades that declare an extension on it (for `find_extension_owners`).
-    by_recv_owners: HashMap<String, Vec<NameId>>,
-    /// Names `@Metadata` marks as GENUINE top-level (a receiver-less function, never an extension) — these
-    /// are never keyed by their first parameter, so `find_extensions` must not return them for any receiver.
-    toplevel_only: std::collections::HashSet<String>,
-}
-
-/// ONE classpath entry's contribution to the extension index, built once per jar/dir and composed per
-/// classpath (see [`EntryCache`] / [`Classpath::ensure_ext_index`]). `by_recv_raw` stays UNFILTERED — the
-/// `toplevel_only` decision is global across the whole cp, so it can only be applied when composing.
+/// ONE classpath entry's contribution to the extension/top-level-function index, built once per
+/// jar/dir (see [`EntryCache`]) and queried PER NAME by the ext lookups — there is no composed
+/// whole-classpath index anymore. Composing one (`name → roots` over every stdlib name) was re-done
+/// for every distinct classpath vector (each MODULE-test cp), and the queried working set is a tiny
+/// fraction of it; the lookups now union the per-entry maps for just the queried name/receiver.
+/// `by_recv_raw` stays UNFILTERED — the `toplevel_only` decision (`union(top) - union(ext)`) is
+/// global across the whole cp, so it is applied per queried name at lookup time.
 #[derive(Default)]
 struct EntryExt {
     owner_names: NameTree,
@@ -961,7 +922,9 @@ pub struct Classpath {
     /// once, then read class bytes lazily on demand. Profiling showed the per-read re-parse dominated
     /// type checking. Lives behind a `RefCell` (one `Classpath` per thread; never shared across threads).
     archives: RefCell<HashMap<PathBuf, zip::ZipArchive<File>>>,
-    ext: RefCell<Option<std::sync::Arc<ExtIndex>>>,
+    /// Per-entry ext contributions (each cached process-globally by its path), fetched once per
+    /// instance. The ext lookups union these per queried name — no composed whole-cp index.
+    ext: RefCell<Option<std::rc::Rc<Vec<std::sync::Arc<EntryExt>>>>>,
     types: RefCell<Option<std::sync::Arc<TypeIndex>>>,
     /// The composed package table (`package NameId → PackageNode`, each node listing the jars that declare
     /// that package) — the merged classpath view name resolution walks. Composed once from the per-jar
@@ -1003,6 +966,10 @@ pub struct Classpath {
     /// the process-global L2 where the one-time rebuild lives. Both hold only QUERIED names (the working set).
     ext_l1: RefCell<crate::lru::LruCache<String, std::sync::Arc<ExtByName>>>,
     ext_candidates: ExtCandCache,
+    /// Memoized [`Self::facade_statics`] per facade root — `facade_method` walks the same facade's
+    /// super chain for every extension emit-handle lookup, so the candidate vec is built once and
+    /// shared behind `Rc`. Bounded by the queried facades (the working set).
+    facade_statics_memo: RefCell<crate::lru::LruCache<TypeName, std::rc::Rc<Vec<ExtCandidate>>>>,
     /// The spec's top-level memo: `fqn → ResolvedSymbols` (the namespace record — classifier + callables).
     /// The single result cache of the classpath `SymbolSource`: `resolve_symbols(fqn)` is composed once
     /// per name and reused across the compile (the per-(jar,package) parses are the intermediate caches).
@@ -1083,6 +1050,7 @@ impl Classpath {
             builtin_members: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             ext_l1: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
             ext_candidates: global_ext_candidates(&cache_key),
+            facade_statics_memo: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             symbols_memo: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
             id,
         }
@@ -1109,11 +1077,14 @@ impl Classpath {
             .borrow()
             .as_ref()
             .map_or(0, |i| i.type_aliases.len());
-        let ext = self
-            .ext
-            .borrow()
-            .as_ref()
-            .map_or(0, |i| i.by_name.len() + i.by_recv_owners.len());
+        // RAW per-entry map sizes (unfiltered, undeduplicated) — the retained footprint, which is what
+        // this memory diagnostic tracks; there is no composed per-cp index anymore.
+        let ext = self.ext.borrow().as_ref().map_or(0, |parts| {
+            parts
+                .iter()
+                .map(|p| p.by_name.len() + p.by_recv_raw.len())
+                .sum()
+        });
         let pkgtree = self
             .pkg_tree
             .borrow()
@@ -1469,17 +1440,25 @@ impl Classpath {
     /// Every distinct owner (facade) that declares a static method whose first parameter matches
     /// `receiver_desc` — the facades to consult for a Kotlin-name resolution (`sumOf`).
     pub fn find_extension_owners(&self, receiver_desc: &str) -> Vec<TypeName> {
-        self.ensure_ext_index();
-        let ext = self.ext.borrow().as_ref().cloned();
-        ext.and_then(|idx| {
-            idx.by_recv_owners.get(receiver_desc).map(|owners| {
-                owners
-                    .iter()
-                    .map(|&id| type_name_from(&idx.owner_names, id))
-                    .collect()
-            })
-        })
-        .unwrap_or_default()
+        // Union the per-entry receiver records for THIS descriptor, dropping genuine top-level names
+        // (never reachable via a receiver) — the same filter the composed index applied while merging.
+        // Owners keep entry order and dedup across names/entries.
+        let mut out: Vec<TypeName> = Vec::new();
+        for p in self.ext_parts().iter() {
+            let Some(statics) = p.by_recv_raw.get(receiver_desc) else {
+                continue;
+            };
+            for (name, owner) in statics {
+                if self.ext_toplevel_only(name) {
+                    continue;
+                }
+                let owner = type_name_from(&p.owner_names, *owner);
+                if !out.contains(&owner) {
+                    out.push(owner);
+                }
+            }
+        }
+        out
     }
 
     /// Rebuild the [`ExtCandidate`]s a facade/part `root` contributes for `name` — the lazy counterpart of
@@ -2089,14 +2068,8 @@ impl Classpath {
     /// `receiver_desc` is a JVM type descriptor, e.g. `Ljava/lang/String;`.
     /// Returns all static methods in any classpath class whose first parameter matches.
     pub fn find_extensions(&self, receiver_desc: &str, method_name: &str) -> Vec<ExtCandidate> {
-        self.ensure_ext_index();
         // A genuine top-level name is never reachable via a receiver.
-        if self
-            .ext
-            .borrow()
-            .as_ref()
-            .is_some_and(|idx| idx.toplevel_only.contains(method_name))
-        {
+        if self.ext_toplevel_only(method_name) {
             return Vec::new();
         }
         // O(1): the rebuilt candidates are pre-grouped by receiver (first-parameter) descriptor.
@@ -2147,8 +2120,9 @@ impl Classpath {
         };
         let named: Vec<ExtCandidate> = self
             .facade_statics(root)
-            .into_iter()
+            .iter()
             .filter(|c| c.name == jvm_name)
+            .cloned()
             .collect();
         // Prefer the FULL parameter match (receiver + value params) — it disambiguates same-receiver
         // overloads that differ by value param. Fall back to receiver-only when the full descriptor is not
@@ -2191,8 +2165,22 @@ impl Classpath {
 
     /// Every static callable a facade `root` declares (all names), following the multifile-facade super
     /// chain — the name-agnostic form of [`Self::rebuild_ext_candidate_records`], used to build a package's
-    /// [`Self::pkg_members`] in one pass. Each `ClassInfo` is served from the L1/L2 cache.
-    fn facade_statics(&self, root: &str) -> Vec<ExtCandidate> {
+    /// [`Self::pkg_members`] in one pass. Each `ClassInfo` is served from the L1/L2 cache. Memoized per
+    /// root behind `Rc`: `facade_method` re-walks the same facade for every extension emit-handle lookup,
+    /// and rebuilding the candidate vec re-interned every owner name and re-split every descriptor.
+    fn facade_statics(&self, root: &str) -> std::rc::Rc<Vec<ExtCandidate>> {
+        let root_id = type_name(root);
+        if let Some(hit) = self.facade_statics_memo.borrow_mut().get(&root_id) {
+            return hit.clone();
+        }
+        let rc = std::rc::Rc::new(self.build_facade_statics(root));
+        self.facade_statics_memo
+            .borrow_mut()
+            .insert(root_id, rc.clone());
+        rc
+    }
+
+    fn build_facade_statics(&self, root: &str) -> Vec<ExtCandidate> {
         let mut out = Vec::new();
         let Some(root_ci) = self.find(root) else {
             return out;
@@ -2256,7 +2244,7 @@ impl Classpath {
                 }
                 let facade_id = m.owner_names.insert(facade);
                 let metas = self.meta_functions(facade);
-                for cand in self.facade_statics(facade) {
+                for cand in self.facade_statics(facade).iter() {
                     // Key each static by its @Metadata SOURCE name (`kotlin_name`), NOT its JVM name — a
                     // `@JvmName`-mangled extension (`sum` → `sumOfInt`) or value-class member resolves by
                     // the source name; the JVM name is emit-only, kept on the candidate. A static with no
@@ -2278,7 +2266,7 @@ impl Classpath {
                     let jvm_name = cand.name.clone();
                     let idx = m.candidates.len();
                     m.candidates
-                        .push(ExtCandidateRecord::from_candidate(facade_id, &cand));
+                        .push(ExtCandidateRecord::from_candidate(facade_id, cand));
                     m.by_jvm.entry(jvm_name).or_default().push(idx);
                     m.by_source.entry(source).or_default().push(idx);
                 }
@@ -2532,19 +2520,21 @@ impl Classpath {
             return hit;
         }
         cache_stat!(ext_l2, false);
-        self.ensure_ext_index();
-        // Clone the small owner list, releasing the `ext` borrow before `rebuild` (which borrows the class
-        // caches). Candidates are rebuilt from each owner's cached `ClassInfo`, then grouped by receiver.
-        let ext = self.ext.borrow().as_ref().cloned();
-        let roots = ext
-            .as_ref()
-            .and_then(|idx| idx.by_name.get(method_name).cloned())
-            .unwrap_or_default();
+        // Union the per-entry root lists for THIS name (entry order, dedup by rendered root — the same
+        // order the composed index's per-part merge produced), then rebuild candidates from each root's
+        // cached `ClassInfo`, grouped by receiver.
         let mut grouped = ExtByName::default();
-        if let Some(idx) = ext {
-            for root_id in roots {
-                let root = idx.owner_names.render(root_id);
-                let owner = grouped.owner_names.insert_from(&idx.owner_names, root_id);
+        let mut seen_roots: Vec<String> = Vec::new();
+        for p in self.ext_parts().iter() {
+            let Some(owners) = p.by_name.get(method_name) else {
+                continue;
+            };
+            for &owner_id in owners {
+                let root = p.owner_names.render(owner_id);
+                if seen_roots.contains(&root) {
+                    continue;
+                }
+                let owner = grouped.owner_names.insert_from(&p.owner_names, owner_id);
                 for cand in self.rebuild_ext_candidate_records(owner, &root, method_name) {
                     let cand_idx = grouped.all.len();
                     if let Some(recv) = descriptor_parts(&cand.descriptor).and_then(|(fp, _)| fp) {
@@ -2552,6 +2542,7 @@ impl Classpath {
                     }
                     grouped.all.push(cand);
                 }
+                seen_roots.push(root);
             }
         }
         let rc = std::sync::Arc::new(grouped);
@@ -2565,82 +2556,37 @@ impl Classpath {
         rc
     }
 
-    fn ensure_ext_index(&self) {
-        if self.ext.borrow().is_some() {
-            return;
+    /// The per-entry ext contributions, each scanned once per process (cached by entry path via
+    /// `global_entry_ext`) and fetched once per instance.
+    fn ext_parts(&self) -> std::rc::Rc<Vec<std::sync::Arc<EntryExt>>> {
+        if let Some(parts) = self.ext.borrow().as_ref() {
+            return parts.clone();
         }
-        let key: Vec<PathBuf> = self
-            .entries
-            .iter()
-            .map(|e| e.path().to_path_buf())
-            .collect();
-        if let Some(idx) = global_ext_cache().lock().unwrap().get(&key) {
-            *self.ext.borrow_mut() = Some(idx.clone());
-            return;
-        }
-        // Compose the index from PER-ENTRY contributions: each jar/dir is scanned once (cached by its
-        // path via `global_entry_ext`) and shared by every classpath that includes it, so a cp that only
-        // adds one library reuses the stdlib's cached scan instead of rescanning it (rescanning the whole
-        // stdlib per unique cp was ~30% of compile). Only the cross-entry `toplevel_only` decision — a
-        // name is top-level EVERYWHERE and never an extension — is global, so it is computed here, and the
-        // receiver keying (skip a `toplevel_only` name) is applied while merging.
-        let parts: Vec<std::sync::Arc<EntryExt>> = self
-            .entries
-            .iter()
-            .map(|e| global_entry_ext().get_or_build(e.path(), || build_entry_ext(e)))
-            .collect();
-        let mut top: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        let mut ext_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for p in &parts {
-            top.extend(p.toplevel_names.iter().map(String::as_str));
-            ext_names.extend(p.ext_names.iter().map(String::as_str));
-        }
-        let toplevel_only: std::collections::HashSet<String> = top
-            .iter()
-            .filter(|n| !ext_names.contains(*n))
-            .map(|s| s.to_string())
-            .collect();
-        let mut idx = ExtIndex {
-            toplevel_only,
-            ..ExtIndex::default()
-        };
-        for p in &parts {
-            for (name, owners) in &p.by_name {
-                for &owner in owners {
-                    push_name_from_dedup(
-                        &mut idx.owner_names,
-                        &mut idx.by_name,
-                        name,
-                        &p.owner_names,
-                        owner,
-                    );
-                }
-            }
-            for (recv, statics) in &p.by_recv_raw {
-                for (name, owner) in statics {
-                    if !idx.toplevel_only.contains(name) {
-                        push_name_from_dedup(
-                            &mut idx.owner_names,
-                            &mut idx.by_recv_owners,
-                            recv,
-                            &p.owner_names,
-                            *owner,
-                        );
-                    }
-                }
-            }
-        }
-        let idx = std::sync::Arc::new(idx);
-        global_ext_cache().lock().unwrap().insert(key, idx.clone());
-        *self.ext.borrow_mut() = Some(idx);
+        let parts: std::rc::Rc<Vec<std::sync::Arc<EntryExt>>> = std::rc::Rc::new(
+            self.entries
+                .iter()
+                .map(|e| global_entry_ext().get_or_build(e.path(), || build_entry_ext(e)))
+                .collect(),
+        );
+        *self.ext.borrow_mut() = Some(parts.clone());
+        parts
+    }
+
+    /// Whether `@Metadata` marks `name` as a GENUINE top-level function — top-level in some entry and
+    /// an extension in none — so `find_extensions` must not return it for any receiver. The cross-entry
+    /// union is evaluated per queried name instead of materializing a whole-cp set.
+    fn ext_toplevel_only(&self, name: &str) -> bool {
+        let parts = self.ext_parts();
+        parts.iter().any(|p| p.toplevel_names.contains(name))
+            && !parts.iter().any(|p| p.ext_names.contains(name))
     }
 }
 
 /// Scan ONE classpath entry into its [`EntryExt`] contribution: collect each class's lean record, then
 /// index the statics reachable via each class's super-walk WITHIN this entry (a Kotlin multifile facade
 /// and its `*___*Kt` part classes are compiled into the same jar, so the chain never crosses entries).
-/// The `toplevel_only` filter is a whole-classpath decision, so it is deferred to the per-cp compose in
-/// [`Classpath::ensure_ext_index`] — here every receiver-taking static is recorded raw in `by_recv_raw`.
+/// The `toplevel_only` filter is a whole-classpath decision, so it is deferred to the per-name lookup
+/// ([`Classpath::ext_toplevel_only`]) — here every receiver-taking static is recorded raw in `by_recv_raw`.
 fn build_entry_ext(entry: &Entry) -> EntryExt {
     let mut names = NameTree::default();
     let mut all: HashMap<NameId, ClassLite> = HashMap::new();
@@ -2866,6 +2812,30 @@ fn build_jar_packages_dir(root: &Path, dir: &Path, jp: &mut JarPackages) {
             }
         } else {
             record_pkg_entry_name(&rel, jp);
+            // A class DIRECTORY often carries no `META-INF/*.kotlin_module` (a jar build writes one;
+            // a separate-compilation output dir usually doesn't), which would leave its packages with
+            // an empty facade catalog — cross-module top-level/extension resolution silently blind.
+            // The catalog is fully recoverable from each class's own `@Metadata`: a file facade/part
+            // declares `Package` members, a multifile facade lists its parts. Record those classes as
+            // the package's facades, exactly as `kotlin_module` would have.
+            if rel.ends_with(".class") {
+                if let Some(ci) = std::fs::read(&p).ok().and_then(|b| parse_class(&b).ok()) {
+                    let m = &ci.meta;
+                    if !m.package_functions.is_empty()
+                        || !m.package_properties.is_empty()
+                        || !m.type_aliases.is_empty()
+                        || !m.multifile_parts.is_empty()
+                    {
+                        let internal = ci.this_class.render();
+                        let pkg = internal.rsplit_once('/').map_or("", |(p, _)| p);
+                        let facade_id = jp.names.insert(&internal);
+                        let entry = jp.entry_mut(pkg);
+                        if !entry.facades.contains(&facade_id) {
+                            entry.facades.push(facade_id);
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -3255,38 +3225,58 @@ mod fq_tests {
         assert_eq!(tree.len(), 5);
     }
 
+    // `toplevel_only` is a WHOLE-classpath decision evaluated per queried name: top-level in some
+    // entry and an extension in none. A name one entry marks top-level and another marks extension
+    // must stay receiver-reachable.
     #[test]
-    fn name_tree_copies_between_indexes_without_render_dedup() {
-        let entry_names = NameTree::default();
-        let collections = entry_names.insert("kotlin/collections/CollectionsKt");
-        let maps = entry_names.insert("kotlin/collections/MapsKt");
+    fn toplevel_only_unions_across_entries() {
+        let cp = Classpath::new(vec![]);
+        let mut a = EntryExt::default();
+        a.toplevel_names.insert("run".into());
+        let mut b = EntryExt::default();
+        b.ext_names.insert("run".into());
+        b.toplevel_names.insert("println".into());
+        *cp.ext.borrow_mut() = Some(std::rc::Rc::new(vec![
+            std::sync::Arc::new(a),
+            std::sync::Arc::new(b),
+        ]));
+        assert!(!cp.ext_toplevel_only("run"));
+        assert!(cp.ext_toplevel_only("println"));
+        assert!(!cp.ext_toplevel_only("absent"));
+    }
 
-        let mut index_names = NameTree::default();
-        let mut owners = HashMap::new();
-        push_name_from_dedup(
-            &mut index_names,
-            &mut owners,
-            "map",
-            &entry_names,
-            collections,
+    // `find_extension_owners` unions per-entry receiver records in entry order, dedups owners, and
+    // drops genuine top-level names.
+    #[test]
+    fn extension_owners_union_per_entry_records() {
+        let cp = Classpath::new(vec![]);
+        let mut a = EntryExt::default();
+        let a_owner = a.owner_names.insert("kotlin/collections/CollectionsKt");
+        a.by_recv_raw.insert(
+            "Ljava/lang/Iterable;".to_string(),
+            vec![
+                ("map".to_string(), a_owner),
+                ("filter".to_string(), a_owner),
+            ],
         );
-        push_name_from_dedup(
-            &mut index_names,
-            &mut owners,
-            "map",
-            &entry_names,
-            collections,
+        let mut b = EntryExt::default();
+        let b_owner = b.owner_names.insert("demo/DemoKt");
+        let b_top = b.owner_names.insert("demo/TopKt");
+        b.by_recv_raw.insert(
+            "Ljava/lang/Iterable;".to_string(),
+            vec![("map".to_string(), b_owner), ("runAll".to_string(), b_top)],
         );
-        push_name_from_dedup(&mut index_names, &mut owners, "map", &entry_names, maps);
-
-        let copied = owners.get("map").expect("owner ids copied");
-        assert_eq!(copied.len(), 2);
+        b.toplevel_names.insert("runAll".to_string());
+        *cp.ext.borrow_mut() = Some(std::rc::Rc::new(vec![
+            std::sync::Arc::new(a),
+            std::sync::Arc::new(b),
+        ]));
+        let owners = cp.find_extension_owners("Ljava/lang/Iterable;");
         assert_eq!(
-            index_names.render(copied[0]),
-            "kotlin/collections/CollectionsKt"
+            owners.iter().map(|o| o.render()).collect::<Vec<_>>(),
+            vec!["kotlin/collections/CollectionsKt", "demo/DemoKt"]
         );
-        assert_eq!(index_names.render(copied[1]), "kotlin/collections/MapsKt");
-        assert_eq!(index_names.len(), 5);
+        assert!(cp.find_extension_owners("Lother;").is_empty());
     }
 
     #[test]
