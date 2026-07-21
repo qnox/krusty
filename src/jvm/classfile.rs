@@ -916,9 +916,17 @@ impl ClassWriter {
     /// Like [`add_method`], plus an optional generic `Signature` attribute string.
     /// Append the StackMapTable verification type of each parameter in `desc` to `out` (a `long`/
     /// `double` occupies one verification-type slot here, matching the StackMapTable encoding).
-    fn append_param_verif_types(&mut self, desc: &str, out: &mut Vec<VerifType>) {
-        let end = desc.rfind(')').unwrap_or(0);
-        let params = &desc.as_bytes()[1..end.max(1)];
+    ///
+    /// Returns `false` on a malformed descriptor WITHOUT completing `out` — the caller must then
+    /// compress against no baseline (all `full_frame`s) rather than a silently wrong initial frame:
+    /// a frame that falsely compared "same" against a mis-derived baseline would make the verifier
+    /// (which derives the real one from the descriptor) reject the class.
+    #[must_use]
+    fn append_param_verif_types(&mut self, desc: &str, out: &mut Vec<VerifType>) -> bool {
+        let (Some(stripped), Some(end)) = (desc.strip_prefix('('), desc.find(')')) else {
+            return false;
+        };
+        let params = &stripped.as_bytes()[..end - 1];
         let mut i = 0;
         while i < params.len() {
             match params[i] {
@@ -943,7 +951,12 @@ impl ClassWriter {
                     while i < params.len() && params[i] != b';' {
                         i += 1;
                     }
-                    let name = std::str::from_utf8(&params[start + 1..i]).unwrap_or("");
+                    if i == params.len() {
+                        return false; // unterminated `L…;`
+                    }
+                    let Ok(name) = std::str::from_utf8(&params[start + 1..i]) else {
+                        return false;
+                    };
                     let idx = self.cp.class(name);
                     out.push(VerifType::Object(idx));
                     i += 1; // skip ';'
@@ -957,22 +970,30 @@ impl ClassWriter {
                         while i < params.len() && params[i] != b';' {
                             i += 1;
                         }
+                        if i == params.len() {
+                            return false; // unterminated `[L…;`
+                        }
                         i += 1;
-                    } else {
+                    } else if i < params.len() {
                         i += 1; // primitive array element (`[I`, `[[Z`, …)
+                    } else {
+                        return false; // bare `[` with no element type
                     }
                     // An array type is a REFERENCE; its StackMapTable verification type is
                     // `Object_variable_info` referencing a `CONSTANT_Class` whose name is the array
                     // DESCRIPTOR itself (`[I`, `[Ljava/lang/String;`) — JVMS §4.7.4 / §4.4.1. `cp.class`
                     // interns it verbatim (`to_jvm_internal` leaves descriptors untouched), so this is
                     // correct for both primitive and reference arrays.
-                    let descriptor = std::str::from_utf8(&params[start..i]).unwrap_or("");
+                    let Ok(descriptor) = std::str::from_utf8(&params[start..i]) else {
+                        return false;
+                    };
                     let idx = self.cp.class(descriptor);
                     out.push(VerifType::Object(idx));
                 }
-                _ => i += 1,
+                _ => return false, // not a JVM type descriptor character
             }
         }
+        true
     }
 
     pub fn add_method_sig(
@@ -1000,8 +1021,10 @@ impl ClassWriter {
                     VerifType::Object(self.this_class)
                 });
             }
-            self.append_param_verif_types(desc, &mut initial_locals);
-            code.build_stackmap(&initial_locals)
+            let baseline = self
+                .append_param_verif_types(desc, &mut initial_locals)
+                .then_some(initial_locals);
+            code.build_stackmap(baseline.as_deref())
         } else {
             None
         };
@@ -1567,8 +1590,12 @@ impl CodeBuilder {
     }
 
     /// Build the StackMapTable attribute body. Returns `None` when no frames are needed.
-    /// Emits a `full_frame` entry for every registered label, sorted by bytecode offset.
-    pub fn build_stackmap(&self, initial_locals: &[VerifType]) -> Option<Vec<u8>> {
+    ///
+    /// `initial_locals` is the method-entry frame the first entry compresses against; `None` means
+    /// the baseline could not be derived (malformed descriptor) — then the first entry is written
+    /// as a `full_frame`, which is always verifiable, instead of risking a false "same" match
+    /// against a wrong baseline.
+    pub fn build_stackmap(&self, initial_locals: Option<&[VerifType]>) -> Option<Vec<u8>> {
         if self.frames.is_empty() {
             return None;
         }
@@ -1594,8 +1621,11 @@ impl CodeBuilder {
         // Emit each frame in kotlinc's COMPRESSED form vs the previous frame (initial frame = the
         // method-entry locals): same/same_extended, same_locals_1_stack_item[/extended], chop, append,
         // or full_frame. Offset deltas: first = offset; subsequent = offset - prev_offset - 1.
+        // The `as u16` delta casts cannot truncate: a `Code` attribute's code array is capped at
+        // 65535 bytes (JVMS §4.7.3) and every entry offset was filtered to `< code_len` above.
         let mut prev_off: i64 = -1;
-        let mut prev_locals: Vec<VerifType> = initial_locals.to_vec();
+        // `None` = no usable baseline yet: the first frame is forced to `full_frame`.
+        let mut prev_locals: Option<Vec<VerifType>> = initial_locals.map(|s| s.to_vec());
         let full = |body: &mut Vec<u8>, delta: u16, locals: &[VerifType], stack: &[VerifType]| {
             body.push(255);
             u2(body, delta);
@@ -1615,11 +1645,18 @@ impl CodeBuilder {
                 offset - prev_off as u32 - 1
             } as u16;
             prev_off = offset as i64;
-            let same_locals = **locals == prev_locals;
+            let (same_locals, shares_prefix, p) = match &prev_locals {
+                Some(prev) => {
+                    let common = locals.len().min(prev.len());
+                    (
+                        **locals == *prev,
+                        locals[..common] == prev[..common],
+                        prev.len(),
+                    )
+                }
+                None => (false, false, 0),
+            };
             let n = locals.len();
-            let p = prev_locals.len();
-            let common_prefix = n.min(p);
-            let shares_prefix = locals[..common_prefix] == prev_locals[..common_prefix];
             if stack.is_empty() && same_locals {
                 if delta <= 63 {
                     body.push(delta as u8); // same_frame
@@ -1647,7 +1684,7 @@ impl CodeBuilder {
             } else {
                 full(&mut body, delta, locals, stack);
             }
-            prev_locals = locals.clone();
+            prev_locals = Some(locals.clone());
         }
         Some(body)
     }
