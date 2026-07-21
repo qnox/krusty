@@ -196,6 +196,66 @@ pub fn compile_in_process(
     }
 }
 
+/// Like [`compile_in_process`], but forces the opt-in per-class `@kotlin.Metadata` on (default emit
+/// keeps it off — see [`krusty::jvm::ir_emit::EmitOptions::emit_class_metadata`]). Lets a test decode
+/// the metadata krusty computes from IR (the wiring), independent of the CLI env-var flag.
+#[allow(dead_code)]
+/// Compile `src` in-process with krusty's opt-in class metadata ON and a classpath (for sources that
+/// reference the kotlin stdlib or other jars), stamping the `SourceFile` (`<stem>.kt`) exactly as the
+/// CLI backend does, so the emitted bytes match a `krusty -d …` (and thus kotlinc) run WITHOUT spawning
+/// a subprocess. This is the in-process path the byte-identity tests use, so their whole codepath is
+/// coverage-instrumented (a spawned CLI is not) and pays no per-run cold classpath scan.
+pub fn compile_in_process_metadata_cp(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+) -> Option<Vec<(String, Vec<u8>)>> {
+    use krusty::diag::DiagSink;
+    use krusty::frontend::{check_file, collect_signatures_with_cp};
+    use krusty::jvm::ir_emit::{emit_all_with_opts, EmitOptions, EmitRun};
+    use krusty::jvm::names::file_class_name;
+
+    let _pg = ProfGuard::new("krusty");
+    let mut diags = DiagSink::new();
+    let features = krusty::features::LangFeatures::from_source(src);
+    let toks = krusty::lexer::lex(src, &mut diags);
+    let files = vec![krusty::parser::parse_with_features(
+        src, &toks, &mut diags, &features,
+    )];
+    if diags.has_errors() {
+        return None;
+    }
+    let cp = std::rc::Rc::new(Classpath::new(cp_jars.to_vec()));
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
+    if diags.has_errors() {
+        return None;
+    }
+    let file = &files[0];
+    let info = check_file(file, &mut syms, &mut diags);
+    if diags.has_errors() {
+        return None;
+    }
+    let facade = file_class_name(stem, file.package.as_deref());
+    let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
+    let mut ir = krusty::ir_lower::lower_file(file, &info, &syms, &runtime)?;
+    krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms).ok()?;
+    let opts = EmitOptions {
+        emit_class_metadata: true,
+        // Match the CLI backend (`{stem}.kt`) so the bytes equal a `krusty -d …` run.
+        source_file: Some(format!("{stem}.kt")),
+        ..Default::default()
+    };
+    let run = EmitRun::default();
+    // Facade `@Metadata` (k = 2, top-level fn/extension records), exactly as the CLI backend and
+    // `compile_in_process` pass it — `None` for a class-only source, so today's byte-identity
+    // fixtures are unaffected, and a future fixture mixing a class with top-level functions gets
+    // the same facade record a real build would.
+    let metadata = krusty::jvm::backend::facade_package_metadata(file, 0, &syms);
+    let outputs = emit_all_with_opts(&ir, &facade, &*cp, metadata.as_ref(), &opts, &run)?;
+    (!outputs.is_empty()).then_some(outputs)
+}
+
 /// Compile Kotlin `src` in-process and write the emitted `.class` files under `out_dir`, preserving
 /// package directories. This matches the classfile layout the CLI writes for tests that need to run a
 /// Java driver against krusty output, without paying a subprocess/compiler-cache cold start per case.

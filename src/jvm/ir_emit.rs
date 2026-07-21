@@ -81,6 +81,443 @@ pub struct EmitOptions {
     pub class_major: Option<u16>,
     /// Source-file simple name for the `SourceFile` attribute (e.g. `Foo.kt`); `None` ⇒ no attribute.
     pub source_file: Option<String>,
+    /// `-module-name` value, recorded in each class's `@Metadata` (`classModuleName`). kotlinc omits it
+    /// for the default module `main`; `None` here matches that.
+    pub module_name: Option<String>,
+    /// Emit a computed `@kotlin.Metadata` for supported class shapes (WIP — [`build_class_metadata`]).
+    /// Byte-verified vs kotlinc for a plain `val`/`var`-property class and a `data class` (its IS_DATA
+    /// flag + synthesized `componentN`/`copy`/`equals`/`hashCode`/`toString`); other shapes are gated
+    /// out and emit no metadata. OFF by default: an unverified payload breaks kotlin-reflect (a
+    /// box-corpus case caught this), so the default emit stays unchanged until a shape is verified.
+    pub emit_class_metadata: bool,
+}
+
+/// Compute a class's `@kotlin.Metadata` from its IR — WIRING [`crate::metadata::class_builder::build_class`]
+/// into emission. Bounded (for now) to a PLAIN class with a primary constructor of `val`/`var` properties
+/// and NO user methods — the shape whose metadata is byte-verified against kotlinc. Returns `None` for
+/// any other shape (object/enum/interface/annotation/companion/data-class-with-methods/…), so those
+/// classes emit no `@Metadata` yet (unchanged). Broader shapes follow as `build_class` grows.
+fn build_class_metadata(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    opts: &EmitOptions,
+) -> Option<KotlinMetadata> {
+    use crate::metadata::class_builder::{
+        build_class, ClassTail, FnMeta, PropMeta, COMPONENT_FN_FLAGS, COPY_FN_FLAGS,
+        DATA_CLASS_FLAGS, EQUALS_FN_FLAGS, HASHCODE_TOSTRING_FN_FLAGS,
+    };
+    if c.is_object
+        || c.is_companion
+        || c.is_interface
+        || c.is_annotation
+        || c.is_value
+        || !c.enum_entries.is_empty()
+        || c.enum_entry_of.is_some()
+        || c.prop_ref.is_some()
+        || c.func_ref.is_some()
+        || c.companion_class.is_some()
+        || !c.secondary_ctors.is_empty()
+        || !c.has_primary_ctor
+        || c.fields.len() != c.ctor_param_count as usize
+    {
+        return None;
+    }
+    let cap = |s: &str| {
+        let mut c = s.chars();
+        c.next()
+            .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+            .unwrap_or_default()
+    };
+    // A `data class` also carries kotlinc's synthesized `componentN`/`copy`/`equals`/`hashCode`/
+    // `toString` — derivable from the primary-ctor properties alone, so allowed alongside accessors.
+    let data_method_names: std::collections::HashSet<String> = if c.is_data {
+        let mut s: std::collections::HashSet<String> = (1..=c.fields.len())
+            .map(|i| format!("component{i}"))
+            .collect();
+        s.extend(["copy", "equals", "hashCode", "toString"].map(String::from));
+        s
+    } else {
+        std::collections::HashSet::new()
+    };
+    // The only methods allowed in this bounded shape are the properties' own accessors (`getX`/`setX`)
+    // plus a data class's synthesized set; any other real method is a shape not computed yet.
+    let accessor_names: std::collections::HashSet<String> = c
+        .fields
+        .iter()
+        .flat_map(|f| {
+            let cn = cap(&f.name);
+            [format!("get{cn}"), format!("set{cn}")]
+        })
+        .collect();
+    if c.methods.iter().any(|&fid| {
+        let n = &ir.functions[fid as usize].name;
+        !accessor_names.contains(n) && !data_method_names.contains(n)
+    }) {
+        return None;
+    }
+    let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
+    let props: Vec<PropMeta> = c
+        .fields
+        .iter()
+        .map(|f| PropMeta {
+            name: f.name.clone(),
+            ty: f.ty,
+            is_var: !f.is_final,
+            getter: (format!("get{}", cap(&f.name)), format!("(){}", desc(f.ty))),
+            setter: (!f.is_final)
+                .then(|| (format!("set{}", cap(&f.name)), format!("({})V", desc(f.ty)))),
+        })
+        .collect();
+    let ctor_params: Vec<(String, Ty)> = c.fields.iter().map(|f| (f.name.clone(), f.ty)).collect();
+    let ctor_param_defaults: Vec<bool> = c.fields.iter().map(|f| f.has_default).collect();
+    let ctor_desc = format!(
+        "({})V",
+        ctor_params
+            .iter()
+            .map(|(_, t)| desc(*t))
+            .collect::<String>()
+    );
+    // kotlinc's synthesized data-class methods, in declaration order: componentN, copy, equals,
+    // hashCode, toString. Their shapes come entirely from the primary-ctor properties.
+    let methods: Vec<FnMeta> = if c.is_data {
+        let mut m: Vec<FnMeta> = c
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(i, f)| FnMeta {
+                name: format!("component{}", i + 1),
+                params: vec![],
+                ret: f.ty,
+                flags: COMPONENT_FN_FLAGS,
+                params_have_defaults: false,
+            })
+            .collect();
+        m.push(FnMeta {
+            name: "copy".into(),
+            params: c.fields.iter().map(|f| (f.name.clone(), f.ty)).collect(),
+            ret: Ty::obj(&c.fq_name()),
+            flags: COPY_FN_FLAGS,
+            params_have_defaults: true,
+        });
+        m.push(FnMeta {
+            name: "equals".into(),
+            params: vec![("other".into(), Ty::nullable(Ty::obj("kotlin/Any")))],
+            ret: Ty::Boolean,
+            flags: EQUALS_FN_FLAGS,
+            params_have_defaults: false,
+        });
+        m.push(FnMeta {
+            name: "hashCode".into(),
+            params: vec![],
+            ret: Ty::Int,
+            flags: HASHCODE_TOSTRING_FN_FLAGS,
+            params_have_defaults: false,
+        });
+        m.push(FnMeta {
+            name: "toString".into(),
+            params: vec![],
+            ret: Ty::String,
+            flags: HASHCODE_TOSTRING_FN_FLAGS,
+            params_have_defaults: false,
+        });
+        m
+    } else {
+        vec![]
+    };
+    let (d1_bytes, d2) = build_class(
+        &c.fq_name(),
+        &ctor_params,
+        &ctor_desc,
+        &props,
+        &methods,
+        &[],
+        &ClassTail {
+            flags: if c.is_data { DATA_CLASS_FLAGS } else { 0 },
+            module_name: opts.module_name.as_deref(),
+            ctor_param_defaults: &ctor_param_defaults,
+            ..Default::default()
+        },
+    );
+    // d1 is the protobuf payload as one `char` per byte (the constant pool writes it as modified-UTF-8).
+    let d1 = vec![d1_bytes.iter().map(|&b| b as char).collect()];
+    Some(KotlinMetadata {
+        k: 1,
+        mv: vec![2, 4, 0],
+        xi: 48,
+        d1,
+        d2,
+    })
+}
+
+/// Attach kotlinc-style `LineNumberTable` + `LocalVariableTable` debug tables to a plain property
+/// class's synthesized members (primary ctor + property accessors). Every such member maps to the
+/// class declaration line, and its locals (`this` + params) live for the whole method — so the tables
+/// are computable from `c.fields` alone. Call BEFORE `@Metadata` is attached so the debug strings
+/// (`this`, member param names, the attribute names) intern into the constant pool ahead of the
+/// annotation, matching kotlinc's ordering. Scoped to non-data classes for now (data-class synthesized
+/// methods carry branches/stack maps and need their own line mapping).
+/// Compute a plain property class's ctor/field/accessor descriptors and seed the constant pool in
+/// kotlinc's interning order (see [`ClassWriter::seed_plain_class_pool`]). Mirrors the descriptors that
+/// `attach_synth_debug_tables` and the natural emission produce, so the seeded entries are reused.
+fn seed_plain_class_pool(
+    c: &crate::ir::IrClass,
+    fq_name: &str,
+    superclass: &str,
+    cw: &mut ClassWriter,
+) {
+    let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
+    let cap = |s: &str| {
+        let mut ch = s.chars();
+        ch.next()
+            .map(|f| f.to_uppercase().collect::<String>() + ch.as_str())
+            .unwrap_or_default()
+    };
+    // Reference-type annotation kind: 0 = primitive (no annotation), 1 = non-null reference (@NotNull +
+    // a `checkNotNullParameter` guard), 2 = nullable reference (@Nullable, no guard).
+    let ann_kind = |t: Ty| -> u8 {
+        let d = desc(t);
+        if !(d.starts_with('L') || d.starts_with('[')) {
+            0
+        } else if matches!(t, Ty::Nullable(_)) {
+            2
+        } else {
+            1
+        }
+    };
+    let is_nonnull_ref = |t: Ty| ann_kind(t) == 1;
+    let ctor_desc = format!(
+        "({})V",
+        c.fields.iter().map(|f| desc(f.ty)).collect::<String>()
+    );
+    let fields: Vec<(String, String, u8)> = c
+        .fields
+        .iter()
+        .map(|f| (f.name.clone(), desc(f.ty), ann_kind(f.ty)))
+        .collect();
+    // (name, descriptor, setter_kind): 0 getter, 1 primitive setter, 2 non-null reference setter.
+    let mut accessors: Vec<(String, String, u8)> = Vec::new();
+    for f in &c.fields {
+        accessors.push((
+            format!("get{}", cap(&f.name)),
+            format!("(){}", desc(f.ty)),
+            0,
+        ));
+        if !f.is_final {
+            let kind = if is_nonnull_ref(f.ty) { 2 } else { 1 };
+            accessors.push((
+                format!("set{}", cap(&f.name)),
+                format!("({})V", desc(f.ty)),
+                kind,
+            ));
+        }
+    }
+    cw.seed_plain_class_pool(fq_name, superclass, &ctor_desc, &fields, &accessors);
+    if c.is_data {
+        let simple = fq_name.rsplit('/').next().unwrap_or(fq_name);
+        let data_fields: Vec<(String, String)> = c
+            .fields
+            .iter()
+            .map(|f| (f.name.clone(), desc(f.ty)))
+            .collect();
+        cw.seed_data_class_pool(fq_name, &ctor_desc, simple, &data_fields);
+    }
+}
+
+fn attach_synth_debug_tables(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
+    let line = c.decl_line;
+    if line == 0 {
+        return;
+    }
+    let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
+    let slot_size = |t: Ty| -> u16 {
+        match desc(t).as_str() {
+            "J" | "D" => 2,
+            _ => 1,
+        }
+    };
+    let cap = |s: &str| {
+        let mut ch = s.chars();
+        ch.next()
+            .map(|f| f.to_uppercase().collect::<String>() + ch.as_str())
+            .unwrap_or_default()
+    };
+    // A non-null reference param carries a `checkNotNullParameter` guard (aload+ldc+invokestatic = 6
+    // bytes) before the body; kotlinc's LineNumberTable maps the decl line to the post-prologue offset.
+    let is_nonnull_ref = |t: Ty| -> bool {
+        let d = desc(t);
+        (d.starts_with('L') || d.starts_with('[')) && !matches!(t, Ty::Nullable(_))
+    };
+    const GUARD_LEN: u16 = 6;
+    let this_desc = format!("L{};", c.fq_name());
+    // Primary constructor: `this` + one local per ctor parameter (a property-backed param).
+    let ctor_desc = format!(
+        "({})V",
+        c.fields.iter().map(|f| desc(f.ty)).collect::<String>()
+    );
+    let mut ctor_locals = vec![("this".to_string(), this_desc.clone(), 0u16)];
+    let mut slot = 1u16;
+    for f in &c.fields {
+        ctor_locals.push((f.name.clone(), desc(f.ty), slot));
+        slot += slot_size(f.ty);
+    }
+    let ctor_pc = c.fields.iter().filter(|f| is_nonnull_ref(f.ty)).count() as u16 * GUARD_LEN;
+    let this_only = [("this".to_string(), this_desc.clone(), 0u16)];
+    cw.set_method_debug("<init>", &ctor_desc, Some((ctor_pc, line)), &ctor_locals);
+    // Property accessors: getter has only `this`; a `var` setter also has its value parameter (named
+    // `<set-?>` by kotlinc), guarded when the property type is a non-null reference.
+    for f in &c.fields {
+        let g = format!("get{}", cap(&f.name));
+        cw.set_method_debug(
+            &g,
+            &format!("(){}", desc(f.ty)),
+            Some((0, line)),
+            &this_only,
+        );
+        if !f.is_final {
+            let s = format!("set{}", cap(&f.name));
+            let pd = desc(f.ty);
+            let set_pc = if is_nonnull_ref(f.ty) { GUARD_LEN } else { 0 };
+            cw.set_method_debug(
+                &s,
+                &format!("({pd})V"),
+                Some((set_pc, line)),
+                &[
+                    ("this".to_string(), this_desc.clone(), 0),
+                    ("<set-?>".to_string(), pd, 1),
+                ],
+            );
+        }
+    }
+    // A `data class`'s synthesized methods carry a LocalVariableTable (this + params) but NO
+    // LineNumberTable (kotlinc gives them none). componentN/hashCode/toString/equals have only `this`
+    // (equals also `other`); `copy` has the ctor parameters.
+    if c.is_data {
+        let self_ref = format!("L{};", c.fq_name());
+        for (i, f) in c.fields.iter().enumerate() {
+            cw.set_method_debug(
+                &format!("component{}", i + 1),
+                &format!("(){}", desc(f.ty)),
+                None,
+                &this_only,
+            );
+        }
+        let mut copy_locals = vec![("this".to_string(), this_desc.clone(), 0u16)];
+        let mut slot = 1u16;
+        for f in &c.fields {
+            copy_locals.push((f.name.clone(), desc(f.ty), slot));
+            slot += slot_size(f.ty);
+        }
+        cw.set_method_debug(
+            "copy",
+            &format!(
+                "{ctor_desc_no_v}{self_ref}",
+                ctor_desc_no_v = &ctor_desc[..ctor_desc.len() - 1]
+            ),
+            None,
+            &copy_locals,
+        );
+        cw.set_method_debug(
+            "equals",
+            "(Ljava/lang/Object;)Z",
+            None,
+            &[
+                ("this".to_string(), this_desc.clone(), 0),
+                ("other".to_string(), "Ljava/lang/Object;".to_string(), 1),
+            ],
+        );
+        cw.set_method_debug("hashCode", "()I", None, &this_only);
+        cw.set_method_debug("toString", "()Ljava/lang/String;", None, &this_only);
+    }
+}
+
+/// Attach kotlinc's `@org.jetbrains.annotations.NotNull` / `@Nullable` to a plain property class's
+/// synthesized members: each non-null reference-typed return/parameter gets `@NotNull`, each nullable
+/// reference gets `@Nullable` (primitives get nothing). Covers the ctor's reference params, each
+/// getter's reference return, and each `var` setter's reference param — the shape kotlinc emits for a
+/// class with reference-typed properties. Call after `attach_synth_debug_tables`.
+fn attach_synth_nullability(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
+    let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
+    let cap = |s: &str| {
+        let mut ch = s.chars();
+        ch.next()
+            .map(|f| f.to_uppercase().collect::<String>() + ch.as_str())
+            .unwrap_or_default()
+    };
+    // A reference type (descriptor `L…;`/`[…`) gets `@NotNull` unless it is `Ty::Nullable`, then
+    // `@Nullable`; a primitive gets no annotation.
+    let ann = |t: Ty| -> Option<&'static str> {
+        let d = desc(t);
+        if !(d.starts_with('L') || d.starts_with('[')) {
+            return None;
+        }
+        Some(if matches!(t, Ty::Nullable(_)) {
+            "Lorg/jetbrains/annotations/Nullable;"
+        } else {
+            "Lorg/jetbrains/annotations/NotNull;"
+        })
+    };
+    // Backing field of a reference property: kotlinc annotates it (`@NotNull` for non-null).
+    for f in &c.fields {
+        if let Some(a) = ann(f.ty) {
+            cw.set_field_nullability(&f.name, a);
+        }
+    }
+    // Primary constructor: one parameter annotation slot per property-backed parameter.
+    let ctor_params: Vec<Option<&str>> = c.fields.iter().map(|f| ann(f.ty)).collect();
+    if ctor_params.iter().any(|p| p.is_some()) {
+        let ctor_desc = format!(
+            "({})V",
+            c.fields.iter().map(|f| desc(f.ty)).collect::<String>()
+        );
+        cw.set_method_nullability("<init>", &ctor_desc, None, &ctor_params);
+    }
+    // Accessors: a reference getter annotates its return; a `var` reference setter its parameter.
+    for f in &c.fields {
+        let Some(a) = ann(f.ty) else { continue };
+        cw.set_method_nullability(
+            &format!("get{}", cap(&f.name)),
+            &format!("(){}", desc(f.ty)),
+            Some(a),
+            &[],
+        );
+        if !f.is_final {
+            cw.set_method_nullability(
+                &format!("set{}", cap(&f.name)),
+                &format!("({})V", desc(f.ty)),
+                None,
+                &[Some(a)],
+            );
+        }
+    }
+    // Data-class synthesized methods: `copy` returns the class (`@NotNull`), `toString` returns
+    // `String` (`@NotNull`), `equals`' `other` param is `@Nullable`, and a reference-typed `componentN`
+    // return is `@NotNull`.
+    if c.is_data {
+        let not_null = "Lorg/jetbrains/annotations/NotNull;";
+        let self_ref = format!("L{};", c.fq_name());
+        let copy_desc = format!(
+            "({}){self_ref}",
+            c.fields.iter().map(|f| desc(f.ty)).collect::<String>()
+        );
+        cw.set_method_nullability("copy", &copy_desc, Some(not_null), &[]);
+        cw.set_method_nullability("toString", "()Ljava/lang/String;", Some(not_null), &[]);
+        cw.set_method_nullability(
+            "equals",
+            "(Ljava/lang/Object;)Z",
+            None,
+            &[Some("Lorg/jetbrains/annotations/Nullable;")],
+        );
+        for (i, f) in c.fields.iter().enumerate() {
+            if let Some(a) = ann(f.ty) {
+                cw.set_method_nullability(
+                    &format!("component{}", i + 1),
+                    &format!("(){}", desc(f.ty)),
+                    Some(a),
+                    &[],
+                );
+            }
+        }
+    }
 }
 
 /// Register the file's nested-class `InnerClasses` candidates on `cw`; the writer's `finish` keeps only
@@ -1002,6 +1439,15 @@ fn emit_class(
     let superclass = c.superclass();
     let mut cw = new_writer(&fq_name, &superclass, opts);
     register_inner_classes(&mut cw, ir);
+    // Seed the constant pool in kotlinc's interning order for a plain property class that will carry a
+    // computed `@Metadata` + debug tables — so the emitted class is byte-identical, not just
+    // structurally equal. Gated exactly like the debug tables (opt-in, non-data, qualifying shape).
+    // A cross-module `class_meta` PROVIDER record (none exists today) deliberately does NOT seed:
+    // provider metadata makes the class correct, not byte-identical — byte identity is only claimed
+    // for the computed path this gate mirrors.
+    if opts.emit_class_metadata && build_class_metadata(ir, c, opts).is_some() {
+        seed_plain_class_pool(c, &fq_name, &superclass, &mut cw);
+    }
     // Access: an extended or abstract class must not be `final`; a class with an abstract method
     // (body `None`) is `ACC_ABSTRACT`.
     let extended = ir.classes.iter().any(|o| o.superclass_matches(&fq_name));
@@ -1622,7 +2068,19 @@ fn emit_class(
     }
     emit_bridges(c, &mut cw);
     cw.set_runtime_annotations(&c.applied_annotations);
-    if let Some(m) = class_meta {
+    // A cross-module provider's `@Metadata` wins; otherwise compute one from the IR (bounded shapes).
+    let computed = (class_meta.is_none() && opts.emit_class_metadata)
+        .then(|| build_class_metadata(ir, c, opts))
+        .flatten();
+    // Debug tables + nullability annotations (opt-in with metadata) for any class that qualified for a
+    // computed `@Metadata` — including data classes (their synthesized methods get a LocalVariableTable
+    // + @NotNull/@Nullable). NOTE: the constant-pool seeding (above) is still plain-class only, so a
+    // data class is not yet FULLY byte-identical (its pool order differs) — but the attributes match.
+    if computed.is_some() {
+        attach_synth_debug_tables(c, &mut cw);
+        attach_synth_nullability(c, &mut cw);
+    }
+    if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
     cw.finish()

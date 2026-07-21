@@ -622,6 +622,10 @@ pub struct ClassDecl {
     /// `class A()`, `class A(...)`), including a `class A() { constructor(...) : this(...) }`.
     pub has_primary_ctor: bool,
     pub span: Span,
+    /// 1-based source line of the class declaration (from `span.lo`), for the `LineNumberTable` of
+    /// kotlinc's synthesized members (ctor/accessors), which all map to the class's declaration line.
+    /// 0 = unknown (no debug tables emitted). Filled by a parser post-pass.
+    pub decl_line: u32,
 }
 
 /// What a declaration *is*. Mutually exclusive at the source level (`data`/`value` are modifiers on a

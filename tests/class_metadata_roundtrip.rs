@@ -7,7 +7,7 @@
 
 use krusty::jvm::classreader::ClassInfo;
 use krusty::jvm::metadata::{class_functions, decode_metadata, package_functions};
-use krusty::metadata::class_builder::{build_class, FnMeta};
+use krusty::metadata::class_builder::{build_class, ClassTail, FnMeta};
 use krusty::types::{type_name, Ty};
 
 /// Wrap built `(d1_bytes, d2)` into a `ClassInfo` the reader consumes. `d1` is the protobuf payload with
@@ -46,7 +46,7 @@ fn class_member_value_params_round_trip() {
         &[],
         &methods,
         &[],
-        0,
+        &ClassTail::default(),
     );
     let ci = class_info("com/example/Greeter", d1, d2);
 
