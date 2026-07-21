@@ -1357,6 +1357,9 @@ fn emit_class(
     // Seed the constant pool in kotlinc's interning order for a plain property class that will carry a
     // computed `@Metadata` + debug tables — so the emitted class is byte-identical, not just
     // structurally equal. Gated exactly like the debug tables (opt-in, non-data, qualifying shape).
+    // A cross-module `class_meta` PROVIDER record (none exists today) deliberately does NOT seed:
+    // provider metadata makes the class correct, not byte-identical — byte identity is only claimed
+    // for the computed path this gate mirrors.
     if opts.emit_class_metadata && !c.is_data && build_class_metadata(ir, c, opts).is_some() {
         seed_plain_class_pool(c, &fq_name, &superclass, &mut cw);
     }

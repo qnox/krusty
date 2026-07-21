@@ -48,7 +48,7 @@ Supporting mechanics:
   (opt-in with metadata, non-data only), called BEFORE the `@Metadata` attach.
 
 Metadata + debug tables are OPT-IN (default off; `KRUSTY_EMIT_CLASS_METADATA=1` on CLI, or the test
-helper `compile_in_process_with_class_metadata`). Default emit path unchanged → box corpus + parity safe.
+helper `compile_in_process_metadata_cp`). Default emit path unchanged → box corpus + parity safe.
 
 ## FIRST: commit this work
 

@@ -247,7 +247,12 @@ pub fn compile_in_process_metadata_cp(
         ..Default::default()
     };
     let run = EmitRun::default();
-    let outputs = emit_all_with_opts(&ir, &facade, &*cp, None, &opts, &run)?;
+    // Facade `@Metadata` (k = 2, top-level fn/extension records), exactly as the CLI backend and
+    // `compile_in_process` pass it — `None` for a class-only source, so today's byte-identity
+    // fixtures are unaffected, and a future fixture mixing a class with top-level functions gets
+    // the same facade record a real build would.
+    let metadata = krusty::jvm::backend::facade_package_metadata(file, 0, &syms);
+    let outputs = emit_all_with_opts(&ir, &facade, &*cp, metadata.as_ref(), &opts, &run)?;
     (!outputs.is_empty()).then_some(outputs)
 }
 
