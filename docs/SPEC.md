@@ -1294,6 +1294,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `invokestatic` (previously the checker resolved it but the emit bailed). Test:
   `java_instance_e2e::calls_java_static_overloaded_methods`.
 
+- **Static call on a bare same-package (incl. ROOT-package) classpath class name (`J.greet()`).** Kotlin
+  makes same-package declarations visible without an import, and the file's own package — the root
+  package for an unpackaged file — is an implicit wildcard (`import_wildcards`). The checker's
+  static-call receiver path only consulted the EXPLICIT import map, so `J.greet()` failed to resolve even
+  though `J()` (constructor) and `fun f(j: J)` (type position) resolved via the import levels. It now
+  falls back to `imported_type_internal` (the same level-based resolver), keeping shadowing intact: a
+  lexical value or top-level property named `J` still wins (`value_root_shadows_classifier`). Test:
+  `java_source_interop_e2e::root_package_static_call_matches_other_positions`; corpus
+  `fakeOverride/kt40180*.kt` exercise the sibling type positions.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
