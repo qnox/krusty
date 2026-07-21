@@ -7546,33 +7546,79 @@ impl<'a> Lower<'a> {
     /// boundary (`Objects.hashCode`) so the value class's own `hashCode` runs.
     /// Whether class `class_id`'s field `i` has a nullable reference type (its lowered `IrType` carries
     /// the `?`), so `hashCode` keeps it on the null-safe `Objects.hashCode` path.
-    fn field_nullable(&self, class_id: ClassId, i: usize) -> bool {
-        self.ir.classes[class_id as usize].fields[i]
-            .ty
-            .is_nullable()
-    }
-    fn field_hash(&mut self, v: u32, t: Ty, nullable: bool) -> Option<u32> {
-        match t {
-            // kotlinc hashes each primitive field via its boxed type's static `hashCode(prim)` (so the
-            // bytecode matches even though `Integer.hashCode(I)` is the identity on `int`).
-            Ty::Int | Ty::Short | Ty::Byte | Ty::Char | Ty::Boolean => {
-                self.runtime_call(RuntimeOp::HashCode, t, vec![v])
+    /// kotlinc's per-field hash in a data-class `hashCode`, shape-for-shape:
+    ///
+    /// - a non-null primitive → the boxed type's STATIC `hashCode(prim)` (`Integer.hashCode(I)`);
+    /// - an array (primitive or boxed, regardless of nullability) → `java.util.Arrays.hashCode`
+    ///   (kotlinc CONTENT-hashes data-class arrays even though its `equals` compares them by
+    ///   reference — mirror the quirk, the platform layer picks the exact overload);
+    /// - any other reference → `invokevirtual <declared class>.hashCode()` on the field's own class
+    ///   (a BOXED nullable primitive dispatches on `kotlin/Any` — `Int?` has no JVM class of its own);
+    /// - an opaque type (no classifier) → the platform's null-safe object hash.
+    ///
+    /// A field that can hold null — declared nullable, or a TYPE-PARAMETER field (`val t: T`, whose
+    /// erased bound admits null) — wraps its hash in kotlinc's guard `if (f == null) 0 else hash(f)`,
+    /// re-reading the field in the non-null arm (no `dup`), phrased so the `When` lowers to kotlinc's
+    /// exact layout: `ifnonnull <hash arm>; iconst_0; goto end; <re-read; hash>; end`.
+    fn field_hash(&mut self, class_id: ClassId, idx: u32, t: Ty) -> Option<u32> {
+        let field = &self.ir.classes[class_id as usize].fields[idx as usize];
+        let guarded = field.ty.is_nullable() || field.type_param.is_some();
+        // The checker `Ty` of a nullable-primitive field is `Nullable(Int)` — test the classifier
+        // under the `?`.
+        let is_prim = matches!(
+            t.non_null(),
+            Ty::Int
+                | Ty::Short
+                | Ty::Byte
+                | Ty::Char
+                | Ty::Boolean
+                | Ty::Long
+                | Ty::Double
+                | Ty::Float
+        );
+        // The hash of the (known non-null) field value `v`.
+        let hash_of = |s: &mut Self, v: u32| -> Option<u32> {
+            if is_prim {
+                return if guarded {
+                    // The field is BOXED (`Int?`): kotlinc dispatches `Object.hashCode()` — the
+                    // Kotlin type has no JVM class of its own to name as the owner.
+                    Some(s.emit_virtual_call(
+                        "kotlin/Any",
+                        "hashCode".into(),
+                        "()I".into(),
+                        false,
+                        v,
+                        vec![],
+                    ))
+                } else {
+                    s.runtime_call(RuntimeOp::HashCode, t, vec![v])
+                };
             }
-            // A NON-null `String` hashes via its own `String.hashCode()` (kotlinc's `invokevirtual`),
-            // matching the bytecode. A nullable one stays on `Objects.hashCode` (which null-guards,
-            // returning 0 for `null`) — the null-guarded-ternary form is a future parity item.
-            t if !nullable
-                && t.non_null()
-                    .kotlin_class_internal()
-                    .is_some_and(|n| n.matches("kotlin/String")) =>
-            {
-                Some(self.emit_external_call("kotlin/String.hashCode", Some(v), vec![]))
+            if t.is_array() {
+                return s.runtime_call(RuntimeOp::HashCode, t, vec![v]);
             }
-            Ty::Long | Ty::Double | Ty::Float => self.runtime_call(RuntimeOp::HashCode, t, vec![v]),
-            // An array/reference property hashes by reference identity/null-safe object hash, matching
-            // kotlinc — a data class does NOT content-hash arrays.
-            _ => self.runtime_call(RuntimeOp::HashCode, t, vec![v]),
+            match t.non_null().kotlin_class_internal() {
+                Some(cls) => Some(s.emit_virtual_call(
+                    cls,
+                    "hashCode".into(),
+                    "()I".into(),
+                    false,
+                    v,
+                    vec![],
+                )),
+                None => s.runtime_call(RuntimeOp::HashCode, t, vec![v]),
+            }
+        };
+        let v = self.this_field(class_id, idx);
+        if !guarded {
+            return hash_of(self, v);
         }
+        let nullc = self.emit_const(IrConst::Null);
+        let isnull = self.emit_primitive_bin_op(IrBinOp::RefEq, v, nullc);
+        let zero = self.emit_const(IrConst::Int(0));
+        let v2 = self.this_field(class_id, idx);
+        let hc = hash_of(self, v2)?;
+        Some(self.emit_when(vec![(Some(isnull), zero), (None, hc)]))
     }
     /// A `Boolean` IR expr testing field *inequality* (IEEE-aware for float/double, structural for
     /// refs) — used to build `equals` as a chain of `if (a != b) return false` early-outs.
@@ -7760,23 +7806,17 @@ impl<'a> Lower<'a> {
                 let ret = self.emit_return(Some(zero));
                 self.emit_block(vec![ret], None)
             } else if fields.len() == 1 {
-                let fv = self.this_field(class_id, 0);
-                let n = self.field_nullable(class_id, 0);
-                let h = self.field_hash(fv, fields[0].1, n)?;
+                let h = self.field_hash(class_id, 0, fields[0].1)?;
                 let ret = self.emit_return(Some(h));
                 self.emit_block(vec![ret], None)
             } else {
                 // `result` occupies the first local slot after `this` (hashCode takes no parameters).
                 const RV: u32 = 1;
                 let mut stmts = Vec::new();
-                let f0 = self.this_field(class_id, 0);
-                let n0 = self.field_nullable(class_id, 0);
-                let h0 = self.field_hash(f0, fields[0].1, n0)?;
+                let h0 = self.field_hash(class_id, 0, fields[0].1)?;
                 stmts.push(self.emit_variable(RV, ty_to_ir(Ty::Int), Some(h0)));
                 for (i, f) in fields.iter().enumerate().skip(1) {
-                    let fv = self.this_field(class_id, i as u32);
-                    let ni = self.field_nullable(class_id, i);
-                    let h = self.field_hash(fv, f.1, ni)?;
+                    let h = self.field_hash(class_id, i as u32, f.1)?;
                     let prev = self.emit_get_value(RV);
                     let c31 = self.emit_const(IrConst::Int(31));
                     let mul = self.emit_primitive_bin_op(IrBinOp::Mul, prev, c31);

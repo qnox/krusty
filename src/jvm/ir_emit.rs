@@ -7878,8 +7878,18 @@ impl<'a> Emitter<'a> {
     ) {
         use IrBinOp::*;
         let lt = self.value_ty(lhs);
-        // Referential identity (`===`/`!==`) on references → `if_acmpeq`/`if_acmpne`.
-        if matches!(op, RefEq | RefNe) && lt.is_reference() && self.value_ty(rhs).is_reference() {
+        // `x == null` / `x != null` / `x === null` / `x !== null` → single-operand `ifnull`/`ifnonnull`
+        // (kotlinc's form), NOT `aconst_null; if_acmp*`. Computed up front so the referential-identity
+        // path below doesn't claim a null comparison (a `null` literal's type is a reference).
+        let lhs_null = matches!(self.ir.expr(lhs), IrExpr::Const(IrConst::Null));
+        let rhs_null = matches!(self.ir.expr(rhs), IrExpr::Const(IrConst::Null));
+        // Referential identity (`===`/`!==`) on two non-null references → `if_acmpeq`/`if_acmpne`.
+        if matches!(op, RefEq | RefNe)
+            && lt.is_reference()
+            && self.value_ty(rhs).is_reference()
+            && !lhs_null
+            && !rhs_null
+        {
             self.emit_operands(&[lhs, rhs], code);
             self.frame(target, vec![], code);
             if (op == RefEq) == jt {
@@ -7894,9 +7904,6 @@ impl<'a> Emitter<'a> {
             RefNe => Ne,
             o => o,
         };
-        // `x == null` / `x != null` → `ifnull`/`ifnonnull`.
-        let lhs_null = matches!(self.ir.expr(lhs), IrExpr::Const(IrConst::Null));
-        let rhs_null = matches!(self.ir.expr(rhs), IrExpr::Const(IrConst::Null));
         if matches!(op, Eq | Ne) && (lhs_null || rhs_null) {
             let operand = if lhs_null { rhs } else { lhs };
             self.emit_value(operand, code);

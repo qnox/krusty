@@ -190,6 +190,37 @@ fn data_class_multi_mixed_is_byte_identical() {
     );
 }
 
+/// A single NULLABLE-reference (`String?`) data class — its `hashCode` is kotlinc's null-guarded ternary
+/// `d != null ? d.hashCode() : 0` (an `ifnonnull` branch to a virtual `String.hashCode`, else `0`), NOT
+/// `Objects.hashCode`. Pins both the codegen (via a direct `ifnonnull` on the `d == null` test) and the
+/// pool (the seeded virtual `String.hashCode` is the one used).
+#[test]
+fn data_class_single_nullable_reference_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ndata class N(val d: String?)\n",
+        "demo/N",
+        &[],
+    );
+}
+
+/// A data class over a same-file CUSTOM class — its `hashCode` dispatches a virtual `hashCode()` on
+/// the field's OWN class (`demo/Other.hashCode:()I`), not `Objects.hashCode`; both the single-field
+/// and the multi-field (`result` accumulator) shapes. Pins the generalized per-field dispatch: no
+/// class name is special-cased (`String` was; any classifier now takes the same path).
+#[test]
+fn data_class_custom_class_field_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass Other\ndata class C1(val c: Other)\n",
+        "demo/C1",
+        &[],
+    );
+    assert_byte_identical(
+        "package demo\nclass Other\ndata class O2(val c: Other, val e: Other)\n",
+        "demo/O2",
+        &[],
+    );
+}
+
 // ---- @Metadata-level checks for shapes not yet FULLY byte-identical (data classes) ----------------
 
 /// A `data class` (metadata on): its IR → `build_class_metadata` yields the synthesized

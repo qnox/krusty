@@ -94,6 +94,14 @@ impl ConstPool {
     fn utf8(&mut self, s: &str) -> u16 {
         self.intern(Const::Utf8(s.to_string()))
     }
+    /// Non-interning lookup of an existing `CONSTANT_Class` entry (same name mapping as [`class`]).
+    /// Probing must never perturb the pool — constant-pool order is part of byte-identity with
+    /// kotlinc, and the implicit initial frame this serves is never written to the file.
+    fn lookup_class(&self, internal_name: &str) -> Option<u16> {
+        let mapped = super::jvm_class_map::to_jvm_internal(internal_name);
+        let n = self.dedup.get(&Const::Utf8(mapped.to_string())).copied()?;
+        self.dedup.get(&Const::Class(n)).copied()
+    }
     fn class(&mut self, internal_name: &str) -> u16 {
         // Ty→bytecode boundary: a built-in type may reach here under its Kotlin name (`kotlin/Any`);
         // a `CONSTANT_Class` must carry the JVM name (`java/lang/Object`). Every bare class reference
@@ -818,8 +826,25 @@ impl ClassWriter {
                 "append",
                 append_desc("Ljava/lang/String;"),
             );
-            self.cp
-                .methodref("java/lang/StringBuilder", "append", append_desc(desc));
+            if desc.starts_with('[') {
+                // An ARRAY field content-prints via `java.util.Arrays.toString` (kotlinc's data-class
+                // shape); its `String` result reuses the `append(String)` methodref above.
+                let ts = match desc.as_str() {
+                    "[Z" => "([Z)Ljava/lang/String;",
+                    "[C" => "([C)Ljava/lang/String;",
+                    "[B" => "([B)Ljava/lang/String;",
+                    "[S" => "([S)Ljava/lang/String;",
+                    "[I" => "([I)Ljava/lang/String;",
+                    "[J" => "([J)Ljava/lang/String;",
+                    "[F" => "([F)Ljava/lang/String;",
+                    "[D" => "([D)Ljava/lang/String;",
+                    _ => "([Ljava/lang/Object;)Ljava/lang/String;",
+                };
+                self.cp.methodref("java/util/Arrays", "toString", ts);
+            } else {
+                self.cp
+                    .methodref("java/lang/StringBuilder", "append", append_desc(desc));
+            }
         }
         self.cp.methodref(
             "java/lang/StringBuilder",
@@ -831,18 +856,57 @@ impl ClassWriter {
             "toString",
             "()Ljava/lang/String;",
         );
-        // hashCode — per-field hash (boxing-class static for a primitive; virtual for a reference).
+        // hashCode — kotlinc interns the method NAME and its `()I` descriptor together at method
+        // entry (both no-ops when an `Int` getter already interned them), then the per-field hash
+        // refs in body order: a primitive via its boxing class's static, an ARRAY via
+        // `java.util.Arrays.hashCode` (content hash — kotlinc's data-class shape), a BOXED nullable
+        // primitive via `Object.hashCode()` (its Kotlin type has no JVM class to name as owner),
+        // and any other reference via a virtual `hashCode()` on the field's own class. A nullable
+        // field's null guard is branches only — it interns nothing extra.
         self.cp.utf8("hashCode");
+        self.cp.utf8("()I");
+        // The `Arrays.hashCode` overload for an array field descriptor.
+        let arrays_hash_desc = |d: &str| -> &'static str {
+            match d {
+                "[Z" => "([Z)I",
+                "[C" => "([C)I",
+                "[B" => "([B)I",
+                "[S" => "([S)I",
+                "[I" => "([I)I",
+                "[J" => "([J)I",
+                "[F" => "([F)I",
+                "[D" => "([D)I",
+                _ => "([Ljava/lang/Object;)I", // reference/nested arrays share the Object[] overload
+            }
+        };
+        // A boxed-primitive field (`Int?` → `Ljava/lang/Integer;`) dispatches `Object.hashCode()`.
+        let is_boxed_prim = |d: &str| {
+            matches!(
+                d,
+                "Ljava/lang/Integer;"
+                    | "Ljava/lang/Long;"
+                    | "Ljava/lang/Double;"
+                    | "Ljava/lang/Float;"
+                    | "Ljava/lang/Short;"
+                    | "Ljava/lang/Byte;"
+                    | "Ljava/lang/Character;"
+                    | "Ljava/lang/Boolean;"
+            )
+        };
         for (_, desc) in fields {
             match hashcode_ref(desc) {
                 Some((cls, d)) => {
                     self.cp.methodref(cls, "hashCode", d);
                 }
+                None if desc.starts_with('[') => {
+                    self.cp
+                        .methodref("java/util/Arrays", "hashCode", arrays_hash_desc(desc));
+                }
+                None if is_boxed_prim(desc) => {
+                    self.cp.methodref("java/lang/Object", "hashCode", "()I");
+                }
                 None if is_ref(desc) => {
                     let cls = &desc[1..desc.len() - 1];
-                    // kotlinc interns the `()I` descriptor BEFORE the receiver class for a reference
-                    // field's virtual `hashCode()` call — pre-seed the descriptor to match.
-                    self.cp.utf8("()I");
                     self.cp.methodref(cls, "hashCode", "()I");
                 }
                 None => {}
@@ -936,7 +1000,7 @@ impl ClassWriter {
     /// a frame that falsely compared "same" against a mis-derived baseline would make the verifier
     /// (which derives the real one from the descriptor) reject the class.
     #[must_use]
-    fn append_param_verif_types(&mut self, desc: &str, out: &mut Vec<VerifType>) -> bool {
+    fn append_param_verif_types(&self, desc: &str, out: &mut Vec<Option<VerifType>>) -> bool {
         let (Some(stripped), Some(end)) = (desc.strip_prefix('('), desc.find(')')) else {
             return false;
         };
@@ -945,19 +1009,19 @@ impl ClassWriter {
         while i < params.len() {
             match params[i] {
                 b'I' | b'S' | b'B' | b'C' | b'Z' => {
-                    out.push(VerifType::Integer);
+                    out.push(Some(VerifType::Integer));
                     i += 1;
                 }
                 b'J' => {
-                    out.push(VerifType::Long);
+                    out.push(Some(VerifType::Long));
                     i += 1;
                 }
                 b'F' => {
-                    out.push(VerifType::Float);
+                    out.push(Some(VerifType::Float));
                     i += 1;
                 }
                 b'D' => {
-                    out.push(VerifType::Double);
+                    out.push(Some(VerifType::Double));
                     i += 1;
                 }
                 b'L' => {
@@ -971,8 +1035,11 @@ impl ClassWriter {
                     let Ok(name) = std::str::from_utf8(&params[start + 1..i]) else {
                         return false;
                     };
-                    let idx = self.cp.class(name);
-                    out.push(VerifType::Object(idx));
+                    // Lookup-only: a class with no pool entry yet cannot appear in any recorded
+                    // frame either, so a `None` slot (never equal) safely forces `full_frame` —
+                    // interning here would ADD entries kotlinc's pool does not have (e.g. `[I` for
+                    // an array param whose frames all compress to `same_frame`).
+                    out.push(self.cp.lookup_class(name).map(VerifType::Object));
                     i += 1; // skip ';'
                 }
                 b'[' => {
@@ -1001,8 +1068,7 @@ impl ClassWriter {
                     let Ok(descriptor) = std::str::from_utf8(&params[start..i]) else {
                         return false;
                     };
-                    let idx = self.cp.class(descriptor);
-                    out.push(VerifType::Object(idx));
+                    out.push(self.cp.lookup_class(descriptor).map(VerifType::Object));
                 }
                 _ => return false, // not a JVM type descriptor character
             }
@@ -1027,13 +1093,13 @@ impl ClassWriter {
         // parameters' class types, which would otherwise perturb the pool of a branch-free method.
         let stackmap = if code.has_frames() {
             const ACC_STATIC: u16 = 0x0008;
-            let mut initial_locals: Vec<VerifType> = Vec::new();
+            let mut initial_locals: Vec<Option<VerifType>> = Vec::new();
             if access & ACC_STATIC == 0 {
-                initial_locals.push(if name == "<init>" {
+                initial_locals.push(Some(if name == "<init>" {
                     VerifType::UninitializedThis
                 } else {
                     VerifType::Object(self.this_class)
-                });
+                }));
             }
             let baseline = self
                 .append_param_verif_types(desc, &mut initial_locals)
@@ -1671,7 +1737,7 @@ impl CodeBuilder {
     /// the baseline could not be derived (malformed descriptor) — then the first entry is written
     /// as a `full_frame`, which is always verifiable, instead of risking a false "same" match
     /// against a wrong baseline.
-    pub fn build_stackmap(&self, initial_locals: Option<&[VerifType]>) -> Option<Vec<u8>> {
+    pub fn build_stackmap(&self, initial_locals: Option<&[Option<VerifType>]>) -> Option<Vec<u8>> {
         if self.frames.is_empty() {
             return None;
         }
@@ -1700,8 +1766,10 @@ impl CodeBuilder {
         // The `as u16` delta casts cannot truncate: a `Code` attribute's code array is capped at
         // 65535 bytes (JVMS §4.7.3) and every entry offset was filtered to `< code_len` above.
         let mut prev_off: i64 = -1;
-        // `None` = no usable baseline yet: the first frame is forced to `full_frame`.
-        let mut prev_locals: Option<Vec<VerifType>> = initial_locals.map(|s| s.to_vec());
+        // Outer `None` = no usable baseline yet (malformed descriptor): the first frame is forced
+        // to `full_frame`. An inner `None` slot is a type with no pool entry — it never compares
+        // equal, so any frame touching it also falls back to `full_frame`.
+        let mut prev_locals: Option<Vec<Option<VerifType>>> = initial_locals.map(|s| s.to_vec());
         let full = |body: &mut Vec<u8>, delta: u16, locals: &[VerifType], stack: &[VerifType]| {
             body.push(255);
             u2(body, delta);
@@ -1724,9 +1792,13 @@ impl CodeBuilder {
             let (same_locals, shares_prefix, p) = match &prev_locals {
                 Some(prev) => {
                     let common = locals.len().min(prev.len());
+                    let prefix_eq = locals[..common]
+                        .iter()
+                        .zip(&prev[..common])
+                        .all(|(c, p)| p.as_ref() == Some(c));
                     (
-                        **locals == *prev,
-                        locals[..common] == prev[..common],
+                        locals.len() == prev.len() && prefix_eq,
+                        prefix_eq,
                         prev.len(),
                     )
                 }
@@ -1760,7 +1832,7 @@ impl CodeBuilder {
             } else {
                 full(&mut body, delta, locals, stack);
             }
-            prev_locals = Some(locals.clone());
+            prev_locals = Some(locals.iter().cloned().map(Some).collect());
         }
         Some(body)
     }

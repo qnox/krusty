@@ -360,8 +360,9 @@ fn data_class_object_overrides_are_not_final() {
 
 #[test]
 fn data_class_nonnull_string_hashes_via_string_hashcode() {
-    // A non-null `String` field hashes via `invokevirtual String.hashCode()` (kotlinc's shape); a
-    // nullable `String?` stays on the null-safe `Objects.hashCode`.
+    // Both a non-null `String` and a nullable `String?` field hash via `invokevirtual String.hashCode()`
+    // (kotlinc's shape). The nullable one is null-guarded inline (`d != null ? d.hashCode() : 0`, an
+    // `ifnonnull` branch), NOT routed through `Objects.hashCode`.
     let Some((dir, jh)) = krusty_compile(
         "dcstrhash",
         "data class D(val s: String, val q: String?)\nfun box() = \"OK\"\n",
@@ -374,11 +375,56 @@ fn data_class_nonnull_string_hashes_via_string_hashcode() {
     let hc = &hc[..hc[1..].find("\n\n").map(|p| p + 1).unwrap_or(hc.len())];
     assert!(
         hc.contains("String.hashCode"),
-        "non-null String field must hash via String.hashCode:\n{hc}"
+        "String fields must hash via String.hashCode:\n{hc}"
     );
     assert!(
-        hc.contains("Objects.hashCode"),
-        "nullable String? field must stay on the null-safe Objects.hashCode:\n{hc}"
+        hc.contains("ifnonnull"),
+        "nullable String? field must be null-guarded inline (ifnonnull), not Objects.hashCode:\n{hc}"
+    );
+    assert!(
+        !hc.contains("Objects.hashCode"),
+        "nullable String? field must NOT route through Objects.hashCode:\n{hc}"
+    );
+}
+
+#[test]
+fn data_class_hash_shapes_match_kotlinc_per_field_kind() {
+    // kotlinc's per-field-kind hash dispatch, shape-for-shape: an ARRAY content-hashes via
+    // `java.util.Arrays.hashCode` (and content-prints via `Arrays.toString`); a BOXED nullable
+    // primitive (`Int?`) dispatches `Object.hashCode()` (its Kotlin type has no JVM class to name);
+    // a custom-class field dispatches a virtual `hashCode()` on its OWN class. None of them route
+    // through `Objects.hashCode`.
+    let Some((dir, jh)) = krusty_compile(
+        "dchashkinds",
+        "class Own\ndata class D(val xs: IntArray, val b: Int?, val o: Own)\nfun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let text = javap(&jh, &dir.join("D.class"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let hc = &text[text.find("int hashCode").expect("hashCode")..];
+    let hc = &hc[..hc[1..].find("\n\n").map(|p| p + 1).unwrap_or(hc.len())];
+    assert!(
+        hc.contains("Arrays.hashCode"),
+        "array field must content-hash via Arrays.hashCode:\n{hc}"
+    );
+    assert!(
+        hc.contains("Object.hashCode"),
+        "boxed Int? field must dispatch Object.hashCode:\n{hc}"
+    );
+    assert!(
+        hc.contains("Own.hashCode"),
+        "custom-class field must dispatch its own class's hashCode:\n{hc}"
+    );
+    assert!(
+        !hc.contains("Objects.hashCode"),
+        "no field kind routes through Objects.hashCode:\n{hc}"
+    );
+    let ts = &text[text.find("String toString").expect("toString")..];
+    let ts = &ts[..ts[1..].find("\n\n").map(|p| p + 1).unwrap_or(ts.len())];
+    assert!(
+        ts.contains("Arrays.toString"),
+        "array field must content-print via Arrays.toString:\n{ts}"
     );
 }
 

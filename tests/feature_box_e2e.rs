@@ -59,6 +59,29 @@ fun box(): String {
 
 /// `(class-stem, source)` — the file is written as `<stem>.kt`, whose facade class is `<stem>Kt`.
 const SNIPPETS: &[(&str, &str)] = &[
+    // Data-class hashCode/toString SEMANTICS per field kind, matching kotlinc: an array field
+    // CONTENT-hashes (`java.util.Arrays.hashCode`) and content-prints (`Arrays.toString`) — the old
+    // `Objects.hashCode` identity hash silently diverged from kotlinc; a nullable field hashes 0 for
+    // null via kotlinc's inline guard; a TYPE-PARAMETER field (`val t: T`) is null-guarded even
+    // though its declared type isn't marked nullable (its erased bound admits null — an unguarded
+    // virtual dispatch would NPE where kotlinc returns 0).
+    (
+        "DataClassHashSemantics",
+        r#"// WITH_STDLIB
+data class W(val xs: IntArray, val s: String?)
+data class G<T>(val t: T)
+fun box(): String {
+    val w = W(intArrayOf(1, 2, 3), null)
+    val expect = java.util.Arrays.hashCode(intArrayOf(1, 2, 3)) * 31 + 0
+    if (w.hashCode() != expect) return "h=${w.hashCode()} want $expect"
+    if (!w.toString().contains("[1, 2, 3]")) return "s=$w"
+    val gn: G<Int?> = G(null)
+    if (gn.hashCode() != 0) return "gnull=${gn.hashCode()}"
+    if (G("x").hashCode() != "x".hashCode()) return "gstr"
+    return "OK"
+}
+"#,
+    ),
     // `joinToString` with a TRAILING LAMBDA: the lambda fills the LAST parameter (`transform`), the five
     // middle parameters defaulting (`separator`/`prefix`/… via the `$default` synthetic + bit-mask). The
     // lambda's `it` binds to the receiver's element type. Covers both the lambda-only form and a leading

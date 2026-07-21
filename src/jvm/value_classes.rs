@@ -1419,6 +1419,40 @@ pub fn lower_value_classes(
             } if vc_getters.get(owner).is_some_and(|g| g == name) => {
                 value_class_name(*owner, &under).map(|owner| Rw::Prop(*receiver, owner))
             }
+            // A zero-arg `Any`-override dispatched VIRTUALLY on the value class itself (`id.hashCode()`
+            // / `id.toString()` — e.g. a data class hashing its value-class field on the field's own
+            // class, kotlinc's per-field shape) → the static `-impl` over the unboxed underlying
+            // (`invokestatic Id.hashCode-impl(U)I`), exactly as kotlinc emits it. The receiver
+            // becomes the static's sole argument (the unboxed `$this` — a `Static` callee's
+            // `dispatch_receiver` is only consumed by the splice path, never plain emission).
+            IrExpr::Call {
+                callee: Callee::Virtual { owner, name, .. },
+                dispatch_receiver: Some(receiver),
+                args,
+            } if args.is_empty()
+                && (name == "hashCode" || name == "toString")
+                && is_value_class_internal(*owner, &under) =>
+            {
+                let u = under
+                    .get(owner)
+                    .map(|t| erase(t, &under))
+                    .unwrap_or(Ty::Error);
+                let ret = if name == "hashCode" {
+                    "I"
+                } else {
+                    "Ljava/lang/String;"
+                };
+                Some(Rw::Ctor(IrExpr::Call {
+                    callee: Callee::Static {
+                        owner: *owner,
+                        name: format!("{name}-impl"),
+                        descriptor: format!("({}){ret}", desc(&u)),
+                        inline: InlineKind::None,
+                    },
+                    dispatch_receiver: None,
+                    args: vec![*receiver],
+                }))
+            }
             // `x.getV()` getter: identity on an unboxed value, `unbox-impl()` on a boxed one.
             IrExpr::MethodCall {
                 class,
