@@ -2752,6 +2752,30 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
             }
             RuntimeOp::PrimitiveCompare => None,
             RuntimeOp::HashCode => {
+                // An ARRAY content-hashes via `java.util.Arrays.hashCode` — kotlinc's data-class
+                // shape (even though data-class `equals` compares arrays by reference).
+                if let Some(fq) = array_kotlin_fq(ty.non_null()) {
+                    let desc = match fq {
+                        "kotlin/BooleanArray" => "([Z)I",
+                        "kotlin/CharArray" => "([C)I",
+                        "kotlin/ByteArray" => "([B)I",
+                        "kotlin/ShortArray" => "([S)I",
+                        "kotlin/IntArray" => "([I)I",
+                        "kotlin/LongArray" => "([J)I",
+                        "kotlin/FloatArray" => "([F)I",
+                        "kotlin/DoubleArray" => "([D)I",
+                        "kotlin/Array" => "([Ljava/lang/Object;)I",
+                        _ => unreachable!("array_kotlin_fq returns only the names above"),
+                    };
+                    return callable(
+                        "java/util/Arrays",
+                        "hashCode",
+                        vec![ty],
+                        Ty::Int,
+                        Ty::Int,
+                        desc.to_string(),
+                    );
+                }
                 let (owner, desc, param) = match ty {
                     Ty::Int => ("java/lang/Integer", "(I)I", Ty::Int),
                     Ty::Short => ("java/lang/Short", "(S)I", Ty::Short),
