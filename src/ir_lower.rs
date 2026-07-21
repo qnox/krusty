@@ -7563,6 +7563,9 @@ impl<'a> Lower<'a> {
     fn field_hash(&mut self, class_id: ClassId, idx: u32, t: Ty) -> Option<u32> {
         let field = &self.ir.classes[class_id as usize].fields[idx as usize];
         let guarded = field.ty.is_nullable() || field.type_param.is_some();
+        // Keys for recording this field's chosen `hashCode` owner (read by the pool seeder).
+        let class_internal = self.ir.classes[class_id as usize].fq_name();
+        let field_name = field.name.clone();
         // The checker `Ty` of a nullable-primitive field is `Nullable(Int)` — test the classifier
         // under the `?`.
         let is_prim = matches!(
@@ -7620,6 +7623,9 @@ impl<'a> Lower<'a> {
                     } else {
                         type_name("kotlin/Any")
                     };
+                    // Record the owner (backend maps `kotlin/Any` → `java/lang/Object`) so the pool seeder
+                    // interns the SAME `hashCode` methodref this body emits.
+                    s.ir.set_data_hashcode_owner(&class_internal, &field_name, owner.render());
                     Some(s.emit_virtual_call(
                         owner,
                         "hashCode".into(),

@@ -70,6 +70,26 @@ fn assert_byte_identical(src: &str, class_internal: &str, cp: &[PathBuf]) {
 
 // ---- Byte-identity (the end-to-end goal) ----------------------------------------------------------
 
+/// A `data class` with a PARAMETERIZED-type field (`List<String>`) — the generic `Signature` on the
+/// field/getter/component1/copy/ctor (copy-sig right after the copy descriptor, field-sig LATE before
+/// `@Metadata`) AND the interface-field `hashCode` owner (`java/lang/Object`, not `List`) are now seeded
+/// to match the body. IGNORED pending the LAST divergence: `copy$default`'s synthesized skip-frames are
+/// `same_frame`s, but `verif_single` interns their object-typed locals (e.g. `Class java/util/List`)
+/// EAGERLY at frame-record time — an orphan the written `same_frame` never references. kotlinc interns a
+/// frame `Class` only when a written frame lists it. The fix is deferred `VerifType` interning (carry the
+/// class NAME, intern at `build_stackmap` write time), which also touches the `append_param_verif_types`
+/// baseline — a focused core change. Un-ignore once that lands.
+#[test]
+#[ignore = "pending deferred VerifType interning to drop the copy$default same_frame orphan"]
+fn data_class_generic_collection_field_is_byte_identical() {
+    let cp: Vec<PathBuf> = common::stdlib_jar().into_iter().collect();
+    assert_byte_identical(
+        "package demo\ndata class D(val xs: List<String>)\n",
+        "demo/D",
+        &cp,
+    );
+}
+
 /// A plain (non-`data`) class with a PARAMETERIZED-type property (`List<String>`) — the generic
 /// `Signature` machinery: the field, its getter, and the constructor each carry a `Signature`
 /// attribute (`Ljava/util/List<Ljava/lang/String;>;` and the `(…)V`/`()…` method forms), interned in
