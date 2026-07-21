@@ -1690,6 +1690,10 @@ pub fn javac_compile(sources: &[(String, String)], cp_jars: &[PathBuf]) -> Optio
     // Empty main class = compile-only (no run) in the JavaRunner protocol.
     let res = javac_run(&joined, &cp, &outdir.to_string_lossy(), "")?;
     if res != "OK" {
+        // Failure is a legitimate SKIP for the harness; surface the javac error only on demand.
+        if std::env::var("KRUSTY_JAVAC_DEBUG").is_ok() {
+            eprintln!("[javac_compile] cp={cp}\n{res}");
+        }
         let _ = std::fs::remove_dir_all(&root);
         return None;
     }

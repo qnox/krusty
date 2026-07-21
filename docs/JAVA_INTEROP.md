@@ -109,8 +109,16 @@ outer loop is bounded by the KSP backstop too.
    javac, compile-only protocol), `.java` blocks in `compile_multifile`, resolver fix: static-call
    receiver on a same/root-package classpath class now resolves through the import levels
    (`imported_type_internal` fallback), matching ctor/type positions.
-2. **Java signature stubs (B)** — header-only Java parser feeding `SymbolSource`; unlocks
-   `kt40180_3.kt` and Java→Kotlin references in drop-in builds; javac still emits the bytecode.
+2. **[landed] Java signature stubs (B)** — `src/jvm/java_stub.rs` parses the Java signature
+   surface and emits stub `.class` files (descriptors + generic `Signature` attrs; dummy bodies —
+   stubs are never JVM-loaded). The harness falls back to Kotlin-first when javac-first fails:
+   stubs → krusty → real javac against krusty's output → ship javac's classes. Resolution is
+   callback-based (Kotlin module names + classpath); unresolvable types abort → skip.
+   Fixed along the way: `open fun` members were emitted `ACC_FINAL` when nothing in-module
+   extended the class — unsound across compilation boundaries (javac rejected the override);
+   `FunDecl.is_open` now flows to `ir.open_methods`. `kt40180_3.kt` remains skipped on an
+   unrelated pre-existing limitation (`listIterator` same-name overloads: "multiple overloads with
+   different erased signatures").
 3. **`// MODULE:` Java files** — extend `split_modules` to keep `.java` files per module and javac
    them in dependency order (same seam as slice 1). Zero corpus tests today; needed for drop-in.
 4. **APT host** — pass `-processorpath`/`-processor` through the JavaRunner javac call; javac owns
