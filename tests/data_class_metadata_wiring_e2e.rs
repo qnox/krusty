@@ -70,6 +70,27 @@ fn assert_byte_identical(src: &str, class_internal: &str, cp: &[PathBuf]) {
 
 // ---- Byte-identity (the end-to-end goal) ----------------------------------------------------------
 
+/// A `data class` with a NULLABLE-PRIMITIVE field (`Int?` → boxed `Integer`) — its `component1`/`copy`
+/// carry a `JvmMethodSignature` (`@Metadata` f100) recording the boxed descriptor, which the proto type
+/// alone (`Int?`) does not pin. Non-null `Int` needs none; this pins the boxed-signature emission.
+#[test]
+fn data_class_nullable_primitive_field_is_byte_identical() {
+    assert_byte_identical("package demo\ndata class D(val x: Int?)\n", "demo/D", &[]);
+}
+
+/// A `data class` whose FIRST field is a nullable primitive and whose later field is a non-null
+/// primitive (`Int?`, `Int`) — two f100 positions (`component1` + `copy`, `component2`/the non-null
+/// stay derivable). The `hashCode` accumulation starts AFTER the nullable field's ternary, so it does
+/// not exercise the (separate) keep-`result`-on-stack path — isolating the f100 metadata coverage.
+#[test]
+fn data_class_nullable_first_primitive_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ndata class D(val a: Int?, val b: Int)\n",
+        "demo/D",
+        &[],
+    );
+}
+
 /// A `data class` with a PARAMETERIZED-type field (`List<String>`) — FULLY byte-identical. Combines the
 /// generic `Signature` on field/getter/component1/copy/ctor (copy-sig after the copy descriptor, field-sig
 /// late before `@Metadata`), the interface-field `hashCode` owner (`java/lang/Object`, not `List`), and
