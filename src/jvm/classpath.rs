@@ -2812,6 +2812,30 @@ fn build_jar_packages_dir(root: &Path, dir: &Path, jp: &mut JarPackages) {
             }
         } else {
             record_pkg_entry_name(&rel, jp);
+            // A class DIRECTORY often carries no `META-INF/*.kotlin_module` (a jar build writes one;
+            // a separate-compilation output dir usually doesn't), which would leave its packages with
+            // an empty facade catalog — cross-module top-level/extension resolution silently blind.
+            // The catalog is fully recoverable from each class's own `@Metadata`: a file facade/part
+            // declares `Package` members, a multifile facade lists its parts. Record those classes as
+            // the package's facades, exactly as `kotlin_module` would have.
+            if rel.ends_with(".class") {
+                if let Some(ci) = std::fs::read(&p).ok().and_then(|b| parse_class(&b).ok()) {
+                    let m = &ci.meta;
+                    if !m.package_functions.is_empty()
+                        || !m.package_properties.is_empty()
+                        || !m.type_aliases.is_empty()
+                        || !m.multifile_parts.is_empty()
+                    {
+                        let internal = ci.this_class.render();
+                        let pkg = internal.rsplit_once('/').map_or("", |(p, _)| p);
+                        let facade_id = jp.names.insert(&internal);
+                        let entry = jp.entry_mut(pkg);
+                        if !entry.facades.contains(&facade_id) {
+                            entry.facades.push(facade_id);
+                        }
+                    }
+                }
+            }
         }
     }
 }
