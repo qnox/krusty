@@ -162,6 +162,11 @@ impl Backend for JvmBackend {
         let emit_opts = crate::jvm::ir_emit::EmitOptions {
             class_major: self.class_major,
             source_file: Some(format!("{stem}.kt")),
+            // kotlinc records `classModuleName` in @Metadata unless the module is the default `main`.
+            module_name: (module_name != "main").then(|| module_name.to_string()),
+            // Opt-in (WIP): compute + emit `@Metadata` for supported shapes. Off unless requested, so
+            // the default emit is unchanged (an unverified payload breaks kotlin-reflect).
+            emit_class_metadata: std::env::var_os("KRUSTY_EMIT_CLASS_METADATA").is_some(),
         };
 
         // Lower the checked file to the backend-agnostic IR, then emit JVM bytecode from it.

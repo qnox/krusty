@@ -3912,6 +3912,8 @@ fn build_continuation_class(
     let class = IrClass {
         fq_name: crate::types::type_name(internal),
         is_value: false,
+        is_data: false,
+        decl_line: 0,
         type_param_bounds: vec![],
         type_params: Vec::new(),
         supertypes: vec![],

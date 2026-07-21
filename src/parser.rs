@@ -43,7 +43,34 @@ pub fn parse_with_features(
     hoist_local_classes(&mut p.file);
     fixup_parenless_base_classes(&mut p.file);
     rewrite_anon_captures(&mut p.file);
+    fill_class_decl_lines(&mut p.file, src);
     p.file
+}
+
+/// Fill each `ClassDecl::decl_line` with the 1-based source line of its `span.lo`. kotlinc maps the
+/// `LineNumberTable` of a class's synthesized members (primary ctor, property accessors) to the class
+/// declaration line; the emitter reads this off `IrClass::decl_line`. Uses a single ascending scan of
+/// newline offsets so the whole arena costs one pass over `src`.
+fn fill_class_decl_lines(file: &mut File, src: &str) {
+    // `line_starts[k]` = byte offset where line (k+1) begins; line 1 starts at 0.
+    let mut line_starts = vec![0u32];
+    for (i, b) in src.bytes().enumerate() {
+        if b == b'\n' {
+            line_starts.push(i as u32 + 1);
+        }
+    }
+    let line_at = |off: u32| -> u32 {
+        // 1-based line: index of the last start <= off.
+        match line_starts.binary_search(&off) {
+            Ok(k) => k as u32 + 1,
+            Err(k) => k as u32, // k = count of starts strictly <= off (since off not found)
+        }
+    };
+    for decl in &mut file.decl_arena {
+        if let Decl::Class(c) = decl {
+            c.decl_line = line_at(c.span.lo);
+        }
+    }
 }
 
 /// Whether `body` is the FunBody root expression (an `=`-body or a block).
@@ -2059,6 +2086,7 @@ impl<'a> Parser<'a> {
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             span: Span::new(start.lo, end.hi),
+            decl_line: 0,
         }
     }
 
@@ -2908,6 +2936,7 @@ impl<'a> Parser<'a> {
             has_primary_ctor: header_has_primary || secondary_ctors.is_empty(),
             secondary_ctors,
             span: Span::new(start.lo, end.hi),
+            decl_line: 0,
         }
     }
 
@@ -3238,6 +3267,7 @@ impl<'a> Parser<'a> {
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             span: Span::new(start.lo, end.hi),
+            decl_line: 0,
         }
     }
 
@@ -3373,6 +3403,7 @@ impl<'a> Parser<'a> {
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             span: Span::new(span.lo, end.hi),
+            decl_line: 0,
         };
         let did = self.file.add_decl(Decl::Class(synth));
         self.file.decls.push(did);
@@ -3541,6 +3572,7 @@ impl<'a> Parser<'a> {
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             span: Span::new(start.lo, end.hi),
+            decl_line: 0,
         }
     }
 
