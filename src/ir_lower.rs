@@ -7598,14 +7598,37 @@ impl<'a> Lower<'a> {
                 return s.runtime_call(RuntimeOp::ArrayHashCode, t, vec![v]);
             }
             match t.non_null().kotlin_class_internal() {
-                Some(cls) => Some(s.emit_virtual_call(
-                    cls,
-                    "hashCode".into(),
-                    "()I".into(),
-                    false,
-                    v,
-                    vec![],
-                )),
+                Some(cls) => {
+                    // An INTERFACE-typed field (including annotation types — interfaces at the JVM
+                    // level) dispatches `Object.hashCode()`, matching kotlinc: `hashCode` is not an
+                    // interface member, so a Methodref on the interface owner would be rejected at
+                    // runtime (`IncompatibleClassChangeError`). Interface-ness resolves from the
+                    // source file's classes or the classpath; an UNRESOLVABLE classifier also takes
+                    // the `Object` owner — always legal, and kotlinc's owner for every non-class.
+                    let is_class = s
+                        .syms
+                        .class_by_internal(&cls.render())
+                        .map(|c| !c.is_interface)
+                        .unwrap_or_else(|| {
+                            s.syms
+                                .libraries
+                                .resolve_type_name(cls)
+                                .is_some_and(|lt| !lt.is_interface())
+                        });
+                    let owner = if is_class {
+                        cls
+                    } else {
+                        type_name("kotlin/Any")
+                    };
+                    Some(s.emit_virtual_call(
+                        owner,
+                        "hashCode".into(),
+                        "()I".into(),
+                        false,
+                        v,
+                        vec![],
+                    ))
+                }
                 None => s.runtime_call(RuntimeOp::HashCode, t, vec![v]),
             }
         };
