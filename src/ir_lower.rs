@@ -7557,58 +7557,81 @@ impl<'a> Lower<'a> {
                 .kotlin_class_internal()
                 .is_some_and(|n| n.matches("kotlin/String"))
         };
-        let v = self.this_field(class_id, idx);
-        match t {
-            // kotlinc hashes each primitive field via its boxed type's static `hashCode(prim)` (so the
-            // bytecode matches even though `Integer.hashCode(I)` is the identity on `int`).
-            Ty::Int | Ty::Short | Ty::Byte | Ty::Char | Ty::Boolean => {
-                self.runtime_call(RuntimeOp::HashCode, t, vec![v])
-            }
-            // A NON-null `String` hashes via its own `String.hashCode()` (kotlinc's `invokevirtual`).
-            t if !nullable && is_string(&t) => {
-                Some(self.emit_external_call("kotlin/String.hashCode", Some(v), vec![]))
-            }
-            // A NULLABLE `String?` or a nullable BOXED PRIMITIVE (`Int?` ⇒ boxed `Integer`) uses kotlinc's
-            // null-guarded ternary `x != null ? x.hashCode() : 0` (an `ifnonnull` branch, NOT
-            // `Objects.hashCode`). The inner virtual call is `String.hashCode` for a `String?` and
-            // `Object.hashCode` for a boxed primitive (kotlinc resolves the boxed receiver against
-            // `Object`). Phrased `if (x == null) 0 else x.hashCode()` so the When lowers to kotlinc's exact
-            // layout (the `x == null` false-branch is an `ifnonnull` to the hashCode arm, `0` falls
-            // through). The field is loaded twice (no `dup`), as kotlinc does. Other nullable references
-            // still fall through to the null-safe `Objects.hashCode`.
-            t if nullable
-                && (is_string(&t)
-                    || matches!(
-                        t.non_null(),
-                        Ty::Int
-                            | Ty::Long
-                            | Ty::Short
-                            | Ty::Byte
-                            | Ty::Char
-                            | Ty::Boolean
-                            | Ty::Double
-                            | Ty::Float
-                    )) =>
+        // The virtual `hashCode()I` symbol kotlinc uses for a reference field — `String.hashCode`, a boxed
+        // primitive's `Object.hashCode`, or a concrete class's own `<Class>.hashCode` — or `None` to fall
+        // back to `Objects.hashCode`. Scoped to a same-compilation concrete class (internal name == JVM
+        // name); interfaces (`invokeinterface`), stdlib/collection types (remapped name) and value classes
+        // fall back.
+        let ref_hc_sym: Option<String> = {
+            let nn = t.non_null();
+            if is_string(&t) {
+                Some("kotlin/String.hashCode".into())
+            } else if nullable
+                && matches!(
+                    nn,
+                    Ty::Int
+                        | Ty::Long
+                        | Ty::Short
+                        | Ty::Byte
+                        | Ty::Char
+                        | Ty::Boolean
+                        | Ty::Double
+                        | Ty::Float
+                )
             {
-                let sym = if is_string(&t) {
-                    "kotlin/String.hashCode"
-                } else {
-                    "java/lang/Object.hashCode"
-                };
+                Some("java/lang/Object.hashCode".into())
+            } else if !nn.is_array() {
+                nn.obj_internal().and_then(|internal| {
+                    let name = internal.render();
+                    self.syms
+                        .class_by_internal(&name)
+                        .is_some_and(|c| {
+                            !c.is_interface && c.value_field.is_none() && !c.is_annotation
+                        })
+                        .then(|| format!("{name}.hashCode"))
+                })
+            } else {
+                None
+            }
+        };
+        let v = self.this_field(class_id, idx);
+        // A NON-null primitive hashes via its boxed type's static `hashCode(prim)` (kotlinc's bytecode).
+        if !nullable
+            && matches!(
+                t,
+                Ty::Int
+                    | Ty::Short
+                    | Ty::Byte
+                    | Ty::Char
+                    | Ty::Boolean
+                    | Ty::Long
+                    | Ty::Double
+                    | Ty::Float
+            )
+        {
+            return self.runtime_call(RuntimeOp::HashCode, t, vec![v]);
+        }
+        // A data class CONTENT-hashes an array property via `java.util.Arrays.hashCode([X)I`.
+        if t.non_null().is_array() {
+            return self.runtime_call(RuntimeOp::ArrayHashCode, t, vec![v]);
+        }
+        // A reference with a known virtual hashCode: called directly if non-null, or null-guarded by
+        // kotlinc's ternary `if (x == null) 0 else x.hashCode()` (an `ifnonnull` to the hashCode arm, `0`
+        // the fall-through; the field is loaded twice, no `dup`, as kotlinc does).
+        if let Some(sym) = ref_hc_sym {
+            return if nullable {
                 let nullc = self.emit_const(IrConst::Null);
                 let isnull = self.emit_primitive_bin_op(IrBinOp::RefEq, v, nullc);
                 let v2 = self.this_field(class_id, idx);
                 let hc = self.emit_external_call(sym, Some(v2), vec![]);
                 let zero = self.emit_const(IrConst::Int(0));
                 Some(self.emit_when(vec![(Some(isnull), zero), (None, hc)]))
-            }
-            Ty::Long | Ty::Double | Ty::Float => self.runtime_call(RuntimeOp::HashCode, t, vec![v]),
-            // A data class CONTENT-hashes an array property via `java.util.Arrays.hashCode([X)I` (kotlinc's
-            // shape), not the array's identity `Object`/`Objects.hashCode`.
-            t if t.non_null().is_array() => self.runtime_call(RuntimeOp::ArrayHashCode, t, vec![v]),
-            // Any other reference property hashes by the null-safe object hash, matching kotlinc.
-            _ => self.runtime_call(RuntimeOp::HashCode, t, vec![v]),
+            } else {
+                Some(self.emit_external_call(sym, Some(v), vec![]))
+            };
         }
+        // Any other reference property hashes by the null-safe object hash, matching kotlinc.
+        self.runtime_call(RuntimeOp::HashCode, t, vec![v])
     }
     /// A `Boolean` IR expr testing field *inequality* (IEEE-aware for float/double, structural for
     /// refs) — used to build `equals` as a chain of `if (a != b) return false` early-outs.

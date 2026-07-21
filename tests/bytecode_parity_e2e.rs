@@ -387,6 +387,39 @@ fn data_class_nonnull_string_hashes_via_string_hashcode() {
     );
 }
 
+/// A data-class field of a concrete (same-compilation) class hashes via that class's OWN virtual
+/// `hashCode()` (`invokevirtual demo/D.hashCode`), not the null-safe static `Objects.hashCode` — for
+/// both a non-null and a nullable field (the nullable one via kotlinc's `ifnonnull` ternary).
+#[test]
+fn data_class_concrete_ref_field_hashes_via_own_hashcode() {
+    for (name, src) in [
+        (
+            "dcrefnn",
+            "class D\ndata class C(val x: D)\nfun box() = \"OK\"\n",
+        ),
+        (
+            "dcrefnull",
+            "class D\ndata class C(val x: D?)\nfun box() = \"OK\"\n",
+        ),
+    ] {
+        let Some((dir, jh)) = krusty_compile(name, src) else {
+            return;
+        };
+        let text = javap(&jh, &dir.join("C.class"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let hc = &text[text.find("int hashCode").expect("hashCode")..];
+        let hc = &hc[..hc[1..].find("\n\n").map(|p| p + 1).unwrap_or(hc.len())];
+        assert!(
+            hc.contains("D.hashCode"),
+            "{name}: concrete-class field must hash via its own hashCode:\n{hc}"
+        );
+        assert!(
+            !hc.contains("Objects.hashCode"),
+            "{name}: concrete-class field must NOT use Objects.hashCode:\n{hc}"
+        );
+    }
+}
+
 /// A nullable BOXED-primitive data-class field (`Int?`) hashes via kotlinc's null-guarded ternary
 /// `x != null ? x.hashCode() : 0` — an `ifnonnull` branch to the RAW virtual `Object.hashCode()`, NOT
 /// the null-safe `Objects.hashCode` (nor the wrapper's static `Integer.hashCode(I)`).

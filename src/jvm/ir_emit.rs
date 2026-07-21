@@ -7124,6 +7124,14 @@ impl<'a> Emitter<'a> {
                     }
                 }
             }
+            // A concrete class's own virtual `hashCode()I` — `field_hash` forms `<internal>.hashCode` only
+            // for a same-compilation concrete class (JVM name == internal), so `invokevirtual` is correct.
+            fq if fq.ends_with(".hashCode") => {
+                let cls = &fq[..fq.len() - ".hashCode".len()];
+                self.emit_value(recv.unwrap(), code);
+                let m = self.cw.methodref(cls, "hashCode", "()I");
+                code.invokevirtual(m, 0, 1);
+            }
             _ => {}
         }
     }
