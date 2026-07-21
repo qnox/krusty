@@ -251,6 +251,38 @@ fn data_class_all_primitive_kinds_is_byte_identical() {
     );
 }
 
+// ---- Real-world data-class shapes (grounding) ----------------------------------------------------
+// These mirror the shapes of real domain types (a small all-`Int` result, a many-`Int` aggregate, a
+// single-`String` holder) whose fields are all primitives/`String`, anchoring the synthetic coverage
+// above to representative real-world shapes without naming any specific domain type.
+
+/// A two-`Int` result-type shape (like an operation's summary counts). Byte-for-byte identical to kotlinc.
+#[test]
+fn two_int_result_shape_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ndata class C(val a: Int, val b: Int)\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// A seven-`Int` aggregate shape (like a status breakdown). Exercises the `result` accumulator across
+/// many primitive fields.
+#[test]
+fn seven_int_aggregate_shape_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ndata class C(val a: Int, val b: Int, val c: Int, val d: Int, val e: Int, val f: Int, val g: Int)\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// A single non-null-`String` value-holder shape.
+#[test]
+fn single_string_holder_shape_is_byte_identical() {
+    assert_byte_identical("package demo\ndata class C(val s: String)\n", "demo/C", &[]);
+}
+
 // ---- @Metadata-level checks for shapes not yet FULLY byte-identical (data classes) ----------------
 
 /// A `data class` (metadata on): its IR → `build_class_metadata` yields the synthesized
@@ -296,29 +328,30 @@ fn data_class_emits_metadata_debug_tables_and_annotations() {
     );
 }
 
-/// A real infragnite domain data class (`List<String>` property with a default) — its `@Metadata`
-/// d1/d2 is byte-identical to kotlinc: generic `Type.argument`, the `List` builtin (predefinedIndex),
-/// and the `DECLARES_DEFAULT_VALUE` ctor-param flag. Uses the kotlin stdlib classpath.
+/// A representative real-world data-class shape (two `String`s + a `List<String>` property with a
+/// default) — its `@Metadata` d1/d2 is byte-identical to kotlinc: generic `Type.argument`, the `List`
+/// builtin (predefinedIndex), and the `DECLARES_DEFAULT_VALUE` ctor-param flag. Uses the kotlin stdlib
+/// classpath.
 #[test]
-fn real_data_class_metadata_byte_identical() {
+fn generic_list_property_with_default_metadata_byte_identical() {
     let Some(stdlib) = common::stdlib_jar() else {
         eprintln!("skip (kotlin stdlib jar unavailable)");
         return;
     };
     let cp = [stdlib];
     let src = "package demo\n\
-        data class IfaceConfig(val address: String, val subnet: String, val routes: List<String> = emptyList())\n";
-    let Some(kr) = krusty_bytes(src, "demo/IfaceConfig", &cp) else {
+        data class C(val a: String, val b: String, val items: List<String> = emptyList())\n";
+    let Some(kr) = krusty_bytes(src, "demo/C", &cp) else {
         eprintln!("skip (krusty declined)");
         return;
     };
-    let Some(ko) = kotlinc_bytes(src, "IfaceConfig", "demo/IfaceConfig", &cp) else {
+    let Some(ko) = kotlinc_bytes(src, "C", "demo/C", &cp) else {
         eprintln!("skip (kotlinc unavailable)");
         return;
     };
     // The whole data class isn't byte-identical yet (debug tables/annotations), but its @Metadata is —
     // so the decoded shape must match kotlinc exactly: same property names, function names, and the
-    // `routes: List<String>` return type resolving to the `List` builtin (a generic/argument/default
+    // `items: List<String>` return type resolving to the `List` builtin (a generic/argument/default
     // encoding divergence would surface as a decode mismatch here).
     let kr_meta = parse_class(&kr).expect("krusty parses").meta;
     let ko_meta = parse_class(&ko).expect("kotlinc parses").meta;
@@ -339,14 +372,14 @@ fn real_data_class_metadata_byte_identical() {
         names(&ko_meta),
         "@Metadata property + function names match kotlinc"
     );
-    let routes = kr_meta
+    let items = kr_meta
         .class_properties
         .iter()
-        .find(|p| p.name == "routes")
-        .expect("routes property in @Metadata");
+        .find(|p| p.name == "items")
+        .expect("items property in @Metadata");
     assert_eq!(
-        routes.ret_class.as_ref().map(|t| t.render()).as_deref(),
+        items.ret_class.as_ref().map(|t| t.render()).as_deref(),
         Some("kotlin/collections/List"),
-        "routes decodes as the List builtin",
+        "items decodes as the List builtin",
     );
 }
