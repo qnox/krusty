@@ -64,17 +64,24 @@ pub struct JvmLibraries {
 }
 
 impl JvmLibraries {
-    /// The TOP-LEVEL (receiver-less) function overloads of `name` — `listOf`/`run`/`println`/…
-    /// each with its inline/`@InlineOnly` flags and logical (continuation-stripped) suspend
-    /// signature. The building block `resolve_symbols` uses so a top-level name resolves through
-    /// the ONE fqn seam without the removed receiver-indexed `functions()` query. `find_top_level`
-    /// also surfaces an extension's compiled form; each is classified honestly by its metadata
-    /// receiver, so a caller filters by `FnKind` as needed.
-    fn top_level_overloads(&self, name: &str) -> Vec<FunctionInfo> {
+    /// The TOP-LEVEL (receiver-less) function overloads of `name` declared in package `pkg` —
+    /// `listOf`/`run`/`println`/… each with its inline/`@InlineOnly` flags and logical
+    /// (continuation-stripped) suspend signature. The building block `resolve_symbols` uses so a
+    /// top-level name resolves through the ONE fqn seam without the removed receiver-indexed
+    /// `functions()` query. The package filter runs BEFORE the per-candidate decoration
+    /// (metadata alignment, generic-signature parse, suspend/inline probes) — the index returns
+    /// `name`'s candidates across every package, and decorating the out-of-package ones only to
+    /// throw them away dominated namespace-record composition. `find_top_level` also surfaces an
+    /// extension's compiled form; each is classified honestly by its metadata receiver, so the
+    /// caller filters by `FnKind` as needed.
+    fn top_level_overloads(&self, name: &str, pkg: TypeName) -> Vec<FunctionInfo> {
         let mut overloads = Vec::new();
         // Top-level (receiver-less) functions of this name — `listOf`, `run`, `println`, … — each with
         // its inline/`@InlineOnly` flags in one place.
         for c in self.cp.find_top_level(name) {
+            if c.owner.parent() != Some(pkg) {
+                continue;
+            }
             let is_default = c.name.ends_with("$default");
             let meta_name = c.name.strip_suffix("$default").unwrap_or(&c.name);
             // Suspend-ness lives on the SOURCE function's `@Metadata`; a `$default` synthetic is not in
@@ -1821,9 +1828,9 @@ impl SymbolSource for JvmLibraries {
         // a malformed shape for extension selection. Take only genuine `TopLevel` here; extensions come
         // from the receiver-carrying tree loop below, so the namespace has ONE clean source per kind.
         let mut overloads: Vec<_> = self
-            .top_level_overloads(&name)
+            .top_level_overloads(&name, pkg)
             .into_iter()
-            .filter(|o| o.kind == FnKind::TopLevel && o.callable.owner_package_matches_name(pkg))
+            .filter(|o| o.kind == FnKind::TopLevel)
             .collect();
         // Extension PROPERTIES of the source name live in the CALLABLE namespace's property half. A name is
         // functions XOR a property, so these are surfaced separately and chosen when there are no functions.
