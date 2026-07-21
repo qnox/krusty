@@ -309,6 +309,32 @@ fn data_class_two_class_fields_is_byte_identical() {
     );
 }
 
+/// A MULTI-property data class with a NULLABLE reference field — the pervasive real-world domain-record
+/// shape (a record with several fields, some optional). Its `hashCode` accumulates `result = result*31 +
+/// <field hash>`; the nullable field's hash is a branchy null-guarded ternary, and kotlinc keeps the
+/// `result*31` on the operand stack ACROSS that branch (krusty used to spill it to a temp). Fully
+/// byte-identical.
+#[test]
+fn data_class_multi_property_nullable_reference_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ndata class C(val a: String, val b: String?)\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// A mixed multi-property record with a primitive, a concrete-class field, a `String`, and a NULLABLE
+/// concrete-class field — the general domain-aggregate shape, fully byte-identical (exercises the
+/// operand-stack-preserved `hashCode` accumulator across the nullable field's branch).
+#[test]
+fn data_class_mixed_record_with_nullable_class_field_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass D\ndata class C(val a: Int, val d: D, val s: String, val n: D?)\n",
+        "demo/C",
+        &[],
+    );
+}
+
 // ---- Real-world data-class shapes (grounding) ----------------------------------------------------
 // These mirror the shapes of real domain types (a small all-`Int` result, a many-`Int` aggregate, a
 // single-`String` holder) whose fields are all primitives/`String`, anchoring the synthetic coverage

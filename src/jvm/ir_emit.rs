@@ -1410,6 +1410,7 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env: &EmitEnv) 
         next_slot: 0,
         ret: Ty::Unit,
         loop_stack: Vec::new(),
+        pending_stack: Vec::new(),
     };
     let mut code = CodeBuilder::new(0);
     let mut any_init = false;
@@ -1640,6 +1641,7 @@ fn emit_class(
                 next_slot: 1 + params_words,
                 ret: Ty::Unit,
                 loop_stack: Vec::new(),
+                pending_stack: Vec::new(),
             };
             e.slots.insert(0, (0, Ty::obj(&fq_name)));
             let mut s = 1u16;
@@ -1863,6 +1865,7 @@ fn emit_class(
                 next_slot: 1 + sc_words,
                 ret: Ty::Unit,
                 loop_stack: Vec::new(),
+                pending_stack: Vec::new(),
             };
             e.slots.insert(0, (0, Ty::obj(&fq_name)));
             let mut s = 1u16;
@@ -2016,6 +2019,7 @@ fn emit_class(
                 next_slot: 0,
                 ret: Ty::Unit,
                 loop_stack: Vec::new(),
+                pending_stack: Vec::new(),
             };
             let mut clinit = CodeBuilder::new(0);
             if let Some(comp_fq) = c.companion_class() {
@@ -2176,6 +2180,7 @@ fn emit_enum_entry_subclass(
             next_slot: 1 + ctor_words,
             ret: Ty::Unit,
             loop_stack: Vec::new(),
+            pending_stack: Vec::new(),
         };
         e.slots.insert(0, (0, Ty::obj(&fq_name))); // `this`
         e.emit(init_body, &mut ctor);
@@ -3523,6 +3528,7 @@ fn emit_interface_class(
             next_slot: 0,
             ret: Ty::Unit,
             loop_stack: Vec::new(),
+            pending_stack: Vec::new(),
         };
         let mut clinit = CodeBuilder::new(0);
         if let Some(comp_fq) = c.companion_class() {
@@ -3692,6 +3698,7 @@ fn emit_enum_class(
             next_slot: 1 + ctor_words,
             ret: Ty::Unit,
             loop_stack: Vec::new(),
+            pending_stack: Vec::new(),
         };
         e.slots.insert(0, (0, Ty::obj(&fq)));
         let mut s = 3u16;
@@ -3755,6 +3762,7 @@ fn emit_enum_class(
             next_slot: 0,
             ret: Ty::Unit,
             loop_stack: Vec::new(),
+            pending_stack: Vec::new(),
         };
         let mut clinit = CodeBuilder::new(0);
         for (i, entry) in c.enum_entries.iter().enumerate() {
@@ -4002,6 +4010,7 @@ fn emit_method_inner(
         next_slot: 0,
         ret,
         loop_stack: Vec::new(),
+        pending_stack: Vec::new(),
     };
     if instance {
         e.slots.insert(0, (0, Ty::obj(owner)));
@@ -4266,6 +4275,7 @@ fn emit_default_stub(
         next_slot: 0,
         ret,
         loop_stack: Vec::new(),
+        pending_stack: Vec::new(),
     };
     // value 0 = self; values 1..=n = the real params; then mask + marker (not value-indexed).
     e.slots.insert(0, (0, owner_ty));
@@ -4472,6 +4482,7 @@ fn emit_facade_default_stub(
         next_slot: 0,
         ret,
         loop_stack: Vec::new(),
+        pending_stack: Vec::new(),
     };
     // No `self`: value-index `i` = the i-th real parameter (the static layout the defaults were lowered
     // with); then mask + marker (not value-indexed).
@@ -4557,6 +4568,7 @@ fn emit_ctor_default_stub(
         next_slot: 0,
         ret: Ty::Unit,
         loop_stack: Vec::new(),
+        pending_stack: Vec::new(),
     };
     let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
     // `this` at slot 0 = value-index 0; real params at value-index 1..=n.
@@ -4705,6 +4717,12 @@ struct Emitter<'a> {
     /// `break@l`/`continue@l` targets the entry whose `source_label == Some(l)`; an unlabeled one
     /// targets the innermost (top).
     loop_stack: Vec<(Label, Label, Option<String>)>,
+    /// Operand-stack verification types sitting BELOW the expression currently being emitted (an
+    /// arithmetic LHS held on the stack across a branchy RHS, e.g. a data-class `hashCode` accumulator
+    /// `result*31 + <branchy nullable-field hash>`). Prepended to every recorded stack-map frame's stack
+    /// so the pending operand is typed through the branch (matching kotlinc), avoiding the spill-to-temp
+    /// krusty would otherwise need. Pushed/popped around the branchy RHS in `emit_binop`.
+    pending_stack: Vec<VerifType>,
 }
 
 /// Parse a method descriptor's parameter types (in order) to `Ty`s.
@@ -7594,11 +7612,21 @@ impl<'a> Emitter<'a> {
         let lt = self.value_ty(lhs);
         match op {
             Add | Sub | Mul | Div | Rem => {
-                // `emit_operands` spills the lhs to a temp when the rhs records a stackmap frame (a
-                // branchy operand, `5 + if (c) 1 else 2`) — else it just emits both in order, so the
-                // bytecode is unchanged for the common case. Without it the lhs is stranded on the stack
-                // across the rhs's merge frame (`VerifyError: Inconsistent stackmap frames`).
-                self.emit_operands(&[lhs, rhs], code);
+                // A branchy RHS (`result*31 + <nullable-field hashCode ternary>`): keep the numeric LHS on
+                // the operand stack across the RHS's branch — matching kotlinc — by typing it into the
+                // RHS's stack-map frames via `pending_stack`, instead of spilling it to a temp. The LHS of
+                // arithmetic is always a numeric scalar, so the pending verif type interns no `Class`. A
+                // non-branchy RHS (or a branchy LHS) keeps the ordinary `emit_operands` path (spill only if
+                // needed) — bytecode unchanged for the common case.
+                if self.records_frame(rhs) && !self.records_frame(lhs) {
+                    self.emit_value(lhs, code);
+                    let lv = self.verif_single(lt);
+                    self.pending_stack.push(lv);
+                    self.emit_value(rhs, code);
+                    self.pending_stack.pop();
+                } else {
+                    self.emit_operands(&[lhs, rhs], code);
+                }
                 match lt {
                     Ty::Long => match op {
                         Add => code.ladd(),
@@ -8382,6 +8410,15 @@ impl<'a> Emitter<'a> {
 
     fn frame(&mut self, label: Label, stack: Vec<VerifType>, code: &mut CodeBuilder) {
         let locals = self.verif_locals();
+        // Prepend any operand held on the stack below the current expression (an arithmetic LHS across a
+        // branchy RHS), so the frame types the full operand stack the verifier sees.
+        let stack = if self.pending_stack.is_empty() {
+            stack
+        } else {
+            let mut full = self.pending_stack.clone();
+            full.extend(stack);
+            full
+        };
         code.add_frame_if_new(label, locals, stack);
     }
 
