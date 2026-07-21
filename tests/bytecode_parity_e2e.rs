@@ -477,6 +477,17 @@ fn data_class_value_class_field_hashes_via_hashcode_impl() {
         !hc.contains("box-impl") && !hc.contains("Objects.hashCode"),
         "value-class field must NOT box then Objects.hashCode:\n{hc}"
     );
+    // `equals` compares the field via the value class's static `equals-impl0(U, U)`, not `Intrinsics.areEqual`.
+    let eq = &text[text.find("boolean equals").expect("equals")..];
+    let eq = &eq[..eq[1..].find("\n\n").map(|p| p + 1).unwrap_or(eq.len())];
+    assert!(
+        eq.contains("equals-impl0"),
+        "value-class field must compare via its static equals-impl0:\n{eq}"
+    );
+    assert!(
+        !eq.contains("Intrinsics.areEqual"),
+        "value-class field must NOT compare via Intrinsics.areEqual:\n{eq}"
+    );
 }
 
 /// A collection/library-interface data-class field (`List`/`Map`) hashes via `Object.hashCode` (kotlinc's

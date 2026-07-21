@@ -7679,6 +7679,40 @@ impl<'a> Lower<'a> {
                 let z = self.emit_const(IrConst::Int(0));
                 Some(self.emit_primitive_bin_op(IrBinOp::Ne, cmp, z))
             }
+            // A NON-null value-class field compares via the value class's static `equals-impl0(U, U)Z` on
+            // the underlying values (kotlinc's shape), `== 0` for the `!=` guard — NOT box +
+            // `Intrinsics.areEqual`.
+            _ if t
+                .non_null()
+                .obj_internal()
+                .and_then(|vc| {
+                    self.syms
+                        .class_by_internal(&vc.render())
+                        .and_then(|c| c.value_field.clone())
+                })
+                .is_some() =>
+            {
+                let vc = t.non_null().obj_internal().unwrap();
+                let vc_name = vc.render();
+                let under = self
+                    .syms
+                    .class_by_internal(&vc_name)
+                    .and_then(|c| c.value_field.clone())
+                    .unwrap()
+                    .1;
+                let desc = self
+                    .runtime
+                    .method_descriptor(&[under, under], Ty::Boolean)?;
+                let eq = self.emit_static_call(
+                    vc_name,
+                    "equals-impl0".to_string(),
+                    desc,
+                    InlineKind::None,
+                    vec![a, b],
+                );
+                let z = self.emit_const(IrConst::Int(0));
+                Some(self.emit_primitive_bin_op(IrBinOp::Eq, eq, z))
+            }
             // Int/Long/… → native compare; reference (incl. an array property, which a data class
             // compares by reference, not content) → `!Intrinsics.areEqual` via the reference Ne path.
             _ => Some(self.emit_primitive_bin_op(IrBinOp::Ne, a, b)),
