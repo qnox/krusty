@@ -6046,6 +6046,7 @@ impl<'a> Checker<'a> {
             return None;
         }
         let src = self.fed_source();
+        let mro = crate::symbol_resolver::ReceiverMro::new(&src, receiver);
         self.resolver()
             .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
             .map(crate::symbol_resolver::Symbol::overloads)
@@ -6056,9 +6057,9 @@ impl<'a> Checker<'a> {
                     && !matches!(o.callable.origin, crate::libraries::Origin::Module { .. })
                     && o.callable.ret == lambda_ret
                     && match o.kind {
-                        crate::libraries::FnKind::Extension => o.receiver.is_none_or(|dr| {
-                            crate::symbol_resolver::source_receiver_rank(&src, receiver, dr).is_some()
-                        }),
+                        crate::libraries::FnKind::Extension => {
+                            o.receiver.is_none_or(|dr| mro.rank(&src, dr).is_some())
+                        }
                         _ => true,
                     }
             })
@@ -6080,16 +6081,14 @@ impl<'a> Checker<'a> {
     /// (`Iterable<T>.sumOf { … }`), read from the selected overload family.
     fn lambda_return_overload_param_types(&self, receiver: Ty, name: &str) -> Option<Vec<Ty>> {
         let src = self.fed_source();
+        let mro = crate::symbol_resolver::ReceiverMro::new(&src, receiver);
         self.resolver()
             .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
             .map(crate::symbol_resolver::Symbol::overloads)
             .unwrap_or_default()
             .iter()
             .filter(|o| {
-                o.is_extension()
-                    && o.receiver.is_none_or(|dr| {
-                        crate::symbol_resolver::source_receiver_rank(&src, receiver, dr).is_some()
-                    })
+                o.is_extension() && o.receiver.is_none_or(|dr| mro.rank(&src, dr).is_some())
             })
             .find_map(|o| {
                 let gsig = o.generic_sig.as_ref()?;
