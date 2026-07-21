@@ -251,6 +251,21 @@ struct MethodInfo {
     stackmap: Option<Vec<u8>>,
     /// `Signature` attribute: constant-pool UTF8 index of the generic signature string, or `None`.
     signature: Option<u16>,
+    /// `LineNumberTable` entries `(start_pc, line_number)`, or empty for no attribute. kotlinc emits
+    /// this for every method; krusty currently fills it only for synthesized members (one entry at
+    /// pc 0 → the class declaration line).
+    lnt: Vec<(u16, u16)>,
+    /// `LocalVariableTable` entries `(name_index, descriptor_index, slot)`; `start_pc` is 0 and
+    /// `length` is the whole code length (filled at write time) — the shape of every synthesized
+    /// member's locals (`this` + params, all live for the whole method).
+    lvt: Vec<(u16, u16, u16)>,
+    /// Method-level `RuntimeInvisibleAnnotations` (each entry a pre-encoded annotation) — e.g. the
+    /// `@org.jetbrains.annotations.NotNull` kotlinc puts on a non-null reference RETURN.
+    invisible_anns: Vec<Vec<u8>>,
+    /// `RuntimeInvisibleParameterAnnotations`: one entry per method parameter (in order), each a list
+    /// of that parameter's pre-encoded annotations. Empty ⇒ no attribute; kotlinc annotates each
+    /// non-null reference parameter with `@NotNull` (primitive params get an empty list).
+    param_anns: Vec<Vec<Vec<u8>>>,
 }
 
 struct FieldInfo {
@@ -400,6 +415,10 @@ impl ClassWriter {
             exceptions: Vec::new(),
             stackmap: None,
             signature: None,
+            lnt: Vec::new(),
+            lvt: Vec::new(),
+            invisible_anns: Vec::new(),
+            param_anns: Vec::new(),
         });
     }
 
@@ -477,26 +496,28 @@ impl ClassWriter {
         d1: &[String],
         d2: &[String],
     ) {
+        // kotlinc interns each element's KEY immediately before that element's VALUE constants (mv key
+        // then the mv integers, then k key then its integer, …) rather than all keys up front — so the
+        // constant pool interleaves keys and values. Match that by interning each key inline.
         let anno_type = self.cp.utf8("Lkotlin/Metadata;");
-        let n_mv = self.cp.utf8("mv");
-        let n_k = self.cp.utf8("k");
-        let n_xi = self.cp.utf8("xi");
-        let n_d1 = self.cp.utf8("d1");
-        let n_d2 = self.cp.utf8("d2");
-
         // One `annotation` structure (type_index + element_value_pairs) — appended to the shared list so
         // `finish` writes a single `RuntimeVisibleAnnotations` attribute even alongside user annotations.
         let mut body = Vec::new();
         u2(&mut body, anno_type);
         u2(&mut body, 5); // element_value_pairs: mv, k, xi, d1, d2
+        let n_mv = self.cp.utf8("mv");
         u2(&mut body, n_mv);
         self.ev_int_array(&mut body, mv);
+        let n_k = self.cp.utf8("k");
         u2(&mut body, n_k);
         self.ev_int(&mut body, k);
+        let n_xi = self.cp.utf8("xi");
         u2(&mut body, n_xi);
         self.ev_int(&mut body, xi);
+        let n_d1 = self.cp.utf8("d1");
         u2(&mut body, n_d1);
         self.ev_str_array(&mut body, d1);
+        let n_d2 = self.cp.utf8("d2");
         u2(&mut body, n_d2);
         self.ev_str_array(&mut body, d2);
         self.runtime_annotations.push(body);
@@ -636,6 +657,74 @@ impl ClassWriter {
     pub fn fieldref(&mut self, class: &str, name: &str, desc: &str) -> u16 {
         self.cp.fieldref(class, name, desc)
     }
+
+    /// Pre-intern a plain property class's constant-pool entries in kotlinc/ASM's first-use order, so
+    /// the natural emission that follows reuses these indices (interning dedups). kotlinc visits each
+    /// method [name, descriptor, body refs, LVT strings] before the next, and interns backing-field
+    /// name/descriptor lazily at the `putfield` — an order krusty's field-then-method emission does not
+    /// otherwise reproduce. Call BEFORE any `add_field`/`add_method` for the class. `accessors` are the
+    /// getters (and, for a `var`, setters) in declaration order as `(name, descriptor)`.
+    pub fn seed_plain_class_pool(
+        &mut self,
+        this_internal: &str,
+        super_internal: &str,
+        ctor_desc: &str,
+        fields: &[(String, String, bool)],
+        accessors: &[(String, String)],
+        has_nonnull_ref_setter: bool,
+    ) {
+        // Primary constructor: name + descriptor are interned at method entry, before its body.
+        self.cp.utf8("<init>");
+        self.cp.utf8(ctor_desc);
+        // The `@NotNull` annotation type, interned at the constructor's first non-null reference PARAMETER
+        // annotation (kotlinc visits parameter annotations before the body). Reused by every getter
+        // return / setter parameter annotation and every `checkNotNullParameter` guard.
+        let any_nonnull_ref = fields.iter().any(|(_, _, nn)| *nn);
+        if any_nonnull_ref {
+            self.cp.utf8("Lorg/jetbrains/annotations/NotNull;");
+        }
+        // Constructor body — a `checkNotNullParameter(param, "name")` guard per non-null reference param
+        // (its name + a String constant), then, at the FIRST guard, the shared `Intrinsics` machinery.
+        let mut seeded_intrinsics = false;
+        for (name, _, nn) in fields {
+            if *nn {
+                self.cp.utf8(name);
+                self.cp.string(name);
+                if !seeded_intrinsics {
+                    self.cp.methodref(
+                        "kotlin/jvm/internal/Intrinsics",
+                        "checkNotNullParameter",
+                        "(Ljava/lang/Object;Ljava/lang/String;)V",
+                    );
+                    seeded_intrinsics = true;
+                }
+            }
+        }
+        // `super()` call: `()V`, its NameAndType, the Methodref.
+        self.cp.methodref(super_internal, "<init>", "()V");
+        // One `putfield` per property-backed parameter: field name, descriptor, NameAndType, Fieldref.
+        for (name, desc, _) in fields {
+            self.cp.utf8(name);
+            self.cp.utf8(desc);
+            self.cp.fieldref(this_internal, name, desc);
+        }
+        // The constructor's LocalVariableTable strings (`this` and its type); the parameters reuse the
+        // field name/descriptor entries interned just above.
+        self.cp.utf8("this");
+        self.cp.utf8(&format!("L{this_internal};"));
+        // Each accessor: name + descriptor at entry (its body reuses the field Fieldref above).
+        for (name, desc) in accessors {
+            self.cp.utf8(name);
+            self.cp.utf8(desc);
+        }
+        // A `var` non-null reference setter guards its value with `checkNotNullParameter(v, "<set-?>")`
+        // — its `<set-?>` name + String constant intern after the accessors (kotlinc's order).
+        if has_nonnull_ref_setter {
+            self.cp.utf8("<set-?>");
+            self.cp.string("<set-?>");
+        }
+    }
+
     pub fn const_string(&mut self, s: &str) -> u16 {
         self.cp.string(s)
     }
@@ -713,12 +802,135 @@ impl ClassWriter {
             exceptions: code.resolved_exceptions(),
             stackmap,
             signature: sig,
+            lnt: Vec::new(),
+            lvt: Vec::new(),
+            invisible_anns: Vec::new(),
+            param_anns: Vec::new(),
         });
     }
 
+    /// Attach kotlinc's non-null annotations to a previously-added method (matched by name+descriptor):
+    /// `@org.jetbrains.annotations.NotNull` / `@Nullable` on the return (a method-level
+    /// `RuntimeInvisibleAnnotations`) and/or on individual parameters (`RuntimeInvisibleParameterAnnotations`).
+    /// `ret` is the return annotation's type descriptor (e.g. `Lorg/jetbrains/annotations/NotNull;`) or
+    /// `None`; `params` gives each parameter's annotation type or `None`, in parameter order. Interning
+    /// the annotation types here fixes their constant-pool position. No-op if the method isn't found.
+    pub fn set_method_nullability(
+        &mut self,
+        name: &str,
+        desc: &str,
+        ret: Option<&str>,
+        params: &[Option<&str>],
+    ) {
+        let n = self.cp.utf8(name);
+        let d = self.cp.utf8(desc);
+        // A parameterless annotation is `type_index(u2) + num_element_value_pairs(u2 = 0)`.
+        let empty_ann = |cp: &mut ConstPool, ty: &str| -> Vec<u8> {
+            let ti = cp.utf8(ty);
+            vec![(ti >> 8) as u8, ti as u8, 0, 0]
+        };
+        let invisible_anns: Vec<Vec<u8>> = ret
+            .map(|t| vec![empty_ann(&mut self.cp, t)])
+            .unwrap_or_default();
+        let has_param_ann = params.iter().any(|p| p.is_some());
+        let param_anns: Vec<Vec<Vec<u8>>> = if has_param_ann {
+            params
+                .iter()
+                .map(|p| {
+                    p.map(|t| vec![empty_ann(&mut self.cp, t)])
+                        .unwrap_or_default()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
+            m.invisible_anns = invisible_anns;
+            m.param_anns = param_anns;
+        }
+    }
+
+    /// Attach `@NotNull` / `@Nullable` (a `RuntimeInvisibleAnnotations`) to a previously-added field by
+    /// name — kotlinc annotates the backing field of a non-null reference property. No-op if not found.
+    pub fn set_field_nullability(&mut self, name: &str, ann_type: &str) {
+        let n = self.cp.utf8(name);
+        let ti = self.cp.utf8(ann_type);
+        let ann = vec![(ti >> 8) as u8, ti as u8, 0, 0];
+        if let Some(f) = self.fields.iter_mut().find(|f| f.name == n) {
+            f.invisible_anns = vec![ann];
+        }
+    }
+
+    /// Attach kotlinc-style debug tables to a previously-added method (matched by name+descriptor):
+    /// a `LineNumberTable` mapping pc 0 → `decl_line`, and a `LocalVariableTable` listing `locals`
+    /// (`(name, jvm_descriptor, slot)`), each live for the whole method body. Interns the attribute
+    /// names and each local's name/descriptor here, so the call ORDER fixes their constant-pool
+    /// position (kotlinc adds them per method, ctor before accessors). No-op if the method isn't found.
+    pub fn set_method_debug(
+        &mut self,
+        name: &str,
+        desc: &str,
+        decl_line: u32,
+        line_pc: u16,
+        locals: &[(String, String, u16)],
+    ) {
+        let n = self.cp.utf8(name);
+        let d = self.cp.utf8(desc);
+        let lvt: Vec<(u16, u16, u16)> = locals
+            .iter()
+            .map(|(nm, ds, slot)| (self.cp.utf8(nm), self.cp.utf8(ds), *slot))
+            .collect();
+        if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
+            // kotlinc maps the declaration line to the first instruction AFTER any
+            // `checkNotNullParameter` prologue (`line_pc`), not always pc 0.
+            m.lnt = vec![(line_pc, decl_line as u16)];
+            m.lvt = lvt;
+        }
+    }
+
     pub fn finish(mut self) -> Vec<u8> {
+        // kotlinc interns the `SourceFile` VALUE (the `.kt` name) right after the class annotations and
+        // before the Code-attribute names, then the `SourceFile` attribute NAME later, and
+        // `RuntimeVisibleAnnotations` last. Intern the value up front to match.
+        let sourcefile_value = self.source_file.clone().map(|src| self.cp.utf8(&src));
+        // kotlinc interns the method-level `RuntimeInvisibleAnnotations` name BEFORE `Code` (shared UTF8
+        // with the field-level one via dedup); `RuntimeInvisibleParameterAnnotations` after the debug
+        // tables. Intern both here to match, so they land ahead of `Code`/after `LocalVariableTable`.
+        let invis_ann_name = if self.methods.iter().any(|m| !m.invisible_anns.is_empty())
+            || self.fields.iter().any(|f| !f.invisible_anns.is_empty())
+        {
+            Some(self.cp.utf8("RuntimeInvisibleAnnotations"))
+        } else {
+            None
+        };
+        let method_invis_ann_name = invis_ann_name;
         let code_attr_name = self.cp.utf8("Code");
-        let stackmap_attr_name = self.cp.utf8("StackMapTable");
+        // Intern `StackMapTable` only if a method actually needs one — an unused pool entry would
+        // diverge from kotlinc for branch-free classes.
+        let stackmap_attr_name = self
+            .methods
+            .iter()
+            .any(|m| m.stackmap.is_some())
+            .then(|| self.cp.utf8("StackMapTable"));
+        // Intern the debug-table attribute names only if a method carries them (unused pool entries
+        // would diverge from kotlinc for classes emitted without debug info).
+        let lnt_attr_name = self
+            .methods
+            .iter()
+            .any(|m| !m.lnt.is_empty())
+            .then(|| self.cp.utf8("LineNumberTable"));
+        let lvt_attr_name = self
+            .methods
+            .iter()
+            .any(|m| !m.lvt.is_empty())
+            .then(|| self.cp.utf8("LocalVariableTable"));
+        // `RuntimeInvisibleParameterAnnotations` name interns right after the debug tables (kotlinc's
+        // order for a class with annotated method parameters).
+        let ripa_attr_name = self
+            .methods
+            .iter()
+            .any(|m| !m.param_anns.is_empty())
+            .then(|| self.cp.utf8("RuntimeInvisibleParameterAnnotations"));
         // Intern the `Signature` attribute name only if a method actually carries one — an unused
         // constant-pool entry would diverge from kotlinc's output for non-generic classes.
         let signature_attr_name = if self.methods.iter().any(|m| m.signature.is_some())
@@ -746,8 +958,9 @@ impl ClassWriter {
         } else {
             None
         };
+        // Field-level `RuntimeInvisibleAnnotations` reuses the name interned before `Code` (dedup).
         let field_invis_ann_name = if self.fields.iter().any(|f| !f.invisible_anns.is_empty()) {
-            Some(self.cp.utf8("RuntimeInvisibleAnnotations"))
+            invis_ann_name
         } else {
             None
         };
@@ -773,7 +986,17 @@ impl ClassWriter {
         } else {
             None
         };
-        // ONE `RuntimeVisibleAnnotations` attribute for all queued annotations (`@Metadata` + user ones).
+        // `SourceFile`: name_index + a 2-byte body = the CP index of the source-file UTF8 (its VALUE was
+        // interned at the top of `finish`). kotlinc interns the `SourceFile` name BEFORE the
+        // `RuntimeVisibleAnnotations` name, so build this attribute first.
+        let sourcefile_attr = sourcefile_value.map(|file_idx| {
+            let name = self.cp.utf8("SourceFile");
+            let mut body = Vec::new();
+            u2(&mut body, file_idx);
+            (name, body)
+        });
+        // ONE `RuntimeVisibleAnnotations` attribute for all queued annotations (`@Metadata` + user ones);
+        // its attribute name is interned LAST, as kotlinc does.
         let rva_attr = if !self.runtime_annotations.is_empty() {
             let name = self.cp.utf8("RuntimeVisibleAnnotations");
             let mut body = Vec::new();
@@ -785,15 +1008,6 @@ impl ClassWriter {
         } else {
             None
         };
-        // `SourceFile`: name_index + a 2-byte body = the CP index of the source-file UTF8. kotlinc emits
-        // this on every class naming the origin `.kt`.
-        let sourcefile_attr = self.source_file.clone().map(|src| {
-            let name = self.cp.utf8("SourceFile");
-            let file_idx = self.cp.utf8(&src);
-            let mut body = Vec::new();
-            u2(&mut body, file_idx);
-            (name, body)
-        });
         // Class-level `Deprecated` (zero-length). Its name was interned above with the method one.
         let deprecated_attr = self
             .class_deprecated
@@ -872,20 +1086,47 @@ impl ClassWriter {
             } else {
                 0
             };
+            // Method-level `RuntimeInvisibleAnnotations` (annotated return) and
+            // `RuntimeInvisibleParameterAnnotations` (annotated params) each count as one attribute.
+            let mria_attr: u16 = u16::from(!m.invisible_anns.is_empty());
+            let ripa_attr: u16 = u16::from(!m.param_anns.is_empty());
+            let ann_attr = mria_attr + ripa_attr;
             match &m.code {
-                None => u2(&mut out, sig_attr + dep_attr), // abstract: optional Signature [+ Deprecated]
+                None => u2(&mut out, sig_attr + dep_attr + ann_attr), // abstract: optional Signature [+ Deprecated] [+ anns]
                 Some(code) => {
-                    u2(&mut out, 1 + sig_attr + dep_attr); // Code [+ Signature] [+ Deprecated]
+                    u2(&mut out, 1 + sig_attr + dep_attr + ann_attr); // Code [+ Signature] [+ Deprecated] [+ anns]
                     u2(&mut out, code_attr_name);
                     let code_len = code.len();
                     let sm_overhead = match &m.stackmap {
                         None => 0,
                         Some(sm) => 2 + 4 + sm.len(), // name_idx + length + body
                     };
-                    let num_code_attrs: u16 = if m.stackmap.is_some() { 1 } else { 0 };
-                    // Code attr body: max_stack(2) + max_locals(2) + code_len(4) + code + exception_count(2) + exceptions + code_attrs_count(2) + [stackmap]
-                    let attr_len =
-                        2 + 2 + 4 + code_len + 2 + m.exceptions.len() * 8 + 2 + sm_overhead;
+                    // LineNumberTable: name(2)+len(4)+count(2)+entries*(start_pc 2 + line 2).
+                    let lnt_overhead = if m.lnt.is_empty() {
+                        0
+                    } else {
+                        2 + 4 + 2 + m.lnt.len() * 4
+                    };
+                    // LocalVariableTable: name(2)+len(4)+count(2)+entries*(start 2+len 2+name 2+desc 2+slot 2).
+                    let lvt_overhead = if m.lvt.is_empty() {
+                        0
+                    } else {
+                        2 + 4 + 2 + m.lvt.len() * 10
+                    };
+                    let num_code_attrs: u16 = u16::from(m.stackmap.is_some())
+                        + u16::from(!m.lnt.is_empty())
+                        + u16::from(!m.lvt.is_empty());
+                    // Code attr body: max_stack(2) + max_locals(2) + code_len(4) + code + exception_count(2) + exceptions + code_attrs_count(2) + [line/local/stackmap]
+                    let attr_len = 2
+                        + 2
+                        + 4
+                        + code_len
+                        + 2
+                        + m.exceptions.len() * 8
+                        + 2
+                        + lnt_overhead
+                        + lvt_overhead
+                        + sm_overhead;
                     u4(&mut out, attr_len as u32);
                     u2(&mut out, m.max_stack);
                     u2(&mut out, m.max_locals);
@@ -899,8 +1140,31 @@ impl ClassWriter {
                         u2(&mut out, catch_type);
                     }
                     u2(&mut out, num_code_attrs);
+                    // kotlinc's Code sub-attribute order: LineNumberTable, LocalVariableTable, then
+                    // StackMapTable. (For a synthesized member there is no StackMapTable.)
+                    if !m.lnt.is_empty() {
+                        u2(&mut out, lnt_attr_name.unwrap());
+                        u4(&mut out, (2 + m.lnt.len() * 4) as u32);
+                        u2(&mut out, m.lnt.len() as u16);
+                        for &(start_pc, line) in &m.lnt {
+                            u2(&mut out, start_pc);
+                            u2(&mut out, line);
+                        }
+                    }
+                    if !m.lvt.is_empty() {
+                        u2(&mut out, lvt_attr_name.unwrap());
+                        u4(&mut out, (2 + m.lvt.len() * 10) as u32);
+                        u2(&mut out, m.lvt.len() as u16);
+                        for &(name_idx, desc_idx, slot) in &m.lvt {
+                            u2(&mut out, 0); // start_pc
+                            u2(&mut out, code_len as u16); // length = whole method
+                            u2(&mut out, name_idx);
+                            u2(&mut out, desc_idx);
+                            u2(&mut out, slot);
+                        }
+                    }
                     if let Some(sm) = &m.stackmap {
-                        u2(&mut out, stackmap_attr_name);
+                        u2(&mut out, stackmap_attr_name.unwrap());
                         u4(&mut out, sm.len() as u32);
                         out.extend_from_slice(sm);
                     }
@@ -911,6 +1175,28 @@ impl ClassWriter {
                 u2(&mut out, signature_attr_name.unwrap());
                 u4(&mut out, 2);
                 u2(&mut out, si);
+            }
+            // Method-level `RuntimeInvisibleAnnotations` (the annotated return), then
+            // `RuntimeInvisibleParameterAnnotations` — kotlinc's order, after `Code`/`Signature`.
+            if mria_attr == 1 {
+                write_annotation_attr(&mut out, method_invis_ann_name, &m.invisible_anns);
+            }
+            if ripa_attr == 1 {
+                u2(&mut out, ripa_attr_name.unwrap());
+                // body: num_parameters(u1) + per-parameter [num_annotations(u2) + annotations].
+                let body_len: usize = 1 + m
+                    .param_anns
+                    .iter()
+                    .map(|p| 2 + p.iter().map(|a| a.len()).sum::<usize>())
+                    .sum::<usize>();
+                u4(&mut out, body_len as u32);
+                out.push(m.param_anns.len() as u8);
+                for p in &m.param_anns {
+                    u2(&mut out, p.len() as u16);
+                    for a in p {
+                        out.extend_from_slice(a);
+                    }
+                }
             }
             // `Deprecated` attribute: a zero-length attribute (name_index, length=0).
             if dep_attr == 1 {

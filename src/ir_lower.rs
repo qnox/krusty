@@ -795,6 +795,8 @@ pub fn lower_file_at_reporting(
             let id = lo.ir.add_class(IrClass {
                 fq_name: type_name(&internal),
                 is_value: c.is_value,
+                is_data: c.is_data,
+                decl_line: c.decl_line,
                 type_param_bounds: c
                     .type_param_bounds
                     .iter()
@@ -1245,6 +1247,18 @@ pub fn lower_file_at_reporting(
                             let sf = lo.emit_set_field(this_e, id, fidx as u32, v);
                             let body = lo.emit_block(vec![sf], None);
                             let mi = method_fids.len() as u32;
+                            // kotlinc guards a non-null reference setter parameter with
+                            // `Intrinsics.checkNotNullParameter(value, "<set-?>")` at entry (the special
+                            // synthetic name kotlinc uses for a setter's value). Primitives, nullable
+                            // properties, and bare type-parameter fields skip it.
+                            let param_checks = if fty.is_reference()
+                                && !fty_ir.is_nullable()
+                                && !field_tp.contains_key(pname)
+                            {
+                                vec![Some("<set-?>".to_string())]
+                            } else {
+                                vec![None]
+                            };
                             let fid = lo.ir.add_fun(IrFunction {
                                 name: sname.clone(),
                                 params: vec![fty_ir.clone()],
@@ -1252,7 +1266,7 @@ pub fn lower_file_at_reporting(
                                 body: Some(body),
                                 is_static: false,
                                 dispatch_receiver: Some(type_name(&internal)),
-                                param_checks: vec![],
+                                param_checks,
                             });
                             // `var x = …; private set` — the setter is emitted `private`.
                             if c.body_props.iter().any(|p| {
@@ -1453,6 +1467,8 @@ pub fn lower_file_at_reporting(
                 let comp_id = lo.ir.add_class(IrClass {
                     fq_name: type_name(&comp_fq),
                     is_value: false,
+                    is_data: false,
+                    decl_line: 0,
                     type_param_bounds: vec![],
                     type_params: Vec::new(),
                     supertypes: vec![],
@@ -3479,6 +3495,8 @@ pub fn lower_file_at_reporting(
                         let sub_id = lo.ir.add_class(IrClass {
                             fq_name: type_name(&sub_fq),
                             is_value: false,
+                            is_data: false,
+                            decl_line: 0,
                             type_param_bounds: vec![],
                             type_params: Vec::new(),
                             supertypes: vec![],
@@ -7003,6 +7021,8 @@ impl<'a> Lower<'a> {
         let class = IrClass {
             fq_name: type_name(&internal),
             is_value: false,
+            is_data: false,
+            decl_line: 0,
             type_param_bounds: vec![],
             type_params: Vec::new(),
             supertypes: vec![],
@@ -8982,6 +9002,8 @@ impl<'a> Lower<'a> {
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
             is_value: false,
+            is_data: false,
+            decl_line: 0,
             type_param_bounds: vec![],
             type_params: Vec::new(),
             supertypes: vec![],
@@ -9068,6 +9090,8 @@ impl<'a> Lower<'a> {
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
             is_value: false,
+            is_data: false,
+            decl_line: 0,
             type_param_bounds: vec![],
             type_params: Vec::new(),
             supertypes: vec![],
@@ -9315,6 +9339,8 @@ impl<'a> Lower<'a> {
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
             is_value: false,
+            is_data: false,
+            decl_line: 0,
             type_param_bounds: vec![],
             type_params: Vec::new(),
             supertypes: vec![],
@@ -9897,6 +9923,8 @@ impl<'a> Lower<'a> {
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
             is_value: false,
+            is_data: false,
+            decl_line: 0,
             type_param_bounds: vec![],
             type_params: Vec::new(),
             supertypes: vec![],

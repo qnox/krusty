@@ -579,6 +579,12 @@ pub struct IrClass {
     /// `@JvmInline value class` — a single-field class represented unboxed (as its one field's type) by
     /// the JVM `jvm::value_classes` IR pass. The IR otherwise treats it as a plain class.
     pub is_value: bool,
+    /// `data class` — carried so the metadata emitter can reproduce kotlinc's `IS_DATA` class flag and
+    /// its synthesized `componentN`/`copy`/`equals`/`hashCode`/`toString` function metadata.
+    pub is_data: bool,
+    /// 1-based source line of the class declaration (0 = unknown). The emitter maps the
+    /// `LineNumberTable` of synthesized members (ctor/accessors) to this line, as kotlinc does.
+    pub decl_line: u32,
     /// Declared non-`Any` generic upper bounds (`<T: String>` → `("T", String)`), carried verbatim from
     /// the source. Platform-neutral metadata; the JVM value-class pass uses it to erase a value class's
     /// underlying type parameter to its bound (`value class S<T: String>` → `String`).
@@ -1737,6 +1743,8 @@ mod tests {
         IrClass {
             fq_name: fq.into(),
             is_value: false,
+            is_data: false,
+            decl_line: 0,
             type_param_bounds: Vec::new(),
             type_params: Vec::new(),
             supertypes: Vec::new(),
