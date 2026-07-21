@@ -55,6 +55,83 @@ fn cleanup(classes_dir: &std::path::Path) {
     }
 }
 
+/// The CIRCULAR direction (slice 2, Kotlin-first): Java extends a Kotlin class, Kotlin calls the
+/// Java class. Pipeline: signature stubs from the Java source (`krusty::jvm::java_stub`, no
+/// javac) → krusty compiles Kotlin against the stub dir → real javac compiles the Java against
+/// krusty's output → both class sets run together. The stubs never reach the runtime.
+#[test]
+fn java_extends_kotlin_via_stub_pipeline() {
+    let kotlin = r#"
+open class A {
+    open fun name(): String = "FAIL:A"
+}
+
+fun box(): String = J().name()
+"#;
+    let java = "public class J extends A { @Override public String name() { return \"OK\"; } }";
+    let Some(jdk) = common::jdk_modules() else {
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+    let jars = common::classpath_jars_for(kotlin);
+
+    // 1. Stubs: resolve `A` as a known Kotlin class, everything else via a real Classpath.
+    let mut cp_paths = jars.clone();
+    cp_paths.push(jdk.clone());
+    let classpath = krusty::jvm::classpath::Classpath::new(cp_paths);
+    let resolve = |cand: &str| cand == "A" || classpath.find(cand).is_some();
+    let stubs =
+        krusty::jvm::java_stub::stub_classes(&[("J.java".to_string(), java.to_string())], &resolve)
+            .expect("stub generation");
+
+    let root = std::env::temp_dir().join(format!("krusty_stub_e2e_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let stubdir = root.join("stubs");
+    let kotlindir = root.join("kotlin");
+    for (name, bytes) in &stubs {
+        let p = stubdir.join(format!("{name}.class"));
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, bytes).unwrap();
+    }
+
+    // 2. Kotlin against the stubs.
+    let mut cp = jars.clone();
+    cp.push(stubdir);
+    let kotlin_classes =
+        match common::compile_in_process(kotlin, "MainKt", &cp, Some(jdk.as_path())) {
+            Some(c) => c,
+            None => {
+                let d = common::front_end_diagnostics(kotlin, &cp, Some(jdk.as_path()));
+                let _ = std::fs::remove_dir_all(&root);
+                panic!("krusty should compile Kotlin against the stub dir; diags: {d:?}");
+            }
+        };
+
+    // 3. Real javac against krusty's output; the stub dir is NOT on javac's classpath.
+    for (name, bytes) in &kotlin_classes {
+        let p = kotlindir.join(format!("{name}.class"));
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, bytes).unwrap();
+    }
+    let mut javac_cp = jars.clone();
+    javac_cp.push(kotlindir.clone());
+    let Some((javadir, java_classes)) =
+        common::javac_compile(&[("J.java".to_string(), java.to_string())], &javac_cp)
+    else {
+        let _ = std::fs::remove_dir_all(&root);
+        panic!("javac should compile J against krusty's emitted A");
+    };
+    cleanup(&javadir);
+    let _ = std::fs::remove_dir_all(&root);
+
+    // 4. Run with the REAL classes only.
+    let mut classes = kotlin_classes;
+    classes.extend(java_classes);
+    let box_class = common::find_box_class(&classes).expect("box() class");
+    let got = common::run_box(&classes, &box_class, &jars).expect("box run");
+    assert_eq!(got, "OK");
+}
+
 /// Kotlin `box()` calling a static method on a javac-compiled Java class (the
 /// `constants/numberLiteralCoercionToInferredType.kt` shape, minus the K2-ignored parts).
 #[test]

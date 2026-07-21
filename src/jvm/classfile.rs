@@ -495,8 +495,20 @@ impl ClassWriter {
 
     /// Declare an abstract method (no `Code` attribute) — for interfaces.
     pub fn add_abstract_method(&mut self, access: u16, name: &str, desc: &str) {
+        self.add_abstract_method_sig(access, name, desc, None);
+    }
+
+    /// Like [`add_abstract_method`], plus an optional generic `Signature` attribute string.
+    pub fn add_abstract_method_sig(
+        &mut self,
+        access: u16,
+        name: &str,
+        desc: &str,
+        signature: Option<&str>,
+    ) {
         let n = self.cp.utf8(name);
         let d = self.cp.utf8(desc);
+        let sig = signature.map(|s| self.cp.utf8(s));
         self.methods.push(MethodInfo {
             access: access | ACC_ABSTRACT,
             name: n,
@@ -506,7 +518,7 @@ impl ClassWriter {
             code: None,
             exceptions: Vec::new(),
             stackmap: None,
-            signature: None,
+            signature: sig,
             lnt: Vec::new(),
             lvt: Vec::new(),
             invisible_anns: Vec::new(),
