@@ -679,15 +679,83 @@ impl MetadataCallFacts {
 /// The per-function `@Metadata` lookups for one class, all derived from its single decoded function list
 /// (facade parts merged). Computed once per class in [`Classpath::class_meta`].
 struct ClassMeta {
-    by_jvm_name: HashMap<String, Vec<usize>>,
+    /// `(FxHash of jvm_name, flat index over the segment concatenation)`, sorted — the by-JVM-name
+    /// lookup WITHOUT duplicating every function's name into a map key (one cloned `String` per
+    /// function per cached class was ~46% of peak heap). Lookup hashes the queried name once, then
+    /// binary-searches u64s ([`ClassMeta::fns_named`]) and VERIFIES each candidate by string
+    /// equality (hash collisions stay correct). Same-name entries keep declaration order (sort is
+    /// by `(hash, index)`).
+    by_jvm_name: Vec<(u64, u32)>,
     suspend_names: HashSet<String>,
-    /// The full facade-merged [`MetaFn`] list this is projected from — exposed via
-    /// [`Classpath::meta_functions`] for the lookups that need a whole `MetaFn` (return class by JVM
-    /// name, receiver-function params) rather than one of the maps above, so they share THIS decode
-    /// instead of re-decoding + re-merging the `d1` themselves.
-    fns: std::sync::Arc<[super::metadata::MetaFn]>,
-    /// The facade-merged `@Metadata` properties, decoded alongside `fns` from the same `d1`.
-    props: std::sync::Arc<[super::metadata::MetaProp]>,
+    /// The facade's decoded [`MetaFn`] slices, SHARED by refcount: the class's own `Package`
+    /// functions, or one segment per multifile PART. The parts' decodes are already retained on
+    /// their cached `ClassInfo`s — segmenting instead of materializing a merged copy removes the
+    /// duplicate `MetaFn`s (deep Strings included). Exposed via [`Classpath::meta_functions_name`]
+    /// as an iterating handle, so lookups share THIS decode instead of re-merging `d1` themselves.
+    fn_segments: Vec<std::sync::Arc<[super::metadata::MetaFn]>>,
+    /// The facade's `@Metadata` property slices, segmented like `fn_segments`.
+    prop_segments: Vec<std::sync::Arc<[super::metadata::MetaProp]>>,
+}
+
+impl ClassMeta {
+    fn iter_fns(&self) -> impl Iterator<Item = &super::metadata::MetaFn> {
+        self.fn_segments.iter().flat_map(|s| s.iter())
+    }
+
+    /// The function at FLAT index `i` over the segment concatenation.
+    fn fn_at(&self, mut i: usize) -> &super::metadata::MetaFn {
+        for s in &self.fn_segments {
+            if i < s.len() {
+                return &s[i];
+            }
+            i -= s.len();
+        }
+        unreachable!("ClassMeta::fn_at index out of range")
+    }
+
+    /// The flat indices whose `jvm_name` equals `name`: hash once, binary-search the u64 range,
+    /// verify by string equality (collision-safe). Declaration order preserved.
+    fn fns_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = u32> + 'a {
+        let h = jvm_name_hash(name);
+        let start = self.by_jvm_name.partition_point(|&(k, _)| k < h);
+        self.by_jvm_name[start..]
+            .iter()
+            .take_while(move |&&(k, _)| k == h)
+            .map(|&(_, i)| i)
+            .filter(move |&i| self.fn_at(i as usize).jvm_name == name)
+    }
+
+    fn has_jvm_name(&self, name: &str) -> bool {
+        self.fns_named(name).next().is_some()
+    }
+}
+
+/// FxHash of a JVM method name, for [`ClassMeta::by_jvm_name`] — the compiler's trusted internal
+/// data, so the dependency-lean hand-rolled hasher (see `name_tree`) is the right tool.
+fn jvm_name_hash(name: &str) -> u64 {
+    use std::hash::Hasher;
+    let mut h = crate::name_tree::FxHasher::default();
+    h.write(name.as_bytes());
+    h.finish()
+}
+
+/// A refcounted handle to one class's decoded `@Metadata` functions (facade parts segmented) —
+/// what [`Classpath::meta_functions_name`] returns so consumers iterate the shared decode.
+pub struct MetaFns(std::rc::Rc<ClassMeta>);
+
+impl MetaFns {
+    pub fn iter(&self) -> impl Iterator<Item = &super::metadata::MetaFn> {
+        self.0.iter_fns()
+    }
+}
+
+/// The property analogue of [`MetaFns`].
+pub struct MetaProps(std::rc::Rc<ClassMeta>);
+
+impl MetaProps {
+    pub fn iter(&self) -> impl Iterator<Item = &super::metadata::MetaProp> {
+        self.0.prop_segments.iter().flat_map(|s| s.iter())
+    }
 }
 
 #[derive(Default)]
@@ -858,11 +926,9 @@ fn aligned_meta_index(
     desc_params: &[Ty],
     desc_ret: &Ty,
 ) -> Option<(usize, usize)> {
-    meta.by_jvm_name
-        .get(fn_name)?
-        .iter()
-        .filter_map(|&i| {
-            let f = &meta.fns[i];
+    meta.fns_named(fn_name)
+        .filter_map(|i| {
+            let f = meta.fn_at(i as usize);
             let (end, exact) = meta_callable_aligns(f, desc_params)?;
             // Return match disambiguates overloads that differ ONLY by return (`sum` → `sumOfInt`/
             // `sumOfLong`, same erased params). Soft tiebreaker: a concrete metadata return equal to the
@@ -875,7 +941,7 @@ fn aligned_meta_index(
             Some((end, exact, ret_match, i))
         })
         .max_by_key(|(end, exact, ret_match, _)| (*end, *exact, *ret_match))
-        .map(|(end, _, _, i)| (end, i))
+        .map(|(end, _, _, i)| (end, i as usize))
 }
 
 fn aligned_meta_callable<'a>(
@@ -884,7 +950,7 @@ fn aligned_meta_callable<'a>(
     desc_params: &[Ty],
     desc_ret: &Ty,
 ) -> Option<(usize, &'a super::metadata::MetaFn)> {
-    aligned_meta_index(meta, fn_name, desc_params, desc_ret).map(|(end, i)| (end, &meta.fns[i]))
+    aligned_meta_index(meta, fn_name, desc_params, desc_ret).map(|(end, i)| (end, meta.fn_at(i)))
 }
 
 pub(super) fn metadata_return_info(class: Option<TypeName>, nullable: bool) -> ReturnInfo {
@@ -1177,83 +1243,71 @@ impl Classpath {
         }
         cache_stat!(meta_fns, false);
         let ci = self.find_name(internal_id);
-        // The common case shares the class's decoded slice by refcount; only a multifile facade (whose
-        // functions live in its PART classes) materializes a merged copy.
-        let mut shared_fns: Option<std::sync::Arc<[super::metadata::MetaFn]>> =
-            ci.as_ref().map(|c| c.meta.package_functions.clone());
-        let mut fns: Vec<super::metadata::MetaFn> = Vec::new();
-        let mut suspend_names: HashSet<String> = shared_fns
-            .iter()
-            .flat_map(|f| f.iter())
-            .filter(|f| f.is_suspend)
-            .map(|f| f.kotlin_name.clone())
-            .collect();
+        // SEGMENTS share every decoded slice by refcount — the class's own `Package` functions, or (for
+        // a multifile FACADE, which has no function metadata of its own) each PART class's slice. The
+        // parts' decodes are already retained on their cached `ClassInfo`s, so materializing a merged
+        // copy here duplicated every part `MetaFn` (deep Strings included) — ~a third of peak heap.
+        let mut fn_segments: Vec<std::sync::Arc<[super::metadata::MetaFn]>> = Vec::new();
+        let mut prop_segments: Vec<std::sync::Arc<[super::metadata::MetaProp]>> = Vec::new();
+        let mut suspend_names: HashSet<String> = HashSet::new();
         if let Some(ci) = &ci {
+            if !ci.meta.package_functions.is_empty() {
+                fn_segments.push(ci.meta.package_functions.clone());
+            }
+            if !ci.meta.package_properties.is_empty() {
+                prop_segments.push(ci.meta.package_properties.clone());
+            }
             suspend_names.extend(
                 super::metadata::class_functions(ci)
                     .iter()
                     .filter(|f| f.is_suspend)
                     .map(|f| f.kotlin_name.clone()),
             );
-        }
-        // A multifile FACADE has no function metadata of its own — its `d1` lists the PART class names,
-        // which hold the functions; merge them in (the parts' `d1` is decoded once here, not per lookup).
-        if shared_fns.as_ref().is_none_or(|f| f.is_empty()) {
-            if let Some(ci) = &ci {
+            // A multifile FACADE has no function/property metadata of its own — its `d1` lists the
+            // PART class names, which hold them; each part slice becomes a shared segment (the same
+            // fns-empty/props-empty gating the merged-copy version used).
+            let merge_fns = ci.meta.package_functions.is_empty();
+            let merge_props = ci.meta.package_properties.is_empty();
+            if merge_fns || merge_props {
                 for part in &ci.meta.multifile_parts {
-                    if let Some(pci) = self.find(part) {
-                        let part_fns = super::metadata::package_functions(&pci);
-                        suspend_names.extend(
-                            part_fns
-                                .iter()
-                                .filter(|f| f.is_suspend)
-                                .map(|f| f.kotlin_name.clone()),
-                        );
-                        suspend_names.extend(
-                            super::metadata::class_functions(&pci)
-                                .iter()
-                                .filter(|f| f.is_suspend)
-                                .map(|f| f.kotlin_name.clone()),
-                        );
-                        fns.extend_from_slice(part_fns);
+                    let Some(pci) = self.find(part) else { continue };
+                    if merge_fns && !pci.meta.package_functions.is_empty() {
+                        fn_segments.push(pci.meta.package_functions.clone());
                     }
-                }
-            }
-            if !fns.is_empty() {
-                shared_fns = None;
-            }
-        }
-        let fns: std::sync::Arc<[super::metadata::MetaFn]> = match shared_fns {
-            Some(shared) if fns.is_empty() => shared,
-            _ => fns.into(),
-        };
-        let mut by_jvm_name: HashMap<String, Vec<usize>> = HashMap::new();
-        for (i, f) in fns.iter().enumerate() {
-            by_jvm_name.entry(f.jvm_name.clone()).or_default().push(i);
-        }
-        // Properties from the same facade `d1`, part-merged like the functions, so property lookups
-        // share this cached decode instead of re-decoding the facade per query.
-        let shared_props: Option<std::sync::Arc<[super::metadata::MetaProp]>> =
-            ci.as_ref().map(|c| c.meta.package_properties.clone());
-        let mut merged_props: Vec<super::metadata::MetaProp> = Vec::new();
-        if shared_props.as_ref().is_none_or(|p| p.is_empty()) {
-            if let Some(ci) = &ci {
-                for part in &ci.meta.multifile_parts {
-                    if let Some(pci) = self.find(part) {
-                        merged_props.extend_from_slice(super::metadata::package_properties(&pci));
+                    if merge_props && !pci.meta.package_properties.is_empty() {
+                        prop_segments.push(pci.meta.package_properties.clone());
                     }
+                    suspend_names.extend(
+                        super::metadata::class_functions(&pci)
+                            .iter()
+                            .filter(|f| f.is_suspend)
+                            .map(|f| f.kotlin_name.clone()),
+                    );
                 }
             }
         }
-        let props: std::sync::Arc<[super::metadata::MetaProp]> = match shared_props {
-            Some(shared) if merged_props.is_empty() => shared,
-            _ => merged_props.into(),
-        };
+        suspend_names.extend(
+            fn_segments
+                .iter()
+                .flat_map(|s| s.iter())
+                .filter(|f| f.is_suspend)
+                .map(|f| f.kotlin_name.clone()),
+        );
+        // Hash-sorted by-JVM-name lookup over the flat segment concatenation: no name copies, and
+        // same-name overloads stay in declaration order (sort by `(hash, index)`), matching the old
+        // map's insertion-ordered index vecs.
+        let mut by_jvm_name: Vec<(u64, u32)> = fn_segments
+            .iter()
+            .flat_map(|s| s.iter())
+            .enumerate()
+            .map(|(i, f)| (jvm_name_hash(&f.jvm_name), i as u32))
+            .collect();
+        by_jvm_name.sort_unstable();
         let meta = std::rc::Rc::new(ClassMeta {
             by_jvm_name,
             suspend_names,
-            fns,
-            props,
+            fn_segments,
+            prop_segments,
         });
         self.meta_fns.borrow_mut().insert(internal_id, meta.clone());
         meta
@@ -1262,24 +1316,18 @@ impl Classpath {
     /// Every `@Metadata` function of `internal` (a facade's PART classes merged), decoded once and
     /// cached — the single source the metadata-primary `MetaFn` lookups share. Use this instead of
     /// re-calling `package_functions` + re-merging the facade parts at each call site.
-    pub fn meta_functions(&self, internal: &str) -> std::sync::Arc<[super::metadata::MetaFn]> {
-        self.class_meta(internal).fns.clone()
+    pub fn meta_functions(&self, internal: &str) -> MetaFns {
+        MetaFns(self.class_meta(internal))
     }
 
-    pub fn meta_functions_name(
-        &self,
-        internal: TypeName,
-    ) -> std::sync::Arc<[super::metadata::MetaFn]> {
-        self.class_meta_name(internal).fns.clone()
+    pub fn meta_functions_name(&self, internal: TypeName) -> MetaFns {
+        MetaFns(self.class_meta_name(internal))
     }
 
     /// The facade-merged `@Metadata` properties of `internal`, from the same cached decode as
     /// [`Self::meta_functions_name`].
-    pub fn meta_properties_name(
-        &self,
-        internal: TypeName,
-    ) -> std::sync::Arc<[super::metadata::MetaProp]> {
-        self.class_meta_name(internal).props.clone()
+    pub fn meta_properties_name(&self, internal: TypeName) -> MetaProps {
+        MetaProps(self.class_meta_name(internal))
     }
 
     /// The metadata-primary [`GenericSig`] for the `internal.jvm_name` overload corresponding to the JVM
@@ -1296,9 +1344,9 @@ impl Classpath {
         desc_ret: &Ty,
     ) -> Option<Option<crate::libraries::GenericSig>> {
         let meta = self.class_meta_name(internal);
-        meta.by_jvm_name.contains_key(jvm_name).then(|| {
+        meta.has_jvm_name(jvm_name).then(|| {
             aligned_meta_index(&meta, jvm_name, desc_params, desc_ret)
-                .and_then(|(_, idx)| meta.fns.get(idx))
+                .map(|(_, idx)| meta.fn_at(idx))
                 .and_then(|f| f.generic_sig.clone())
         })
     }
