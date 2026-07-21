@@ -1003,6 +1003,10 @@ pub struct Classpath {
     /// the process-global L2 where the one-time rebuild lives. Both hold only QUERIED names (the working set).
     ext_l1: RefCell<crate::lru::LruCache<String, std::sync::Arc<ExtByName>>>,
     ext_candidates: ExtCandCache,
+    /// Memoized [`Self::facade_statics`] per facade root — `facade_method` walks the same facade's
+    /// super chain for every extension emit-handle lookup, so the candidate vec is built once and
+    /// shared behind `Rc`. Bounded by the queried facades (the working set).
+    facade_statics_memo: RefCell<crate::lru::LruCache<TypeName, std::rc::Rc<Vec<ExtCandidate>>>>,
     /// The spec's top-level memo: `fqn → ResolvedSymbols` (the namespace record — classifier + callables).
     /// The single result cache of the classpath `SymbolSource`: `resolve_symbols(fqn)` is composed once
     /// per name and reused across the compile (the per-(jar,package) parses are the intermediate caches).
@@ -1083,6 +1087,7 @@ impl Classpath {
             builtin_members: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             ext_l1: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
             ext_candidates: global_ext_candidates(&cache_key),
+            facade_statics_memo: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             symbols_memo: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
             id,
         }
@@ -2147,8 +2152,9 @@ impl Classpath {
         };
         let named: Vec<ExtCandidate> = self
             .facade_statics(root)
-            .into_iter()
+            .iter()
             .filter(|c| c.name == jvm_name)
+            .cloned()
             .collect();
         // Prefer the FULL parameter match (receiver + value params) — it disambiguates same-receiver
         // overloads that differ by value param. Fall back to receiver-only when the full descriptor is not
@@ -2191,8 +2197,22 @@ impl Classpath {
 
     /// Every static callable a facade `root` declares (all names), following the multifile-facade super
     /// chain — the name-agnostic form of [`Self::rebuild_ext_candidate_records`], used to build a package's
-    /// [`Self::pkg_members`] in one pass. Each `ClassInfo` is served from the L1/L2 cache.
-    fn facade_statics(&self, root: &str) -> Vec<ExtCandidate> {
+    /// [`Self::pkg_members`] in one pass. Each `ClassInfo` is served from the L1/L2 cache. Memoized per
+    /// root behind `Rc`: `facade_method` re-walks the same facade for every extension emit-handle lookup,
+    /// and rebuilding the candidate vec re-interned every owner name and re-split every descriptor.
+    fn facade_statics(&self, root: &str) -> std::rc::Rc<Vec<ExtCandidate>> {
+        let root_id = type_name(root);
+        if let Some(hit) = self.facade_statics_memo.borrow_mut().get(&root_id) {
+            return hit.clone();
+        }
+        let rc = std::rc::Rc::new(self.build_facade_statics(root));
+        self.facade_statics_memo
+            .borrow_mut()
+            .insert(root_id, rc.clone());
+        rc
+    }
+
+    fn build_facade_statics(&self, root: &str) -> Vec<ExtCandidate> {
         let mut out = Vec::new();
         let Some(root_ci) = self.find(root) else {
             return out;
@@ -2256,7 +2276,7 @@ impl Classpath {
                 }
                 let facade_id = m.owner_names.insert(facade);
                 let metas = self.meta_functions(facade);
-                for cand in self.facade_statics(facade) {
+                for cand in self.facade_statics(facade).iter() {
                     // Key each static by its @Metadata SOURCE name (`kotlin_name`), NOT its JVM name — a
                     // `@JvmName`-mangled extension (`sum` → `sumOfInt`) or value-class member resolves by
                     // the source name; the JVM name is emit-only, kept on the candidate. A static with no
@@ -2278,7 +2298,7 @@ impl Classpath {
                     let jvm_name = cand.name.clone();
                     let idx = m.candidates.len();
                     m.candidates
-                        .push(ExtCandidateRecord::from_candidate(facade_id, &cand));
+                        .push(ExtCandidateRecord::from_candidate(facade_id, cand));
                     m.by_jvm.entry(jvm_name).or_default().push(idx);
                     m.by_source.entry(source).or_default().push(idx);
                 }
