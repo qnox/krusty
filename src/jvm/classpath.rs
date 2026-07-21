@@ -508,14 +508,6 @@ impl ExtByName {
             })
             .unwrap_or_default()
     }
-
-    fn render_all(&self) -> Vec<ExtCandidate> {
-        self.render_candidates(&self.all)
-    }
-
-    fn render_candidates(&self, cands: &[ExtCandidateRecord]) -> Vec<ExtCandidate> {
-        cands.iter().map(|c| c.render(&self.owner_names)).collect()
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -2076,13 +2068,6 @@ impl Classpath {
         self.ext_by_name(method_name).render_by_recv(receiver_desc)
     }
 
-    /// Every static method named `method_name` across the classpath (top-level functions and
-    /// extensions), for resolving a receiver-less call. Includes non-public (`@InlineOnly`) candidates,
-    /// each tagged via `ExtCandidate.public`; the caller filters — normal resolution is public-only.
-    pub fn find_top_level(&self, method_name: &str) -> Vec<ExtCandidate> {
-        self.ext_by_name(method_name).render_all()
-    }
-
     /// The JVM descriptor of the static method named `jvm_name` on facade `root` (walking the multifile
     /// super chain) — the emit-handle fallback when a `@Metadata` function omits its `method_signature`.
     /// When `recv_desc` is `Some`, the method whose FIRST parameter (the extension receiver) matches it is
@@ -2234,14 +2219,27 @@ impl Classpath {
         let mut m = PkgMembers::default();
         if let Some(pe) = jp.entry(&pkg_rendered) {
             let mut seen_facade = std::collections::HashSet::new();
+            let mut roots: Vec<String> = Vec::new();
             for &part_id in &pe.facades {
                 let part = jp.names.render(part_id);
                 // The public multifile facade is the `__`-prefix of a part (`…/CollectionsKt__X` →
-                // `…/CollectionsKt`); a single-file facade has no `__` and roots at itself.
-                let facade = part.split_once("__").map_or(part.as_str(), |(f, _)| f);
-                if !seen_facade.insert(facade.to_string()) {
-                    continue;
+                // `…/CollectionsKt`); a single-file facade has no `__` and roots at itself. Root at
+                // BOTH: the facade carries the callable public statics, but an `@InlineOnly` inline
+                // function's body is a PRIVATE static on the package-private PART only (never
+                // forwarded), and the bytecode inliner must still find it — `facade_statics` keeps a
+                // non-public root's non-public statics for exactly that, with `public: false` so
+                // resolution admits them only as splice-only candidates.
+                if let Some((facade, _)) = part.split_once("__") {
+                    if seen_facade.insert(facade.to_string()) {
+                        roots.push(facade.to_string());
+                    }
                 }
+                if seen_facade.insert(part.clone()) {
+                    roots.push(part);
+                }
+            }
+            for facade in &roots {
+                let facade = facade.as_str();
                 let facade_id = m.owner_names.insert(facade);
                 let metas = self.meta_functions(facade);
                 for cand in self.facade_statics(facade).iter() {
@@ -3334,8 +3332,6 @@ mod fq_tests {
             .push(0);
 
         assert_eq!(cached.owner_names.len(), 4);
-        let all = cached.render_all();
-        assert!(all[0].owner.matches("kotlin/collections/CollectionsKt"));
         let by_recv = cached.render_by_recv("Ljava/lang/Iterable;");
         assert!(by_recv[0].owner.matches("kotlin/collections/CollectionsKt"));
     }
