@@ -388,18 +388,30 @@ fn data_class_nonnull_string_hashes_via_string_hashcode() {
 }
 
 /// A data-class field of a concrete (same-compilation) class hashes via that class's OWN virtual
-/// `hashCode()` (`invokevirtual demo/D.hashCode`), not the null-safe static `Objects.hashCode` — for
-/// both a non-null and a nullable field (the nullable one via kotlinc's `ifnonnull` ternary).
+/// `hashCode()` (`invokevirtual demo/D.hashCode`), and an interface-typed field via `Object.hashCode`
+/// (kotlinc's shape) — never the null-safe static `Objects.hashCode`. Covers non-null and nullable.
 #[test]
 fn data_class_concrete_ref_field_hashes_via_own_hashcode() {
-    for (name, src) in [
+    for (name, src, want) in [
         (
             "dcrefnn",
             "class D\ndata class C(val x: D)\nfun box() = \"OK\"\n",
+            "D.hashCode",
         ),
         (
             "dcrefnull",
             "class D\ndata class C(val x: D?)\nfun box() = \"OK\"\n",
+            "D.hashCode",
+        ),
+        (
+            "dcifacenn",
+            "interface I\ndata class C(val x: I)\nfun box() = \"OK\"\n",
+            "java/lang/Object.hashCode",
+        ),
+        (
+            "dcifacenull",
+            "interface I\ndata class C(val x: I?)\nfun box() = \"OK\"\n",
+            "java/lang/Object.hashCode",
         ),
     ] {
         let Some((dir, jh)) = krusty_compile(name, src) else {
@@ -410,12 +422,12 @@ fn data_class_concrete_ref_field_hashes_via_own_hashcode() {
         let hc = &text[text.find("int hashCode").expect("hashCode")..];
         let hc = &hc[..hc[1..].find("\n\n").map(|p| p + 1).unwrap_or(hc.len())];
         assert!(
-            hc.contains("D.hashCode"),
-            "{name}: concrete-class field must hash via its own hashCode:\n{hc}"
+            hc.contains(want),
+            "{name}: reference field must hash via {want}:\n{hc}"
         );
         assert!(
             !hc.contains("Objects.hashCode"),
-            "{name}: concrete-class field must NOT use Objects.hashCode:\n{hc}"
+            "{name}: reference field must NOT use the null-safe Objects.hashCode:\n{hc}"
         );
     }
 }
