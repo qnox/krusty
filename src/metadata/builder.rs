@@ -182,6 +182,9 @@ pub struct PropMeta {
     pub name: String,
     pub ty: Ty,
     pub is_var: bool,
+    /// Extension-receiver type (`Property.receiver_type` = 10), `Some` for an extension property —
+    /// the same separation from the accessor's JVM parameters as [`FnMeta::receiver`].
+    pub receiver: Option<Ty>,
     pub getter: (String, String),
     pub setter: Option<(String, String)>,
 }
@@ -202,6 +205,10 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
     p.field_varint(2, st.local(&m.name) as u64); // Property.name = 2
     let ret = type_pb(st, m.ty);
     p.field_message(3, &ret); // Property.return_type = 3
+    if let Some(recv) = m.receiver {
+        let rt = type_pb(st, recv);
+        p.field_message(5, &rt); // Property.receiver_type = 5 (extension properties only)
+    }
     p.field_varint(
         11,
         if m.is_var {
@@ -278,6 +285,43 @@ mod tests {
         );
         assert_eq!(d2, vec!["f".to_string(), "".to_string(), "a".to_string()]);
         assert_eq!(d1, REF, "\n got: {:02x?}\n ref: {:02x?}", d1, REF);
+    }
+
+    // An EXTENSION property's receiver must survive a write→read round trip through krusty's own
+    // metadata reader (`Property.receiver_type = 5`): the accessor's JVM descriptor cannot mark
+    // receiver-ness, so a separate compilation resolves `"s".doubled` from this record alone.
+    #[test]
+    fn extension_property_receiver_round_trips() {
+        let (d1, d2) = build_package(
+            &[],
+            &[PropMeta {
+                name: "doubled".into(),
+                ty: Ty::String,
+                is_var: false,
+                receiver: Some(Ty::String),
+                getter: (
+                    "getDoubled".into(),
+                    "(Ljava/lang/String;)Ljava/lang/String;".into(),
+                ),
+                setter: None,
+            }],
+        );
+        let d1s: String = d1.iter().map(|&b| b as char).collect();
+        let meta = crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/Lib1Kt", &[]);
+        let props = meta.package_properties;
+        assert_eq!(props.len(), 1);
+        assert_eq!(props[0].name, "doubled");
+        assert!(
+            props[0]
+                .receiver_class
+                .is_some_and(|r| r.matches("kotlin/String")),
+            "receiver_class = {:?}",
+            props[0].receiver_class
+        );
+        assert_eq!(
+            props[0].getter.as_ref().map(|g| g.name.as_str()),
+            Some("getDoubled")
+        );
     }
 
     #[test]

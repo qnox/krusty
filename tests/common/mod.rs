@@ -185,7 +185,10 @@ pub fn compile_in_process(
     // must-inline marks → lambda reparenting) — one definition, so `compile_in_process` can't drift
     // from what ships. An unlowerable shape → skip, don't miscompile.
     krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms).ok()?;
-    let outputs = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None)?;
+    // The facade `@Metadata` the CLI backend writes (top-level fn/extension records) — without it a
+    // SEPARATE compilation reading this output from the classpath cannot resolve extensions.
+    let metadata = krusty::jvm::backend::facade_package_metadata(file, 0, &syms);
+    let outputs = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, metadata.as_ref())?;
     if outputs.is_empty() {
         None
     } else {

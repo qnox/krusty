@@ -461,7 +461,11 @@ fn compile_blocks(
         let mut ir = krusty::ir_lower::lower_file_at(file, i as u32, &info, &syms, &runtime)?;
         // Shared post-lowering pass pipeline (jvm/backend.rs); unlowerable shape → skip, don't miscompile.
         krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms).ok()?;
-        let out = ir_emit::emit_all(&ir, &facade, &*cp, None)?;
+        // Facade `@Metadata` (top-level fn/extension records), as the CLI backend writes — a later
+        // MODULE's compile reads this module's output from the classpath and needs it to resolve
+        // cross-module extensions.
+        let metadata = krusty::jvm::backend::facade_package_metadata(file, i as u32, &syms);
+        let out = ir_emit::emit_all(&ir, &facade, &*cp, metadata.as_ref())?;
         all.extend(out);
     }
     if all.is_empty() {
