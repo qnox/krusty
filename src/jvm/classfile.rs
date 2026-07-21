@@ -57,6 +57,19 @@ pub struct MemberSignatures<'a> {
     pub fields: &'a [Option<String>],
 }
 
+/// Extra per-member data a `data class` needs when seeding [`ClassWriter::seed_data_class_pool`], all
+/// index-parallel to its `fields`. Bundled to keep the seeder's arity in check.
+pub struct DataMemberInfo<'a> {
+    /// Per-field JVM `hashCode` owner override — an interface/collection field dispatches
+    /// `java/lang/Object.hashCode`, not `<field-class>.hashCode`. `None` ⇒ derive from the descriptor.
+    pub hashcode_owners: &'a [Option<String>],
+    /// The `copy` method's generic `Signature` (`(Ljava/util/List<Ljava/lang/String;>;)Ldemo/D;`),
+    /// interned right after the erased `copy` descriptor.
+    pub copy_sig: Option<&'a str>,
+    /// Per-field generic `Signature`, interned LATE (after all data-method entries, before `@Metadata`).
+    pub field_sigs: &'a [Option<String>],
+}
+
 #[derive(PartialEq, Eq, Hash, Clone)]
 enum Const {
     Utf8(String),
@@ -795,6 +808,7 @@ impl ClassWriter {
         ctor_desc: &str,
         simple: &str,
         fields: &[(String, String)],
+        info: &DataMemberInfo,
     ) {
         let self_ref = format!("L{this_internal};");
         // The primary-ctor parameter descriptors (between the parens of `ctor_desc`).
@@ -833,10 +847,14 @@ impl ClassWriter {
         for i in 1..=fields.len() {
             self.cp.utf8(&format!("component{i}"));
         }
-        // copy — name, descriptor, @NotNull (return), then `new <self>(...)` (Methodref on the ctor).
+        // copy — name, descriptor, its generic Signature (a parameterized ctor param — right after the
+        // erased descriptor, kotlinc's order), @NotNull (return), then `new <self>(...)` (ctor Methodref).
         self.cp.utf8("copy");
         let copy_desc = format!("({}){self_ref}", params);
         self.cp.utf8(&copy_desc);
+        if let Some(s) = info.copy_sig {
+            self.cp.utf8(s);
+        }
         self.cp.utf8("Lorg/jetbrains/annotations/NotNull;");
         self.cp.methodref(this_internal, "<init>", ctor_desc);
         // copy$default — its descriptor, then the Methodref back to `copy`.
@@ -928,7 +946,7 @@ impl ClassWriter {
                     | "Ljava/lang/Boolean;"
             )
         };
-        for (_, desc) in fields {
+        for (i, (_, desc)) in fields.iter().enumerate() {
             match hashcode_ref(desc) {
                 Some((cls, d)) => {
                     self.cp.methodref(cls, "hashCode", d);
@@ -941,8 +959,14 @@ impl ClassWriter {
                     self.cp.methodref("java/lang/Object", "hashCode", "()I");
                 }
                 None if is_ref(desc) => {
-                    let cls = &desc[1..desc.len() - 1];
-                    self.cp.methodref(cls, "hashCode", "()I");
+                    // The owner `field_hash` chose (interface/collection → `java/lang/Object`); fall back
+                    // to the descriptor's class when unrecorded (a concrete class owns its `hashCode`).
+                    let owner = info
+                        .hashcode_owners
+                        .get(i)
+                        .and_then(|o| o.as_deref())
+                        .unwrap_or(&desc[1..desc.len() - 1]);
+                    self.cp.methodref(owner, "hashCode", "()I");
                 }
                 None => {}
             }
@@ -982,6 +1006,12 @@ impl ClassWriter {
         }
         self.cp.utf8("other");
         self.cp.utf8("Ljava/lang/Object;");
+        // Each parameterized-type FIELD's `Signature` value, LATE — after every data-method entry, right
+        // before the class's `@Metadata` (kotlinc interns a data class's field signatures here, not with
+        // the field/accessors like a plain class).
+        for s in info.field_sigs.iter().flatten() {
+            self.cp.utf8(s);
+        }
     }
 
     pub fn const_string(&mut self, s: &str) -> u16 {
