@@ -269,6 +269,64 @@ fn data_class_all_primitive_kinds_is_byte_identical() {
     );
 }
 
+/// A data class with a CONCRETE same-file-class field (`val x: D`) — FULLY byte-identical (metadata,
+/// debug tables, pool). The synthesized `hashCode` calls `D.hashCode()` (kotlinc's shape) and the pool
+/// seeder already seeds that same ref, so body and metadata agree. A common real-world shape (a data
+/// class holding another class).
+#[test]
+fn data_class_concrete_class_field_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass D\ndata class C(val x: D)\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// A data class with a NULLABLE concrete-class field (`val x: D?`) — fully byte-identical; `hashCode` is
+/// the null-guarded `x != null ? x.hashCode() : 0` ternary, and the rest matches kotlinc.
+#[test]
+fn data_class_nullable_concrete_class_field_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass D\ndata class C(val x: D?)\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// A multi-property data class mixing a primitive, a `String`, and a concrete-class field — the general
+/// real-world domain-record shape, fully byte-identical.
+#[test]
+fn data_class_mixed_primitive_string_class_field_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass D\ndata class C(val a: Int, val b: String, val d: D)\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// A data class holding another DATA class (`val d: D` where `D` is itself a `data class`) — the pervasive
+/// real-world "record holding a record" shape (a domain aggregate holding a sub-record). Fully
+/// byte-identical: `D`'s own `hashCode()` is called on the nested field, matching kotlinc + the seeder.
+#[test]
+fn data_class_nested_data_class_field_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ndata class D(val v: Int)\ndata class C(val d: D)\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// A data class with TWO concrete-class fields (`val x: D, val y: E`) — the seeding/hashCode machinery
+/// generalizes across multiple class-typed properties.
+#[test]
+fn data_class_two_class_fields_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass D\nclass E\ndata class C(val x: D, val y: E)\n",
+        "demo/C",
+        &[],
+    );
+}
+
 // ---- Real-world data-class shapes (grounding) ----------------------------------------------------
 // These mirror the shapes of real domain types (a small all-`Int` result, a many-`Int` aggregate, a
 // single-`String` holder) whose fields are all primitives/`String`, anchoring the synthetic coverage
