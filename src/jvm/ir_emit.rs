@@ -334,6 +334,9 @@ fn seed_plain_class_pool(
             }
         }
     }
+    // A `data class` interns its parameterized-field `Signature`s LATE (in `seed_data_class_pool`, before
+    // `@Metadata`), not with the field/accessors — so hand the plain seeder an EMPTY field-sig list and
+    // pass the real ones to the data seeder below.
     cw.seed_plain_class_pool(
         fq_name,
         superclass,
@@ -343,7 +346,7 @@ fn seed_plain_class_pool(
         &crate::jvm::classfile::MemberSignatures {
             ctor: ctor_sig,
             accessors: &accessor_sigs,
-            fields: &field_sigs,
+            fields: if c.is_data { &[] } else { &field_sigs },
         },
     );
     if c.is_data {
@@ -353,7 +356,27 @@ fn seed_plain_class_pool(
             .iter()
             .map(|f| (f.name.clone(), desc(f.ty)))
             .collect();
-        cw.seed_data_class_pool(fq_name, &ctor_desc, simple, &data_fields);
+        // Per-field `hashCode` owner (interface field → `java/lang/Object`), recorded by `field_hash`.
+        let hashcode_owners: Vec<Option<String>> = c
+            .fields
+            .iter()
+            .map(|f| ir.data_hashcode_owner(fq_name, &f.name).map(str::to_string))
+            .collect();
+        // `copy`'s generic Signature shares the ctor's parameter list, returning `self` instead of `void`.
+        let copy_sig = ctor_sig
+            .and_then(|s| s.strip_suffix('V'))
+            .map(|params| format!("{params}L{fq_name};"));
+        cw.seed_data_class_pool(
+            fq_name,
+            &ctor_desc,
+            simple,
+            &data_fields,
+            &crate::jvm::classfile::DataMemberInfo {
+                hashcode_owners: &hashcode_owners,
+                copy_sig: copy_sig.as_deref(),
+                field_sigs: &field_sigs,
+            },
+        );
     }
 }
 

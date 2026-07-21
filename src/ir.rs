@@ -1134,6 +1134,12 @@ pub struct IrFile {
     /// is a bare type parameter (`class Pair<A, B>(val a: A)` → `[("a", "A")]`). The JVM backend formats
     /// each into a field `Signature` (`TA;`). Backend-agnostic: only the type-parameter name is stored.
     field_signatures: std::collections::HashMap<TypeName, Vec<(String, String)>>,
+    /// `(data-class fq-internal-name, field name)` → the JVM owner internal the field's `hashCode()`
+    /// dispatches on, as chosen by `field_hash` (ir_lower, which has the classpath). A concrete-class
+    /// field owns its own `hashCode`; an INTERFACE/collection field (`List`, `Set`, `Map`, …) dispatches
+    /// `java/lang/Object.hashCode`. The pool seeder reads this to intern the SAME methodref the body
+    /// emits — otherwise it would seed `List.hashCode` (an orphan) while the body uses `Object.hashCode`.
+    data_hashcode_owners: std::collections::HashMap<(String, String), String>,
     /// Classpath `@JvmInline value class` (fq-internal-name → erased underlying `Ty`) REFERENCED in
     /// this file — `kotlin/Result` → `Object`. The JVM value-class pass merges these into its erasure map
     /// so a classpath value-class type unboxes exactly like a user value class. Populated by ir_lower
@@ -1324,6 +1330,19 @@ impl IrFile {
     pub fn field_signatures(&self, internal: &str) -> Option<&Vec<(String, String)>> {
         self.field_signatures
             .get(&crate::types::type_name(internal))
+    }
+
+    /// Record the JVM owner a data-class field's `hashCode()` dispatches on (see `data_hashcode_owners`).
+    pub fn set_data_hashcode_owner(&mut self, class_internal: &str, field: &str, owner: String) {
+        self.data_hashcode_owners
+            .insert((class_internal.to_string(), field.to_string()), owner);
+    }
+
+    /// The JVM `hashCode()` owner recorded for a data-class field, if any.
+    pub fn data_hashcode_owner(&self, class_internal: &str, field: &str) -> Option<&str> {
+        self.data_hashcode_owners
+            .get(&(class_internal.to_string(), field.to_string()))
+            .map(String::as_str)
     }
 
     pub fn insert_external_value_class_name(&mut self, internal: TypeName, underlying: Ty) {
