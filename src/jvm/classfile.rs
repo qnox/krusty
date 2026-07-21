@@ -25,10 +25,16 @@ pub enum VerifType {
     Double,
     Null,
     UninitializedThis, // `this` inside a constructor, before the `<init>`/`super(…)` call
-    Object(u16),       // constant-pool index of a Class entry
+    Object(u16),       // a `CONSTANT_Class` interned EAGERLY (its pool index)
+    /// A `CONSTANT_Class` by NAME, interned LAZILY at StackMapTable write time — matching kotlinc, which
+    /// interns a frame's class ONLY when a WRITTEN frame lists it. A `same_frame` drops its locals, so a
+    /// class that appears only in dropped frames (e.g. a `copy$default` mask-branch param) is never
+    /// interned — no orphan pool entry. The frame-record path (`verif_single`, the method-entry baseline)
+    /// uses this; instruction-referenced classes stay `Object(idx)`.
+    ObjectName(String),
 }
 
-fn write_verif_type(vt: &VerifType, out: &mut Vec<u8>) {
+fn write_verif_type(vt: &VerifType, out: &mut Vec<u8>, cp: &mut ConstPool) {
     match vt {
         VerifType::Top => out.push(0),
         VerifType::Integer => out.push(1),
@@ -41,6 +47,29 @@ fn write_verif_type(vt: &VerifType, out: &mut Vec<u8>) {
             out.push(7);
             u2(out, *idx);
         }
+        VerifType::ObjectName(name) => {
+            out.push(7);
+            u2(out, cp.class(name)); // intern NOW — only reached for a frame actually written
+        }
+    }
+}
+
+/// Two `VerifType`s equal for StackMapTable delta comparison — class types by canonical (JVM-mapped)
+/// name, bridging `Object(idx)`/`ObjectName`; every other variant by identity. Allocation-free: this
+/// runs per local per frame in `build_stackmap`.
+fn verif_eq(a: &VerifType, b: &VerifType, cp: &ConstPool) -> bool {
+    match (a, b) {
+        // The pool dedups `CONSTANT_Class` entries (and `class()` canonicalizes the name first), so
+        // equal indices ⇔ the same class.
+        (VerifType::Object(i), VerifType::Object(j)) => i == j,
+        (VerifType::ObjectName(x), VerifType::ObjectName(y)) => {
+            super::jvm_class_map::to_jvm_internal(x) == super::jvm_class_map::to_jvm_internal(y)
+        }
+        (VerifType::Object(i), VerifType::ObjectName(n))
+        | (VerifType::ObjectName(n), VerifType::Object(i)) => cp
+            .class_name(*i)
+            .is_some_and(|s| s == super::jvm_class_map::to_jvm_internal(n)),
+        _ => a == b,
     }
 }
 
@@ -92,19 +121,15 @@ enum Const {
 struct ConstPool {
     entries: Vec<Const>, // index 0 unused conceptually; we store 1-based via len()
     dedup: HashMap<Const, u16>,
+    /// Wide (`Long`/`Double`, 2-slot) entry count — lets `slot_count`/`entry_at` skip the O(n) slot walk
+    /// for the common all-narrow pool.
+    wide_count: u16,
 }
 
 impl ConstPool {
     /// Number of slots used (long/double take 2). Pool count in the file = this + 1.
     fn slot_count(&self) -> u16 {
-        let mut n = 0u16;
-        for c in &self.entries {
-            n += match c {
-                Const::Long(_) | Const::Double(_) => 2,
-                _ => 1,
-            };
-        }
-        n
+        self.entries.len() as u16 + self.wide_count
     }
 
     fn intern(&mut self, c: Const) -> u16 {
@@ -112,6 +137,9 @@ impl ConstPool {
             return i;
         }
         let idx = self.slot_count() + 1; // 1-based
+        if matches!(c, Const::Long(_) | Const::Double(_)) {
+            self.wide_count += 1;
+        }
         self.entries.push(c.clone());
         self.dedup.insert(c, idx);
         idx
@@ -120,18 +148,41 @@ impl ConstPool {
     fn utf8(&mut self, s: &str) -> u16 {
         self.intern(Const::Utf8(s.to_string()))
     }
-    /// Non-interning lookup of an existing `CONSTANT_Class` entry (same name mapping as [`class`]).
-    /// Probing must never perturb the pool — constant-pool order is part of byte-identity with
-    /// kotlinc, and the implicit initial frame this serves is never written to the file.
-    fn lookup_class(&self, internal_name: &str) -> Option<u16> {
-        let mapped = super::jvm_class_map::to_jvm_internal(internal_name);
-        let n = self.dedup.get(&Const::Utf8(mapped.to_string())).copied()?;
-        self.dedup.get(&Const::Class(n)).copied()
-    }
     /// Non-interning lookup of an existing `CONSTANT_String` entry.
     fn lookup_string(&self, s: &str) -> Option<u16> {
         let n = self.dedup.get(&Const::Utf8(s.to_string())).copied()?;
         self.dedup.get(&Const::String(n)).copied()
+    }
+    /// The entry at 1-based pool index `idx` (long/double occupy 2 slots, so this is not a plain
+    /// `entries[idx-1]` in general). Reverses a `CONSTANT_Class` index back to its name for frame
+    /// comparison — called per mixed `Object(idx)`/`ObjectName` local per frame, so the common
+    /// no-wide-constants pool takes the O(1) path.
+    fn entry_at(&self, idx: u16) -> Option<&Const> {
+        if self.wide_count == 0 {
+            return self.entries.get(idx as usize - 1);
+        }
+        let mut slot = 1u16;
+        for c in &self.entries {
+            if slot == idx {
+                return Some(c);
+            }
+            slot += if matches!(c, Const::Long(_) | Const::Double(_)) {
+                2
+            } else {
+                1
+            };
+        }
+        None
+    }
+    /// The internal name of the `CONSTANT_Class` at `idx` (via its `Utf8` name), if it is one.
+    fn class_name(&self, idx: u16) -> Option<&str> {
+        let Const::Class(utf8_idx) = self.entry_at(idx)? else {
+            return None;
+        };
+        match self.entry_at(*utf8_idx)? {
+            Const::Utf8(s) => Some(s),
+            _ => None,
+        }
     }
     fn class(&mut self, internal_name: &str) -> u16 {
         // Ty→bytecode boundary: a built-in type may reach here under its Kotlin name (`kotlin/Any`);
@@ -1077,7 +1128,7 @@ impl ClassWriter {
     /// a frame that falsely compared "same" against a mis-derived baseline would make the verifier
     /// (which derives the real one from the descriptor) reject the class.
     #[must_use]
-    fn append_param_verif_types(&self, desc: &str, out: &mut Vec<Option<VerifType>>) -> bool {
+    fn append_param_verif_types(desc: &str, out: &mut Vec<VerifType>) -> bool {
         let (Some(stripped), Some(end)) = (desc.strip_prefix('('), desc.find(')')) else {
             return false;
         };
@@ -1086,19 +1137,19 @@ impl ClassWriter {
         while i < params.len() {
             match params[i] {
                 b'I' | b'S' | b'B' | b'C' | b'Z' => {
-                    out.push(Some(VerifType::Integer));
+                    out.push(VerifType::Integer);
                     i += 1;
                 }
                 b'J' => {
-                    out.push(Some(VerifType::Long));
+                    out.push(VerifType::Long);
                     i += 1;
                 }
                 b'F' => {
-                    out.push(Some(VerifType::Float));
+                    out.push(VerifType::Float);
                     i += 1;
                 }
                 b'D' => {
-                    out.push(Some(VerifType::Double));
+                    out.push(VerifType::Double);
                     i += 1;
                 }
                 b'L' => {
@@ -1112,11 +1163,10 @@ impl ClassWriter {
                     let Ok(name) = std::str::from_utf8(&params[start + 1..i]) else {
                         return false;
                     };
-                    // Lookup-only: a class with no pool entry yet cannot appear in any recorded
-                    // frame either, so a `None` slot (never equal) safely forces `full_frame` —
-                    // interning here would ADD entries kotlinc's pool does not have (e.g. `[I` for
-                    // an array param whose frames all compress to `same_frame`).
-                    out.push(self.cp.lookup_class(name).map(VerifType::Object));
+                    // Deferred: record the name; `write_verif_type` interns it ONLY if a written frame
+                    // lists it. A param whose frames all compress to `same_frame` is never interned — no
+                    // orphan pool entry (the reason this baseline is not eagerly interned).
+                    out.push(VerifType::ObjectName(name.to_string()));
                     i += 1; // skip ';'
                 }
                 b'[' => {
@@ -1139,13 +1189,13 @@ impl ClassWriter {
                     }
                     // An array type is a REFERENCE; its StackMapTable verification type is
                     // `Object_variable_info` referencing a `CONSTANT_Class` whose name is the array
-                    // DESCRIPTOR itself (`[I`, `[Ljava/lang/String;`) — JVMS §4.7.4 / §4.4.1. `cp.class`
-                    // interns it verbatim (`to_jvm_internal` leaves descriptors untouched), so this is
-                    // correct for both primitive and reference arrays.
+                    // DESCRIPTOR itself (`[I`, `[Ljava/lang/String;`) — JVMS §4.7.4 / §4.4.1. Recorded by
+                    // name and interned at write only if a written frame lists it (`to_jvm_internal`
+                    // leaves descriptors untouched).
                     let Ok(descriptor) = std::str::from_utf8(&params[start..i]) else {
                         return false;
                     };
-                    out.push(self.cp.lookup_class(descriptor).map(VerifType::Object));
+                    out.push(VerifType::ObjectName(descriptor.to_string()));
                 }
                 _ => return false, // not a JVM type descriptor character
             }
@@ -1170,18 +1220,17 @@ impl ClassWriter {
         // parameters' class types, which would otherwise perturb the pool of a branch-free method.
         let stackmap = if code.has_frames() {
             const ACC_STATIC: u16 = 0x0008;
-            let mut initial_locals: Vec<Option<VerifType>> = Vec::new();
+            let mut initial_locals: Vec<VerifType> = Vec::new();
             if access & ACC_STATIC == 0 {
-                initial_locals.push(Some(if name == "<init>" {
+                initial_locals.push(if name == "<init>" {
                     VerifType::UninitializedThis
                 } else {
-                    VerifType::Object(self.this_class)
-                }));
+                    VerifType::ObjectName(self.internal_name.clone())
+                });
             }
-            let baseline = self
-                .append_param_verif_types(desc, &mut initial_locals)
-                .then_some(initial_locals);
-            code.build_stackmap(baseline.as_deref())
+            let baseline =
+                Self::append_param_verif_types(desc, &mut initial_locals).then_some(initial_locals);
+            code.build_stackmap(baseline.as_deref(), &mut self.cp)
         } else {
             None
         };
@@ -1833,7 +1882,11 @@ impl CodeBuilder {
     /// the baseline could not be derived (malformed descriptor) — then the first entry is written
     /// as a `full_frame`, which is always verifiable, instead of risking a false "same" match
     /// against a wrong baseline.
-    pub fn build_stackmap(&self, initial_locals: Option<&[Option<VerifType>]>) -> Option<Vec<u8>> {
+    fn build_stackmap(
+        &self,
+        initial_locals: Option<&[VerifType]>,
+        cp: &mut ConstPool,
+    ) -> Option<Vec<u8>> {
         if self.frames.is_empty() {
             return None;
         }
@@ -1862,22 +1915,27 @@ impl CodeBuilder {
         // The `as u16` delta casts cannot truncate: a `Code` attribute's code array is capped at
         // 65535 bytes (JVMS §4.7.3) and every entry offset was filtered to `< code_len` above.
         let mut prev_off: i64 = -1;
-        // Outer `None` = no usable baseline yet (malformed descriptor): the first frame is forced
-        // to `full_frame`. An inner `None` slot is a type with no pool entry — it never compares
-        // equal, so any frame touching it also falls back to `full_frame`.
-        let mut prev_locals: Option<Vec<Option<VerifType>>> = initial_locals.map(|s| s.to_vec());
-        let full = |body: &mut Vec<u8>, delta: u16, locals: &[VerifType], stack: &[VerifType]| {
+        // `None` = no usable baseline yet (malformed descriptor): the first frame is forced to
+        // `full_frame`. Borrows (the baseline, then each emitted frame's locals) — no per-frame clone.
+        let mut prev_locals: Option<&[VerifType]> = initial_locals;
+        fn full(
+            body: &mut Vec<u8>,
+            delta: u16,
+            locals: &[VerifType],
+            stack: &[VerifType],
+            cp: &mut ConstPool,
+        ) {
             body.push(255);
             u2(body, delta);
             u2(body, locals.len() as u16);
             for vt in locals {
-                write_verif_type(vt, body);
+                write_verif_type(vt, body, cp);
             }
             u2(body, stack.len() as u16);
             for vt in stack {
-                write_verif_type(vt, body);
+                write_verif_type(vt, body, cp);
             }
-        };
+        }
         for (offset, locals, stack) in entries {
             let delta = if prev_off < 0 {
                 offset
@@ -1885,13 +1943,13 @@ impl CodeBuilder {
                 offset - prev_off as u32 - 1
             } as u16;
             prev_off = offset as i64;
-            let (same_locals, shares_prefix, p) = match &prev_locals {
+            let (same_locals, shares_prefix, p) = match prev_locals {
                 Some(prev) => {
                     let common = locals.len().min(prev.len());
                     let prefix_eq = locals[..common]
                         .iter()
                         .zip(&prev[..common])
-                        .all(|(c, p)| p.as_ref() == Some(c));
+                        .all(|(c, p)| verif_eq(p, c, cp));
                     (
                         locals.len() == prev.len() && prefix_eq,
                         prefix_eq,
@@ -1912,7 +1970,7 @@ impl CodeBuilder {
                 body.push((251 + (n - p)) as u8); // append_frame
                 u2(&mut body, delta);
                 for vt in &locals[p..] {
-                    write_verif_type(vt, &mut body);
+                    write_verif_type(vt, &mut body, cp);
                 }
             } else if stack.is_empty() && shares_prefix && p > n && p - n <= 3 {
                 body.push((251 - (p - n)) as u8); // chop_frame
@@ -1924,11 +1982,11 @@ impl CodeBuilder {
                     body.push(247); // same_locals_1_stack_item_frame_extended
                     u2(&mut body, delta);
                 }
-                write_verif_type(&stack[0], &mut body);
+                write_verif_type(&stack[0], &mut body, cp);
             } else {
-                full(&mut body, delta, locals, stack);
+                full(&mut body, delta, locals, stack, cp);
             }
-            prev_locals = Some(locals.iter().cloned().map(Some).collect());
+            prev_locals = Some(locals);
         }
         Some(body)
     }

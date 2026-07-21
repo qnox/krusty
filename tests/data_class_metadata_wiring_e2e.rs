@@ -70,21 +70,42 @@ fn assert_byte_identical(src: &str, class_internal: &str, cp: &[PathBuf]) {
 
 // ---- Byte-identity (the end-to-end goal) ----------------------------------------------------------
 
-/// A `data class` with a PARAMETERIZED-type field (`List<String>`) — the generic `Signature` on the
-/// field/getter/component1/copy/ctor (copy-sig right after the copy descriptor, field-sig LATE before
-/// `@Metadata`) AND the interface-field `hashCode` owner (`java/lang/Object`, not `List`) are now seeded
-/// to match the body. IGNORED pending the LAST divergence: `copy$default`'s synthesized skip-frames are
-/// `same_frame`s, but `verif_single` interns their object-typed locals (e.g. `Class java/util/List`)
-/// EAGERLY at frame-record time — an orphan the written `same_frame` never references. kotlinc interns a
-/// frame `Class` only when a written frame lists it. The fix is deferred `VerifType` interning (carry the
-/// class NAME, intern at `build_stackmap` write time), which also touches the `append_param_verif_types`
-/// baseline — a focused core change. Un-ignore once that lands.
+/// A `data class` with a PARAMETERIZED-type field (`List<String>`) — FULLY byte-identical. Combines the
+/// generic `Signature` on field/getter/component1/copy/ctor (copy-sig after the copy descriptor, field-sig
+/// late before `@Metadata`), the interface-field `hashCode` owner (`java/lang/Object`, not `List`), and
+/// deferred `VerifType` interning so `copy$default`'s `same_frame` locals never intern an orphan
+/// `Class java/util/List`. The pervasive `List`/`Map`/`Set`-field data-class shape.
 #[test]
-#[ignore = "pending deferred VerifType interning to drop the copy$default same_frame orphan"]
 fn data_class_generic_collection_field_is_byte_identical() {
     let cp: Vec<PathBuf> = common::stdlib_jar().into_iter().collect();
     assert_byte_identical(
         "package demo\ndata class D(val xs: List<String>)\n",
+        "demo/D",
+        &cp,
+    );
+}
+
+/// A `data class` with a two-argument generic field (`Map<String, Int>`) — the `Signature` nests both
+/// type arguments (`Ljava/util/Map<Ljava/lang/String;Ljava/lang/Integer;>;`, the `Int` boxed) and the
+/// same deferred-interning path keeps `copy$default` orphan-free.
+#[test]
+fn data_class_generic_map_field_is_byte_identical() {
+    let cp: Vec<PathBuf> = common::stdlib_jar().into_iter().collect();
+    assert_byte_identical(
+        "package demo\ndata class D(val m: Map<String, Int>)\n",
+        "demo/D",
+        &cp,
+    );
+}
+
+/// A `data class` with a NULLABLE generic field (`List<String>?`) — the generic `Signature` survives
+/// nullability (`parameterized_sig` unwraps `T?`), and the nullable `hashCode`/`equals` guards compose
+/// with the deferred-interned frames.
+#[test]
+fn data_class_nullable_generic_collection_field_is_byte_identical() {
+    let cp: Vec<PathBuf> = common::stdlib_jar().into_iter().collect();
+    assert_byte_identical(
+        "package demo\ndata class D(val xs: List<String>?)\n",
         "demo/D",
         &cp,
     );

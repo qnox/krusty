@@ -8545,15 +8545,19 @@ impl<'a> Emitter<'a> {
     }
 
     fn verif_single(&mut self, ty: Ty) -> VerifType {
+        // Object types are recorded by NAME (`VerifType::ObjectName`), NOT interned here — the class is
+        // interned only when a WRITTEN StackMapTable frame lists it (`build_stackmap`). A frame that
+        // compresses to `same_frame` drops its locals, so a class appearing only in dropped frames (e.g.
+        // a `copy$default` mask-branch param) never enters the pool — matching kotlinc, no orphan.
         match ty {
             t if is_jvm_int_category(t) => VerifType::Integer,
             Ty::Long => VerifType::Long,
             Ty::Double => VerifType::Double,
             Ty::Float => VerifType::Float,
-            Ty::String => VerifType::Object(self.cw.class_ref("java/lang/String")),
+            Ty::String => VerifType::ObjectName("java/lang/String".to_string()),
             // An array's verification type is an `Object` whose class name is its descriptor (`[I`).
-            t if t.is_array() => VerifType::Object(self.cw.class_ref(&type_descriptor(ty))),
-            Ty::Obj(n, _) => VerifType::Object(self.cw.class_ref(&n.render())),
+            t if t.is_array() => VerifType::ObjectName(type_descriptor(ty)),
+            Ty::Obj(n, _) => VerifType::ObjectName(n.render()),
             _ => VerifType::Top,
         }
     }
