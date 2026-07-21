@@ -80,12 +80,25 @@ fn data_class_nullable_primitive_field_is_byte_identical() {
 
 /// A `data class` whose FIRST field is a nullable primitive and whose later field is a non-null
 /// primitive (`Int?`, `Int`) — two f100 positions (`component1` + `copy`, `component2`/the non-null
-/// stay derivable). The `hashCode` accumulation starts AFTER the nullable field's ternary, so it does
-/// not exercise the (separate) keep-`result`-on-stack path — isolating the f100 metadata coverage.
+/// stay derivable).
 #[test]
 fn data_class_nullable_first_primitive_is_byte_identical() {
     assert_byte_identical(
         "package demo\ndata class D(val a: Int?, val b: Int)\n",
+        "demo/D",
+        &[],
+    );
+}
+
+/// A multi-field `data class` mixing a non-null primitive, a NULLABLE primitive, and a reference
+/// (`Int`, `Double?`, `String`) — the `hashCode` accumulator `result = result*31 + h(field)` runs
+/// ACROSS the nullable primitive's `if (b==null) 0 else Object.hashCode(b)` ternary. kotlinc keeps
+/// `result*31` on the operand stack across that branch (the keep-LHS-on-stack path), and the boxed
+/// `Double?` positions carry the f100 signature — the two fixes composing.
+#[test]
+fn data_class_mixed_nullable_primitive_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ndata class D(val a: Int, val b: Double?, val c: String)\n",
         "demo/D",
         &[],
     );
@@ -413,6 +426,32 @@ fn data_class_nested_data_class_field_is_byte_identical() {
 fn data_class_two_class_fields_is_byte_identical() {
     assert_byte_identical(
         "package demo\nclass D\nclass E\ndata class C(val x: D, val y: E)\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// A MULTI-property data class with a NULLABLE reference field — the pervasive real-world domain-record
+/// shape (a record with several fields, some optional). Its `hashCode` accumulates `result = result*31 +
+/// <field hash>`; the nullable field's hash is a branchy null-guarded ternary, and kotlinc keeps the
+/// `result*31` on the operand stack ACROSS that branch (krusty used to spill it to a temp). Fully
+/// byte-identical.
+#[test]
+fn data_class_multi_property_nullable_reference_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ndata class C(val a: String, val b: String?)\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// A mixed multi-property record with a primitive, a concrete-class field, a `String`, and a NULLABLE
+/// concrete-class field — the general domain-aggregate shape, fully byte-identical (exercises the
+/// operand-stack-preserved `hashCode` accumulator across the nullable field's branch).
+#[test]
+fn data_class_mixed_record_with_nullable_class_field_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass D\ndata class C(val a: Int, val d: D, val s: String, val n: D?)\n",
         "demo/C",
         &[],
     );
