@@ -102,6 +102,11 @@ impl ConstPool {
         let n = self.dedup.get(&Const::Utf8(mapped.to_string())).copied()?;
         self.dedup.get(&Const::Class(n)).copied()
     }
+    /// Non-interning lookup of an existing `CONSTANT_String` entry.
+    fn lookup_string(&self, s: &str) -> Option<u16> {
+        let n = self.dedup.get(&Const::Utf8(s.to_string())).copied()?;
+        self.dedup.get(&Const::String(n)).copied()
+    }
     fn class(&mut self, internal_name: &str) -> u16 {
         // Ty→bytecode boundary: a built-in type may reach here under its Kotlin name (`kotlin/Any`);
         // a `CONSTANT_Class` must carry the JVM name (`java/lang/Object`). Every bare class reference
@@ -920,18 +925,30 @@ impl ClassWriter {
             self.cp.utf8("result");
             self.cp.utf8("I");
         }
-        // equals — name, descriptor, @Nullable (param). kotlinc interns the equals BODY's
-        // `Intrinsics.areEqual` (for reference fields) BEFORE the `other`/`Object` LVT names, so seed it
-        // in that order.
+        // equals — name, descriptor, @Nullable (param). kotlinc interns the equals BODY's per-field
+        // comparison refs BEFORE the `other`/`Object` LVT names, in field order: a `Double`/`Float` field
+        // compares via the IEEE-aware `<Box>.compare` (so `NaN`/`-0.0` match kotlinc), a reference via
+        // `Intrinsics.areEqual`; the other primitives compare directly (`if_icmp*`/`lcmp`, no ref).
         self.cp.utf8("equals");
         self.cp.utf8("(Ljava/lang/Object;)Z");
         self.cp.utf8("Lorg/jetbrains/annotations/Nullable;");
-        if fields.iter().any(|(_, d)| is_ref(d)) {
-            self.cp.methodref(
-                "kotlin/jvm/internal/Intrinsics",
-                "areEqual",
-                "(Ljava/lang/Object;Ljava/lang/Object;)Z",
-            );
+        for (_, desc) in fields {
+            match desc.as_str() {
+                "D" => {
+                    self.cp.methodref("java/lang/Double", "compare", "(DD)I");
+                }
+                "F" => {
+                    self.cp.methodref("java/lang/Float", "compare", "(FF)I");
+                }
+                d if is_ref(d) => {
+                    self.cp.methodref(
+                        "kotlin/jvm/internal/Intrinsics",
+                        "areEqual",
+                        "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+                    );
+                }
+                _ => {}
+            }
         }
         self.cp.utf8("other");
         self.cp.utf8("Ljava/lang/Object;");
@@ -1212,6 +1229,16 @@ impl ClassWriter {
     /// exact shape. No LineNumberTable (a synthesized data-class method gets none). `result`'s start is
     /// found by walking the emitted body to the first store into slot 1 (the `istore_1` that folds the
     /// first field's hash into the accumulator), so it is correct regardless of the first field's type.
+    /// Byte length of the `ldc` loading `s` as a String constant — 2 (`ldc`, pool index ≤ 255) or
+    /// 3 (`ldc_w`). Lookup-only (never interns); `None` when the constant is absent. Lets the
+    /// debug-table pass compute a `checkNotNullParameter` prologue's real length instead of
+    /// assuming the 2-byte form — a big class can push the param-name String past index 255.
+    pub fn string_ldc_len(&self, s: &str) -> Option<u16> {
+        self.cp
+            .lookup_string(s)
+            .map(|i| if i <= 255 { 2 } else { 3 })
+    }
+
     pub fn set_hashcode_result_debug(&mut self, this_desc: &str) {
         let hn = self.cp.utf8("hashCode");
         let hd = self.cp.utf8("()I");
