@@ -66,11 +66,17 @@ const DECLARES_DEFAULT_VALUE: u64 = 2;
 fn predefined_index(t: Ty) -> u64 {
     match t {
         Ty::Unit => 2,
+        Ty::Byte => 5,
         Ty::Double => 6,
+        Ty::Float => 7,
         Ty::Int => 8,
         Ty::Long => 9,
+        Ty::Short => 10,
         Ty::Boolean => 11,
+        Ty::Char => 12,
         Ty::String => 14,
+        // `UInt`/`ULong` are value classes over Int/Long — their @Metadata class name is the unsigned
+        // type itself (a class-id, not a builtin), so they fall through to the class-id path elsewhere.
         _ => 0, // kotlin/Any fallback
     }
 }

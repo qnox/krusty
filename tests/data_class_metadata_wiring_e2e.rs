@@ -118,6 +118,18 @@ fn multi_property_mixed_nullability_is_byte_identical() {
     );
 }
 
+/// Every primitive property type — pins the `@Metadata` builtin `predefinedIndex` for each
+/// (Byte=5, Float=7, Short=10, Char=12, plus Int/Long/Double/Boolean). A wrong index would fall back
+/// to `kotlin/Any` and diverge.
+#[test]
+fn all_primitive_types_class_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C(val a: Byte, val b: Short, val c: Int, val d: Long, val e: Float, val f: Double, val g: Boolean, val h: Char)\n",
+        "demo/C",
+        &[],
+    );
+}
+
 // ---- @Metadata-level checks for shapes not yet FULLY byte-identical (data classes) ----------------
 
 /// A `data class` (metadata on): its IR → `build_class_metadata` yields the synthesized
