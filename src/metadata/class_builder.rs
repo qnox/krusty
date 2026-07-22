@@ -72,6 +72,10 @@ pub const HASHCODE_TOSTRING_FN_FLAGS: u64 = 0x100d6;
 pub const DATA_CLASS_FLAGS: u64 = 0x406;
 /// `Class.flags` (f1) for a `@JvmInline value class` (IS_VALUE + public + final). From kotlinc 2.4.0.
 pub const VALUE_CLASS_FLAGS: u64 = 8199;
+/// `Class.flags` (f1) for a `sealed class` (public + SEALED modality). From kotlinc 2.4.0.
+pub const SEALED_CLASS_FLAGS: u64 = 54;
+/// `Constructor.flags` (f1) for a sealed class's primary constructor — kotlinc marks it PROTECTED.
+pub const SEALED_CTOR_FLAGS: u64 = 4;
 /// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE`.
 const DECLARES_DEFAULT_VALUE: u64 = 2;
 
@@ -314,6 +318,9 @@ pub struct ClassTail<'a> {
     /// `inlineClassUnderlyingPropertyName` (f17, the name's string-table id) +
     /// `inlineClassUnderlyingType` (f18, an inline `Type`). `None` for an ordinary class.
     pub inline_underlying: Option<(&'a str, Ty)>,
+    /// `Constructor.flags` (f1) for the PRIMARY constructor — 0 (omitted) for an ordinary class; a
+    /// sealed class's primary ctor is PROTECTED, which kotlinc records.
+    pub primary_ctor_flags: u64,
     /// The primary constructor's `JvmMethodSignature` NAME — a value class's primary ctor is realized as
     /// the static `constructor-impl`, not `<init>`. `None` ⇒ `<init>` (the ordinary shape).
     pub ctor_sig_name: Option<&'a str>,
@@ -351,7 +358,7 @@ pub fn build_class(
         &mut st,
         ctor_params,
         ctor_desc,
-        0,
+        tail.primary_ctor_flags,
         tail.ctor_param_defaults,
         tail.ctor_sig_name,
     )];
