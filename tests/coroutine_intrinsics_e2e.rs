@@ -212,3 +212,18 @@ fun box(): String {{ val c = C(); builder {{ run(c) }}; return if (c.s == \"56\"
         "OK"
     );
 }
+
+#[test]
+fn unit_lambda_statement_tail_after_suspension() {
+    // A Unit suspend lambda whose tail is a value-less STATEMENT (`if (y) res = "OK"` after a
+    // suspension): binding the tail as the return-temp's initializer pushed nothing (`astore` from
+    // an empty stack → VerifyError). The tail runs as a statement; the temp binds `Unit`.
+    let src = format!(
+        "{BUILDER}\
+class C {{ var res = \"FAIL\"\n\
+  suspend fun pause(): Unit = suspendCoroutineUninterceptedOrReturn {{ x -> x.resume(Unit); COROUTINE_SUSPENDED }} }}\n\
+suspend fun go(c: C) {{ val x = true; c.pause(); val y: Boolean = x; if (y) c.res = \"OK\" }}\n\
+fun box(): String {{ val c = C(); builder {{ go(c) }}; return c.res }}\n"
+    );
+    assert_eq!(run(&src).expect("unit statement tail runs"), "OK");
+}

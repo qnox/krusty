@@ -7360,7 +7360,17 @@ impl<'a> Lower<'a> {
             // Bind the body value to a temp (`val tmp = <value>; return box(tmp)`) so a CONDITIONAL
             // suspension in the value (`if (c) foo() else 7`) surfaces as a `Variable{init: When}`
             // the flattener's `stmt_cond_suspension` handles — not a raw `return box(When)`.
-            b_stmts.push(self.emit_variable(tmp_idx, body_ty, Some(b_val)));
+            // A UNIT body's tail is a STATEMENT (`if (y) res = "OK"`, a loop, a Unit-returning
+            // call) — it pushes nothing (or a value the Unit body discards), so binding IT would
+            // `astore` from an empty stack; run it as a statement and bind the `Unit` singleton.
+            let unit_stmt_tail = self.info.ty(body) == Ty::Unit;
+            if unit_stmt_tail {
+                b_stmts.push(b_val);
+                let u = self.emit_unit();
+                b_stmts.push(self.emit_variable(tmp_idx, body_ty, Some(u)));
+            } else {
+                b_stmts.push(self.emit_variable(tmp_idx, body_ty, Some(b_val)));
+            }
             let tmpg = self.emit_get_value(tmp_idx);
             let boxed = self.emit_type_op(IrTypeOp::ImplicitCoercion, tmpg, object_ir.clone());
             b_stmts.push(self.emit_return(Some(boxed)));

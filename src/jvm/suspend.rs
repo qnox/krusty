@@ -1967,15 +1967,7 @@ fn build_lambda_state_machine(
             spilled.push((idx, spill_field_ty(ty)));
         }
     }
-    // The spill-shape bail applies only to a RECEIVER lambda's machine (leading `this` field): the
-    // plain lambda's restore handles sub-int spills (a `Boolean` across try/catch, e2e-verified),
-    // while the receiver form's restore mis-slots them (the corpus intLikeVarSpilling shapes).
-    let receiver_lambda = ir.classes[class_id as usize]
-        .fields
-        .first()
-        .is_some_and(|f| f.name == "this");
-    if (receiver_lambda && spill_shape_unmodeled(&spilled))
-        || consecutive_temp_suspensions(ir, &stmts, &suspend_set)
+    if consecutive_temp_suspensions(ir, &stmts, &suspend_set)
         || suspending_over_progression(ir, b, &suspend_set)
     {
         return false;
@@ -2983,6 +2975,24 @@ impl Flat<'_> {
             } = &self.ir.exprs[stmt as usize]
             {
                 if expr_calls_suspend(self.ir, stmt, self.suspend) {
+                    // A NESTED `try` inside a suspending try body isn't modeled (the inner region's
+                    // handler ranges and the outer's overlap across states) — bail, never miscompile.
+                    let mut nested = false;
+                    for_each_child(&self.ir.exprs, *body, &mut |c| {
+                        let mut stack = vec![c];
+                        while let Some(cur) = stack.pop() {
+                            if matches!(&self.ir.exprs[cur as usize], IrExpr::Try { .. }) {
+                                nested = true;
+                                break;
+                            }
+                            for_each_child(&self.ir.exprs, cur, &mut |c2| stack.push(c2));
+                        }
+                    });
+                    if nested {
+                        self.failed = true;
+                        self.states[cur] = out;
+                        return;
+                    }
                     let (body, catches, finally) = (*body, catches.clone(), *finally);
                     // A BRANCH (`When`) in the catch body — a `?.`/elvis/`if` — introduces a temp/local
                     // whose slot the state machine's exception-handler frame can't reconcile with the try
@@ -4341,18 +4351,6 @@ fn spill_field_ty(ty: Ty) -> Ty {
     }
 }
 
-/// A spilled-local shape the state machine's uniform restore doesn't model yet: kotlinc's per-kind
-/// positional spilling coerces INT-LIKE sub-int locals (`I$N` restored with `i2b`/`i2s`/`i2c`),
-/// restores an array-typed local with its exact frame type, and null-checks a NULLABLE reference
-/// restore; krusty's restore emits none of these, so such a machine would fail verification (or
-/// corrupt a frame type) — bail (skip, never miscompile).
-fn spill_shape_unmodeled(spilled: &[(u32, Ty)]) -> bool {
-    spilled.iter().any(|(_, t)| {
-        matches!(t, Ty::Byte | Ty::Short | Ty::Char | Ty::Boolean)
-            || t.non_null().array_elem().is_some()
-    })
-}
-
 /// A suspending body iterating a `kotlin.ranges` PROGRESSION object (`for (x in 20L..30L step 5L)` —
 /// the stepped/long form kotlinc iterates via `LongProgression.iterator()`, unlike the optimized
 /// counted `Int` loop): the induction state across a suspension isn't modeled yet — the loop resumes
@@ -4400,9 +4398,28 @@ fn stmt_contains_loop(ir: &IrFile, e: ExprId) -> bool {
 fn consecutive_temp_suspensions(ir: &IrFile, stmts: &[ExprId], suspend_set: &HashSet<u32>) -> bool {
     let temp_susp = |s: ExprId| {
         matches!(&ir.exprs[s as usize], IrExpr::Variable { named: false, init: Some(i), .. }
-            if is_suspend_call(ir, unwrap_suspend_cast(ir, *i, suspend_set, false), suspend_set))
+            if expr_calls_suspend(ir, *i, suspend_set))
     };
-    stmts.windows(2).any(|w| temp_susp(w[0]) && temp_susp(w[1]))
+    // The pair may sit inside a nested statement Block (`splice_return_blocks` grouping) — scan
+    // every reachable statement list.
+    fn scan(
+        ir: &IrFile,
+        stmts: &[ExprId],
+        suspend_set: &HashSet<u32>,
+        temp_susp: &dyn Fn(ExprId) -> bool,
+    ) -> bool {
+        if stmts
+            .windows(2)
+            .any(|w| temp_susp(w[0]) && expr_calls_suspend(ir, w[1], suspend_set))
+        {
+            return true;
+        }
+        stmts.iter().any(|&st| {
+            matches!(&ir.exprs[st as usize], IrExpr::Block { stmts: inner, .. }
+                if scan(ir, inner, suspend_set, temp_susp))
+        })
+    }
+    scan(ir, stmts, suspend_set, &temp_susp)
 }
 
 /// True if `e`'s subtree binds the result of a suspension to a value(inline)-class-typed local. An
