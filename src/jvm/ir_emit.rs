@@ -2453,7 +2453,38 @@ fn emit_class(
         cw.add_method(0x0008, "<clinit>", "()V", &clinit);
     }
     // Instance methods (concrete emitted; abstract declared with `ACC_ABSTRACT`, no Code).
-    for &fid in &c.methods {
+    // kotlinc emits a property's ACCESSORS before the class's declared functions (source order: ctor
+    // properties precede the body). The IR appends synthesized accessors after the declared methods, so
+    // reorder here — accessors first (in field order), then everything else in IR order.
+    let accessor_order: Vec<String> = c
+        .fields
+        .iter()
+        .flat_map(|f| {
+            let cn = {
+                let mut ch = f.name.chars();
+                ch.next()
+                    .map(|x| x.to_uppercase().collect::<String>() + ch.as_str())
+                    .unwrap_or_default()
+            };
+            [format!("get{cn}"), format!("set{cn}")]
+        })
+        .collect();
+    let mut ordered: Vec<u32> = Vec::with_capacity(c.methods.len());
+    for name in &accessor_order {
+        ordered.extend(
+            c.methods
+                .iter()
+                .copied()
+                .filter(|&fid| &ir.functions[fid as usize].name == name),
+        );
+    }
+    ordered.extend(
+        c.methods
+            .iter()
+            .copied()
+            .filter(|&fid| !accessor_order.contains(&ir.functions[fid as usize].name)),
+    );
+    for &fid in &ordered {
         let f = &ir.functions[fid as usize];
         if f.body.is_some() {
             // A `static` member (e.g. a value class's `box-impl`/`constructor-impl`) emits with no
