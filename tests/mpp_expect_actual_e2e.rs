@@ -147,3 +147,37 @@ actual fun rep(s: String, t: String): String = s + t
 fun box(): String = if (rep("X") == "XX") "OK" else "FAIL"
 "#);
 }
+
+/// Body-less `expect val`/`var` (incl. extension receivers) parse as headers and strip away.
+#[test]
+fn expect_properties_including_extensions() {
+    run(r#"// LANGUAGE: +MultiPlatformProjects
+expect val v: String
+expect val Char.extensionVal: String
+expect var String.extensionVar: Char
+
+actual val v: String = ""
+actual val Char.extensionVal: String
+    get() = toString()
+actual var String.extensionVar: Char
+    get() = this[0]
+    set(value) {}
+
+fun box(): String = v + 'O'.extensionVal + "K".extensionVar
+"#);
+}
+
+/// An UNMATCHED body-less `expect val` (parser now accepts the header shape) must still fail
+/// downstream — never silently emit a property with no backing.
+#[test]
+fn unmatched_expect_property_fails_compile() {
+    let src = r#"// LANGUAGE: +MultiPlatformProjects
+expect val v: String
+
+fun box(): String = v
+"#;
+    assert!(
+        common::compile_and_run_with_stdlib(src, "MainKt").is_none(),
+        "an expect val without an actual must not compile"
+    );
+}

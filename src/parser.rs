@@ -1012,9 +1012,11 @@ impl<'a> Parser<'a> {
                 }
                 // top-level property: `val`/`var name (: Type)? = init`
                 TokenKind::KwVal | TokenKind::KwVar => {
+                    // An `expect val/var` is a HEADER — legally initializer- and accessor-less
+                    // (the matched actual supplies them; expect/actual stripping removes it).
                     let mut d = self.parse_top_property_c(
                         mods.iter().any(|m| m == "lateinit"),
-                        false,
+                        is_expect,
                         mods.iter().any(|m| m == "const"),
                         false,
                     );
