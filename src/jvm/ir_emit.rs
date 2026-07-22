@@ -209,6 +209,15 @@ fn init_body_string_consts(ir: &IrFile, c: &IrClass) -> std::collections::HashMa
     out
 }
 
+/// Is this property declared as a bare TYPE PARAMETER (`class C<T>(val a: T)`)? It erases to
+/// `Ljava/lang/Object;`, but `T`'s implicit bound is `Any?`, so kotlinc annotates it neither
+/// `@NotNull` nor `@Nullable` and emits no `checkNotNullParameter` guard. `field_signatures` already
+/// tracks these — it is what drives their `Signature` attribute.
+fn is_type_parameter_field(ir: &IrFile, fq_name: &str, field: &str) -> bool {
+    ir.field_signatures(fq_name)
+        .is_some_and(|fs| fs.iter().any(|(name, _)| name == field))
+}
+
 fn init_body_constant_fields(ir: &IrFile, c: &IrClass) -> std::collections::HashSet<u32> {
     let mut out = std::collections::HashSet::new();
     let Some(body) = c.init_body else { return out };
@@ -552,11 +561,12 @@ fn seed_plain_class_pool(
             .map(|f| f.to_uppercase().collect::<String>() + ch.as_str())
             .unwrap_or_default()
     };
-    // Reference-type annotation kind: 0 = primitive (no annotation), 1 = non-null reference (@NotNull +
-    // a `checkNotNullParameter` guard), 2 = nullable reference (@Nullable, no guard).
-    let ann_kind = |t: Ty| -> u8 {
+    // Reference-type annotation kind: 0 = primitive or bare type parameter (no annotation), 1 =
+    // non-null reference (@NotNull + a `checkNotNullParameter` guard), 2 = nullable (@Nullable, no guard).
+    let ann_kind = |name: &str, t: Ty| -> u8 {
         let d = desc(t);
-        if !(d.starts_with('L') || d.starts_with('[')) {
+        if !(d.starts_with('L') || d.starts_with('[')) || is_type_parameter_field(ir, fq_name, name)
+        {
             0
         } else if matches!(t, Ty::Nullable(_)) {
             2
@@ -564,7 +574,7 @@ fn seed_plain_class_pool(
             1
         }
     };
-    let is_nonnull_ref = |t: Ty| ann_kind(t) == 1;
+    let is_nonnull_ref = |name: &str, t: Ty| ann_kind(name, t) == 1;
     let ctor_desc = format!("({})V", ctor_field_descs(c));
     let body_consts = init_body_string_consts(ir, c);
     let stored = init_body_stored_fields(ir, c);
@@ -575,7 +585,7 @@ fn seed_plain_class_pool(
         .map(|(i, f)| crate::jvm::classfile::SeedField {
             name: f.name.clone(),
             desc: desc(f.ty),
-            ann_kind: ann_kind(f.ty),
+            ann_kind: ann_kind(&f.name, f.ty),
             is_ctor_param: i < c.ctor_param_count as usize,
             stores_in_ctor: i < c.ctor_param_count as usize || stored.contains(&(i as u32)),
             string_const: body_consts.get(&(i as u32)).cloned(),
@@ -590,7 +600,7 @@ fn seed_plain_class_pool(
             0,
         ));
         if !f.is_final {
-            let kind = if is_nonnull_ref(f.ty) { 2 } else { 1 };
+            let kind = if is_nonnull_ref(&f.name, f.ty) { 2 } else { 1 };
             accessors.push((
                 format!("set{}", cap(&f.name)),
                 format!("({})V", desc(f.ty)),
@@ -964,7 +974,7 @@ fn attach_synth_debug_tables(
 /// reference gets `@Nullable` (primitives get nothing). Covers the ctor's reference params, each
 /// getter's reference return, and each `var` setter's reference param — the shape kotlinc emits for a
 /// class with reference-typed properties. Call after `attach_synth_debug_tables`.
-fn attach_synth_nullability(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
+fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
     let cap = |s: &str| {
         let mut ch = s.chars();
@@ -974,9 +984,11 @@ fn attach_synth_nullability(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     };
     // A reference type (descriptor `L…;`/`[…`) gets `@NotNull` unless it is `Ty::Nullable`, then
     // `@Nullable`; a primitive gets no annotation.
-    let ann = |t: Ty| -> Option<&'static str> {
+    let ann = |name: &str, t: Ty| -> Option<&'static str> {
         let d = desc(t);
-        if !(d.starts_with('L') || d.starts_with('[')) {
+        if !(d.starts_with('L') || d.starts_with('['))
+            || is_type_parameter_field(ir, &c.fq_name(), name)
+        {
             return None;
         }
         Some(if matches!(t, Ty::Nullable(_)) {
@@ -987,7 +999,7 @@ fn attach_synth_nullability(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     };
     // Backing field of a reference property: kotlinc annotates it (`@NotNull` for non-null).
     for f in &c.fields {
-        if let Some(a) = ann(f.ty) {
+        if let Some(a) = ann(&f.name, f.ty) {
             cw.set_field_nullability(&f.name, a);
         }
     }
@@ -998,7 +1010,7 @@ fn attach_synth_nullability(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
         .fields
         .iter()
         .take(c.ctor_param_count as usize)
-        .map(|f| ann(f.ty))
+        .map(|f| ann(&f.name, f.ty))
         .collect();
     if ctor_params.iter().any(|p| p.is_some()) {
         let ctor_desc = format!("({})V", ctor_field_descs(c));
@@ -1006,7 +1018,9 @@ fn attach_synth_nullability(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     }
     // Accessors: a reference getter annotates its return; a `var` reference setter its parameter.
     for f in &c.fields {
-        let Some(a) = ann(f.ty) else { continue };
+        let Some(a) = ann(&f.name, f.ty) else {
+            continue;
+        };
         cw.set_method_nullability(
             &format!("get{}", cap(&f.name)),
             &format!("(){}", desc(f.ty)),
@@ -1031,7 +1045,7 @@ fn attach_synth_nullability(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
         let copy_desc = format!("({}){self_ref}", ctor_field_descs(c));
         // `copy`'s parameters mirror the primary-constructor properties, so each reference param takes
         // the SAME `@NotNull`/`@Nullable` annotation kotlinc puts on the constructor's.
-        let copy_params: Vec<Option<&str>> = c.fields.iter().map(|f| ann(f.ty)).collect();
+        let copy_params: Vec<Option<&str>> = c.fields.iter().map(|f| ann(&f.name, f.ty)).collect();
         cw.set_method_nullability("copy", &copy_desc, Some(not_null), &copy_params);
         cw.set_method_nullability("toString", "()Ljava/lang/String;", Some(not_null), &[]);
         cw.set_method_nullability(
@@ -1041,7 +1055,7 @@ fn attach_synth_nullability(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
             &[Some("Lorg/jetbrains/annotations/Nullable;")],
         );
         for (i, f) in c.fields.iter().enumerate() {
-            if let Some(a) = ann(f.ty) {
+            if let Some(a) = ann(&f.name, f.ty) {
                 cw.set_method_nullability(
                     &format!("component{}", i + 1),
                     &format!("(){}", desc(f.ty)),
@@ -1055,7 +1069,7 @@ fn attach_synth_nullability(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     // exactly like the property's (a non-null reference underlying → `@NotNull`).
     if c.is_value {
         if let Some(f0) = c.fields.first() {
-            if let Some(a) = ann(f0.ty) {
+            if let Some(a) = ann(&f0.name, f0.ty) {
                 let u = desc(f0.ty);
                 cw.set_method_nullability("constructor-impl", &format!("({u}){u}"), Some(a), &[]);
             }
@@ -2684,7 +2698,7 @@ fn emit_class(
     if computed.is_some() {
         attach_synth_debug_tables(ir, c, &mut cw, &ctor_lines);
         attach_declared_method_debug(ir, c, &mut cw);
-        attach_synth_nullability(c, &mut cw);
+        attach_synth_nullability(ir, c, &mut cw);
     }
     if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
@@ -4138,7 +4152,7 @@ fn emit_interface_class(
     if computed.is_some() {
         attach_synth_debug_tables(ir, c, &mut cw, &[]);
         attach_declared_method_debug(ir, c, &mut cw);
-        attach_synth_nullability(c, &mut cw);
+        attach_synth_nullability(ir, c, &mut cw);
     }
     if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
@@ -4533,7 +4547,7 @@ fn emit_enum_class(
     {
         attach_synth_debug_tables(ir, c, &mut cw, &[]);
         attach_declared_method_debug(ir, c, &mut cw);
-        attach_synth_nullability(c, &mut cw);
+        attach_synth_nullability(ir, c, &mut cw);
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
     cw.finish()
