@@ -166,3 +166,31 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run(src).expect("let(fn-value) splices"), "OK");
 }
+
+#[test]
+fn suspend_fn_entry_has_no_param_null_check() {
+    // The state-machine RE-ENTRY call (`foo(null, continuation)`) passes null for every value
+    // parameter — kotlinc emits no `checkNotNullParameter` on a suspend fn, so neither must krusty
+    // (with the check, the resume NPEs). The conditional tail forces a real re-entry.
+    let src = format!(
+        "{BUILDER}\
+suspend fun sh(): Int = suspendCoroutineUninterceptedOrReturn {{ c -> c.resume(56); COROUTINE_SUSPENDED }}\n\
+suspend fun foo(x: Any): Int {{ return if (x == \"56\") sh() else 13 }}\n\
+fun box(): String {{ var r = -1; builder {{ r = foo(\"56\") }}; return if (r == 56) \"OK\" else \"fail: $r\" }}\n"
+    );
+    assert_eq!(run(&src).expect("suspend re-entry runs"), "OK");
+}
+
+#[test]
+fn unit_suspend_fn_returns_intrinsic_value_not_unit() {
+    // `suspend fun …: Unit = suspendCoroutineUninterceptedOrReturn { … COROUTINE_SUSPENDED }` must
+    // return the intrinsic's value (the suspension marker), NOT the declared `Unit` — returning
+    // `Unit` signals completion while the continuation is pending → double resume.
+    let src = format!(
+        "{BUILDER}\
+class C {{ var v = \"fail\"\n\
+  suspend fun put(s: String): Unit = suspendCoroutineUninterceptedOrReturn {{ x -> v = s; x.resume(Unit); COROUTINE_SUSPENDED }} }}\n\
+fun box(): String {{ val c = C(); builder {{ c.put(\"OK\") }}; return c.v }}\n"
+    );
+    assert_eq!(run(&src).expect("unit suspend intrinsic runs"), "OK");
+}

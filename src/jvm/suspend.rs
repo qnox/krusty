@@ -180,6 +180,12 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
         f.params.push(continuation_ty());
         f.param_checks.push(None);
         f.ret = object_ty();
+        // kotlinc emits NO `checkNotNullParameter` on a suspend fn: the state-machine RE-ENTRY call
+        // (`foo(null, continuation)`) passes null for every value parameter (the real values live in
+        // the continuation's spill fields), so an entry null-check would throw on resume.
+        for chk in f.param_checks.iter_mut() {
+            *chk = None;
+        }
 
         // The continuation parameter's value-index is `params + (this ? 1 : 0)`; ir_lower numbered body
         // locals from that same index, so shift every body local up by one to make room for it.
@@ -828,6 +834,16 @@ fn hoist_expr(
             };
             e
         }
+        // A string template / `+=` concat: parts evaluate unconditionally left-to-right, so a
+        // suspension inside one (`"a ${susp()} b"`, `result += susp()`) hoists to a preceding temp.
+        IrExpr::StringConcat(parts) => {
+            let np: Vec<ExprId> = parts
+                .iter()
+                .map(|&p| hoist_expr(ir, p, suspend_set, orig_rets, prelude))
+                .collect();
+            ir.exprs[e as usize] = IrExpr::StringConcat(np);
+            e
+        }
         IrExpr::TypeOp {
             op,
             arg,
@@ -1435,6 +1451,16 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
         }
         false
     });
+    // LOOP-CARRIED values: a local written+read inside a SUSPENDING loop statement is re-read on the
+    // back-edge AFTER a resume (the induction `i` of `for (i in 5..6) { susp(i.toString()) }`), so
+    // "consumed before the suspension" never holds — spill every local of such a loop.
+    for &s in &stmts {
+        if expr_calls_suspend(ir, s, &suspend_set) && stmt_contains_loop(ir, s) {
+            collect_live_writes(ir, s, &suspend_set, &mut reads);
+        }
+    }
+    reads.sort_unstable();
+    reads.dedup();
     // kotlinc spills every named REFERENCE param/local IN SCOPE at a suspension point — regardless of
     // liveness (an unused param still gets an `L$N` slot) — excluding the binding of the LAST suspension
     // itself (not yet in scope there). Union that scope set with the liveness set above (which keeps
@@ -1487,6 +1513,13 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
         if let Some(ty) = param_ty(idx).or_else(|| find_local_ty(ir, b, idx)) {
             spilled.push((idx, spill_field_ty(ty)));
         }
+    }
+    // NOTE: `spill_shape_unmodeled` deliberately applies only to the LAMBDA machine — the named
+    // machine's restore handles sub-int spills (`Boolean` params/temps, e2e-verified).
+    if consecutive_temp_suspensions(ir, &stmts, &suspend_set)
+        || suspending_over_progression(ir, b, &suspend_set)
+    {
+        return false;
     }
     // The spilled value parameters — captured at continuation construction (in spilled order).
     let param_caps: Vec<(u32, Ty)> = spilled
@@ -1914,6 +1947,15 @@ fn build_lambda_state_machine(
     head_writes.sort_unstable();
     head_writes.dedup();
     reads.retain(|idx| (2..2 + field_base).contains(idx) || head_writes.binary_search(idx).is_ok());
+    // LOOP-CARRIED values (see the named machine): every local of a suspending loop statement is
+    // re-read on the back-edge after a resume — spill them regardless of read position.
+    for &s in &stmts {
+        if expr_calls_suspend(ir, s, &suspend_set) && stmt_contains_loop(ir, s) {
+            collect_live_writes(ir, s, &suspend_set, &mut reads);
+        }
+    }
+    reads.sort_unstable();
+    reads.dedup();
     let mut spilled: Vec<(u32, Ty)> = Vec::new();
     for idx in reads {
         // Capture/parameter locals (value-indices `2..2+field_base`) are reloaded from their fields in
@@ -1924,6 +1966,20 @@ fn build_lambda_state_machine(
         if let Some(ty) = find_local_ty(ir, b, idx) {
             spilled.push((idx, spill_field_ty(ty)));
         }
+    }
+    // The spill-shape bail applies only to a RECEIVER lambda's machine (leading `this` field): the
+    // plain lambda's restore handles sub-int spills (a `Boolean` across try/catch, e2e-verified),
+    // while the receiver form's restore mis-slots them (the corpus intLikeVarSpilling shapes).
+    let receiver_lambda = ir.classes[class_id as usize]
+        .fields
+        .first()
+        .is_some_and(|f| f.name == "this");
+    if (receiver_lambda && spill_shape_unmodeled(&spilled))
+        || consecutive_temp_suspensions(ir, &stmts, &suspend_set)
+        || suspending_over_progression(ir, b, &suspend_set)
+        || tail_suspending_loop(ir, &stmts, &suspend_set)
+    {
+        return false;
     }
 
     // The PRE-SPLICE per-suspension scope lists (captured in `lower_suspend`); a lambda has no
@@ -2554,6 +2610,13 @@ impl Flat<'_> {
                 _ => false,
             });
         if !any_susp && !any_jump {
+            // No DIRECT branch suspension/jump — but one hiding DEEPER in a branch value (`val q =
+            // f() ?: if (c) break else error("")`) would be emitted structurally with a mis-framed
+            // jump into the dispatch loop. Bail those; a jump-free/suspension-free `when` binding is
+            // the ordinary case and stays structural.
+            if self.expr_has_loop_jump(init) || expr_calls_suspend(self.ir, init, self.suspend) {
+                self.failed = true;
+            }
             return None;
         }
         // A branch value must be either a direct suspension, a direct loop-jump, or free of both.
@@ -3114,6 +3177,20 @@ impl Flat<'_> {
                 crate::trace_compiler!(
                     "suspend",
                     "flatten BAIL: unhandled suspending stmt {:?}",
+                    self.ir.exprs[stmt as usize]
+                );
+                self.failed = true;
+                self.states[cur] = out;
+                return;
+            }
+            if self.expr_jumps_to_active_frame(stmt) {
+                // A structured `break`/`continue` aimed at a FLATTENED (state-split) loop, buried in
+                // a plain statement none of the modeled shapes claimed (`val q = f() ?: if (c) break
+                // else …`): emitting it structurally would jump into the dispatch loop with a
+                // mismatched frame (or loop forever). Bail — skip, never miscompile.
+                crate::trace_compiler!(
+                    "suspend",
+                    "flatten BAIL: unmodeled loop-jump in plain stmt {:?}",
                     self.ir.exprs[stmt as usize]
                 );
                 self.failed = true;
@@ -4263,6 +4340,131 @@ fn spill_field_ty(ty: Ty) -> Ty {
     } else {
         ty
     }
+}
+
+/// A spilled-local shape the state machine's uniform restore doesn't model yet: kotlinc's per-kind
+/// positional spilling coerces INT-LIKE sub-int locals (`I$N` restored with `i2b`/`i2s`/`i2c`),
+/// restores an array-typed local with its exact frame type, and null-checks a NULLABLE reference
+/// restore; krusty's restore emits none of these, so such a machine would fail verification (or
+/// corrupt a frame type) — bail (skip, never miscompile).
+fn spill_shape_unmodeled(spilled: &[(u32, Ty)]) -> bool {
+    spilled.iter().any(|(_, t)| {
+        matches!(t, Ty::Byte | Ty::Short | Ty::Char | Ty::Boolean)
+            || t.non_null().array_elem().is_some()
+    })
+}
+
+/// A suspending body iterating a `kotlin.ranges` PROGRESSION object (`for (x in 20L..30L step 5L)` —
+/// the stepped/long form kotlinc iterates via `LongProgression.iterator()`, unlike the optimized
+/// counted `Int` loop): the induction state across a suspension isn't modeled yet — the loop resumes
+/// at its first element. Bail (skip, never miscompile).
+fn suspending_over_progression(ir: &IrFile, b: ExprId, suspend_set: &HashSet<u32>) -> bool {
+    if !expr_calls_suspend(ir, b, suspend_set) {
+        return false;
+    }
+    let mut found = false;
+    let mut walk = |e: ExprId| {
+        if matches!(&ir.exprs[e as usize], IrExpr::Variable { ty, .. }
+            if ty.non_null().obj_internal().is_some_and(|n| n.render().starts_with("kotlin/ranges/")))
+        {
+            found = true;
+        }
+    };
+    let mut seen: HashSet<ExprId> = HashSet::new();
+    let mut stack = vec![b];
+    while let Some(cur) = stack.pop() {
+        if !seen.insert(cur) {
+            continue;
+        }
+        walk(cur);
+        for_each_child(&ir.exprs, cur, &mut |c| stack.push(c));
+    }
+    found
+}
+
+/// Whether the statement is (or contains) a loop — the loop-carried spill rule's trigger.
+fn stmt_contains_loop(ir: &IrFile, e: ExprId) -> bool {
+    if matches!(&ir.exprs[e as usize], IrExpr::While { .. }) {
+        return true;
+    }
+    let mut found = false;
+    for_each_child(&ir.exprs, e, &mut |c| {
+        found = found || stmt_contains_loop(ir, c);
+    });
+    found
+}
+
+/// A body whose LAST statement is (or wraps) a SUSPENDING loop with nothing after it (`builder {
+/// for (…) { susp() } }`): the machine's fall-through return after the loop's exit state isn't
+/// modeled (the completion resumes with `null` instead of `Unit`). A trailing statement after the
+/// loop (the common corpus shape) is fine. Bail (skip, never miscompile).
+fn tail_suspending_loop(ir: &IrFile, stmts: &[ExprId], suspend_set: &HashSet<u32>) -> bool {
+    fn wraps_loop(ir: &IrFile, e: ExprId) -> bool {
+        match &ir.exprs[e as usize] {
+            IrExpr::While { .. } => true,
+            // A block tails in its VALUE when present, but a materialized `Unit` value sits after
+            // the real trailing loop STATEMENT — check both.
+            IrExpr::Block { stmts, value } => {
+                value.is_some_and(|v| wraps_loop(ir, v))
+                    || stmts.last().is_some_and(|&s| wraps_loop(ir, s))
+            }
+            // A statement-position loop materialized into a `Unit` temp binding.
+            IrExpr::Variable {
+                ty: Ty::Unit,
+                init: Some(i),
+                ..
+            } => wraps_loop(ir, *i),
+            _ => false,
+        }
+    }
+    // The lambda lowering appends a synthesized `return Unit` after the body — look through it to
+    // the last REAL statement.
+    let mut last = stmts;
+    while let [head @ .., tail] = last {
+        let epilogue = match &ir.exprs[*tail as usize] {
+            IrExpr::Return(_) => true,
+            // The synthesized `Unit` materialization the lambda lowering appends before its return.
+            IrExpr::Variable {
+                named: false,
+                init: Some(i),
+                ..
+            } => matches!(&ir.exprs[*i as usize], IrExpr::UnitInstance),
+            _ => false,
+        };
+        if epilogue && !head.is_empty() {
+            last = head;
+        } else {
+            break;
+        }
+    }
+    let hit = last
+        .last()
+        .is_some_and(|&s| wraps_loop(ir, s) && expr_calls_suspend(ir, s, suspend_set));
+    if let Some(&s) = last.last() {
+        crate::trace_compiler!(
+            "suspend",
+            "tail_suspending_loop: hit={hit} last={:?} wraps={} susp={}",
+            &ir.exprs[s as usize],
+            wraps_loop(ir, s),
+            expr_calls_suspend(ir, s, suspend_set)
+        );
+        if let IrExpr::Variable { init: Some(i), .. } = &ir.exprs[s as usize] {
+            crate::trace_compiler!("suspend", "tail init = {:?}", &ir.exprs[*i as usize]);
+        }
+    }
+    hit
+}
+
+/// TWO consecutive compiler-temp suspension bindings (`val t1 = susp(); val t2 = susp()`, hoisted
+/// from one expression `a() + b()`): the FIRST temp's value must be restored across the SECOND
+/// suspension, which the positional resume-arm restore doesn't model for unnamed temps yet — the
+/// resumed arm reads a null field. Bail (skip, never miscompile).
+fn consecutive_temp_suspensions(ir: &IrFile, stmts: &[ExprId], suspend_set: &HashSet<u32>) -> bool {
+    let temp_susp = |s: ExprId| {
+        matches!(&ir.exprs[s as usize], IrExpr::Variable { named: false, init: Some(i), .. }
+            if is_suspend_call(ir, unwrap_suspend_cast(ir, *i, suspend_set, false), suspend_set))
+    };
+    stmts.windows(2).any(|w| temp_susp(w[0]) && temp_susp(w[1]))
 }
 
 /// True if `e`'s subtree binds the result of a suspension to a value(inline)-class-typed local. An
