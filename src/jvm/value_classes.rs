@@ -476,6 +476,17 @@ pub fn lower_value_classes(
     // Per-function value-slot types (parameters + local `Variable`s) and return types, captured BEFORE
     // erasure so the box/unbox analysis sees `Class{X}` (non-null = unboxed, nullable = boxed).
     let orig_rets: Vec<Ty> = ir.functions.iter().map(|f| f.ret.clone()).collect();
+    // Shared-cell (`Ref$XxxRef`) element types, also pre-erasure: a write into a cell whose element
+    // is a boxed `X?` (or reference) is a box boundary for an unboxed value.
+    let orig_ref_elems: HashMap<ExprId, Ty> = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| match e {
+            IrExpr::RefNew { elem, .. } | IrExpr::RefSet { elem, .. } => Some((i as ExprId, *elem)),
+            _ => None,
+        })
+        .collect();
     // Suspend functions, for value-class mangling: kotlinc mangles the ORIGINAL signature, which for a
     // suspend fun carries a trailing `Continuation` value parameter (a non-inline `_` element). By fid
     // for the declaration sites, and by `(owner, source-name, arity)` for the recompute sites (bridges,
@@ -488,6 +499,28 @@ pub fn lower_value_classes(
         .filter(|(fid, _)| suspend_fids.contains(&(*fid as u32)))
         .map(|(fid, f)| (f.dispatch_receiver, f.name.clone(), orig_params[fid].len()))
         .collect();
+    // Suspend ⨯ value-class interplay is not yet modeled: a suspend fn's result crosses the
+    // `Continuation` `Object` boundary BOXED (kotlinc re-boxes at every suspension and unboxes on
+    // resume), while krusty's erasure keeps it unboxed — the resume-side `checkcast X` then meets the
+    // raw underlying (CCE/VerifyError). Until the boxed-resume ABI is implemented, a file where a
+    // suspend fn's LOGICAL signature (or a cross-unit suspend call's logical type) carries a value
+    // class bails → the gate SKIPS it, never miscompiles.
+    let mentions_vc = |t: &Ty| {
+        t.non_null()
+            .obj_internal()
+            .is_some_and(|fq| under.contains_key(&fq))
+    };
+    // Only a NON-NULL value-class RETURN is unmodeled (the resume-side `checkcast X` meets the raw
+    // underlying); VC PARAMS pass unboxed through the mangled CPS signature and work, and a nullable
+    // `X?` return is already the boxed form.
+    let vc_ret = |t: &Ty| !t.is_nullable() && mentions_vc(t);
+    let suspend_vc = suspend_fids
+        .iter()
+        .any(|&fid| orig_rets.get(fid as usize).is_some_and(vc_ret))
+        || ir.suspend_calls.values().any(vc_ret);
+    if suspend_vc {
+        return false;
+    }
     let slot_types: Vec<HashMap<u32, Ty>> = ir
         .functions
         .iter()
@@ -506,8 +539,7 @@ pub fn lower_value_classes(
                     && !p.is_nullable()
                     && p.non_null()
                         .obj_internal()
-                        .and_then(|fq| under.get(&fq))
-                        .is_some_and(|u| u.is_reference());
+                        .is_some_and(|fq| under.contains_key(&fq));
                 let slot_ty = if boxed_own { Ty::nullable(*p) } else { *p };
                 m.insert(base + i as u32, slot_ty);
             }
@@ -734,7 +766,23 @@ pub fn lower_value_classes(
                 f.name = mangled;
             }
         }
+        let own_from = ir.lambda_own_params_from.get(&(fid as u32)).copied();
         for (idx, p) in f.params.iter_mut().enumerate() {
+            // A lifted lambda's OWN value-class parameter arrives BOXED through the `FunctionN`
+            // generic invoke slot. A scalar-underlying one must KEEP the boxed `LX;` in the impl
+            // signature — erased to the scalar, the indy adapter would cast the incoming box to the
+            // scalar's wrapper (`checkcast Integer` on a `W`) and CCE. A reference-underlying one
+            // erases to its underlying reference as before (the adapter's `Object` cast is benign).
+            if own_from.is_some_and(|s| idx as u32 >= s)
+                && !p.is_nullable()
+                && p.non_null()
+                    .obj_internal()
+                    .is_some_and(|fq| under.contains_key(&fq))
+                && !is_ref(&erase(p, &under))
+            {
+                *p = Ty::nullable(*p);
+                continue;
+            }
             if !(vc_member && is_vc_ty(p)) {
                 if vc_underlying_nullable(p, &under) {
                     default_boxed.push((fid as u32, idx, *p));
@@ -1740,6 +1788,23 @@ pub fn lower_value_classes(
                         ops.push((id, BoxOp::Unbox(x)));
                     }
                 }
+                // The sole-field coercion (`w.v` → `ImplicitCoercion(<w>, U)`) over a BOXED receiver
+                // (`w!!` of a boxed `W?` shared cell): unbox the receiver first — otherwise the
+                // emitter coerces the box reference straight to the underlying (`checkcast Integer`
+                // on a `W` → CCE).
+                if let (Some(x), true) = (
+                    match repr_ctx.repr(*arg) {
+                        Repr::Boxed(x) => Some(x),
+                        _ => None,
+                    },
+                    type_operand.non_null().obj_internal().is_none()
+                        || !under.contains_key(&type_operand.non_null().obj_internal().unwrap()),
+                ) {
+                    let u = under.get(&x).map(|t| erase(t, &under));
+                    if u.map(|u| u.non_null()) == Some(type_operand.non_null()) {
+                        ops.push((*arg, BoxOp::Unbox(x)));
+                    }
+                }
             }
             // A member call (`toString`/`equals`/`hashCode`/user method) on an UNBOXED value class
             // dispatches on the boxed object — box the receiver. (Getter calls were already rewritten to
@@ -2078,9 +2143,10 @@ pub fn lower_value_classes(
                             .collect()
                     })
                     .unwrap_or_default(),
-                // A local initializer `val x: T = <vc>` is a representation boundary: an unboxed value
-                // into a boxed (`Any`/`X?`-boxed/generic) slot must `box-impl`. The slot's PRE-erasure
-                // declared type lives in `slots` (the `Variable.ty` was erased in step 3).
+                // A local initializer `val x: T = <vc>` — and equally a later ASSIGNMENT `x = <vc>` —
+                // is a representation boundary: an unboxed value into a boxed (`Any`/`X?`-boxed/
+                // generic) slot must `box-impl`. The slot's PRE-erasure declared type lives in
+                // `slots` (the `Variable.ty` was erased in step 3).
                 IrExpr::Variable {
                     index,
                     init: Some(v),
@@ -2088,6 +2154,22 @@ pub fn lower_value_classes(
                 } => match slots.get(index) {
                     Some(t) => vec![(*v, t.clone())],
                     None => continue,
+                },
+                IrExpr::SetValue { var, value } => match slots.get(var) {
+                    Some(t) => vec![(*value, *t)],
+                    None => continue,
+                },
+                // A shared-cell write/init (`Ref$ObjectRef.element = <vc>`): boundary ONLY when the
+                // cell's pre-erasure element is the BOXED nullable `X?` form — a NON-null element is
+                // the value's own unboxed underlying (even an `Object` underlying: the cell is the
+                // vc's native slot, not a generic supertype slot), where boxing would corrupt reads.
+                IrExpr::RefNew { init, .. } => match orig_ref_elems.get(&id) {
+                    Some(t) if t.is_nullable() => vec![(*init, *t)],
+                    _ => continue,
+                },
+                IrExpr::RefSet { value, .. } => match orig_ref_elems.get(&id) {
+                    Some(t) if t.is_nullable() => vec![(*value, *t)],
+                    _ => continue,
                 },
                 _ => continue,
             };

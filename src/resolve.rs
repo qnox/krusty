@@ -8616,18 +8616,22 @@ impl<'a> Checker<'a> {
         } else {
             (expected, actual)
         };
-        // Same-type non-null value flowing into its nullable form (`X` -> `X?`, including `Unit?`).
-        if matches!(
-            ctx,
-            "function body" | "getter body" | "local function body" | "return"
-        ) && expected.is_nullable()
-            && !actual.is_nullable()
-            && expected.non_null() == actual
-            && (actual == Ty::Unit
-                || self.ty_is_value_class(actual)
-                || self.syms.libraries.value_underlying(actual).is_some())
-        {
-            return;
+        // Same-type non-null value flowing into its nullable form (`X` -> `X?`, including `Unit?`) —
+        // any context, like the primitive box rule below: an assignment/argument boxes exactly as a
+        // return does (the value-class pass inserts the box from the nullable target type). Generic
+        // arguments compare by class only (`Result<T>` vs an erased call's `Result`), matching the
+        // non-null `Obj`-to-`Obj` rule below, which ignores arguments too.
+        if expected.is_nullable() && !actual.is_nullable() {
+            let en = expected.non_null();
+            let same_class =
+                en == actual || matches!((en, actual), (Ty::Obj(e, _), Ty::Obj(a, _)) if e == a);
+            if same_class
+                && (actual == Ty::Unit
+                    || self.ty_is_value_class(actual)
+                    || self.syms.libraries.value_underlying(actual).is_some())
+            {
+                return;
+            }
         }
         // A nullable REFERENCE argument whose non-null form is the expected type: krusty erases reference
         // nullability from a declared parameter (`C?` param → `C`), so a genuinely-nullable argument — an
