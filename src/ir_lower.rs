@@ -18838,20 +18838,37 @@ impl<'a> Lower<'a> {
                             }
                         }
                     }
-                    // `recv.startCoroutine(completion)` — a `kotlin.coroutines` intrinsic.
-                    if let [completion_arg] = args.as_slice() {
-                        if matches!(self.info.ty(receiver), Ty::Fun(s) if s.suspend)
-                            && crate::libraries::coroutine_intrinsic(&name)
-                                == Some(crate::libraries::CoroutineIntrinsic::StartCoroutine)
-                        {
-                            let recv_v = self.expr(receiver)?;
-                            let cont_ir = ty_to_ir(Ty::obj("kotlin/coroutines/Continuation"));
-                            let comp_v = self.lower_arg(*completion_arg, &cont_ir)?;
-                            return self.runtime_call(
-                                RuntimeOp::StartCoroutine,
-                                Ty::Unit,
-                                vec![recv_v, comp_v],
-                            );
+                    // `recv.startCoroutine(completion)` — a `kotlin.coroutines` intrinsic. The
+                    // TWO-argument form is the receiver overload on a `suspend R.() -> T` value:
+                    // `c.startCoroutine(receiver, completion)` → the stdlib's
+                    // `startCoroutine(Function2, R, Continuation)` static.
+                    if matches!(self.info.ty(receiver), Ty::Fun(s) if s.suspend)
+                        && crate::libraries::coroutine_intrinsic(&name)
+                            == Some(crate::libraries::CoroutineIntrinsic::StartCoroutine)
+                    {
+                        let cont_ir = ty_to_ir(Ty::obj("kotlin/coroutines/Continuation"));
+                        match args.as_slice() {
+                            [completion_arg] => {
+                                let recv_v = self.expr(receiver)?;
+                                let comp_v = self.lower_arg(*completion_arg, &cont_ir)?;
+                                return self.runtime_call(
+                                    RuntimeOp::StartCoroutine,
+                                    Ty::Unit,
+                                    vec![recv_v, comp_v],
+                                );
+                            }
+                            [receiver_arg, completion_arg] => {
+                                let recv_v = self.expr(receiver)?;
+                                let obj_ir = ty_to_ir(Ty::obj("kotlin/Any"));
+                                let target_v = self.lower_arg(*receiver_arg, &obj_ir)?;
+                                let comp_v = self.lower_arg(*completion_arg, &cont_ir)?;
+                                return self.runtime_call(
+                                    RuntimeOp::StartCoroutineReceiver,
+                                    Ty::Unit,
+                                    vec![recv_v, target_v, comp_v],
+                                );
+                            }
+                            _ => {}
                         }
                     }
                     // `super.method(args)` → a non-virtual `invokespecial` on `this` (value 0). The
@@ -19804,7 +19821,7 @@ impl<'a> Lower<'a> {
                         // A private `@InlineOnly` extension (scope fn / `String.uppercase()`) is recorded
                         // as an [`Extension`] by the checker and handled by the general branch above (its
                         // `inline` metadata makes the backend splice). Nothing left to resolve here.
-                        self.set_bail("unrecorded qualified call target");
+                        self.set_bail(&format!("unrecorded qualified call target '{name}'"));
                         return None;
                     }
                 }
