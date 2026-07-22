@@ -2389,6 +2389,10 @@ pub fn lower_file_at_reporting(
                         return None;
                     }
                     let (_, fid, _) = lo.class_info(&internal)?.methods[&m.name];
+                    // Remember the declaration line for this method's `LineNumberTable`.
+                    if m.decl_line != 0 {
+                        lo.ir.fn_decl_lines.insert(fid, m.decl_line);
+                    }
                     lo.scope.clear();
                     lo.boxed_elem.clear();
                     lo.next_value = 0;

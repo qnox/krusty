@@ -577,6 +577,46 @@ fn seed_plain_class_pool(
 /// entries as `(name, descriptor, slot)`)`.
 type VcDebugMethod = (String, String, Vec<(String, String, u16)>);
 
+/// Attach kotlinc's `LineNumberTable` + `LocalVariableTable` to a class's DECLARED methods (as opposed
+/// to the synthesized ctor/accessors handled by [`attach_synth_debug_tables`]). kotlinc maps a method's
+/// table to its own `fun` line — recorded per-FunId by the lowering — and lists `this` plus each
+/// parameter for the whole method.
+fn attach_declared_method_debug(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
+    let this_desc = format!("L{};", c.fq_name());
+    for &fid in &c.methods {
+        let Some(f) = ir.functions.get(fid as usize) else {
+            continue;
+        };
+        let Some(&line) = ir.fn_decl_lines.get(&fid) else {
+            continue;
+        };
+        if f.body.is_none() {
+            continue; // abstract: no Code, so no debug tables
+        }
+        let param_tys = jvm_tys(&f.params);
+        let ret = ir_ty_to_jvm(&f.ret);
+        let desc = method_descriptor(&param_tys, ret);
+        let mut locals: Vec<(String, String, u16)> = Vec::new();
+        let mut slot = 0u16;
+        if !f.is_static {
+            locals.push(("this".to_string(), this_desc.clone(), 0));
+            slot = 1;
+        }
+        for (i, t) in param_tys.iter().enumerate() {
+            locals.push((
+                f.param_checks
+                    .get(i)
+                    .and_then(|n| n.clone())
+                    .unwrap_or_else(|| format!("p{i}")),
+                crate::jvm::names::type_descriptor(*t),
+                slot,
+            ));
+            slot += slot_words(*t);
+        }
+        cw.set_method_debug(&f.name, &desc, Some((0, line)), &locals);
+    }
+}
+
 fn attach_synth_debug_tables(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     let line = c.decl_line;
     if line == 0 {
@@ -2456,6 +2496,7 @@ fn emit_class(
     // data class is not yet FULLY byte-identical (its pool order differs) — but the attributes match.
     if computed.is_some() {
         attach_synth_debug_tables(c, &mut cw);
+        attach_declared_method_debug(ir, c, &mut cw);
         attach_synth_nullability(c, &mut cw);
     }
     if let Some(m) = class_meta.or(computed.as_ref()) {
@@ -3909,6 +3950,7 @@ fn emit_interface_class(
         .flatten();
     if computed.is_some() {
         attach_synth_debug_tables(c, &mut cw);
+        attach_declared_method_debug(ir, c, &mut cw);
         attach_synth_nullability(c, &mut cw);
     }
     if let Some(m) = class_meta.or(computed.as_ref()) {
@@ -4303,6 +4345,7 @@ fn emit_enum_class(
         .flatten()
     {
         attach_synth_debug_tables(c, &mut cw);
+        attach_declared_method_debug(ir, c, &mut cw);
         attach_synth_nullability(c, &mut cw);
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
