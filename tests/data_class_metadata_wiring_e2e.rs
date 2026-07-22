@@ -720,3 +720,24 @@ fn class_with_nullable_body_property_is_byte_identical() {
         &[],
     );
 }
+
+/// An interface with a property — its abstract getter carries no body, and the interface itself has
+/// no constructor or fields for the plain-class seeding path to describe.
+#[test]
+fn interface_with_property_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ninterface I {\n    val x: Int\n}\n",
+        "demo/I",
+        &[],
+    );
+}
+
+/// An interface with a `var` property — an abstract getter AND setter, neither with a Code attribute.
+#[test]
+fn interface_with_var_property_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ninterface I {\n    var x: Int\n}\n",
+        "demo/I",
+        &[],
+    );
+}
