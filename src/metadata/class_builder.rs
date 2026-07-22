@@ -22,6 +22,10 @@ pub struct PropMeta {
     /// The property has a compile-time CONSTANT initializer (`val y: Int = 2` in the class body) —
     /// kotlinc records `hasConstant` in `Property.flags`.
     pub has_constant: bool,
+    /// An ABSTRACT property (an interface member, or `abstract val`): kotlinc records the abstract
+    /// modality in `Property.flags` and, since there is no backing field, omits the
+    /// `JvmPropertySignature.field` entry entirely.
+    pub is_abstract: bool,
     pub getter: (String, String),         // (jvm name, jvm descriptor)
     pub setter: Option<(String, String)>, // present iff `var`
 }
@@ -115,6 +119,8 @@ const DEFAULT_PROPERTY_FLAGS: u64 = 518;
 const PROP_IS_VAR: u64 = 256;
 const PROP_HAS_SETTER: u64 = 1024;
 const PROP_HAS_CONSTANT: u64 = 8192;
+/// `Property.flags` modality bits (4-5): ABSTRACT = 2.
+const PROP_MODALITY_ABSTRACT: u64 = 32;
 
 #[derive(Default)]
 struct StringTable {
@@ -420,7 +426,12 @@ pub fn build_class(
                 } else {
                     0
                 }
-                | if p.has_constant { PROP_HAS_CONSTANT } else { 0 };
+                | if p.has_constant { PROP_HAS_CONSTANT } else { 0 }
+                | if p.is_abstract {
+                    PROP_MODALITY_ABSTRACT
+                } else {
+                    0
+                };
             if pflags != DEFAULT_PROPERTY_FLAGS {
                 prop.field_varint(11, pflags); // Property.flags = 11
             }
@@ -453,7 +464,11 @@ pub fn build_class(
             if let Some(d) = &boxed_field_desc {
                 field.field_varint(2, st.local(d) as u64); // JvmFieldSignature.desc = 2
             }
-            jvm.field_message(1, &field); // field (empty → derived; boxed primitive → explicit desc)
+            // An abstract property has no backing field at all — kotlinc omits the entry rather than
+            // writing an empty one (which is what a concrete property's derived field looks like).
+            if !p.is_abstract {
+                jvm.field_message(1, &field); // field (empty → derived; boxed primitive → explicit desc)
+            }
             jvm.field_message(3, &getter); // JvmPropertySignature.getter = 3
             if let Some(setter) = &setter {
                 jvm.field_message(4, setter); // JvmPropertySignature.setter = 4
@@ -614,6 +629,7 @@ mod tests {
                 ty: Ty::Int,
                 is_var: false,
                 has_constant: false,
+                is_abstract: false,
                 getter: ("getX".into(), "()I".into()),
                 setter: None,
             }],
@@ -709,6 +725,7 @@ mod tests {
                 ty: Ty::Int,
                 is_var: false,
                 has_constant: false,
+                is_abstract: false,
                 getter: ("getX".into(), "()I".into()),
                 setter: None,
             },
@@ -717,6 +734,7 @@ mod tests {
                 ty: Ty::String,
                 is_var: true,
                 has_constant: false,
+                is_abstract: false,
                 getter: ("getY".into(), "()Ljava/lang/String;".into()),
                 setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
             },
@@ -774,6 +792,7 @@ mod tests {
                 ty: list_string,
                 is_var: false,
                 has_constant: false,
+                is_abstract: false,
                 getter: ("getR".into(), "()Ljava/util/List;".into()),
                 setter: None,
             }],
@@ -877,6 +896,7 @@ mod tests {
                 ty: Ty::Int,
                 is_var: false,
                 has_constant: false,
+                is_abstract: false,
                 getter: ("getX".into(), "()I".into()),
                 setter: None,
             }],
@@ -921,6 +941,7 @@ mod tests {
                 ty: Ty::Int,
                 is_var: false,
                 has_constant: false,
+                is_abstract: false,
                 getter: ("getX".into(), "()I".into()),
                 setter: None,
             }],
@@ -969,6 +990,7 @@ mod tests {
                     ty: Ty::Int,
                     is_var: false,
                     has_constant: false,
+                    is_abstract: false,
                     getter: ("getX".into(), "()I".into()),
                     setter: None,
                 },
@@ -977,6 +999,7 @@ mod tests {
                     ty: Ty::String,
                     is_var: true,
                     has_constant: false,
+                    is_abstract: false,
                     getter: ("getY".into(), "()Ljava/lang/String;".into()),
                     setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
                 },

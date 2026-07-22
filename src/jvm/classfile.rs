@@ -1384,7 +1384,13 @@ impl ClassWriter {
         let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
             return;
         };
-        if !self.methods.iter().any(|m| m.name == n && m.desc == d) {
+        // An ABSTRACT method (an interface member, or `abstract fun`) has no Code attribute, so it
+        // has nowhere to hang a LineNumberTable or LocalVariableTable — kotlinc emits neither.
+        if !self
+            .methods
+            .iter()
+            .any(|m| m.name == n && m.desc == d && m.code.is_some())
+        {
             return;
         }
         let lvt: Vec<(u16, u16, u16, Option<u16>)> = locals
@@ -1408,7 +1414,11 @@ impl ClassWriter {
         let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
             return;
         };
-        if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
+        if let Some(m) = self
+            .methods
+            .iter_mut()
+            .find(|m| m.name == n && m.desc == d && m.code.is_some())
+        {
             m.lnt = entries.iter().map(|&(pc, l)| (pc, l as u16)).collect();
         }
     }
