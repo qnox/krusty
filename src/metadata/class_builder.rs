@@ -84,6 +84,9 @@ pub const DEFAULT_FUNCTION_FLAGS: u64 = 6;
 pub const DEFAULT_CLASS_FLAGS: u64 = 6;
 /// `Constructor.flags` (f1) for a sealed class's primary constructor — kotlinc marks it PROTECTED.
 pub const SEALED_CTOR_FLAGS: u64 = 4;
+/// `Constructor.flags` (f1) for an `object`'s primary constructor — kotlinc marks it PRIVATE
+/// (visibility bits 1-3 = 1). Instances come only from the static `INSTANCE` field.
+pub const OBJECT_CTOR_FLAGS: u64 = 2;
 /// `Function.flags` for a value class's `equals`/`hashCode`/`toString` — same shape as the data-class
 /// overrides (public final member overriding a supertype member).
 pub const VC_EQUALS_FN_FLAGS: u64 = EQUALS_FN_FLAGS;
