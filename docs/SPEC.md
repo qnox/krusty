@@ -1780,3 +1780,37 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   classpath's class flags); a class owner (a stdlib facade — the common case) stays `Methodref`. Surfaced by
   the ee1 overload-selection fix routing an omitted-default interface call to the correct `A.f$default`
   target. (box corpus `codegen/box/compileKotlinAgainstKotlin/delegatedDefault.kt`; box-OK 2378→2379)
+
+- **A suspend fn carries NO `checkNotNullParameter` on its value parameters.** kotlinc's state-machine
+  RE-ENTRY call (`foo(null, continuation)`) passes null for every value parameter — the real values live
+  in the continuation's spill fields — so an entry null-check would throw on resume. kotlinc emits none;
+  the CPS transform now clears them. (`suspend_fn_entry_has_no_param_null_check`; unlocks the
+  `WITH_COROUTINES` corpus slice.)
+
+- **A `Unit`-returning suspend fn whose whole body is `suspendCoroutineUninterceptedOrReturn { … }`
+  returns the intrinsic's value, not `Unit`.** The value IS the suspension protocol result
+  (`COROUTINE_SUSPENDED` or an immediate value); returning `Unit` signals completion while the
+  continuation is pending → double resume (an NPE inside `releaseIntercepted`). An EMPTY intrinsic
+  block yields `Unit` explicitly. (`unit_suspend_fn_returns_intrinsic_value_not_unit`.)
+
+- **A `suspend` function type erases to the arity+1 `FunctionN`.** `suspend () -> Unit` is a `Function1`
+  at runtime (trailing `Continuation` parameter), so `as`/`is` against a suspend fn type checkcast/test
+  `Function{n+1}` (KT-66093). (`suspend_fn_type_cast_targets_arity_plus_one_interface`.)
+
+- **A non-null value class flows into its nullable form (`X` → `X?`) in ANY context.** Assignment and
+  argument positions box exactly as a return does — the value-class pass inserts `box-impl` from the
+  nullable target type at `SetValue`/`RefSet`/`RefNew` boundaries; the shared mutable cell of a
+  captured `var x: X?` is always the `ObjectRef` (a nullable value class never holds the raw scalar).
+  Generic arguments compare by class (the non-null `Obj` rule ignores them too).
+  (`assignment_to_nullable_value_class_var_boxes`.)
+
+- **The `// WITH_COROUTINES` helpers form an implicit `support` module in `// MODULE:` tests.** kotlinc's
+  test infra compiles them as a module every declared module sees (some tests write `(support)`
+  explicitly, others just `import helpers.*`) — mirrored by `krusty::conformance::inject_support_module`.
+
+- **`ifEmpty`-style TyParam-receiver extensions discriminate by the JVM descriptor's first parameter.**
+  Four stdlib `ifEmpty`s reach selection as identical `Any`-receiver candidates (their `C : CharSequence`
+  / `Array<out T>` receivers erase); the physical first parameter is the last discriminator — a candidate
+  whose physical receiver can't hold the actual one is dropped, else the tie breaks on declaration order
+  and the inliner splices the wrong overload's body (`arraylength` on a String → VerifyError).
+  (`string_if_empty_selects_the_charsequence_overload`.)

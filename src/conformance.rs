@@ -30,7 +30,12 @@ pub fn directive(src: &str, name: &str) -> bool {
 /// - `// IGNORE_BACKEND_K1:` mutes it under the OLD K1 frontend ONLY → krusty is NOT K1, so this must
 ///   NOT exclude (excluding it under-counts: the test is valid for krusty's K2 semantics).
 pub fn backend_applicable(src: &str, names: &[&str]) -> bool {
-    let mentions = |line: &str| line.split(',').any(|t| names.contains(&t.trim()));
+    // `ANY` names every backend (kotlinc's test runner uses it for red-code tests kept only for
+    // their diagnostic half), so it always mentions ours.
+    let mentions = |line: &str| {
+        line.split(',')
+            .any(|t| t.trim() == "ANY" || names.contains(&t.trim()))
+    };
     if let Some(l) = src.lines().find(|l| l.starts_with("// TARGET_BACKEND:")) {
         if !mentions(l.trim_start_matches("// TARGET_BACKEND:").trim()) {
             return false;
@@ -214,14 +219,43 @@ pub fn split_modules(src: &str) -> Option<Vec<ModuleBlock>> {
         }
     }
     flush(&mut mods, &mut cur_file, &mut cur);
+    // A source-less module is a legitimate hmpp intermediate source set (its dependents fold it in
+    // or depend on its representative); decline only when NO module has sources (a mis-parse).
     if mods.len() < 2
         || mods
             .iter()
-            .any(|m| m.files.is_empty() && m.java_files.is_empty())
+            .all(|m| m.files.is_empty() && m.java_files.is_empty())
     {
         return None;
     }
     Some(mods)
+}
+
+/// kotlinc's test infra compiles the `// WITH_COROUTINES` helpers as an implicit `support` module
+/// visible to every module — some tests declare `(support)` as an explicit dependency, others just
+/// `import helpers.*`. Mirror it: prepend a synthesized `support` module holding the helpers source
+/// and give every module an implicit classpath dependency on it. No-op if the test declares its own
+/// `support` module.
+pub fn inject_support_module(mods: &mut Vec<ModuleBlock>, helpers: &str) {
+    if mods.iter().any(|m| m.name == "support") {
+        return;
+    }
+    for m in mods.iter_mut() {
+        if !m.deps.iter().any(|d| d == "support") {
+            m.deps.push("support".to_string());
+        }
+    }
+    mods.insert(
+        0,
+        ModuleBlock {
+            name: "support".to_string(),
+            deps: Vec::new(),
+            friends: Vec::new(),
+            depends_on: Vec::new(),
+            files: vec![("CoroutineUtil".to_string(), helpers.to_string())],
+            java_files: Vec::new(),
+        },
+    );
 }
 
 /// One split source block: `(name, content)` — a Kotlin file's stem, or a Java file's leaf name
@@ -288,18 +322,24 @@ pub struct ModuleUnit {
 
 /// Fold [`ModuleBlock`]s into build units in declaration order (kotlinc's JVM MPP model: the
 /// platform module and its `dependsOn` chain are ONE compilation).
+///
+/// A unit's classpath deps are the union over its whole folded chain (an intermediate source set's
+/// dependency must be visible to the platform compilation that absorbs its sources), and a dep
+/// naming a `dependsOn` TARGET — a source set that is never built standalone — is remapped to its
+/// REPRESENTATIVE: the first built unit whose chain folds it in (its declarations live in that
+/// unit's output). Self-references left by the remap are dropped.
 pub fn module_units(modules: &[ModuleBlock]) -> Vec<ModuleUnit> {
-    let dependson_targets: std::collections::HashSet<&str> = modules
+    use std::collections::{HashMap, HashSet};
+    let dependson_targets: HashSet<&str> = modules
         .iter()
         .flat_map(|m| m.depends_on.iter().map(String::as_str))
         .collect();
-    // Transitive dependsOn closure, dependency-first order, dedup.
-    fn add_sources(
-        modules: &[ModuleBlock],
+    // Transitive dependsOn closure, dependency-first order, dedup, ending with the module itself.
+    fn add_chain<'a>(
+        modules: &'a [ModuleBlock],
         name: &str,
-        seen: &mut std::collections::HashSet<String>,
-        out: &mut Vec<(String, String)>,
-        java_out: &mut Vec<(String, String)>,
+        seen: &mut HashSet<String>,
+        out: &mut Vec<&'a ModuleBlock>,
     ) {
         if !seen.insert(name.to_string()) {
             return;
@@ -308,31 +348,54 @@ pub fn module_units(modules: &[ModuleBlock]) -> Vec<ModuleUnit> {
             return;
         };
         for d in &m.depends_on {
-            add_sources(modules, d, seen, out, java_out);
+            add_chain(modules, d, seen, out);
         }
-        out.extend(m.files.iter().cloned());
-        java_out.extend(m.java_files.iter().cloned());
+        out.push(m);
     }
-    modules
+    let built: Vec<(&ModuleBlock, Vec<&ModuleBlock>)> = modules
         .iter()
         .filter(|m| !dependson_targets.contains(m.name.as_str()))
         .map(|m| {
-            let (files, java_files) = if m.depends_on.is_empty() {
-                (m.files.clone(), m.java_files.clone())
-            } else {
-                let mut seen = std::collections::HashSet::new();
-                let mut files = Vec::new();
-                let mut java_files = Vec::new();
-                for d in &m.depends_on {
-                    add_sources(modules, d, &mut seen, &mut files, &mut java_files);
-                }
+            let mut seen = HashSet::new();
+            let mut chain = Vec::new();
+            add_chain(modules, &m.name, &mut seen, &mut chain);
+            (m, chain)
+        })
+        .collect();
+    let mut representative: HashMap<&str, &str> = HashMap::new();
+    for (u, chain) in &built {
+        for m in chain {
+            representative
+                .entry(m.name.as_str())
+                .or_insert(u.name.as_str());
+        }
+    }
+    built
+        .into_iter()
+        .map(|(u, chain)| {
+            let mut files = Vec::new();
+            let mut java_files = Vec::new();
+            for m in &chain {
                 files.extend(m.files.iter().cloned());
                 java_files.extend(m.java_files.iter().cloned());
-                (files, java_files)
-            };
+            }
+            // Own deps first (chain ends with the module itself), then the folded source sets'.
+            let mut deps: Vec<String> = Vec::new();
+            let mut seen = HashSet::new();
+            for m in chain.iter().rev() {
+                for d in m.deps.iter().chain(m.friends.iter()) {
+                    let r = representative
+                        .get(d.as_str())
+                        .copied()
+                        .unwrap_or(d.as_str());
+                    if r != u.name && seen.insert(r.to_string()) {
+                        deps.push(r.to_string());
+                    }
+                }
+            }
             ModuleUnit {
-                name: m.name.clone(),
-                deps: m.deps.iter().chain(m.friends.iter()).cloned().collect(),
+                name: u.name.clone(),
+                deps,
                 files,
                 java_files,
             }
@@ -458,6 +521,14 @@ mod tests {
     fn backend_applicable_ignore_backend_k1_is_not_excluded() {
         // krusty is NOT K1: a K1-only mute must NOT exclude (it isn't in the filtered set).
         assert!(backend_applicable("// IGNORE_BACKEND_K1: JVM_IR", BACKENDS));
+    }
+
+    #[test]
+    fn backend_applicable_any_token_names_every_backend() {
+        // Red-code tests kept for their diagnostic half: excluded everywhere.
+        assert!(!backend_applicable("// IGNORE_BACKEND: ANY", BACKENDS));
+        // A test targeting ANY targets ours too.
+        assert!(backend_applicable("// TARGET_BACKEND: ANY", BACKENDS));
     }
 
     #[test]
@@ -771,12 +842,24 @@ fun box(): String = \"OK\"
     }
 
     #[test]
-    fn split_modules_module_without_any_source_is_declined() {
+    fn split_modules_source_less_module_is_kept() {
+        // An hmpp intermediate source set can be empty; it must not sink the whole test.
         let src = "\
 // MODULE: lib
 // MODULE: main(lib)
 // FILE: main.kt
 fun box(): String = \"OK\"
+";
+        let mods = split_modules(src).unwrap();
+        assert_eq!(mods.len(), 2);
+        assert!(mods[0].files.is_empty());
+    }
+
+    #[test]
+    fn split_modules_all_modules_empty_is_declined() {
+        let src = "\
+// MODULE: lib
+// MODULE: main(lib)
 ";
         assert!(split_modules(src).is_none());
     }
@@ -879,6 +962,96 @@ fun box(): String = f()
         assert_eq!(units[0].files.len(), 2);
         assert_eq!(units[0].files[0].0, "common");
         assert_eq!(units[0].files[1].0, "platform");
+    }
+
+    #[test]
+    fn module_units_chain_deps_union_into_the_built_unit() {
+        // `common` depends on `support`; `main` folds `common` in, so the built unit must carry the
+        // `support` classpath dep even though `main` itself declares none.
+        let src = "\
+// MODULE: support
+// FILE: support.kt
+fun helper() = 1
+// MODULE: common(support)
+// FILE: common.kt
+expect fun f(): String
+// MODULE: main()()(common)
+// FILE: main.kt
+actual fun f(): String = \"OK\"
+fun box(): String = f()
+";
+        let units = module_units(&split_modules(src).unwrap());
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[1].name, "main");
+        assert_eq!(units[1].deps, vec!["support".to_string()]);
+    }
+
+    #[test]
+    fn module_units_dep_on_folded_target_remaps_to_representative() {
+        // `app-common` depends on `lib-common`, which is folded into `lib-platform` — the dep must
+        // remap to `lib-platform` (where lib-common's declarations actually live), and the
+        // self-reference left by remapping `app-common`'s position is dropped.
+        let src = "\
+// MODULE: lib-common
+// FILE: libcommon.kt
+fun libCommon() = 1
+// MODULE: lib-platform()()(lib-common)
+// FILE: libplatform.kt
+fun libPlatform() = 2
+// MODULE: app-common(lib-common)
+// FILE: appcommon.kt
+fun appCommon() = libCommon()
+// MODULE: app-platform(lib-platform)()(app-common)
+// FILE: appplatform.kt
+fun box(): String = \"OK\"
+";
+        let units = module_units(&split_modules(src).unwrap());
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].name, "lib-platform");
+        assert!(units[0].deps.is_empty());
+        assert_eq!(units[1].name, "app-platform");
+        // Own dep `lib-platform` first; app-common's `lib-common` remaps to `lib-platform`, dedups.
+        assert_eq!(units[1].deps, vec!["lib-platform".to_string()]);
+        let names: Vec<&str> = units[1].files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["appcommon", "appplatform"]);
+    }
+
+    #[test]
+    fn inject_support_module_prepends_and_adds_implicit_deps() {
+        let src = "\
+// MODULE: lib
+// FILE: lib.kt
+fun lib() = 1
+// MODULE: main(lib)
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        let mut mods = split_modules(src).unwrap();
+        inject_support_module(&mut mods, "package helpers\nfun h() = 1\n");
+        assert_eq!(mods[0].name, "support");
+        assert_eq!(mods[0].files[0].0, "CoroutineUtil");
+        // Every original module now depends on `support` (explicit declarations untouched).
+        assert_eq!(mods[1].deps, vec!["support".to_string()]);
+        assert_eq!(mods[2].deps, vec!["lib".to_string(), "support".to_string()]);
+        let units = module_units(&mods);
+        assert_eq!(units[0].name, "support");
+        assert_eq!(units[1].deps, vec!["support".to_string()]);
+    }
+
+    #[test]
+    fn inject_support_module_noop_when_declared() {
+        let src = "\
+// MODULE: support
+// FILE: support.kt
+fun helper() = 1
+// MODULE: main(support)
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        let mut mods = split_modules(src).unwrap();
+        inject_support_module(&mut mods, "unused");
+        assert_eq!(mods.len(), 2);
+        assert_eq!(mods[0].files[0].0, "support");
     }
 
     #[test]

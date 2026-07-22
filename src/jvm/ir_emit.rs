@@ -5380,11 +5380,11 @@ impl<'a> Emitter<'a> {
             if body_invokes_lambda {
                 return self.try_inline_unified(descriptor, args, &body, base, code);
             }
-        } else if descriptor.contains("Lkotlin/jvm/functions/Function") {
-            // A function-typed parameter whose argument isn't a literal lambda (a passed `Function`) is a
-            // current inline-splice gap — can't materialize an unknown `Function` value here.
-            return false;
         }
+        // A function-typed parameter whose argument isn't a literal lambda (a passed `Function`
+        // value, `t?.let(x)`) needs NO invoke-site substitution: the verbatim splice below binds the
+        // param slot to the materialized `Function` object, and the body's own
+        // `FunctionN.invoke` interface calls dispatch on it — exactly kotlinc's inlined shape.
         let ret_words = descriptor_ret_words(descriptor);
         let top_local = base + body.max_locals;
         // ONE splicer for every no-lambda body (`splice_unified` subsumes the old branchless + branchy
@@ -6050,6 +6050,22 @@ impl<'a> Emitter<'a> {
                     return;
                 }
                 let call_args: Vec<u32> = args.iter().map(|a| a.unwrap()).collect();
+                // An argument-count/descriptor mismatch can only come from a pass that rewrote the
+                // callee's ABI without fixing this call site (a suspend call the coroutine flattener
+                // failed to thread a continuation into — an unmodeled shape). Never emit the
+                // unverifiable call: bail the file (the gate SKIPS it), pushing a typed zero so the
+                // dead code that follows still assembles.
+                if call_args.len() != param_tys.len() {
+                    self.run.set_inline_bail(format!(
+                        "call arity mismatch for {owner}.{name} ({} args vs {} params)",
+                        call_args.len(),
+                        param_tys.len()
+                    ));
+                    if ret != Ty::Unit {
+                        push_zero(ret, code, self.cw);
+                    }
+                    return;
+                }
                 self.emit_virtual_operands(&owner, *receiver, &call_args, code);
                 let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
                 let desc = method_descriptor(&param_tys, ret);
@@ -6098,6 +6114,21 @@ impl<'a> Emitter<'a> {
                         f.name.clone()
                     };
                     let args = args.clone();
+                    // Same arity/descriptor net as `MethodCall` above: an unthreaded suspend call
+                    // (the CPS transform appended a `Continuation` param this site never passes)
+                    // must bail the file, never emit an unverifiable call.
+                    if args.len() != param_tys.len() {
+                        self.run.set_inline_bail(format!(
+                            "call arity mismatch for {}.{name} ({} args vs {} params)",
+                            self.facade,
+                            args.len(),
+                            param_tys.len()
+                        ));
+                        if ret != Ty::Unit {
+                            push_zero(ret, code, self.cw);
+                        }
+                        return;
+                    }
                     self.emit_operands(&args, code);
                     let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
                     let owner = self.facade.clone();
@@ -6886,8 +6917,21 @@ impl<'a> Emitter<'a> {
                 elem,
                 value,
             } => {
-                self.emit_value(*holder, code);
-                self.emit_value(*value, code);
+                // A branchy value (`msg = x ?: "?"`) can't run with the holder on the stack — its
+                // branch frames assume a clean stack. Spill it first (mirrors `RefNew`).
+                if self.records_frame(*value) {
+                    let temps = self.spill_to_temps(&[*value], code);
+                    self.emit_value(*holder, code);
+                    for &(slot, t, _) in &temps {
+                        load(t, slot, code);
+                    }
+                    for &(_, _, key) in &temps {
+                        self.slots.remove(&key);
+                    }
+                } else {
+                    self.emit_value(*holder, code);
+                    self.emit_value(*value, code);
+                }
                 let (cls, fdesc) = ref_class(elem);
                 let f = self.cw.fieldref(cls, "element", fdesc);
                 code.putfield(f, slot_words(ir_ty_to_jvm(elem)) as i32);

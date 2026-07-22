@@ -2261,6 +2261,73 @@ pub fn lower_file_at_reporting(
                             }
                         }
                     }
+                    // The CLASSPATH-supertype twin of the loop above: a property whose INFERRED type
+                    // covariantly narrows a classpath supertype property (`override val context =
+                    // EmptyCoroutineContext` under `Continuation.context: CoroutineContext`) needs the
+                    // same `get<X>()` bridge. The classpath interface's accessor is a plain METHOD
+                    // (`getContext()`), so pair the class's own properties against the supertype
+                    // method set.
+                    let own_prop_names: Vec<String> = c
+                        .body_props
+                        .iter()
+                        .map(|p| p.name.clone())
+                        .chain(c.props.iter().map(|p| p.name.clone()))
+                        .collect();
+                    // The CHECKER-resolved supertype names (the AST `TypeRef`s are unresolved simple
+                    // names): the direct superclass + every direct interface.
+                    let sup_names: Vec<TypeName> = lo
+                        .syms
+                        .class_by_type_name(internal_name)
+                        .map(|ci| {
+                            ci.interfaces
+                                .iter_ids()
+                                .chain(ci.super_internal)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    for sup in sup_names {
+                        let recv = Ty::Obj(sup, &[]);
+                        for pname in &own_prop_names {
+                            let Some((own_ty, _)) = lo.syms.prop_of_name(internal_name, pname)
+                            else {
+                                continue;
+                            };
+                            let ps = lo.syms.libraries.property_members(recv, pname);
+                            let Some(pi) = ps
+                                .overloads
+                                .iter()
+                                .find(|p| matches!(p.kind, crate::libraries::PropKind::Member))
+                            else {
+                                continue;
+                            };
+                            let (Some(sdesc), Some(odesc)) = (
+                                lo.runtime.type_descriptor(pi.ty),
+                                lo.runtime.type_descriptor(own_ty),
+                            ) else {
+                                continue;
+                            };
+                            if sdesc == odesc {
+                                continue;
+                            }
+                            let gname = property_getter_name(pname);
+                            let already = lo.ir.classes[cid as usize]
+                                .bridges
+                                .iter()
+                                .any(|b| b.name == gname && b.erased_params.is_empty());
+                            if !already {
+                                lo.ir.classes[cid as usize].bridges.push(crate::ir::Bridge {
+                                    name: gname,
+                                    erased_params: vec![],
+                                    erased_ret: ty_to_ir(pi.ty),
+                                    concrete_params: vec![],
+                                    concrete_ret: ty_to_ir(own_ty),
+                                    target_name: None,
+                                    box_ret: None,
+                                    unbox_params: Vec::new(),
+                                });
+                            }
+                        }
+                    }
                 }
                 // Collection special-member stubs: a class implementing a mapped `kotlin.collections`
                 // interface must provide the `java.util` method the interface declares for a Kotlin PROPERTY
@@ -5501,7 +5568,10 @@ impl<'a> Lower<'a> {
     /// value through the `Ref` (and `x!!` unboxes it).
     fn shared_cell_elem_ty(&self, kty: Ty) -> Ty {
         match self.value_class_underlying(kty) {
-            Some(u) if kty.is_nullable() && self.runtime.scalar_value_repr(u).is_none() => kty,
+            // A nullable `X?` never holds the raw scalar — over a primitive underlying it is the
+            // BOXED `X` (the only null-capable form), over a reference underlying a reference either
+            // way — so its shared cell is always the `ObjectRef`, never a primitive `Ref`.
+            Some(_) if kty.is_nullable() => kty,
             Some(u) => u,
             None => kty,
         }
@@ -6968,13 +7038,26 @@ impl<'a> Lower<'a> {
     /// suspend gate. Used both to classify a suspend lambda literal and to guard the non-inlined
     /// suspend-inline-HOF path (a plain `Function0` argument cannot legally call a suspend function).
     fn ast_body_suspends(&self, body: AstExprId) -> bool {
+        // Top-level suspend functions PLUS same-file class suspend METHODS: a method called with an
+        // IMPLICIT receiver (`suspendWithResult(x)` inside a receiver lambda) is a bare `Name` call,
+        // invisible to the explicit-`Member` checks below. Matching by name over-approximates (a
+        // same-named non-suspend call would classify the body as suspending), which is SAFE: the
+        // general machine over a body with no real suspension is a single state.
         let susp_names: std::collections::HashSet<String> = self
             .afile
             .decls
             .iter()
-            .filter_map(|&d| match self.afile.decl(d) {
-                ast::Decl::Fun(f) if f.is_suspend => Some(f.name.clone()),
-                _ => None,
+            .flat_map(|&d| -> Vec<String> {
+                match self.afile.decl(d) {
+                    ast::Decl::Fun(f) if f.is_suspend => vec![f.name.clone()],
+                    ast::Decl::Class(c) => c
+                        .methods
+                        .iter()
+                        .filter(|m| m.is_suspend)
+                        .map(|m| m.name.clone())
+                        .collect(),
+                    _ => Vec::new(),
+                }
             })
             .collect();
         let call_names_cell = std::cell::RefCell::new(Vec::new());
@@ -7033,26 +7116,28 @@ impl<'a> Lower<'a> {
             {
                 return true;
             }
-            // A plain member call `recv.m(args)` to a suspend method — a USER class method (its
-            // suspend flag is in `syms`), or a CLASSPATH member / suspend EXTENSION (`Mutex.withLock`)
-            // whose suspend-ness the CHECKER recorded on the resolved callable. The lowerer only reads.
+            // A member / extension call to a suspend method, resolved by the CHECKER — with an
+            // EXPLICIT receiver (`recv.m(args)`) or an IMPLICIT one (`suspendWithResult(x)` inside a
+            // receiver lambda, whose callee is a bare `Name`, not a `Member`). The lowerer only reads.
+            if self
+                .info
+                .resolved_member(call)
+                .is_some_and(|m| m.member.suspend)
+                || self
+                    .info
+                    .resolved_extension(call)
+                    .is_some_and(|c| c.suspend)
+            {
+                return true;
+            }
+            // A plain member call `recv.m(args)` to a suspend USER class method (its suspend flag is
+            // in `syms`, keyed by the receiver's static type).
             if let ast::Expr::Call { callee, .. } = self.afile.expr(call) {
                 if let ast::Expr::Member { receiver, name } = self.afile.expr(*callee) {
                     let recv_ty = self.info.ty(*receiver);
                     if recv_ty
                         .obj_internal()
                         .is_some_and(|i| method_suspends(i, name))
-                    {
-                        return true;
-                    }
-                    if self
-                        .info
-                        .resolved_member(call)
-                        .is_some_and(|m| m.member.suspend)
-                        || self
-                            .info
-                            .resolved_extension(call)
-                            .is_some_and(|c| c.suspend)
                     {
                         return true;
                     }
@@ -12336,7 +12421,13 @@ impl<'a> Lower<'a> {
         // so build a `Ty::Fun` of the right arity with erased `Any` slots.
         if (r.name == "<fun>" || !r.fun_params.is_empty()) && r.fun_params.len() <= 22 {
             let params = vec![Ty::obj("kotlin/Any"); r.fun_params.len()];
-            return Some(Ty::fun(params, Ty::obj("kotlin/Any")));
+            // Keep the `suspend` marker: a `suspend (A) -> B` erases to the arity+1 `FunctionN`
+            // (trailing `Continuation`), so dropping it would `checkcast` the wrong interface.
+            return Some(if r.fun_suspend {
+                Ty::fun_suspend(params, Ty::obj("kotlin/Any"))
+            } else {
+                Ty::fun(params, Ty::obj("kotlin/Any"))
+            });
         }
         if let Some(suffix) = r.name.strip_prefix("Function") {
             if let Ok(arity) = suffix.parse::<usize>() {
@@ -12459,7 +12550,31 @@ impl<'a> Lower<'a> {
         let b = match body {
             FunBody::Expr(e) => {
                 let diverges = self.info.ty(*e) == Ty::Nothing;
-                let stmts = if *ret_ty == Ty::Unit || diverges {
+                // A suspend fn whose whole body is `suspendCoroutineUninterceptedOrReturn { … }`:
+                // the intrinsic's value IS the suspension protocol result (`COROUTINE_SUSPENDED` or
+                // an immediate value). Return it even from a declared-`Unit` fn — the CPS return is
+                // `Any?`, and swallowing it (returning `Unit`) would signal completion to the caller
+                // while the continuation is still pending → double resume.
+                let is_suspend_intrinsic_body = self.ir.suspend_funs.contains(&fid)
+                    && matches!(self.afile.expr(*e), Expr::Call { callee, args }
+                        if args.len() == 1
+                            && matches!(self.afile.expr(*callee), ast::Expr::Name(n)
+                                if crate::libraries::coroutine_intrinsic(n)
+                                    == Some(crate::libraries::CoroutineIntrinsic::SuspendCoroutineUninterceptedOrReturn)));
+                let stmts = if is_suspend_intrinsic_body {
+                    let ve = self.expr(*e)?;
+                    // An EMPTY intrinsic block (`suspendCoroutineUninterceptedOrReturn { c -> }`)
+                    // yields `Unit` — materialize it (a value-less block leaves nothing to return).
+                    let ve = match &self.ir.exprs[ve as usize] {
+                        IrExpr::Block { value: None, stmts } => {
+                            let stmts = stmts.clone();
+                            let u = self.emit_unit();
+                            self.emit_block(stmts, Some(u))
+                        }
+                        _ => ve,
+                    };
+                    vec![self.emit_return(Some(ve))]
+                } else if *ret_ty == Ty::Unit || diverges {
                     vec![self.expr(*e)?] // Unit, or a diverging expr (it returns/throws on its own — no wrap)
                 } else {
                     // Coerce the body to the return type (a generic-erased `Object` return gets the
@@ -13107,8 +13222,17 @@ impl<'a> Lower<'a> {
                 if self.shared_cell_vars.contains(&name) {
                     // A `@JvmInline value class` var is represented UNBOXED as its underlying type, so its
                     // `Ref` holder + element use that underlying type (`var z: Z(Int)` → `Ref.IntRef`) —
-                    // except a nullable reference value class (`Result<T>?`) stays BOXED (see helper).
-                    let elem_ty = self.shared_cell_elem_ty(kty);
+                    // except a NULLABLE `X?`, which holds a reference (the box / null-capable underlying),
+                    // never the raw scalar (see helper). The file-class arm above resolves `W?` to the
+                    // non-null `Obj(W)` (deliberate for plain locals), so re-apply the declared `?` here
+                    // where the boxed-vs-scalar `Ref` choice depends on it.
+                    let cell_kty = match ty.as_ref() {
+                        Some(r) if r.nullable && !kty.is_nullable() && kty.is_reference() => {
+                            Ty::nullable(kty)
+                        }
+                        _ => kty,
+                    };
+                    let elem_ty = self.shared_cell_elem_ty(cell_kty);
                     let elem = ref_elem_ir(elem_ty);
                     let it = self.lower_arg(init, &ty_to_ir(kty))?;
                     let holder = self.fresh_value();

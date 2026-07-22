@@ -183,6 +183,44 @@ fun box(): String {
 }
 
 #[test]
+fn assignment_to_nullable_value_class_var_boxes() {
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(java_home) = common::java_home() else {
+        return;
+    };
+    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
+    // `w = it` / `u = W(7)`: a non-null value class assigned into a nullable (boxed) slot must
+    // `box-impl` at the ASSIGNMENT boundary (`SetValue`), not only at a declaration initializer.
+    // The captured `w` exercises the closure (`ObjectRef`) store path; `u` the plain local slot.
+    let src = r#"
+@JvmInline
+value class W(val v: Int)
+
+fun box(): String {
+    var w: W? = null
+    val cb: (W) -> Unit = { w = it }
+    cb(W(42))
+    if (w!!.v != 42) return "capture:${w!!.v}"
+    var u: W? = null
+    u = W(7)
+    if (u!!.v != 7) return "local:${u!!.v}"
+    val r: Result<Int>? = null
+    var res: Result<Int>? = r
+    res = Result.success(9)
+    if (res!!.getOrNull() != 9) return "result"
+    return "OK"
+}
+"#;
+    assert_eq!(
+        common::compile_and_run_box(src, "NullableValueClassAssign", &[stdlib], Some(&jdk))
+            .as_deref(),
+        Some("OK")
+    );
+}
+
+#[test]
 fn sized_array_of_value_class_uses_provider_value_underlying() {
     let Some(stdlib) = common::stdlib_jar() else {
         return;
