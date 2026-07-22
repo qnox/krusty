@@ -119,6 +119,28 @@ fn suspend_member_returning_a_value_is_byte_identical() {
     );
 }
 
+/// A member taking a value-class parameter. The JVM method is mangled and takes the erased underlying
+/// type, but `@Metadata` names the Kotlin function and its DECLARED parameter type, recording the
+/// mangled name and erased descriptor as a `JvmMethodSignature`.
+#[test]
+fn value_class_parameter_member_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\n\n@JvmInline\nvalue class K(val v: String)\n\ninterface I {\n    suspend fun f(a: K): String\n}\n",
+        "demo/I",
+        &[],
+    );
+}
+
+/// The same for a value-class RETURN, which mangles the name on its own.
+#[test]
+fn value_class_return_member_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\n\n@JvmInline\nvalue class K(val v: String)\n\ninterface I {\n    fun f(): K\n}\n",
+        "demo/I",
+        &[],
+    );
+}
+
 /// A `private val` in the primary constructor — the everyday dependency-injection shape. A private
 /// property has NO accessor, so kotlinc interns no `getX` name/descriptor and records the property as
 /// private in `@Metadata`; krusty leaked both (orphan pool entries plus public property flags).

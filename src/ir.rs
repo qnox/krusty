@@ -1115,6 +1115,13 @@ pub struct IrFile {
     /// generic `Signature` both describe the function in Kotlin terms — `suspend fun f(a: String)`,
     /// not `f(String, Continuation): Object` — so both need the signature the CPS rewrite consumed.
     pub suspend_declared_sigs: std::collections::HashMap<u32, (Vec<Ty>, Ty)>,
+    /// Each function the value-class pass rewrote, keyed by `FunId` → its DECLARED `(name, params,
+    /// ret)` before the pass mangled the name and erased the value classes to their underlying types.
+    /// `@Metadata` names the Kotlin function and its declared parameter types (`ApplicationId`, not
+    /// `String`); the mangled name and erased descriptor ride along as a `JvmMethodSignature`. Captured
+    /// before the CPS rewrite, so a function that is both `suspend` and value-class-typed reports the
+    /// fully declared signature here rather than the half-lowered one.
+    pub vc_declared_sigs: std::collections::HashMap<u32, (String, Vec<Ty>, Ty)>,
     /// `ExprId` of each direct call to a `suspend fun` → the callee's LOGICAL return type (the source
     /// return, before CPS erasure to `Object`). Recorded by ir_lower from the resolver
     /// (`flags.suspend`), so the coroutine pass recognizes a suspend call to ANOTHER file or a classpath

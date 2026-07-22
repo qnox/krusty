@@ -698,6 +698,9 @@ pub fn lower_value_classes(
     // `(fid, param idx, boxed value-class Ty)` for nullable-underlying value-class params — the base
     // method unboxes them (below), but its `$default` stub + call site keep them boxed (recorded here).
     let mut default_boxed: Vec<(u32, usize, Ty)> = Vec::new();
+    // `(fid, declared name, declared params, declared ret)` — collected while `ir.functions` is borrowed
+    // mutably, moved into `ir.vc_declared_sigs` once the loop releases it.
+    let mut declared_sigs: Vec<(u32, String, Vec<Ty>, Ty)> = Vec::new();
     for (fid, f) in ir.functions.iter_mut().enumerate() {
         let is_box_impl = f.name == "box-impl";
         // A USER value-class member function's body runs on the BOXED object; its value-class-typed
@@ -748,6 +751,21 @@ pub fn lower_value_classes(
             // A top-level (facade/file-class) function has no dispatch receiver — its value-class RETURN
             // is not mangled; a member's is.
             let is_file_class = f.dispatch_receiver.is_none();
+            // Keep the declared signature for `@Metadata`, which names the Kotlin function and its
+            // declared types — the mangling and erasure below are a JVM realization it records
+            // separately. Only worth keeping when a value class is actually involved.
+            if orig_params[fid]
+                .iter()
+                .chain(std::iter::once(&orig_rets[fid]))
+                .any(is_vc_ty)
+            {
+                declared_sigs.push((
+                    fid as u32,
+                    f.name.clone(),
+                    orig_params[fid].clone(),
+                    orig_rets[fid],
+                ));
+            }
             let mangled = vc_mangle(
                 &f.name,
                 &orig_params[fid],
@@ -807,6 +825,9 @@ pub fn lower_value_classes(
                 }
             }
         }
+    }
+    for (fid, name, params, ret) in declared_sigs {
+        ir.vc_declared_sigs.insert(fid, (name, params, ret));
     }
     for (fid, idx, ty) in default_boxed {
         ir.default_stub_boxed_params
