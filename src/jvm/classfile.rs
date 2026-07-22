@@ -82,6 +82,10 @@ pub struct SeedField {
     /// `true` for a primary-constructor PARAMETER. Only a parameter carries a ctor parameter
     /// annotation or a null-check guard — a body property is initialized in `init_body`.
     pub is_ctor_param: bool,
+    /// `true` when the constructor actually stores this field. A body property initialized to `null`
+    /// has no store at all — the JVM already zero-initializes it — so its name and descriptor first
+    /// appear at the getter's `getfield`, not at a `putfield`.
+    pub stores_in_ctor: bool,
     /// A `String` literal initializer. kotlinc interns it as an `ldc` constant just before the
     /// property's store, so it lands ahead of the field's own name/descriptor.
     pub string_const: Option<String>,
@@ -829,7 +833,7 @@ impl ClassWriter {
         // `super()` call: `()V`, its NameAndType, the Methodref.
         self.cp.methodref(super_internal, "<init>", "()V");
         // One `putfield` per property-backed parameter: field name, descriptor, NameAndType, Fieldref.
-        for f in fields {
+        for f in fields.iter().filter(|f| f.stores_in_ctor) {
             // A body property's `String` initializer is pushed by `ldc` before its `putfield`.
             if let Some(sc) = &f.string_const {
                 self.cp.string(sc);
@@ -854,6 +858,34 @@ impl ClassWriter {
             // right after its descriptor (kotlinc's order).
             if let Some(Some(s)) = sigs.accessors.get(i) {
                 self.cp.utf8(s);
+            }
+            // A field the constructor never stores (a body property initialized to `null`) first
+            // appears at its GETTER: kotlinc interns the return annotation, then the field's name and
+            // descriptor at the `getfield`.
+            if *setter_kind == 0 {
+                if let Some(f) = fields.iter().find(|f| {
+                    !f.stores_in_ctor && {
+                        let mut ch = f.name.chars();
+                        let cap = ch
+                            .next()
+                            .map(|c| c.to_uppercase().collect::<String>() + ch.as_str())
+                            .unwrap_or_default();
+                        *name == format!("get{cap}")
+                    }
+                }) {
+                    match f.ann_kind {
+                        1 => {
+                            self.cp.utf8("Lorg/jetbrains/annotations/NotNull;");
+                        }
+                        2 => {
+                            self.cp.utf8("Lorg/jetbrains/annotations/Nullable;");
+                        }
+                        _ => {}
+                    }
+                    self.cp.utf8(&f.name);
+                    self.cp.utf8(&f.desc);
+                    self.cp.fieldref(this_internal, &f.name, &f.desc);
+                }
             }
             if *setter_kind >= 1 {
                 self.cp.utf8("<set-?>");
