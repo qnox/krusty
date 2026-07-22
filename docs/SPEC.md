@@ -1807,3 +1807,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **The `// WITH_COROUTINES` helpers form an implicit `support` module in `// MODULE:` tests.** kotlinc's
   test infra compiles them as a module every declared module sees (some tests write `(support)`
   explicitly, others just `import helpers.*`) — mirrored by `krusty::conformance::inject_support_module`.
+
+- **A non-null value class flows into its nullable form (`X` → `X?`) in ANY context.** Assignment and
+  argument positions box exactly as a return does — the value-class pass inserts `box-impl` from the
+  nullable target type at `SetValue`/`RefSet`/`RefNew` boundaries; the shared mutable cell of a
+  captured `var x: X?` is always the `ObjectRef` (a nullable value class never holds the raw scalar).
+  Generic arguments compare by class (the non-null `Obj` rule ignores them too).
+  (`assignment_to_nullable_value_class_var_boxes`.)
