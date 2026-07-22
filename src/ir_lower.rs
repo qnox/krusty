@@ -491,6 +491,11 @@ pub fn lower_file_at_reporting(
                 .collect();
             // A custom-accessor property is read/written ONLY via `getX`/`setX` — record it so an
             // in-class access by name routes through the accessor, not a direct field read/write.
+            for p in c.body_props.iter().filter(|p| is_backing_field_prop(p)) {
+                lo.ir
+                    .prop_decl_lines
+                    .insert((internal.clone(), p.name.clone()), p.decl_line);
+            }
             for p in c.body_props.iter().filter(|p| is_field_accessor_prop(p)) {
                 lo.field_accessor_props
                     .insert((type_name(&internal), p.name.clone()));

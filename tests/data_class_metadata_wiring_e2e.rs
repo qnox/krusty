@@ -643,3 +643,47 @@ fn generic_list_property_with_default_metadata_byte_identical() {
         "items decodes as the List builtin",
     );
 }
+
+/// A class with a BODY property carrying a compile-time initializer (`val y: Int = 2`). The initializer
+/// lives in the class `init_body`, not on `IrField::default` — kotlinc sets `Property.hasConstant`.
+#[test]
+fn class_with_constant_body_property_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C {\n    val y: Int = 2\n}\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// TWO body properties on separate lines — the ctor's LineNumberTable gets one entry per initializer,
+/// each on its own line, and both accessors follow their own declaration lines.
+#[test]
+fn class_with_two_constant_body_properties_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C {\n    val a: Int = 1\n    val b: Int = 2\n}\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// A `var` body property — `Property.flags` carries `isVar`/`hasSetter` alongside `hasConstant`, and
+/// the setter joins the accessors that follow the declaration line.
+#[test]
+fn class_with_var_body_property_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C {\n    var n: Int = 7\n}\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// A ctor parameter AND a body property — the ctor descriptor covers only the parameter, while the
+/// body property still contributes its own initializer line and `hasConstant`.
+#[test]
+fn class_with_ctor_param_and_body_property_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C(val x: Int) {\n    val y: Int = 2\n}\n",
+        "demo/C",
+        &[],
+    );
+}

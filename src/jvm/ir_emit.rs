@@ -158,6 +158,34 @@ fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -> u64 {
     (visibility << 1) | (modality << 4)
 }
 
+/// The primary constructor's parameter descriptors. Only the LEADING `ctor_param_count` fields are
+/// constructor parameters — a BODY property (`val y: Int = 2`) is a field but not a ctor argument.
+fn ctor_field_descs(c: &IrClass) -> String {
+    c.fields
+        .iter()
+        .take(c.ctor_param_count as usize)
+        .map(|f| crate::jvm::names::type_descriptor(f.ty))
+        .collect()
+}
+
+/// Field indices a class `init_body` assigns a compile-time literal — a BODY property such as
+/// `val y: Int = 2`. kotlinc sets `Property.hasConstant` for exactly these.
+fn init_body_constant_fields(ir: &IrFile, c: &IrClass) -> std::collections::HashSet<u32> {
+    let mut out = std::collections::HashSet::new();
+    let Some(body) = c.init_body else { return out };
+    let IrExpr::Block { stmts, .. } = ir.expr(body) else {
+        return out;
+    };
+    for &s in stmts {
+        if let IrExpr::SetField { index, value, .. } = ir.expr(s) {
+            if matches!(ir.expr(*value), IrExpr::Const(_)) {
+                out.insert(*index);
+            }
+        }
+    }
+    out
+}
+
 /// Compute a class's `@kotlin.Metadata` from its IR — WIRING [`crate::metadata::class_builder::build_class`]
 /// into emission. Covers a class with a primary constructor of `val`/`var` properties plus real declared
 /// members (emitted with derived [`function_flags`]), and the data/value-class synthesized sets. Returns
@@ -250,18 +278,22 @@ fn build_class_metadata(
         })
         .collect();
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
+    let const_fields = init_body_constant_fields(ir, c);
     let props: Vec<PropMeta> = c
         .fields
         .iter()
-        .map(|f| PropMeta {
+        .enumerate()
+        .map(|(i, f)| PropMeta {
             name: f.name.clone(),
             ty: f.ty,
             is_var: !f.is_final,
-            // Not yet detectable: only a BODY property (past the ctor params) carries a compile-time
-            // constant (kotlinc: `val y: Int = 2` → flags 8710), but its initializer is not on
-            // `IrField::default` (that carries a ctor-PARAMETER default) — it lives in the class
-            // `init_body`, so wiring `hasConstant` needs a separate pass.
-            has_constant: false,
+            // Only a BODY property (past the ctor params) carries a compile-time constant; a ctor
+            // parameter's default is the PARAMETER's, not the property's. A body property's
+            // initializer is not on `IrField::default` either — it lives in the class `init_body`.
+            // Only a `val`: a `var` can be reassigned, so kotlinc gives it no constant.
+            has_constant: f.is_final
+                && i >= c.ctor_param_count as usize
+                && const_fields.contains(&(i as u32)),
             getter: (format!("get{}", cap(&f.name)), format!("(){}", desc(f.ty))),
             setter: (!f.is_final)
                 .then(|| (format!("set{}", cap(&f.name)), format!("({})V", desc(f.ty)))),
@@ -493,10 +525,7 @@ fn seed_plain_class_pool(
         }
     };
     let is_nonnull_ref = |t: Ty| ann_kind(t) == 1;
-    let ctor_desc = format!(
-        "({})V",
-        c.fields.iter().map(|f| desc(f.ty)).collect::<String>()
-    );
+    let ctor_desc = format!("({})V", ctor_field_descs(c));
     let fields: Vec<(String, String, u8)> = c
         .fields
         .iter()
@@ -630,7 +659,14 @@ fn attach_declared_method_debug(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut Cl
     }
 }
 
-fn attach_synth_debug_tables(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
+fn attach_synth_debug_tables(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    cw: &mut ClassWriter,
+    // Extra ctor LineNumberTable entries (body-property initializers + the trailing `return`), with
+    // their real pcs captured during emission. Empty ⇒ the ctor gets kotlinc's single entry.
+    ctor_lines: &[(u16, u32)],
+) {
     let line = c.decl_line;
     if line == 0 {
         return;
@@ -669,14 +705,12 @@ fn attach_synth_debug_tables(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     };
     let this_desc = format!("L{};", c.fq_name());
     // Primary constructor: `this` + one local per ctor parameter (a property-backed param).
-    let ctor_desc = format!(
-        "({})V",
-        c.fields.iter().map(|f| desc(f.ty)).collect::<String>()
-    );
+    let ctor_desc = format!("({})V", ctor_field_descs(c));
     let mut ctor_locals = vec![("this".to_string(), this_desc.clone(), 0u16)];
     let mut slot = 1u16;
     let mut ctor_pc = 0u16;
-    for f in &c.fields {
+    // Only ctor PARAMETERS are constructor locals — a body property is a field, never an argument.
+    for f in c.fields.iter().take(c.ctor_param_count as usize) {
         ctor_locals.push((f.name.clone(), desc(f.ty), slot));
         if is_nonnull_ref(f.ty) {
             // guard = aload(slot) + ldc(param-name String) + invokestatic checkNotNullParameter(3).
@@ -689,32 +723,48 @@ fn attach_synth_debug_tables(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     }
     let this_only = [("this".to_string(), this_desc.clone(), 0u16)];
     cw.set_method_debug("<init>", &ctor_desc, Some((ctor_pc, line)), &ctor_locals);
+    if !ctor_lines.is_empty() {
+        let mut entries = vec![(ctor_pc, line)];
+        entries.extend_from_slice(ctor_lines);
+        cw.set_method_lines("<init>", &ctor_desc, &entries);
+    }
     // A SEALED class's primary ctor is private; kotlinc pairs it with a PUBLIC|SYNTHETIC
     // `(…args, DefaultConstructorMarker)` accessor carrying `this`, the ctor params, and the marker
     // (named `$constructor_marker`). It gets a LocalVariableTable but no LineNumberTable.
     if c.is_sealed {
         const MARKER: &str = "Lkotlin/jvm/internal/DefaultConstructorMarker;";
         let mut acc_locals = ctor_locals.clone();
-        let marker_slot = c.fields.iter().map(|f| slot_size(f.ty)).sum::<u16>() + 1;
+        let marker_slot = c
+            .fields
+            .iter()
+            .take(c.ctor_param_count as usize)
+            .map(|f| slot_size(f.ty))
+            .sum::<u16>()
+            + 1;
         acc_locals.push((
             "$constructor_marker".to_string(),
             MARKER.to_string(),
             marker_slot,
         ));
-        let acc_desc = format!(
-            "({}{MARKER})V",
-            c.fields.iter().map(|f| desc(f.ty)).collect::<String>()
-        );
+        let acc_desc = format!("({}{MARKER})V", ctor_field_descs(c));
         cw.set_method_debug("<init>", &acc_desc, None, &acc_locals);
     }
     // Property accessors: getter has only `this`; a `var` setter also has its value parameter (named
     // `<set-?>` by kotlinc), guarded when the property type is a non-null reference.
     for f in &c.fields {
+        // A CTOR-parameter property's accessors sit on the class-declaration line; a BODY property's
+        // sit on its own `val`/`var` line.
+        let pline = ir
+            .prop_decl_lines
+            .get(&(c.fq_name(), f.name.clone()))
+            .copied()
+            .filter(|&l| l != 0)
+            .unwrap_or(line);
         let g = format!("get{}", cap(&f.name));
         cw.set_method_debug(
             &g,
             &format!("(){}", desc(f.ty)),
-            Some((0, line)),
+            Some((0, pline)),
             &this_only,
         );
         if !f.is_final {
@@ -730,7 +780,7 @@ fn attach_synth_debug_tables(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
             cw.set_method_debug(
                 &s,
                 &format!("({pd})V"),
-                Some((set_pc, line)),
+                Some((set_pc, pline)),
                 &[
                     ("this".to_string(), this_desc.clone(), 0),
                     ("<set-?>".to_string(), pd, 1),
@@ -893,10 +943,7 @@ fn attach_synth_nullability(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     // Primary constructor: one parameter annotation slot per property-backed parameter.
     let ctor_params: Vec<Option<&str>> = c.fields.iter().map(|f| ann(f.ty)).collect();
     if ctor_params.iter().any(|p| p.is_some()) {
-        let ctor_desc = format!(
-            "({})V",
-            c.fields.iter().map(|f| desc(f.ty)).collect::<String>()
-        );
+        let ctor_desc = format!("({})V", ctor_field_descs(c));
         cw.set_method_nullability("<init>", &ctor_desc, None, &ctor_params);
     }
     // Accessors: a reference getter annotates its return; a `var` reference setter its parameter.
@@ -923,10 +970,7 @@ fn attach_synth_nullability(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     if c.is_data {
         let not_null = "Lorg/jetbrains/annotations/NotNull;";
         let self_ref = format!("L{};", c.fq_name());
-        let copy_desc = format!(
-            "({}){self_ref}",
-            c.fields.iter().map(|f| desc(f.ty)).collect::<String>()
-        );
+        let copy_desc = format!("({}){self_ref}", ctor_field_descs(c));
         // `copy`'s parameters mirror the primary-constructor properties, so each reference param takes
         // the SAME `@NotNull`/`@Nullable` annotation kotlinc puts on the constructor's.
         let copy_params: Vec<Option<&str>> = c.fields.iter().map(|f| ann(f.ty)).collect();
@@ -2005,6 +2049,9 @@ fn emit_class(
     // The constructor takes ALL primary-ctor params (`ctor_args`), in declaration order — `val`/`var`
     // params back a field, plain params are arguments only. (Synthesized classes have empty `ctor_args`
     // and fall back to the leading `ctor_param_count` fields.)
+    // `(start_pc, line)` for the ctor's LineNumberTable — one per body-property initializer, plus the
+    // trailing `return`. Empty when the class has no body properties (kotlinc emits a single entry).
+    let mut ctor_lines: Vec<(u16, u32)> = Vec::new();
     let param_tys = class_ctor_jvm_tys(c);
     // A class with NO primary constructor emits no primary `<init>` — every `<init>` comes from a
     // secondary constructor (below). Otherwise emit the primary `<init>` here.
@@ -2148,7 +2195,36 @@ fn emit_class(
                 }
             }
             if let Some(init_body) = c.init_body {
-                e.emit(init_body, &mut ctor);
+                // kotlinc gives the ctor one LineNumberTable entry per body-property initializer, on
+                // that property's own source line. Emit the initializer statements one at a time so
+                // each one's real start pc is known; only for a pure list of `SetField` stores (the
+                // desugared `val y: Int = 2` shape) — anything else keeps the whole-block emit.
+                let stmts: Option<Vec<crate::ir::ExprId>> = match ir.expr(init_body) {
+                    crate::ir::IrExpr::Block { stmts, value } if value.is_none() => stmts
+                        .iter()
+                        .all(|&st| matches!(ir.expr(st), crate::ir::IrExpr::SetField { .. }))
+                        .then(|| stmts.clone()),
+                    _ => None,
+                };
+                match stmts {
+                    Some(stmts) => {
+                        for st in stmts {
+                            let pc = ctor.bytes.len() as u16;
+                            if let crate::ir::IrExpr::SetField { index, .. } = ir.expr(st) {
+                                let name = &c.fields[*index as usize].name;
+                                if let Some(&pl) =
+                                    ir.prop_decl_lines.get(&(c.fq_name(), name.clone()))
+                                {
+                                    if pl != 0 {
+                                        ctor_lines.push((pc, pl));
+                                    }
+                                }
+                            }
+                            e.emit(st, &mut ctor);
+                        }
+                    }
+                    None => e.emit(init_body, &mut ctor),
+                }
                 init_diverges = e.diverges(init_body);
             }
             max_slot = e.next_slot;
@@ -2156,6 +2232,10 @@ fn emit_class(
         // A diverging `init` (e.g. `init { throw … }`) leaves no fall-through — the trailing `return`
         // would be dead code after `athrow` (which the verifier rejects without a frame).
         if !init_diverges {
+            // The trailing `return` goes back on the class-declaration line, closing the ctor's table.
+            if !ctor_lines.is_empty() {
+                ctor_lines.push((ctor.bytes.len() as u16, c.decl_line));
+            }
             ctor.ret_void();
         }
         ctor.ensure_locals(max_slot);
@@ -2539,7 +2619,7 @@ fn emit_class(
     // + @NotNull/@Nullable). NOTE: the constant-pool seeding (above) is still plain-class only, so a
     // data class is not yet FULLY byte-identical (its pool order differs) — but the attributes match.
     if computed.is_some() {
-        attach_synth_debug_tables(c, &mut cw);
+        attach_synth_debug_tables(ir, c, &mut cw, &ctor_lines);
         attach_declared_method_debug(ir, c, &mut cw);
         attach_synth_nullability(c, &mut cw);
     }
@@ -3998,7 +4078,7 @@ fn emit_interface_class(
         .then(|| build_class_metadata(ir, c, opts))
         .flatten();
     if computed.is_some() {
-        attach_synth_debug_tables(c, &mut cw);
+        attach_synth_debug_tables(ir, c, &mut cw, &[]);
         attach_declared_method_debug(ir, c, &mut cw);
         attach_synth_nullability(c, &mut cw);
     }
@@ -4393,7 +4473,7 @@ fn emit_enum_class(
         .then(|| build_class_metadata(ir, c, opts))
         .flatten()
     {
-        attach_synth_debug_tables(c, &mut cw);
+        attach_synth_debug_tables(ir, c, &mut cw, &[]);
         attach_declared_method_debug(ir, c, &mut cw);
         attach_synth_nullability(c, &mut cw);
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
