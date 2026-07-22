@@ -874,6 +874,7 @@ pub fn lower_file_at_reporting(
                         name: e.name.clone(),
                         args: Vec::new(),
                         subclass: None,
+                        decl_line: e.decl_line,
                     })
                     .collect(),
                 enum_entry_of: None,

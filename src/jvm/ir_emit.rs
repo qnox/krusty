@@ -377,8 +377,16 @@ fn build_class_metadata(
         .take(c.ctor_param_count as usize)
         .map(|f| f.has_default)
         .collect();
+    // An `enum class`'s JVM constructor takes the two synthetic `Enum` parameters first, so its
+    // recorded `JvmMethodSignature` is `(Ljava/lang/String;I…)V` — the metadata names the REAL
+    // descriptor even though those parameters are not Kotlin-visible.
     let ctor_desc = format!(
-        "({})V",
+        "({}{})V",
+        if c.enum_entries.is_empty() {
+            ""
+        } else {
+            "Ljava/lang/String;I"
+        },
         ctor_params
             .iter()
             .map(|(_, t)| desc(*t))
@@ -4286,9 +4294,55 @@ fn emit_enum_class(
     for (f, t) in c.fields[n_params..].iter().zip(&field_tys[n_params..]) {
         cw.add_field(enum_field_acc(f), &f.name, &type_descriptor(*t));
     }
+    // kotlinc visits the whole CONSTRUCTOR before the entry constants — name, descriptor, its generic
+    // `Signature` (the two synthetic `Enum` params are erased, leaving `()V`), then its
+    // LocalVariableTable strings. `add_field` would otherwise claim those slots for the first entry.
+    cw.reserve_method_name("<init>");
+    cw.reserve_descriptor(&format!("(Ljava/lang/String;I{})V", ctor_field_descs(c)));
+    cw.reserve_descriptor(&format!("({})V", ctor_field_descs(c)));
+    // The ctor BODY's `super(name, ordinal)` call resolves before its LocalVariableTable strings.
+    cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
+    cw.reserve_method_name("this");
+    cw.reserve_descriptor(&self_desc);
+    cw.reserve_method_name("$enum$name");
+    cw.reserve_descriptor("Ljava/lang/String;");
+    cw.reserve_method_name("$enum$ordinal");
+    cw.reserve_descriptor("I");
+    // …then the synthesized members, in kotlinc's visit order, each with the entries its body
+    // references: `values()` reads `$VALUES` and calls `Object.clone()`; `valueOf` delegates to
+    // `Enum.valueOf` and names its parameter `value`; `getEntries` returns the `@NotNull`
+    // `$ENTRIES`. Only after all of them does kotlinc reach the entry constants themselves.
+    cw.reserve_method_name("values");
+    cw.reserve_descriptor(&format!("(){arr_desc}"));
+    cw.reserve_method_name("$VALUES");
+    cw.reserve_descriptor(&arr_desc);
+    cw.fieldref(&fq, "$VALUES", &arr_desc);
+    cw.class_ref("java/lang/Object");
+    cw.methodref("java/lang/Object", "clone", "()Ljava/lang/Object;");
+    // `values()` casts the `clone()` result back: `checkcast [LE;`.
+    cw.class_ref(&arr_desc);
+    cw.reserve_method_name("valueOf");
+    cw.reserve_descriptor(&format!("(Ljava/lang/String;){self_desc}"));
+    cw.methodref(
+        "java/lang/Enum",
+        "valueOf",
+        "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;",
+    );
+    cw.reserve_method_name("value");
+    cw.reserve_method_name("getEntries");
+    cw.reserve_descriptor("()Lkotlin/enums/EnumEntries;");
+    cw.reserve_descriptor(&format!("()Lkotlin/enums/EnumEntries<{self_desc}>;"));
+    cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;");
+    cw.reserve_method_name("$ENTRIES");
+    cw.reserve_descriptor("Lkotlin/enums/EnumEntries;");
+    cw.fieldref(&fq, "$ENTRIES", "Lkotlin/enums/EnumEntries;");
+    cw.reserve_method_name("$values");
     // One static-final constant per entry, plus the private `$VALUES` array.
     for entry in &c.enum_entries {
         cw.add_field(0x0001 | 0x0008 | 0x0010 | ACC_ENUM, &entry.name, &self_desc);
+        // `<clinit>`'s `putstatic` for this entry resolves right after the field's own name, before
+        // the next entry — kotlinc interleaves them rather than batching the Fieldrefs at the end.
+        cw.fieldref(&fq, &entry.name, &self_desc);
         apply_field_annotations(&mut cw, c, &entry.name);
     }
     cw.add_field(
@@ -4303,6 +4357,9 @@ fn emit_enum_class(
         "$ENTRIES",
         "Lkotlin/enums/EnumEntries;",
     );
+    // `<clinit>`'s NAME interns before anything its body references (the `EnumEntriesKt.enumEntries`
+    // machinery), as kotlinc reaches a method's signature before its code.
+    cw.reserve_method_name("<clinit>");
     // A `@Serializable enum`'s serializer machinery: a `public static final Companion` field + any
     // owner-scoped statics the serialization plugin synthesized (`$cachedSerializer$delegate`), both
     // initialized in `<clinit>` below.
@@ -4407,6 +4464,7 @@ fn emit_enum_class(
     // `$ENTRIES = EnumEntriesKt.enumEntries($VALUES)`. BUILT here but ADDED last (kotlinc orders it
     // after values/valueOf/getEntries/$values); the linked `CodeBuilder` is self-contained.
     let ctor_argw: i32 = ctor_params.iter().map(|t| slot_words(*t) as i32).sum();
+    let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
     let clinit = {
         let mut e = Emitter {
             ir,
@@ -4423,7 +4481,12 @@ fn emit_enum_class(
             pending_stack: Vec::new(),
         };
         let mut clinit = CodeBuilder::new(0);
+        // kotlinc gives each entry's construction its own `<clinit>` LineNumberTable entry, on that
+        // entry's declaration line — recorded here, where the real pc is known.
         for (i, entry) in c.enum_entries.iter().enumerate() {
+            if entry.decl_line != 0 {
+                clinit_lines.push((clinit.bytes.len() as u16, entry.decl_line));
+            }
             let args = &entry.args;
             // A branchy entry arg (`X(1 == 1)`) must run on a clean stack — spill all args to temps
             // first, then construct (mirrors the `New` node's spill).
@@ -4502,7 +4565,9 @@ fn emit_enum_class(
             clinit.putstatic(fref, 1);
         }
         clinit.ret_void();
-        clinit.ensure_locals(e.next_slot.max(2));
+        // `max_locals` is exactly what the body allocated — entry-arg spills bump `next_slot`, and a
+        // `<clinit>` that spills nothing has no locals at all (kotlinc writes 0, not a floor of 2).
+        clinit.ensure_locals(e.next_slot);
         clinit.link();
         clinit
     };
@@ -4625,6 +4690,9 @@ fn emit_enum_class(
             Some("Lorg/jetbrains/annotations/NotNull;"),
             &[],
         );
+        if !clinit_lines.is_empty() {
+            cw.set_method_lines("<clinit>", "()V", &clinit_lines);
+        }
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
     cw.finish()

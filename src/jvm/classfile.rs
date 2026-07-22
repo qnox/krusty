@@ -1511,16 +1511,12 @@ impl ClassWriter {
             Ria,
             Smt,
             Ripa,
+            Sig,
         }
         // A field's `Signature` attribute name interns BEFORE its `RuntimeInvisibleAnnotations` and before
         // `Code` — kotlinc visits fields first, and a field's `Signature` attribute precedes its
         // annotations (`class C(val xs: List<String>)` pool: `Signature`, `RuntimeInvisibleAnnotations`,
         // `Code`). The later `signature_attr_name` intern dedups onto this index.
-        // The class's own `Signature` attribute name interns with the other attribute names, before
-        // `Code` — the same slot a field's `Signature` uses (both dedup onto one entry).
-        let class_sig_attr = self
-            .class_signature
-            .map(|sig| (self.cp.utf8("Signature"), sig));
         let field_sig_name = self
             .fields
             .iter()
@@ -1545,6 +1541,11 @@ impl ClassWriter {
             if !m.lvt.is_empty() && !seq.contains(&An::Lvt) {
                 seq.push(An::Lvt);
             }
+            // A method's own generic `Signature` — after its Code sub-attributes, before its
+            // annotations (kotlinc's per-method attribute order).
+            if m.signature.is_some() && !seq.contains(&An::Sig) {
+                seq.push(An::Sig);
+            }
             if !m.invisible_anns.is_empty() && !seq.contains(&An::Ria) {
                 seq.push(An::Ria);
             }
@@ -1568,16 +1569,18 @@ impl ClassWriter {
                 An::Ripa => {
                     ripa_attr_name = Some(self.cp.utf8("RuntimeInvisibleParameterAnnotations"))
                 }
+                An::Sig => {
+                    self.cp.utf8("Signature");
+                }
             }
         }
         let method_invis_ann_name = invis_ann_name;
         // The `Signature` attribute name: reuse the early field-Signature index when a field carries one
         // (interned before `Code`), else intern here if a METHOD carries a signature. Only interned when
         // actually used — an unused entry would diverge from kotlinc's output for non-generic classes.
+        let class_has_sig = self.class_signature.is_some();
         let signature_attr_name = field_sig_name.or_else(|| {
-            self.methods
-                .iter()
-                .any(|m| m.signature.is_some())
+            (class_has_sig || self.methods.iter().any(|m| m.signature.is_some()))
                 .then(|| self.cp.utf8("Signature"))
         });
         // Intern `ConstantValue` only if a `const val` field carries one.
@@ -1850,10 +1853,10 @@ impl ClassWriter {
         // Assemble the class attribute table in kotlinc's fixed order. `self.class_attributes` is empty
         // in practice (nothing pushes to it outside `finish`); it is prepended to preserve the API.
         let mut ordered: Vec<(u16, Vec<u8>)> = std::mem::take(&mut self.class_attributes);
-        if let Some((name, sig)) = class_sig_attr {
+        if let Some(sig) = self.class_signature {
             let mut body = Vec::new();
             u2(&mut body, sig);
-            ordered.push((name, body));
+            ordered.push((signature_attr_name.unwrap(), body));
         }
         ordered.extend(
             [

@@ -78,6 +78,9 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
                 for p in &mut c.body_props {
                     p.decl_line = line_at(p.span.lo);
                 }
+                for e in &mut c.enum_entries {
+                    e.decl_line = line_at(e.span.lo);
+                }
             }
             Decl::Fun(f) => f.decl_line = line_at(f.span.lo),
             _ => {}
@@ -1886,6 +1889,7 @@ impl<'a> Parser<'a> {
                 if !self.at(TokenKind::Ident) {
                     break;
                 }
+                let entry_span = self.tok().span;
                 let entry_name = self.text().to_string();
                 self.bump();
                 // Optional constructor arguments: `RED(0xFF0000)`, incl. named `RED(rgb = 0xFF0000)`.
@@ -1960,6 +1964,8 @@ impl<'a> Parser<'a> {
                 }
                 entries.push(AstEnumEntry {
                     name: entry_name,
+                    span: entry_span,
+                    decl_line: 0,
                     annotations: entry_ann_names,
                     annotation_args: entry_ann_args,
                     args,
