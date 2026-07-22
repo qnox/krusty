@@ -29,7 +29,9 @@ pub struct PropMeta {
     /// Index of the class type parameter this property is declared as (`class C<T>(val a: T)` → 0).
     /// `None` for an ordinary type.
     pub tparam: Option<u32>,
-    pub getter: (String, String),         // (jvm name, jvm descriptor)
+    /// `(jvm name, jvm descriptor)` of the accessor. `None` for a property declared `private`: it is
+    /// read straight from the field, so there is no accessor for the signature to name.
+    pub getter: Option<(String, String)>,
     pub setter: Option<(String, String)>, // present iff `var`
 }
 
@@ -504,7 +506,10 @@ pub fn build_class(
             // (the boxed descriptor = the getter's return type). Every other property leaves the field
             // empty (the reader derives it). kotlinc interns the getter/setter strings BEFORE the field
             // descriptor (even though the proto writes `field` (f1) first), so build them in that order.
-            let getter = jvm_method_sig(&mut st, Some(&p.getter.0), &p.getter.1);
+            let getter = p
+                .getter
+                .as_ref()
+                .map(|(gn, gd)| jvm_method_sig(&mut st, Some(gn), gd));
             let setter = p
                 .setter
                 .as_ref()
@@ -519,11 +524,17 @@ pub fn build_class(
                     | Ty::Short
                     | Ty::Char
                     | Ty::Boolean,
-                ) => p.getter.1.rsplit(')').next().map(str::to_string),
+                ) => p
+                    .getter
+                    .as_ref()
+                    .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string)),
                 // A bare type-parameter property erases to `Ljava/lang/Object;`, which the reader
                 // cannot derive from the type `T` — so kotlinc records the descriptor explicitly, the
                 // same way it does for a boxed nullable primitive.
-                _ if p.tparam.is_some() => p.getter.1.rsplit(')').next().map(str::to_string),
+                _ if p.tparam.is_some() => p
+                    .getter
+                    .as_ref()
+                    .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string)),
                 _ => None,
             };
             let mut field = Pb::new();
@@ -535,7 +546,9 @@ pub fn build_class(
             if !p.is_abstract {
                 jvm.field_message(1, &field); // field (empty → derived; boxed primitive → explicit desc)
             }
-            jvm.field_message(3, &getter); // JvmPropertySignature.getter = 3
+            if let Some(getter) = &getter {
+                jvm.field_message(3, getter); // JvmPropertySignature.getter = 3
+            }
             if let Some(setter) = &setter {
                 jvm.field_message(4, setter); // JvmPropertySignature.setter = 4
             }
@@ -701,7 +714,7 @@ mod tests {
                 has_constant: false,
                 is_abstract: false,
                 tparam: None,
-                getter: ("getX".into(), "()I".into()),
+                getter: Some(("getX".into(), "()I".into())),
                 setter: None,
             }],
             &[],
@@ -798,7 +811,7 @@ mod tests {
                 has_constant: false,
                 is_abstract: false,
                 tparam: None,
-                getter: ("getX".into(), "()I".into()),
+                getter: Some(("getX".into(), "()I".into())),
                 setter: None,
             },
             PropMeta {
@@ -808,7 +821,7 @@ mod tests {
                 has_constant: false,
                 is_abstract: false,
                 tparam: None,
-                getter: ("getY".into(), "()Ljava/lang/String;".into()),
+                getter: Some(("getY".into(), "()Ljava/lang/String;".into())),
                 setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
             },
         ];
@@ -867,7 +880,7 @@ mod tests {
                 has_constant: false,
                 is_abstract: false,
                 tparam: None,
-                getter: ("getR".into(), "()Ljava/util/List;".into()),
+                getter: Some(("getR".into(), "()Ljava/util/List;".into())),
                 setter: None,
             }],
             &[],
@@ -972,7 +985,7 @@ mod tests {
                 has_constant: false,
                 is_abstract: false,
                 tparam: None,
-                getter: ("getX".into(), "()I".into()),
+                getter: Some(("getX".into(), "()I".into())),
                 setter: None,
             }],
             &[],
@@ -1018,7 +1031,7 @@ mod tests {
                 has_constant: false,
                 is_abstract: false,
                 tparam: None,
-                getter: ("getX".into(), "()I".into()),
+                getter: Some(("getX".into(), "()I".into())),
                 setter: None,
             }],
             &[],
@@ -1068,7 +1081,7 @@ mod tests {
                     has_constant: false,
                     is_abstract: false,
                     tparam: None,
-                    getter: ("getX".into(), "()I".into()),
+                    getter: Some(("getX".into(), "()I".into())),
                     setter: None,
                 },
                 PropMeta {
@@ -1078,7 +1091,7 @@ mod tests {
                     has_constant: false,
                     is_abstract: false,
                     tparam: None,
-                    getter: ("getY".into(), "()Ljava/lang/String;".into()),
+                    getter: Some(("getY".into(), "()Ljava/lang/String;".into())),
                     setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
                 },
             ],

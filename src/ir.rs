@@ -1132,6 +1132,10 @@ pub struct IrFile {
     /// FunId → its declared parameter NAMES, in order. kotlinc records these in a method's
     /// `LocalVariableTable` and in `@Metadata`; `IrFunction` keeps only types, so they ride alongside.
     pub fn_param_names: std::collections::HashMap<u32, Vec<String>>,
+    /// (class internal name, property name) for a property DECLARED `private` in Kotlin. Distinct
+    /// from `IrField::is_private`, which is the backing FIELD's visibility — private for every normal
+    /// property. A private property has no accessor, so `@Metadata` names none.
+    pub private_props: std::collections::HashSet<(String, String)>,
     /// (class internal name, property name) → 1-based source line of a BODY property's declaration.
     /// kotlinc attributes both the property's getter and its constructor-side initializer to this line.
     pub prop_decl_lines: std::collections::HashMap<(String, String), u32>,
