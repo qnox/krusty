@@ -121,3 +121,29 @@ actual open class C1 {
 fun box(): String = if (C2().k == "K") "OK" else "FAIL"
 "#);
 }
+
+/// Parameter defaults live on the `expect` (kotlinc forbids them on the actual) — dropping the
+/// expect grafts its defaults onto the actual so omitted-argument calls still resolve.
+#[test]
+fn expect_defaults_graft_onto_actual() {
+    run(r#"// LANGUAGE: +MultiPlatformProjects
+expect fun foo(a: String, b: String = "K"): String
+
+actual fun foo(a: String, b: String): String = a + b
+
+fun box(): String = foo("O")
+"#);
+}
+
+/// A grafted default may reference a PRIOR parameter — kotlinc guarantees the actual's parameter
+/// names match the expect's, so the name binds to the same position.
+#[test]
+fn expect_default_referencing_prior_parameter() {
+    run(r#"// LANGUAGE: +MultiPlatformProjects
+expect fun rep(s: String, t: String = s): String
+
+actual fun rep(s: String, t: String): String = s + t
+
+fun box(): String = if (rep("X") == "XX") "OK" else "FAIL"
+"#);
+}

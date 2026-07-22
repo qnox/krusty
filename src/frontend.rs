@@ -38,14 +38,18 @@ pub struct CheckedFile<'a> {
 /// modifier itself is inert; an UNMATCHED `expect` stays in the tree and fails checking exactly
 /// like any body-less declaration (skip, never mis-grade). Callers gate this on the
 /// `MultiPlatformProjects` language feature, mirroring kotlinc.
+/// The package-qualified expect/actual match key: `(package, kind, name, ext-receiver, arity)`.
+type ExpectKey = (String, u8, String, String, usize);
+
 pub fn strip_matched_expects(files: &mut [File]) {
     use crate::ast::Decl;
     // The match key is PACKAGE-qualified (expect/actual couple by FqName) but deliberately omits
-    // the RETURN/property type: an `actual` routinely INFERS it (`actual fun greet() = "O"`), so a
+    // the RETURN/property type and the receiver's TYPE ARGUMENTS (`List<String>.foo` keys as
+    // `List`) — an `actual` routinely INFERS it (`actual fun greet() = "O"`), so a
     // type component would wrongly leave such pairs unmatched. kotlinc validates actual/expect
     // compatibility upstream; krusty trusts that and lets an incompatible pair fail checking on
     // its own terms downstream.
-    fn key(file: &File, id: crate::ast::DeclId) -> (String, u8, String, String, usize) {
+    fn key(file: &File, id: crate::ast::DeclId) -> ExpectKey {
         let pkg = file.package.clone().unwrap_or_default();
         let (kind, name, recv, arity) = match file.decl(id) {
             Decl::Fun(f) => (
@@ -73,8 +77,7 @@ pub fn strip_matched_expects(files: &mut [File]) {
     // Pass 1: every NON-expect top-level declaration's key across the whole set. An
     // `actual typealias S = String` also actualizes an `expect class S` — typealiases live in
     // `File.type_aliases`, so add each alias NAME as a class-kind actual.
-    let mut actuals: std::collections::HashSet<(String, u8, String, String, usize)> =
-        std::collections::HashSet::new();
+    let mut actuals: std::collections::HashSet<ExpectKey> = std::collections::HashSet::new();
     for file in files.iter() {
         for &d in &file.decls {
             if !file.expect_decls.contains(&d) {
@@ -91,7 +94,37 @@ pub fn strip_matched_expects(files: &mut [File]) {
             ));
         }
     }
-    // Pass 2: drop each matched expect declaration from its file's decl list.
+    // Pass 1b: DEFAULT-ARGUMENT transplant. Parameter defaults live on the EXPECT declaration
+    // (kotlinc forbids them on the actual), so dropping the expect would lose them and an
+    // omitted-argument call site would mis-resolve. Harvest each matched expect fun's defaults as
+    // COPYABLE expression trees; pass 2b grafts them onto the matching actual's parameters. A
+    // default outside the copyable subset (literals/names/simple operators) is skipped — the
+    // actual stays default-less there and an omitting call fails to resolve (skip, never wrong).
+    // Alongside the defaults, the expect's PARAMETER NAMES: a default may reference a prior
+    // parameter (`b: Int = a`), which only stays meaningful if the actual's names match — kotlinc
+    // enforces exactly that (actual/expect parameter-name mismatch is an error), so a mismatch
+    // here means invalid input; the graft is skipped rather than silently re-binding the name.
+    let mut expect_defaults: std::collections::HashMap<
+        ExpectKey,
+        (Vec<String>, Vec<Option<CopyExpr>>),
+    > = std::collections::HashMap::new();
+    for file in files.iter() {
+        for &d in &file.expect_decls {
+            if let Decl::Fun(f) = file.decl(d) {
+                if f.params.iter().any(|p| p.default.is_some()) {
+                    let defs: Vec<Option<CopyExpr>> = f
+                        .params
+                        .iter()
+                        .map(|p| p.default.and_then(|e| CopyExpr::lift(file, e)))
+                        .collect();
+                    let names = f.params.iter().map(|p| p.name.clone()).collect();
+                    expect_defaults.insert(key(file, d), (names, defs));
+                }
+            }
+        }
+    }
+    // Pass 2: drop each matched expect declaration from its file's decl list; graft harvested
+    // defaults onto the surviving actuals.
     for file in files.iter_mut() {
         let expects = std::mem::take(&mut file.expect_decls);
         let drop: Vec<crate::ast::DeclId> = expects
@@ -101,6 +134,93 @@ pub fn strip_matched_expects(files: &mut [File]) {
             .collect();
         file.decls.retain(|d| !drop.contains(d));
         file.expect_decls = expects.into_iter().filter(|d| !drop.contains(d)).collect();
+        // Pass 2b: graft defaults. Two loops because materializing allocates into the file's
+        // expr arena while the decl is temporarily detached.
+        let decls: Vec<crate::ast::DeclId> = file.decls.clone();
+        for d in decls {
+            let k = key(file, d);
+            let Some((names, defs)) = expect_defaults.get(&k) else {
+                continue;
+            };
+            let names_match = match file.decl(d) {
+                Decl::Fun(f) => f
+                    .params
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .eq(names.iter().map(String::as_str)),
+                _ => false,
+            };
+            if !names_match {
+                continue; // invalid expect/actual pair (kotlinc rejects it) — don't graft
+            }
+            let materialized: Vec<Option<crate::ast::ExprId>> = defs
+                .iter()
+                .map(|c| c.as_ref().map(|c| c.materialize(file)))
+                .collect();
+            if let Decl::Fun(f) = file.decl_mut(d) {
+                for (p, def) in f.params.iter_mut().zip(materialized) {
+                    if p.default.is_none() {
+                        p.default = def;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A detached, owned copy of a SIMPLE expression tree (literals, names, unary/binary operators) —
+/// enough for realistic parameter defaults — that can be re-materialized into another file's
+/// arena. `lift` returns `None` for anything richer.
+enum CopyExpr {
+    Leaf(crate::ast::Expr),
+    Binary {
+        op: crate::ast::BinOp,
+        lhs: Box<CopyExpr>,
+        rhs: Box<CopyExpr>,
+    },
+}
+
+impl CopyExpr {
+    fn lift(file: &File, e: crate::ast::ExprId) -> Option<CopyExpr> {
+        use crate::ast::Expr;
+        Some(match file.expr(e) {
+            leaf @ (Expr::IntLit(_)
+            | Expr::LongLit(_)
+            | Expr::UIntLit(_)
+            | Expr::ULongLit(_)
+            | Expr::DoubleLit(_)
+            | Expr::FloatLit(_)
+            | Expr::BoolLit(_)
+            | Expr::StringLit(_)
+            | Expr::CharLit(_)
+            | Expr::NullLit
+            | Expr::Name(_)) => CopyExpr::Leaf(leaf.clone()),
+            Expr::Binary { op, lhs, rhs } => CopyExpr::Binary {
+                op: *op,
+                lhs: Box::new(CopyExpr::lift(file, *lhs)?),
+                rhs: Box::new(CopyExpr::lift(file, *rhs)?),
+            },
+            _ => return None,
+        })
+    }
+
+    fn materialize(&self, file: &mut File) -> crate::ast::ExprId {
+        let span = crate::diag::Span::new(0, 0); // synthetic — diags never point at a grafted default
+        match self {
+            CopyExpr::Leaf(e) => file.add_expr(e.clone(), span),
+            CopyExpr::Binary { op, lhs, rhs } => {
+                let l = lhs.materialize(file);
+                let r = rhs.materialize(file);
+                file.add_expr(
+                    crate::ast::Expr::Binary {
+                        op: *op,
+                        lhs: l,
+                        rhs: r,
+                    },
+                    span,
+                )
+            }
+        }
     }
 }
 
