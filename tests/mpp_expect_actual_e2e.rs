@@ -181,3 +181,29 @@ fun box(): String = v
         "an expect val without an actual must not compile"
     );
 }
+
+/// Defaults on an `expect class` MEMBER graft onto the actual class's matching member, and an
+/// overriding subclass inherits them at call sites.
+#[test]
+fn expect_class_member_defaults_graft() {
+    run(r#"// LANGUAGE: +MultiPlatformProjects
+expect open class C() {
+    open fun f(p: Int = 2): String
+}
+
+actual open class C {
+    actual open fun f(p: Int): String = "C" + p
+}
+
+open class D : C() {
+    override fun f(p: Int): String = "D" + p
+}
+
+fun box(): String {
+    if (C().f() != "C2") return "FAIL0"
+    if (C().f(9) != "C9") return "FAIL1"
+    if (D().f() != "D2") return "FAIL2"
+    return "OK"
+}
+"#);
+}
