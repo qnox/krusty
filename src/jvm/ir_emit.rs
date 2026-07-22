@@ -170,6 +170,22 @@ fn ctor_field_descs(c: &IrClass) -> String {
 
 /// `String` literals a class `init_body` assigns to a field, by field index. kotlinc interns each as
 /// an `ldc` constant just before that property's store.
+/// Field indices a class `init_body` actually stores into. A body property initialized to `null` is
+/// not among them — the JVM's zero-initialization already does the job, so kotlinc emits no store.
+fn init_body_stored_fields(ir: &IrFile, c: &IrClass) -> std::collections::HashSet<u32> {
+    let mut out = std::collections::HashSet::new();
+    let Some(body) = c.init_body else { return out };
+    let IrExpr::Block { stmts, .. } = ir.expr(body) else {
+        return out;
+    };
+    for &s in stmts {
+        if let IrExpr::SetField { index, .. } = ir.expr(s) {
+            out.insert(*index);
+        }
+    }
+    out
+}
+
 fn init_body_string_consts(ir: &IrFile, c: &IrClass) -> std::collections::HashMap<u32, String> {
     let mut out = std::collections::HashMap::new();
     let Some(body) = c.init_body else { return out };
@@ -545,6 +561,7 @@ fn seed_plain_class_pool(
     let is_nonnull_ref = |t: Ty| ann_kind(t) == 1;
     let ctor_desc = format!("({})V", ctor_field_descs(c));
     let body_consts = init_body_string_consts(ir, c);
+    let stored = init_body_stored_fields(ir, c);
     let fields: Vec<crate::jvm::classfile::SeedField> = c
         .fields
         .iter()
@@ -554,6 +571,7 @@ fn seed_plain_class_pool(
             desc: desc(f.ty),
             ann_kind: ann_kind(f.ty),
             is_ctor_param: i < c.ctor_param_count as usize,
+            stores_in_ctor: i < c.ctor_param_count as usize || stored.contains(&(i as u32)),
             string_const: body_consts.get(&(i as u32)).cloned(),
         })
         .collect();
