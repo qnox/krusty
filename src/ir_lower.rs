@@ -1108,6 +1108,9 @@ pub fn lower_file_at_reporting(
                     dispatch_receiver: Some(type_name(&internal)),
                     param_checks: vec![],
                 });
+                if p.is_open {
+                    lo.ir.open_methods.insert(fid);
+                }
                 methods.entry(gname).or_default().push((mi, fid, prop_ty));
                 method_fids.push(fid);
                 if p.is_var {
@@ -1122,6 +1125,9 @@ pub fn lower_file_at_reporting(
                         dispatch_receiver: Some(type_name(&internal)),
                         param_checks: vec![],
                     });
+                    if p.is_open {
+                        lo.ir.open_methods.insert(fid);
+                    }
                     methods.entry(sname).or_default().push((mi, fid, Ty::Unit));
                     method_fids.push(fid);
                 }
@@ -1238,6 +1244,14 @@ pub fn lower_file_at_reporting(
                     // bare `Ty` — so a nullable value-class property getter erases consistently with the
                     // field (`z: Z1?` → `LZ1;`, not the collapsed final underlying).
                     let fty_ir = lo.ir.classes[id as usize].fields[fidx].ty;
+                    // `open`/`override` property accessors must stay non-final (kotlinc's member
+                    // modality — same rule as methods). Only BODY properties carry the flag;
+                    // an `open val` PRIMARY-CONSTRUCTOR property isn't modeled yet.
+                    let prop_open = c
+                        .body_props
+                        .iter()
+                        .find(|pp| pp.name == *pname)
+                        .is_some_and(|pp| pp.is_open);
                     let gname = property_getter_name(pname);
                     if !methods.contains_key(&gname) {
                         // A plain field read; if the field is `lateinit` the backend's `GetField`
@@ -1266,6 +1280,9 @@ pub fn lower_file_at_reporting(
                                     supers: Vec::new(),
                                 },
                             );
+                        }
+                        if prop_open {
+                            lo.ir.open_methods.insert(fid);
                         }
                         methods.entry(gname).or_default().push((mi, fid, fty));
                         method_fids.push(fid);
@@ -2392,6 +2409,64 @@ pub fn lower_file_at_reporting(
                                         box_ret: None,
                                         unbox_params: Vec::new(),
                                     });
+                                }
+                            }
+                        }
+                        // A CROSS-FILE module interface (a `dependsOn` source set, or a multi-file
+                        // test declaring the interface in another file) isn't in THIS file's IR, so
+                        // `collect_iface_methods` sees nothing — read its erased method signatures
+                        // from the symbol table instead. Only the GENERIC-IFACE direction is
+                        // synthesized here (iface param/ret erased, impl concrete): body-presence
+                        // (default vs abstract) isn't recorded in the symbol table, so the
+                        // fake-override direction stays same-file-only rather than risking a bridge
+                        // that shadows a live default.
+                        if lo.class_info_name(itf).is_none() {
+                            if let Some(isig) = lo.syms.class_by_type_name(itf) {
+                                let imethods: Vec<(String, Vec<Ty>, Ty)> = isig
+                                    .methods
+                                    .iter()
+                                    .flat_map(|(n, sigs)| {
+                                        sigs.iter()
+                                            .map(move |s| (n.clone(), s.params.clone(), s.ret))
+                                    })
+                                    .collect();
+                                for (mname, iparams, iret) in imethods {
+                                    let Some((_, _, impl_fid, _)) = lo.resolve_method_by_arity(
+                                        type_name(&internal),
+                                        &mname,
+                                        iparams.len(),
+                                    ) else {
+                                        continue;
+                                    };
+                                    let ip = tys_to_ir(&iparams);
+                                    let ir_ = ty_to_ir(iret);
+                                    let cp = lo.ir.functions[impl_fid as usize].params.clone();
+                                    let cr = lo.ir.functions[impl_fid as usize].ret;
+                                    let generic_iface_dir = ip
+                                        .iter()
+                                        .zip(&cp)
+                                        .all(|(&e, &c)| e == c || e.is_erased_top())
+                                        && (ir_ == cr || ir_.is_erased_top());
+                                    if !generic_iface_dir || (ip == cp && ir_ == cr) {
+                                        continue;
+                                    }
+                                    if lo.ir.suspend_funs.contains(&impl_fid) {
+                                        return None; // same CPS-bridge hazard as the same-file path
+                                    }
+                                    if seen.insert(format!("{}{:?}{:?}", mname, ip, ir_)) {
+                                        lo.ir.classes[cid as usize].bridges.push(
+                                            crate::ir::Bridge {
+                                                name: mname,
+                                                erased_params: ip,
+                                                erased_ret: ir_,
+                                                concrete_params: cp,
+                                                concrete_ret: cr,
+                                                target_name: None,
+                                                box_ret: None,
+                                                unbox_params: Vec::new(),
+                                            },
+                                        );
+                                    }
                                 }
                             }
                         }

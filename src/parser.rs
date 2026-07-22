@@ -959,6 +959,10 @@ impl<'a> Parser<'a> {
             let is_sealed = mods.iter().any(|m| m == "sealed");
             let is_open = is_sealed || mods.iter().any(|m| m == "open");
             let is_abstract = is_sealed || mods.iter().any(|m| m == "abstract");
+            // `expect` (multiplatform header): whatever declaration the arm below pushes is
+            // recorded so expect/actual matching can drop it once an `actual` provides the body.
+            let is_expect = mods.iter().any(|m| m == "expect");
+            let decls_before = self.file.decls.len();
             match self.kind() {
                 TokenKind::Eof => break,
                 // A `package` directive may follow file-level annotations (`@file:...`), so also
@@ -1163,6 +1167,12 @@ impl<'a> Parser<'a> {
                     // poisoning its type (the reported `unresolved reference 'private'/'suspend'` cascade).
                     self.recover_to_decl_boundary();
                 }
+            }
+            if is_expect {
+                let after = self.file.decls.len();
+                self.file
+                    .expect_decls
+                    .extend_from_slice(&self.file.decls[decls_before..after]);
             }
         }
     }
@@ -1642,6 +1652,7 @@ impl<'a> Parser<'a> {
             })
             .is_some_and(|e| self.expr_reads_field(e));
         PropDecl {
+            is_open: false,
             name,
             decl_line: 0,
             visibility: Visibility::Public,
@@ -1781,6 +1792,8 @@ impl<'a> Parser<'a> {
                         false,
                     );
                     p.visibility = visibility_of(&mods);
+                    p.is_open = !mods.iter().any(|x| x == "final")
+                        && mods.iter().any(|x| x == "open" || x == "override");
                     props.push(p);
                 }
                 _ => {
@@ -2018,6 +2031,8 @@ impl<'a> Parser<'a> {
                             false,
                         );
                         p.visibility = visibility_of(&emods);
+                        p.is_open = !emods.iter().any(|x| x == "final")
+                            && emods.iter().any(|x| x == "open" || x == "override");
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -2763,6 +2778,8 @@ impl<'a> Parser<'a> {
                             is_abstract,
                         );
                         p.visibility = visibility_of(&mods);
+                        p.is_open = !mods.iter().any(|x| x == "final")
+                            && mods.iter().any(|x| x == "open" || x == "override");
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -3367,6 +3384,8 @@ impl<'a> Parser<'a> {
                             false,
                         );
                         p.visibility = visibility_of(&mods);
+                        p.is_open = !mods.iter().any(|x| x == "final")
+                            && mods.iter().any(|x| x == "open" || x == "override");
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -3523,6 +3542,8 @@ impl<'a> Parser<'a> {
                             false,
                         ); // init blocks may supply the value
                         p.visibility = visibility_of(&mods);
+                        p.is_open = !mods.iter().any(|x| x == "final")
+                            && mods.iter().any(|x| x == "open" || x == "override");
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }

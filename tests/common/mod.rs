@@ -151,11 +151,15 @@ pub fn compile_in_process(
     // test infrastructure supplies them — so flag-gated syntax compiles iff the test enables it.
     let features = krusty::features::LangFeatures::from_source(src);
     let toks = krusty::lexer::lex(src, &mut diags);
-    let files = vec![krusty::parser::parse_with_features(
+    let mut files = vec![krusty::parser::parse_with_features(
         src, &toks, &mut diags, &features,
     )];
     if diags.has_errors() {
         return None;
+    }
+    // Multiplatform: a matched `expect` header is replaced by its `actual` in the same set.
+    if features.has("MultiPlatformProjects") {
+        krusty::frontend::strip_matched_expects(&mut files);
     }
     let mut cp_paths: Vec<PathBuf> = cp_jars.to_vec();
     if let Some(p) = jdk_modules {
@@ -300,11 +304,15 @@ pub fn backend_rejects_in_process(
     let mut diags = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(src);
     let toks = krusty::lexer::lex(src, &mut diags);
-    let files = vec![krusty::parser::parse_with_features(
+    let mut files = vec![krusty::parser::parse_with_features(
         src, &toks, &mut diags, &features,
     )];
     if diags.has_errors() {
         return None;
+    }
+    // Multiplatform: a matched `expect` header is replaced by its `actual` in the same set.
+    if features.has("MultiPlatformProjects") {
+        krusty::frontend::strip_matched_expects(&mut files);
     }
     let mut cp_paths: Vec<PathBuf> = cp_jars.to_vec();
     if let Some(p) = jdk_modules {
@@ -357,11 +365,15 @@ pub fn lower_to_ir(
     let mut diags = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(src);
     let toks = krusty::lexer::lex(src, &mut diags);
-    let files = vec![krusty::parser::parse_with_features(
+    let mut files = vec![krusty::parser::parse_with_features(
         src, &toks, &mut diags, &features,
     )];
     if diags.has_errors() {
         return None;
+    }
+    // Multiplatform: a matched `expect` header is replaced by its `actual` in the same set.
+    if features.has("MultiPlatformProjects") {
+        krusty::frontend::strip_matched_expects(&mut files);
     }
     let mut cp_paths: Vec<PathBuf> = cp_jars.to_vec();
     if let Some(p) = jdk_modules {
@@ -395,11 +407,15 @@ pub fn compile_js_in_process(
     let mut diags = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(src);
     let toks = krusty::lexer::lex(src, &mut diags);
-    let files = vec![krusty::parser::parse_with_features(
+    let mut files = vec![krusty::parser::parse_with_features(
         src, &toks, &mut diags, &features,
     )];
     if diags.has_errors() {
         return None;
+    }
+    // Multiplatform: a matched `expect` header is replaced by its `actual` in the same set.
+    if features.has("MultiPlatformProjects") {
+        krusty::frontend::strip_matched_expects(&mut files);
     }
     let mut cp_paths: Vec<PathBuf> = cp_jars.to_vec();
     if let Some(p) = jdk_modules {
