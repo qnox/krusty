@@ -1129,6 +1129,10 @@ pub struct IrFile {
     /// `FunId` → the backend-agnostic generic-signature SHAPE of a type-parameterized function. The JVM
     /// backend formats this into a `Signature` attribute; the IR itself holds no target descriptors.
     pub signatures: std::collections::HashMap<u32, IrGenericSig>,
+    /// (class internal name, property name) for a property DECLARED `private` in Kotlin. Distinct
+    /// from `IrField::is_private`, which is the backing FIELD's visibility — private for every normal
+    /// property. A private property has no accessor, so `@Metadata` names none.
+    pub private_props: std::collections::HashSet<(String, String)>,
     /// (class internal name, property name) → 1-based source line of a BODY property's declaration.
     /// kotlinc attributes both the property's getter and its constructor-side initializer to this line.
     pub prop_decl_lines: std::collections::HashMap<(String, String), u32>,
