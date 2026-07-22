@@ -467,6 +467,7 @@ mod tests {
             internal: internal.into(),
             props: vec![],
             ctor_params: vec![],
+            ctor_param_names: vec![],
             methods: HashMap::new(),
             is_interface: false,
             is_object: false,
