@@ -126,3 +126,12 @@ fn string_if_empty_selects_the_charsequence_overload() {
     let src = "fun box(): String = \"\".ifEmpty { \"OK\" }\n";
     assert_eq!(run(src).expect("String.ifEmpty runs"), "OK");
 }
+
+#[test]
+fn suspend_fn_type_cast_targets_arity_plus_one_interface() {
+    // `suspend () -> Unit` erases to `Function1` (trailing `Continuation`), so an `as` against it
+    // must checkcast `Function1`, not `Function0` (KT-66093 shape).
+    let src = "fun f(block: (kotlin.coroutines.Continuation<Unit>) -> Any?) { block as (suspend () -> Unit) }\n\
+fun box(): String { f {}; return \"OK\" }\n";
+    assert_eq!(run(src).expect("suspend fn-type cast runs"), "OK");
+}

@@ -1787,3 +1787,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   whose physical receiver can't hold the actual one is dropped, else the tie breaks on declaration order
   and the inliner splices the wrong overload's body (`arraylength` on a String → VerifyError).
   (`string_if_empty_selects_the_charsequence_overload`.)
+
+- **A `suspend` function type erases to the arity+1 `FunctionN`.** `suspend () -> Unit` is a `Function1`
+  at runtime (trailing `Continuation` parameter), so `as`/`is` against a suspend fn type checkcast/test
+  `Function{n+1}` (KT-66093). (`suspend_fn_type_cast_targets_arity_plus_one_interface`.)

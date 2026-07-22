@@ -622,7 +622,12 @@ impl Ty {
     /// backend, so only the assignability checks that want the interface identity opt in here.
     pub fn function_interface_internal(self) -> Option<&'static str> {
         match self {
-            Ty::Fun(s) => FUNCTION_N_INTERNAL.get(s.params.len()).copied(),
+            // A `suspend` function type erases to the arity+1 interface (the trailing
+            // `Continuation` parameter): `suspend () -> Unit` is a `Function1` at runtime, so an
+            // `as`/`is` against it must test `Function1`, not `Function0`.
+            Ty::Fun(s) => FUNCTION_N_INTERNAL
+                .get(s.params.len() + usize::from(s.suspend))
+                .copied(),
             _ => None,
         }
     }
