@@ -1360,8 +1360,15 @@ impl ClassWriter {
         ret: Option<&str>,
         params: &[Option<&str>],
     ) {
-        let n = self.cp.utf8(name);
-        let d = self.cp.utf8(desc);
+        // Resolve WITHOUT interning first, like `set_method_debug`: describing a method that was never
+        // emitted (the accessors of a `private` property, which are read straight from the field) must
+        // not perturb the constant pool — the name and descriptor would be orphan entries.
+        let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
+            return;
+        };
+        if !self.methods.iter().any(|m| m.name == n && m.desc == d) {
+            return;
+        }
         // A parameterless annotation is `type_index(u2) + num_element_value_pairs(u2 = 0)`.
         let empty_ann = |cp: &mut ConstPool, ty: &str| -> Vec<u8> {
             let ti = cp.utf8(ty);

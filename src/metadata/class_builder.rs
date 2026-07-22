@@ -122,6 +122,11 @@ const ENUM_PREDEFINED: u64 = 16;
 /// → 6), bit8 isVar, bit9 hasGetter, bit10 hasSetter, bit13 hasConstant. It self-checks: the `var`
 /// value kotlinc emits (1798) is exactly 518 + isVar(256) + hasSetter(1024).
 const DEFAULT_PROPERTY_FLAGS: u64 = 518;
+/// Visibility bits 1-3 of `Property.flags`: PUBLIC = 3 (the default, folded into
+/// [`DEFAULT_PROPERTY_FLAGS`]) and PRIVATE = 1. Swapping one for the other is the whole difference a
+/// `private` property makes to the bitfield — it keeps `hasGetter`, since the getter is still declared.
+const PROP_VISIBILITY_PUBLIC: u64 = 6;
+const PROP_VISIBILITY_PRIVATE: u64 = 2;
 const PROP_IS_VAR: u64 = 256;
 const PROP_HAS_SETTER: u64 = 1024;
 const PROP_HAS_CONSTANT: u64 = 8192;
@@ -480,18 +485,24 @@ pub fn build_class(
             prop.field_varint(2, st.local(&p.name) as u64); // Property.name = 2
             let ty = type_pb_tp(&mut st, p.ty, p.tparam);
             prop.field_message(3, &ty); // Property.return_type = 3
-            let pflags = DEFAULT_PROPERTY_FLAGS
-                | if p.is_var {
+                                        // No accessor ⇒ the property is `private` (see [`PropMeta::getter`]), which shows up in the
+                                        // bitfield as the visibility bits alone.
+            let base = if p.getter.is_some() {
+                DEFAULT_PROPERTY_FLAGS
+            } else {
+                DEFAULT_PROPERTY_FLAGS - PROP_VISIBILITY_PUBLIC + PROP_VISIBILITY_PRIVATE
+            };
+            let pflags =
+                base | if p.is_var {
                     PROP_IS_VAR | PROP_HAS_SETTER
                 } else {
                     0
-                }
-                | if p.has_constant { PROP_HAS_CONSTANT } else { 0 }
-                | if p.is_abstract {
-                    PROP_MODALITY_ABSTRACT
-                } else {
-                    0
-                };
+                } | if p.has_constant { PROP_HAS_CONSTANT } else { 0 }
+                    | if p.is_abstract {
+                        PROP_MODALITY_ABSTRACT
+                    } else {
+                        0
+                    };
             if pflags != DEFAULT_PROPERTY_FLAGS {
                 prop.field_varint(11, pflags); // Property.flags = 11
             }
