@@ -118,6 +118,12 @@ pub fn extra_libs(src: &str) -> ExtraLibs {
 pub struct ModuleBlock {
     pub name: String,
     pub deps: Vec<String>,
+    /// FRIEND dependency modules (second `(...)` group): a classpath dependency whose `internal`
+    /// declarations are visible. The harness treats them like regular classpath deps.
+    pub friends: Vec<String>,
+    /// `dependsOn` modules (third `(...)` group, multiplatform source-set refinement): their
+    /// SOURCES compile INTO this module (kotlinc's JVM MPP model), transitively.
+    pub depends_on: Vec<String>,
     /// Kotlin sources: `(file stem, content)`.
     pub files: Vec<(String, String)>,
     /// Java sources: `(leaf file name incl. `.java`, content)` — compiled by javac (javac-first,
@@ -148,24 +154,32 @@ pub fn split_modules(src: &str) -> Option<Vec<ModuleBlock>> {
         let t = line.trim_start();
         if let Some(rest) = t.strip_prefix("// MODULE:") {
             flush(&mut mods, &mut cur_file, &mut cur);
+            // Header: `name(dependencies)(friends)(dependsOn)` — kotlinc's test-module syntax.
             let header = rest.trim();
-            if header.matches('(').count() > 1 {
+            if header.matches('(').count() > 3 {
                 return None;
             }
             let name_end = header.find('(').unwrap_or(header.len());
             let name = header[..name_end].trim().to_string();
-            let deps = header[name_end..]
-                .trim_start_matches('(')
-                .split(')')
-                .next()
-                .unwrap_or("")
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+            let mut groups: Vec<Vec<String>> = Vec::new();
+            let mut restpart = &header[name_end..];
+            while let Some(open) = restpart.find('(') {
+                let close = restpart[open..].find(')')?;
+                groups.push(
+                    restpart[open + 1..open + close]
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect(),
+                );
+                restpart = &restpart[open + close + 1..];
+            }
+            let mut groups = groups.into_iter();
             mods.push(ModuleBlock {
                 name,
-                deps,
+                deps: groups.next().unwrap_or_default(),
+                friends: groups.next().unwrap_or_default(),
+                depends_on: groups.next().unwrap_or_default(),
                 files: Vec::new(),
                 java_files: Vec::new(),
             });
@@ -533,7 +547,7 @@ fun box(): String = \"OK\"
     }
 
     #[test]
-    fn split_modules_friend_or_dependson_header_is_declined() {
+    fn split_modules_parses_friend_and_dependson_groups() {
         let src = "\
 // MODULE: common
 // FILE: common.kt
@@ -541,6 +555,39 @@ expect fun f(): String
 // MODULE: main()()(common)
 // FILE: main.kt
 actual fun f(): String = \"OK\"
+";
+        let mods = split_modules(src).expect("MPP header should split");
+        assert_eq!(mods[1].name, "main");
+        assert!(mods[1].deps.is_empty());
+        assert!(mods[1].friends.is_empty());
+        assert_eq!(mods[1].depends_on, vec!["common".to_string()]);
+    }
+
+    #[test]
+    fn split_modules_parses_friend_group() {
+        let src = "\
+// MODULE: lib
+// FILE: lib.kt
+internal fun f(): String = \"OK\"
+// MODULE: main()(lib)
+// FILE: main.kt
+fun box(): String = f()
+";
+        let mods = split_modules(src).expect("friend header should split");
+        assert!(mods[1].deps.is_empty());
+        assert_eq!(mods[1].friends, vec!["lib".to_string()]);
+        assert!(mods[1].depends_on.is_empty());
+    }
+
+    #[test]
+    fn split_modules_four_paren_groups_are_declined() {
+        let src = "\
+// MODULE: a
+// FILE: a.kt
+class A
+// MODULE: main()()()(a)
+// FILE: main.kt
+fun box(): String = \"OK\"
 ";
         assert!(split_modules(src).is_none());
     }

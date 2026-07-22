@@ -31,6 +31,79 @@ pub struct CheckedFile<'a> {
     pub module_name: &'a str,
 }
 
+/// Multiplatform `expect`/`actual` resolution over ONE compiled source set (kotlinc's JVM MPP
+/// model: a platform module and its `dependsOn` chain compile as one set): drop every top-level
+/// `expect` declaration for which some file supplies a matching non-`expect` counterpart — same
+/// kind + name, and for callables the same arity and extension-receiver name. The `actual`
+/// modifier itself is inert; an UNMATCHED `expect` stays in the tree and fails checking exactly
+/// like any body-less declaration (skip, never mis-grade). Callers gate this on the
+/// `MultiPlatformProjects` language feature, mirroring kotlinc.
+pub fn strip_matched_expects(files: &mut [File]) {
+    use crate::ast::Decl;
+    // The match key is PACKAGE-qualified (expect/actual couple by FqName) but deliberately omits
+    // the RETURN/property type: an `actual` routinely INFERS it (`actual fun greet() = "O"`), so a
+    // type component would wrongly leave such pairs unmatched. kotlinc validates actual/expect
+    // compatibility upstream; krusty trusts that and lets an incompatible pair fail checking on
+    // its own terms downstream.
+    fn key(file: &File, id: crate::ast::DeclId) -> (String, u8, String, String, usize) {
+        let pkg = file.package.clone().unwrap_or_default();
+        let (kind, name, recv, arity) = match file.decl(id) {
+            Decl::Fun(f) => (
+                0,
+                f.name.clone(),
+                f.receiver
+                    .as_ref()
+                    .map(|r| r.name.clone())
+                    .unwrap_or_default(),
+                f.params.len(),
+            ),
+            Decl::Class(c) => (1, c.name.clone(), String::new(), 0),
+            Decl::Property(p) => (
+                2,
+                p.name.clone(),
+                p.receiver
+                    .as_ref()
+                    .map(|r| r.name.clone())
+                    .unwrap_or_default(),
+                0,
+            ),
+        };
+        (pkg, kind, name, recv, arity)
+    }
+    // Pass 1: every NON-expect top-level declaration's key across the whole set. An
+    // `actual typealias S = String` also actualizes an `expect class S` — typealiases live in
+    // `File.type_aliases`, so add each alias NAME as a class-kind actual.
+    let mut actuals: std::collections::HashSet<(String, u8, String, String, usize)> =
+        std::collections::HashSet::new();
+    for file in files.iter() {
+        for &d in &file.decls {
+            if !file.expect_decls.contains(&d) {
+                actuals.insert(key(file, d));
+            }
+        }
+        for (alias, _) in &file.type_aliases {
+            actuals.insert((
+                file.package.clone().unwrap_or_default(),
+                1,
+                alias.clone(),
+                String::new(),
+                0,
+            ));
+        }
+    }
+    // Pass 2: drop each matched expect declaration from its file's decl list.
+    for file in files.iter_mut() {
+        let expects = std::mem::take(&mut file.expect_decls);
+        let drop: Vec<crate::ast::DeclId> = expects
+            .iter()
+            .filter(|&&d| actuals.contains(&key(file, d)))
+            .copied()
+            .collect();
+        file.decls.retain(|d| !drop.contains(d));
+        file.expect_decls = expects.into_iter().filter(|d| !drop.contains(d)).collect();
+    }
+}
+
 /// Lex and parse one source string with an explicit feature set.
 pub fn parse_source(src: &str, features: &LangFeatures, diags: &mut DiagSink) -> File {
     let tokens = crate::lexer::lex(src, diags);

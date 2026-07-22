@@ -754,6 +754,9 @@ pub struct PropDecl {
     pub receiver: Option<TypeRef>,
     pub ty: Option<TypeRef>,
     pub is_var: bool,
+    /// `open` or `override` (without `final`) — the accessors are overridable, so the JVM backend
+    /// must not emit `ACC_FINAL` on them (same rule as `FunDecl::is_open`).
+    pub is_open: bool,
     /// `None` for a `lateinit var` (declared without an initializer; the backing field defaults to
     /// null and is assigned later).
     pub init: Option<ExprId>,
@@ -807,6 +810,10 @@ pub struct File {
     /// Fully-qualified import names (e.g. `util.Calc`), used to resolve Java/JDK references.
     pub imports: Vec<String>,
     pub decls: Vec<DeclId>,
+    /// Top-level declarations carrying the `expect` modifier (multiplatform headers). A matched
+    /// `actual` in the same compiled source set replaces them (see `strip_matched_expects`); an
+    /// unmatched `expect` stays and fails checking like any body-less declaration.
+    pub expect_decls: Vec<DeclId>,
     pub decl_arena: Vec<Decl>,
     pub expr_arena: Vec<Expr>,
     pub stmt_arena: Vec<Stmt>,

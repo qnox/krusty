@@ -198,12 +198,15 @@ fn compile_source(
     let toks = lex(src, &mut diags);
     T_LEX.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     let t1 = std::time::Instant::now();
-    let files = vec![krusty::parser::parse_with_features(
+    let mut files = vec![krusty::parser::parse_with_features(
         src, &toks, &mut diags, &features,
     )];
     T_PARSE.fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
     if diags.has_errors() {
         return None;
+    }
+    if features.has("MultiPlatformProjects") {
+        krusty::frontend::strip_matched_expects(&mut files);
     }
     let t2 = std::time::Instant::now();
     // The stdlib is on krusty's classpath only for `// WITH_STDLIB` tests — the caller passes the
@@ -533,7 +536,7 @@ fn compile_blocks(
 ) -> Option<Vec<(String, Vec<u8>)>> {
     use krusty::ast::Decl;
     let mut diags = DiagSink::new();
-    let files: Vec<_> = blocks
+    let mut files: Vec<_> = blocks
         .iter()
         .map(|(_, content)| {
             let toks = lex(content, &mut diags);
@@ -542,6 +545,10 @@ fn compile_blocks(
         .collect();
     if diags.has_errors() {
         return None;
+    }
+    // Multiplatform: a matched `expect` header is replaced by its `actual` across the set.
+    if features.has("MultiPlatformProjects") {
+        krusty::frontend::strip_matched_expects(&mut files);
     }
 
     let mut cp_paths: Vec<std::path::PathBuf> = cp_jars.to_vec();
@@ -647,10 +654,42 @@ fn compile_module_test(
     let mut dirmap: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
     let mut all: Vec<(String, Vec<u8>)> = Vec::new();
     let mut ok = true;
+    // A module named as a `dependsOn` target compiles INTO its dependents (kotlinc's JVM MPP
+    // model: the platform module and its dependsOn chain are ONE compilation) — it is not built
+    // standalone, which would leave its `expect` declarations without actuals.
+    let dependson_targets: std::collections::HashSet<&str> = modules
+        .iter()
+        .flat_map(|m| m.depends_on.iter().map(String::as_str))
+        .collect();
+    // Transitive dependsOn closure, dependency-first order, dedup.
+    fn dependson_sources(
+        modules: &[krusty::conformance::ModuleBlock],
+        name: &str,
+        seen: &mut std::collections::HashSet<String>,
+        out: &mut Vec<(String, String)>,
+        java_out: &mut Vec<(String, String)>,
+    ) {
+        if !seen.insert(name.to_string()) {
+            return;
+        }
+        let Some(m) = modules.iter().find(|m| m.name == name) else {
+            return;
+        };
+        for d in &m.depends_on {
+            dependson_sources(modules, d, seen, out, java_out);
+        }
+        out.extend(m.files.iter().cloned());
+        java_out.extend(m.java_files.iter().cloned());
+    }
     for m in &modules {
-        // Compile-time classpath = the base (stdlib/JDK) + each dependency module's emitted-class dir.
+        if dependson_targets.contains(m.name.as_str()) {
+            continue;
+        }
+        // Compile-time classpath = the base (stdlib/JDK) + each dependency module's emitted-class
+        // dir. FRIEND deps ride the same classpath (their `internal` visibility is the friend
+        // part; krusty resolves them like any dependency).
         let mut cp = cp_jars.to_vec();
-        for d in &m.deps {
+        for d in m.deps.iter().chain(m.friends.iter()) {
             match dirmap.get(d) {
                 Some(p) => cp.push(p.clone()),
                 None => {
@@ -662,20 +701,37 @@ fn compile_module_test(
         if !ok {
             break;
         }
+        // dependsOn: prepend the chain's sources (dependency-first) to this module's own.
+        let (m_files, m_java);
+        let (files, java_files) = if m.depends_on.is_empty() {
+            (&m.files, &m.java_files)
+        } else {
+            let mut seen = std::collections::HashSet::new();
+            let mut out = Vec::new();
+            let mut java_out = Vec::new();
+            for d in &m.depends_on {
+                dependson_sources(&modules, d, &mut seen, &mut out, &mut java_out);
+            }
+            out.extend(m.files.iter().cloned());
+            java_out.extend(m.java_files.iter().cloned());
+            m_files = out;
+            m_java = java_out;
+            (&m_files, &m_java)
+        };
         // A module's `.java` sources: javac-first against the module classpath (Java referencing
         // only deps/JDK); when that fails — the Java references THIS module's Kotlin — fall back to
         // the Kotlin-first stub pipeline, exactly like the single-module path.
-        let classes = if m.java_files.is_empty() {
-            compile_blocks(&m.files, &cp, jdk_modules, &features)
+        let classes = if java_files.is_empty() {
+            compile_blocks(files, &cp, jdk_modules, &features)
         } else {
-            match common::javac_compile(&m.java_files, &cp) {
+            match common::javac_compile(java_files, &cp) {
                 Some((javadir, java_classes)) => {
-                    let kotlin = if m.files.is_empty() {
+                    let kotlin = if files.is_empty() {
                         Some(Vec::new()) // a Java-only module
                     } else {
                         let mut kcp = cp.clone();
                         kcp.push(javadir.clone());
-                        compile_blocks(&m.files, &kcp, jdk_modules, &features)
+                        compile_blocks(files, &kcp, jdk_modules, &features)
                     };
                     if let Some(root) = javadir.parent() {
                         let _ = fs::remove_dir_all(root);
@@ -685,7 +741,7 @@ fn compile_module_test(
                         k
                     })
                 }
-                None => compile_kotlin_first(src, &m.files, &m.java_files, &cp, jdk_modules),
+                None => compile_kotlin_first(src, files, java_files, &cp, jdk_modules),
             }
         };
         let Some(classes) = classes else {
