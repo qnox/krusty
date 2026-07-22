@@ -1299,6 +1299,27 @@ impl ClassWriter {
         true
     }
 
+    /// Intern a method's name, descriptor, generic `Signature` and annotation types NOW, before its
+    /// body is emitted. kotlinc (ASM) visits a method header before its code, so those entries precede
+    /// every constant the body introduces; krusty builds the body first, which would otherwise put them
+    /// after. Interning is idempotent, so calling this and then adding the method is safe.
+    pub fn reserve_method_pool(
+        &mut self,
+        name: &str,
+        desc: &str,
+        signature: Option<&str>,
+        ann_types: &[&str],
+    ) {
+        self.cp.utf8(name);
+        self.cp.utf8(desc);
+        if let Some(s) = signature {
+            self.cp.utf8(s);
+        }
+        for a in ann_types {
+            self.cp.utf8(a);
+        }
+    }
+
     pub fn add_method_sig(
         &mut self,
         access: u16,
