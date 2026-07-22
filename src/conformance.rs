@@ -118,7 +118,11 @@ pub fn extra_libs(src: &str) -> ExtraLibs {
 pub struct ModuleBlock {
     pub name: String,
     pub deps: Vec<String>,
+    /// Kotlin sources: `(file stem, content)`.
     pub files: Vec<(String, String)>,
+    /// Java sources: `(leaf file name incl. `.java`, content)` — compiled by javac (javac-first,
+    /// with the Kotlin-first stub fallback) before/around the module's Kotlin.
+    pub java_files: Vec<(String, String)>,
 }
 
 /// Split a `// MODULE:`-partitioned box test into modules, each with its `// FILE:` blocks. Returns
@@ -126,15 +130,20 @@ pub struct ModuleBlock {
 /// instead of mis-grading them.
 pub fn split_modules(src: &str) -> Option<Vec<ModuleBlock>> {
     let mut mods: Vec<ModuleBlock> = Vec::new();
-    let mut cur_file: Option<String> = None;
+    let mut cur_file: Option<(String, bool)> = None; // (name, is_java)
     let mut cur = String::new();
-    let flush = |mods: &mut Vec<ModuleBlock>, cur_file: &mut Option<String>, cur: &mut String| {
-        if let Some(fname) = cur_file.take() {
-            if let Some(m) = mods.last_mut() {
-                m.files.push((fname, std::mem::take(cur)));
+    let flush =
+        |mods: &mut Vec<ModuleBlock>, cur_file: &mut Option<(String, bool)>, cur: &mut String| {
+            if let Some((fname, is_java)) = cur_file.take() {
+                if let Some(m) = mods.last_mut() {
+                    if is_java {
+                        m.java_files.push((fname, std::mem::take(cur)));
+                    } else {
+                        m.files.push((fname, std::mem::take(cur)));
+                    }
+                }
             }
-        }
-    };
+        };
     for line in src.lines() {
         let t = line.trim_start();
         if let Some(rest) = t.strip_prefix("// MODULE:") {
@@ -158,32 +167,44 @@ pub fn split_modules(src: &str) -> Option<Vec<ModuleBlock>> {
                 name,
                 deps,
                 files: Vec::new(),
+                java_files: Vec::new(),
             });
         } else if let Some(rest) = t.strip_prefix("// FILE:") {
             flush(&mut mods, &mut cur_file, &mut cur);
             let fname = rest.trim();
-            if !fname.ends_with(".kt") {
+            if fname.ends_with(".java") {
+                // Keep the full leaf name — javac requires it to match the public class.
+                let leaf = fname.rsplit('/').next().unwrap_or(fname).to_string();
+                cur_file = Some((leaf, true));
+            } else if fname.ends_with(".kt") {
+                let stem = fname
+                    .strip_suffix(".kt")
+                    .unwrap_or(fname)
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(fname)
+                    .to_string();
+                cur_file = Some((stem, false));
+            } else {
                 return None;
             }
-            let stem = fname
-                .strip_suffix(".kt")
-                .unwrap_or(fname)
-                .rsplit('/')
-                .next()
-                .unwrap_or(fname)
-                .to_string();
-            cur_file = Some(stem);
         } else if cur_file.is_some() {
             cur.push_str(line);
             cur.push('\n');
         } else if !mods.is_empty() && !t.is_empty() && !t.starts_with("//") {
-            cur_file = Some(mods.last().unwrap().name.clone());
+            // Implicit file body straight after a `// MODULE:` header (no `// FILE:`) — KOTLIN by
+            // kotlinc's test convention; Java sources always carry an explicit `// FILE: X.java`.
+            cur_file = Some((mods.last().unwrap().name.clone(), false));
             cur.push_str(line);
             cur.push('\n');
         }
     }
     flush(&mut mods, &mut cur_file, &mut cur);
-    if mods.len() < 2 || mods.iter().any(|m| m.files.is_empty()) {
+    if mods.len() < 2
+        || mods
+            .iter()
+            .any(|m| m.files.is_empty() && m.java_files.is_empty())
+    {
         return None;
     }
     Some(mods)
@@ -525,11 +546,50 @@ actual fun f(): String = \"OK\"
     }
 
     #[test]
-    fn split_modules_java_file_source_is_declined() {
+    fn split_modules_java_file_lands_in_java_files() {
         let src = "\
 // MODULE: lib
 // FILE: J.java
 public class J {}
+// FILE: lib.kt
+class A
+// MODULE: main(lib)
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        let mods = split_modules(src).expect("java-in-module test should split");
+        assert_eq!(
+            mods[0].java_files,
+            vec![("J.java".to_string(), "public class J {}\n".to_string())]
+        );
+        assert_eq!(
+            mods[0].files,
+            vec![("lib".to_string(), "class A\n".to_string())]
+        );
+        assert!(mods[1].java_files.is_empty());
+    }
+
+    #[test]
+    fn split_modules_java_only_module_is_accepted() {
+        let src = "\
+// MODULE: lib
+// FILE: J.java
+public class J {}
+// MODULE: main(lib)
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        let mods = split_modules(src).expect("java-only module should split");
+        assert_eq!(mods[0].java_files.len(), 1);
+        assert!(mods[0].files.is_empty());
+    }
+
+    #[test]
+    fn split_modules_non_source_file_is_declined() {
+        let src = "\
+// MODULE: lib
+// FILE: data.txt
+hello
 // MODULE: main(lib)
 // FILE: main.kt
 fun box(): String = \"OK\"

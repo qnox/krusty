@@ -662,7 +662,33 @@ fn compile_module_test(
         if !ok {
             break;
         }
-        let Some(classes) = compile_blocks(&m.files, &cp, jdk_modules, &features) else {
+        // A module's `.java` sources: javac-first against the module classpath (Java referencing
+        // only deps/JDK); when that fails — the Java references THIS module's Kotlin — fall back to
+        // the Kotlin-first stub pipeline, exactly like the single-module path.
+        let classes = if m.java_files.is_empty() {
+            compile_blocks(&m.files, &cp, jdk_modules, &features)
+        } else {
+            match common::javac_compile(&m.java_files, &cp) {
+                Some((javadir, java_classes)) => {
+                    let kotlin = if m.files.is_empty() {
+                        Some(Vec::new()) // a Java-only module
+                    } else {
+                        let mut kcp = cp.clone();
+                        kcp.push(javadir.clone());
+                        compile_blocks(&m.files, &kcp, jdk_modules, &features)
+                    };
+                    if let Some(root) = javadir.parent() {
+                        let _ = fs::remove_dir_all(root);
+                    }
+                    kotlin.map(|mut k| {
+                        k.extend(java_classes);
+                        k
+                    })
+                }
+                None => compile_kotlin_first(src, &m.files, &m.java_files, &cp, jdk_modules),
+            }
+        };
+        let Some(classes) = classes else {
             ok = false;
             break;
         };

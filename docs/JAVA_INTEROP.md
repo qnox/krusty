@@ -119,8 +119,11 @@ outer loop is bounded by the KSP backstop too.
    `FunDecl.is_open` now flows to `ir.open_methods`. `kt40180_3.kt` remains skipped on an
    unrelated pre-existing limitation (`listIterator` same-name overloads: "multiple overloads with
    different erased signatures").
-3. **`// MODULE:` Java files** — extend `split_modules` to keep `.java` files per module and javac
-   them in dependency order (same seam as slice 1). Zero corpus tests today; needed for drop-in.
+3. **[landed] `// MODULE:` Java files** — `split_modules` keeps `.java` files per module
+   (`ModuleBlock.java_files`); the gate compiles them javac-first against the module classpath
+   (base + dependency dirs), appends the javac dir for the module's Kotlin, and chains BOTH class
+   sets through the module dir; javac failure falls back to the Kotlin-first stub pipeline.
+   Java-only modules supported. Zero corpus tests today — model completeness for drop-in.
 4. **APT host** — pass `-processorpath`/`-processor` through the JavaRunner javac call; javac owns
    the rounds. Validated by an e2e with a real annotation processor jar (mirror the KSP e2e shape,
    opt-in env gate).
