@@ -1127,6 +1127,9 @@ pub struct IrFile {
     /// `FunId` → the backend-agnostic generic-signature SHAPE of a type-parameterized function. The JVM
     /// backend formats this into a `Signature` attribute; the IR itself holds no target descriptors.
     pub signatures: std::collections::HashMap<u32, IrGenericSig>,
+    /// FunId → its declared parameter NAMES, in order. kotlinc records these in a method's
+    /// `LocalVariableTable` and in `@Metadata`; `IrFunction` keeps only types, so they ride alongside.
+    pub fn_param_names: std::collections::HashMap<u32, Vec<String>>,
     /// FunId → 1-based source line of its `fun` declaration, for the method's `LineNumberTable`.
     /// A side map (not a field on `IrFunction`) so the 40-odd construction sites stay untouched.
     pub fn_decl_lines: std::collections::HashMap<u32, u32>,

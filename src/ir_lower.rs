@@ -2389,10 +2389,14 @@ pub fn lower_file_at_reporting(
                         return None;
                     }
                     let (_, fid, _) = lo.class_info(&internal)?.methods[&m.name];
-                    // Remember the declaration line for this method's `LineNumberTable`.
+                    // Remember the declaration line for this method's `LineNumberTable`, and its
+                    // parameter names for the `LocalVariableTable` / `@Metadata`.
                     if m.decl_line != 0 {
                         lo.ir.fn_decl_lines.insert(fid, m.decl_line);
                     }
+                    lo.ir
+                        .fn_param_names
+                        .insert(fid, m.params.iter().map(|p| p.name.clone()).collect());
                     lo.scope.clear();
                     lo.boxed_elem.clear();
                     lo.next_value = 0;

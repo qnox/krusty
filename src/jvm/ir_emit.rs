@@ -391,7 +391,14 @@ fn build_class_metadata(
                         .params
                         .iter()
                         .enumerate()
-                        .map(|(i, t)| (format!("p{i}"), *t))
+                        .map(|(i, t)| {
+                            let n = ir
+                                .fn_param_names
+                                .get(&fid)
+                                .and_then(|ns| ns.get(i).cloned())
+                                .unwrap_or_else(|| format!("p{i}"));
+                            (n, *t)
+                        })
                         .collect(),
                     ret: f.ret,
                     flags: function_flags(ir, fid, f),
@@ -604,9 +611,10 @@ fn attach_declared_method_debug(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut Cl
         }
         for (i, t) in param_tys.iter().enumerate() {
             locals.push((
-                f.param_checks
-                    .get(i)
-                    .and_then(|n| n.clone())
+                ir.fn_param_names
+                    .get(&fid)
+                    .and_then(|ns| ns.get(i).cloned())
+                    .or_else(|| f.param_checks.get(i).and_then(|n| n.clone()))
                     .unwrap_or_else(|| format!("p{i}")),
                 crate::jvm::names::type_descriptor(*t),
                 slot,
