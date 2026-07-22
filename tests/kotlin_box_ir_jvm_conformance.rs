@@ -336,48 +336,189 @@ fn compile_multifile(
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     // Split on `// FILE: name.kt` markers (the preamble before the first marker is directives).
+    // `.java` blocks are collected separately: javac compiles them first (in-process, via the
+    // persistent JavaRunner) and their output dir joins krusty's classpath, mirroring how kotlinc's
+    // test infra makes Java sources visible to the Kotlin compile.
     let mut blocks: Vec<(String, String)> = Vec::new();
+    let mut java_blocks: Vec<(String, String)> = Vec::new();
     let mut cur_name: Option<String> = None;
+    let mut cur_is_java = false;
     let mut cur = String::new();
+    let flush = |name: Option<String>,
+                 is_java: bool,
+                 cur: &mut String,
+                 blocks: &mut Vec<(String, String)>,
+                 java_blocks: &mut Vec<(String, String)>| {
+        if let Some(n) = name {
+            if is_java {
+                java_blocks.push((n, std::mem::take(cur)));
+            } else {
+                blocks.push((n, std::mem::take(cur)));
+            }
+        }
+    };
     for line in src.lines() {
         if let Some(rest) = line.trim_start().strip_prefix("// FILE:") {
-            if let Some(n) = cur_name.take() {
-                blocks.push((n, std::mem::take(&mut cur)));
-            }
+            flush(
+                cur_name.take(),
+                cur_is_java,
+                &mut cur,
+                &mut blocks,
+                &mut java_blocks,
+            );
             let fname = rest.trim();
-            let stem = fname
-                .strip_suffix(".kt")
-                .unwrap_or(fname)
-                .rsplit('/')
-                .next()
-                .unwrap_or(fname)
-                .to_string();
-            cur_name = Some(stem);
+            cur_is_java = fname.ends_with(".java");
+            let name = if cur_is_java {
+                // Keep the full leaf file name — javac requires it to match the public class.
+                fname.rsplit('/').next().unwrap_or(fname).to_string()
+            } else {
+                fname
+                    .strip_suffix(".kt")
+                    .unwrap_or(fname)
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(fname)
+                    .to_string()
+            };
+            cur_name = Some(name);
         } else if cur_name.is_some() {
             cur.push_str(line);
             cur.push('\n');
         }
     }
-    if let Some(n) = cur_name.take() {
-        blocks.push((n, cur));
-    }
+    flush(
+        cur_name.take(),
+        cur_is_java,
+        &mut cur,
+        &mut blocks,
+        &mut java_blocks,
+    );
     // Single-file (no `// FILE:` markers) but routed here for coroutine-helper injection: the whole
     // source is the one main block.
-    if blocks.is_empty() {
+    if blocks.is_empty() && java_blocks.is_empty() {
         blocks.push((main_stem.to_string(), src.to_string()));
     }
     // Mirror kotlinc: a `// WITH_COROUTINES` test gets the generated `helpers` source as an extra file.
     if src.contains("// WITH_COROUTINES") {
         blocks.push(("CoroutineUtil".to_string(), COROUTINE_HELPERS.to_string()));
     }
-    if blocks.len() < 2 {
-        return None; // not actually multi-file
+    if blocks.is_empty() || (blocks.len() < 2 && java_blocks.is_empty()) {
+        return None; // not actually multi-file (and nothing for javac either)
+    }
+
+    // Compile the Java blocks first (in-process javac, persistent JVM — no per-test spawn) and put
+    // their class dir on krusty's classpath; the emitted classes ride along to BoxRunner's loader.
+    // When javac-first fails — the Java references Kotlin declarations, so it cannot be ordered
+    // first — fall back to the KOTLIN-FIRST pipeline: signature stubs → krusty → real javac
+    // (docs/JAVA_INTEROP.md slice 2).
+    let mut cp: Vec<std::path::PathBuf> = cp_jars.to_vec();
+    let mut java_classes: Vec<(String, Vec<u8>)> = Vec::new();
+    if !java_blocks.is_empty() {
+        match common::javac_compile(&java_blocks, cp_jars) {
+            Some((javadir, classes)) => {
+                cp.push(javadir);
+                java_classes = classes;
+            }
+            None => return compile_kotlin_first(src, &blocks, &java_blocks, cp_jars, jdk_modules),
+        }
     }
 
     // `// LANGUAGE:` directives live in the preamble before the first `// FILE:` — read them from the
     // whole source and apply to every block.
     let features = krusty::features::LangFeatures::from_source(src);
-    compile_blocks(&blocks, cp_jars, jdk_modules, &features)
+    let compiled = compile_blocks(&blocks, &cp, jdk_modules, &features);
+    // The javac classes were read into memory (and BoxRunner loads from bytes), so the scratch
+    // src+classes tree is no longer needed — success or skip.
+    if let Some(javadir) = cp.last().filter(|_| !java_classes.is_empty()) {
+        if let Some(root) = javadir.parent() {
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+    let mut out = compiled?;
+    out.extend(java_classes);
+    Some(out)
+}
+
+/// Kotlin-first mixed compilation for a test whose Java references Kotlin declarations
+/// (`docs/JAVA_INTEROP.md` slice 2): generate signature STUBS from the Java sources (no javac —
+/// `krusty::jvm::java_stub`), compile the Kotlin blocks against the stub dir, then javac the REAL
+/// Java against krusty's emitted classes and ship javac's output. Stub-generation or javac failure
+/// (unsupported Java subset, genuinely broken source) → skip, never mis-grade.
+fn compile_kotlin_first(
+    src: &str,
+    blocks: &[(String, String)],
+    java_blocks: &[(String, String)],
+    cp_jars: &[std::path::PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    use krusty::ast::Decl;
+    let features = krusty::features::LangFeatures::from_source(src);
+    // The stub resolver's world: the Kotlin blocks' own top-level classes (parse only — internal
+    // name = `pkg/Name` with `.`→`$` nesting, as the signature pass derives it)…
+    let mut kotlin_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (_, content) in blocks {
+        let mut diags = DiagSink::new();
+        let toks = lex(content, &mut diags);
+        let file = krusty::parser::parse_with_features(content, &toks, &mut diags, &features);
+        if diags.has_errors() {
+            return None;
+        }
+        let pkg = file
+            .package
+            .as_ref()
+            .map(|p| p.replace('.', "/"))
+            .unwrap_or_default();
+        for &d in &file.decls {
+            if let Decl::Class(c) = file.decl(d) {
+                let mangled = c.name.replace('.', "$");
+                kotlin_names.insert(if pkg.is_empty() {
+                    mangled
+                } else {
+                    format!("{pkg}/{mangled}")
+                });
+            }
+        }
+    }
+    // …plus everything on the classpath (same thread-local warm `Classpath` the compile uses).
+    let mut cp_paths: Vec<std::path::PathBuf> = cp_jars.to_vec();
+    if let Some(p) = jdk_modules {
+        cp_paths.push(p.to_path_buf());
+    }
+    let classpath = CP_CACHE.with(|c| {
+        c.borrow_mut()
+            .entry(cp_paths.clone())
+            .or_insert_with(|| std::rc::Rc::new(Classpath::new(cp_paths.clone())))
+            .clone()
+    });
+    let resolve = |cand: &str| kotlin_names.contains(cand) || classpath.find(cand).is_some();
+    let stubs = krusty::jvm::java_stub::stub_classes(java_blocks, &resolve)?;
+
+    static UID: AtomicU64 = AtomicU64::new(0);
+    let uid = UID.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("krusty_ktfirst_{uid}_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let result = (|| {
+        let stubdir = root.join("stubs");
+        write_classes_to_dir(&stubs, &stubdir)?;
+        let mut cp = cp_jars.to_vec();
+        cp.push(stubdir);
+        let kotlin_classes = compile_blocks(blocks, &cp, jdk_modules, &features)?;
+        // Real javac against krusty's output (the stubs are DISCARDED — javac must see the real
+        // Kotlin classes so Java→Kotlin references type-check for real).
+        let kotlindir = root.join("kotlin");
+        write_classes_to_dir(&kotlin_classes, &kotlindir)?;
+        let mut javac_cp = cp_jars.to_vec();
+        javac_cp.push(kotlindir);
+        let (javadir, java_classes) = common::javac_compile(java_blocks, &javac_cp)?;
+        if let Some(jroot) = javadir.parent() {
+            let _ = fs::remove_dir_all(jroot);
+        }
+        let mut out = kotlin_classes;
+        out.extend(java_classes);
+        Some(out)
+    })();
+    let _ = fs::remove_dir_all(&root);
+    result
 }
 
 /// Compile a set of already-split source blocks `(stem, content)` as ONE krusty module against the

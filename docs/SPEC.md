@@ -1294,6 +1294,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `invokestatic` (previously the checker resolved it but the emit bailed). Test:
   `java_instance_e2e::calls_java_static_overloaded_methods`.
 
+- **Static call on a bare same-package (incl. ROOT-package) classpath class name (`J.greet()`).** Kotlin
+  makes same-package declarations visible without an import, and the file's own package — the root
+  package for an unpackaged file — is an implicit wildcard (`import_wildcards`). The checker's
+  static-call receiver path only consulted the EXPLICIT import map, so `J.greet()` failed to resolve even
+  though `J()` (constructor) and `fun f(j: J)` (type position) resolved via the import levels. It now
+  falls back to `imported_type_internal` (the same level-based resolver), keeping shadowing intact: a
+  lexical value or top-level property named `J` still wins (`value_root_shadows_classifier`). Test:
+  `java_source_interop_e2e::root_package_static_call_matches_other_positions`; corpus
+  `fakeOverride/kt40180*.kt` exercise the sibling type positions.
+
+- **`open`/`override` members are emitted WITHOUT `ACC_FINAL` (kotlinc's member modality).** The
+  emitter's finality shortcut ("no same-module subclass ⇒ method is final") is unsound across a
+  compilation boundary: kotlinc keeps an `open`/`override` (non-`final`) member's flag OPEN even when
+  nothing in the module extends the class, because a separately compiled module — or javac in a mixed
+  Java/Kotlin build — may override it. `FunDecl.is_open` (parser: `open`/`override` without `final`)
+  flows to `ir.open_methods`, which the JVM backend already honors. Surfaced by the Kotlin-first
+  Java-interop pipeline: javac rejected `class J extends A` because krusty's `A.name()` (an `open fun`)
+  carried `ACC_FINAL`. Test: `java_source_interop_e2e::java_extends_kotlin_via_stub_pipeline`.
+
+- **Java-source signature stubs (Kotlin-first mixed compilation, `docs/JAVA_INTEROP.md` slice 2).**
+  When a box test's Java references Kotlin declarations, javac cannot run first. `jvm/java_stub.rs`
+  parses the Java SIGNATURE surface (never bodies) and emits stub `.class` files — descriptors, access
+  flags, generic `Signature` attributes; concrete bodies are `aconst_null; athrow` since a stub is
+  never JVM-loaded. krusty compiles Kotlin against the stub dir, then javac compiles the real Java
+  against krusty's output, and only javac's classes ship. Name resolution is callback-based (Kotlin
+  module names + classpath probe) — an unresolvable type aborts stub generation (skip, never guess).
+  Tests: `jvm::java_stub::tests` (unit), `java_source_interop_e2e::java_extends_kotlin_via_stub_pipeline`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
