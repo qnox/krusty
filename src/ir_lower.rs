@@ -2261,6 +2261,73 @@ pub fn lower_file_at_reporting(
                             }
                         }
                     }
+                    // The CLASSPATH-supertype twin of the loop above: a property whose INFERRED type
+                    // covariantly narrows a classpath supertype property (`override val context =
+                    // EmptyCoroutineContext` under `Continuation.context: CoroutineContext`) needs the
+                    // same `get<X>()` bridge. The classpath interface's accessor is a plain METHOD
+                    // (`getContext()`), so pair the class's own properties against the supertype
+                    // method set.
+                    let own_prop_names: Vec<String> = c
+                        .body_props
+                        .iter()
+                        .map(|p| p.name.clone())
+                        .chain(c.props.iter().map(|p| p.name.clone()))
+                        .collect();
+                    // The CHECKER-resolved supertype names (the AST `TypeRef`s are unresolved simple
+                    // names): the direct superclass + every direct interface.
+                    let sup_names: Vec<TypeName> = lo
+                        .syms
+                        .class_by_type_name(internal_name)
+                        .map(|ci| {
+                            ci.interfaces
+                                .iter_ids()
+                                .chain(ci.super_internal)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    for sup in sup_names {
+                        let recv = Ty::Obj(sup, &[]);
+                        for pname in &own_prop_names {
+                            let Some((own_ty, _)) = lo.syms.prop_of_name(internal_name, pname)
+                            else {
+                                continue;
+                            };
+                            let ps = lo.syms.libraries.property_members(recv, pname);
+                            let Some(pi) = ps
+                                .overloads
+                                .iter()
+                                .find(|p| matches!(p.kind, crate::libraries::PropKind::Member))
+                            else {
+                                continue;
+                            };
+                            let (Some(sdesc), Some(odesc)) = (
+                                lo.runtime.type_descriptor(pi.ty),
+                                lo.runtime.type_descriptor(own_ty),
+                            ) else {
+                                continue;
+                            };
+                            if sdesc == odesc {
+                                continue;
+                            }
+                            let gname = property_getter_name(pname);
+                            let already = lo.ir.classes[cid as usize]
+                                .bridges
+                                .iter()
+                                .any(|b| b.name == gname && b.erased_params.is_empty());
+                            if !already {
+                                lo.ir.classes[cid as usize].bridges.push(crate::ir::Bridge {
+                                    name: gname,
+                                    erased_params: vec![],
+                                    erased_ret: ty_to_ir(pi.ty),
+                                    concrete_params: vec![],
+                                    concrete_ret: ty_to_ir(own_ty),
+                                    target_name: None,
+                                    box_ret: None,
+                                    unbox_params: Vec::new(),
+                                });
+                            }
+                        }
+                    }
                 }
                 // Collection special-member stubs: a class implementing a mapped `kotlin.collections`
                 // interface must provide the `java.util` method the interface declares for a Kotlin PROPERTY
