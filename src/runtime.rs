@@ -75,6 +75,9 @@ pub enum RuntimeOp {
     ArrayHashCode,
     ArrayCopyOf,
     StartCoroutine,
+    /// The RECEIVER form — `(suspend R.() -> T).startCoroutine(receiver, completion)` →
+    /// `ContinuationKt.startCoroutine(Function2, Object, Continuation)`.
+    StartCoroutineReceiver,
     ThrowOnFailure,
     CoroutineSuspended,
 }

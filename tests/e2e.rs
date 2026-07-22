@@ -20,6 +20,8 @@ mod anon_object_capture_e2e;
 mod anon_object_capture_member_e2e;
 #[path = "anonymous_function_e2e.rs"]
 mod anonymous_function_e2e;
+#[path = "apt_host_e2e.rs"]
+mod apt_host_e2e;
 #[path = "arity_error_coverage_e2e.rs"]
 mod arity_error_coverage_e2e;
 #[path = "assert_intrinsic_e2e.rs"]
@@ -468,6 +470,8 @@ mod js_backend_coverage_e2e;
 mod js_backend_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
 mod krusty_dep_dir_e2e;
+#[path = "ksp_apt_loop_e2e.rs"]
+mod ksp_apt_loop_e2e;
 #[path = "ksp_provision_e2e.rs"]
 mod ksp_provision_e2e;
 #[path = "labeled_expression_e2e.rs"]
@@ -524,6 +528,8 @@ mod metadata_reader_e2e;
 mod metadata_return_types;
 #[path = "missing_return_check_e2e.rs"]
 mod missing_return_check_e2e;
+#[path = "mpp_expect_actual_e2e.rs"]
+mod mpp_expect_actual_e2e;
 #[path = "multi_index_operator_e2e.rs"]
 mod multi_index_operator_e2e;
 #[path = "multiline_catch_e2e.rs"]
@@ -756,6 +762,8 @@ mod suspend_loop_compound_assign_e2e;
 mod suspend_loop_continue_break_e2e;
 #[path = "suspend_member_after_call_e2e.rs"]
 mod suspend_member_after_call_e2e;
+#[path = "suspend_receiver_lambda_e2e.rs"]
+mod suspend_receiver_lambda_e2e;
 #[path = "suspend_return_type_recovery_e2e.rs"]
 mod suspend_return_type_recovery_e2e;
 #[path = "suspend_spill_slot_reuse_e2e.rs"]

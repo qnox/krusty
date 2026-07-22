@@ -124,9 +124,20 @@ outer loop is bounded by the KSP backstop too.
    (base + dependency dirs), appends the javac dir for the module's Kotlin, and chains BOTH class
    sets through the module dir; javac failure falls back to the Kotlin-first stub pipeline.
    Java-only modules supported. Zero corpus tests today — model completeness for drop-in.
-4. **APT host** — pass `-processorpath`/`-processor` through the JavaRunner javac call; javac owns
-   the rounds. Validated by an e2e with a real annotation processor jar (mirror the KSP e2e shape,
-   opt-in env gate).
-5. **Combined outer fixpoint (C)** — wire KSP host + APT javac into the §4 loop behind the plugin
-   registry; e2e: KSP generates an annotated Java file → APT generates a Java class → Kotlin
-   references it.
+4. **[landed] APT host** — `common::javac_compile_proc` passes `-processorpath` (+ `-proc:full`,
+   required on JDK >= 23, and `-s` for generated sources) through the persistent JavaRunner; javac
+   discovers processors via ServiceLoader and owns the multi-round loop. Validated self-contained
+   (`tests/apt_host_e2e.rs`): an in-test-built `AbstractProcessor` (dir-based service registration,
+   no jar needed) generates across TWO rounds (`@Gen Src` → `@Gen2 SrcMid` → `SrcMidEnd`), krusty
+   compiles Kotlin calling the round-2 class, and a Filer collision surfaces as a failed compile
+   (skip, never mis-grade).
+5. **[landed] Combined outer fixpoint (C)** — `src/plugins/codegen_loop.rs::run_codegen_loop`
+   owns the §4 loop: KSP rounds (the host's own fixpoint) → java step when the `.java` set grew
+   (javac + APT rounds inside, via callback so the driver stays JVM-free) → repeat while either
+   engine contributes; generated names dedup across outer iterations; own outer backstop keeps
+   capped work. e2e `ksp_apt_loop_e2e`: KSP generates an APT-annotated `Bridge.java` → javac runs
+   the two-round processor (`BridgeMid`, `BridgeMidEnd`) → the APT-generated symbol re-enters the
+   KSP view → `Done.kt` → joint fixpoint in exactly two outer rounds; krusty then compiles Kotlin
+   calling `BridgeMidEnd.ping()`. Production remaining: the REAL-KSP sidecar as the KSP engine
+   (ksp_real_e2e proves the sidecar; wiring it behind `SymbolProcessor` is the shim work in
+   docs/PLUGIN_API.md) and CLI plumbing behind the plugin registry.
