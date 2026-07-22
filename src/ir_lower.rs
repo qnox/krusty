@@ -5568,7 +5568,10 @@ impl<'a> Lower<'a> {
     /// value through the `Ref` (and `x!!` unboxes it).
     fn shared_cell_elem_ty(&self, kty: Ty) -> Ty {
         match self.value_class_underlying(kty) {
-            Some(u) if kty.is_nullable() && self.runtime.scalar_value_repr(u).is_none() => kty,
+            // A nullable `X?` never holds the raw scalar — over a primitive underlying it is the
+            // BOXED `X` (the only null-capable form), over a reference underlying a reference either
+            // way — so its shared cell is always the `ObjectRef`, never a primitive `Ref`.
+            Some(_) if kty.is_nullable() => kty,
             Some(u) => u,
             None => kty,
         }
@@ -7135,17 +7138,6 @@ impl<'a> Lower<'a> {
                     if recv_ty
                         .obj_internal()
                         .is_some_and(|i| method_suspends(i, name))
-                    {
-                        return true;
-                    }
-                    if self
-                        .info
-                        .resolved_member(call)
-                        .is_some_and(|m| m.member.suspend)
-                        || self
-                            .info
-                            .resolved_extension(call)
-                            .is_some_and(|c| c.suspend)
                     {
                         return true;
                     }
@@ -13230,8 +13222,17 @@ impl<'a> Lower<'a> {
                 if self.shared_cell_vars.contains(&name) {
                     // A `@JvmInline value class` var is represented UNBOXED as its underlying type, so its
                     // `Ref` holder + element use that underlying type (`var z: Z(Int)` → `Ref.IntRef`) —
-                    // except a nullable reference value class (`Result<T>?`) stays BOXED (see helper).
-                    let elem_ty = self.shared_cell_elem_ty(kty);
+                    // except a NULLABLE `X?`, which holds a reference (the box / null-capable underlying),
+                    // never the raw scalar (see helper). The file-class arm above resolves `W?` to the
+                    // non-null `Obj(W)` (deliberate for plain locals), so re-apply the declared `?` here
+                    // where the boxed-vs-scalar `Ref` choice depends on it.
+                    let cell_kty = match ty.as_ref() {
+                        Some(r) if r.nullable && !kty.is_nullable() && kty.is_reference() => {
+                            Ty::nullable(kty)
+                        }
+                        _ => kty,
+                    };
+                    let elem_ty = self.shared_cell_elem_ty(cell_kty);
                     let elem = ref_elem_ir(elem_ty);
                     let it = self.lower_arg(init, &ty_to_ir(kty))?;
                     let holder = self.fresh_value();
