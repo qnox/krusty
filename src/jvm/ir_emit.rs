@@ -529,9 +529,10 @@ fn build_class_metadata(
             type_params: &c.type_params,
             ctor_param_tparams: &ctor_param_tparams,
             flags: class_metadata_flags(c),
+            // An `enum class`'s primary ctor is private too — entries are the only instances.
             primary_ctor_flags: if c.is_sealed {
                 SEALED_CTOR_FLAGS
-            } else if c.is_object {
+            } else if c.is_object || !c.enum_entries.is_empty() {
                 OBJECT_CTOR_FLAGS
             } else {
                 0
@@ -793,10 +794,26 @@ fn attach_synth_debug_tables(
         }
     };
     let this_desc = format!("L{};", c.fq_name());
-    // Primary constructor: `this` + one local per ctor parameter (a property-backed param).
-    let ctor_desc = format!("({})V", ctor_field_descs(c));
+    // Primary constructor: `this` + one local per ctor parameter (a property-backed param). An
+    // `enum class`'s ctor is `(String name, int ordinal, …declared params)`: kotlinc prepends the two
+    // synthetic `Enum` parameters and names them `$enum$name` / `$enum$ordinal` in the LVT.
+    let is_enum = !c.enum_entries.is_empty();
+    let ctor_desc = if is_enum {
+        format!("(Ljava/lang/String;I{})V", ctor_field_descs(c))
+    } else {
+        format!("({})V", ctor_field_descs(c))
+    };
     let mut ctor_locals = vec![("this".to_string(), this_desc.clone(), 0u16)];
     let mut slot = 1u16;
+    if is_enum {
+        ctor_locals.push((
+            "$enum$name".to_string(),
+            "Ljava/lang/String;".to_string(),
+            slot,
+        ));
+        ctor_locals.push(("$enum$ordinal".to_string(), "I".to_string(), slot + 1));
+        slot += 2;
+    }
     let mut ctor_pc = 0u16;
     // Only ctor PARAMETERS are constructor locals — a body property is a field, never an argument.
     for f in c.fields.iter().take(c.ctor_param_count as usize) {
@@ -4222,7 +4239,11 @@ fn emit_enum_class(
     let fq = c.fq_name();
     let self_desc = format!("L{fq};");
     let arr_desc = format!("[{self_desc}");
-    let mut cw = new_writer(&fq, "java/lang/Enum", opts);
+    // An enum extends the PARAMETERIZED `java.lang.Enum<E>`, so it carries a class `Signature` —
+    // whose value interns between the class and superclass names, as ASM visits them.
+    let enum_sig = format!("Ljava/lang/Enum<L{fq};>;");
+    let mut cw = new_writer_generic(&fq, Some(&enum_sig), "java/lang/Enum", opts);
+    cw.set_signature(&enum_sig);
     // An enum with an abstract member is `ACC_ABSTRACT`; one with any bodied entry (so a subclass
     // extends it) must not be `final`. A plain enum stays `final`.
     let has_abstract = c
@@ -4594,6 +4615,21 @@ fn emit_enum_class(
         attach_synth_debug_tables(ir, c, &mut cw, &[]);
         attach_declared_method_debug(ir, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
+        // kotlinc's synthesized enum members: `valueOf` names its parameter `value` in a
+        // LocalVariableTable (with no LineNumberTable), and `getEntries` returns `@NotNull`.
+        // `values()` gets neither.
+        cw.set_method_debug(
+            "valueOf",
+            &format!("(Ljava/lang/String;)L{};", c.fq_name()),
+            None,
+            &[("value".to_string(), "Ljava/lang/String;".to_string(), 0)],
+        );
+        cw.set_method_nullability(
+            "getEntries",
+            "()Lkotlin/enums/EnumEntries;",
+            Some("Lorg/jetbrains/annotations/NotNull;"),
+            &[],
+        );
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
     cw.finish()
