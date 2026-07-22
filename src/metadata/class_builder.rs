@@ -314,6 +314,9 @@ pub struct ClassTail<'a> {
     /// `inlineClassUnderlyingPropertyName` (f17, the name's string-table id) +
     /// `inlineClassUnderlyingType` (f18, an inline `Type`). `None` for an ordinary class.
     pub inline_underlying: Option<(&'a str, Ty)>,
+    /// `Class` JvmProtoBuf extension field 104 (`jvmClassFlags`) — kotlinc emits `3` for an interface.
+    /// `None` for every other kind (field omitted).
+    pub jvm_class_flags: Option<u64>,
     /// Whether the class HAS a primary constructor at all — an `interface` has none, so `Class` carries
     /// no `constructor` (f8) entry. Defaults to true (every other kind).
     pub emit_primary_ctor: bool,
@@ -336,6 +339,7 @@ impl Default for ClassTail<'_> {
             ctor_param_defaults: &[],
             inline_underlying: None,
             ctor_sig_name: None,
+            jvm_class_flags: None,
             emit_primary_ctor: true,
             primary_ctor_flags: 0,
         }
@@ -522,6 +526,9 @@ pub fn build_class(
     }
     for ee in &enum_msgs {
         class.repeated_message(13, ee); // Class.enum_entry = 13
+    }
+    if let Some(v) = tail.jvm_class_flags {
+        class.field_varint(104, v); // JvmProtoBuf.classFlags = 104 (interfaces carry 3)
     }
     if let Some((name_id, ty_pb)) = &inline_underlying {
         class.field_varint(17, *name_id as u64); // Class.inlineClassUnderlyingPropertyName = 17

@@ -148,6 +148,10 @@ impl ConstPool {
     fn utf8(&mut self, s: &str) -> u16 {
         self.intern(Const::Utf8(s.to_string()))
     }
+    /// Non-interning lookup of an existing `CONSTANT_Utf8` entry.
+    fn lookup_utf8(&self, s: &str) -> Option<u16> {
+        self.dedup.get(&Const::Utf8(s.to_string())).copied()
+    }
     /// Non-interning lookup of an existing `CONSTANT_String` entry.
     fn lookup_string(&self, s: &str) -> Option<u16> {
         let n = self.dedup.get(&Const::Utf8(s.to_string())).copied()?;
@@ -1337,8 +1341,14 @@ impl ClassWriter {
         lnt: Option<(u16, u32)>,
         locals: &[(String, String, u16)],
     ) {
-        let n = self.cp.utf8(name);
-        let d = self.cp.utf8(desc);
+        // Resolve WITHOUT interning first: describing a method that was never emitted (e.g. the ctor /
+        // accessors of an `interface`, which has neither) must not perturb the constant pool.
+        let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
+            return;
+        };
+        if !self.methods.iter().any(|m| m.name == n && m.desc == d) {
+            return;
+        }
         let lvt: Vec<(u16, u16, u16, Option<u16>)> = locals
             .iter()
             .map(|(nm, ds, slot)| (self.cp.utf8(nm), self.cp.utf8(ds), *slot, None))
@@ -1430,7 +1440,13 @@ impl ClassWriter {
         let field_has_invis = self.fields.iter().any(|f| !f.invisible_anns.is_empty());
         // Field-level RIA, if any field is annotated: interns before `Code` (fields precede methods).
         let field_ria = field_has_invis.then(|| self.cp.utf8("RuntimeInvisibleAnnotations"));
-        let code_attr_name = self.cp.utf8("Code");
+        // kotlinc interns `Code` only when a method actually has one — an `interface` with no bodies
+        // has none, and an unused attribute name would diverge.
+        let code_attr_name = if self.methods.iter().any(|m| m.code.is_some()) {
+            self.cp.utf8("Code")
+        } else {
+            0
+        };
         // First-use order of the per-method attribute names, in method emit order.
         let mut seq: Vec<An> = Vec::new();
         for m in &self.methods {
