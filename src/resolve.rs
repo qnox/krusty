@@ -177,6 +177,10 @@ pub struct ClassSig {
     pub props: Vec<(String, Ty, bool)>, // backing-field properties (name, type, is_var)
     /// Full primary-constructor parameter types in order (includes non-property params).
     pub ctor_params: Vec<Ty>,
+    /// Primary-constructor parameter NAMES, in order, and whether each declares a default. Needed to
+    /// map a named-argument call (`C(b = 9)`) onto positions from ANY file in the module — the AST
+    /// declaration is only reachable from the file that declares it.
+    pub ctor_param_names: Vec<(String, bool)>,
     pub methods: HashMap<String, Signature>,
     /// True if this is an `interface` (calls dispatch via `invokeinterface`).
     pub is_interface: bool,
@@ -1711,6 +1715,11 @@ pub fn collect_signatures_with_cp(
                         .iter()
                         .map(|p| ty_of_ref(&p.ty, &class_names, &ctp, diags))
                         .collect();
+                    let ctor_param_names: Vec<(String, bool)> = c
+                        .props
+                        .iter()
+                        .map(|p| (p.name.clone(), p.default.is_some()))
+                        .collect();
                     let ctor_defaults: Vec<Option<CtorDefaultValue>> = c
                         .props
                         .iter()
@@ -2371,6 +2380,7 @@ pub fn collect_signatures_with_cp(
                             super_internal: super_internal_ref,
                             super_ctor_params: Vec::new(),
                             is_annotation: c.is_annotation(),
+                            ctor_param_names,
                             ctor_defaults,
                             secondary_ctors,
                             tparam_names,
@@ -2415,6 +2425,7 @@ pub fn collect_signatures_with_cp(
                                 super_internal: companion_super_internal_ref,
                                 super_ctor_params: Vec::new(),
                                 is_annotation: false,
+                                ctor_param_names: Vec::new(),
                                 ctor_defaults: Vec::new(),
                                 secondary_ctors: Vec::new(),
                                 tparam_names: Vec::new(),
@@ -12400,6 +12411,19 @@ impl<'a> Checker<'a> {
                     defaults: c.props.iter().map(|p| p.default.is_some()).collect(),
                 }),
                 _ => None,
+            })
+            // Declared in ANOTHER FILE of the same module: the AST is out of reach, but the resolver
+            // already recorded the names on the class signature.
+            .or_else(|| {
+                let sig = self.syms.classes.get(class_name)?;
+                (!sig.ctor_param_names.is_empty()).then(|| ParamList {
+                    names: sig
+                        .ctor_param_names
+                        .iter()
+                        .map(|(n, _)| n.clone())
+                        .collect(),
+                    defaults: sig.ctor_param_names.iter().map(|(_, d)| *d).collect(),
+                })
             })
     }
 
