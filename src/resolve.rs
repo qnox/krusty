@@ -350,6 +350,41 @@ pub type MethodMap = HashMap<String, Vec<Signature>>;
 /// itself). Returns an EMPTY list when an erased-`Any` argument sits at a position where viable
 /// candidates' parameter types differ — krusty cannot reproduce kotlinc's precise-type selection
 /// there, and an unresolved member (skip) beats a misdispatch.
+/// Per-position score of `params` against `arg_tys` (2 exact, 1 assignable), `None` if any position is
+/// not assignable. The shared scoring kernel of `pick_overload` and `pick_member_overloads` — the
+/// selection rule must not drift between the top-level and member paths.
+fn positional_score(params: &[Ty], arg_tys: &[Ty]) -> Option<usize> {
+    let mut sc = 0;
+    for (&p, &a) in params.iter().zip(arg_tys.iter()) {
+        if !arg_assignable_simple(p, a) {
+            return None;
+        }
+        sc += if p == a { 2 } else { 1 };
+    }
+    Some(sc)
+}
+
+/// Soundness guard shared by `pick_overload` and `pick_member_overloads`: krusty erases generics, so a
+/// generic value reads as `kotlin/Any`. An erased-`Any` ARGUMENT at a position where the candidates'
+/// parameter types DIFFER defeats selection — kotlinc selects on the precise type krusty no longer has —
+/// so the caller must bail (leave unresolved / skip, never dispatch wrongly).
+fn erased_arg_defeats_selection<'a>(
+    arg_tys: &[Ty],
+    param_lists: impl Iterator<Item = &'a [Ty]> + Clone,
+) -> bool {
+    for (i, &a) in arg_tys.iter().enumerate() {
+        if a.is_erased_top() {
+            let mut params_here = param_lists.clone().filter_map(|ps| ps.get(i));
+            if let Some(first) = params_here.next() {
+                if params_here.any(|p| p != first) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn pick_member_overloads(
     members: Vec<crate::libraries::LibraryMember>,
     arg_tys: &[Ty],
@@ -395,30 +430,15 @@ fn pick_member_overloads(
             }
         }
     }
-    // An erased-`Any` ARGUMENT at a position where candidates' params differ: krusty cannot
-    // reproduce kotlinc's precise-type selection (same rule as top-level `pick_overload`).
-    for (i, &a) in arg_tys.iter().enumerate() {
-        if a.is_erased_top() {
-            let mut params_here = viable.iter().filter_map(|m| m.params.get(i));
-            if let Some(first) = params_here.next() {
-                if params_here.any(|p| p != first) {
-                    return Vec::new();
-                }
-            }
-        }
+    if erased_arg_defeats_selection(arg_tys, viable.iter().map(|m| m.params.as_slice())) {
+        return Vec::new();
     }
     let score = |m: &crate::libraries::LibraryMember| -> Option<usize> {
         if m.params.len() != arg_tys.len() {
             return Some(1); // omitted-arg/vararg candidate: viable but never beats an exact fit
         }
-        let mut sc = 2;
-        for (&p, &a) in m.params.iter().zip(arg_tys.iter()) {
-            if !arg_assignable_simple(p, a) {
-                return None;
-            }
-            sc += if p == a { 2 } else { 1 };
-        }
-        Some(sc)
+        // +2 baseline: any exact-arity assignable fit outranks every omitted-arg/vararg candidate.
+        positional_score(&m.params, arg_tys).map(|sc| sc + 2)
     };
     let scored: Vec<(usize, &crate::libraries::LibraryMember)> = viable
         .iter()
@@ -956,33 +976,12 @@ pub fn pick_overload(sigs: &[Signature], arg_tys: &[Ty]) -> Option<usize> {
     if cands.len() <= 1 {
         return cands.first().copied();
     }
-    // Soundness guard: krusty erases generics, so a generic value reads as `kotlin/Any`. If an argument
-    // is the erased `Any` at a position where the candidates' parameter types DIFFER, krusty cannot
-    // reproduce kotlinc's precise-type overload selection (kotlinc may see a concrete type there). Bail
-    // (`None`) so the call is left unresolved and the file is skipped rather than dispatched wrongly.
-    for (i, &a) in arg_tys.iter().enumerate() {
-        if a.is_erased_top() {
-            let mut params_here = cands.iter().filter_map(|&c| sigs[c].params.get(i));
-            if let Some(first) = params_here.next() {
-                if params_here.any(|p| p != first) {
-                    return None;
-                }
-            }
-        }
+    if erased_arg_defeats_selection(arg_tys, cands.iter().map(|&c| sigs[c].params.as_slice())) {
+        return None;
     }
-    let score = |s: &Signature| -> Option<usize> {
-        let mut sc = 0;
-        for (&p, &a) in s.params.iter().zip(arg_tys.iter()) {
-            if !arg_assignable_simple(p, a) {
-                return None;
-            }
-            sc += if p == a { 2 } else { 1 };
-        }
-        Some(sc)
-    };
     cands
         .iter()
-        .filter_map(|&i| score(&sigs[i]).map(|sc| (sc, i)))
+        .filter_map(|&i| positional_score(&sigs[i].params, arg_tys).map(|sc| (sc, i)))
         .max_by_key(|&(sc, _)| sc)
         .map(|(_, i)| i)
         .or_else(|| cands.first().copied())
