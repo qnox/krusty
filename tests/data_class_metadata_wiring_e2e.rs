@@ -141,6 +141,31 @@ fn value_class_return_member_is_byte_identical() {
     );
 }
 
+/// A method whose body introduces constants of its own — the null-check guard's parameter-name String
+/// and the `Intrinsics` reference. Pins that the method HEADER (name, descriptor, annotation types)
+/// interns before them, as kotlinc's writer does by visiting the header before the code, and that the
+/// `fun` line is attributed past the guard prologue rather than to pc 0.
+#[test]
+fn method_header_interns_before_its_body() {
+    assert_byte_identical(
+        "package demo\nclass C {\n    fun f(a: String): String = a\n}\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// The everyday service shape: a private constructor dependency and a method delegating to it. Nothing
+/// here is unusual, which is the point — it exercises the header/body interning order, the declared
+/// method's `@NotNull` annotations, and a private property all at once.
+#[test]
+fn class_delegating_to_a_private_dependency_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\n\ninterface P {\n    fun g(a: String): String\n}\n\nclass C(private val p: P) {\n    fun f(a: String): String = p.g(a)\n}\n",
+        "demo/C",
+        &[],
+    );
+}
+
 /// A `private val` in the primary constructor — the everyday dependency-injection shape. A private
 /// property has NO accessor, so kotlinc interns no `getX` name/descriptor and records the property as
 /// private in `@Metadata`; krusty leaked both (orphan pool entries plus public property flags).
