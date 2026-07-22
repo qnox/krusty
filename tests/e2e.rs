@@ -20,6 +20,8 @@ mod anon_object_capture_e2e;
 mod anon_object_capture_member_e2e;
 #[path = "anonymous_function_e2e.rs"]
 mod anonymous_function_e2e;
+#[path = "apt_host_e2e.rs"]
+mod apt_host_e2e;
 #[path = "arity_error_coverage_e2e.rs"]
 mod arity_error_coverage_e2e;
 #[path = "assert_intrinsic_e2e.rs"]

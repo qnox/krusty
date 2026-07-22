@@ -1463,6 +1463,7 @@ import javax.tools.*;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 
 public class JavaRunner {
     public static void main(String[] a) throws Exception {
@@ -1470,19 +1471,33 @@ public class JavaRunner {
         DataOutputStream dout = new DataOutputStream(new BufferedOutputStream(System.out, 4096));
         PrintStream realOut = System.out;
         while (true) {
-            String driver, cp, outdir, mainClass;
+            String driver, cp, outdir, mainClass, procPath;
             try { driver = readStr(din); } catch (EOFException e) { break; }
             cp = readStr(din); outdir = readStr(din); mainClass = readStr(din);
+            procPath = readStr(din);
             String result;
             try {
                 ByteArrayOutputStream jerr = new ByteArrayOutputStream();
                 JavaCompiler jc = ToolProvider.getSystemJavaCompiler();
                 // `driver` is one or more `.java` paths joined by the platform path separator.
                 String[] srcs = driver.split(File.pathSeparator);
-                String[] jargs = new String[4 + srcs.length];
-                jargs[0] = "-cp"; jargs[1] = cp; jargs[2] = "-d"; jargs[3] = outdir;
-                System.arraycopy(srcs, 0, jargs, 4, srcs.length);
-                int rc = jc.run(null, null, new PrintStream(jerr, true, "UTF-8"), jargs);
+                ArrayList<String> jargs = new ArrayList<>();
+                jargs.add("-cp"); jargs.add(cp);
+                jargs.add("-d"); jargs.add(outdir);
+                if (!procPath.isEmpty()) {
+                    // Annotation processing: javac discovers processors via ServiceLoader on the
+                    // processor path and runs its own multi-round loop. JDK >= 23 disables
+                    // processing unless explicitly requested, hence -proc:full. Generated sources
+                    // land in outdir/apt-src (their classes still go to -d).
+                    File gen = new File(outdir, "apt-src");
+                    gen.mkdirs();
+                    jargs.add("-processorpath"); jargs.add(procPath);
+                    jargs.add("-proc:full");
+                    jargs.add("-s"); jargs.add(gen.getPath());
+                }
+                for (String s : srcs) jargs.add(s);
+                int rc = jc.run(null, null, new PrintStream(jerr, true, "UTF-8"),
+                        jargs.toArray(new String[0]));
                 if (rc != 0) {
                     result = "ERROR:javac:" + jerr.toString("UTF-8");
                 } else if (mainClass.isEmpty()) {
@@ -1592,11 +1607,13 @@ impl JavaRunner {
         cp: &str,
         outdir: &str,
         main_class: &str,
+        proc_path: &str,
     ) -> std::io::Result<String> {
         self.write_str(driver)?;
         self.write_str(cp)?;
         self.write_str(outdir)?;
         self.write_str(main_class)?;
+        self.write_str(proc_path)?;
         self.stdin.flush()?;
         let deadline = Instant::now() + Duration::from_secs(60);
         let fd = self.stdout.as_raw_fd();
@@ -1614,6 +1631,19 @@ impl JavaRunner {
 /// classpath (krusty output dirs + stdlib); `outdir` receives the driver's `.class`.
 #[allow(dead_code)]
 pub fn javac_run(driver_path: &str, cp: &str, outdir: &str, main_class: &str) -> Option<String> {
+    javac_run_proc(driver_path, cp, outdir, main_class, "")
+}
+
+/// [`javac_run`] with an annotation `-processorpath` (empty = no processing) — javac runs its own
+/// multi-round APT loop in the same persistent JVM.
+#[allow(dead_code)]
+pub fn javac_run_proc(
+    driver_path: &str,
+    cp: &str,
+    outdir: &str,
+    main_class: &str,
+    proc_path: &str,
+) -> Option<String> {
     // A POOL of runner JVMs (not one global), so Java-driver tests run N-wide instead of serializing
     // on a single mutex held across the whole javac+run. The pool lock is released before the run.
     static POOL: OnceLock<Mutex<Vec<Arc<Mutex<JavaRunner>>>>> = OnceLock::new();
@@ -1637,11 +1667,13 @@ pub fn javac_run(driver_path: &str, cp: &str, outdir: &str, main_class: &str) ->
         }
     };
     let mut runner = runner.lock().unwrap();
-    match runner.try_run(driver_path, cp, outdir, main_class) {
+    match runner.try_run(driver_path, cp, outdir, main_class, proc_path) {
         Ok(s) => Some(s),
         Err(_) => {
             *runner = JavaRunner::new(&java, &runner_dir)?;
-            runner.try_run(driver_path, cp, outdir, main_class).ok()
+            runner
+                .try_run(driver_path, cp, outdir, main_class, proc_path)
+                .ok()
         }
     }
 }
@@ -1657,6 +1689,19 @@ pub type JavacOutput = (PathBuf, Vec<(String, Vec<u8>)>);
 /// — for the conformance harness that is a SKIP, not a failure.
 #[allow(dead_code)]
 pub fn javac_compile(sources: &[(String, String)], cp_jars: &[PathBuf]) -> Option<JavacOutput> {
+    javac_compile_proc(sources, cp_jars, &[])
+}
+
+/// [`javac_compile`] with annotation processors: `proc_path` entries (dirs or jars, each carrying
+/// `META-INF/services/javax.annotation.processing.Processor`) go on javac's `-processorpath`, and
+/// javac runs its own multi-round APT loop in-process — generated sources are compiled in the same
+/// invocation and their classes come back with the rest.
+#[allow(dead_code)]
+pub fn javac_compile_proc(
+    sources: &[(String, String)],
+    cp_jars: &[PathBuf],
+    proc_path: &[PathBuf],
+) -> Option<JavacOutput> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static UID: AtomicU64 = AtomicU64::new(0);
     if sources.is_empty() {
@@ -1689,8 +1734,13 @@ pub fn javac_compile(sources: &[(String, String)], cp_jars: &[PathBuf]) -> Optio
             .collect::<Vec<_>>()
             .join(sep)
     };
+    let proc = proc_path
+        .iter()
+        .map(|j| j.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(":");
     // Empty main class = compile-only (no run) in the JavaRunner protocol.
-    let res = javac_run(&joined, &cp, &outdir.to_string_lossy(), "")?;
+    let res = javac_run_proc(&joined, &cp, &outdir.to_string_lossy(), "", &proc)?;
     if res != "OK" {
         // Failure is a legitimate SKIP for the harness; surface the javac error only on demand.
         if std::env::var("KRUSTY_JAVAC_DEBUG").is_ok() {

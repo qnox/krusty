@@ -124,9 +124,13 @@ outer loop is bounded by the KSP backstop too.
    (base + dependency dirs), appends the javac dir for the module's Kotlin, and chains BOTH class
    sets through the module dir; javac failure falls back to the Kotlin-first stub pipeline.
    Java-only modules supported. Zero corpus tests today — model completeness for drop-in.
-4. **APT host** — pass `-processorpath`/`-processor` through the JavaRunner javac call; javac owns
-   the rounds. Validated by an e2e with a real annotation processor jar (mirror the KSP e2e shape,
-   opt-in env gate).
+4. **[landed] APT host** — `common::javac_compile_proc` passes `-processorpath` (+ `-proc:full`,
+   required on JDK >= 23, and `-s` for generated sources) through the persistent JavaRunner; javac
+   discovers processors via ServiceLoader and owns the multi-round loop. Validated self-contained
+   (`tests/apt_host_e2e.rs`): an in-test-built `AbstractProcessor` (dir-based service registration,
+   no jar needed) generates across TWO rounds (`@Gen Src` → `@Gen2 SrcMid` → `SrcMidEnd`), krusty
+   compiles Kotlin calling the round-2 class, and a Filer collision surfaces as a failed compile
+   (skip, never mis-grade).
 5. **Combined outer fixpoint (C)** — wire KSP host + APT javac into the §4 loop behind the plugin
    registry; e2e: KSP generates an annotated Java file → APT generates a Java class → Kotlin
    references it.
