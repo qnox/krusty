@@ -467,6 +467,10 @@ pub struct FunDecl {
     /// NOT emit `ACC_FINAL` (kotlinc's ABI: a separately-compiled module, or javac in a mixed
     /// build, may override it).
     pub is_open: bool,
+    /// `override` modifier — the member MUST match a supertype member (kotlinc rejects an
+    /// `override` that overrides nothing; with member overloads a same-name sibling no longer
+    /// counts as a match).
+    pub is_override: bool,
     /// `abstract` modifier — a member with no body, only valid in an abstract class or interface.
     pub is_abstract: bool,
     /// Declaration visibility (`public`/`internal`/`protected`/`private`; `public` by default).

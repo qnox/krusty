@@ -3007,6 +3007,11 @@ fn emit_bridges(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
                     code.checkcast(ci);
                 } else if et.is_reference() && ct.is_jvm_scalar() {
                     unbox_prim(cw, &mut code, *ct);
+                } else if et.is_jvm_scalar() && ct.is_reference() {
+                    // The erased slot is a PRIMITIVE but the concrete override takes the generic
+                    // reference (`B.foo(int)` bridged onto `foo(t: T)="…"` erased to `Object`):
+                    // box the scalar before delegating, exactly as kotlinc's bridge does.
+                    box_prim_free(cw, &mut code, *et);
                 } else if et.is_jvm_scalar() && ct.is_jvm_scalar() {
                     emit_num_conv(*et, *ct, &mut code);
                 }
