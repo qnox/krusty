@@ -16,6 +16,7 @@
 //! generated symbols resolve. Body and expression rewriting belongs at the IR level.
 
 pub mod cli;
+pub mod codegen_loop;
 pub mod deps;
 pub mod ksp;
 pub mod registry;

@@ -57,7 +57,8 @@ public class MiniProcessor extends AbstractProcessor {
 "#;
 
 /// Build the processor into a class DIR with its ServiceLoader registration; return the dir.
-fn build_processor() -> Option<std::path::PathBuf> {
+/// (Shared with the KSP+APT loop e2e.)
+pub fn build_processor() -> Option<std::path::PathBuf> {
     let (procdir, _) = common::javac_compile(
         &[
             ("MiniProcessor.java".to_string(), PROCESSOR.to_string()),

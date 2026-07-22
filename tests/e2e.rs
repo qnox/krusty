@@ -470,6 +470,8 @@ mod js_backend_coverage_e2e;
 mod js_backend_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
 mod krusty_dep_dir_e2e;
+#[path = "ksp_apt_loop_e2e.rs"]
+mod ksp_apt_loop_e2e;
 #[path = "ksp_provision_e2e.rs"]
 mod ksp_provision_e2e;
 #[path = "labeled_expression_e2e.rs"]
