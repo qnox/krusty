@@ -141,6 +141,28 @@ fn class_metadata_flags(c: &crate::ir::IrClass) -> u64 {
         | (u64::from(!c.enum_entries.is_empty()) << 15)
 }
 
+/// `Function.flags` (proto field 9) — ONE bitfield like [`class_metadata_flags`], not a per-shape
+/// constant. Decoded from kotlinc 2.4.0 (copy 198, componentN 454, hashCode/toString 65750, equals
+/// 66006): bit0 hasAnnotations | bits1-3 visibility (PUBLIC=3, PRIVATE=1) | bits4-5 modality
+/// (FINAL=0, OPEN=1, ABSTRACT=2) | bits6-7 memberKind (DECLARATION=0, SYNTHESIZED=3) | bit8 isOperator.
+/// Used for a class's REAL declared members; the data/value-class synthesized sets keep their own
+/// (already kotlinc-verified) constants.
+fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -> u64 {
+    let visibility: u64 = if ir.private_methods.contains(&fid) {
+        1
+    } else {
+        3
+    };
+    let modality: u64 = if f.body.is_none() {
+        2 // abstract (an interface method or an `abstract fun`)
+    } else if ir.open_methods.contains(&fid) {
+        1
+    } else {
+        0
+    };
+    (visibility << 1) | (modality << 4)
+}
+
 fn build_class_metadata(
     ir: &IrFile,
     c: &crate::ir::IrClass,
@@ -150,17 +172,15 @@ fn build_class_metadata(
         build_class, ClassTail, FnMeta, PropMeta, COMPONENT_FN_FLAGS, COPY_FN_FLAGS,
         EQUALS_FN_FLAGS, HASHCODE_TOSTRING_FN_FLAGS, SEALED_CTOR_FLAGS,
     };
-    if c.is_object
-        || c.is_companion
-        || c.is_interface
+    if c.is_companion
         || c.is_annotation
-        || !c.enum_entries.is_empty()
         || c.enum_entry_of.is_some()
         || c.prop_ref.is_some()
         || c.func_ref.is_some()
         || c.companion_class.is_some()
         || !c.secondary_ctors.is_empty()
-        || !c.has_primary_ctor
+        // An interface legitimately has NO constructor; every other kind must have its primary.
+        || (!c.has_primary_ctor && !c.is_interface)
         || c.fields.len() != c.ctor_param_count as usize
     {
         return None;
@@ -216,14 +236,19 @@ fn build_class_metadata(
             [format!("get{cn}"), format!("set{cn}")]
         })
         .collect();
-    if c.methods.iter().any(|&fid| {
-        let n = &ir.functions[fid as usize].name;
-        !accessor_names.contains(n)
-            && !data_method_names.contains(n)
-            && !value_method_names.contains(n)
-    }) {
-        return None;
-    }
+    // Any member that is NOT an accessor and NOT part of a data/value class's synthesized set is a REAL
+    // declared function — emit it (with derived flags) rather than declining the whole class.
+    let declared_fids: Vec<u32> = c
+        .methods
+        .iter()
+        .copied()
+        .filter(|&fid| {
+            let n = &ir.functions[fid as usize].name;
+            !accessor_names.contains(n)
+                && !data_method_names.contains(n)
+                && !value_method_names.contains(n)
+        })
+        .collect();
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
     let props: Vec<PropMeta> = c
         .fields
@@ -344,7 +369,26 @@ fn build_class_metadata(
             },
         ]
     } else {
-        vec![]
+        declared_fids
+            .iter()
+            .filter_map(|&fid| {
+                let f = ir.functions.get(fid as usize)?;
+                Some(FnMeta {
+                    name: f.name.clone(),
+                    params: f
+                        .params
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| (format!("p{i}"), *t))
+                        .collect(),
+                    ret: f.ret,
+                    flags: function_flags(ir, fid, f),
+                    params_have_defaults: false,
+                    jvm_sig: None,
+                    jvm_sig_name: None,
+                })
+            })
+            .collect()
     };
     // A value class's primary constructor is realized as the static `constructor-impl` returning the
     // erased underlying, not `<init>`; its `@Metadata` signature records that.
