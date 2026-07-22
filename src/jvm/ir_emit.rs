@@ -92,6 +92,50 @@ pub struct EmitOptions {
     pub emit_class_metadata: bool,
 }
 
+/// `Class.flags` (proto field 1) for any Kotlin class kind — ONE bitfield, not a per-kind constant.
+/// Decoded from kotlinc 2.4.0 across every kind (plain 6, open 22, abstract 38, sealed 54, interface
+/// 102, annotation 262, object 326, data 1030, value 8199, enum 32902):
+///   bit0 hasAnnotations | bits1-3 visibility (PUBLIC=3) | bits4-5 modality (FINAL0/OPEN1/ABSTRACT2/
+///   SEALED3) | bits6-8 classKind (CLASS0/INTERFACE1/ENUM2/ENUM_ENTRY3/ANNOTATION4/OBJECT5/COMPANION6)
+///   | bit10 isData | bit13 isValue | bit15 hasEnumEntries.
+/// The writer omits the field at [`DEFAULT_CLASS_FLAGS`] (a public final class).
+fn class_metadata_flags(c: &crate::ir::IrClass) -> u64 {
+    const VIS_PUBLIC: u64 = 3;
+    let modality: u64 = if c.is_sealed {
+        3
+    } else if c.is_abstract || c.is_interface {
+        2
+    } else if c.is_open {
+        1
+    } else {
+        0
+    };
+    let kind: u64 = if c.is_annotation {
+        4
+    } else if c.is_interface {
+        1
+    } else if !c.enum_entries.is_empty() {
+        2
+    } else if c.enum_entry_of.is_some() {
+        3
+    } else if c.is_companion {
+        6
+    } else if c.is_object {
+        5
+    } else {
+        0
+    };
+    // A value class carries `@JvmInline`, which sets `hasAnnotations`.
+    let has_annotations = u64::from(c.is_value);
+    has_annotations
+        | (VIS_PUBLIC << 1)
+        | (modality << 4)
+        | (kind << 6)
+        | (u64::from(c.is_data) << 10)
+        | (u64::from(c.is_value) << 13)
+        | (u64::from(!c.enum_entries.is_empty()) << 15)
+}
+
 /// Compute a class's `@kotlin.Metadata` from its IR — WIRING [`crate::metadata::class_builder::build_class`]
 /// into emission. Bounded (for now) to a PLAIN class with a primary constructor of `val`/`var` properties
 /// and NO user methods — the shape whose metadata is byte-verified against kotlinc. Returns `None` for
@@ -104,8 +148,7 @@ fn build_class_metadata(
 ) -> Option<KotlinMetadata> {
     use crate::metadata::class_builder::{
         build_class, ClassTail, FnMeta, PropMeta, COMPONENT_FN_FLAGS, COPY_FN_FLAGS,
-        DATA_CLASS_FLAGS, EQUALS_FN_FLAGS, HASHCODE_TOSTRING_FN_FLAGS, SEALED_CLASS_FLAGS,
-        SEALED_CTOR_FLAGS, VALUE_CLASS_FLAGS,
+        EQUALS_FN_FLAGS, HASHCODE_TOSTRING_FN_FLAGS, SEALED_CTOR_FLAGS,
     };
     if c.is_object
         || c.is_companion
@@ -316,15 +359,7 @@ fn build_class_metadata(
         &methods,
         &[],
         &ClassTail {
-            flags: if c.is_data {
-                DATA_CLASS_FLAGS
-            } else if c.is_value {
-                VALUE_CLASS_FLAGS
-            } else if c.is_sealed {
-                SEALED_CLASS_FLAGS
-            } else {
-                0
-            },
+            flags: class_metadata_flags(c),
             primary_ctor_flags: if c.is_sealed { SEALED_CTOR_FLAGS } else { 0 },
             module_name: opts.module_name.as_deref(),
             ctor_param_defaults: &ctor_param_defaults,
