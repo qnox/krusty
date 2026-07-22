@@ -325,6 +325,7 @@ fn build_class_metadata(
             // parameter's default is the PARAMETER's, not the property's. A body property's
             // initializer is not on `IrField::default` either — it lives in the class `init_body`.
             // Only a `val`: a `var` can be reassigned, so kotlinc gives it no constant.
+            is_abstract: c.is_interface,
             has_constant: f.is_final
                 && i >= c.ctor_param_count as usize
                 && const_fields.contains(&(i as u32)),
