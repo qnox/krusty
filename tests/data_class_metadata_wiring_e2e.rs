@@ -166,6 +166,18 @@ fn class_delegating_to_a_private_dependency_is_byte_identical() {
     );
 }
 
+/// An expression-body method whose signature wraps across lines. kotlinc attributes the
+/// `LineNumberTable` to the `=` expression, not the `fun` keyword — so a multi-line signature makes the
+/// two diverge. A single-line body keeps both on one line and is unaffected.
+#[test]
+fn multiline_signature_expression_body_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C {\n    fun f(\n        a: Int,\n    ): Int = a\n}\n",
+        "demo/C",
+        &[],
+    );
+}
+
 /// A `private val` in the primary constructor — the everyday dependency-injection shape. A private
 /// property has NO accessor, so kotlinc interns no `getX` name/descriptor and records the property as
 /// private in `@Metadata`; krusty leaked both (orphan pool entries plus public property flags).
