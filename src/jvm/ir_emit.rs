@@ -415,13 +415,15 @@ fn build_class_metadata(
     let vc_ctor_desc = c
         .is_value
         .then(|| format!("({0}){0}", desc(c.fields[0].ty)));
+    // `Class.enumEntry` (f13) — the builder has always accepted these; only the caller withheld them.
+    let enum_entry_names: Vec<String> = c.enum_entries.iter().map(|e| e.name.clone()).collect();
     let (d1_bytes, d2) = build_class(
         &c.fq_name(),
         &ctor_params,
         vc_ctor_desc.as_deref().unwrap_or(&ctor_desc),
         &props,
         &methods,
-        &[],
+        &enum_entry_names,
         &ClassTail {
             flags: class_metadata_flags(c),
             primary_ctor_flags: if c.is_sealed { SEALED_CTOR_FLAGS } else { 0 },
@@ -4306,6 +4308,17 @@ fn emit_enum_class(
     // Erased bridges for a generic-interface method overridden at the enum level
     // (`enum E : A<String> { …; override fun foo(t: String) }` → bridge `foo(Object)`→`foo(String)`).
     emit_bridges(c, &mut cw);
+    // An enum is a VIEW of the same `IrClass` — compute its `@Metadata` (and hence debug tables /
+    // annotations) through the shared path, exactly like `emit_class` and `emit_interface_class`.
+    if let Some(m) = opts
+        .emit_class_metadata
+        .then(|| build_class_metadata(ir, c, opts))
+        .flatten()
+    {
+        attach_synth_debug_tables(c, &mut cw);
+        attach_synth_nullability(c, &mut cw);
+        cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
+    }
     cw.finish()
 }
 
