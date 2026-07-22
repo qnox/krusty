@@ -132,6 +132,67 @@ fun box(): String = J().name()
     assert_eq!(got, "OK");
 }
 
+/// The `// MODULE:` chaining shape with a Java file in the DEPENDENCY module: `lib` is a Java
+/// class plus Kotlin that uses it, `main` is Kotlin `box()` against lib's emitted dir on the
+/// classpath — the same javac-first, dir-chaining flow `compile_module_test` performs per module.
+#[test]
+fn module_dependency_with_java_source() {
+    let Some(jdk) = common::jdk_modules() else {
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+    let jars = common::classpath_jars_for("");
+    // Module `lib`: J.java + lib.kt (Kotlin wrapping the Java class).
+    let Some((javadir, java_classes)) = common::javac_compile(
+        &[(
+            "J.java".to_string(),
+            "public class J { public static String part() { return \"O\"; } }".to_string(),
+        )],
+        &jars,
+    ) else {
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+    let mut libcp = jars.clone();
+    libcp.push(javadir.clone());
+    let lib_kotlin = common::compile_in_process(
+        "class A { fun part(): String = J.part() + \"K\" }",
+        "Lib",
+        &libcp,
+        Some(jdk.as_path()),
+    )
+    .expect("lib kotlin compiles against the javac dir");
+    // Write lib's FULL output (kotlin + java classes) to one dir — the chained module classpath.
+    let root = std::env::temp_dir().join(format!("krusty_modjava_e2e_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let libdir = root.join("lib");
+    for (name, bytes) in lib_kotlin.iter().chain(java_classes.iter()) {
+        let p = libdir.join(format!("{name}.class"));
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, bytes).unwrap();
+    }
+    if let Some(jroot) = javadir.parent() {
+        let _ = std::fs::remove_dir_all(jroot);
+    }
+    // Module `main`: box() against lib's dir.
+    let mut maincp = jars.clone();
+    maincp.push(libdir);
+    let main_classes = common::compile_in_process(
+        "fun box(): String = A().part()",
+        "MainKt",
+        &maincp,
+        Some(jdk.as_path()),
+    )
+    .expect("main compiles against lib's emitted dir");
+    let mut classes = lib_kotlin;
+    classes.extend(java_classes);
+    classes.extend(main_classes);
+    let _ = std::fs::remove_dir_all(&root);
+    let box_class = common::find_box_class(&classes).expect("box class");
+    let got = common::run_box(&classes, &box_class, &jars).expect("box run");
+    assert_eq!(got, "OK");
+}
+
 /// Kotlin `box()` calling a static method on a javac-compiled Java class (the
 /// `constants/numberLiteralCoercionToInferredType.kt` shape, minus the K2-ignored parts).
 #[test]
