@@ -46,13 +46,14 @@ pub struct FnMeta {
 }
 
 impl FnMeta {
-    /// A plain member function (no special flags) — the common case.
+    /// A plain member function (public, final, a declaration) — the common case, whose flags are
+    /// kotlinc's default and therefore omitted from the proto.
     pub fn plain(name: String, params: Vec<(String, Ty)>, ret: Ty) -> FnMeta {
         FnMeta {
             name,
             params,
             ret,
-            flags: 0,
+            flags: DEFAULT_FUNCTION_FLAGS,
             params_have_defaults: false,
             jvm_sig: None,
             jvm_sig_name: None,
@@ -68,6 +69,9 @@ pub const COPY_FN_FLAGS: u64 = 198;
 /// overriding a supertype member — hence the higher bits). From kotlinc 2.4.0.
 pub const EQUALS_FN_FLAGS: u64 = 0x101d6;
 pub const HASHCODE_TOSTRING_FN_FLAGS: u64 = 0x100d6;
+/// `Function.flags` (f9) for a plain `public final` declared member — kotlinc's DEFAULT, so the field
+/// is OMITTED at this exact value (mirrors [`DEFAULT_CLASS_FLAGS`]).
+pub const DEFAULT_FUNCTION_FLAGS: u64 = 6;
 /// `Class.flags` (f1) for a plain `public final class` — kotlinc's DEFAULT, so the field is OMITTED at
 /// this exact value (an `internal class` writes an explicit `0`, visibility INTERNAL being 0).
 pub const DEFAULT_CLASS_FLAGS: u64 = 6;
@@ -462,7 +466,8 @@ pub fn build_class(
                 vp.field_message(3, &ty);
                 func.repeated_message(6, &vp); // Function.value_parameter = 6
             }
-            if m.flags != 0 {
+            // Omitted at the public-final-declaration default, exactly like `Class.flags`.
+            if m.flags != DEFAULT_FUNCTION_FLAGS {
                 func.field_varint(9, m.flags); // Function.flags = 9
             }
             if let Some(sig) = &m.jvm_sig {
