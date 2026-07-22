@@ -95,6 +95,29 @@ fn class_with_property_and_method_is_byte_identical() {
     );
 }
 
+/// A `private val` in the primary constructor — the everyday dependency-injection shape. A private
+/// property has NO accessor, so kotlinc interns no `getX` name/descriptor and records the property as
+/// private in `@Metadata`; krusty leaked both (orphan pool entries plus public property flags).
+#[test]
+fn private_ctor_property_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C(private val a: String)\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// The same private property declared in the class BODY rather than the primary constructor — a
+/// separate lowering path onto the same accessor-and-flags question.
+#[test]
+fn private_body_property_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C {\n    private val a: String = \"x\"\n}\n",
+        "demo/C",
+        &[],
+    );
+}
+
 /// A bare `interface` — reached through `emit_interface_class`, which never computed a `@Metadata` at
 /// all (so no debug tables either). Now wired to the shared metadata path: an interface has NO
 /// constructor (no `Class.constructor`), carries the JvmProtoBuf class-flags extension (f104 = 3), and
