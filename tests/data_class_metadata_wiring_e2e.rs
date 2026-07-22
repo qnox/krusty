@@ -709,3 +709,14 @@ fn class_with_ref_ctor_param_and_string_body_property_is_byte_identical() {
         &[],
     );
 }
+
+/// A nullable body property (`val s: String? = null`) — `@Nullable` with no guard, and no constant:
+/// kotlinc omits the redundant `null` store, so the field name interns at the getter's `getfield`.
+#[test]
+fn class_with_nullable_body_property_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C {\n    val s: String? = null\n}\n",
+        "demo/C",
+        &[],
+    );
+}

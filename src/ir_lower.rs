@@ -486,6 +486,13 @@ pub fn lower_file_at_reporting(
                         p.ty.as_ref()
                             .map(|_| resolved_prop_ty(&p.name))
                             .unwrap_or_else(|| info.ty(p.init.unwrap()));
+                    // A declared `T?` keeps its nullability — the resolver's ClassSig type is the
+                    // stored value type, which does not carry it.
+                    let ty = if p.ty.as_ref().is_some_and(|r| r.nullable) {
+                        mark_nullable(ty)
+                    } else {
+                        ty
+                    };
                     (p.name.clone(), ty)
                 })
                 .collect();
@@ -3120,6 +3127,12 @@ pub fn lower_file_at_reporting(
                                     .ty
                                     .clone();
                                 let init_e = c.body_props[*i].init.unwrap();
+                                // `val s: String? = null` — the JVM already zero-initializes the field,
+                                // so kotlinc emits no store at all. Skipping it also keeps the field's
+                                // name/descriptor out of the pool until the getter's `getfield`.
+                                if matches!(lo.afile.expr(init_e), Expr::NullLit) {
+                                    continue;
+                                }
                                 // A branchy body-property initializer (`val k = when { … }`) emits
                                 // merge-point frames in the constructor's init context that the flat
                                 // emitter doesn't reconcile yet — bail rather than miscompile.
