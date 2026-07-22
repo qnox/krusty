@@ -60,11 +60,15 @@ fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
     let mut d = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(src);
     let toks = lex(src, &mut d);
-    let files = vec![krusty::parser::parse_with_features(
+    let mut files = vec![krusty::parser::parse_with_features(
         src, &toks, &mut d, &features,
     )];
     if d.has_errors() {
         return Some(d.diags[0].msg.clone());
+    }
+    // Multiplatform: a matched `expect` header is replaced by its `actual` (mirrors the gate).
+    if features.has("MultiPlatformProjects") {
+        krusty::frontend::strip_matched_expects(&mut files);
     }
     let platform = Box::new(JvmLibraries::new(cp.clone()));
     let mut syms = collect_signatures_with_cp(&files, platform, &mut d);

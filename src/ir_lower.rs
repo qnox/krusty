@@ -1108,6 +1108,9 @@ pub fn lower_file_at_reporting(
                     dispatch_receiver: Some(type_name(&internal)),
                     param_checks: vec![],
                 });
+                if p.is_open {
+                    lo.ir.open_methods.insert(fid);
+                }
                 methods.entry(gname).or_default().push((mi, fid, prop_ty));
                 method_fids.push(fid);
                 if p.is_var {
@@ -1122,6 +1125,9 @@ pub fn lower_file_at_reporting(
                         dispatch_receiver: Some(type_name(&internal)),
                         param_checks: vec![],
                     });
+                    if p.is_open {
+                        lo.ir.open_methods.insert(fid);
+                    }
                     methods.entry(sname).or_default().push((mi, fid, Ty::Unit));
                     method_fids.push(fid);
                 }
@@ -1238,6 +1244,14 @@ pub fn lower_file_at_reporting(
                     // bare `Ty` — so a nullable value-class property getter erases consistently with the
                     // field (`z: Z1?` → `LZ1;`, not the collapsed final underlying).
                     let fty_ir = lo.ir.classes[id as usize].fields[fidx].ty;
+                    // `open`/`override` property accessors must stay non-final (kotlinc's member
+                    // modality — same rule as methods). Only BODY properties carry the flag;
+                    // an `open val` PRIMARY-CONSTRUCTOR property isn't modeled yet.
+                    let prop_open = c
+                        .body_props
+                        .iter()
+                        .find(|pp| pp.name == *pname)
+                        .is_some_and(|pp| pp.is_open);
                     let gname = property_getter_name(pname);
                     if !methods.contains_key(&gname) {
                         // A plain field read; if the field is `lateinit` the backend's `GetField`
@@ -1266,6 +1280,9 @@ pub fn lower_file_at_reporting(
                                     supers: Vec::new(),
                                 },
                             );
+                        }
+                        if prop_open {
+                            lo.ir.open_methods.insert(fid);
                         }
                         methods.entry(gname).or_default().push((mi, fid, fty));
                         method_fids.push(fid);
@@ -2392,6 +2409,64 @@ pub fn lower_file_at_reporting(
                                         box_ret: None,
                                         unbox_params: Vec::new(),
                                     });
+                                }
+                            }
+                        }
+                        // A CROSS-FILE module interface (a `dependsOn` source set, or a multi-file
+                        // test declaring the interface in another file) isn't in THIS file's IR, so
+                        // `collect_iface_methods` sees nothing — read its erased method signatures
+                        // from the symbol table instead. Only the GENERIC-IFACE direction is
+                        // synthesized here (iface param/ret erased, impl concrete): body-presence
+                        // (default vs abstract) isn't recorded in the symbol table, so the
+                        // fake-override direction stays same-file-only rather than risking a bridge
+                        // that shadows a live default.
+                        if lo.class_info_name(itf).is_none() {
+                            if let Some(isig) = lo.syms.class_by_type_name(itf) {
+                                let imethods: Vec<(String, Vec<Ty>, Ty)> = isig
+                                    .methods
+                                    .iter()
+                                    .flat_map(|(n, sigs)| {
+                                        sigs.iter()
+                                            .map(move |s| (n.clone(), s.params.clone(), s.ret))
+                                    })
+                                    .collect();
+                                for (mname, iparams, iret) in imethods {
+                                    let Some((_, _, impl_fid, _)) = lo.resolve_method_by_arity(
+                                        type_name(&internal),
+                                        &mname,
+                                        iparams.len(),
+                                    ) else {
+                                        continue;
+                                    };
+                                    let ip = tys_to_ir(&iparams);
+                                    let ir_ = ty_to_ir(iret);
+                                    let cp = lo.ir.functions[impl_fid as usize].params.clone();
+                                    let cr = lo.ir.functions[impl_fid as usize].ret;
+                                    let generic_iface_dir = ip
+                                        .iter()
+                                        .zip(&cp)
+                                        .all(|(&e, &c)| e == c || e.is_erased_top())
+                                        && (ir_ == cr || ir_.is_erased_top());
+                                    if !generic_iface_dir || (ip == cp && ir_ == cr) {
+                                        continue;
+                                    }
+                                    if lo.ir.suspend_funs.contains(&impl_fid) {
+                                        return None; // same CPS-bridge hazard as the same-file path
+                                    }
+                                    if seen.insert(format!("{}{:?}{:?}", mname, ip, ir_)) {
+                                        lo.ir.classes[cid as usize].bridges.push(
+                                            crate::ir::Bridge {
+                                                name: mname,
+                                                erased_params: ip,
+                                                erased_ret: ir_,
+                                                concrete_params: cp,
+                                                concrete_ret: cr,
+                                                target_name: None,
+                                                box_ret: None,
+                                                unbox_params: Vec::new(),
+                                            },
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -7309,10 +7384,18 @@ impl<'a> Lower<'a> {
         let new_inst = self.emit_new(class_id, new_args, None);
         let r_idx = arity as u32 + 2;
         let mut inv_stmts = vec![self.emit_variable(r_idx, lambda_ty.clone(), Some(new_inst))];
-        // Store each own parameter (coerced from the erased `Object` argument) into its field.
+        // Store each own parameter (coerced from the erased `Object` argument) into its field —
+        // a REFERENCE target needs the explicit `checkcast` (the field is concretely typed; a bare
+        // Object store fails verification), a primitive the unboxing coercion.
         for (i, pty) in params.iter().enumerate() {
             let pv = self.emit_get_value(1 + i as u32);
-            let coerced = self.emit_type_op(IrTypeOp::ImplicitCoercion, pv, ty_to_ir(*pty));
+            let pty_ir = ty_to_ir(*pty);
+            let op = if pty_ir.is_reference() {
+                IrTypeOp::Cast
+            } else {
+                IrTypeOp::ImplicitCoercion
+            };
+            let coerced = self.emit_type_op(op, pv, pty_ir);
             let rg = self.emit_get_value(r_idx);
             inv_stmts.push(self.emit_set_field(rg, class_id, param_field_base + i as u32, coerced));
         }
@@ -7348,7 +7431,13 @@ impl<'a> Lower<'a> {
         let mut create_stmts = vec![self.emit_variable(cr_idx, lambda_ty, Some(create_new))];
         for (i, pty) in params.iter().enumerate() {
             let pv = self.emit_get_value(1 + i as u32);
-            let coerced = self.emit_type_op(IrTypeOp::ImplicitCoercion, pv, ty_to_ir(*pty));
+            let pty_ir = ty_to_ir(*pty);
+            let op = if pty_ir.is_reference() {
+                IrTypeOp::Cast // erased `Object` arg into the concretely-typed field: checkcast
+            } else {
+                IrTypeOp::ImplicitCoercion
+            };
+            let coerced = self.emit_type_op(op, pv, pty_ir);
             let rg = self.emit_get_value(cr_idx);
             create_stmts.push(self.emit_set_field(
                 rg,
@@ -10922,8 +11011,22 @@ impl<'a> Lower<'a> {
                     body,
                 } = self.afile.expr(arg).clone()
                 {
-                    // Bind names: explicit, or the implicit single `it`, or none (arity 0).
-                    let bind_names = ast::lambda_params_or_implicit(&lparams, params.len())?;
+                    // A RECEIVER suspend lambda (`suspend R.() -> T`, the coroutine-builder idiom):
+                    // the checker marked the receiver, and the checked type folds it in as
+                    // `params[0]` — bind it as the implicit `this` so a bare member access in the
+                    // body dispatches on the receiver, exactly like a non-suspend receiver lambda.
+                    let bind_names = if lambda_info(self.info, arg).receiver.is_some()
+                        && lparams.len() < params.len()
+                    {
+                        // The receiver occupies params[0]; explicit (or implicit-`it`) names bind
+                        // the remaining VALUE parameters.
+                        let mut v = vec!["this".to_string()];
+                        v.extend(ast::lambda_params_or_implicit(&lparams, params.len() - 1)?);
+                        v
+                    } else {
+                        // Bind names: explicit, or the implicit single `it`, or none (arity 0).
+                        ast::lambda_params_or_implicit(&lparams, params.len())?
+                    };
                     // Parameter `Ty`s come from the checked lambda type; absent metadata falls back to `Any`.
                     let ty_params: Vec<Ty> = self
                         .info
@@ -18763,20 +18866,37 @@ impl<'a> Lower<'a> {
                             }
                         }
                     }
-                    // `recv.startCoroutine(completion)` — a `kotlin.coroutines` intrinsic.
-                    if let [completion_arg] = args.as_slice() {
-                        if matches!(self.info.ty(receiver), Ty::Fun(s) if s.suspend)
-                            && crate::libraries::coroutine_intrinsic(&name)
-                                == Some(crate::libraries::CoroutineIntrinsic::StartCoroutine)
-                        {
-                            let recv_v = self.expr(receiver)?;
-                            let cont_ir = ty_to_ir(Ty::obj("kotlin/coroutines/Continuation"));
-                            let comp_v = self.lower_arg(*completion_arg, &cont_ir)?;
-                            return self.runtime_call(
-                                RuntimeOp::StartCoroutine,
-                                Ty::Unit,
-                                vec![recv_v, comp_v],
-                            );
+                    // `recv.startCoroutine(completion)` — a `kotlin.coroutines` intrinsic. The
+                    // TWO-argument form is the receiver overload on a `suspend R.() -> T` value:
+                    // `c.startCoroutine(receiver, completion)` → the stdlib's
+                    // `startCoroutine(Function2, R, Continuation)` static.
+                    if matches!(self.info.ty(receiver), Ty::Fun(s) if s.suspend)
+                        && crate::libraries::coroutine_intrinsic(&name)
+                            == Some(crate::libraries::CoroutineIntrinsic::StartCoroutine)
+                    {
+                        let cont_ir = ty_to_ir(Ty::obj("kotlin/coroutines/Continuation"));
+                        match args.as_slice() {
+                            [completion_arg] => {
+                                let recv_v = self.expr(receiver)?;
+                                let comp_v = self.lower_arg(*completion_arg, &cont_ir)?;
+                                return self.runtime_call(
+                                    RuntimeOp::StartCoroutine,
+                                    Ty::Unit,
+                                    vec![recv_v, comp_v],
+                                );
+                            }
+                            [receiver_arg, completion_arg] => {
+                                let recv_v = self.expr(receiver)?;
+                                let obj_ir = ty_to_ir(Ty::obj("kotlin/Any"));
+                                let target_v = self.lower_arg(*receiver_arg, &obj_ir)?;
+                                let comp_v = self.lower_arg(*completion_arg, &cont_ir)?;
+                                return self.runtime_call(
+                                    RuntimeOp::StartCoroutineReceiver,
+                                    Ty::Unit,
+                                    vec![recv_v, target_v, comp_v],
+                                );
+                            }
+                            _ => {}
                         }
                     }
                     // `super.method(args)` → a non-virtual `invokespecial` on `this` (value 0). The
@@ -19729,7 +19849,7 @@ impl<'a> Lower<'a> {
                         // A private `@InlineOnly` extension (scope fn / `String.uppercase()`) is recorded
                         // as an [`Extension`] by the checker and handled by the general branch above (its
                         // `inline` metadata makes the backend splice). Nothing left to resolve here.
-                        self.set_bail("unrecorded qualified call target");
+                        self.set_bail(&format!("unrecorded qualified call target '{name}'"));
                         return None;
                     }
                 }

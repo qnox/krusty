@@ -1359,6 +1359,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   wrapper krusty doesn't. Rejected in `parse_where_clause` (where-clause bounds are otherwise
   erased/discarded). Corpus: `funInterface/intersectionTypeToFunInterfaceConversion.kt` skips.
 
+- **Multiplatform `expect`/`actual` (JVM model).** A platform module and its `dependsOn` chain
+  compile as ONE source set (kotlinc's JVM MPP compilation): `split_modules` parses the full
+  `name(dependencies)(friends)(dependsOn)` test-module header, the gate merges `dependsOn` sources
+  transitively (dependency-first) into the platform module and never compiles a pure-`dependsOn`
+  target standalone; FRIEND deps ride the classpath like regular deps. `strip_matched_expects`
+  (frontend, gated on `+MultiPlatformProjects`) drops every top-level `expect` declaration matched
+  by a non-expect counterpart — same kind + name, arity and extension-receiver name for callables —
+  or by a TYPEALIAS for an `expect class` (`actual typealias S = String`). The `actual` modifier is
+  inert; an unmatched `expect` stays and fails checking (skip, never mis-grade). `open`/`override`
+  PROPERTY accessors carry `PropDecl.is_open` → `ir.open_methods` (non-final, the property analog
+  of the member-modality rule). Interface bridges synthesize across FILES of one module: a
+  cross-file module interface's erased signatures come from the symbol table (generic-iface
+  direction only — body-presence isn't recorded there, so the fake-override direction stays
+  same-file). Tests: `mpp_expect_actual_e2e`; corpus `multiplatform/` 75 PASS / 0 FAIL
+  (box total 2744 → 2825).
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
