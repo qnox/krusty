@@ -181,7 +181,7 @@ fn build_class_metadata(
         || !c.secondary_ctors.is_empty()
         // An interface legitimately has NO constructor; every other kind must have its primary.
         || (!c.has_primary_ctor && !c.is_interface)
-        || c.fields.len() != c.ctor_param_count as usize
+        || (c.fields.len() as u32) < c.ctor_param_count
     {
         return None;
     }
@@ -262,8 +262,20 @@ fn build_class_metadata(
                 .then(|| (format!("set{}", cap(&f.name)), format!("({})V", desc(f.ty)))),
         })
         .collect();
-    let ctor_params: Vec<(String, Ty)> = c.fields.iter().map(|f| (f.name.clone(), f.ty)).collect();
-    let ctor_param_defaults: Vec<bool> = c.fields.iter().map(|f| f.has_default).collect();
+    // Only the LEADING `ctor_param_count` fields are constructor parameters; any remainder are BODY
+    // properties (an `object`'s `val x = 1`, a class's non-ctor `val`) — they are properties, not params.
+    let ctor_params: Vec<(String, Ty)> = c
+        .fields
+        .iter()
+        .take(c.ctor_param_count as usize)
+        .map(|f| (f.name.clone(), f.ty))
+        .collect();
+    let ctor_param_defaults: Vec<bool> = c
+        .fields
+        .iter()
+        .take(c.ctor_param_count as usize)
+        .map(|f| f.has_default)
+        .collect();
     let ctor_desc = format!(
         "({})V",
         ctor_params
