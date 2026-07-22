@@ -1780,3 +1780,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   classpath's class flags); a class owner (a stdlib facade — the common case) stays `Methodref`. Surfaced by
   the ee1 overload-selection fix routing an omitted-default interface call to the correct `A.f$default`
   target. (box corpus `codegen/box/compileKotlinAgainstKotlin/delegatedDefault.kt`; box-OK 2378→2379)
+
+- **`ifEmpty`-style TyParam-receiver extensions discriminate by the JVM descriptor's first parameter.**
+  Four stdlib `ifEmpty`s reach selection as identical `Any`-receiver candidates (their `C : CharSequence`
+  / `Array<out T>` receivers erase); the physical first parameter is the last discriminator — a candidate
+  whose physical receiver can't hold the actual one is dropped, else the tie breaks on declaration order
+  and the inliner splices the wrong overload's body (`arraylength` on a String → VerifyError).
+  (`string_if_empty_selects_the_charsequence_overload`.)

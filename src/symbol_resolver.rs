@@ -2092,6 +2092,49 @@ struct ExtCtx<'a> {
 /// against their LOGICAL value parameters (a member's `callable.params` are value-only; an extension's
 /// prepend the receiver in the JVM emit shape, so [`logical_value_params`] strips it). Overloads are tried
 /// closest-receiver-rank first, and within a rank by the ordered applicability passes below.
+/// Whether an extension's PHYSICAL receiver (the JVM descriptor's first parameter) can hold the
+/// actual receiver — the discriminator of last resort for TyParam receivers erased to `Any` (see the
+/// call site). `Ljava/lang/Object;` admits everything; an array parameter admits only an array
+/// receiver; a reference parameter admits a receiver whose supertype closure reaches it (mapped back
+/// through the JVM↔Kotlin builtin/collection tables). Unparseable descriptors admit (no evidence).
+fn physical_receiver_admits(
+    lib: &dyn SemanticPlatform,
+    mro: Option<&ReceiverMro>,
+    recv: Ty,
+    descriptor: &str,
+) -> bool {
+    let Some(rest) = descriptor.strip_prefix('(') else {
+        return true;
+    };
+    let recv_is_array = recv.non_null().array_elem().is_some()
+        || recv
+            .non_null()
+            .obj_internal()
+            .is_some_and(|n| n.render().ends_with("Array"));
+    match rest.as_bytes().first() {
+        Some(b'[') => recv_is_array,
+        Some(b'L') => {
+            let Some(end) = rest.find(';') else {
+                return true;
+            };
+            let internal = &rest[1..end];
+            if internal == "java/lang/Object" {
+                return true;
+            }
+            if recv_is_array {
+                return false;
+            }
+            let kotlin = crate::jvm::jvm_class_map::jvm_collection_to_kotlin(internal)
+                .or_else(|| crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_with_members(internal))
+                .unwrap_or(internal);
+            mro.is_none_or(|m| {
+                m.rank(lib, Ty::obj(kotlin)).is_some() || m.rank(lib, Ty::obj(internal)).is_some()
+            })
+        }
+        _ => true,
+    }
+}
+
 fn select_overload(
     lib: &dyn SemanticPlatform,
     recv: Ty,
@@ -2200,6 +2243,23 @@ fn select_overload(
         } else {
             o.receiver_rank
         };
+        // A TyParam receiver erased to `Any` still has its REAL bound in the JVM descriptor's first
+        // parameter (`Array<out T>.ifEmpty` → `[Ljava/lang/Object;`; `C.ifEmpty` where
+        // `C : CharSequence` → `Ljava/lang/CharSequence;`). The four stdlib `ifEmpty`s all reach
+        // here as identical `Any`-receiver candidates, so the descriptor is the only remaining
+        // discriminator — drop one whose PHYSICAL receiver can't hold the actual receiver, else the
+        // tie breaks on declaration order and the inliner splices the wrong overload's body.
+        if kind == FnKind::Extension
+            && matches!(o.receiver, Some(Ty::Obj(n, args)) if n.matches("kotlin/Any") && args.is_empty())
+            && !physical_receiver_admits(lib, recv_mro.as_ref(), recv, &o.callable.descriptor)
+        {
+            crate::trace_compiler!(
+                "resolve",
+                "  drop {name} physical receiver of {} rejects {recv:?}",
+                o.callable.descriptor
+            );
+            continue;
+        }
         let lp = logical_value_params(lib, o, recv, type_args);
         crate::trace_compiler!(
             "resolve",
