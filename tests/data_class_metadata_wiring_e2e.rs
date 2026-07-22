@@ -754,3 +754,14 @@ fn object_is_byte_identical() {
 fn generic_class_is_byte_identical() {
     assert_byte_identical("package demo\nclass C<T>(val a: T)\n", "demo/C", &[]);
 }
+
+/// A plain `enum class` — `Enum<E>` supertype, private ctor, the synthesized `values`/`valueOf`/
+/// `getEntries`/`$VALUES` members, and a `<clinit>` whose LineNumberTable follows the entry lines.
+#[test]
+fn enum_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nenum class E {\n    A,\n    B\n}\n",
+        "demo/E",
+        &[],
+    );
+}

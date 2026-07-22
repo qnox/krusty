@@ -508,6 +508,8 @@ pub struct IrEnumEntry {
     /// `Some(subclass_internal)` when the entry has a body and is constructed as an instance of a synthesized
     /// anonymous subclass (`new Enum$ENTRY(name, ordinal, args)`); `None` when constructed as the enum
     /// itself.
+    /// 1-based source line of the entry's declaration, for the `<clinit>` `LineNumberTable`.
+    pub decl_line: u32,
     pub subclass: Option<TypeName>,
 }
 
