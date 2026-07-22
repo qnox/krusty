@@ -70,6 +70,19 @@ fn assert_byte_identical(src: &str, class_internal: &str, cp: &[PathBuf]) {
 
 // ---- Byte-identity (the end-to-end goal) ----------------------------------------------------------
 
+/// A class with a constructor property AND a declared method — the everyday shape. Needs three things
+/// that only recently exist: the declared member in `@Metadata` (with derived `Function.flags`, omitted
+/// at the public-final default), a `LineNumberTable`/`LocalVariableTable` for the method from its own
+/// source line, and kotlinc's member ORDER (property accessors before declared functions).
+#[test]
+fn class_with_property_and_method_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C(val x: Int) { fun f(): Int = x }\n",
+        "demo/C",
+        &[],
+    );
+}
+
 /// A bare `interface` — reached through `emit_interface_class`, which never computed a `@Metadata` at
 /// all (so no debug tables either). Now wired to the shared metadata path: an interface has NO
 /// constructor (no `Class.constructor`), carries the JvmProtoBuf class-flags extension (f104 = 3), and
