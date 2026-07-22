@@ -408,6 +408,8 @@ pub struct ClassWriter {
     fields: Vec<FieldInfo>,
     methods: Vec<MethodInfo>,
     class_attributes: Vec<(u16, Vec<u8>)>, // (name_index, raw bytes)
+    /// Constant-pool index of the class's generic `Signature` VALUE, when it has one.
+    class_signature: Option<u16>,
     /// Encoded `annotation` structures (type_index + element_value_pairs, WITHOUT the outer count) for the
     /// class's single `RuntimeVisibleAnnotations` attribute — `@Metadata` and user annotations both append
     /// here so `finish` writes ONE attribute (two would be invalid per JVMS §4.7.16).
@@ -441,8 +443,22 @@ pub struct InnerClassSpec {
 
 impl ClassWriter {
     pub fn new(internal_name: &str, super_internal: &str) -> ClassWriter {
+        ClassWriter::new_generic(internal_name, None, super_internal)
+    }
+
+    /// [`ClassWriter::new`] for a class carrying a generic `Signature`. kotlinc (ASM) visits
+    /// `(name, signature, superName)` in that order, so the signature VALUE interns BETWEEN the class
+    /// and superclass names — the attribute NAME is interned later, with the other attribute names.
+    pub fn new_generic(
+        internal_name: &str,
+        signature: Option<&str>,
+        super_internal: &str,
+    ) -> ClassWriter {
         let mut cp = ConstPool::default();
         let this_class = cp.class(internal_name);
+        if let Some(sig) = signature {
+            cp.utf8(sig);
+        }
         let super_class = cp.class(super_internal);
         ClassWriter {
             cp,
@@ -453,6 +469,7 @@ impl ClassWriter {
             fields: Vec::new(),
             methods: Vec::new(),
             class_attributes: Vec::new(),
+            class_signature: None,
             runtime_annotations: Vec::new(),
             bootstrap_methods: Vec::new(),
             class_deprecated: false,
@@ -501,12 +518,12 @@ impl ClassWriter {
     }
 
     /// Attach a class-level generic `Signature` attribute (e.g. `<T:Ljava/lang/Object;>Ljava/lang/Object;`).
+    /// Record the class's generic `Signature`. The VALUE is interned here (it dedups onto the slot
+    /// [`ClassWriter::new_generic`] reserved between the class and superclass names); the attribute
+    /// NAME is interned late, with the other attribute names, matching kotlinc.
     pub fn set_signature(&mut self, signature: &str) {
-        let name = self.cp.utf8("Signature");
         let sig = self.cp.utf8(signature);
-        let mut body = Vec::new();
-        u2(&mut body, sig);
-        self.class_attributes.push((name, body));
+        self.class_signature = Some(sig);
     }
 
     /// Add an implemented interface / extended interface by internal name.
@@ -1499,6 +1516,11 @@ impl ClassWriter {
         // `Code` — kotlinc visits fields first, and a field's `Signature` attribute precedes its
         // annotations (`class C(val xs: List<String>)` pool: `Signature`, `RuntimeInvisibleAnnotations`,
         // `Code`). The later `signature_attr_name` intern dedups onto this index.
+        // The class's own `Signature` attribute name interns with the other attribute names, before
+        // `Code` — the same slot a field's `Signature` uses (both dedup onto one entry).
+        let class_sig_attr = self
+            .class_signature
+            .map(|sig| (self.cp.utf8("Signature"), sig));
         let field_sig_name = self
             .fields
             .iter()
@@ -1828,6 +1850,11 @@ impl ClassWriter {
         // Assemble the class attribute table in kotlinc's fixed order. `self.class_attributes` is empty
         // in practice (nothing pushes to it outside `finish`); it is prepended to preserve the API.
         let mut ordered: Vec<(u16, Vec<u8>)> = std::mem::take(&mut self.class_attributes);
+        if let Some((name, sig)) = class_sig_attr {
+            let mut body = Vec::new();
+            u2(&mut body, sig);
+            ordered.push((name, body));
+        }
         ordered.extend(
             [
                 inner_classes_attr,
