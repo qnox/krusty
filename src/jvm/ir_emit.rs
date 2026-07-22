@@ -241,7 +241,8 @@ fn build_class_metadata(
 ) -> Option<KotlinMetadata> {
     use crate::metadata::class_builder::{
         build_class, ClassTail, FnMeta, PropMeta, COMPONENT_FN_FLAGS, COPY_FN_FLAGS,
-        EQUALS_FN_FLAGS, HASHCODE_TOSTRING_FN_FLAGS, OBJECT_CTOR_FLAGS, SEALED_CTOR_FLAGS,
+        EQUALS_FN_FLAGS, FN_IS_SUSPEND, HASHCODE_TOSTRING_FN_FLAGS, OBJECT_CTOR_FLAGS,
+        SEALED_CTOR_FLAGS,
     };
     if c.is_companion
         || c.is_annotation
@@ -498,10 +499,17 @@ fn build_class_metadata(
                 // Real parameter NAMES — metadata is reflection-visible, so a placeholder would be an
                 // observable lie. Positional fallback only when the IR has no recorded names.
                 let names = ir.param_names(fid);
+                // A `suspend fun` is described as SOURCE declared it — its own parameters and return
+                // type, plus the suspend flag. The CPS form it actually compiles to (a trailing
+                // `Continuation`, `Object` return) is not derivable from that, so it rides along as a
+                // `JvmMethodSignature` descriptor.
+                let declared = ir.suspend_declared_sigs.get(&fid);
+                let (params, ret) = declared
+                    .map(|(p, r)| (p.as_slice(), *r))
+                    .unwrap_or((f.params.as_slice(), f.ret));
                 Some(FnMeta {
                     name: f.name.clone(),
-                    params: f
-                        .params
+                    params: params
                         .iter()
                         .enumerate()
                         .map(|(i, t)| {
@@ -511,10 +519,12 @@ fn build_class_metadata(
                             (n, *t)
                         })
                         .collect(),
-                    ret: f.ret,
-                    flags: function_flags(ir, fid, f),
+                    ret,
+                    flags: function_flags(ir, fid, f)
+                        | if declared.is_some() { FN_IS_SUSPEND } else { 0 },
                     params_have_defaults: false,
-                    jvm_sig: None,
+                    jvm_sig: declared
+                        .map(|_| crate::jvm::names::method_descriptor(&f.params, f.ret)),
                     jvm_sig_name: None,
                 })
             })
@@ -2733,7 +2743,12 @@ fn emit_class(
             // `this` slot; an ordinary member is an instance method.
             emit_method(ir, fid, &fq_name, facade, &mut cw, !f.is_static, env);
         } else {
-            cw.add_abstract_method(0x0001 | 0x0400, &f.name, &ir_method_desc(&f.params, &f.ret));
+            cw.add_abstract_method_sig(
+                0x0001 | 0x0400,
+                &f.name,
+                &ir_method_desc(&f.params, &f.ret),
+                method_signature(ir, fid, f).as_deref(),
+            );
         }
         // A method with default-valued parameters gets a `<name>$default(…, mask, marker)` synthetic stub
         // (the JVM realization of default arguments). A STATIC method (a value class's `constructor-impl`)
@@ -4137,7 +4152,12 @@ fn emit_interface_class(
             emit_method(ir, fid, &fq_name, facade, &mut cw, !f.is_static, env);
         } else {
             let desc = ir_method_desc(&f.params, &f.ret);
-            cw.add_abstract_method(0x0001 | 0x0400, &f.name, &desc);
+            cw.add_abstract_method_sig(
+                0x0001 | 0x0400,
+                &f.name,
+                &desc,
+                method_signature(ir, fid, f).as_deref(),
+            );
             // An abstract method still carries kotlinc's nullability annotations: `@NotNull` /
             // `@Nullable` on each reference parameter and on a reference return. Having no body is
             // why it gets no debug tables — it is not a reason to drop its annotations.
@@ -4661,7 +4681,12 @@ fn emit_enum_class(
         } else {
             // An abstract enum member (`abstract fun t(): String`) — declared `ACC_ABSTRACT`, the
             // entry subclasses override it.
-            cw.add_abstract_method(0x0001 | 0x0400, &f.name, &ir_method_desc(&f.params, &f.ret));
+            cw.add_abstract_method_sig(
+                0x0001 | 0x0400,
+                &f.name,
+                &ir_method_desc(&f.params, &f.ret),
+                method_signature(ir, fid, f).as_deref(),
+            );
         }
     }
     // $values(): build the backing array — `new E[n]` filled with each entry constant (kotlinc factors
@@ -4899,11 +4924,7 @@ fn emit_method_inner(
     // whose concrete param/return type is PARAMETERIZED (`getXs(): List<String>`, `copy(List<String>)`)
     // → its generic signature. `f.params`/`f.ret` are the SOURCE types (retain `<…>` args); `param_tys`/
     // `ret` are erased.
-    let signature = ir
-        .signatures
-        .get(&fid)
-        .and_then(|g| jvm_method_signature(g, f))
-        .or_else(|| method_parameterized_sig(&f.params, &f.ret));
+    let signature = method_signature(ir, fid, f);
     let desc = method_descriptor(&param_tys, ret);
     e.cw.add_method_sig(access, &f.name, &desc, &code, signature.as_deref());
     if ir.deprecated_methods.contains(&fid) {
@@ -4991,6 +5012,39 @@ fn parameterized_sig(ty: &Ty) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// A method's generic `Signature`, from whichever source applies: its own declared type parameters, the
+/// `suspend` CPS shape, or a parameterized concrete parameter/return type. `None` when erasure loses
+/// nothing. Shared by concrete and abstract emission — an abstract method has no body, which is not a
+/// reason to drop its signature.
+fn method_signature(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -> Option<String> {
+    ir.signatures
+        .get(&fid)
+        .and_then(|g| jvm_method_signature(g, f))
+        .or_else(|| {
+            ir.suspend_declared_sigs
+                .get(&fid)
+                .and_then(|(p, r)| suspend_method_sig(p, r))
+        })
+        .or_else(|| method_parameterized_sig(&f.params, &f.ret))
+}
+
+/// The generic `Signature` of a `suspend fun`'s CPS method. The declared return type survives only in
+/// the trailing continuation's type argument — `suspend fun f(a: String)` compiles to
+/// `f(String, Continuation): Object` but signs as
+/// `(Ljava/lang/String;Lkotlin/coroutines/Continuation<-Lkotlin/Unit;>;)Ljava/lang/Object;`, the `-`
+/// being `? super`. Takes the DECLARED parameters and return, not the rewritten ones.
+fn suspend_method_sig(params: &[Ty], ret: &Ty) -> Option<String> {
+    let ret_arg = ty_generic_sig(ret)?;
+    let mut s = String::from("(");
+    for p in params {
+        s.push_str(&parameterized_sig(p).unwrap_or_else(|| ir_type_desc(p)));
+    }
+    s.push_str("Lkotlin/coroutines/Continuation<-");
+    s.push_str(&ret_arg);
+    s.push_str(">;)Ljava/lang/Object;");
+    Some(s)
 }
 
 /// A method's generic `Signature` when a concrete param/return type is parameterized (`getXs()` →

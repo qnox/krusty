@@ -84,6 +84,10 @@ pub const HASHCODE_TOSTRING_FN_FLAGS: u64 = 0x100d6;
 /// `Function.flags` (f9) for a plain `public final` declared member — kotlinc's DEFAULT, so the field
 /// is OMITTED at this exact value (mirrors [`DEFAULT_CLASS_FLAGS`]).
 pub const DEFAULT_FUNCTION_FLAGS: u64 = 6;
+/// `Function.flags` bit 13 — `suspend`. The rest of a suspend function's proto is its DECLARED
+/// signature (no `Continuation` parameter, the source return type); this bit is what tells a reader
+/// the JVM method is the CPS form.
+pub const FN_IS_SUSPEND: u64 = 8192;
 /// `Class.flags` (f1) for a plain `public final class` — kotlinc's DEFAULT, so the field is OMITTED at
 /// this exact value (an `internal class` writes an explicit `0`, visibility INTERNAL being 0).
 pub const DEFAULT_CLASS_FLAGS: u64 = 6;

@@ -95,6 +95,30 @@ fn class_with_property_and_method_is_byte_identical() {
     );
 }
 
+/// An interface's `suspend` member. Everything about it is stated in Kotlin terms even though the JVM
+/// method is the CPS form: `@Metadata` records the declared parameters and return with the suspend
+/// flag (plus a `JvmMethodSignature` for the descriptor, which those types no longer imply), and the
+/// method carries a generic `Signature` naming `Continuation<? super Unit>`.
+#[test]
+fn suspend_interface_member_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ninterface I {\n    suspend fun f(a: String)\n}\n",
+        "demo/I",
+        &[],
+    );
+}
+
+/// A `suspend` member returning a value — the declared return survives only as the continuation's type
+/// argument (`Continuation<? super Integer>`), boxed because a generic position cannot hold `int`.
+#[test]
+fn suspend_member_returning_a_value_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ninterface I {\n    suspend fun f(): Int\n}\n",
+        "demo/I",
+        &[],
+    );
+}
+
 /// A `private val` in the primary constructor — the everyday dependency-injection shape. A private
 /// property has NO accessor, so kotlinc interns no `getX` name/descriptor and records the property as
 /// private in `@Metadata`; krusty leaked both (orphan pool entries plus public property flags).
