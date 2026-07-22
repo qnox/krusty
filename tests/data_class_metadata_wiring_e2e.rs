@@ -765,3 +765,14 @@ fn enum_is_byte_identical() {
         &[],
     );
 }
+
+/// An interface whose only member is an abstract method with a parameter — `@Metadata` names that
+/// parameter, even though there is no body and so no LocalVariableTable to carry the name.
+#[test]
+fn interface_abstract_method_parameter_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass D\ninterface I {\n    fun run(ctx: D)\n}\n",
+        "demo/I",
+        &[],
+    );
+}
