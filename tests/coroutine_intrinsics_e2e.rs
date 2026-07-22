@@ -135,3 +135,20 @@ fn suspend_fn_type_cast_targets_arity_plus_one_interface() {
 fun box(): String { f {}; return \"OK\" }\n";
     assert_eq!(run(src).expect("suspend fn-type cast runs"), "OK");
 }
+
+#[test]
+fn inferred_covariant_context_override_gets_supertype_bridge() {
+    // `override val context = EmptyCoroutineContext` (inferred type narrows the classpath
+    // `Continuation.context: CoroutineContext`): the class needs a `getContext()` BRIDGE returning
+    // the supertype's erased type, or interface dispatch throws AbstractMethodError.
+    let src = "import kotlin.coroutines.*\n\
+class E : Continuation<Any?> {\n\
+    override val context = EmptyCoroutineContext\n\
+    override fun resumeWith(result: Result<Any?>) {}\n\
+}\n\
+fun box(): String {\n\
+    val c: Continuation<Any?> = E()\n\
+    return if (c.context == EmptyCoroutineContext) \"OK\" else \"FAIL\"\n\
+}\n";
+    assert_eq!(run(src).expect("context bridge dispatches"), "OK");
+}
