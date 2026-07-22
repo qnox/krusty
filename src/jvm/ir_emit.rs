@@ -499,16 +499,25 @@ fn build_class_metadata(
                 // Real parameter NAMES — metadata is reflection-visible, so a placeholder would be an
                 // observable lie. Positional fallback only when the IR has no recorded names.
                 let names = ir.param_names(fid);
-                // A `suspend fun` is described as SOURCE declared it — its own parameters and return
-                // type, plus the suspend flag. The CPS form it actually compiles to (a trailing
-                // `Continuation`, `Object` return) is not derivable from that, so it rides along as a
-                // `JvmMethodSignature` descriptor.
-                let declared = ir.suspend_declared_sigs.get(&fid);
-                let (params, ret) = declared
-                    .map(|(p, r)| (p.as_slice(), *r))
-                    .unwrap_or((f.params.as_slice(), f.ret));
+                // A function is described as SOURCE declared it: its own name, parameters and return
+                // type. Two lowerings hide that — CPS gives a `suspend fun` a trailing `Continuation`
+                // and an `Object` return, and the value-class pass mangles the name and erases the
+                // value classes away. Prefer the value-class record when both applied: it ran first,
+                // so it holds the fully declared form. What the JVM method actually looks like rides
+                // along as a `JvmMethodSignature` (name only when mangling changed it).
+                let is_suspend = ir.suspend_declared_sigs.contains_key(&fid);
+                let vc = ir.vc_declared_sigs.get(&fid);
+                let declared = vc
+                    .map(|(n, p, r)| (n.as_str(), p.as_slice(), *r))
+                    .or_else(|| {
+                        ir.suspend_declared_sigs
+                            .get(&fid)
+                            .map(|(p, r)| (f.name.as_str(), p.as_slice(), *r))
+                    });
+                let (name, params, ret) =
+                    declared.unwrap_or((f.name.as_str(), f.params.as_slice(), f.ret));
                 Some(FnMeta {
-                    name: f.name.clone(),
+                    name: name.to_string(),
                     params: params
                         .iter()
                         .enumerate()
@@ -520,12 +529,11 @@ fn build_class_metadata(
                         })
                         .collect(),
                     ret,
-                    flags: function_flags(ir, fid, f)
-                        | if declared.is_some() { FN_IS_SUSPEND } else { 0 },
+                    flags: function_flags(ir, fid, f) | if is_suspend { FN_IS_SUSPEND } else { 0 },
                     params_have_defaults: false,
                     jvm_sig: declared
                         .map(|_| crate::jvm::names::method_descriptor(&f.params, f.ret)),
-                    jvm_sig_name: None,
+                    jvm_sig_name: (name != f.name).then(|| f.name.clone()),
                 })
             })
             .collect()
