@@ -3619,49 +3619,7 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
     {
         let a = ir.add_expr(IrExpr::GetValue(0));
         let b = ir.add_expr(IrExpr::GetValue(1));
-        let cmp = if is_ref_under {
-            ir.add_expr(IrExpr::Call {
-                callee: Callee::Static {
-                    owner: type_name("kotlin/jvm/internal/Intrinsics"),
-                    name: "areEqual".into(),
-                    descriptor: "(Ljava/lang/Object;Ljava/lang/Object;)Z".into(),
-                    inline: InlineKind::None,
-                },
-                dispatch_receiver: None,
-                args: vec![a, b],
-            })
-        } else if existing_type_name(&final_fq).is_some_and(is_ieee_fp) {
-            // A `Float`/`Double` underlying compares by IEEE TOTAL ORDER (`NaN == NaN`, `0.0 != -0.0`) —
-            // exactly `java/lang/Float.compare(a, b) == 0`, NOT a raw `fcmp`/`dcmp` (which gives the
-            // opposite for `NaN` and `±0.0`). Matches kotlinc's value-class `equals-impl0`.
-            let (owner, desc) = if final_fq == "kotlin/Float" {
-                ("java/lang/Float", "(FF)I")
-            } else {
-                ("java/lang/Double", "(DD)I")
-            };
-            let call = ir.add_expr(IrExpr::Call {
-                callee: Callee::Static {
-                    owner: type_name(owner),
-                    name: "compare".into(),
-                    descriptor: desc.into(),
-                    inline: InlineKind::None,
-                },
-                dispatch_receiver: None,
-                args: vec![a, b],
-            });
-            let zero = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
-            ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: crate::ir::IrBinOp::Eq,
-                lhs: call,
-                rhs: zero,
-            })
-        } else {
-            ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: crate::ir::IrBinOp::Eq,
-                lhs: a,
-                rhs: b,
-            })
-        };
+        let cmp = vc_underlying_eq(ir, a, b, is_ref_under, &final_fq);
         let body = ret_block(ir, cmp);
         add_static(ir, "equals-impl0", vec![u_ir, u_ir], bool_ir, body);
     }
@@ -3763,18 +3721,19 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
             dispatch_receiver: Some(ocast),
             args: vec![],
         });
+        // kotlinc INLINES the underlying comparison here (it does not call `equals-impl0`), with the
+        // OTHER operand first, then guards: `if (!eq) return false; return true`.
         let v = ir.add_expr(IrExpr::GetValue(0));
-        let eq0 = ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
-                owner: internal_name,
-                name: "equals-impl0".to_string(),
-                descriptor: format!("({udesc}{udesc})Z"),
-                inline: InlineKind::None,
-            },
-            dispatch_receiver: None,
-            args: vec![v, ounbox],
+        let eq = vc_underlying_eq(ir, ounbox, v, is_ref_under, &final_fq);
+        let zero = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
+        let not_eq = ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: crate::ir::IrBinOp::Eq,
+            lhs: eq,
+            rhs: zero,
         });
-        stmts.push(ir.add_expr(IrExpr::Return(Some(eq0))));
+        stmts.push(guard_false(ir, not_eq));
+        let t = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Boolean(true)));
+        stmts.push(ir.add_expr(IrExpr::Return(Some(t))));
         let sbody = ir.add_expr(IrExpr::Block { stmts, value: None });
         let impl_fid = add_static(ir, "equals-impl", vec![u_ir, any_ir], bool_ir, sbody);
         ir.open_methods.insert(impl_fid);
@@ -3859,6 +3818,59 @@ fn shift_slots(ir: &mut IrFile, root: ExprId) {
 }
 
 /// `if (cond) return false`.
+/// The value-class underlying-value equality kotlinc emits: a reference compares via
+/// `Intrinsics.areEqual`, an IEEE float/double by TOTAL ORDER (`Float.compare(a,b) == 0`, so
+/// `NaN == NaN` and `0.0 != -0.0`), every other primitive natively. Shared by `equals-impl0` and the
+/// inlined comparison inside `equals-impl`.
+fn vc_underlying_eq(
+    ir: &mut IrFile,
+    a: ExprId,
+    b: ExprId,
+    is_ref_under: bool,
+    final_fq: &str,
+) -> ExprId {
+    if is_ref_under {
+        return ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: type_name("kotlin/jvm/internal/Intrinsics"),
+                name: "areEqual".into(),
+                descriptor: "(Ljava/lang/Object;Ljava/lang/Object;)Z".into(),
+                inline: InlineKind::None,
+            },
+            dispatch_receiver: None,
+            args: vec![a, b],
+        });
+    }
+    if existing_type_name(final_fq).is_some_and(is_ieee_fp) {
+        let (owner, desc) = if final_fq == "kotlin/Float" {
+            ("java/lang/Float", "(FF)I")
+        } else {
+            ("java/lang/Double", "(DD)I")
+        };
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: type_name(owner),
+                name: "compare".into(),
+                descriptor: desc.into(),
+                inline: InlineKind::None,
+            },
+            dispatch_receiver: None,
+            args: vec![a, b],
+        });
+        let zero = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
+        return ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: crate::ir::IrBinOp::Eq,
+            lhs: call,
+            rhs: zero,
+        });
+    }
+    ir.add_expr(IrExpr::PrimitiveBinOp {
+        op: crate::ir::IrBinOp::Eq,
+        lhs: a,
+        rhs: b,
+    })
+}
+
 fn guard_false(ir: &mut IrFile, cond: ExprId) -> ExprId {
     let f = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Boolean(false)));
     let r = ir.add_expr(IrExpr::Return(Some(f)));
