@@ -152,3 +152,17 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run(src).expect("context bridge dispatches"), "OK");
 }
+
+#[test]
+fn passed_function_value_splices_into_inline_let() {
+    // `t?.let(x)` with a FUNCTION VALUE (not a lambda literal): the verbatim splice binds the param
+    // slot to the object and the body's own `Function1.invoke` dispatches on it.
+    let src = "fun g(x: (Throwable) -> Unit, t: Throwable?) { t?.let(x) }\n\
+fun box(): String {\n\
+    var m = \"\"\n\
+    g({ m = it.message ?: \"?\" }, RuntimeException(\"OK\"))\n\
+    g({ m = \"no\" }, null)\n\
+    return m\n\
+}\n";
+    assert_eq!(run(src).expect("let(fn-value) splices"), "OK");
+}
