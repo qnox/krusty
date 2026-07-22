@@ -253,10 +253,17 @@ fn build_class_metadata(
     let props: Vec<PropMeta> = c
         .fields
         .iter()
-        .map(|f| PropMeta {
+        .enumerate()
+        .map(|(i, f)| PropMeta {
             name: f.name.clone(),
             ty: f.ty,
             is_var: !f.is_final,
+            // Only a BODY property (past the ctor params) carries a compile-time constant; a ctor
+            // parameter's default is the PARAMETER's, not the property's.
+            // NOTE: a BODY property's constant initializer is not on `IrField::default` (that carries a
+            // ctor-parameter default); it lives in the class `init_body`, so `hasConstant` is not yet
+            // detectable here — kotlinc sets it for `val y: Int = 2` (flags 8710).
+            has_constant: i >= c.ctor_param_count as usize && f.default.is_some(),
             getter: (format!("get{}", cap(&f.name)), format!("(){}", desc(f.ty))),
             setter: (!f.is_final)
                 .then(|| (format!("set{}", cap(&f.name)), format!("({})V", desc(f.ty)))),

@@ -19,6 +19,9 @@ pub struct PropMeta {
     pub name: String,
     pub ty: Ty,
     pub is_var: bool,
+    /// The property has a compile-time CONSTANT initializer (`val y: Int = 2` in the class body) —
+    /// kotlinc records `hasConstant` in `Property.flags`.
+    pub has_constant: bool,
     pub getter: (String, String),         // (jvm name, jvm descriptor)
     pub setter: Option<(String, String)>, // present iff `var`
 }
@@ -104,9 +107,14 @@ fn predefined_index(t: Ty) -> u64 {
 }
 const ANY_PREDEFINED: u64 = 0;
 
-/// `var` property flags, as kotlinc emits them in `Property` field 11 (public mutable property with
-/// default accessors). `val` properties default to 0 and the field is omitted.
-const VAR_PROPERTY_FLAGS: u64 = 1798;
+/// `Property.flags` (f11) for a plain public `val` with a default getter — kotlinc's DEFAULT, so the
+/// field is OMITTED at this value. One bitfield like `Class`/`Function`: bits1-3 visibility (PUBLIC=3
+/// → 6), bit8 isVar, bit9 hasGetter, bit10 hasSetter, bit13 hasConstant. It self-checks: the `var`
+/// value kotlinc emits (1798) is exactly 518 + isVar(256) + hasSetter(1024).
+const DEFAULT_PROPERTY_FLAGS: u64 = 518;
+const PROP_IS_VAR: u64 = 256;
+const PROP_HAS_SETTER: u64 = 1024;
+const PROP_HAS_CONSTANT: u64 = 8192;
 
 #[derive(Default)]
 struct StringTable {
@@ -406,8 +414,15 @@ pub fn build_class(
             prop.field_varint(2, st.local(&p.name) as u64); // Property.name = 2
             let ty = type_pb(&mut st, p.ty);
             prop.field_message(3, &ty); // Property.return_type = 3
-            if p.is_var {
-                prop.field_varint(11, VAR_PROPERTY_FLAGS); // Property flags (var only)
+            let pflags = DEFAULT_PROPERTY_FLAGS
+                | if p.is_var {
+                    PROP_IS_VAR | PROP_HAS_SETTER
+                } else {
+                    0
+                }
+                | if p.has_constant { PROP_HAS_CONSTANT } else { 0 };
+            if pflags != DEFAULT_PROPERTY_FLAGS {
+                prop.field_varint(11, pflags); // Property.flags = 11
             }
             let mut jvm = Pb::new();
             // A nullable PRIMITIVE property (`Int?`, `Double?`, …) has a BOXED backing field
@@ -598,6 +613,7 @@ mod tests {
                 name: "x".into(),
                 ty: Ty::Int,
                 is_var: false,
+                has_constant: false,
                 getter: ("getX".into(), "()I".into()),
                 setter: None,
             }],
@@ -692,6 +708,7 @@ mod tests {
                 name: "x".into(),
                 ty: Ty::Int,
                 is_var: false,
+                has_constant: false,
                 getter: ("getX".into(), "()I".into()),
                 setter: None,
             },
@@ -699,6 +716,7 @@ mod tests {
                 name: "y".into(),
                 ty: Ty::String,
                 is_var: true,
+                has_constant: false,
                 getter: ("getY".into(), "()Ljava/lang/String;".into()),
                 setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
             },
@@ -755,6 +773,7 @@ mod tests {
                 name: "r".into(),
                 ty: list_string,
                 is_var: false,
+                has_constant: false,
                 getter: ("getR".into(), "()Ljava/util/List;".into()),
                 setter: None,
             }],
@@ -857,6 +876,7 @@ mod tests {
                 name: "x".into(),
                 ty: Ty::Int,
                 is_var: false,
+                has_constant: false,
                 getter: ("getX".into(), "()I".into()),
                 setter: None,
             }],
@@ -900,6 +920,7 @@ mod tests {
                 name: "x".into(),
                 ty: Ty::Int,
                 is_var: false,
+                has_constant: false,
                 getter: ("getX".into(), "()I".into()),
                 setter: None,
             }],
@@ -947,6 +968,7 @@ mod tests {
                     name: "x".into(),
                     ty: Ty::Int,
                     is_var: false,
+                    has_constant: false,
                     getter: ("getX".into(), "()I".into()),
                     setter: None,
                 },
@@ -954,6 +976,7 @@ mod tests {
                     name: "y".into(),
                     ty: Ty::String,
                     is_var: true,
+                    has_constant: false,
                     getter: ("getY".into(), "()Ljava/lang/String;".into()),
                     setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
                 },
