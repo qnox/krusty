@@ -104,7 +104,8 @@ fn build_class_metadata(
 ) -> Option<KotlinMetadata> {
     use crate::metadata::class_builder::{
         build_class, ClassTail, FnMeta, PropMeta, COMPONENT_FN_FLAGS, COPY_FN_FLAGS,
-        DATA_CLASS_FLAGS, EQUALS_FN_FLAGS, HASHCODE_TOSTRING_FN_FLAGS, VALUE_CLASS_FLAGS,
+        DATA_CLASS_FLAGS, EQUALS_FN_FLAGS, HASHCODE_TOSTRING_FN_FLAGS, SEALED_CLASS_FLAGS,
+        SEALED_CTOR_FLAGS, VALUE_CLASS_FLAGS,
     };
     if c.is_object
         || c.is_companion
@@ -319,9 +320,12 @@ fn build_class_metadata(
                 DATA_CLASS_FLAGS
             } else if c.is_value {
                 VALUE_CLASS_FLAGS
+            } else if c.is_sealed {
+                SEALED_CLASS_FLAGS
             } else {
                 0
             },
+            primary_ctor_flags: if c.is_sealed { SEALED_CTOR_FLAGS } else { 0 },
             module_name: opts.module_name.as_deref(),
             ctor_param_defaults: &ctor_param_defaults,
             inline_underlying: c
@@ -536,6 +540,24 @@ fn attach_synth_debug_tables(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     }
     let this_only = [("this".to_string(), this_desc.clone(), 0u16)];
     cw.set_method_debug("<init>", &ctor_desc, Some((ctor_pc, line)), &ctor_locals);
+    // A SEALED class's primary ctor is private; kotlinc pairs it with a PUBLIC|SYNTHETIC
+    // `(…args, DefaultConstructorMarker)` accessor carrying `this`, the ctor params, and the marker
+    // (named `$constructor_marker`). It gets a LocalVariableTable but no LineNumberTable.
+    if c.is_sealed {
+        const MARKER: &str = "Lkotlin/jvm/internal/DefaultConstructorMarker;";
+        let mut acc_locals = ctor_locals.clone();
+        let marker_slot = c.fields.iter().map(|f| slot_size(f.ty)).sum::<u16>() + 1;
+        acc_locals.push((
+            "$constructor_marker".to_string(),
+            MARKER.to_string(),
+            marker_slot,
+        ));
+        let acc_desc = format!(
+            "({}{MARKER})V",
+            c.fields.iter().map(|f| desc(f.ty)).collect::<String>()
+        );
+        cw.set_method_debug("<init>", &acc_desc, None, &acc_locals);
+    }
     // Property accessors: getter has only `this`; a `var` setter also has its value parameter (named
     // `<set-?>` by kotlinc), guarded when the property type is a non-null reference.
     for f in &c.fields {
@@ -4998,6 +5020,12 @@ fn emit_ctor_marker_accessor(owner: &str, real_params: &[Ty], cw: &mut ClassWrit
         slot += slot_words(*t);
     }
     let total = slot + 1; // + the marker local
+                          // The accessor's OWN descriptor interns before its body's Methodref — kotlinc visits a method's
+                          // signature before its code, so the private ctor this delegates to must not claim the earlier slot.
+    let mut stub_params = real_params.to_vec();
+    stub_params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
+    let desc = method_descriptor(&stub_params, Ty::Unit);
+    cw.reserve_descriptor(&desc);
     let mut code = CodeBuilder::new(total);
     code.aload(0);
     for &(pslot, pty) in &param_slots {
@@ -5014,9 +5042,6 @@ fn emit_ctor_marker_accessor(owner: &str, real_params: &[Ty], cw: &mut ClassWrit
     code.ensure_locals(total);
     code.link();
 
-    let mut stub_params = real_params.to_vec();
-    stub_params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
-    let desc = method_descriptor(&stub_params, Ty::Unit);
     cw.add_method(0x1001 /* PUBLIC | SYNTHETIC */, "<init>", &desc, &code);
 }
 
