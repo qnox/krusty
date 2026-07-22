@@ -1977,7 +1977,6 @@ fn build_lambda_state_machine(
     if (receiver_lambda && spill_shape_unmodeled(&spilled))
         || consecutive_temp_suspensions(ir, &stmts, &suspend_set)
         || suspending_over_progression(ir, b, &suspend_set)
-        || tail_suspending_loop(ir, &stmts, &suspend_set)
     {
         return false;
     }
@@ -4392,67 +4391,6 @@ fn stmt_contains_loop(ir: &IrFile, e: ExprId) -> bool {
         found = found || stmt_contains_loop(ir, c);
     });
     found
-}
-
-/// A body whose LAST statement is (or wraps) a SUSPENDING loop with nothing after it (`builder {
-/// for (…) { susp() } }`): the machine's fall-through return after the loop's exit state isn't
-/// modeled (the completion resumes with `null` instead of `Unit`). A trailing statement after the
-/// loop (the common corpus shape) is fine. Bail (skip, never miscompile).
-fn tail_suspending_loop(ir: &IrFile, stmts: &[ExprId], suspend_set: &HashSet<u32>) -> bool {
-    fn wraps_loop(ir: &IrFile, e: ExprId) -> bool {
-        match &ir.exprs[e as usize] {
-            IrExpr::While { .. } => true,
-            // A block tails in its VALUE when present, but a materialized `Unit` value sits after
-            // the real trailing loop STATEMENT — check both.
-            IrExpr::Block { stmts, value } => {
-                value.is_some_and(|v| wraps_loop(ir, v))
-                    || stmts.last().is_some_and(|&s| wraps_loop(ir, s))
-            }
-            // A statement-position loop materialized into a `Unit` temp binding.
-            IrExpr::Variable {
-                ty: Ty::Unit,
-                init: Some(i),
-                ..
-            } => wraps_loop(ir, *i),
-            _ => false,
-        }
-    }
-    // The lambda lowering appends a synthesized `return Unit` after the body — look through it to
-    // the last REAL statement.
-    let mut last = stmts;
-    while let [head @ .., tail] = last {
-        let epilogue = match &ir.exprs[*tail as usize] {
-            IrExpr::Return(_) => true,
-            // The synthesized `Unit` materialization the lambda lowering appends before its return.
-            IrExpr::Variable {
-                named: false,
-                init: Some(i),
-                ..
-            } => matches!(&ir.exprs[*i as usize], IrExpr::UnitInstance),
-            _ => false,
-        };
-        if epilogue && !head.is_empty() {
-            last = head;
-        } else {
-            break;
-        }
-    }
-    let hit = last
-        .last()
-        .is_some_and(|&s| wraps_loop(ir, s) && expr_calls_suspend(ir, s, suspend_set));
-    if let Some(&s) = last.last() {
-        crate::trace_compiler!(
-            "suspend",
-            "tail_suspending_loop: hit={hit} last={:?} wraps={} susp={}",
-            &ir.exprs[s as usize],
-            wraps_loop(ir, s),
-            expr_calls_suspend(ir, s, suspend_set)
-        );
-        if let IrExpr::Variable { init: Some(i), .. } = &ir.exprs[s as usize] {
-            crate::trace_compiler!("suspend", "tail init = {:?}", &ir.exprs[*i as usize]);
-        }
-    }
-    hit
 }
 
 /// TWO consecutive compiler-temp suspension bindings (`val t1 = susp(); val t2 = susp()`, hoisted

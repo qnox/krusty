@@ -194,3 +194,21 @@ fun box(): String {{ val c = C(); builder {{ c.put(\"OK\") }}; return c.v }}\n"
     );
     assert_eq!(run(&src).expect("unit suspend intrinsic runs"), "OK");
 }
+
+#[test]
+fn counted_loop_induction_spills_across_suspension() {
+    // `for (i in 5..6) { susp(i) }`: the counted-loop induction is the USER's named variable, so
+    // the state machine spills it (kotlinc's `I$0`) and each resume arm restores it — unnamed, it
+    // was re-initialized to the range start on every re-entry (loop restarted / never terminated).
+    let src = format!(
+        "{BUILDER}\
+class C {{ var s = \"\"\n\
+  suspend fun put(v: String): Unit = suspendCoroutineUninterceptedOrReturn {{ x -> s += v; x.resume(Unit); COROUTINE_SUSPENDED }} }}\n\
+suspend fun run(c: C) {{ for (i in 5..6) {{ c.put(i.toString()) }} }}\n\
+fun box(): String {{ val c = C(); builder {{ run(c) }}; return if (c.s == \"56\") \"OK\" else \"fail: ${{c.s}}\" }}\n"
+    );
+    assert_eq!(
+        run(&src).expect("counted loop across suspension runs"),
+        "OK"
+    );
+}

@@ -13727,7 +13727,9 @@ impl<'a> Lower<'a> {
                 let start = self.lower_arg(range.start, &elem_ir)?;
                 let i_v = self.fresh_value();
                 self.scope.push((name.clone(), i_v, elem));
-                let var_i = self.emit_variable(i_v, elem_ir.clone(), Some(start));
+                // NAMED: `i` is the user's loop variable — the suspend machine spills named locals
+                // by scope (kotlinc's `I\$0` for a counted-loop induction across a suspension).
+                let var_i = self.emit_named_variable(i_v, elem_ir.clone(), Some(start));
                 // The bound. kotlinc folds a CONSTANT bound with unit step into a single `i < C` exclusive
                 // test — no hoisted local, no overflow guard: `1..10` → `i < 11`, `0 until 10` → `i < 10`.
                 // Match that for a literal `Int` bound; every other case hoists the (possibly
