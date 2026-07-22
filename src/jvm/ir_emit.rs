@@ -322,6 +322,20 @@ fn build_class_metadata(
         .collect();
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
     let const_fields = init_body_constant_fields(ir, c);
+    // Per-ctor-parameter type-parameter index — the leading `ctor_param_count` fields, in order.
+    let ctor_param_tparams: Vec<Option<u32>> = c
+        .fields
+        .iter()
+        .take(c.ctor_param_count as usize)
+        .map(|f| {
+            ir.field_signatures(&c.fq_name()).and_then(|fs| {
+                fs.iter()
+                    .find(|(fname, _)| fname == &f.name)
+                    .and_then(|(_, tp)| c.type_params.iter().position(|t| t == tp))
+                    .map(|i| i as u32)
+            })
+        })
+        .collect();
     let props: Vec<PropMeta> = c
         .fields
         .iter()
@@ -335,6 +349,12 @@ fn build_class_metadata(
             // initializer is not on `IrField::default` either — it lives in the class `init_body`.
             // Only a `val`: a `var` can be reassigned, so kotlinc gives it no constant.
             is_abstract: c.is_interface,
+            tparam: ir.field_signatures(&c.fq_name()).and_then(|fs| {
+                fs.iter()
+                    .find(|(fname, _)| fname == &f.name)
+                    .and_then(|(_, tp)| c.type_params.iter().position(|t| t == tp))
+                    .map(|i| i as u32)
+            }),
             has_constant: f.is_final
                 && i >= c.ctor_param_count as usize
                 && const_fields.contains(&(i as u32)),
@@ -506,6 +526,8 @@ fn build_class_metadata(
         &methods,
         &enum_entry_names,
         &ClassTail {
+            type_params: &c.type_params,
+            ctor_param_tparams: &ctor_param_tparams,
             flags: class_metadata_flags(c),
             primary_ctor_flags: if c.is_sealed {
                 SEALED_CTOR_FLAGS
@@ -613,21 +635,25 @@ fn seed_plain_class_pool(
     // Only for a class with NO bare type-parameter fields — a generic class's bare-`T` members are handled by
     // the existing tparam path, left untouched. Seeded here so the natural emission (add_field_sig/
     // add_method_sig) dedupes to kotlinc's interning positions.
-    let no_tparam_fields = ir.field_signatures(fq_name).is_none();
-    let ctor_sig = no_tparam_fields.then_some(ctor_signature).flatten();
-    let field_sigs: Vec<Option<String>> = if no_tparam_fields {
-        c.fields.iter().map(|f| parameterized_sig(&f.ty)).collect()
-    } else {
-        Vec::new()
+    // A field's generic `Signature`: a bare type parameter (`val a: T` → `TT;`), else a parameterized
+    // concrete type (`List<String>`). Disjoint — a field is one or the other.
+    let field_sig_of = |f: &crate::ir::IrField| -> Option<String> {
+        ir.field_signatures(fq_name)
+            .and_then(|fs| {
+                fs.iter()
+                    .find(|(name, _)| name == &f.name)
+                    .map(|(_, tp)| format!("T{tp};"))
+            })
+            .or_else(|| parameterized_sig(&f.ty))
     };
+    let ctor_sig = ctor_signature;
+    let field_sigs: Vec<Option<String>> = c.fields.iter().map(field_sig_of).collect();
     let mut accessor_sigs: Vec<Option<String>> = Vec::new();
-    if no_tparam_fields {
-        for f in &c.fields {
-            let g = parameterized_sig(&f.ty);
-            accessor_sigs.push(g.as_ref().map(|s| format!("(){s}"))); // getter → `()<sig>`
-            if !f.is_final {
-                accessor_sigs.push(g.as_ref().map(|s| format!("({s})V"))); // setter → `(<sig>)V`
-            }
+    for f in &c.fields {
+        let g = field_sig_of(f);
+        accessor_sigs.push(g.as_ref().map(|s| format!("(){s}"))); // getter → `()<sig>`
+        if !f.is_final {
+            accessor_sigs.push(g.as_ref().map(|s| format!("({s})V"))); // setter → `(<sig>)V`
         }
     }
     // A `data class` interns its parameterized-field `Signature`s LATE (in `seed_data_class_pool`, before
@@ -750,9 +776,11 @@ fn attach_synth_debug_tables(
     // offset. The guard's length is SLOT-dependent: `aload_0..3` is 1 byte but `aload <u1>` (slot ≥ 4)
     // is 2, so a class with enough (or wide) ctor params pushes a non-null-ref param past slot 3 and its
     // guard grows — the fixed-6 assumption was wrong there.
-    let is_nonnull_ref = |t: Ty| -> bool {
+    let is_nonnull_ref = |name: &str, t: Ty| -> bool {
         let d = desc(t);
-        (d.starts_with('L') || d.starts_with('[')) && !matches!(t, Ty::Nullable(_))
+        (d.starts_with('L') || d.starts_with('['))
+            && !matches!(t, Ty::Nullable(_))
+            && !is_type_parameter_field(ir, &c.fq_name(), name)
     };
     // `aload <slot>` byte length: 1 (aload_0..3), 2 (aload u1), or 4 (wide aload u2).
     let aload_len = |slot: u16| -> u16 {
@@ -773,7 +801,7 @@ fn attach_synth_debug_tables(
     // Only ctor PARAMETERS are constructor locals — a body property is a field, never an argument.
     for f in c.fields.iter().take(c.ctor_param_count as usize) {
         ctor_locals.push((f.name.clone(), desc(f.ty), slot));
-        if is_nonnull_ref(f.ty) {
+        if is_nonnull_ref(&f.name, f.ty) {
             // guard = aload(slot) + ldc(param-name String) + invokestatic checkNotNullParameter(3).
             // The ldc width is read off the REAL pool (2, or 3 for `ldc_w` past index 255) — the
             // guard was already emitted, so the String constant exists.
@@ -833,7 +861,7 @@ fn attach_synth_debug_tables(
             let pd = desc(f.ty);
             // The setter's value param is always slot 1 (`this`=0): guard = `aload_1`(1) + the
             // `<set-?>` String's real ldc width + invokestatic(3).
-            let set_pc = if is_nonnull_ref(f.ty) {
+            let set_pc = if is_nonnull_ref(&f.name, f.ty) {
                 aload_len(1) + cw.string_ldc_len("<set-?>").unwrap_or(2) + 3
             } else {
                 0
@@ -1111,7 +1139,18 @@ fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
 /// Construct a `ClassWriter` with the per-file [`EmitOptions`] stamped on — the single place emission
 /// builds a writer, so class version + `SourceFile` reach every class (incl. synthetics) explicitly.
 fn new_writer(internal: &str, super_internal: &str, opts: &EmitOptions) -> ClassWriter {
-    let mut cw = ClassWriter::new(internal, super_internal);
+    new_writer_generic(internal, None, super_internal, opts)
+}
+
+/// [`new_writer`] for a class with a generic `Signature`, so the signature value interns in kotlinc's
+/// position (between the class and superclass names).
+fn new_writer_generic(
+    internal: &str,
+    signature: Option<&str>,
+    super_internal: &str,
+    opts: &EmitOptions,
+) -> ClassWriter {
+    let mut cw = ClassWriter::new_generic(internal, signature, super_internal);
     if let Some(major) = opts.class_major {
         cw.set_major(major);
     }
@@ -1995,7 +2034,11 @@ fn emit_class(
     }
     let fq_name = c.fq_name();
     let superclass = c.superclass();
-    let mut cw = new_writer(&fq_name, &superclass, opts);
+    // kotlinc (ASM) visits `(name, signature, superName)`, so a generic class's `Signature` VALUE
+    // interns between the two class names — compute it before the writer exists.
+    let raw_class_sig = ir.class_signature(&fq_name);
+    let jvm_sig = raw_class_sig.and_then(jvm_class_signature);
+    let mut cw = new_writer_generic(&fq_name, jvm_sig.as_deref(), &superclass, opts);
     register_inner_classes(&mut cw, ir);
     // Seed the constant pool in kotlinc's interning order for a plain property class that will carry a
     // computed `@Metadata` + debug tables — so the emitted class is byte-identical, not just
@@ -2050,8 +2093,6 @@ fn emit_class(
     if ir.is_deprecated_class(&fq_name) {
         cw.set_deprecated();
     } // Deprecated attribute (a HIDDEN-deprecated `$$serializer` object)
-    let raw_class_sig = ir.class_signature(&fq_name);
-    let jvm_sig = raw_class_sig.and_then(jvm_class_signature);
     crate::trace_compiler!(
         "value_classes",
         "class {} signature: raw={:?} jvm={:?}",

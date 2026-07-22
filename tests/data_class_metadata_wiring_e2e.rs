@@ -747,3 +747,10 @@ fn interface_with_var_property_is_byte_identical() {
 fn object_is_byte_identical() {
     assert_byte_identical("package demo\nobject O\n", "demo/O", &[]);
 }
+
+/// A generic class with a bare type-parameter property — `@Metadata` records `Class.typeParameter`
+/// and encodes the property's type by INDEX, not as the erased `java/lang/Object` class name.
+#[test]
+fn generic_class_is_byte_identical() {
+    assert_byte_identical("package demo\nclass C<T>(val a: T)\n", "demo/C", &[]);
+}
