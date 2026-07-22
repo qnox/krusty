@@ -635,15 +635,16 @@ pub fn build_class(
     for ee in &enum_msgs {
         class.repeated_message(13, ee); // Class.enum_entry = 13
     }
-    if let Some(v) = tail.jvm_class_flags {
-        class.field_varint(104, v); // JvmProtoBuf.classFlags = 104 (interfaces carry 3)
-    }
     if let Some((name_id, ty_pb)) = &inline_underlying {
         class.field_varint(17, *name_id as u64); // Class.inlineClassUnderlyingPropertyName = 17
         class.field_message(18, ty_pb); // Class.inlineClassUnderlyingType = 18
     }
+    // Extensions are written in ASCENDING field number, like every other field: 101 before 104.
     if let Some(mi) = module_idx {
         class.field_varint(101, mi as u64); // JvmProtoBuf.classModuleName = 101
+    }
+    if let Some(v) = tail.jvm_class_flags {
+        class.field_varint(104, v); // JvmProtoBuf.classFlags = 104 (interfaces carry 3)
     }
 
     let stt = st.serialize_types();
