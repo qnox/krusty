@@ -741,3 +741,9 @@ fn interface_with_var_property_is_byte_identical() {
         &[],
     );
 }
+
+/// A plain `object` — a private constructor, a static `INSTANCE` field, and a `<clinit>` that builds it.
+#[test]
+fn object_is_byte_identical() {
+    assert_byte_identical("package demo\nobject O\n", "demo/O", &[]);
+}

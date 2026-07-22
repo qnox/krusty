@@ -84,6 +84,9 @@ pub const DEFAULT_FUNCTION_FLAGS: u64 = 6;
 pub const DEFAULT_CLASS_FLAGS: u64 = 6;
 /// `Constructor.flags` (f1) for a sealed class's primary constructor — kotlinc marks it PROTECTED.
 pub const SEALED_CTOR_FLAGS: u64 = 4;
+/// `Constructor.flags` (f1) for an `object`'s primary constructor — kotlinc marks it PRIVATE
+/// (visibility bits 1-3 = 1). Instances come only from the static `INSTANCE` field.
+pub const OBJECT_CTOR_FLAGS: u64 = 2;
 /// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE`.
 const DECLARES_DEFAULT_VALUE: u64 = 2;
 

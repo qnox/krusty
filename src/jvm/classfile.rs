@@ -1188,6 +1188,12 @@ impl ClassWriter {
         self.cp.utf8(desc);
     }
 
+    /// Pre-intern a method NAME, for the same reason as [`reserve_descriptor`]: kotlinc reaches a
+    /// method's name before anything its body (or a field it writes) interns.
+    pub fn reserve_method_name(&mut self, name: &str) {
+        self.cp.utf8(name);
+    }
+
     pub fn add_method(&mut self, access: u16, name: &str, desc: &str, code: &CodeBuilder) {
         self.add_method_sig(access, name, desc, code, None);
     }

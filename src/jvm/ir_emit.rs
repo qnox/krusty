@@ -232,7 +232,7 @@ fn build_class_metadata(
 ) -> Option<KotlinMetadata> {
     use crate::metadata::class_builder::{
         build_class, ClassTail, FnMeta, PropMeta, COMPONENT_FN_FLAGS, COPY_FN_FLAGS,
-        EQUALS_FN_FLAGS, HASHCODE_TOSTRING_FN_FLAGS, SEALED_CTOR_FLAGS,
+        EQUALS_FN_FLAGS, HASHCODE_TOSTRING_FN_FLAGS, OBJECT_CTOR_FLAGS, SEALED_CTOR_FLAGS,
     };
     if c.is_companion
         || c.is_annotation
@@ -498,7 +498,13 @@ fn build_class_metadata(
         &enum_entry_names,
         &ClassTail {
             flags: class_metadata_flags(c),
-            primary_ctor_flags: if c.is_sealed { SEALED_CTOR_FLAGS } else { 0 },
+            primary_ctor_flags: if c.is_sealed {
+                SEALED_CTOR_FLAGS
+            } else if c.is_object {
+                OBJECT_CTOR_FLAGS
+            } else {
+                0
+            },
             module_name: opts.module_name.as_deref(),
             ctor_param_defaults: &ctor_param_defaults,
             inline_underlying: c
@@ -2583,14 +2589,19 @@ fn emit_class(
     // A singleton `object`: a `public static final INSTANCE` built in `<clinit>`.
     if c.is_object {
         let self_desc = format!("L{};", fq_name);
-        cw.add_field(0x0019, "INSTANCE", &self_desc); // PUBLIC | STATIC | FINAL
-        let mut clinit = CodeBuilder::new(0);
+        // kotlinc reaches `<clinit>` before the INSTANCE field, so the pool follows its BODY: the
+        // method name, the `<init>` Methodref of `new demo/O`, then the field entries at the
+        // `putstatic`, and only then the field's `@NotNull`.
+        cw.reserve_method_name("<clinit>");
         let ci = cw.class_ref(&fq_name);
+        let init = cw.methodref(&fq_name, "<init>", "()V");
+        let fref = cw.fieldref(&fq_name, "INSTANCE", &self_desc);
+        cw.add_field(0x0019, "INSTANCE", &self_desc); // PUBLIC | STATIC | FINAL
+        cw.set_field_nullability("INSTANCE", "Lorg/jetbrains/annotations/NotNull;");
+        let mut clinit = CodeBuilder::new(0);
         clinit.new_obj(ci);
         clinit.dup();
-        let init = cw.methodref(&fq_name, "<init>", "()V");
         clinit.invokespecial(init, 0, 0);
-        let fref = cw.fieldref(&fq_name, "INSTANCE", &self_desc);
         clinit.putstatic(fref, 1);
         clinit.ret_void();
         clinit.ensure_locals(0);
