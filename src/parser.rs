@@ -66,6 +66,19 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
             Err(k) => k as u32, // k = count of starts strictly <= off (since off not found)
         }
     };
+    // Snapshot each expression's start offset before the mutable walk of `decl_arena` (a disjoint
+    // field, but only borrowck's field-splitting sees that — a helper can't).
+    let expr_lo: Vec<u32> = file.expr_spans.iter().map(|s| s.lo).collect();
+    // kotlinc attributes a method's `LineNumberTable` to its BODY, not the `fun` keyword — for an
+    // EXPRESSION body that is the `=` expression's line, which differs from the declaration line when
+    // the signature wraps across lines. A block body is left at the declaration line (its per-statement
+    // mapping is a separate, larger matter); a single-line expression body is unchanged (same line).
+    let body_line = |body: &FunBody, decl: u32| -> u32 {
+        match body {
+            FunBody::Expr(e) => expr_lo.get(e.0 as usize).map_or(decl, |&lo| line_at(lo)),
+            _ => decl,
+        }
+    };
     for decl in &mut file.decl_arena {
         match decl {
             Decl::Class(c) => {
@@ -73,7 +86,7 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
                 // A class's methods live INSIDE the class decl, not in `decl_arena` — walk them too,
                 // or every member method keeps line 0 and gets no `LineNumberTable`.
                 for m in &mut c.methods {
-                    m.decl_line = line_at(m.span.lo);
+                    m.decl_line = body_line(&m.body, line_at(m.span.lo));
                 }
                 for p in &mut c.body_props {
                     p.decl_line = line_at(p.span.lo);
@@ -82,7 +95,7 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
                     e.decl_line = line_at(e.span.lo);
                 }
             }
-            Decl::Fun(f) => f.decl_line = line_at(f.span.lo),
+            Decl::Fun(f) => f.decl_line = body_line(&f.body, line_at(f.span.lo)),
             _ => {}
         }
     }
