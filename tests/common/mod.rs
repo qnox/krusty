@@ -1677,7 +1677,9 @@ pub fn javac_compile(sources: &[(String, String)], cp_jars: &[PathBuf]) -> Optio
         std::fs::write(&p, text).ok()?;
         paths.push(p.to_string_lossy().into_owned());
     }
-    let joined = paths.join(":");
+    // Must match `File.pathSeparator` in the JavaRunner JVM — the protocol splits on it.
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let joined = paths.join(sep);
     let cp = if cp_jars.is_empty() {
         ".".to_string()
     } else {
@@ -1685,7 +1687,7 @@ pub fn javac_compile(sources: &[(String, String)], cp_jars: &[PathBuf]) -> Optio
             .iter()
             .map(|j| j.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
-            .join(":")
+            .join(sep)
     };
     // Empty main class = compile-only (no run) in the JavaRunner protocol.
     let res = javac_run(&joined, &cp, &outdir.to_string_lossy(), "")?;

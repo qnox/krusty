@@ -831,7 +831,8 @@ impl Resolver<'_> {
         if is_abstract {
             w.add_abstract_method_sig(acc, &m.name, &desc, sig.as_deref());
         } else {
-            let arg_locals = 1 + m.params.iter().map(slot_width).sum::<u16>();
+            let this_slot = if m.access & ACC_STATIC != 0 { 0 } else { 1 };
+            let arg_locals = this_slot + m.params.iter().map(slot_width).sum::<u16>();
             let mut code = CodeBuilder::new(arg_locals);
             code.aconst_null();
             code.athrow();
