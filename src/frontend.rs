@@ -104,22 +104,76 @@ pub fn strip_matched_expects(files: &mut [File]) {
     // parameter (`b: Int = a`), which only stays meaningful if the actual's names match — kotlinc
     // enforces exactly that (actual/expect parameter-name mismatch is an error), so a mismatch
     // here means invalid input; the graft is skipped rather than silently re-binding the name.
-    let mut expect_defaults: std::collections::HashMap<
-        ExpectKey,
-        (Vec<String>, Vec<Option<CopyExpr>>),
+    type FunDefaults = (Vec<String>, Vec<Option<CopyExpr>>);
+    fn harvest_fun(file: &File, f: &crate::ast::FunDecl) -> Option<FunDefaults> {
+        if !f.params.iter().any(|p| p.default.is_some()) {
+            return None;
+        }
+        let defs: Vec<Option<CopyExpr>> = f
+            .params
+            .iter()
+            .map(|p| p.default.and_then(|e| CopyExpr::lift(file, e)))
+            .collect();
+        Some((f.params.iter().map(|p| p.name.clone()).collect(), defs))
+    }
+    fn graft_fun(
+        f: &mut crate::ast::FunDecl,
+        names: &[String],
+        defs: &[Option<crate::ast::ExprId>],
+    ) {
+        let names_match = f
+            .params
+            .iter()
+            .map(|p| p.name.as_str())
+            .eq(names.iter().map(String::as_str));
+        if !names_match {
+            return; // invalid expect/actual pair (kotlinc rejects it) — don't graft
+        }
+        for (p, def) in f.params.iter_mut().zip(defs) {
+            if p.default.is_none() {
+                p.default = *def;
+            }
+        }
+    }
+    let mut expect_defaults: std::collections::HashMap<ExpectKey, FunDefaults> =
+        std::collections::HashMap::new();
+    // Member defaults of an `expect class`, keyed by the CLASS key + `(member name, arity)`.
+    let mut expect_member_defaults: std::collections::HashMap<
+        (ExpectKey, String, usize),
+        FunDefaults,
     > = std::collections::HashMap::new();
+    // Same-name same-arity member OVERLOADS (`f(Int = 1)` / `f(String = "b")`) collide on this
+    // key; grafting either set of defaults onto both actuals would be type-wrong — poison the key
+    // so neither is grafted (the omitting call then fails to resolve: skip, never wrong).
+    let mut ambiguous_members: std::collections::HashSet<(ExpectKey, String, usize)> =
+        std::collections::HashSet::new();
     for file in files.iter() {
         for &d in &file.expect_decls {
-            if let Decl::Fun(f) = file.decl(d) {
-                if f.params.iter().any(|p| p.default.is_some()) {
-                    let defs: Vec<Option<CopyExpr>> = f
-                        .params
-                        .iter()
-                        .map(|p| p.default.and_then(|e| CopyExpr::lift(file, e)))
-                        .collect();
-                    let names = f.params.iter().map(|p| p.name.clone()).collect();
-                    expect_defaults.insert(key(file, d), (names, defs));
+            match file.decl(d) {
+                Decl::Fun(f) => {
+                    if let Some(h) = harvest_fun(file, f) {
+                        expect_defaults.insert(key(file, d), h);
+                    }
                 }
+                Decl::Class(c) => {
+                    for m in &c.methods {
+                        let k = (key(file, d), m.name.clone(), m.params.len());
+                        if ambiguous_members.contains(&k) {
+                            continue;
+                        }
+                        if let Some(h) = harvest_fun(file, m) {
+                            if expect_member_defaults.insert(k.clone(), h).is_some() {
+                                expect_member_defaults.remove(&k);
+                                ambiguous_members.insert(k);
+                            }
+                        } else if expect_member_defaults.remove(&k).is_some() {
+                            // A defaulted overload next to a default-less same-key sibling is just
+                            // as ambiguous for the graft target filter.
+                            ambiguous_members.insert(k);
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -139,28 +193,39 @@ pub fn strip_matched_expects(files: &mut [File]) {
         let decls: Vec<crate::ast::DeclId> = file.decls.clone();
         for d in decls {
             let k = key(file, d);
-            let Some((names, defs)) = expect_defaults.get(&k) else {
-                continue;
-            };
-            let names_match = match file.decl(d) {
-                Decl::Fun(f) => f
-                    .params
+            if let Some((names, defs)) = expect_defaults.get(&k) {
+                let materialized: Vec<Option<crate::ast::ExprId>> = defs
                     .iter()
-                    .map(|p| p.name.as_str())
-                    .eq(names.iter().map(String::as_str)),
-                _ => false,
-            };
-            if !names_match {
-                continue; // invalid expect/actual pair (kotlinc rejects it) — don't graft
+                    .map(|c| c.as_ref().map(|c| c.materialize(file)))
+                    .collect();
+                let names = names.clone();
+                if let Decl::Fun(f) = file.decl_mut(d) {
+                    graft_fun(f, &names, &materialized);
+                }
             }
-            let materialized: Vec<Option<crate::ast::ExprId>> = defs
-                .iter()
-                .map(|c| c.as_ref().map(|c| c.materialize(file)))
+            // Member defaults: an actual CLASS whose key matches an expect class with
+            // defaulted members.
+            let member_keys: Vec<(String, usize)> = expect_member_defaults
+                .keys()
+                .filter(|(ck, _, _)| *ck == k)
+                .map(|(_, n, a)| (n.clone(), *a))
                 .collect();
-            if let Decl::Fun(f) = file.decl_mut(d) {
-                for (p, def) in f.params.iter_mut().zip(materialized) {
-                    if p.default.is_none() {
-                        p.default = def;
+            for (mname, arity) in member_keys {
+                let (names, materialized) = {
+                    let (names, defs) = &expect_member_defaults[&(k.clone(), mname.clone(), arity)];
+                    let m: Vec<Option<crate::ast::ExprId>> = defs
+                        .iter()
+                        .map(|c| c.as_ref().map(|c| c.materialize(file)))
+                        .collect();
+                    (names.clone(), m)
+                };
+                if let Decl::Class(c) = file.decl_mut(d) {
+                    for m in c
+                        .methods
+                        .iter_mut()
+                        .filter(|m| m.name == mname && m.params.len() == arity)
+                    {
+                        graft_fun(m, &names, &materialized);
                     }
                 }
             }
