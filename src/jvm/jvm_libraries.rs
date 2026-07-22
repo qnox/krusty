@@ -2881,6 +2881,19 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
                 Ty::Unit,
                 "(Lkotlin/jvm/functions/Function1;Lkotlin/coroutines/Continuation;)V".to_string(),
             ),
+            RuntimeOp::StartCoroutineReceiver => callable(
+                "kotlin/coroutines/ContinuationKt",
+                "startCoroutine",
+                vec![
+                    Ty::obj("kotlin/Function2"),
+                    Ty::obj("kotlin/Any"),
+                    Ty::obj("kotlin/coroutines/Continuation"),
+                ],
+                Ty::Unit,
+                Ty::Unit,
+                "(Lkotlin/jvm/functions/Function2;Ljava/lang/Object;Lkotlin/coroutines/Continuation;)V"
+                    .to_string(),
+            ),
             RuntimeOp::ThrowOnFailure => callable(
                 "kotlin/ResultKt",
                 "throwOnFailure",
@@ -2928,5 +2941,24 @@ mod tests {
     fn descriptor_void_reference_normalizes_before_core() {
         assert_eq!(desc_to_ty("Ljava/lang/Void;"), Ty::Unit);
         assert_eq!(desc_to_ty("V"), Ty::Unit);
+    }
+
+    #[test]
+    fn start_coroutine_receiver_maps_to_the_function2_overload() {
+        // `(suspend R.() -> T).startCoroutine(receiver, completion)` → the stdlib's
+        // three-argument `ContinuationKt.startCoroutine(Function2, Object, Continuation)`.
+        use crate::runtime::{RuntimeOp, TargetRuntime};
+        let libs = super::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(Vec::new()),
+        ));
+        let c = libs
+            .runtime_callable(RuntimeOp::StartCoroutineReceiver, Ty::Unit)
+            .expect("mapped");
+        assert_eq!(c.owner.render(), "kotlin/coroutines/ContinuationKt");
+        assert_eq!(c.name, "startCoroutine");
+        assert_eq!(
+            c.descriptor,
+            "(Lkotlin/jvm/functions/Function2;Ljava/lang/Object;Lkotlin/coroutines/Continuation;)V"
+        );
     }
 }
