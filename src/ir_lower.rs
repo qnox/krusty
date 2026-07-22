@@ -7035,13 +7035,26 @@ impl<'a> Lower<'a> {
     /// suspend gate. Used both to classify a suspend lambda literal and to guard the non-inlined
     /// suspend-inline-HOF path (a plain `Function0` argument cannot legally call a suspend function).
     fn ast_body_suspends(&self, body: AstExprId) -> bool {
+        // Top-level suspend functions PLUS same-file class suspend METHODS: a method called with an
+        // IMPLICIT receiver (`suspendWithResult(x)` inside a receiver lambda) is a bare `Name` call,
+        // invisible to the explicit-`Member` checks below. Matching by name over-approximates (a
+        // same-named non-suspend call would classify the body as suspending), which is SAFE: the
+        // general machine over a body with no real suspension is a single state.
         let susp_names: std::collections::HashSet<String> = self
             .afile
             .decls
             .iter()
-            .filter_map(|&d| match self.afile.decl(d) {
-                ast::Decl::Fun(f) if f.is_suspend => Some(f.name.clone()),
-                _ => None,
+            .flat_map(|&d| -> Vec<String> {
+                match self.afile.decl(d) {
+                    ast::Decl::Fun(f) if f.is_suspend => vec![f.name.clone()],
+                    ast::Decl::Class(c) => c
+                        .methods
+                        .iter()
+                        .filter(|m| m.is_suspend)
+                        .map(|m| m.name.clone())
+                        .collect(),
+                    _ => Vec::new(),
+                }
             })
             .collect();
         let call_names_cell = std::cell::RefCell::new(Vec::new());
@@ -7100,9 +7113,22 @@ impl<'a> Lower<'a> {
             {
                 return true;
             }
-            // A plain member call `recv.m(args)` to a suspend method — a USER class method (its
-            // suspend flag is in `syms`), or a CLASSPATH member / suspend EXTENSION (`Mutex.withLock`)
-            // whose suspend-ness the CHECKER recorded on the resolved callable. The lowerer only reads.
+            // A member / extension call to a suspend method, resolved by the CHECKER — with an
+            // EXPLICIT receiver (`recv.m(args)`) or an IMPLICIT one (`suspendWithResult(x)` inside a
+            // receiver lambda, whose callee is a bare `Name`, not a `Member`). The lowerer only reads.
+            if self
+                .info
+                .resolved_member(call)
+                .is_some_and(|m| m.member.suspend)
+                || self
+                    .info
+                    .resolved_extension(call)
+                    .is_some_and(|c| c.suspend)
+            {
+                return true;
+            }
+            // A plain member call `recv.m(args)` to a suspend USER class method (its suspend flag is
+            // in `syms`, keyed by the receiver's static type).
             if let ast::Expr::Call { callee, .. } = self.afile.expr(call) {
                 if let ast::Expr::Member { receiver, name } = self.afile.expr(*callee) {
                     let recv_ty = self.info.ty(*receiver);
@@ -12532,7 +12558,31 @@ impl<'a> Lower<'a> {
         let b = match body {
             FunBody::Expr(e) => {
                 let diverges = self.info.ty(*e) == Ty::Nothing;
-                let stmts = if *ret_ty == Ty::Unit || diverges {
+                // A suspend fn whose whole body is `suspendCoroutineUninterceptedOrReturn { … }`:
+                // the intrinsic's value IS the suspension protocol result (`COROUTINE_SUSPENDED` or
+                // an immediate value). Return it even from a declared-`Unit` fn — the CPS return is
+                // `Any?`, and swallowing it (returning `Unit`) would signal completion to the caller
+                // while the continuation is still pending → double resume.
+                let is_suspend_intrinsic_body = self.ir.suspend_funs.contains(&fid)
+                    && matches!(self.afile.expr(*e), Expr::Call { callee, args }
+                        if args.len() == 1
+                            && matches!(self.afile.expr(*callee), ast::Expr::Name(n)
+                                if crate::libraries::coroutine_intrinsic(n)
+                                    == Some(crate::libraries::CoroutineIntrinsic::SuspendCoroutineUninterceptedOrReturn)));
+                let stmts = if is_suspend_intrinsic_body {
+                    let ve = self.expr(*e)?;
+                    // An EMPTY intrinsic block (`suspendCoroutineUninterceptedOrReturn { c -> }`)
+                    // yields `Unit` — materialize it (a value-less block leaves nothing to return).
+                    let ve = match &self.ir.exprs[ve as usize] {
+                        IrExpr::Block { value: None, stmts } => {
+                            let stmts = stmts.clone();
+                            let u = self.emit_unit();
+                            self.emit_block(stmts, Some(u))
+                        }
+                        _ => ve,
+                    };
+                    vec![self.emit_return(Some(ve))]
+                } else if *ret_ty == Ty::Unit || diverges {
                     vec![self.expr(*e)?] // Unit, or a diverging expr (it returns/throws on its own — no wrap)
                 } else {
                     // Coerce the body to the return type (a generic-erased `Object` return gets the

@@ -6050,6 +6050,22 @@ impl<'a> Emitter<'a> {
                     return;
                 }
                 let call_args: Vec<u32> = args.iter().map(|a| a.unwrap()).collect();
+                // An argument-count/descriptor mismatch can only come from a pass that rewrote the
+                // callee's ABI without fixing this call site (a suspend call the coroutine flattener
+                // failed to thread a continuation into — an unmodeled shape). Never emit the
+                // unverifiable call: bail the file (the gate SKIPS it), pushing a typed zero so the
+                // dead code that follows still assembles.
+                if call_args.len() != param_tys.len() {
+                    self.run.set_inline_bail(format!(
+                        "call arity mismatch for {owner}.{name} ({} args vs {} params)",
+                        call_args.len(),
+                        param_tys.len()
+                    ));
+                    if ret != Ty::Unit {
+                        push_zero(ret, code, self.cw);
+                    }
+                    return;
+                }
                 self.emit_virtual_operands(&owner, *receiver, &call_args, code);
                 let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
                 let desc = method_descriptor(&param_tys, ret);
@@ -6098,6 +6114,21 @@ impl<'a> Emitter<'a> {
                         f.name.clone()
                     };
                     let args = args.clone();
+                    // Same arity/descriptor net as `MethodCall` above: an unthreaded suspend call
+                    // (the CPS transform appended a `Continuation` param this site never passes)
+                    // must bail the file, never emit an unverifiable call.
+                    if args.len() != param_tys.len() {
+                        self.run.set_inline_bail(format!(
+                            "call arity mismatch for {}.{name} ({} args vs {} params)",
+                            self.facade,
+                            args.len(),
+                            param_tys.len()
+                        ));
+                        if ret != Ty::Unit {
+                            push_zero(ret, code, self.cw);
+                        }
+                        return;
+                    }
                     self.emit_operands(&args, code);
                     let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
                     let owner = self.facade.clone();
