@@ -257,6 +257,11 @@ fn build_class_metadata(
             name: f.name.clone(),
             ty: f.ty,
             is_var: !f.is_final,
+            // Not yet detectable: only a BODY property (past the ctor params) carries a compile-time
+            // constant (kotlinc: `val y: Int = 2` → flags 8710), but its initializer is not on
+            // `IrField::default` (that carries a ctor-PARAMETER default) — it lives in the class
+            // `init_body`, so wiring `hasConstant` needs a separate pass.
+            has_constant: false,
             getter: (format!("get{}", cap(&f.name)), format!("(){}", desc(f.ty))),
             setter: (!f.is_final)
                 .then(|| (format!("set{}", cap(&f.name)), format!("({})V", desc(f.ty)))),
