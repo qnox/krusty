@@ -75,6 +75,17 @@ fn main() {
         std::process::exit(1);
     }
 
+    // The `kotlin_module` catalog kotlinc writes next to its classes — a directory (or jar) on a
+    // later compilation's classpath resolves `import pkg.*` top-level callables through it.
+    let class_entries: Vec<(String, Vec<u8>)> = outputs
+        .iter()
+        .filter(|(p, _)| p.ends_with(".class"))
+        .map(|(p, b)| (p.trim_end_matches(".class").to_string(), b.clone()))
+        .collect();
+    let mut outputs = outputs;
+    if let Some(km) = krusty::jvm::metadata::kotlin_module_for_classes(&class_entries) {
+        outputs.push((format!("META-INF/{}.kotlin_module", opts.module_name), km));
+    }
     let emitted = outputs
         .iter()
         .filter(|(p, _)| p.ends_with(".class"))

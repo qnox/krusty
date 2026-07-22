@@ -279,6 +279,16 @@ fn first_error_module(
                     return Some("module: failed writing dependency classes".into());
                 }
             }
+            // The `kotlin_module` catalog (see the gate's `write_classes_to_dir`).
+            // (Any `*.kotlin_module` name works for the reader; `main` mirrors kotlinc's default.)
+            if let Some(km) = krusty::jvm::metadata::kotlin_module_for_classes(&classes) {
+                let mi = moddir.join("META-INF");
+                if std::fs::create_dir_all(&mi).is_err()
+                    || std::fs::write(mi.join("main.kotlin_module"), km).is_err()
+                {
+                    return Some("module: failed writing dependency classes".into());
+                }
+            }
             dirmap.insert(m.name.clone(), moddir);
         }
         None

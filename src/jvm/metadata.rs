@@ -2340,6 +2340,40 @@ fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<
     Some((pkg, facades))
 }
 
+/// The `kotlin_module` catalog for a set of freshly EMITTED classes: every class whose `@Metadata`
+/// declares package-level callables (top-level functions/properties/typealiases) is a file facade of
+/// its package. `None` when nothing qualifies.
+pub fn kotlin_module_for_classes(classes: &[(String, Vec<u8>)]) -> Option<Vec<u8>> {
+    let mut by_pkg: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (name, bytes) in classes {
+        let Ok(ci) = crate::jvm::classreader::parse_class(bytes) else {
+            continue;
+        };
+        if package_functions(&ci).is_empty()
+            && package_properties(&ci).is_empty()
+            && package_type_aliases(&ci).is_empty()
+        {
+            continue;
+        }
+        let (pkg, short) = match name.rsplit_once('/') {
+            Some((p, s)) => (p.to_string(), s.to_string()),
+            None => (String::new(), name.clone()),
+        };
+        by_pkg.entry(pkg).or_default().push(short);
+    }
+    if by_pkg.is_empty() {
+        return None;
+    }
+    // Dotted package names, as `build_kotlin_module` (the single serializer, shared with the
+    // backend's finalize path) expects.
+    let packages: Vec<(String, Vec<String>)> = by_pkg
+        .into_iter()
+        .map(|(p, v)| (p.replace('/', "."), v))
+        .collect();
+    Some(crate::metadata::module::build_kotlin_module(&packages))
+}
+
 #[cfg(test)]
 mod module_reader_tests {
     use super::read_kotlin_module;

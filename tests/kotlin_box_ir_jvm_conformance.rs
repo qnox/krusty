@@ -578,6 +578,14 @@ fn write_classes_to_dir(classes: &[(String, Vec<u8>)], dir: &Path) -> Option<()>
         fs::create_dir_all(path.parent()?).ok()?;
         fs::write(&path, bytes).ok()?;
     }
+    // The `kotlin_module` catalog, like kotlinc's output dir: without it a DEPENDENT module's
+    // (The reader accepts any `*.kotlin_module` name; `main` mirrors kotlinc's default module.)
+    // compile cannot resolve `import pkg.*` top-level callables from this directory.
+    if let Some(km) = krusty::jvm::metadata::kotlin_module_for_classes(classes) {
+        let mi = dir.join("META-INF");
+        fs::create_dir_all(&mi).ok()?;
+        fs::write(mi.join("main.kotlin_module"), km).ok()?;
+    }
     Some(())
 }
 
