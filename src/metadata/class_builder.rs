@@ -112,6 +112,8 @@ fn predefined_index(t: Ty) -> u64 {
     }
 }
 const ANY_PREDEFINED: u64 = 0;
+/// `kotlin/Enum`'s slot in kotlinc's predefined-strings table — an enum's supertype.
+const ENUM_PREDEFINED: u64 = 16;
 
 /// `Property.flags` (f11) for a plain public `val` with a default getter — kotlinc's DEFAULT, so the
 /// field is OMITTED at this value. One bitfield like `Class`/`Function`: bits1-3 visibility (PUBLIC=3
@@ -204,6 +206,7 @@ fn builtin_name_index(internal: &str) -> Option<u64> {
         "kotlin/Boolean" => Some(11),
         "kotlin/CharSequence" => Some(13),
         "kotlin/String" => Some(14),
+        "kotlin/Enum" => Some(16),
         // Common collection interfaces from `JvmNameResolverBase.PREDEFINED_STRINGS` (kotlinc encodes
         // these via `predefinedIndex`, an EMPTY d2 slot — not a class-id descriptor). Indices verified
         // against kotlinc's emitted record (List = 32).
@@ -426,9 +429,19 @@ pub fn build_class(
         })
         .collect();
 
-    // f6 = supertype kotlin/Any.
+    // f6 = supertype. An `enum class E` extends `kotlin/Enum<E>` — a PARAMETERIZED supertype whose
+    // single argument is the enum itself; everything else extends `kotlin/Any`.
     let mut supertype = Pb::new();
-    supertype.field_varint(6, st.builtin(ANY_PREDEFINED) as u64);
+    if enum_entries.is_empty() {
+        supertype.field_varint(6, st.builtin(ANY_PREDEFINED) as u64);
+    } else {
+        let mut arg_ty = Pb::new();
+        arg_ty.field_varint(6, fq as u64);
+        let mut arg = Pb::new();
+        arg.field_message(2, &arg_ty); // Type.Argument.type = 2
+        supertype.field_message(2, &arg); // Type.argument = 2
+        supertype.field_varint(6, st.builtin(ENUM_PREDEFINED) as u64);
+    }
 
     // f8 = constructors: the primary (flags 0), then any secondary constructors — each interning in
     // order (kotlinc emits the ctor JVM name `<init>` explicitly, not omitted).
