@@ -1362,6 +1362,19 @@ impl ClassWriter {
         }
     }
 
+    /// Replace a method's LineNumberTable with MULTIPLE `(start_pc, line)` entries. kotlinc gives a
+    /// constructor one entry per source construct it runs: the super call on the class-declaration
+    /// line, each body-property initializer on its own line, then the trailing `return` back on the
+    /// class line. Lookup-only, like [`set_method_debug`] — never perturbs the constant pool.
+    pub fn set_method_lines(&mut self, name: &str, desc: &str, entries: &[(u16, u32)]) {
+        let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
+            return;
+        };
+        if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
+            m.lnt = entries.iter().map(|&(pc, l)| (pc, l as u16)).collect();
+        }
+    }
+
     /// A ≥2-field data class's `hashCode` LocalVariableTable: the `result` accumulator (`I`, slot 1,
     /// live from its first store to method end) listed BEFORE `this` (slot 0, whole method) — kotlinc's
     /// exact shape. No LineNumberTable (a synthesized data-class method gets none). `result`'s start is

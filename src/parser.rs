@@ -75,6 +75,9 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
                 for m in &mut c.methods {
                     m.decl_line = line_at(m.span.lo);
                 }
+                for p in &mut c.body_props {
+                    p.decl_line = line_at(p.span.lo);
+                }
             }
             Decl::Fun(f) => f.decl_line = line_at(f.span.lo),
             _ => {}
@@ -1637,6 +1640,7 @@ impl<'a> Parser<'a> {
             .is_some_and(|e| self.expr_reads_field(e));
         PropDecl {
             name,
+            decl_line: 0,
             visibility: Visibility::Public,
             type_params,
             type_param_bounds,
