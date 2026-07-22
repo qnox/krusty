@@ -1127,6 +1127,13 @@ impl ClassWriter {
         self.methods.iter().any(|m| m.name == n && m.desc == d)
     }
 
+    /// Pre-intern a method DESCRIPTOR so it lands before entries the method's body would otherwise
+    /// intern first. kotlinc visits a method's signature before its code, so a body-only reference
+    /// (e.g. the private ctor a synthetic accessor delegates to) must not claim the earlier slot.
+    pub fn reserve_descriptor(&mut self, desc: &str) {
+        self.cp.utf8(desc);
+    }
+
     pub fn add_method(&mut self, access: u16, name: &str, desc: &str, code: &CodeBuilder) {
         self.add_method_sig(access, name, desc, code, None);
     }
