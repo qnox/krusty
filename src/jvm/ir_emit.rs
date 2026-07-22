@@ -612,9 +612,9 @@ fn attach_declared_method_debug(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut Cl
         }
         for (i, t) in param_tys.iter().enumerate() {
             locals.push((
-                f.param_checks
-                    .get(i)
-                    .and_then(|n| n.clone())
+                ir.param_names(fid)
+                    .and_then(|ns| ns.get(i).cloned())
+                    .or_else(|| f.param_checks.get(i).and_then(|n| n.clone()))
                     .unwrap_or_else(|| format!("p{i}")),
                 crate::jvm::names::type_descriptor(*t),
                 slot,

@@ -70,6 +70,18 @@ fn assert_byte_identical(src: &str, class_internal: &str, cp: &[PathBuf]) {
 
 // ---- Byte-identity (the end-to-end goal) ----------------------------------------------------------
 
+/// A class whose only member is a declared method with a parameter — pins that the parameter's REAL
+/// name reaches both the `LocalVariableTable` and `@Metadata` (krusty previously synthesized `p0`,
+/// since `IrFunction` keeps only types).
+#[test]
+fn class_with_method_parameter_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C {\n    fun f(a: Int): Int = a\n}\n",
+        "demo/C",
+        &[],
+    );
+}
+
 /// A class with a constructor property AND a declared method — the everyday shape. Needs three things
 /// that only recently exist: the declared member in `@Metadata` (with derived `Function.flags`, omitted
 /// at the public-final default), a `LineNumberTable`/`LocalVariableTable` for the method from its own
