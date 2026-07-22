@@ -664,12 +664,35 @@ suspend fun raw(): Int = 1\n";
 
 // A suspend function returning Unit with a non-tail suspension is not yet lowered — declined.
 #[test]
-fn suspend_returns_unit_rejected() {
-    let src = "var sink = 0\n\
+fn suspend_returns_unit_lowers() {
+    // Was a REJECTION pin while a top-level `var` write with a suspending value (`sink += step()`)
+    // had no `SetStatic` hoist/box arms; the shape now lowers and runs — pin the positive behavior.
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(jdk_modules) = common::jdk_modules() else {
+        return;
+    };
+    let src = "import kotlin.coroutines.*\n\
+var sink = 0\n\
 suspend fun step(): Int = 21\n\
 suspend fun act(): Unit {\n\
     sink += step()\n\
     sink += step()\n\
+}\n\
+fun builder(c: suspend () -> Unit) {\n\
+    c.startCoroutine(object : Continuation<Unit> {\n\
+        override val context: CoroutineContext = EmptyCoroutineContext\n\
+        override fun resumeWith(result: Result<Unit>) { result.getOrThrow() }\n\
+    })\n\
+}\n\
+fun box(): String {\n\
+    builder { act() }\n\
+    return if (sink == 42) \"OK\" else \"fail: $sink\"\n\
 }\n";
-    rejects_suspend("suspend_unit", src);
+    assert_eq!(
+        common::compile_and_run_box(src, "S", &[stdlib], Some(&jdk_modules)).as_deref(),
+        Some("OK"),
+        "Unit suspend fn with top-level-var writes should lower and run"
+    );
 }

@@ -195,9 +195,11 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
         if let Some(b) = body {
             shift_locals(ir, b, p_old);
             // `suspendCoroutineUninterceptedOrReturn { c -> … }` bound `c` to a `CurrentContinuation`
-            // placeholder; now that the trailing `Continuation` parameter exists at value-index `p_old`,
-            // resolve the placeholder to read it.
-            rewrite_current_continuation(ir, b, p_old);
+            // placeholder. Its binding depends on the fn's SHAPE: a leaf/tail-forward fn passes its raw
+            // `$completion` (value-index `p_old`), but a STATE-MACHINE fn must pass the machine's OWN
+            // continuation instance — resuming the raw completion would skip the remaining states (the
+            // caller resumes past this fn entirely). So the rewrite happens per-branch below and inside
+            // `build_state_machine`, not here.
             // The pre-splice scope lists (captured above) hold PRE-shift local indices — shift them
             // identically so they match the machine's value numbering.
             if let Some(scopes) = ir.pre_splice_scopes.get_mut(&fid) {
@@ -215,6 +217,7 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
             // Tail-call forward: thread the function's own `$completion` (value-index `p_old`) into the
             // callee and return its `Object` result directly. No state machine, no continuation class —
             // exactly kotlinc's tail-call optimization.
+            rewrite_current_continuation(ir, b, p_old);
             let cont = ir.add_expr(IrExpr::GetValue(p_old));
             append_continuation(ir, call, cont);
             make_forward_body(ir, b, call);
@@ -223,6 +226,7 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
             // / statement body that falls through (no `return`) must get a terminal return — a value body
             // returns its boxed value, a `Unit` body runs for effect then returns `Unit.INSTANCE`.
             if let Some(b) = body {
+                rewrite_current_continuation(ir, b, p_old);
                 if !box_returns(ir, b) {
                     return false;
                 }
@@ -944,6 +948,13 @@ fn hoist_expr(
             ir.exprs[e as usize] = IrExpr::SetValue { var, value: nv };
             e
         }
+        // A TOP-LEVEL `var` write (`log += susp()`): like SetValue/SetField, the value evaluates
+        // unconditionally — hoist its suspension to a preceding bound temp.
+        IrExpr::SetStatic { index, value } => {
+            let nv = hoist_expr(ir, value, suspend_set, orig_rets, prelude);
+            ir.exprs[e as usize] = IrExpr::SetStatic { index, value: nv };
+            e
+        }
         // A write to a captured `var` (a `Ref`-cell field) or any object field whose right-hand side
         // suspends (`result = await(…)`): hoist the receiver then the value so the suspension becomes a
         // preceding bound temp (`val tmp = await(…); ref.element = tmp`), which the flattener handles.
@@ -1610,6 +1621,14 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
 
     let base = max_value_index(ir) + 1;
     let cont_v = base;
+    // A `suspendCoroutineUninterceptedOrReturn { c -> … }` region INSIDE a state machine needs its
+    // own resume state (`return <intrinsic>` must resume by RETURNING the value, not re-running the
+    // state) — not modeled yet. Only the LEAF form (the intrinsic as the fn's sole suspension, no
+    // machine) is supported; bail the machine case (skip, never miscompile — binding `c` to either
+    // the raw completion or the machine instance loops or skips states).
+    if expr_contains_current_continuation(ir, b) {
+        return false;
+    }
     let r_v = base + 1;
     let suspended_v = base + 2;
     // The dispatch's own transient exception var is `base + 3`; the flattener's fresh locals start at
@@ -1954,6 +1973,10 @@ fn build_lambda_state_machine(
     let Some(b) = ir.functions[fid as usize].body else {
         return false;
     };
+    // See the named machine: a raw intrinsic region inside a machine isn't modeled.
+    if expr_contains_current_continuation(ir, b) {
+        return false;
+    }
     let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
     // Flatten a block-valued statement (`{ val g = …; res = g() }` whose tail assignment is wrapped as a
     // `Unit`-valued `Variable { init: Block { … } }`) into the top-level statement list FIRST, so the
@@ -4515,6 +4538,9 @@ fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
         IrExpr::PrimitiveBinOp { lhs, rhs, .. } => box_returns(ir, lhs) && box_returns(ir, rhs),
         IrExpr::SetValue { value, .. } => box_returns(ir, value),
         IrExpr::SetField { value, .. } => box_returns(ir, value),
+        // A TOP-LEVEL `var` assignment (`result += susp()` in a cross-module test's main file) —
+        // a statement like SetField; only its value subtree can hold a return.
+        IrExpr::SetStatic { value, .. } => box_returns(ir, value),
         IrExpr::RefGet { holder, .. } => box_returns(ir, holder),
         IrExpr::RefSet { holder, value, .. } => box_returns(ir, holder) && box_returns(ir, value),
         IrExpr::Variable { init, .. } => init.is_none_or(|i| box_returns(ir, i)),
@@ -4696,6 +4722,23 @@ fn shift_locals(ir: &mut IrFile, e: ExprId, threshold: u32) {
 /// Resolve every `CurrentContinuation` placeholder in `e` to read the continuation value at `slot` (the
 /// trailing `Continuation` parameter's value-index). Emitted by `ir_lower` for the lambda parameter of
 /// `suspendCoroutineUninterceptedOrReturn { c -> … }`.
+fn expr_contains_current_continuation(ir: &IrFile, e: ExprId) -> bool {
+    let mut found = false;
+    let mut seen: HashSet<ExprId> = HashSet::new();
+    let mut stack = vec![e];
+    while let Some(cur) = stack.pop() {
+        if !seen.insert(cur) {
+            continue;
+        }
+        if matches!(&ir.exprs[cur as usize], IrExpr::CurrentContinuation) {
+            found = true;
+            break;
+        }
+        for_each_child(&ir.exprs, cur, &mut |c| stack.push(c));
+    }
+    found
+}
+
 fn rewrite_current_continuation(ir: &mut IrFile, e: ExprId, slot: u32) {
     rewrite_subtree(ir, e, &mut |node| {
         if matches!(node, IrExpr::CurrentContinuation) {

@@ -322,3 +322,20 @@ fn facade_metadata_encodes_function_typed_params() {
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(out.as_deref(), Some("OK"));
 }
+
+#[test]
+fn top_level_var_assignment_in_suspend_body() {
+    // `log += susp()` on a TOP-LEVEL `var` inside a suspend body: `SetStatic` was unhandled in the
+    // CPS return-boxing walk, so the whole file bailed ("suspend-function shape not lowered").
+    let src = format!(
+        "{BUILDER}\
+var log = \"\"\n\
+suspend fun s(v: String): String = suspendCoroutineUninterceptedOrReturn {{ x -> x.resume(v); COROUTINE_SUSPENDED }}\n\
+suspend fun go() {{ log += s(\"O\"); log += s(\"K\") }}\n\
+fun box(): String {{ builder {{ go() }}; return log }}\n"
+    );
+    assert_eq!(
+        run(&src).expect("top-level var suspend assignment runs"),
+        "OK"
+    );
+}
