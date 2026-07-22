@@ -744,6 +744,8 @@ pub enum ClassInit {
 #[derive(Clone, Debug)]
 pub struct PropDecl {
     pub name: String,
+    /// 1-based source line of the declaration, filled by the parser post-pass (0 = unknown).
+    pub decl_line: u32,
     /// Declaration visibility (`public` by default). A `private set` narrows only the SETTER — that
     /// lives on [`PropAccessor::is_private`]; this is the property's (getter's) visibility.
     pub visibility: Visibility,
