@@ -465,6 +465,23 @@ pub fn lower_file_at_reporting(
             // Constructor-parameter fields, then class-body-property fields (initialized in `init_body`).
             // Field types come from the resolver's ClassSig so nested/imported/user classifier decisions
             // are made in the front end and lowering only consumes resolved semantic types.
+            // A property declared `private` has no accessor, so `@Metadata` records no getter name.
+            // Captured here from the DECLARATION — `IrField::is_private` is the backing field's own
+            // visibility, which is private for every normal property and so cannot answer this.
+            for p in c.props.iter().filter(|p| p.is_property) {
+                if p.visibility == crate::types::Visibility::Private {
+                    lo.ir
+                        .private_props
+                        .insert((internal.clone(), p.name.clone()));
+                }
+            }
+            for p in c.body_props.iter().filter(|p| is_backing_field_prop(p)) {
+                if p.visibility == crate::types::Visibility::Private {
+                    lo.ir
+                        .private_props
+                        .insert((internal.clone(), p.name.clone()));
+                }
+            }
             let mut ctor_fields: Vec<(String, Ty)> = c
                 .props
                 .iter()

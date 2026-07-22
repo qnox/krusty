@@ -358,7 +358,8 @@ fn build_class_metadata(
             has_constant: f.is_final
                 && i >= c.ctor_param_count as usize
                 && const_fields.contains(&(i as u32)),
-            getter: (format!("get{}", cap(&f.name)), format!("(){}", desc(f.ty))),
+            getter: (!ir.private_props.contains(&(c.fq_name(), f.name.clone())))
+                .then(|| (format!("get{}", cap(&f.name)), format!("(){}", desc(f.ty)))),
             setter: (!f.is_final)
                 .then(|| (format!("set{}", cap(&f.name)), format!("({})V", desc(f.ty)))),
         })
@@ -625,7 +626,12 @@ fn seed_plain_class_pool(
         .collect();
     // (name, descriptor, setter_kind): 0 getter, 1 primitive setter, 2 non-null reference setter.
     let mut accessors: Vec<(String, String, u8)> = Vec::new();
-    for f in &c.fields {
+    // A property declared `private` has NO accessor methods — seeding their names would intern pool
+    // entries for methods that are never emitted.
+    for f in c.fields.iter().filter(|f| {
+        !ir.private_props
+            .contains(&(fq_name.to_string(), f.name.clone()))
+    }) {
         accessors.push((
             format!("get{}", cap(&f.name)),
             format!("(){}", desc(f.ty)),
