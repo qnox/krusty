@@ -314,6 +314,9 @@ pub struct ClassTail<'a> {
     /// `inlineClassUnderlyingPropertyName` (f17, the name's string-table id) +
     /// `inlineClassUnderlyingType` (f18, an inline `Type`). `None` for an ordinary class.
     pub inline_underlying: Option<(&'a str, Ty)>,
+    /// Whether the class HAS a primary constructor at all — an `interface` has none, so `Class` carries
+    /// no `constructor` (f8) entry. Defaults to true (every other kind).
+    pub emit_primary_ctor: bool,
     /// `Constructor.flags` (f1) for the PRIMARY constructor — 0 (omitted) for an ordinary class; a
     /// sealed class's primary ctor is PROTECTED, which kotlinc records.
     pub primary_ctor_flags: u64,
@@ -333,6 +336,7 @@ impl Default for ClassTail<'_> {
             ctor_param_defaults: &[],
             inline_underlying: None,
             ctor_sig_name: None,
+            emit_primary_ctor: true,
             primary_ctor_flags: 0,
         }
     }
@@ -366,14 +370,18 @@ pub fn build_class(
 
     // f8 = constructors: the primary (flags 0), then any secondary constructors — each interning in
     // order (kotlinc emits the ctor JVM name `<init>` explicitly, not omitted).
-    let mut ctor_msgs = vec![build_ctor(
-        &mut st,
-        ctor_params,
-        ctor_desc,
-        tail.primary_ctor_flags,
-        tail.ctor_param_defaults,
-        tail.ctor_sig_name,
-    )];
+    let mut ctor_msgs = if tail.emit_primary_ctor {
+        vec![build_ctor(
+            &mut st,
+            ctor_params,
+            ctor_desc,
+            tail.primary_ctor_flags,
+            tail.ctor_param_defaults,
+            tail.ctor_sig_name,
+        )]
+    } else {
+        Vec::new()
+    };
     for sc in tail.secondary_ctors {
         ctor_msgs.push(build_ctor(&mut st, sc.params, sc.desc, sc.flags, &[], None));
     }
