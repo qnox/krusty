@@ -35,10 +35,14 @@ pub struct FnMeta {
     /// Mark every value parameter `DECLARES_DEFAULT_VALUE` (so a Kotlin caller may omit it) — used
     /// for the synthesized `copy`.
     pub params_have_defaults: bool,
-    /// The JVM method descriptor for a `JvmMethodSignature` (f100), emitted (name omitted, derivable)
-    /// only when the signature is not derivable from the proto types — a boxed nullable-primitive
-    /// param/return on a synthesized `componentN`/`copy`. `None` ⇒ no extension.
+    /// The JVM method descriptor for a `JvmMethodSignature` (f100), emitted only when the signature is
+    /// not derivable from the proto types — a boxed nullable-primitive param/return on a synthesized
+    /// `componentN`/`copy`, or a value class's `equals`/`hashCode`/`toString` (which dispatch to a
+    /// differently-named static `-impl`). `None` ⇒ no extension.
     pub jvm_sig: Option<String>,
+    /// The `JvmMethodSignature.name` (f1) when the JVM name differs from the Kotlin one — a value
+    /// class's `equals` → `equals-impl`. `None` ⇒ name omitted (derivable), kotlinc's usual shape.
+    pub jvm_sig_name: Option<String>,
 }
 
 impl FnMeta {
@@ -51,6 +55,7 @@ impl FnMeta {
             flags: 0,
             params_have_defaults: false,
             jvm_sig: None,
+            jvm_sig_name: None,
         }
     }
 }
@@ -65,6 +70,12 @@ pub const EQUALS_FN_FLAGS: u64 = 0x101d6;
 pub const HASHCODE_TOSTRING_FN_FLAGS: u64 = 0x100d6;
 /// `Class.flags` (f1) for a `public final data class` (IS_DATA + public + final). From kotlinc 2.4.0.
 pub const DATA_CLASS_FLAGS: u64 = 0x406;
+/// `Class.flags` (f1) for a `@JvmInline value class` (IS_VALUE + public + final). From kotlinc 2.4.0.
+pub const VALUE_CLASS_FLAGS: u64 = 8199;
+/// `Function.flags` for a value class's `equals`/`hashCode`/`toString` — same shape as the data-class
+/// overrides (public final member overriding a supertype member).
+pub const VC_EQUALS_FN_FLAGS: u64 = EQUALS_FN_FLAGS;
+pub const VC_HASHCODE_TOSTRING_FN_FLAGS: u64 = HASHCODE_TOSTRING_FN_FLAGS;
 /// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE`.
 const DECLARES_DEFAULT_VALUE: u64 = 2;
 
@@ -241,6 +252,7 @@ fn build_ctor(
     desc: &str,
     flags: u64,
     param_defaults: &[bool],
+    sig_name: Option<&str>,
 ) -> Pb {
     let mut ctor = Pb::new();
     if flags != 0 {
@@ -258,7 +270,7 @@ fn build_ctor(
         vp.field_message(3, &ty); // ValueParameter.type = 3
         ctor.repeated_message(2, &vp); // Constructor.value_parameter = 2
     }
-    let sig = jvm_method_sig(st, Some("<init>"), desc);
+    let sig = jvm_method_sig(st, Some(sig_name.unwrap_or("<init>")), desc);
     ctor.field_message(100, &sig); // JvmProtoBuf.constructorSignature = 100
     ctor
 }
@@ -302,6 +314,13 @@ pub struct ClassTail<'a> {
     /// with a default (`routes: List<String> = emptyList()`) gets the flag, as kotlinc emits. Empty ⇒
     /// no param has a default.
     pub ctor_param_defaults: &'a [bool],
+    /// A `@JvmInline value class`'s sole underlying property `(name, type)` → `Class`
+    /// `inlineClassUnderlyingPropertyName` (f17, the name's string-table id) +
+    /// `inlineClassUnderlyingType` (f18, an inline `Type`). `None` for an ordinary class.
+    pub inline_underlying: Option<(&'a str, Ty)>,
+    /// The primary constructor's `JvmMethodSignature` NAME — a value class's primary ctor is realized as
+    /// the static `constructor-impl`, not `<init>`. `None` ⇒ `<init>` (the ordinary shape).
+    pub ctor_sig_name: Option<&'a str>,
 }
 
 pub fn build_class(
@@ -338,9 +357,10 @@ pub fn build_class(
         ctor_desc,
         0,
         tail.ctor_param_defaults,
+        tail.ctor_sig_name,
     )];
     for sc in tail.secondary_ctors {
-        ctor_msgs.push(build_ctor(&mut st, sc.params, sc.desc, sc.flags, &[]));
+        ctor_msgs.push(build_ctor(&mut st, sc.params, sc.desc, sc.flags, &[], None));
     }
 
     // Properties BEFORE functions (kotlinc interns property JVM signatures before function names).
@@ -417,7 +437,10 @@ pub fn build_class(
             if let Some(sig) = &m.jvm_sig {
                 // `JvmMethodSignature` (f100), desc only (name derivable) — a boxed nullable-primitive
                 // signature kotlinc records because the proto types alone don't pin the JVM descriptor.
-                func.field_message(100, &jvm_method_sig(&mut st, None, sig));
+                func.field_message(
+                    100,
+                    &jvm_method_sig(&mut st, m.jvm_sig_name.as_deref(), sig),
+                );
             }
             func
         })
@@ -432,6 +455,12 @@ pub fn build_class(
             ee
         })
         .collect();
+
+    // A `@JvmInline value class`'s underlying property name + type (`Class` f17/f18). Interned with the
+    // members (before the companion/nested tail) so the d2 order matches kotlinc.
+    let inline_underlying: Option<(u32, Pb)> = tail
+        .inline_underlying
+        .map(|(name, ty)| (st.local(name), type_pb(&mut st, ty)));
 
     // Companion + nested class names intern LAST (kotlinc's d2 places them after all members).
     let companion_idx = companion_name.map(|c| st.local(c));
@@ -469,6 +498,10 @@ pub fn build_class(
     }
     for ee in &enum_msgs {
         class.repeated_message(13, ee); // Class.enum_entry = 13
+    }
+    if let Some((name_id, ty_pb)) = &inline_underlying {
+        class.field_varint(17, *name_id as u64); // Class.inlineClassUnderlyingPropertyName = 17
+        class.field_message(18, ty_pb); // Class.inlineClassUnderlyingType = 18
     }
     if let Some(mi) = module_idx {
         class.field_varint(101, mi as u64); // JvmProtoBuf.classModuleName = 101
@@ -566,6 +599,7 @@ mod tests {
                 flags: COMPONENT_FN_FLAGS,
                 params_have_defaults: false,
                 jvm_sig: None,
+                jvm_sig_name: None,
             },
             FnMeta {
                 name: "component2".into(),
@@ -574,6 +608,7 @@ mod tests {
                 flags: COMPONENT_FN_FLAGS,
                 params_have_defaults: false,
                 jvm_sig: None,
+                jvm_sig_name: None,
             },
             FnMeta {
                 name: "copy".into(),
@@ -582,6 +617,7 @@ mod tests {
                 flags: COPY_FN_FLAGS,
                 params_have_defaults: true,
                 jvm_sig: None,
+                jvm_sig_name: None,
             },
             FnMeta {
                 name: "equals".into(),
@@ -590,6 +626,7 @@ mod tests {
                 flags: EQUALS_FN_FLAGS,
                 params_have_defaults: false,
                 jvm_sig: None,
+                jvm_sig_name: None,
             },
             FnMeta {
                 name: "hashCode".into(),
@@ -598,6 +635,7 @@ mod tests {
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
                 params_have_defaults: false,
                 jvm_sig: None,
+                jvm_sig_name: None,
             },
             FnMeta {
                 name: "toString".into(),
@@ -606,6 +644,7 @@ mod tests {
                 flags: HASHCODE_TOSTRING_FN_FLAGS,
                 params_have_defaults: false,
                 jvm_sig: None,
+                jvm_sig_name: None,
             },
         ];
         let props = vec![

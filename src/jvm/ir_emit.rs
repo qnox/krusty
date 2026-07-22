@@ -104,13 +104,12 @@ fn build_class_metadata(
 ) -> Option<KotlinMetadata> {
     use crate::metadata::class_builder::{
         build_class, ClassTail, FnMeta, PropMeta, COMPONENT_FN_FLAGS, COPY_FN_FLAGS,
-        DATA_CLASS_FLAGS, EQUALS_FN_FLAGS, HASHCODE_TOSTRING_FN_FLAGS,
+        DATA_CLASS_FLAGS, EQUALS_FN_FLAGS, HASHCODE_TOSTRING_FN_FLAGS, VALUE_CLASS_FLAGS,
     };
     if c.is_object
         || c.is_companion
         || c.is_interface
         || c.is_annotation
-        || c.is_value
         || !c.enum_entries.is_empty()
         || c.enum_entry_of.is_some()
         || c.prop_ref.is_some()
@@ -130,6 +129,30 @@ fn build_class_metadata(
     };
     // A `data class` also carries kotlinc's synthesized `componentN`/`copy`/`equals`/`hashCode`/
     // `toString` — derivable from the primary-ctor properties alone, so allowed alongside accessors.
+    if c.is_value && (c.fields.len() != 1 || !c.fields[0].is_final) {
+        return None; // multi-field / `var` value classes are a shape not computed yet
+    }
+    // A value class's compiler-synthesized members (the static `-impl` family + their instance
+    // delegators); allowed alongside the property accessor without disqualifying the shape.
+    let value_method_names: std::collections::HashSet<String> = if c.is_value {
+        [
+            "equals",
+            "hashCode",
+            "toString",
+            "equals-impl",
+            "equals-impl0",
+            "hashCode-impl",
+            "toString-impl",
+            "box-impl",
+            "unbox-impl",
+            "constructor-impl",
+        ]
+        .map(String::from)
+        .into_iter()
+        .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
     let data_method_names: std::collections::HashSet<String> = if c.is_data {
         let mut s: std::collections::HashSet<String> = (1..=c.fields.len())
             .map(|i| format!("component{i}"))
@@ -151,7 +174,9 @@ fn build_class_metadata(
         .collect();
     if c.methods.iter().any(|&fid| {
         let n = &ir.functions[fid as usize].name;
-        !accessor_names.contains(n) && !data_method_names.contains(n)
+        !accessor_names.contains(n)
+            && !data_method_names.contains(n)
+            && !value_method_names.contains(n)
     }) {
         return None;
     }
@@ -201,6 +226,7 @@ fn build_class_metadata(
                 flags: COMPONENT_FN_FLAGS,
                 params_have_defaults: false,
                 jvm_sig: boxed_fn_sig(&[], f.ty),
+                jvm_sig_name: None,
             })
             .collect();
         m.push(FnMeta {
@@ -210,6 +236,7 @@ fn build_class_metadata(
             flags: COPY_FN_FLAGS,
             params_have_defaults: true,
             jvm_sig: boxed_fn_sig(&field_tys, class_ty),
+            jvm_sig_name: None,
         });
         m.push(FnMeta {
             name: "equals".into(),
@@ -218,6 +245,7 @@ fn build_class_metadata(
             flags: EQUALS_FN_FLAGS,
             params_have_defaults: false,
             jvm_sig: None,
+            jvm_sig_name: None,
         });
         m.push(FnMeta {
             name: "hashCode".into(),
@@ -226,6 +254,7 @@ fn build_class_metadata(
             flags: HASHCODE_TOSTRING_FN_FLAGS,
             params_have_defaults: false,
             jvm_sig: None,
+            jvm_sig_name: None,
         });
         m.push(FnMeta {
             name: "toString".into(),
@@ -234,22 +263,71 @@ fn build_class_metadata(
             flags: HASHCODE_TOSTRING_FN_FLAGS,
             params_have_defaults: false,
             jvm_sig: None,
+            jvm_sig_name: None,
         });
         m
+    } else if c.is_value {
+        // A value class's Kotlin-visible overrides. Each dispatches to a differently-named static
+        // `-impl` taking the erased underlying, so each records a `JvmMethodSignature` (name + desc).
+        let u = desc(c.fields[0].ty);
+        vec![
+            FnMeta {
+                name: "equals".into(),
+                params: vec![("other".into(), Ty::nullable(Ty::obj("kotlin/Any")))],
+                ret: Ty::Boolean,
+                flags: EQUALS_FN_FLAGS,
+                params_have_defaults: false,
+                jvm_sig: Some(format!("({u}Ljava/lang/Object;)Z")),
+                jvm_sig_name: Some("equals-impl".into()),
+            },
+            FnMeta {
+                name: "hashCode".into(),
+                params: vec![],
+                ret: Ty::Int,
+                flags: HASHCODE_TOSTRING_FN_FLAGS,
+                params_have_defaults: false,
+                jvm_sig: Some(format!("({u})I")),
+                jvm_sig_name: Some("hashCode-impl".into()),
+            },
+            FnMeta {
+                name: "toString".into(),
+                params: vec![],
+                ret: Ty::String,
+                flags: HASHCODE_TOSTRING_FN_FLAGS,
+                params_have_defaults: false,
+                jvm_sig: Some(format!("({u})Ljava/lang/String;")),
+                jvm_sig_name: Some("toString-impl".into()),
+            },
+        ]
     } else {
         vec![]
     };
+    // A value class's primary constructor is realized as the static `constructor-impl` returning the
+    // erased underlying, not `<init>`; its `@Metadata` signature records that.
+    let vc_ctor_desc = c
+        .is_value
+        .then(|| format!("({0}){0}", desc(c.fields[0].ty)));
     let (d1_bytes, d2) = build_class(
         &c.fq_name(),
         &ctor_params,
-        &ctor_desc,
+        vc_ctor_desc.as_deref().unwrap_or(&ctor_desc),
         &props,
         &methods,
         &[],
         &ClassTail {
-            flags: if c.is_data { DATA_CLASS_FLAGS } else { 0 },
+            flags: if c.is_data {
+                DATA_CLASS_FLAGS
+            } else if c.is_value {
+                VALUE_CLASS_FLAGS
+            } else {
+                0
+            },
             module_name: opts.module_name.as_deref(),
             ctor_param_defaults: &ctor_param_defaults,
+            inline_underlying: c
+                .is_value
+                .then(|| (c.fields[0].name.as_str(), c.fields[0].ty)),
+            ctor_sig_name: c.is_value.then_some("constructor-impl"),
             ..Default::default()
         },
     );
@@ -395,6 +473,10 @@ fn seed_plain_class_pool(
     }
 }
 
+/// One synthesized value-class member's debug shape: `(jvm name, jvm descriptor, LocalVariableTable
+/// entries as `(name, descriptor, slot)`)`.
+type VcDebugMethod = (String, String, Vec<(String, String, u16)>);
+
 fn attach_synth_debug_tables(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     let line = c.decl_line;
     if line == 0 {
@@ -483,6 +565,78 @@ fn attach_synth_debug_tables(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
                     ("<set-?>".to_string(), pd, 1),
                 ],
             );
+        }
+    }
+    // A `@JvmInline value class`'s synthesized members: the static `-impl` family (taking the erased
+    // underlying) and their instance delegators. kotlinc gives each a LocalVariableTable but no
+    // LineNumberTable; the static impls name their parameter positionally (`arg0`/`v`/`p1`/`p2`) except
+    // `constructor-impl`, which keeps the property name.
+    if c.is_value {
+        if let Some(f0) = c.fields.first() {
+            let u = desc(f0.ty);
+            let obj = "Ljava/lang/Object;".to_string();
+            let w = slot_size(f0.ty);
+            let one = |n: &str, d: &String, slot: u16| vec![(n.to_string(), d.clone(), slot)];
+            let vc_methods: Vec<VcDebugMethod> = vec![
+                (
+                    "toString-impl".into(),
+                    format!("({u})Ljava/lang/String;"),
+                    one("arg0", &u, 0),
+                ),
+                (
+                    "toString".into(),
+                    "()Ljava/lang/String;".into(),
+                    one("this", &this_desc, 0),
+                ),
+                (
+                    "hashCode-impl".into(),
+                    format!("({u})I"),
+                    one("arg0", &u, 0),
+                ),
+                ("hashCode".into(), "()I".into(), one("this", &this_desc, 0)),
+                (
+                    "equals-impl".into(),
+                    format!("({u}Ljava/lang/Object;)Z"),
+                    vec![
+                        ("arg0".to_string(), u.clone(), 0),
+                        ("other".to_string(), obj.clone(), w),
+                    ],
+                ),
+                (
+                    "equals".into(),
+                    "(Ljava/lang/Object;)Z".into(),
+                    vec![
+                        ("this".to_string(), this_desc.clone(), 0),
+                        ("other".to_string(), obj.clone(), 1),
+                    ],
+                ),
+                (
+                    "constructor-impl".into(),
+                    format!("({u}){u}"),
+                    one(&f0.name, &u, 0),
+                ),
+                (
+                    "box-impl".into(),
+                    format!("({u}){this_desc}"),
+                    one("v", &u, 0),
+                ),
+                (
+                    "unbox-impl".into(),
+                    format!("(){u}"),
+                    one("this", &this_desc, 0),
+                ),
+                (
+                    "equals-impl0".into(),
+                    format!("({u}{u})Z"),
+                    vec![
+                        ("p1".to_string(), u.clone(), 0),
+                        ("p2".to_string(), u.clone(), w),
+                    ],
+                ),
+            ];
+            for (name, d, locals) in &vc_methods {
+                cw.set_method_debug(name, d, None, locals);
+            }
         }
     }
     // A `data class`'s synthesized methods carry a LocalVariableTable (this + params) but NO
@@ -621,6 +775,16 @@ fn attach_synth_nullability(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
                     Some(a),
                     &[],
                 );
+            }
+        }
+    }
+    // A value class's `constructor-impl` returns the erased underlying; kotlinc annotates that return
+    // exactly like the property's (a non-null reference underlying → `@NotNull`).
+    if c.is_value {
+        if let Some(f0) = c.fields.first() {
+            if let Some(a) = ann(f0.ty) {
+                let u = desc(f0.ty);
+                cw.set_method_nullability("constructor-impl", &format!("({u}){u}"), Some(a), &[]);
             }
         }
     }
