@@ -458,9 +458,12 @@ pub fn front_end_diagnostics(
     let mut diags = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(src);
     let toks = krusty::lexer::lex(src, &mut diags);
-    let files = vec![krusty::parser::parse_with_features(
+    let mut files = vec![krusty::parser::parse_with_features(
         src, &toks, &mut diags, &features,
     )];
+    if features.has("MultiPlatformProjects") {
+        krusty::frontend::strip_matched_expects(&mut files);
+    }
     if !diags.has_errors() {
         let mut cp_paths: Vec<PathBuf> = cp_jars.to_vec();
         if let Some(p) = jdk_modules {
