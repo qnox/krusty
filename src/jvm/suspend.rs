@@ -157,6 +157,7 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
         // preceding `val tmp = foo()` temp, so the flattener only meets suspensions at handled positions.
         if let (Some(b), None) = (body, forward) {
             hoist_suspensions(ir, b, &suspend_set, &orig_rets);
+            register_hoist_temps(ir, fid, b, &suspend_set);
         }
         // Desugar `return <suspend call>` (incl. an `= <suspend call>` expression body) into
         // `val tmp = <suspend call>; return tmp` so a tail-position suspension becomes a uniform
@@ -613,6 +614,70 @@ fn hoist_when_cond_suspensions(
     Some(ir.add_expr(IrExpr::When {
         branches: new_branches,
     }))
+}
+
+/// After hoisting: register each hoist TEMP (`val t1 = a()` from `a() + b()`) into the pre-splice
+/// scope lists of every LATER suspension it crosses. The prelude captured scopes BEFORE hoisting
+/// created these temps, so the resume arms would never restore them (t1 reads back zeroed in the
+/// arm that resumes b()). Only EXISTING entries are extended (a fresh entry would lack the
+/// value-param prefix), and strictly IN PLACE — the positional layout is built by map iteration,
+/// so rebuilding the map would reorder it. No-op when the fid has no pre-splice entry (the lambda
+/// fallback walks the post-hoist body and sees the temps directly).
+fn register_hoist_temps(ir: &mut IrFile, fid: u32, b: ExprId, suspend_set: &HashSet<u32>) {
+    if !ir.pre_splice_scopes.contains_key(&fid) {
+        return;
+    }
+    fn walk(
+        ir: &IrFile,
+        stmts: &[ExprId],
+        suspend_set: &HashSet<u32>,
+        pending: &mut Vec<(u32, Ty)>,
+        adds: &mut Vec<(ExprId, u32, Ty)>,
+    ) {
+        for &st in stmts {
+            let mut calls: HashSet<ExprId> = HashSet::new();
+            collect_suspend_calls(ir, st, suspend_set, &mut calls);
+            for call in calls {
+                for &(idx, ref ty) in pending.iter() {
+                    adds.push((call, idx, ty.clone()));
+                }
+            }
+            if let IrExpr::Variable {
+                index,
+                ty,
+                named: false,
+                init: Some(i),
+            } = &ir.exprs[st as usize]
+            {
+                if expr_calls_suspend(ir, *i, suspend_set)
+                    && !pending.iter().any(|(l, _)| l == index)
+                {
+                    pending.push((*index, spill_field_ty(*ty)));
+                }
+            }
+            if let IrExpr::Block { stmts: inner, .. } = &ir.exprs[st as usize] {
+                walk(ir, inner, suspend_set, pending, adds);
+            }
+        }
+    }
+    let mut adds: Vec<(ExprId, u32, Ty)> = Vec::new();
+    if let IrExpr::Block { stmts, .. } = ir.exprs[b as usize].clone() {
+        let mut pending = Vec::new();
+        walk(ir, &stmts, suspend_set, &mut pending, &mut adds);
+    }
+    if adds.is_empty() {
+        return;
+    }
+    let Some(scopes) = ir.pre_splice_scopes.get_mut(&fid) else {
+        return;
+    };
+    for (call, idx, ty) in adds {
+        if let Some(list) = scopes.get_mut(&call) {
+            if !list.iter().any(|(l, _)| *l == idx) {
+                list.push((idx, ty));
+            }
+        }
+    }
 }
 
 fn hoist_suspensions(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, orig_rets: &[Ty]) {
@@ -1516,9 +1581,6 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
     }
     // NOTE: `spill_shape_unmodeled` deliberately applies only to the LAMBDA machine — the named
     // machine's restore handles sub-int spills (`Boolean` params/temps, e2e-verified).
-    if consecutive_temp_suspensions(ir, &stmts, &suspend_set) {
-        return false;
-    }
     // The spilled value parameters — captured at continuation construction (in spilled order).
     let param_caps: Vec<(u32, Ty)> = spilled
         .iter()
@@ -1600,6 +1662,19 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
                     e.0 = *ev;
                 }
             }
+        }
+    }
+    // A restore list may only reference SPILLED locals: the scope walk now records unnamed temps
+    // too (they cross suspensions like any value), but one liveness proved stack-held has no
+    // field to restore from.
+    {
+        // A `Null`-typed local (`var x = null`) never spills: its only value IS null, and the
+        // prologue's zero-init `aconst_null` already restores it exactly (a `null` frame type is
+        // assignable everywhere; an Object field restore is not).
+        spilled.retain(|(_, t)| !matches!(t, Ty::Null));
+        let spill_set: HashSet<u32> = spilled.iter().map(|(i, _)| *i).collect();
+        for list in susp_scopes.values_mut() {
+            list.retain(|(l, _)| spill_set.contains(l));
         }
     }
     // Fold the field layout only over suspensions still PRESENT in the final (post-transform)
@@ -1887,6 +1962,7 @@ fn build_lambda_state_machine(
     // flattener meets it as a bound-local suspension typed by the callee's logical return.
     normalize_block_inits(ir, b);
     hoist_suspensions(ir, b, &suspend_set, orig_rets);
+    register_hoist_temps(ir, fid, b, &suspend_set);
     if binds_value_class_suspension(ir, b, &suspend_set) {
         crate::trace_compiler!(
             "suspend",
@@ -1965,9 +2041,6 @@ fn build_lambda_state_machine(
             spilled.push((idx, spill_field_ty(ty)));
         }
     }
-    if consecutive_temp_suspensions(ir, &stmts, &suspend_set) {
-        return false;
-    }
 
     // The PRE-SPLICE per-suspension scope lists (captured in `lower_suspend`); a lambda has no
     // value-param prefix (captures/params live in leading fields, reloaded each entry). A lambda
@@ -1985,6 +2058,19 @@ fn build_lambda_state_machine(
             w.walk_stmts(&stmts);
             w.out
         });
+    // A restore list may only reference SPILLED locals (see the named machine): scope-walked
+    // temps liveness proved stack-held have no field to restore from. Capture/param locals
+    // (2..2+field_base) reload from their fields in the prologue and never appear in lists.
+    let susp_scopes = {
+        // `Null`-typed locals never spill (see the named machine).
+        spilled.retain(|(_, t)| !matches!(t, Ty::Null));
+        let spill_set: HashSet<u32> = spilled.iter().map(|(i, _)| *i).collect();
+        let mut m = susp_scopes;
+        for list in m.values_mut() {
+            list.retain(|(l, _)| spill_set.contains(l));
+        }
+        m
+    };
     let mut live_calls: HashSet<ExprId> = HashSet::new();
     collect_suspend_calls(ir, b, &suspend_set, &mut live_calls);
     let mut layout = SpillLayout::default();
@@ -3374,16 +3460,15 @@ struct ScopeWalk<'a> {
 impl ScopeWalk<'_> {
     fn push_decl(&mut self, st: ExprId) {
         if let IrExpr::Variable {
-            index,
-            ty,
-            named: true,
-            ..
+            index, ty, named, ..
         } = self.ir.exprs[st as usize]
         {
             if !self.scope.iter().any(|(l, _, _)| *l == index) {
                 // Every NAMED source variable participates (kotlinc's scope rule; kind decides the
-                // field family: references L$, ints I$, …).
-                self.scope.push((index, spill_field_ty(ty), true));
+                // field family: references L$, ints I$, …). An UNNAMED temp participates too — a
+                // hoisted suspension binding (`val t1 = a()` from `a() + b()`) crosses the NEXT
+                // suspension, and a value the arms never restore comes back zeroed.
+                self.scope.push((index, spill_field_ty(ty), named));
             }
         }
     }
@@ -3397,9 +3482,8 @@ impl ScopeWalk<'_> {
             // diverge (the arm restores wouldn't cover it). (kotlinc's `nullOutSpilledVariable`
             // stores are FIELD HYGIENE — clearing a previous state's spill of a now-dead var —
             // and never allocate positions beyond some state's live list.)
-            if named {
-                list.push((l, ty.clone()));
-            }
+            let _ = named;
+            list.push((l, ty.clone()));
         }
         self.out.insert(call, list);
     }
@@ -4357,37 +4441,6 @@ fn stmt_contains_loop(ir: &IrFile, e: ExprId) -> bool {
         found = found || stmt_contains_loop(ir, c);
     });
     found
-}
-
-/// TWO consecutive compiler-temp suspension bindings (`val t1 = susp(); val t2 = susp()`, hoisted
-/// from one expression `a() + b()`): the FIRST temp's value must be restored across the SECOND
-/// suspension, which the positional resume-arm restore doesn't model for unnamed temps yet — the
-/// resumed arm reads a null field. Bail (skip, never miscompile).
-fn consecutive_temp_suspensions(ir: &IrFile, stmts: &[ExprId], suspend_set: &HashSet<u32>) -> bool {
-    let temp_susp = |s: ExprId| {
-        matches!(&ir.exprs[s as usize], IrExpr::Variable { named: false, init: Some(i), .. }
-            if expr_calls_suspend(ir, *i, suspend_set))
-    };
-    // The pair may sit inside a nested statement Block (`splice_return_blocks` grouping) — scan
-    // every reachable statement list.
-    fn scan(
-        ir: &IrFile,
-        stmts: &[ExprId],
-        suspend_set: &HashSet<u32>,
-        temp_susp: &dyn Fn(ExprId) -> bool,
-    ) -> bool {
-        if stmts
-            .windows(2)
-            .any(|w| temp_susp(w[0]) && expr_calls_suspend(ir, w[1], suspend_set))
-        {
-            return true;
-        }
-        stmts.iter().any(|&st| {
-            matches!(&ir.exprs[st as usize], IrExpr::Block { stmts: inner, .. }
-                if scan(ir, inner, suspend_set, temp_susp))
-        })
-    }
-    scan(ir, stmts, suspend_set, &temp_susp)
 }
 
 /// True if `e`'s subtree binds the result of a suspension to a value(inline)-class-typed local. An

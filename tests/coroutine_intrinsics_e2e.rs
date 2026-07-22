@@ -242,3 +242,17 @@ fun box(): String {{ val c = C(); builder {{ go(c) }}; return if (c.s == \"#20#2
     );
     assert_eq!(run(&src).expect("stepped progression loop runs"), "OK");
 }
+
+#[test]
+fn hoisted_temp_restores_across_second_suspension() {
+    // `a() + b()`: the hoisted `val t1 = a()` temp crosses b()'s suspension — the resume arm must
+    // restore it (unnamed temps were excluded from the scope lists; t1 read back zeroed → "nullK").
+    let src = format!(
+        "{BUILDER}\
+suspend fun s(v: String): String = suspendCoroutineUninterceptedOrReturn {{ x -> x.resume(v); COROUTINE_SUSPENDED }}\n\
+suspend fun both(): String = s(\"O\") + s(\"K\")\n\
+class C {{ var r = \"\" }}\n\
+fun box(): String {{ val c = C(); builder {{ c.r = both() }}; return c.r }}\n"
+    );
+    assert_eq!(run(&src).expect("hoisted temp restores"), "OK");
+}
