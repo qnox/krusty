@@ -1130,6 +1130,9 @@ pub struct IrFile {
     /// FunId → its declared parameter NAMES, in order. kotlinc records these in a method's
     /// `LocalVariableTable` and in `@Metadata`; `IrFunction` keeps only types, so they ride alongside.
     pub fn_param_names: std::collections::HashMap<u32, Vec<String>>,
+    /// (class internal name, property name) → 1-based source line of a BODY property's declaration.
+    /// kotlinc attributes both the property's getter and its constructor-side initializer to this line.
+    pub prop_decl_lines: std::collections::HashMap<(String, String), u32>,
     /// FunId → 1-based source line of its `fun` declaration, for the method's `LineNumberTable`.
     /// A side map (not a field on `IrFunction`) so the 40-odd construction sites stay untouched.
     pub fn_decl_lines: std::collections::HashMap<u32, u32>,
