@@ -687,3 +687,25 @@ fn class_with_ctor_param_and_body_property_is_byte_identical() {
         &[],
     );
 }
+
+/// A `String`-typed body property — its initializer is a String constant, and the property's own
+/// declaration line drives both the ctor's LineNumberTable entry and the accessor.
+#[test]
+fn class_with_string_body_property_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C {\n    val s: String = \"v\"\n}\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// A non-null reference ctor PARAMETER alongside a `String` body property — the parameter keeps its
+/// `@NotNull` annotation and `checkNotNullParameter` guard; the body property contributes neither.
+#[test]
+fn class_with_ref_ctor_param_and_string_body_property_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C(val p: String) {\n    val s: String = \"v\"\n}\n",
+        "demo/C",
+        &[],
+    );
+}
