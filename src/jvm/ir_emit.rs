@@ -745,6 +745,16 @@ type VcDebugMethod = (String, String, Vec<(String, String, u16)>);
 /// parameter for the whole method.
 fn attach_declared_method_debug(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     let this_desc = format!("L{};", c.fq_name());
+    // `aload <slot>` byte length: 1 (aload_0..3), 2 (aload u1), or 4 (wide aload u2).
+    let aload_len = |slot: u16| -> u16 {
+        if slot <= 3 {
+            1
+        } else if slot <= 255 {
+            2
+        } else {
+            4
+        }
+    };
     for &fid in &c.methods {
         let Some(f) = ir.functions.get(fid as usize) else {
             continue;
@@ -764,18 +774,24 @@ fn attach_declared_method_debug(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut Cl
             locals.push(("this".to_string(), this_desc.clone(), 0));
             slot = 1;
         }
+        // kotlinc attributes the `fun` line to the first instruction of the BODY, not to the
+        // `checkNotNullParameter` guards it emits ahead of it — so the entry starts past that
+        // prologue, measured the same way the constructor's is.
+        let mut body_pc = 0u16;
         for (i, t) in param_tys.iter().enumerate() {
-            locals.push((
-                ir.param_names(fid)
-                    .and_then(|ns| ns.get(i).cloned())
-                    .or_else(|| f.param_checks.get(i).and_then(|n| n.clone()))
-                    .unwrap_or_else(|| format!("p{i}")),
-                crate::jvm::names::type_descriptor(*t),
-                slot,
-            ));
+            let name = ir
+                .param_names(fid)
+                .and_then(|ns| ns.get(i).cloned())
+                .or_else(|| f.param_checks.get(i).and_then(|n| n.clone()))
+                .unwrap_or_else(|| format!("p{i}"));
+            if let Some(Some(guarded)) = f.param_checks.get(i) {
+                // guard = aload(slot) + ldc(param-name String) + invokestatic checkNotNullParameter(3)
+                body_pc += aload_len(slot) + cw.string_ldc_len(guarded).unwrap_or(2) + 3;
+            }
+            locals.push((name, crate::jvm::names::type_descriptor(*t), slot));
             slot += slot_words(*t);
         }
-        cw.set_method_debug(&f.name, &desc, Some((0, line)), &locals);
+        cw.set_method_debug(&f.name, &desc, Some((body_pc, line)), &locals);
     }
 }
 
@@ -4838,6 +4854,51 @@ fn emit_method_inner(
         e.slots.insert(vi, (slot, *t));
         e.next_slot += slot_words(*t);
     }
+    // kotlinc's writer visits a method HEADER before its code, so the name, descriptor, generic
+    // `Signature` and annotation types precede every constant the body introduces. krusty builds the
+    // body first, so reserve those entries here to land them in the same order.
+    let reserved_desc = method_descriptor(&param_tys, ret);
+    let reserved_sig = method_signature(ir, fid, f);
+    let ann_of = |t: Ty| -> Option<&'static str> {
+        let d = crate::jvm::names::type_descriptor(t);
+        if !(d.starts_with('L') || d.starts_with('[')) {
+            return None;
+        }
+        Some(if matches!(t, Ty::Nullable(_)) {
+            "Lorg/jetbrains/annotations/Nullable;"
+        } else {
+            "Lorg/jetbrains/annotations/NotNull;"
+        })
+    };
+    // A bare type-parameter position erases to `Object` but is NOT a known-non-null reference —
+    // kotlinc annotates neither it nor a parameter in that position.
+    let gsig = ir.signatures.get(&fid);
+    let ret_ann = gsig
+        .is_none_or(|g| g.ret_tparam.is_none())
+        .then(|| ann_of(f.ret))
+        .flatten();
+    let param_anns: Vec<Option<&str>> = f
+        .params
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let is_tparam = gsig.is_some_and(|g| {
+                g.param_tparams
+                    .get(i)
+                    .is_some_and(std::option::Option::is_some)
+            });
+            if is_tparam {
+                None
+            } else {
+                ann_of(*t)
+            }
+        })
+        .collect();
+    let ann_types: Vec<&str> = ret_ann
+        .into_iter()
+        .chain(param_anns.iter().flatten().copied())
+        .collect();
+    e.cw.reserve_method_pool(&f.name, &reserved_desc, reserved_sig.as_deref(), &ann_types);
     let mut code = CodeBuilder::new(e.next_slot);
     // kotlinc guards each non-null reference parameter of a visible function with
     // `Intrinsics.checkNotNullParameter(param, "name")` at method entry — emit the same.
@@ -4932,9 +4993,12 @@ fn emit_method_inner(
     // whose concrete param/return type is PARAMETERIZED (`getXs(): List<String>`, `copy(List<String>)`)
     // → its generic signature. `f.params`/`f.ret` are the SOURCE types (retain `<…>` args); `param_tys`/
     // `ret` are erased.
-    let signature = method_signature(ir, fid, f);
-    let desc = method_descriptor(&param_tys, ret);
-    e.cw.add_method_sig(access, &f.name, &desc, &code, signature.as_deref());
+    let desc = reserved_desc;
+    e.cw.add_method_sig(access, &f.name, &desc, &code, reserved_sig.as_deref());
+    // kotlinc annotates a reference return and each reference parameter of a declared method.
+    if ret_ann.is_some() || param_anns.iter().any(Option::is_some) {
+        e.cw.set_method_nullability(&f.name, &desc, ret_ann, &param_anns);
+    }
     if ir.deprecated_methods.contains(&fid) {
         e.cw.mark_method_deprecated(&f.name, &desc);
     }
