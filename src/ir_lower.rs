@@ -12336,7 +12336,13 @@ impl<'a> Lower<'a> {
         // so build a `Ty::Fun` of the right arity with erased `Any` slots.
         if (r.name == "<fun>" || !r.fun_params.is_empty()) && r.fun_params.len() <= 22 {
             let params = vec![Ty::obj("kotlin/Any"); r.fun_params.len()];
-            return Some(Ty::fun(params, Ty::obj("kotlin/Any")));
+            // Keep the `suspend` marker: a `suspend (A) -> B` erases to the arity+1 `FunctionN`
+            // (trailing `Continuation`), so dropping it would `checkcast` the wrong interface.
+            return Some(if r.fun_suspend {
+                Ty::fun_suspend(params, Ty::obj("kotlin/Any"))
+            } else {
+                Ty::fun(params, Ty::obj("kotlin/Any"))
+            });
         }
         if let Some(suffix) = r.name.strip_prefix("Function") {
             if let Ok(arity) = suffix.parse::<usize>() {
