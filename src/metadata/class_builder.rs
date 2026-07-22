@@ -68,12 +68,9 @@ pub const COPY_FN_FLAGS: u64 = 198;
 /// overriding a supertype member — hence the higher bits). From kotlinc 2.4.0.
 pub const EQUALS_FN_FLAGS: u64 = 0x101d6;
 pub const HASHCODE_TOSTRING_FN_FLAGS: u64 = 0x100d6;
-/// `Class.flags` (f1) for a `public final data class` (IS_DATA + public + final). From kotlinc 2.4.0.
-pub const DATA_CLASS_FLAGS: u64 = 0x406;
-/// `Class.flags` (f1) for a `@JvmInline value class` (IS_VALUE + public + final). From kotlinc 2.4.0.
-pub const VALUE_CLASS_FLAGS: u64 = 8199;
-/// `Class.flags` (f1) for a `sealed class` (public + SEALED modality). From kotlinc 2.4.0.
-pub const SEALED_CLASS_FLAGS: u64 = 54;
+/// `Class.flags` (f1) for a plain `public final class` — kotlinc's DEFAULT, so the field is OMITTED at
+/// this exact value (an `internal class` writes an explicit `0`, visibility INTERNAL being 0).
+pub const DEFAULT_CLASS_FLAGS: u64 = 6;
 /// `Constructor.flags` (f1) for a sealed class's primary constructor — kotlinc marks it PROTECTED.
 pub const SEALED_CTOR_FLAGS: u64 = 4;
 /// `Function.flags` for a value class's `equals`/`hashCode`/`toString` — same shape as the data-class
@@ -303,7 +300,6 @@ pub struct CtorMeta<'a> {
     pub flags: u64,
 }
 
-#[derive(Default)]
 pub struct ClassTail<'a> {
     pub flags: u64,
     pub companion: Option<&'a str>,
@@ -328,6 +324,22 @@ pub struct ClassTail<'a> {
     /// The primary constructor's `JvmMethodSignature` NAME — a value class's primary ctor is realized as
     /// the static `constructor-impl`, not `<init>`. `None` ⇒ `<init>` (the ordinary shape).
     pub ctor_sig_name: Option<&'a str>,
+}
+
+impl Default for ClassTail<'_> {
+    fn default() -> Self {
+        ClassTail {
+            flags: DEFAULT_CLASS_FLAGS,
+            companion: None,
+            nested: &[],
+            module_name: None,
+            secondary_ctors: &[],
+            ctor_param_defaults: &[],
+            inline_underlying: None,
+            ctor_sig_name: None,
+            primary_ctor_flags: 0,
+        }
+    }
 }
 
 pub fn build_class(
@@ -479,7 +491,8 @@ pub fn build_class(
     // f6 supertype, f7 nestedClassName (packed repeated int32), f8 ctors, f9 functions, f10 properties,
     // f13 enum entries.
     let mut class = Pb::new();
-    if class_flags != 0 {
+    // kotlinc writes `flags` only when it differs from the public-final-class default.
+    if class_flags != DEFAULT_CLASS_FLAGS {
         class.field_varint(1, class_flags);
     }
     class.field_varint(3, fq as u64);
@@ -678,7 +691,8 @@ mod tests {
             &methods,
             &[],
             &ClassTail {
-                flags: DATA_CLASS_FLAGS,
+                // public + final + IS_DATA, as `class_metadata_flags` derives for a `data class`.
+                flags: 1030,
                 ..Default::default()
             },
         );
