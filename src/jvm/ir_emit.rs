@@ -411,6 +411,9 @@ fn build_class_metadata(
                 .is_value
                 .then(|| (c.fields[0].name.as_str(), c.fields[0].ty)),
             ctor_sig_name: c.is_value.then_some("constructor-impl"),
+            // An interface has no constructor at all, whatever the IR records.
+            emit_primary_ctor: !c.is_interface,
+            jvm_class_flags: c.is_interface.then_some(3),
             ..Default::default()
         },
     );
@@ -3885,7 +3888,16 @@ fn emit_interface_class(
         clinit.link();
         e.cw.add_method(0x0008, "<clinit>", "()V", &clinit);
     }
-    if let Some(m) = class_meta {
+    // An interface is a VIEW of the same `IrClass` every other kind is — compute its `@Metadata` (and
+    // therefore its debug tables/annotations) through the shared path, exactly like `emit_class`.
+    let computed = (class_meta.is_none() && opts.emit_class_metadata)
+        .then(|| build_class_metadata(ir, c, opts))
+        .flatten();
+    if computed.is_some() {
+        attach_synth_debug_tables(c, &mut cw);
+        attach_synth_nullability(c, &mut cw);
+    }
+    if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
     cw.finish()
