@@ -117,3 +117,12 @@ fun box(): String = \"OK\"\n";
         "COROUTINE_SUSPENDED bound to a local should resolve + lower"
     );
 }
+
+#[test]
+fn string_if_empty_selects_the_charsequence_overload() {
+    // Four stdlib `ifEmpty` extensions reach selection as identical `Any`-receiver candidates (their
+    // TyParam receivers erase); the JVM descriptor's first parameter must discriminate, or the
+    // ARRAY overload's body gets spliced onto a String receiver (`arraylength` → VerifyError).
+    let src = "fun box(): String = \"\".ifEmpty { \"OK\" }\n";
+    assert_eq!(run(src).expect("String.ifEmpty runs"), "OK");
+}
