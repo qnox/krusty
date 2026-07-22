@@ -224,6 +224,122 @@ pub fn split_modules(src: &str) -> Option<Vec<ModuleBlock>> {
     Some(mods)
 }
 
+/// One split source block: `(name, content)` — a Kotlin file's stem, or a Java file's leaf name
+/// including `.java`.
+pub type SourceBlock = (String, String);
+
+/// Split a `// FILE:`-partitioned (single-module) test into Kotlin `(stem, content)` and Java
+/// `(leaf name incl. .java, content)` blocks. The preamble before the first marker is directives and
+/// belongs to no block. Non-`.java` files are treated as Kotlin (backend directives filter JS-target
+/// tests before this is reached), keeping the gate's historical behavior.
+pub fn split_files(src: &str) -> (Vec<SourceBlock>, Vec<SourceBlock>) {
+    let mut blocks: Vec<SourceBlock> = Vec::new();
+    let mut java_blocks: Vec<SourceBlock> = Vec::new();
+    let mut cur_name: Option<(String, bool)> = None; // (name, is_java)
+    let mut cur = String::new();
+    let mut flush = |name: Option<(String, bool)>, cur: &mut String| {
+        if let Some((n, is_java)) = name {
+            if is_java {
+                java_blocks.push((n, std::mem::take(cur)));
+            } else {
+                blocks.push((n, std::mem::take(cur)));
+            }
+        }
+    };
+    for line in src.lines() {
+        if let Some(rest) = line.trim_start().strip_prefix("// FILE:") {
+            flush(cur_name.take(), &mut cur);
+            let fname = rest.trim();
+            let is_java = fname.ends_with(".java");
+            let name = if is_java {
+                // Keep the full leaf file name — javac requires it to match the public class.
+                fname.rsplit('/').next().unwrap_or(fname).to_string()
+            } else {
+                fname
+                    .strip_suffix(".kt")
+                    .unwrap_or(fname)
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(fname)
+                    .to_string()
+            };
+            cur_name = Some((name, is_java));
+        } else if cur_name.is_some() {
+            cur.push_str(line);
+            cur.push('\n');
+        }
+    }
+    flush(cur_name.take(), &mut cur);
+    (blocks, java_blocks)
+}
+
+/// One module actually BUILT from a `// MODULE:` test: a `dependsOn` target (multiplatform common
+/// source set) folds INTO its dependents rather than building standalone, so a unit's `files` carry
+/// the transitive `dependsOn` chain's sources (dependency-first) ahead of the module's own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleUnit {
+    pub name: String,
+    /// Classpath dependency module names, regular deps then FRIEND deps (friends ride the classpath
+    /// the same way; their `internal` visibility is the friend part).
+    pub deps: Vec<String>,
+    pub files: Vec<(String, String)>,
+    pub java_files: Vec<(String, String)>,
+}
+
+/// Fold [`ModuleBlock`]s into build units in declaration order (kotlinc's JVM MPP model: the
+/// platform module and its `dependsOn` chain are ONE compilation).
+pub fn module_units(modules: &[ModuleBlock]) -> Vec<ModuleUnit> {
+    let dependson_targets: std::collections::HashSet<&str> = modules
+        .iter()
+        .flat_map(|m| m.depends_on.iter().map(String::as_str))
+        .collect();
+    // Transitive dependsOn closure, dependency-first order, dedup.
+    fn add_sources(
+        modules: &[ModuleBlock],
+        name: &str,
+        seen: &mut std::collections::HashSet<String>,
+        out: &mut Vec<(String, String)>,
+        java_out: &mut Vec<(String, String)>,
+    ) {
+        if !seen.insert(name.to_string()) {
+            return;
+        }
+        let Some(m) = modules.iter().find(|m| m.name == name) else {
+            return;
+        };
+        for d in &m.depends_on {
+            add_sources(modules, d, seen, out, java_out);
+        }
+        out.extend(m.files.iter().cloned());
+        java_out.extend(m.java_files.iter().cloned());
+    }
+    modules
+        .iter()
+        .filter(|m| !dependson_targets.contains(m.name.as_str()))
+        .map(|m| {
+            let (files, java_files) = if m.depends_on.is_empty() {
+                (m.files.clone(), m.java_files.clone())
+            } else {
+                let mut seen = std::collections::HashSet::new();
+                let mut files = Vec::new();
+                let mut java_files = Vec::new();
+                for d in &m.depends_on {
+                    add_sources(modules, d, &mut seen, &mut files, &mut java_files);
+                }
+                files.extend(m.files.iter().cloned());
+                java_files.extend(m.java_files.iter().cloned());
+                (files, java_files)
+            };
+            ModuleUnit {
+                name: m.name.clone(),
+                deps: m.deps.iter().chain(m.friends.iter()).cloned().collect(),
+                files,
+                java_files,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -663,5 +779,126 @@ fun box(): String = \"OK\"
 fun box(): String = \"OK\"
 ";
         assert!(split_modules(src).is_none());
+    }
+
+    #[test]
+    fn split_files_kotlin_blocks_by_stem_preamble_excluded() {
+        let src = "\
+// WITH_STDLIB
+// FILE: a.kt
+fun a() = 1
+// FILE: b.kt
+fun box(): String = \"OK\"
+";
+        let (kt, java) = split_files(src);
+        assert!(java.is_empty());
+        assert_eq!(kt.len(), 2);
+        assert_eq!(kt[0].0, "a");
+        assert_eq!(kt[0].1, "fun a() = 1\n");
+        assert_eq!(kt[1].0, "b");
+        assert_eq!(kt[1].1, "fun box(): String = \"OK\"\n");
+    }
+
+    #[test]
+    fn split_files_java_keeps_leaf_name_with_extension() {
+        let src = "\
+// FILE: p/J.java
+public class J {}
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        let (kt, java) = split_files(src);
+        assert_eq!(java, vec![("J.java".into(), "public class J {}\n".into())]);
+        assert_eq!(kt.len(), 1);
+        assert_eq!(kt[0].0, "main");
+    }
+
+    #[test]
+    fn split_files_nested_kotlin_path_uses_leaf_stem() {
+        let src = "// FILE: foo/bar/x.kt\nfun x() = 2\n";
+        let (kt, _) = split_files(src);
+        assert_eq!(kt[0].0, "x");
+    }
+
+    #[test]
+    fn split_files_no_markers_is_empty() {
+        let (kt, java) = split_files("fun box(): String = \"OK\"\n");
+        assert!(kt.is_empty());
+        assert!(java.is_empty());
+    }
+
+    #[test]
+    fn module_units_plain_deps_preserve_order_and_sources() {
+        let src = "\
+// MODULE: lib
+// FILE: lib.kt
+fun lib() = 1
+// MODULE: main(lib)
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        let units = module_units(&split_modules(src).unwrap());
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].name, "lib");
+        assert!(units[0].deps.is_empty());
+        assert_eq!(units[1].name, "main");
+        assert_eq!(units[1].deps, vec!["lib".to_string()]);
+        assert_eq!(units[1].files.len(), 1);
+    }
+
+    #[test]
+    fn module_units_friends_join_classpath_deps() {
+        let src = "\
+// MODULE: lib
+// FILE: lib.kt
+fun lib() = 1
+// MODULE: main()(lib)
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        let units = module_units(&split_modules(src).unwrap());
+        assert_eq!(units[1].deps, vec!["lib".to_string()]);
+    }
+
+    #[test]
+    fn module_units_dependson_target_folds_into_dependent() {
+        let src = "\
+// MODULE: common
+// FILE: common.kt
+expect fun f(): String
+// MODULE: platform()()(common)
+// FILE: platform.kt
+actual fun f(): String = \"OK\"
+fun box(): String = f()
+";
+        let units = module_units(&split_modules(src).unwrap());
+        // `common` is a dependsOn target: not built standalone; its sources compile INTO `platform`,
+        // dependency-first.
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].name, "platform");
+        assert_eq!(units[0].files.len(), 2);
+        assert_eq!(units[0].files[0].0, "common");
+        assert_eq!(units[0].files[1].0, "platform");
+    }
+
+    #[test]
+    fn module_units_transitive_dependson_dedups_dependency_first() {
+        let src = "\
+// MODULE: common
+// FILE: common.kt
+expect fun f(): String
+// MODULE: mid()()(common)
+// FILE: mid.kt
+fun mid() = 1
+// MODULE: platform()()(mid, common)
+// FILE: platform.kt
+actual fun f(): String = \"OK\"
+fun box(): String = f()
+";
+        let units = module_units(&split_modules(src).unwrap());
+        assert_eq!(units.len(), 1);
+        let names: Vec<&str> = units[0].files.iter().map(|(n, _)| n.as_str()).collect();
+        // `common` appears once (via `mid`'s chain), before `mid`, before the module's own file.
+        assert_eq!(names, vec!["common", "mid", "platform"]);
     }
 }

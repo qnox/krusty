@@ -92,67 +92,76 @@ fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
         Some(ir) => ir,
         None => return Some(format!("lower: {}", lower_bail.borrow())),
     };
-    emit_checked_ir(&mut ir, &files[0], &facade, &syms, cp)
+    emit_checked_ir(&mut ir, &files[0], 0, &facade, &syms, cp).err()
 }
 
 fn emit_checked_ir(
     ir: &mut IrFile,
     file: &krusty::ast::File,
+    file_index: u32,
     facade: &str,
     syms: &FrontendSymbols,
     cp: &Rc<Classpath>,
-) -> Option<String> {
+) -> Result<Vec<(String, Vec<u8>)>, String> {
     // Shared post-lowering pass pipeline (jvm/backend.rs), so the survey's skip
     // reasons track exactly what the shipping backend declines.
     match krusty::jvm::backend::run_backend_passes(ir, file, facade, "main", syms) {
         Err(krusty::jvm::backend::SkipReason::ValueClasses) => {
-            return Some("lower: value-class shape not lowered".into())
+            return Err("lower: value-class shape not lowered".into())
         }
         Err(krusty::jvm::backend::SkipReason::Suspend) => {
-            return Some("lower: suspend-function shape not lowered".into())
+            return Err("lower: suspend-function shape not lowered".into())
         }
         Ok(()) => {}
     }
+    // Facade `@Metadata`, as the gate and CLI backend write — a later MODULE's compile reads this
+    // module's output from the classpath and needs it to resolve cross-module extensions.
+    let metadata = krusty::jvm::backend::facade_package_metadata(file, file_index, syms);
     let run = krusty::jvm::ir_emit::EmitRun::default();
     match krusty::jvm::ir_emit::emit_all_with_opts(
         ir,
         facade,
         &**cp,
-        None,
+        metadata.as_ref(),
         &krusty::jvm::ir_emit::EmitOptions::default(),
         &run,
     ) {
-        Some(o) if !o.is_empty() => None,
-        _ => Some(
-            run.inline_bail()
-                .map(|r| format!("emit: {r}"))
-                .unwrap_or_else(|| "emit: emit_all bailed (unsupported codegen)".into()),
-        ),
+        Some(o) if !o.is_empty() => Ok(o),
+        _ => Err(run
+            .inline_bail()
+            .map(|r| format!("emit: {r}"))
+            .unwrap_or_else(|| "emit: emit_all bailed (unsupported codegen)".into())),
     }
 }
 
-fn first_error_with_coroutine_helpers(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
+/// The survey twin of the gate's `compile_blocks`: compile a set of already-split `(stem, content)`
+/// source blocks as ONE module, reporting the FIRST error (the gate only knows pass/skip). Returns
+/// the emitted classes so `// MODULE:` tests can chain them onto a dependent module's classpath.
+fn first_error_blocks(
+    blocks: &[(String, String)],
+    cp: &Rc<Classpath>,
+    features: &krusty::features::LangFeatures,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut d = DiagSink::new();
-    let features = krusty::features::LangFeatures::from_source(src);
-    let blocks = [
-        (stem.to_string(), src.to_string()),
-        ("CoroutineUtil".to_string(), COROUTINE_HELPERS.to_string()),
-    ];
-    let files: Vec<_> = blocks
+    let mut files: Vec<_> = blocks
         .iter()
         .map(|(_, content)| {
             let toks = lex(content, &mut d);
-            krusty::parser::parse_with_features(content, &toks, &mut d, &features)
+            krusty::parser::parse_with_features(content, &toks, &mut d, features)
         })
         .collect();
     if d.has_errors() {
-        return Some(d.diags[0].msg.clone());
+        return Err(d.diags[0].msg.clone());
+    }
+    // Multiplatform: a matched `expect` header is replaced by its `actual` across the set.
+    if features.has("MultiPlatformProjects") {
+        krusty::frontend::strip_matched_expects(&mut files);
     }
 
     let platform = Box::new(JvmLibraries::new(cp.clone()));
     let mut syms = collect_signatures_with_cp(&files, platform, &mut d);
     if d.has_errors() {
-        return Some(d.diags[0].msg.clone());
+        return Err(d.diags[0].msg.clone());
     }
 
     for (i, file) in files.iter().enumerate() {
@@ -177,11 +186,12 @@ fn first_error_with_coroutine_helpers(src: &str, cp: &Rc<Classpath>, stem: &str)
         }
     }
 
+    let mut all = Vec::new();
     for (i, file) in files.iter().enumerate() {
         d.set_file(i as u32);
         let info = check_file(file, &mut syms, &mut d);
         if d.has_errors() {
-            return Some(d.diags[0].msg.clone());
+            return Err(d.diags[0].msg.clone());
         }
         let facade = file_class_name(&blocks[i].0, file.package.as_deref());
         let runtime = JvmLibraries::new(cp.clone());
@@ -195,13 +205,67 @@ fn first_error_with_coroutine_helpers(src: &str, cp: &Rc<Classpath>, stem: &str)
             &lower_bail,
         ) {
             Some(ir) => ir,
-            None => return Some(format!("lower: {}", lower_bail.borrow())),
+            None => return Err(format!("lower: {}", lower_bail.borrow())),
         };
-        if let Some(err) = emit_checked_ir(&mut ir, file, &facade, &syms, cp) {
-            return Some(err);
-        }
+        all.extend(emit_checked_ir(
+            &mut ir, file, i as u32, &facade, &syms, cp,
+        )?);
     }
-    None
+    Ok(all)
+}
+
+/// Survey a `// MODULE:` test the way the gate's `compile_module_test` builds it: each build unit
+/// (dependsOn chains folded in) compiles in declaration order against its dependency modules'
+/// emitted classes on the classpath, reporting the first error anywhere in the chain.
+fn first_error_module(
+    src: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Option<String> {
+    static UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let Some(modules) = krusty::conformance::split_modules(src) else {
+        return Some("module: unsupported // MODULE: shape".into());
+    };
+    let features = krusty::features::LangFeatures::from_source(src);
+    let uid = UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = std::env::temp_dir().join(format!("krusty_survey_mod_{}_{uid}", std::process::id()));
+    let mut dirmap: HashMap<String, PathBuf> = HashMap::new();
+    let result = (|| {
+        for m in &krusty::conformance::module_units(&modules) {
+            if !m.java_files.is_empty() {
+                return Some("module: .java sources (javac-dependent, gate-only)".into());
+            }
+            let mut cp_paths = cp_jars.to_vec();
+            for d in &m.deps {
+                match dirmap.get(d) {
+                    Some(p) => cp_paths.push(p.clone()),
+                    None => return Some("module: dependency declared out of order".into()),
+                }
+            }
+            if let Some(j) = jdk_modules {
+                cp_paths.push(j.to_path_buf());
+            }
+            // Dependency-class dirs are unique per test — a fresh Classpath, not the shared cache.
+            let cp = Rc::new(Classpath::new(cp_paths));
+            let classes = match first_error_blocks(&m.files, &cp, &features) {
+                Ok(c) => c,
+                Err(e) => return Some(e),
+            };
+            let moddir = tmp.join(&m.name);
+            for (name, bytes) in &classes {
+                let path = moddir.join(format!("{name}.class"));
+                if std::fs::create_dir_all(path.parent().unwrap_or(&moddir)).is_err()
+                    || std::fs::write(&path, bytes).is_err()
+                {
+                    return Some("module: failed writing dependency classes".into());
+                }
+            }
+            dirmap.insert(m.name.clone(), moddir);
+        }
+        None
+    })();
+    let _ = std::fs::remove_dir_all(&tmp);
+    result
 }
 
 fn categorize(err: &str) -> String {
@@ -257,6 +321,17 @@ fn collect_kt(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 }
 
 fn main() {
+    // Deeply nested corpus sources overflow the default main stack; the gate compiles on 64 MiB
+    // worker stacks — match it.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(run)
+        .expect("spawn survey thread")
+        .join()
+        .expect("survey thread panicked");
+}
+
+fn run() {
     let mut args = std::env::args().skip(1);
     let box_dir = args
         .next()
@@ -281,9 +356,6 @@ fn main() {
     for f in &files {
         let src = std::fs::read_to_string(f).unwrap_or_default();
         let src = src.replace("OPTIONAL_JVM_INLINE_ANNOTATION", "@JvmInline");
-        if src.contains("// FILE:") || src.contains("// MODULE:") {
-            continue;
-        }
         if !src.contains("fun box()") {
             continue;
         }
@@ -294,18 +366,37 @@ fn main() {
         }
         scanned += 1;
         let stem = f.file_stem().and_then(|s| s.to_str()).unwrap_or("File");
-        let mut cp_paths = krusty::toolchain::classpath_jars_for(&src);
-        if let Some(j) = &jdk_modules {
-            cp_paths.push(j.clone());
-        }
-        let cp = cp_cache
-            .entry(cp_paths.clone())
-            .or_insert_with(|| Rc::new(Classpath::new(cp_paths.clone())))
-            .clone();
-        let err = if src.contains("// WITH_COROUTINES") {
-            first_error_with_coroutine_helpers(&src, &cp, stem)
+        let base_jars = krusty::toolchain::classpath_jars_for(&src);
+        let err = if src.contains("// MODULE:") {
+            first_error_module(&src, &base_jars, jdk_modules.as_deref())
         } else {
-            first_error(&src, &cp, stem)
+            let mut cp_paths = base_jars;
+            if let Some(j) = &jdk_modules {
+                cp_paths.push(j.clone());
+            }
+            let cp = cp_cache
+                .entry(cp_paths.clone())
+                .or_insert_with(|| Rc::new(Classpath::new(cp_paths.clone())))
+                .clone();
+            if src.contains("// FILE:") || src.contains("// WITH_COROUTINES") {
+                // The gate's `compile_multifile` shape: `// FILE:` blocks as one module, plus the
+                // generated coroutine helpers for `// WITH_COROUTINES` (even single-file).
+                let (mut blocks, java_blocks) = krusty::conformance::split_files(&src);
+                if blocks.is_empty() && java_blocks.is_empty() {
+                    blocks.push((stem.to_string(), src.to_string()));
+                }
+                if src.contains("// WITH_COROUTINES") {
+                    blocks.push(("CoroutineUtil".to_string(), COROUTINE_HELPERS.to_string()));
+                }
+                if !java_blocks.is_empty() {
+                    Some("multifile: .java sources (javac-dependent, gate-only)".into())
+                } else {
+                    let features = krusty::features::LangFeatures::from_source(&src);
+                    first_error_blocks(&blocks, &cp, &features).err()
+                }
+            } else {
+                first_error(&src, &cp, stem)
+            }
         };
         match err {
             None => compiled += 1,
