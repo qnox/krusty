@@ -70,6 +70,26 @@ fn assert_byte_identical(src: &str, class_internal: &str, cp: &[PathBuf]) {
 
 // ---- Byte-identity (the end-to-end goal) ----------------------------------------------------------
 
+/// A bare `interface` — reached through `emit_interface_class`, which never computed a `@Metadata` at
+/// all (so no debug tables either). Now wired to the shared metadata path: an interface has NO
+/// constructor (no `Class.constructor`), carries the JvmProtoBuf class-flags extension (f104 = 3), and
+/// interns no `Code` attribute name because it has no method bodies.
+#[test]
+fn interface_is_byte_identical() {
+    assert_byte_identical("package demo\ninterface I\n", "demo/I", &[]);
+}
+
+/// An `interface` with an abstract member — the member is emitted from the generic path with derived
+/// `Function.flags` (ABSTRACT modality, since it has no body).
+#[test]
+fn interface_with_member_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ninterface I { fun f(): Int }\n",
+        "demo/I",
+        &[],
+    );
+}
+
 /// A `sealed class` — kotlinc marks the class SEALED (`Class.flags`) and its primary ctor PROTECTED
 /// (`Constructor.flags`), and pairs the private ctor with a PUBLIC|SYNTHETIC
 /// `(DefaultConstructorMarker)` accessor that carries its own LocalVariableTable (`this` +
