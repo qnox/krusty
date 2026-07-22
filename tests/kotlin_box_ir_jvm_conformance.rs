@@ -342,60 +342,7 @@ fn compile_multifile(
     // `.java` blocks are collected separately: javac compiles them first (in-process, via the
     // persistent JavaRunner) and their output dir joins krusty's classpath, mirroring how kotlinc's
     // test infra makes Java sources visible to the Kotlin compile.
-    let mut blocks: Vec<(String, String)> = Vec::new();
-    let mut java_blocks: Vec<(String, String)> = Vec::new();
-    let mut cur_name: Option<String> = None;
-    let mut cur_is_java = false;
-    let mut cur = String::new();
-    let flush = |name: Option<String>,
-                 is_java: bool,
-                 cur: &mut String,
-                 blocks: &mut Vec<(String, String)>,
-                 java_blocks: &mut Vec<(String, String)>| {
-        if let Some(n) = name {
-            if is_java {
-                java_blocks.push((n, std::mem::take(cur)));
-            } else {
-                blocks.push((n, std::mem::take(cur)));
-            }
-        }
-    };
-    for line in src.lines() {
-        if let Some(rest) = line.trim_start().strip_prefix("// FILE:") {
-            flush(
-                cur_name.take(),
-                cur_is_java,
-                &mut cur,
-                &mut blocks,
-                &mut java_blocks,
-            );
-            let fname = rest.trim();
-            cur_is_java = fname.ends_with(".java");
-            let name = if cur_is_java {
-                // Keep the full leaf file name — javac requires it to match the public class.
-                fname.rsplit('/').next().unwrap_or(fname).to_string()
-            } else {
-                fname
-                    .strip_suffix(".kt")
-                    .unwrap_or(fname)
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(fname)
-                    .to_string()
-            };
-            cur_name = Some(name);
-        } else if cur_name.is_some() {
-            cur.push_str(line);
-            cur.push('\n');
-        }
-    }
-    flush(
-        cur_name.take(),
-        cur_is_java,
-        &mut cur,
-        &mut blocks,
-        &mut java_blocks,
-    );
+    let (mut blocks, java_blocks) = krusty::conformance::split_files(src);
     // Single-file (no `// FILE:` markers) but routed here for coroutine-helper injection: the whole
     // source is the one main block.
     if blocks.is_empty() && java_blocks.is_empty() {
@@ -654,42 +601,15 @@ fn compile_module_test(
     let mut dirmap: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
     let mut all: Vec<(String, Vec<u8>)> = Vec::new();
     let mut ok = true;
-    // A module named as a `dependsOn` target compiles INTO its dependents (kotlinc's JVM MPP
-    // model: the platform module and its dependsOn chain are ONE compilation) — it is not built
-    // standalone, which would leave its `expect` declarations without actuals.
-    let dependson_targets: std::collections::HashSet<&str> = modules
-        .iter()
-        .flat_map(|m| m.depends_on.iter().map(String::as_str))
-        .collect();
-    // Transitive dependsOn closure, dependency-first order, dedup.
-    fn dependson_sources(
-        modules: &[krusty::conformance::ModuleBlock],
-        name: &str,
-        seen: &mut std::collections::HashSet<String>,
-        out: &mut Vec<(String, String)>,
-        java_out: &mut Vec<(String, String)>,
-    ) {
-        if !seen.insert(name.to_string()) {
-            return;
-        }
-        let Some(m) = modules.iter().find(|m| m.name == name) else {
-            return;
-        };
-        for d in &m.depends_on {
-            dependson_sources(modules, d, seen, out, java_out);
-        }
-        out.extend(m.files.iter().cloned());
-        java_out.extend(m.java_files.iter().cloned());
-    }
-    for m in &modules {
-        if dependson_targets.contains(m.name.as_str()) {
-            continue;
-        }
+    // Build units: a `dependsOn` target compiles INTO its dependents (kotlinc's JVM MPP model — the
+    // platform module and its dependsOn chain are ONE compilation), so each unit's sources already
+    // carry the chain dependency-first.
+    for m in &krusty::conformance::module_units(&modules) {
         // Compile-time classpath = the base (stdlib/JDK) + each dependency module's emitted-class
         // dir. FRIEND deps ride the same classpath (their `internal` visibility is the friend
         // part; krusty resolves them like any dependency).
         let mut cp = cp_jars.to_vec();
-        for d in m.deps.iter().chain(m.friends.iter()) {
+        for d in &m.deps {
             match dirmap.get(d) {
                 Some(p) => cp.push(p.clone()),
                 None => {
@@ -701,23 +621,7 @@ fn compile_module_test(
         if !ok {
             break;
         }
-        // dependsOn: prepend the chain's sources (dependency-first) to this module's own.
-        let (m_files, m_java);
-        let (files, java_files) = if m.depends_on.is_empty() {
-            (&m.files, &m.java_files)
-        } else {
-            let mut seen = std::collections::HashSet::new();
-            let mut out = Vec::new();
-            let mut java_out = Vec::new();
-            for d in &m.depends_on {
-                dependson_sources(&modules, d, &mut seen, &mut out, &mut java_out);
-            }
-            out.extend(m.files.iter().cloned());
-            java_out.extend(m.java_files.iter().cloned());
-            m_files = out;
-            m_java = java_out;
-            (&m_files, &m_java)
-        };
+        let (files, java_files) = (&m.files, &m.java_files);
         // A module's `.java` sources: javac-first against the module classpath (Java referencing
         // only deps/JDK); when that fails — the Java references THIS module's Kotlin — fall back to
         // the Kotlin-first stub pipeline, exactly like the single-module path.

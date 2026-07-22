@@ -103,7 +103,13 @@ cargo run --profile gate --bin survey -- target/cache/box-corpus/2.4.0/compiler/
 ```
 
 The survey reuses the same provisioned toolchain/cache paths as the harness and reports specific
-inline splice bail callees when available.
+inline splice bail callees when available. It covers the full corpus shape set the gate compiles:
+single-file, `// FILE:`-split multi-file (with the generated `// WITH_COROUTINES` helpers), and
+`// MODULE:` multi-module tests (each build unit compiled against its dependency modules' emitted
+classes, `dependsOn` chains folded in — the splitting lives in `krusty::conformance`, shared with
+the gate). Tests with `.java` sources are the one exception: they need the harness's persistent
+javac runner, so the survey reports them under a dedicated `javac-dependent` category instead of a
+first compiler error.
 
 ## JVM-Running Tests
 
