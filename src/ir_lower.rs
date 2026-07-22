@@ -2393,6 +2393,18 @@ pub fn lower_file_at_reporting(
                     && c.companion_methods.is_empty()
                     && c.companion_props.is_empty()
                 {
+                    // No BODIES to lower — but `@Metadata` still names each parameter, so record the
+                    // declared names before skipping. Without this every abstract method's parameters
+                    // fall back to `p0`, `p1`, … in the metadata kotlinc fills with the real names.
+                    for m in &c.methods {
+                        if let Some(info) = lo.class_info(&internal) {
+                            if let Some(&(_, fid, _)) = info.methods.get(&m.name) {
+                                lo.ir
+                                    .fn_param_names
+                                    .insert(fid, m.params.iter().map(|p| p.name.clone()).collect());
+                            }
+                        }
+                    }
                     continue;
                 }
                 for m in &c.methods {

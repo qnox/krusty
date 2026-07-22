@@ -4189,7 +4189,26 @@ fn emit_interface_class(
             // A default method — concrete instance method on the interface.
             emit_method(ir, fid, &fq_name, facade, &mut cw, !f.is_static, env);
         } else {
-            cw.add_abstract_method(0x0001 | 0x0400, &f.name, &ir_method_desc(&f.params, &f.ret));
+            let desc = ir_method_desc(&f.params, &f.ret);
+            cw.add_abstract_method(0x0001 | 0x0400, &f.name, &desc);
+            // An abstract method still carries kotlinc's nullability annotations: `@NotNull` /
+            // `@Nullable` on each reference parameter and on a reference return. Having no body is
+            // why it gets no debug tables — it is not a reason to drop its annotations.
+            let ann = |t: Ty| -> Option<&'static str> {
+                let d = crate::jvm::names::type_descriptor(t);
+                if !(d.starts_with('L') || d.starts_with('[')) {
+                    return None;
+                }
+                Some(if matches!(t, Ty::Nullable(_)) {
+                    "Lorg/jetbrains/annotations/Nullable;"
+                } else {
+                    "Lorg/jetbrains/annotations/NotNull;"
+                })
+            };
+            let params: Vec<Option<&str>> = f.params.iter().map(|t| ann(*t)).collect();
+            if ann(f.ret).is_some() || params.iter().any(Option::is_some) {
+                cw.set_method_nullability(&f.name, &desc, ann(f.ret), &params);
+            }
             // PUBLIC | ABSTRACT
         }
         // An interface method with default parameters gets a STATIC `<name>$default(iface, params…, mask,
