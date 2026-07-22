@@ -30,7 +30,12 @@ pub fn directive(src: &str, name: &str) -> bool {
 /// - `// IGNORE_BACKEND_K1:` mutes it under the OLD K1 frontend ONLY → krusty is NOT K1, so this must
 ///   NOT exclude (excluding it under-counts: the test is valid for krusty's K2 semantics).
 pub fn backend_applicable(src: &str, names: &[&str]) -> bool {
-    let mentions = |line: &str| line.split(',').any(|t| names.contains(&t.trim()));
+    // `ANY` names every backend (kotlinc's test runner uses it for red-code tests kept only for
+    // their diagnostic half), so it always mentions ours.
+    let mentions = |line: &str| {
+        line.split(',')
+            .any(|t| t.trim() == "ANY" || names.contains(&t.trim()))
+    };
     if let Some(l) = src.lines().find(|l| l.starts_with("// TARGET_BACKEND:")) {
         if !mentions(l.trim_start_matches("// TARGET_BACKEND:").trim()) {
             return false;
@@ -458,6 +463,14 @@ mod tests {
     fn backend_applicable_ignore_backend_k1_is_not_excluded() {
         // krusty is NOT K1: a K1-only mute must NOT exclude (it isn't in the filtered set).
         assert!(backend_applicable("// IGNORE_BACKEND_K1: JVM_IR", BACKENDS));
+    }
+
+    #[test]
+    fn backend_applicable_any_token_names_every_backend() {
+        // Red-code tests kept for their diagnostic half: excluded everywhere.
+        assert!(!backend_applicable("// IGNORE_BACKEND: ANY", BACKENDS));
+        // A test targeting ANY targets ours too.
+        assert!(backend_applicable("// TARGET_BACKEND: ANY", BACKENDS));
     }
 
     #[test]

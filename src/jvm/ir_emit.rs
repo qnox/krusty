@@ -5380,11 +5380,11 @@ impl<'a> Emitter<'a> {
             if body_invokes_lambda {
                 return self.try_inline_unified(descriptor, args, &body, base, code);
             }
-        } else if descriptor.contains("Lkotlin/jvm/functions/Function") {
-            // A function-typed parameter whose argument isn't a literal lambda (a passed `Function`) is a
-            // current inline-splice gap — can't materialize an unknown `Function` value here.
-            return false;
         }
+        // A function-typed parameter whose argument isn't a literal lambda (a passed `Function`
+        // value, `t?.let(x)`) needs NO invoke-site substitution: the verbatim splice below binds the
+        // param slot to the materialized `Function` object, and the body's own
+        // `FunctionN.invoke` interface calls dispatch on it — exactly kotlinc's inlined shape.
         let ret_words = descriptor_ret_words(descriptor);
         let top_local = base + body.max_locals;
         // ONE splicer for every no-lambda body (`splice_unified` subsumes the old branchless + branchy
@@ -6886,8 +6886,21 @@ impl<'a> Emitter<'a> {
                 elem,
                 value,
             } => {
-                self.emit_value(*holder, code);
-                self.emit_value(*value, code);
+                // A branchy value (`msg = x ?: "?"`) can't run with the holder on the stack — its
+                // branch frames assume a clean stack. Spill it first (mirrors `RefNew`).
+                if self.records_frame(*value) {
+                    let temps = self.spill_to_temps(&[*value], code);
+                    self.emit_value(*holder, code);
+                    for &(slot, t, _) in &temps {
+                        load(t, slot, code);
+                    }
+                    for &(_, _, key) in &temps {
+                        self.slots.remove(&key);
+                    }
+                } else {
+                    self.emit_value(*holder, code);
+                    self.emit_value(*value, code);
+                }
                 let (cls, fdesc) = ref_class(elem);
                 let f = self.cw.fieldref(cls, "element", fdesc);
                 code.putfield(f, slot_words(ir_ty_to_jvm(elem)) as i32);
