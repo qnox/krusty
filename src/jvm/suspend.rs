@@ -352,7 +352,18 @@ fn value_block(ir: &IrFile, e: ExprId) -> Option<(Vec<ExprId>, ExprId)> {
         IrExpr::Block {
             stmts,
             value: Some(v),
-        } => Some((stmts.clone(), *v)),
+        } => {
+            // A `suspendCoroutineUninterceptedOrReturn { c -> … }` region stays INTACT: the
+            // flattener handles `return <intrinsic-block>` as one resume-state unit — splicing
+            // would strand the `c` binding (a `CurrentContinuation`) as a plain statement.
+            if stmts
+                .iter()
+                .any(|&st| expr_contains_current_continuation(ir, st))
+            {
+                return None;
+            }
+            Some((stmts.clone(), *v))
+        }
         _ => None,
     }
 }
@@ -1621,14 +1632,7 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
 
     let base = max_value_index(ir) + 1;
     let cont_v = base;
-    // A `suspendCoroutineUninterceptedOrReturn { c -> … }` region INSIDE a state machine needs its
-    // own resume state (`return <intrinsic>` must resume by RETURNING the value, not re-running the
-    // state) — not modeled yet. Only the LEAF form (the intrinsic as the fn's sole suspension, no
-    // machine) is supported; bail the machine case (skip, never miscompile — binding `c` to either
-    // the raw completion or the machine instance loops or skips states).
-    if expr_contains_current_continuation(ir, b) {
-        return false;
-    }
+
     let r_v = base + 1;
     let suspended_v = base + 2;
     // The dispatch's own transient exception var is `base + 3`; the flattener's fresh locals start at
@@ -1748,6 +1752,16 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
             "suspend",
             "build_state_machine fid={fid} BAIL: flattener failed"
         );
+        return false;
+    }
+    // A `CurrentContinuation` placeholder surviving OUTSIDE the handled `return <intrinsic>` shape
+    // (an intrinsic in a non-return position) has no resume state — bail, never mis-bind.
+    let leftover_stmts: Vec<ExprId> = flat.states.iter().flatten().copied().collect();
+    if leftover_stmts
+        .iter()
+        .any(|&st| expr_contains_current_continuation(flat.ir, st))
+    {
+        crate::trace_compiler!("suspend", "BAIL: leftover CurrentContinuation in states");
         return false;
     }
     let states = std::mem::take(&mut flat.states);
@@ -1973,10 +1987,7 @@ fn build_lambda_state_machine(
     let Some(b) = ir.functions[fid as usize].body else {
         return false;
     };
-    // See the named machine: a raw intrinsic region inside a machine isn't modeled.
-    if expr_contains_current_continuation(ir, b) {
-        return false;
-    }
+
     let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
     // Flatten a block-valued statement (`{ val g = …; res = g() }` whose tail assignment is wrapped as a
     // `Unit`-valued `Variable { init: Block { … } }`) into the top-level statement list FIRST, so the
@@ -2162,6 +2173,19 @@ fn build_lambda_state_machine(
         crate::trace_compiler!(
             "suspend",
             "build_lambda_sm fid={fid} BAIL: flattener failed"
+        );
+        return false;
+    }
+    // A `CurrentContinuation` surviving outside the handled `return <intrinsic>` shape — see the
+    // named machine's identical check.
+    let leftover_stmts: Vec<ExprId> = flat.states.iter().flatten().copied().collect();
+    if leftover_stmts
+        .iter()
+        .any(|&st| expr_contains_current_continuation(flat.ir, st))
+    {
+        crate::trace_compiler!(
+            "suspend",
+            "BAIL: leftover CurrentContinuation in lambda states"
         );
         return false;
     }
@@ -3268,6 +3292,34 @@ impl Flat<'_> {
                     spliced.extend_from_slice(&stmts[i + 1..]);
                     self.states[cur] = out;
                     self.flatten(&spliced, cur, after);
+                    return;
+                }
+            }
+            // `return suspendCoroutineUninterceptedOrReturn { c -> … }` INSIDE a machine: its own
+            // resume state — set the label FIRST (the block may publish `c` and be resumed before
+            // this frame returns), bind `c` to the machine's continuation instance, and return the
+            // intrinsic's value (COROUTINE_SUSPENDED or an immediate). The arm resumes by RETURNING
+            // the resumed result — kotlinc's shape. Nothing is live after the return, so the spill
+            // list is empty.
+            if let IrExpr::Return(Some(v)) = self.ir.exprs[stmt as usize].clone() {
+                if expr_contains_current_continuation(self.ir, v) {
+                    let resume = self.new_state();
+                    if let Some(sc) = self.state_scope.get_mut(resume) {
+                        *sc = Some(Vec::new());
+                    }
+                    self.set_label(&mut out, resume);
+                    rewrite_current_continuation(self.ir, v, self.cont_v);
+                    let boxed = self.add(IrExpr::TypeOp {
+                        op: IrTypeOp::ImplicitCoercion,
+                        arg: v,
+                        type_operand: object_ty(),
+                    });
+                    let ret = self.add(IrExpr::Return(Some(boxed)));
+                    out.push(ret);
+                    self.states[cur] = out;
+                    let rg = self.gv(self.r_v);
+                    let rret = self.add(IrExpr::Return(Some(rg)));
+                    self.states[resume] = vec![rret];
                     return;
                 }
             }

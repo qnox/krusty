@@ -339,3 +339,28 @@ fun box(): String {{ builder {{ go() }}; return log }}\n"
         "OK"
     );
 }
+
+#[test]
+fn tail_intrinsic_inside_state_machine_gets_resume_state() {
+    // `return suspendCoroutineUninterceptedOrReturn { c -> … }` AFTER an earlier suspension: the
+    // machine sets a label BEFORE running the block (it may be resumed mid-block), binds `c` to the
+    // machine's own continuation, and the resume arm RETURNS the resumed value — resuming the raw
+    // completion skipped the remaining states; resuming without an arm re-ran the state (infinite
+    // postponed loop in the corpus test).
+    let src = format!(
+        "{BUILDER}\
+var postponed: (() -> Unit)? = null\n\
+var log = \"\"\n\
+suspend fun pause(): Unit {{\n\
+    log += \"p;\"\n\
+    return suspendCoroutineUninterceptedOrReturn {{ c -> postponed = {{ c.resume(Unit) }}; COROUTINE_SUSPENDED }}\n\
+}}\n\
+suspend fun go() {{ log += \"1;\"; pause(); log += \"2;\" }}\n\
+fun box(): String {{\n\
+    builder {{ go() }}\n\
+    while (postponed != null) {{ val p = postponed!!; postponed = null; p() }}\n\
+    return if (log == \"1;p;2;\") \"OK\" else \"fail: $log\"\n\
+}}\n"
+    );
+    assert_eq!(run(&src).expect("intrinsic resume state runs"), "OK");
+}
