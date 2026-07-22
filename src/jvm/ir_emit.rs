@@ -2076,7 +2076,30 @@ fn emit_class(
     // signature (`List<String>` → `Ljava/util/List<Ljava/lang/String;>;`). `None` when no param needs it.
     // Computed once here: the pool seeder interns it and the `<init>` emission attaches it.
     let ctor_signature: Option<String> = class_ctor_generic_sig(ir, c, &fq_name);
-    if opts.emit_class_metadata && build_class_metadata(ir, c, opts).is_some() {
+    // A `@JvmInline value class` is NOT seeded here: the plain order opens with `<init>` and the
+    // constructor descriptor, but kotlinc reaches a value class's user-facing members first — its
+    // constructor is emitted after them (see `emit_primary_ctor` below), and the natural emission
+    // order that produces is already kotlinc's.
+    if opts.emit_class_metadata && c.is_value {
+        // kotlinc reaches a value class's GETTER before its backing field, whose name and descriptor
+        // intern at the `getfield` in that getter's body.
+        if let Some(f) = c.fields.first() {
+            let mut ch = f.name.chars();
+            let cap = ch
+                .next()
+                .map(|x| x.to_uppercase().collect::<String>() + ch.as_str())
+                .unwrap_or_default();
+            cw.reserve_method_name(&format!("get{cap}"));
+            cw.reserve_descriptor(&format!("(){}", ir_type_desc(&f.ty)));
+            cw.reserve_method_name(&f.name);
+            cw.reserve_descriptor(&ir_type_desc(&f.ty));
+            // …then the getter's own LocalVariableTable strings, which the debug pass would otherwise
+            // intern long after the bodies that follow.
+            cw.reserve_method_name("this");
+            cw.reserve_descriptor(&format!("L{fq_name};"));
+        }
+    }
+    if opts.emit_class_metadata && !c.is_value && build_class_metadata(ir, c, opts).is_some() {
         seed_plain_class_pool(
             ir,
             c,
@@ -2193,270 +2216,278 @@ fn emit_class(
     let param_tys = class_ctor_jvm_tys(c);
     // A class with NO primary constructor emits no primary `<init>` — every `<init>` comes from a
     // secondary constructor (below). Otherwise emit the primary `<init>` here.
-    if c.has_primary_ctor {
-        let params_words: u16 = param_tys.iter().map(|t| slot_words(*t)).sum();
-        let mut ctor = CodeBuilder::new(1 + params_words);
-        // The superclass constructor's parameter types (empty for the erased top type — the front end
-        // names it `kotlin/Any`, which this backend maps to `java/lang/Object`).
-        let mut super_param_tys: Vec<Ty> =
-            if crate::jvm::jvm_class_map::to_jvm_internal(&superclass) == "java/lang/Object" {
-                Vec::new()
-            } else {
-                ir.classes
-                    .iter()
-                    .find(|sc| sc.fq_name_matches(&superclass))
-                    .map(class_ctor_jvm_tys)
-                    .unwrap_or_default()
-            };
-        let max_slot;
-        let mut init_diverges = false;
-        {
-            let mut e = Emitter {
-                ir,
-                cw: &mut cw,
-                bodies,
-                run: env.run,
-                owner: fq_name.clone(),
-                facade: facade.to_string(),
-                slots: HashMap::new(),
-                var_types: collect_var_types(ir),
-                next_slot: 1 + params_words,
-                ret: Ty::Unit,
-                loop_stack: Vec::new(),
-                pending_stack: Vec::new(),
-            };
-            e.slots.insert(0, (0, Ty::obj(&fq_name)));
-            let mut s = 1u16;
-            for (vi, t) in param_tys.iter().enumerate() {
-                e.slots.insert(vi as u32 + 1, (s, *t));
-                s += slot_words(*t);
-            }
-            // A classpath superclass (not an IR class) with `super(args)`: the IR-class lookup above
-            // found no parameter types, so derive the super constructor's descriptor from the argument
-            // expressions themselves (e.g. a synthesized coroutine continuation's `super(completion)`).
-            if super_param_tys.is_empty() && !c.super_args.is_empty() {
-                super_param_tys = c.super_args.iter().map(|&a| e.value_ty(a)).collect();
-            }
-            // kotlinc guards each non-null reference constructor parameter with checkNotNullParameter at
-            // the very start of `<init>` — before the super() call.
-            for (i, a) in c.ctor_args.iter().enumerate() {
-                if let Some(name) = &a.check {
-                    if let Some(&(slot, _)) = e.slots.get(&(i as u32 + 1)) {
-                        ctor.aload(slot);
-                        ctor.push_string(name, e.cw);
-                        let m = e.cw.methodref(
-                            "kotlin/jvm/internal/Intrinsics",
-                            "checkNotNullParameter",
-                            "(Ljava/lang/Object;Ljava/lang/String;)V",
-                        );
-                        ctor.invokestatic(m, 2, 0);
-                    }
-                }
-            }
-            // An inner class stores its captured outer instance (`this$0`, field 0) BEFORE `super(…)`,
-            // so a super-constructor argument can read the outer instance (`inner class Inner :
-            // Base(run { outerProp })`) — kotlinc emits the same. A `putfield` of the current class's own
-            // field on the still-uninitialized `this` is legal per JVMS 4.10.2.4.
-            let stores_this0 = c.fields.first().is_some_and(|f0| f0.name == "this$0");
-            if stores_this0 {
-                let f0 = &c.fields[0];
-                ctor.aload(0);
-                ctor.aload(1); // the outer instance = first constructor parameter
-                let fref = e.cw.fieldref(&fq_name, "this$0", &type_descriptor(f0.ty));
-                ctor.putfield(fref, slot_words(f0.ty) as i32);
-            }
-            // `super(args)` — `this` is loaded first, so spill any branchy arg to temps before it.
-            let super_args = c.super_args.clone();
-            if super_args.iter().any(|&a| e.records_frame(a)) {
-                let temps = e.spill_to_temps(&super_args, &mut ctor);
-                ctor.aload(0);
-                for &(slot, t, _) in &temps {
-                    load(t, slot, &mut ctor);
-                }
-                for &(_, _, key) in &temps {
-                    e.slots.remove(&key);
-                }
-            } else {
-                ctor.aload(0);
-                for &a in &super_args {
-                    e.emit_value(a, &mut ctor);
-                }
-            }
-            // A base whose primary ctor takes a value-class param — or a SEALED base — has a PRIVATE
-            // primary; a subclass `super(…)` must reach it through the PUBLIC|SYNTHETIC
-            // `(…args, DefaultConstructorMarker)` accessor (a trailing `null` marker), never the
-            // inaccessible private primary.
-            let super_accessor = e.ir.has_value_param_ctor(&superclass)
-                || e.ir
-                    .classes
-                    .iter()
-                    .any(|o| o.fq_name_matches(&superclass) && o.is_sealed);
-            let mut super_param_tys = super_param_tys.clone();
-            if super_accessor {
-                ctor.aconst_null();
-                super_param_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
-            }
-            let aw: i32 = super_param_tys.iter().map(|t| slot_words(*t) as i32).sum();
-            let super_init = e.cw.methodref(
-                &superclass,
-                "<init>",
-                &method_descriptor(&super_param_tys, Ty::Unit),
-            );
-            ctor.invokespecial(super_init, aw, 0);
-            // Store this class's own primary-constructor parameter fields: each `val`/`var` param's arg is
-            // stored to its field (the property fields are `fields[0..]` in declaration order among params);
-            // a plain param is skipped (it stays a local for the initializer body). `is_field` flags come
-            // from `ctor_args`; a synthesized class (empty `ctor_args`) stores all leading param fields.
-            // SKIPPED when `explicit_param_stores` is set — a desugared class already stores them via
-            // explicit `SetField`s at the head of `init_body`; auto-storing too would double-store.
-            if !c.explicit_param_stores {
-                let mut slot = 1u16;
-                let mut field_i = 0usize;
-                let is_field: Vec<bool> = if c.ctor_args.is_empty() {
-                    vec![true; param_tys.len()]
+    // The primary constructor's emission POSITION differs by class kind: a `@JvmInline value
+    // class` is reached user-facing-members-first by kotlinc, so its ctor (and the pool entries
+    // its construction interns) comes after them; every other class emits it here.
+    let emit_primary_ctor = |cw: &mut ClassWriter, ctor_lines: &mut Vec<(u16, u32)>| {
+        if c.has_primary_ctor {
+            let params_words: u16 = param_tys.iter().map(|t| slot_words(*t)).sum();
+            let mut ctor = CodeBuilder::new(1 + params_words);
+            // The superclass constructor's parameter types (empty for the erased top type — the front end
+            // names it `kotlin/Any`, which this backend maps to `java/lang/Object`).
+            let mut super_param_tys: Vec<Ty> =
+                if crate::jvm::jvm_class_map::to_jvm_internal(&superclass) == "java/lang/Object" {
+                    Vec::new()
                 } else {
-                    c.ctor_args.iter().map(|a| a.is_field).collect()
-                };
-                for (i, t) in param_tys.iter().enumerate() {
-                    if is_field.get(i).copied().unwrap_or(true) {
-                        let name = &c.fields[field_i].name;
-                        // `this$0` is already stored BEFORE `super(…)` above — don't store it again.
-                        if name != "this$0" {
-                            ctor.aload(0);
-                            load(*t, slot, &mut ctor);
-                            let fref = e.cw.fieldref(&fq_name, name, &type_descriptor(*t));
-                            ctor.putfield(fref, slot_words(*t) as i32);
-                        }
-                        field_i += 1;
-                    }
-                    slot += slot_words(*t);
-                }
-            }
-            if let Some(init_body) = c.init_body {
-                // kotlinc gives the ctor one LineNumberTable entry per body-property initializer, on
-                // that property's own source line. Emit the initializer statements one at a time so
-                // each one's real start pc is known; only for a pure list of `SetField` stores (the
-                // desugared `val y: Int = 2` shape) — anything else keeps the whole-block emit.
-                let stmts: Option<Vec<crate::ir::ExprId>> = match ir.expr(init_body) {
-                    crate::ir::IrExpr::Block { stmts, value } if value.is_none() => stmts
+                    ir.classes
                         .iter()
-                        .all(|&st| matches!(ir.expr(st), crate::ir::IrExpr::SetField { .. }))
-                        .then(|| stmts.clone()),
-                    _ => None,
+                        .find(|sc| sc.fq_name_matches(&superclass))
+                        .map(class_ctor_jvm_tys)
+                        .unwrap_or_default()
                 };
-                match stmts {
-                    Some(stmts) => {
-                        for st in stmts {
-                            let pc = ctor.bytes.len() as u16;
-                            if let crate::ir::IrExpr::SetField { index, .. } = ir.expr(st) {
-                                let name = &c.fields[*index as usize].name;
-                                if let Some(&pl) =
-                                    ir.prop_decl_lines.get(&(c.fq_name(), name.clone()))
-                                {
-                                    if pl != 0 {
-                                        ctor_lines.push((pc, pl));
+            let max_slot;
+            let mut init_diverges = false;
+            {
+                let mut e = Emitter {
+                    ir,
+                    cw,
+                    bodies,
+                    run: env.run,
+                    owner: fq_name.clone(),
+                    facade: facade.to_string(),
+                    slots: HashMap::new(),
+                    var_types: collect_var_types(ir),
+                    next_slot: 1 + params_words,
+                    ret: Ty::Unit,
+                    loop_stack: Vec::new(),
+                    pending_stack: Vec::new(),
+                };
+                e.slots.insert(0, (0, Ty::obj(&fq_name)));
+                let mut s = 1u16;
+                for (vi, t) in param_tys.iter().enumerate() {
+                    e.slots.insert(vi as u32 + 1, (s, *t));
+                    s += slot_words(*t);
+                }
+                // A classpath superclass (not an IR class) with `super(args)`: the IR-class lookup above
+                // found no parameter types, so derive the super constructor's descriptor from the argument
+                // expressions themselves (e.g. a synthesized coroutine continuation's `super(completion)`).
+                if super_param_tys.is_empty() && !c.super_args.is_empty() {
+                    super_param_tys = c.super_args.iter().map(|&a| e.value_ty(a)).collect();
+                }
+                // kotlinc guards each non-null reference constructor parameter with checkNotNullParameter at
+                // the very start of `<init>` — before the super() call.
+                for (i, a) in c.ctor_args.iter().enumerate() {
+                    if let Some(name) = &a.check {
+                        if let Some(&(slot, _)) = e.slots.get(&(i as u32 + 1)) {
+                            ctor.aload(slot);
+                            ctor.push_string(name, e.cw);
+                            let m = e.cw.methodref(
+                                "kotlin/jvm/internal/Intrinsics",
+                                "checkNotNullParameter",
+                                "(Ljava/lang/Object;Ljava/lang/String;)V",
+                            );
+                            ctor.invokestatic(m, 2, 0);
+                        }
+                    }
+                }
+                // An inner class stores its captured outer instance (`this$0`, field 0) BEFORE `super(…)`,
+                // so a super-constructor argument can read the outer instance (`inner class Inner :
+                // Base(run { outerProp })`) — kotlinc emits the same. A `putfield` of the current class's own
+                // field on the still-uninitialized `this` is legal per JVMS 4.10.2.4.
+                let stores_this0 = c.fields.first().is_some_and(|f0| f0.name == "this$0");
+                if stores_this0 {
+                    let f0 = &c.fields[0];
+                    ctor.aload(0);
+                    ctor.aload(1); // the outer instance = first constructor parameter
+                    let fref = e.cw.fieldref(&fq_name, "this$0", &type_descriptor(f0.ty));
+                    ctor.putfield(fref, slot_words(f0.ty) as i32);
+                }
+                // `super(args)` — `this` is loaded first, so spill any branchy arg to temps before it.
+                let super_args = c.super_args.clone();
+                if super_args.iter().any(|&a| e.records_frame(a)) {
+                    let temps = e.spill_to_temps(&super_args, &mut ctor);
+                    ctor.aload(0);
+                    for &(slot, t, _) in &temps {
+                        load(t, slot, &mut ctor);
+                    }
+                    for &(_, _, key) in &temps {
+                        e.slots.remove(&key);
+                    }
+                } else {
+                    ctor.aload(0);
+                    for &a in &super_args {
+                        e.emit_value(a, &mut ctor);
+                    }
+                }
+                // A base whose primary ctor takes a value-class param — or a SEALED base — has a PRIVATE
+                // primary; a subclass `super(…)` must reach it through the PUBLIC|SYNTHETIC
+                // `(…args, DefaultConstructorMarker)` accessor (a trailing `null` marker), never the
+                // inaccessible private primary.
+                let super_accessor = e.ir.has_value_param_ctor(&superclass)
+                    || e.ir
+                        .classes
+                        .iter()
+                        .any(|o| o.fq_name_matches(&superclass) && o.is_sealed);
+                let mut super_param_tys = super_param_tys.clone();
+                if super_accessor {
+                    ctor.aconst_null();
+                    super_param_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
+                }
+                let aw: i32 = super_param_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                let super_init = e.cw.methodref(
+                    &superclass,
+                    "<init>",
+                    &method_descriptor(&super_param_tys, Ty::Unit),
+                );
+                ctor.invokespecial(super_init, aw, 0);
+                // Store this class's own primary-constructor parameter fields: each `val`/`var` param's arg is
+                // stored to its field (the property fields are `fields[0..]` in declaration order among params);
+                // a plain param is skipped (it stays a local for the initializer body). `is_field` flags come
+                // from `ctor_args`; a synthesized class (empty `ctor_args`) stores all leading param fields.
+                // SKIPPED when `explicit_param_stores` is set — a desugared class already stores them via
+                // explicit `SetField`s at the head of `init_body`; auto-storing too would double-store.
+                if !c.explicit_param_stores {
+                    let mut slot = 1u16;
+                    let mut field_i = 0usize;
+                    let is_field: Vec<bool> = if c.ctor_args.is_empty() {
+                        vec![true; param_tys.len()]
+                    } else {
+                        c.ctor_args.iter().map(|a| a.is_field).collect()
+                    };
+                    for (i, t) in param_tys.iter().enumerate() {
+                        if is_field.get(i).copied().unwrap_or(true) {
+                            let name = &c.fields[field_i].name;
+                            // `this$0` is already stored BEFORE `super(…)` above — don't store it again.
+                            if name != "this$0" {
+                                ctor.aload(0);
+                                load(*t, slot, &mut ctor);
+                                let fref = e.cw.fieldref(&fq_name, name, &type_descriptor(*t));
+                                ctor.putfield(fref, slot_words(*t) as i32);
+                            }
+                            field_i += 1;
+                        }
+                        slot += slot_words(*t);
+                    }
+                }
+                if let Some(init_body) = c.init_body {
+                    // kotlinc gives the ctor one LineNumberTable entry per body-property initializer, on
+                    // that property's own source line. Emit the initializer statements one at a time so
+                    // each one's real start pc is known; only for a pure list of `SetField` stores (the
+                    // desugared `val y: Int = 2` shape) — anything else keeps the whole-block emit.
+                    let stmts: Option<Vec<crate::ir::ExprId>> = match ir.expr(init_body) {
+                        crate::ir::IrExpr::Block { stmts, value } if value.is_none() => stmts
+                            .iter()
+                            .all(|&st| matches!(ir.expr(st), crate::ir::IrExpr::SetField { .. }))
+                            .then(|| stmts.clone()),
+                        _ => None,
+                    };
+                    match stmts {
+                        Some(stmts) => {
+                            for st in stmts {
+                                let pc = ctor.bytes.len() as u16;
+                                if let crate::ir::IrExpr::SetField { index, .. } = ir.expr(st) {
+                                    let name = &c.fields[*index as usize].name;
+                                    if let Some(&pl) =
+                                        ir.prop_decl_lines.get(&(c.fq_name(), name.clone()))
+                                    {
+                                        if pl != 0 {
+                                            ctor_lines.push((pc, pl));
+                                        }
                                     }
                                 }
+                                e.emit(st, &mut ctor);
                             }
-                            e.emit(st, &mut ctor);
                         }
+                        None => e.emit(init_body, &mut ctor),
                     }
-                    None => e.emit(init_body, &mut ctor),
+                    init_diverges = e.diverges(init_body);
                 }
-                init_diverges = e.diverges(init_body);
+                max_slot = e.next_slot;
             }
-            max_slot = e.next_slot;
-        }
-        // A diverging `init` (e.g. `init { throw … }`) leaves no fall-through — the trailing `return`
-        // would be dead code after `athrow` (which the verifier rejects without a frame).
-        if !init_diverges {
-            // The trailing `return` goes back on the class-declaration line, closing the ctor's table.
-            if !ctor_lines.is_empty() {
-                ctor_lines.push((ctor.bytes.len() as u16, c.decl_line));
-            }
-            ctor.ret_void();
-        }
-        ctor.ensure_locals(max_slot);
-        ctor.link();
-        // An `object`'s constructor is private; a `@JvmInline value class`'s is private too (instances are
-        // created via `constructor-impl`/`box-impl`, never `new`); a class whose primary ctor takes a
-        // value-class-typed parameter is private too (kotlinc routes construction through a synthetic
-        // `(…args, DefaultConstructorMarker)` accessor — emitted below); a `C$Companion`'s is
-        // package-private (so the outer class's `<clinit>` can call it without nestmate attributes); a
-        // normal class's is public.
-        let value_param_ctor = ir.has_value_param_ctor(&fq_name);
-        // A SEALED class's primary ctor is private too — subclasses (and Java/reflection) construct
-        // through the PUBLIC|SYNTHETIC `(…args, DefaultConstructorMarker)` accessor (kotlinc's shape).
-        let ctor_access =
-            if c.is_object || c.is_value || value_param_ctor || c.is_companion || c.is_sealed {
-                // A companion's real ctor is PRIVATE too — the outer `<clinit>` constructs it through the
-                // PUBLIC|SYNTHETIC `(DefaultConstructorMarker)` accessor emitted below (kotlinc's shape).
-                0x0002
-            } else if is_continuation {
-                // A continuation class's ctor is package-private (constructed only by its own file).
-                0x0000
-            } else {
-                0x0001
-            };
-        cw.add_method_sig(
-            ctor_access,
-            "<init>",
-            &method_descriptor(&param_tys, Ty::Unit),
-            &ctor,
-            ctor_signature.as_deref(),
-        );
-        // A default on any primary-ctor parameter → kotlinc's synthetic
-        // `<init>(params…, int mask, DefaultConstructorMarker)` overload (fills the masked slots from the
-        // defaults, then `invokespecial` the real `<init>`).
-        if let Some(defaults) = ir.class_ctor_defaults(&fq_name) {
-            emit_ctor_default_stub(ir, &fq_name, &param_tys, defaults, &mut cw, env);
-            // EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
-            // (`AuditFilters()` in Java/reflection), delegating to the `$default` overload with a
-            // full mask.
-            if !param_tys.is_empty()
-                && defaults.len() == param_tys.len()
-                && defaults.iter().all(Option::is_some)
-                && !c.is_sealed
-                && ctor_access == 0x0001
-            {
-                let mut z = CodeBuilder::new(1);
-                z.aload(0);
-                for &t in &param_tys {
-                    push_zero(t, &mut z, &mut cw);
+            // A diverging `init` (e.g. `init { throw … }`) leaves no fall-through — the trailing `return`
+            // would be dead code after `athrow` (which the verifier rejects without a frame).
+            if !init_diverges {
+                // The trailing `return` goes back on the class-declaration line, closing the ctor's table.
+                if !ctor_lines.is_empty() {
+                    ctor_lines.push((ctor.bytes.len() as u16, c.decl_line));
                 }
-                for mask in full_default_masks(param_tys.len()) {
-                    z.push_int(mask, &mut cw);
-                }
-                z.aconst_null();
-                let mut stub_params = param_tys.clone();
-                stub_params.extend(std::iter::repeat_n(
-                    Ty::Int,
-                    default_mask_count(param_tys.len()),
-                ));
-                stub_params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
-                let aw: i32 = 1 + stub_params
-                    .iter()
-                    .map(|t| slot_words(*t) as i32)
-                    .sum::<i32>();
-                let m = cw.methodref(
-                    &fq_name,
-                    "<init>",
-                    &method_descriptor(&stub_params, Ty::Unit),
-                );
-                z.invokespecial(m, aw, 0);
-                z.ret_void();
-                z.ensure_locals(1);
-                z.link();
-                cw.add_method(0x0001, "<init>", "()V", &z);
+                ctor.ret_void();
             }
-        }
-        // A value-class-param primary ctor is private (above); kotlinc exposes a PUBLIC|SYNTHETIC accessor
-        // `<init>(…args, DefaultConstructorMarker)` that simply delegates to it, so Java/reflection can
-        // still construct the class.
-        if value_param_ctor || c.is_companion || c.is_sealed {
-            emit_ctor_marker_accessor(&fq_name, &param_tys, &mut cw);
-        }
-    } // end `if c.has_primary_ctor`
+            ctor.ensure_locals(max_slot);
+            ctor.link();
+            // An `object`'s constructor is private; a `@JvmInline value class`'s is private too (instances are
+            // created via `constructor-impl`/`box-impl`, never `new`); a class whose primary ctor takes a
+            // value-class-typed parameter is private too (kotlinc routes construction through a synthetic
+            // `(…args, DefaultConstructorMarker)` accessor — emitted below); a `C$Companion`'s is
+            // package-private (so the outer class's `<clinit>` can call it without nestmate attributes); a
+            // normal class's is public.
+            let value_param_ctor = ir.has_value_param_ctor(&fq_name);
+            // A SEALED class's primary ctor is private too — subclasses (and Java/reflection) construct
+            // through the PUBLIC|SYNTHETIC `(…args, DefaultConstructorMarker)` accessor (kotlinc's shape).
+            let ctor_access =
+                if c.is_object || c.is_value || value_param_ctor || c.is_companion || c.is_sealed {
+                    // A companion's real ctor is PRIVATE too — the outer `<clinit>` constructs it through the
+                    // PUBLIC|SYNTHETIC `(DefaultConstructorMarker)` accessor emitted below (kotlinc's shape).
+                    0x0002
+                } else if is_continuation {
+                    // A continuation class's ctor is package-private (constructed only by its own file).
+                    0x0000
+                } else {
+                    0x0001
+                };
+            cw.add_method_sig(
+                ctor_access,
+                "<init>",
+                &method_descriptor(&param_tys, Ty::Unit),
+                &ctor,
+                ctor_signature.as_deref(),
+            );
+            // A default on any primary-ctor parameter → kotlinc's synthetic
+            // `<init>(params…, int mask, DefaultConstructorMarker)` overload (fills the masked slots from the
+            // defaults, then `invokespecial` the real `<init>`).
+            if let Some(defaults) = ir.class_ctor_defaults(&fq_name) {
+                emit_ctor_default_stub(ir, &fq_name, &param_tys, defaults, cw, env);
+                // EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
+                // (`AuditFilters()` in Java/reflection), delegating to the `$default` overload with a
+                // full mask.
+                if !param_tys.is_empty()
+                    && defaults.len() == param_tys.len()
+                    && defaults.iter().all(Option::is_some)
+                    && !c.is_sealed
+                    && ctor_access == 0x0001
+                {
+                    let mut z = CodeBuilder::new(1);
+                    z.aload(0);
+                    for &t in &param_tys {
+                        push_zero(t, &mut z, cw);
+                    }
+                    for mask in full_default_masks(param_tys.len()) {
+                        z.push_int(mask, cw);
+                    }
+                    z.aconst_null();
+                    let mut stub_params = param_tys.clone();
+                    stub_params.extend(std::iter::repeat_n(
+                        Ty::Int,
+                        default_mask_count(param_tys.len()),
+                    ));
+                    stub_params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
+                    let aw: i32 = 1 + stub_params
+                        .iter()
+                        .map(|t| slot_words(*t) as i32)
+                        .sum::<i32>();
+                    let m = cw.methodref(
+                        &fq_name,
+                        "<init>",
+                        &method_descriptor(&stub_params, Ty::Unit),
+                    );
+                    z.invokespecial(m, aw, 0);
+                    z.ret_void();
+                    z.ensure_locals(1);
+                    z.link();
+                    cw.add_method(0x0001, "<init>", "()V", &z);
+                }
+            }
+            // A value-class-param primary ctor is private (above); kotlinc exposes a PUBLIC|SYNTHETIC accessor
+            // `<init>(…args, DefaultConstructorMarker)` that simply delegates to it, so Java/reflection can
+            // still construct the class.
+            if value_param_ctor || c.is_companion || c.is_sealed {
+                emit_ctor_marker_accessor(&fq_name, &param_tys, cw);
+            }
+        } // end `if c.has_primary_ctor`
+    };
+    if !c.is_value {
+        emit_primary_ctor(&mut cw, &mut ctor_lines);
+    }
 
     // Secondary constructors: each `<init>(p)` delegates (via `this(…)` to an own `<init>`, or via
     // `super(…)` to the base `<init>`) then runs its body. A `super(…)`-reaching ctor's `body` already
@@ -2714,14 +2745,43 @@ fn emit_class(
                 .filter(|&fid| &ir.functions[fid as usize].name == name),
         );
     }
-    ordered.extend(
-        c.methods
+    let mut rest: Vec<u32> = c
+        .methods
+        .iter()
+        .copied()
+        .filter(|&fid| !accessor_order.contains(&ir.functions[fid as usize].name))
+        .collect();
+    // A value class emits its USER-FACING members first — each `-impl` immediately before the bridge
+    // that calls it — and only then the machinery that constructs and boxes it.
+    if c.is_value {
+        let rank = |n: &str| -> usize {
+            [
+                "toString-impl",
+                "toString",
+                "hashCode-impl",
+                "hashCode",
+                "equals-impl",
+                "equals",
+                "constructor-impl",
+                "box-impl",
+                "unbox-impl",
+                "equals-impl0",
+            ]
             .iter()
-            .copied()
-            .filter(|&fid| !accessor_order.contains(&ir.functions[fid as usize].name)),
-    );
+            .position(|k| *k == n)
+            .unwrap_or(usize::MAX)
+        };
+        rest.sort_by_key(|&fid| rank(&ir.functions[fid as usize].name));
+    }
+    ordered.extend(rest);
     for &fid in &ordered {
         let f = &ir.functions[fid as usize];
+        // kotlinc reaches a method's SIGNATURE before its code. A plain class gets that ordering from
+        // `seed_plain_class_pool`; a value class is not seeded, so reserve it per member here.
+        if c.is_value {
+            cw.reserve_method_name(&f.name);
+            cw.reserve_descriptor(&ir_method_desc(&f.params, &f.ret));
+        }
         if f.body.is_some() {
             // A `static` member (e.g. a value class's `box-impl`/`constructor-impl`) emits with no
             // `this` slot; an ordinary member is an instance method.
@@ -2750,6 +2810,10 @@ fn emit_class(
                 emit_default_stub(ir, fid, &fq_name, facade, &mut cw, defaults, env, false);
             }
         }
+    }
+    // A value class's constructor and boxing machinery follow its user-facing members.
+    if c.is_value {
+        emit_primary_ctor(&mut cw, &mut ctor_lines);
     }
     emit_bridges(c, &mut cw);
     cw.set_runtime_annotations(&c.applied_annotations);
