@@ -13066,7 +13066,17 @@ impl<'a> Checker<'a> {
                                 }
                             };
                         }
-                        if let Some(internal) = self.imports.get(&cls).cloned() {
+                        // An explicit import maps the name directly; otherwise resolve through the
+                        // import levels (same-package — including the ROOT package for a classpath
+                        // class compiled without one, e.g. a javac'd test source — then wildcards and
+                        // defaults), so `J.greet()` on a same-package Java class resolves exactly like
+                        // a type-position `J`.
+                        let receiver_class = self
+                            .imports
+                            .get(&cls)
+                            .cloned()
+                            .or_else(|| self.imported_type_internal(&cls));
+                        if let Some(internal) = receiver_class {
                             let arg_tys = self.arg_tys(args);
                             return match self.resolve_companion(&internal, &name, &arg_tys) {
                                 Some(m) => {

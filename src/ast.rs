@@ -463,6 +463,10 @@ pub struct FunDecl {
     /// `final` modifier — cannot be overridden. Data-class synthesis skips methods a parent marks
     /// `final` (overriding them would produce wrong behavior).
     pub is_final: bool,
+    /// `open` or `override` (without `final`) — the member is overridable, so the JVM backend must
+    /// NOT emit `ACC_FINAL` (kotlinc's ABI: a separately-compiled module, or javac in a mixed
+    /// build, may override it).
+    pub is_open: bool,
     /// `abstract` modifier — a member with no body, only valid in an abstract class or interface.
     pub is_abstract: bool,
     /// Declaration visibility (`public`/`internal`/`protected`/`private`; `public` by default).

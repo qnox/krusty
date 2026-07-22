@@ -1753,6 +1753,7 @@ impl<'a> Parser<'a> {
                         mods.iter().any(|m| m == "abstract"),
                     );
                     d.visibility = visibility_of(&mods);
+                    d.is_open = !d.is_final && mods.iter().any(|m| m == "open" || m == "override");
                     methods.push(d);
                 }
                 TokenKind::KwVal | TokenKind::KwVar => {
@@ -1982,6 +1983,8 @@ impl<'a> Parser<'a> {
                             emods.iter().any(|m| m == "abstract"),
                         );
                         f.visibility = visibility_of(&emods);
+                        f.is_open =
+                            !f.is_final && emods.iter().any(|m| m == "open" || m == "override");
                         methods.push(f);
                     }
                     // A body member property (`enum class C { A; val x = … }`): a field + accessor on
@@ -2200,6 +2203,7 @@ impl<'a> Parser<'a> {
                 span: start,
                 is_inline: false,
                 is_final: false,
+                is_open: false,
                 is_abstract: false,
                 visibility: Visibility::Public,
                 is_suspend: false,
@@ -2347,6 +2351,7 @@ impl<'a> Parser<'a> {
             span: Span::new(start.lo, end.hi),
             is_inline,
             is_final,
+            is_open: false,
             is_abstract,
             visibility: Visibility::Public,
             is_suspend,
@@ -2700,6 +2705,8 @@ impl<'a> Parser<'a> {
                             mods.iter().any(|m| m == "abstract"),
                         );
                         f.visibility = visibility_of(&mods);
+                        f.is_open =
+                            !f.is_final && mods.iter().any(|m| m == "open" || m == "override");
                         methods.push(f);
                     }
                     TokenKind::KwVal | TokenKind::KwVar => {
@@ -3303,6 +3310,8 @@ impl<'a> Parser<'a> {
                             mods.iter().any(|m| m == "abstract"),
                         );
                         f.visibility = visibility_of(&mods);
+                        f.is_open =
+                            !f.is_final && mods.iter().any(|m| m == "open" || m == "override");
                         methods.push(f);
                     }
                     TokenKind::KwVal | TokenKind::KwVar => {
@@ -3456,6 +3465,8 @@ impl<'a> Parser<'a> {
                             mods.iter().any(|m| m == "abstract"),
                         );
                         f.visibility = visibility_of(&mods);
+                        f.is_open =
+                            !f.is_final && mods.iter().any(|m| m == "open" || m == "override");
                         methods.push(f);
                     }
                     TokenKind::KwVal | TokenKind::KwVar => {

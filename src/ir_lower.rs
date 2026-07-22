@@ -935,6 +935,12 @@ pub fn lower_file_at_reporting(
                 if m.visibility.is_private() {
                     lo.ir.private_methods.insert(fid);
                 }
+                // An `open`/`override` member is overridable — kotlinc's member modality stays OPEN
+                // (no `ACC_FINAL`) even when nothing in this module extends the class: a separately
+                // compiled module (or javac in a mixed build) may override it.
+                if m.is_open {
+                    lo.ir.open_methods.insert(fid);
+                }
                 // Mark defaults in pass 1; pass 2 overwrites the marker with lowered expressions.
                 if !m.params.iter().any(|p| p.default.is_some()) && !m.params.is_empty() {
                     // No OWN defaults: an override may still inherit the base method's defaults.
