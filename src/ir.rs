@@ -1110,6 +1110,11 @@ pub struct IrFile {
     /// with suspension points, builds the state machine + continuation class. ir_lower itself lowers a
     /// `suspend fun` as a plain function (mirroring how value classes stay plain until their pass).
     pub suspend_funs: Vec<u32>,
+    /// Each rewritten `suspend fun`'s DECLARED signature `(params, ret)`, captured by the coroutine
+    /// pass just before it appends the `Continuation` and erases the return. `@Metadata` and the JVM
+    /// generic `Signature` both describe the function in Kotlin terms — `suspend fun f(a: String)`,
+    /// not `f(String, Continuation): Object` — so both need the signature the CPS rewrite consumed.
+    pub suspend_declared_sigs: std::collections::HashMap<u32, (Vec<Ty>, Ty)>,
     /// `ExprId` of each direct call to a `suspend fun` → the callee's LOGICAL return type (the source
     /// return, before CPS erasure to `Object`). Recorded by ir_lower from the resolver
     /// (`flags.suspend`), so the coroutine pass recognizes a suspend call to ANOTHER file or a classpath

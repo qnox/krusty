@@ -175,6 +175,13 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
             ir.functions[fid as usize].name
         );
         let is_static = ir.functions[fid as usize].is_static;
+        // Keep the declared signature before it is consumed — the class's `@Metadata` and the method's
+        // generic `Signature` both describe the function as Kotlin declared it.
+        {
+            let f = &ir.functions[fid as usize];
+            let declared = (f.params.clone(), f.ret);
+            ir.suspend_declared_sigs.insert(fid, declared);
+        }
         // CPS signature: append the continuation parameter, erase the return to Object.
         let f = &mut ir.functions[fid as usize];
         f.params.push(continuation_ty());
