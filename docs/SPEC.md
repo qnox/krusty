@@ -1814,3 +1814,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   captured `var x: X?` is always the `ObjectRef` (a nullable value class never holds the raw scalar).
   Generic arguments compare by class (the non-null `Obj` rule ignores them too).
   (`assignment_to_nullable_value_class_var_boxes`.)
+
+- **An elvis/`when` BINDING in a suspend body flattens per-arm: bind, jump, or diverge.** `val q =
+  susp() ?: if (c) break else error("…")` becomes a conditional whose arms each (a) bind a value and
+  transition to the merge state, (b) transfer to a loop's break/continue state, or (c) diverge — a
+  `throw` or a `Nothing`-returning call (`)Ljava/lang/Void;` descriptor). A diverging arm's effect IS
+  the transfer of control: nothing is bound and NO merge transition is emitted after it (a dead bind
+  after the spliced `athrow` is unreachable code with no stack-map frame — VerifyError). Nested
+  `when`s/blocks in arm position recurse under the same rule.
+  (`elvis_break_in_suspend_loop_binds_or_jumps`, `diverging_elvis_arm_emits_no_dead_bind`; unlocks
+  `kt83728` + the `suspend*InsideElvis` corpus tests.)

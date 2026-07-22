@@ -8864,7 +8864,7 @@ fn prim_newarray_atype(elem: Ty) -> u8 {
 /// must be terminated). A `Nothing?` return is NULLABLE — it can yield `null` (`fun f(): Nothing? { … return
 /// null … }`) — and must NOT be treated as diverging; the JVM descriptor erases the `?` (both are `Void`),
 /// so the nullability is checked on the IR type before it is erased by `ir_ty_to_jvm`.
-fn ret_is_nothing(ret: &Ty) -> bool {
+pub(crate) fn ret_is_nothing(ret: &Ty) -> bool {
     !ret.is_nullable() && norm_nothing(ir_ty_to_jvm(ret)) == Ty::Nothing
 }
 

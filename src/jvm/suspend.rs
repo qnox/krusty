@@ -2729,26 +2729,49 @@ impl Flat<'_> {
                 }
                 _ => false,
             });
-        if !any_susp && !any_jump {
-            // No DIRECT branch suspension/jump — but one hiding DEEPER in a branch value (`val q =
-            // f() ?: if (c) break else error("")`) would be emitted structurally with a mis-framed
-            // jump into the dispatch loop. Bail those; a jump-free/suspension-free `when` binding is
-            // the ordinary case and stays structural.
-            if self.expr_has_loop_jump(init) || expr_calls_suspend(self.ir, init, self.suspend) {
-                self.failed = true;
-            }
+        // A suspension/jump hiding DEEPER in a branch value (`val q = f() ?: if (c) break else
+        // error("")`) also routes through emit_cond — its nested-when arm recurses; only a
+        // jump-free/suspension-free `when` binding stays structural.
+        let any_deep = branches.iter().any(|(_, v)| {
+            expr_calls_suspend(self.ir, *v, self.suspend) || self.expr_has_loop_jump(*v)
+        });
+        if !any_susp && !any_jump && !any_deep {
             return None;
         }
-        // A branch value must be either a direct suspension, a direct loop-jump, or free of both.
-        for (_, v) in &branches {
-            let direct_jump = matches!(
-                self.ir.exprs[*v as usize],
+        // A branch value must be a direct suspension, a direct loop-jump, free of both, or a
+        // NESTED `when`/block whose branches recursively satisfy the same rule.
+        fn branch_ok(f: &Flat<'_>, v: ExprId) -> bool {
+            if matches!(
+                f.ir.exprs[v as usize],
                 IrExpr::Break { .. } | IrExpr::Continue { .. }
-            );
-            if !is_suspend_call(self.ir, *v, self.suspend)
-                && !direct_jump
-                && (expr_calls_suspend(self.ir, *v, self.suspend) || self.expr_has_loop_jump(*v))
+            ) || is_suspend_call(f.ir, v, f.suspend)
             {
+                return true;
+            }
+            if !expr_calls_suspend(f.ir, v, f.suspend) && !f.expr_has_loop_jump(v) {
+                return true;
+            }
+            if let IrExpr::When { branches } = &f.ir.exprs[v as usize] {
+                return branches.iter().all(|(c, bv)| {
+                    c.is_none_or(|c| {
+                        !expr_calls_suspend(f.ir, c, f.suspend) && !f.expr_has_loop_jump(c)
+                    }) && branch_ok(f, *bv)
+                });
+            }
+            if let IrExpr::Block { stmts, value } = &f.ir.exprs[v as usize] {
+                let (lead, term) = match (value, stmts.split_last()) {
+                    (Some(bv), _) => (&stmts[..], Some(*bv)),
+                    (None, Some((&last, lead))) => (lead, Some(last)),
+                    (None, None) => (&stmts[..], None),
+                };
+                return lead.iter().all(|&st| {
+                    !expr_calls_suspend(f.ir, st, f.suspend) && !f.expr_has_loop_jump(st)
+                }) && term.is_none_or(|t| branch_ok(f, t));
+            }
+            false
+        }
+        for (_, v) in &branches {
+            if !branch_ok(self, *v) {
                 self.failed = true;
                 return None;
             }
@@ -2785,6 +2808,40 @@ impl Flat<'_> {
                 self.bind_from_r(&mut rs, local, ty, br_resume);
                 self.goto(&mut rs, merge);
                 self.states[br_resume] = rs;
+            } else if let IrExpr::Block { stmts, value } = self.ir.exprs[*value as usize].clone() {
+                // A Block-wrapped branch value: run the (validated jump/suspension-free) leading
+                // statements, then treat the terminator — the trailing value, or a value-less
+                // block's LAST statement (`{ log(); break }`) — as this branch's value recursively.
+                let (lead, term) = match (value, stmts.split_last()) {
+                    (Some(bv), _) => (stmts.clone(), Some(bv)),
+                    (None, Some((&last, lead))) => (lead.to_vec(), Some(last)),
+                    (None, None) => (stmts.clone(), None),
+                };
+                bb.extend(lead);
+                if let Some(t) = term {
+                    let w = self.emit_cond(local, ty, &[(None, t)], merge);
+                    bb.push(w);
+                } else {
+                    self.goto(&mut bb, merge);
+                }
+            } else if matches!(&self.ir.exprs[*value as usize], IrExpr::When { .. })
+                && (expr_calls_suspend(self.ir, *value, self.suspend)
+                    || self.expr_has_loop_jump(*value))
+            {
+                // A branch value that is ITSELF a `when` carrying a jump or suspension
+                // (`?: if (c) break else error("")`): recurse — each nested branch binds, jumps,
+                // or diverges exactly like a top-level conditional binding.
+                let IrExpr::When { branches: nested } = self.ir.exprs[*value as usize].clone()
+                else {
+                    unreachable!()
+                };
+                let w = self.emit_cond(local, ty, &nested, merge);
+                bb.push(w);
+            } else if stmt_diverges(self.ir, *value) {
+                // A diverging branch value (`throw`, an inlined `error(…)` tail): its effect IS the
+                // transfer of control — bind nothing and emit no transition. A dead bind after the
+                // `athrow` would be unreachable code with no stack-map frame (VerifyError).
+                bb.push(*value);
             } else {
                 if self.is_spilled(local) {
                     bb.push(self.add(IrExpr::SetValue {
@@ -3405,6 +3462,34 @@ fn stmt_diverges(ir: &IrFile, s: ExprId) -> bool {
         IrExpr::Return(_) | IrExpr::Throw { .. } => true,
         IrExpr::Block { stmts, value: None } => {
             stmts.last().is_some_and(|&last| stmt_diverges(ir, last))
+        }
+        IrExpr::Block { value: Some(v), .. } => stmt_diverges(ir, *v),
+        // A coercion (`Nothing` → the branch type on an `?: error("…")` arm) diverges with its arg.
+        IrExpr::TypeOp { arg, .. } => stmt_diverges(ir, *arg),
+        // A call to a `Nothing`-returning function never returns (`error("…")` left un-inlined).
+        IrExpr::Call {
+            callee: Callee::Local(fid) | Callee::LocalDefault(fid),
+            ..
+        } => crate::jvm::ir_emit::ret_is_nothing(&ir.functions[*fid as usize].ret),
+        IrExpr::Call {
+            callee: Callee::CrossFile { ret, .. },
+            ..
+        } => crate::jvm::ir_emit::ret_is_nothing(ret),
+        // A descriptor-resolved callee: a `)Ljava/lang/Void;` return is a Kotlin `Nothing` — the call
+        // (an emit-spliced `error(…)`) never returns. Mirrors the emitter's `value_ty` treatment,
+        // including its blind spot: the descriptor erases `Nothing?` to the same `Void`, so a
+        // classpath `Nothing?`-returning function in branch position would be wrongly treated as
+        // diverging — exactly as the emitter already mis-frames it (`ret_is_nothing` doc).
+        IrExpr::Call {
+            callee:
+                Callee::Static { descriptor, .. }
+                | Callee::Virtual { descriptor, .. }
+                | Callee::Special { descriptor, .. },
+            ..
+        } => descriptor.ends_with(")Ljava/lang/Void;"),
+        IrExpr::MethodCall { class, index, .. } => {
+            let fid = ir.classes[*class as usize].methods[*index as usize];
+            crate::jvm::ir_emit::ret_is_nothing(&ir.functions[fid as usize].ret)
         }
         IrExpr::When { branches } => {
             // A `when` diverges only if it is exhaustive (has an `else`) AND every arm diverges.

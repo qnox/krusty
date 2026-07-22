@@ -364,3 +364,46 @@ fun box(): String {{\n\
     );
     assert_eq!(run(&src).expect("intrinsic resume state runs"), "OK");
 }
+
+#[test]
+fn elvis_break_in_suspend_loop_binds_or_jumps() {
+    // `val q = susp() ?: break` inside a suspend `while`: the elvis is a conditional BINDING whose
+    // else-arm is a loop jump — each arm either binds the value and proceeds or transfers to the
+    // loop's break state. Previously bailed ("shape not lowered").
+    let src = format!(
+        "{BUILDER}\
+suspend fun f(i: Int): String? {{ return if (i < 2) \"v$i\" else null }}\n\
+suspend fun go(): String {{\n\
+    var acc = \"\"\n\
+    var i = 0\n\
+    while (true) {{ val q = f(i) ?: break; acc += q; i++ }}\n\
+    return acc\n\
+}}\n\
+fun box(): String {{ var r = \"\"; builder {{ r = go() }}; return if (r == \"v0v1\") \"OK\" else \"fail: $r\" }}\n"
+    );
+    assert_eq!(run(&src).expect("elvis break binding runs"), "OK");
+}
+
+#[test]
+fn diverging_elvis_arm_emits_no_dead_bind() {
+    // `?: if (c) break else error("x")`: the nested when's else-arm DIVERGES (`error` is a
+    // `Nothing`-returning `)Ljava/lang/Void;` callee). Binding its "value" after the spliced
+    // `athrow` emitted unreachable code with no stack-map frame — VerifyError. A diverging arm's
+    // effect IS the transfer: bind nothing, emit no transition.
+    let src = format!(
+        "{BUILDER}\
+suspend fun f(i: Int): String? {{ return if (i < 2) \"v$i\" else null }}\n\
+suspend fun go(): String {{\n\
+    var acc = \"\"\n\
+    var i = 0\n\
+    while (true) {{\n\
+        val q = f(i) ?: if (i > 1) break else error(\"x\")\n\
+        acc += q\n\
+        i++\n\
+    }}\n\
+    return acc\n\
+}}\n\
+fun box(): String {{ var r = \"\"; builder {{ r = go() }}; return if (r == \"v0v1\") \"OK\" else \"fail: $r\" }}\n"
+    );
+    assert_eq!(run(&src).expect("diverging elvis arm runs"), "OK");
+}
