@@ -72,10 +72,6 @@ pub const HASHCODE_TOSTRING_FN_FLAGS: u64 = 0x100d6;
 pub const DATA_CLASS_FLAGS: u64 = 0x406;
 /// `Class.flags` (f1) for a `@JvmInline value class` (IS_VALUE + public + final). From kotlinc 2.4.0.
 pub const VALUE_CLASS_FLAGS: u64 = 8199;
-/// `Function.flags` for a value class's `equals`/`hashCode`/`toString` — same shape as the data-class
-/// overrides (public final member overriding a supertype member).
-pub const VC_EQUALS_FN_FLAGS: u64 = EQUALS_FN_FLAGS;
-pub const VC_HASHCODE_TOSTRING_FN_FLAGS: u64 = HASHCODE_TOSTRING_FN_FLAGS;
 /// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE`.
 const DECLARES_DEFAULT_VALUE: u64 = 2;
 
