@@ -1839,10 +1839,13 @@ pub fn splice_unified(
             }
         }
     }
-    // The body must contain exactly one `FunctionN.invoke` per lambda argument — otherwise matching each
-    // lambda to its invoke site (and which `aload` feeds it) is ambiguous, and a mis-paired splice calls
-    // `.invoke` on the wrong object. Conservative: bail unless the counts line up (skips complex stdlib
-    // HOFs that call a lambda more than once or alongside other functional values).
+    // The body must contain exactly one `FunctionN.invoke` per SUBSTITUTED lambda argument — otherwise
+    // matching each lambda to its invoke site (and which `aload` feeds it) is ambiguous, and a
+    // mis-paired splice calls `.invoke` on the wrong object. Conservative: bail unless the counts line
+    // up (skips complex stdlib HOFs that call a lambda more than once or alongside other functional
+    // values). With NO literal lambdas to substitute (`t?.let(x)` — a passed `Function` value), the
+    // invoke sites are LEFT IN PLACE and dispatch on the argument bound to the param slot, so any count
+    // is fine.
     let invoke_count = insns
         .iter()
         .filter(|insn| {
@@ -1851,7 +1854,7 @@ pub fn splice_unified(
                     .is_some_and(|(cls, n)| n == "invoke" && cls.starts_with("kotlin/jvm/functions/Function")))
         })
         .count();
-    if invoke_count != lambdas.len() {
+    if !lambdas.is_empty() && invoke_count != lambdas.len() {
         return None;
     }
     // Indices already consumed by a null-check deletion (its `aload <lambda>` doesn't count as a use).
