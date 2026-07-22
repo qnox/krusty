@@ -593,7 +593,11 @@ fn compile_module_test(
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     static UID: AtomicU64 = AtomicU64::new(0);
-    let modules = split_modules(src)?;
+    let mut modules = split_modules(src)?;
+    // kotlinc's `// WITH_COROUTINES` helpers live in an implicit `support` module every module sees.
+    if krusty::conformance::directive(src, "WITH_COROUTINES") {
+        krusty::conformance::inject_support_module(&mut modules, COROUTINE_HELPERS);
+    }
     let features = krusty::features::LangFeatures::from_source(src);
     let uid = UID.fetch_add(1, Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!("krusty_modtest_{}_{uid}", std::process::id()));
@@ -622,6 +626,17 @@ fn compile_module_test(
             break;
         }
         let (files, java_files) = (&m.files, &m.java_files);
+        // A source-less unit (an empty hmpp intermediate built standalone) emits nothing; it still
+        // gets a (created, empty) classpath dir so dependents resolve it.
+        if files.is_empty() && java_files.is_empty() {
+            let moddir = tmp.join(&m.name);
+            if fs::create_dir_all(&moddir).is_err() {
+                ok = false;
+                break;
+            }
+            dirmap.insert(m.name.clone(), moddir);
+            continue;
+        }
         // A module's `.java` sources: javac-first against the module classpath (Java referencing
         // only deps/JDK); when that fails — the Java references THIS module's Kotlin — fall back to
         // the Kotlin-first stub pipeline, exactly like the single-module path.
