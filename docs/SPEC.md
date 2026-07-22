@@ -1791,3 +1791,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A `suspend` function type erases to the arity+1 `FunctionN`.** `suspend () -> Unit` is a `Function1`
   at runtime (trailing `Continuation` parameter), so `as`/`is` against a suspend fn type checkcast/test
   `Function{n+1}` (KT-66093). (`suspend_fn_type_cast_targets_arity_plus_one_interface`.)
+
+- **A suspend fn carries NO `checkNotNullParameter` on its value parameters.** kotlinc's state-machine
+  RE-ENTRY call (`foo(null, continuation)`) passes null for every value parameter — the real values live
+  in the continuation's spill fields — so an entry null-check would throw on resume. kotlinc emits none;
+  the CPS transform now clears them. (`suspend_fn_entry_has_no_param_null_check`; unlocks the
+  `WITH_COROUTINES` corpus slice.)
+
+- **A `Unit`-returning suspend fn whose whole body is `suspendCoroutineUninterceptedOrReturn { … }`
+  returns the intrinsic's value, not `Unit`.** The value IS the suspension protocol result
+  (`COROUTINE_SUSPENDED` or an immediate value); returning `Unit` signals completion while the
+  continuation is pending → double resume (an NPE inside `releaseIntercepted`). An EMPTY intrinsic
+  block yields `Unit` explicitly. (`unit_suspend_fn_returns_intrinsic_value_not_unit`.)
