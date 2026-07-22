@@ -529,6 +529,11 @@ pub struct PropParam {
 pub struct AstEnumEntry {
     /// Entry name (`RED`).
     pub name: String,
+    /// Source span of the entry name.
+    pub span: Span,
+    /// 1-based source line of the entry, filled by the parser post-pass (0 = unknown). kotlinc gives
+    /// each entry's construction in `<clinit>` its own `LineNumberTable` entry.
+    pub decl_line: u32,
     /// Simple names of annotations on this constant (`@SerialName("x") RED` → `["SerialName"]`),
     /// parallel to `annotation_args`. Emitted onto the enum's static field (per JVM retention).
     pub annotations: Vec<String>,
