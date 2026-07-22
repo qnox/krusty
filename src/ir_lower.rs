@@ -7384,10 +7384,18 @@ impl<'a> Lower<'a> {
         let new_inst = self.emit_new(class_id, new_args, None);
         let r_idx = arity as u32 + 2;
         let mut inv_stmts = vec![self.emit_variable(r_idx, lambda_ty.clone(), Some(new_inst))];
-        // Store each own parameter (coerced from the erased `Object` argument) into its field.
+        // Store each own parameter (coerced from the erased `Object` argument) into its field —
+        // a REFERENCE target needs the explicit `checkcast` (the field is concretely typed; a bare
+        // Object store fails verification), a primitive the unboxing coercion.
         for (i, pty) in params.iter().enumerate() {
             let pv = self.emit_get_value(1 + i as u32);
-            let coerced = self.emit_type_op(IrTypeOp::ImplicitCoercion, pv, ty_to_ir(*pty));
+            let pty_ir = ty_to_ir(*pty);
+            let op = if pty_ir.is_reference() {
+                IrTypeOp::Cast
+            } else {
+                IrTypeOp::ImplicitCoercion
+            };
+            let coerced = self.emit_type_op(op, pv, pty_ir);
             let rg = self.emit_get_value(r_idx);
             inv_stmts.push(self.emit_set_field(rg, class_id, param_field_base + i as u32, coerced));
         }
@@ -7423,7 +7431,13 @@ impl<'a> Lower<'a> {
         let mut create_stmts = vec![self.emit_variable(cr_idx, lambda_ty, Some(create_new))];
         for (i, pty) in params.iter().enumerate() {
             let pv = self.emit_get_value(1 + i as u32);
-            let coerced = self.emit_type_op(IrTypeOp::ImplicitCoercion, pv, ty_to_ir(*pty));
+            let pty_ir = ty_to_ir(*pty);
+            let op = if pty_ir.is_reference() {
+                IrTypeOp::Cast // erased `Object` arg into the concretely-typed field: checkcast
+            } else {
+                IrTypeOp::ImplicitCoercion
+            };
+            let coerced = self.emit_type_op(op, pv, pty_ir);
             let rg = self.emit_get_value(cr_idx);
             create_stmts.push(self.emit_set_field(
                 rg,
@@ -10997,8 +11011,22 @@ impl<'a> Lower<'a> {
                     body,
                 } = self.afile.expr(arg).clone()
                 {
-                    // Bind names: explicit, or the implicit single `it`, or none (arity 0).
-                    let bind_names = ast::lambda_params_or_implicit(&lparams, params.len())?;
+                    // A RECEIVER suspend lambda (`suspend R.() -> T`, the coroutine-builder idiom):
+                    // the checker marked the receiver, and the checked type folds it in as
+                    // `params[0]` — bind it as the implicit `this` so a bare member access in the
+                    // body dispatches on the receiver, exactly like a non-suspend receiver lambda.
+                    let bind_names = if lambda_info(self.info, arg).receiver.is_some()
+                        && lparams.len() < params.len()
+                    {
+                        // The receiver occupies params[0]; explicit (or implicit-`it`) names bind
+                        // the remaining VALUE parameters.
+                        let mut v = vec!["this".to_string()];
+                        v.extend(ast::lambda_params_or_implicit(&lparams, params.len() - 1)?);
+                        v
+                    } else {
+                        // Bind names: explicit, or the implicit single `it`, or none (arity 0).
+                        ast::lambda_params_or_implicit(&lparams, params.len())?
+                    };
                     // Parameter `Ty`s come from the checked lambda type; absent metadata falls back to `Any`.
                     let ty_params: Vec<Ty> = self
                         .info
