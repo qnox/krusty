@@ -10734,14 +10734,16 @@ impl<'a> Lower<'a> {
         let i_v = self.fresh_value();
         self.scope.push((name.to_string(), i_v, elem));
         let var_i = self.emit_named_variable(i_v, elem_ir.clone(), Some(first));
-        // last = p.getLast()  (hoisted)
+        // last = p.getLast()  (hoisted). NAMED like the induction: the bound/step live across
+        // iterations, so a suspension in the body must spill+restore them (kotlinc's J\$/I\$ spills);
+        // an unnamed temp is excluded from the machine's per-arm scope restores.
         let last = getter(self, &loop_info.last);
         let n_v = self.fresh_value();
-        let var_n = self.emit_variable(n_v, elem_ir.clone(), Some(last));
+        let var_n = self.emit_named_variable(n_v, elem_ir.clone(), Some(last));
         // step = p.getStep()  (hoisted)
         let step = getter(self, &step_accessor);
         let s_v = self.fresh_value();
-        let var_s = self.emit_variable(s_v, ty_to_ir(step_ty), Some(step));
+        let var_s = self.emit_named_variable(s_v, ty_to_ir(step_ty), Some(step));
         // The step zero literal, in the step's own (signed) type.
         let zero_step = |this: &mut Self| {
             this.emit_const(if step_ty == Ty::Long {

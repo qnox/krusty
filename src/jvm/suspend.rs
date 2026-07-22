@@ -1516,9 +1516,7 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
     }
     // NOTE: `spill_shape_unmodeled` deliberately applies only to the LAMBDA machine — the named
     // machine's restore handles sub-int spills (`Boolean` params/temps, e2e-verified).
-    if consecutive_temp_suspensions(ir, &stmts, &suspend_set)
-        || suspending_over_progression(ir, b, &suspend_set)
-    {
+    if consecutive_temp_suspensions(ir, &stmts, &suspend_set) {
         return false;
     }
     // The spilled value parameters — captured at continuation construction (in spilled order).
@@ -1967,9 +1965,7 @@ fn build_lambda_state_machine(
             spilled.push((idx, spill_field_ty(ty)));
         }
     }
-    if consecutive_temp_suspensions(ir, &stmts, &suspend_set)
-        || suspending_over_progression(ir, b, &suspend_set)
-    {
+    if consecutive_temp_suspensions(ir, &stmts, &suspend_set) {
         return false;
     }
 
@@ -4349,34 +4345,6 @@ fn spill_field_ty(ty: Ty) -> Ty {
     } else {
         ty
     }
-}
-
-/// A suspending body iterating a `kotlin.ranges` PROGRESSION object (`for (x in 20L..30L step 5L)` —
-/// the stepped/long form kotlinc iterates via `LongProgression.iterator()`, unlike the optimized
-/// counted `Int` loop): the induction state across a suspension isn't modeled yet — the loop resumes
-/// at its first element. Bail (skip, never miscompile).
-fn suspending_over_progression(ir: &IrFile, b: ExprId, suspend_set: &HashSet<u32>) -> bool {
-    if !expr_calls_suspend(ir, b, suspend_set) {
-        return false;
-    }
-    let mut found = false;
-    let mut walk = |e: ExprId| {
-        if matches!(&ir.exprs[e as usize], IrExpr::Variable { ty, .. }
-            if ty.non_null().obj_internal().is_some_and(|n| n.render().starts_with("kotlin/ranges/")))
-        {
-            found = true;
-        }
-    };
-    let mut seen: HashSet<ExprId> = HashSet::new();
-    let mut stack = vec![b];
-    while let Some(cur) = stack.pop() {
-        if !seen.insert(cur) {
-            continue;
-        }
-        walk(cur);
-        for_each_child(&ir.exprs, cur, &mut |c| stack.push(c));
-    }
-    found
 }
 
 /// Whether the statement is (or contains) a loop — the loop-carried spill rule's trigger.

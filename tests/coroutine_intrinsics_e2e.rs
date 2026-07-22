@@ -227,3 +227,18 @@ fun box(): String {{ val c = C(); builder {{ go(c) }}; return c.res }}\n"
     );
     assert_eq!(run(&src).expect("unit statement tail runs"), "OK");
 }
+
+#[test]
+fn stepped_progression_loop_spills_bound_and_step() {
+    // `for (i in 20L..30L step 5L) { susp(i) }`: the hoisted bound/step temps live across
+    // iterations like the induction — unnamed, they were spilled but never restored by the resume
+    // arms (zeroed → the loop exited after its first element).
+    let src = format!(
+        "{BUILDER}\
+class C {{ var s = \"\"\n\
+  suspend fun put(v: String): Unit = suspendCoroutineUninterceptedOrReturn {{ x -> s += v; x.resume(Unit); COROUTINE_SUSPENDED }} }}\n\
+suspend fun go(c: C) {{ for (i in 20L..30L step 5L) {{ c.put(\"#$i\") }} }}\n\
+fun box(): String {{ val c = C(); builder {{ go(c) }}; return if (c.s == \"#20#25#30\") \"OK\" else \"fail: ${{c.s}}\" }}\n"
+    );
+    assert_eq!(run(&src).expect("stepped progression loop runs"), "OK");
+}
