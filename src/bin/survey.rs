@@ -223,9 +223,13 @@ fn first_error_module(
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<String> {
     static UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let Some(modules) = krusty::conformance::split_modules(src) else {
+    let Some(mut modules) = krusty::conformance::split_modules(src) else {
         return Some("module: unsupported // MODULE: shape".into());
     };
+    // kotlinc's `// WITH_COROUTINES` helpers live in an implicit `support` module every module sees.
+    if krusty::conformance::directive(src, "WITH_COROUTINES") {
+        krusty::conformance::inject_support_module(&mut modules, COROUTINE_HELPERS);
+    }
     let features = krusty::features::LangFeatures::from_source(src);
     let uid = UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!("krusty_survey_mod_{}_{uid}", std::process::id()));
@@ -234,6 +238,16 @@ fn first_error_module(
         for m in &krusty::conformance::module_units(&modules) {
             if !m.java_files.is_empty() {
                 return Some("module: .java sources (javac-dependent, gate-only)".into());
+            }
+            if m.files.is_empty() {
+                // An empty hmpp intermediate built standalone: nothing to compile, but dependents
+                // still resolve its (empty) classpath dir.
+                let moddir = tmp.join(&m.name);
+                if std::fs::create_dir_all(&moddir).is_err() {
+                    return Some("module: failed writing dependency classes".into());
+                }
+                dirmap.insert(m.name.clone(), moddir);
+                continue;
             }
             let mut cp_paths = cp_jars.to_vec();
             for d in &m.deps {
@@ -252,6 +266,11 @@ fn first_error_module(
                 Err(e) => return Some(e),
             };
             let moddir = tmp.join(&m.name);
+            // Created even when the unit emits nothing (an empty hmpp intermediate), so a
+            // dependent's classpath entry exists.
+            if std::fs::create_dir_all(&moddir).is_err() {
+                return Some("module: failed writing dependency classes".into());
+            }
             for (name, bytes) in &classes {
                 let path = moddir.join(format!("{name}.class"));
                 if std::fs::create_dir_all(path.parent().unwrap_or(&moddir)).is_err()

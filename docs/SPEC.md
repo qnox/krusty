@@ -1803,3 +1803,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`COROUTINE_SUSPENDED` or an immediate value); returning `Unit` signals completion while the
   continuation is pending → double resume (an NPE inside `releaseIntercepted`). An EMPTY intrinsic
   block yields `Unit` explicitly. (`unit_suspend_fn_returns_intrinsic_value_not_unit`.)
+
+- **The `// WITH_COROUTINES` helpers form an implicit `support` module in `// MODULE:` tests.** kotlinc's
+  test infra compiles them as a module every declared module sees (some tests write `(support)`
+  explicitly, others just `import helpers.*`) — mirrored by `krusty::conformance::inject_support_module`.
