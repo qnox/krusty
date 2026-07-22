@@ -108,6 +108,27 @@ impl StringTable {
 
 fn type_pb(st: &mut StringTable, t: Ty) -> Pb {
     let mut p = Pb::new();
+    // A FUNCTION type is the `kotlin/Function{n}` class (`kotlin/coroutines/SuspendFunction{n}`
+    // for `suspend`) with each parameter and the return as `Type.argument`s — kotlinc's shape;
+    // the erased `kotlin/Any` fallback made a reader see `(Int) -> Unit` as a plain `Any` param
+    // and drop the whole candidate.
+    if let Ty::Fun(sig) = t {
+        let n = sig.params.len();
+        let name = if sig.suspend {
+            format!("Lkotlin/coroutines/SuspendFunction{n};")
+        } else {
+            format!("Lkotlin/Function{n};")
+        };
+        let class_name = st.class_id_from_desc(&name);
+        p.field_varint(6, class_name as u64); // Type.class_name = 6
+        for &a in sig.params.iter().chain(std::iter::once(&sig.ret)) {
+            let at = type_pb(st, a);
+            let mut arg = Pb::new();
+            arg.field_message(2, &at); // Argument.type = 2
+            p.repeated_message(2, &arg); // Type.argument = 2
+        }
+        return p;
+    }
     let class_name = match t {
         Ty::Obj(internal, _) => st.class_id_from_desc(&format!("L{internal};")),
         _ => st.builtin(builtin_index(t).unwrap_or(0)), // 0 = kotlin/Any fallback on erroring code

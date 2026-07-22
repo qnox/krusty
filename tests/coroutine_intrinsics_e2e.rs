@@ -288,3 +288,37 @@ fn emitted_dir_carries_kotlin_module_for_cross_module_imports() {
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(out.as_deref(), Some("OK"));
 }
+
+#[test]
+fn facade_metadata_encodes_function_typed_params() {
+    // A facade fn with a FUNCTION-typed parameter (`fun helperA(x: (Int) -> Unit)`) encoded its
+    // param as the erased `kotlin/Any` in @Metadata — a dependent module's read dropped the whole
+    // candidate ("unresolved"). It now encodes `kotlin/Function1` with the param/return type
+    // arguments, kotlinc's shape; generic fns ride along.
+    let Some(jh) = common::java_home() else {
+        return;
+    };
+    let Some(sl) = common::stdlib_jar() else {
+        return;
+    };
+    let jdk = PathBuf::from(format!("{jh}/lib/modules"));
+    let lib =
+        "package helpers\nfun helperA(x: (Int) -> Unit): Int = 1\nfun <T> helperB(t: T): Int = 2\n";
+    let dir = std::env::temp_dir().join(format!("krusty_fnmeta_e2e_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let classes =
+        common::compile_in_process(lib, "CoroutineUtil", std::slice::from_ref(&sl), Some(&jdk))
+            .expect("helpers compile");
+    for (name, bytes) in &classes {
+        let p = dir.join(format!("{name}.class"));
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, bytes).unwrap();
+    }
+    let km = krusty::jvm::metadata::kotlin_module_for_classes(&classes).expect("facade catalog");
+    std::fs::create_dir_all(dir.join("META-INF")).unwrap();
+    std::fs::write(dir.join("META-INF/main.kotlin_module"), km).unwrap();
+    let main = "import helpers.*\nfun box(): String = if (helperA({ }) == 1 && helperB(\"x\") == 2) \"OK\" else \"F\"\n";
+    let out = common::compile_and_run_box(main, "Main", &[dir.clone(), sl], Some(&jdk));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(out.as_deref(), Some("OK"));
+}
