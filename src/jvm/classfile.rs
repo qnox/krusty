@@ -72,6 +72,20 @@ fn verif_eq(a: &VerifType, b: &VerifType, cp: &ConstPool) -> bool {
         _ => a == b,
     }
 }
+/// One backing field, as the plain-class pool seeder sees it.
+pub struct SeedField {
+    pub name: String,
+    pub desc: String,
+    /// 0 = primitive (no annotation), 1 = non-null reference (`@NotNull` + a `checkNotNullParameter`
+    /// guard), 2 = nullable reference (`@Nullable`, no guard).
+    pub ann_kind: u8,
+    /// `true` for a primary-constructor PARAMETER. Only a parameter carries a ctor parameter
+    /// annotation or a null-check guard — a body property is initialized in `init_body`.
+    pub is_ctor_param: bool,
+    /// A `String` literal initializer. kotlinc interns it as an `ldc` constant just before the
+    /// property's store, so it lands ahead of the field's own name/descriptor.
+    pub string_const: Option<String>,
+}
 
 /// Per-member JVM generic `Signature` strings for a plain class, in kotlinc's interning positions, passed
 /// to [`ClassWriter::seed_plain_class_pool`]. `None`/empty entries mean "no `Signature`" (a member whose
@@ -765,9 +779,7 @@ impl ClassWriter {
         this_internal: &str,
         super_internal: &str,
         ctor_desc: &str,
-        // (name, descriptor, ann_kind): 0 = primitive, 1 = non-null reference (@NotNull + a
-        // `checkNotNullParameter` guard), 2 = nullable reference (@Nullable, no guard).
-        fields: &[(String, String, u8)],
+        fields: &[SeedField],
         // (name, descriptor, setter_kind): 0 = getter, 1 = primitive/other setter, 2 = non-null
         // reference setter (its `checkNotNullParameter` guard also interns a `<set-?>` String constant).
         accessors: &[(String, String, u8)],
@@ -786,11 +798,12 @@ impl ClassWriter {
         // parameters. Reused by every getter return / setter parameter annotation and guard.
         let mut seeded_notnull = false;
         let mut seeded_nullable = false;
-        for (_, _, kind) in fields {
-            if *kind == 1 && !seeded_notnull {
+        for f in fields.iter().filter(|f| f.is_ctor_param) {
+            let kind = f.ann_kind;
+            if kind == 1 && !seeded_notnull {
                 self.cp.utf8("Lorg/jetbrains/annotations/NotNull;");
                 seeded_notnull = true;
-            } else if *kind == 2 && !seeded_nullable {
+            } else if kind == 2 && !seeded_nullable {
                 self.cp.utf8("Lorg/jetbrains/annotations/Nullable;");
                 seeded_nullable = true;
             }
@@ -798,8 +811,9 @@ impl ClassWriter {
         // Constructor body — a `checkNotNullParameter(param, "name")` guard per non-null reference param
         // (its name + a String constant), then, at the FIRST guard, the shared `Intrinsics` machinery.
         let mut seeded_intrinsics = false;
-        for (name, _, kind) in fields {
-            if *kind == 1 {
+        for f in fields.iter().filter(|f| f.is_ctor_param) {
+            if f.ann_kind == 1 {
+                let name = &f.name;
                 self.cp.utf8(name);
                 self.cp.string(name);
                 if !seeded_intrinsics {
@@ -815,10 +829,14 @@ impl ClassWriter {
         // `super()` call: `()V`, its NameAndType, the Methodref.
         self.cp.methodref(super_internal, "<init>", "()V");
         // One `putfield` per property-backed parameter: field name, descriptor, NameAndType, Fieldref.
-        for (name, desc, _) in fields {
-            self.cp.utf8(name);
-            self.cp.utf8(desc);
-            self.cp.fieldref(this_internal, name, desc);
+        for f in fields {
+            // A body property's `String` initializer is pushed by `ldc` before its `putfield`.
+            if let Some(sc) = &f.string_const {
+                self.cp.string(sc);
+            }
+            self.cp.utf8(&f.name);
+            self.cp.utf8(&f.desc);
+            self.cp.fieldref(this_internal, &f.name, &f.desc);
         }
         // The constructor's LocalVariableTable strings (`this` and its type); the parameters reuse the
         // field name/descriptor entries interned just above.

@@ -175,6 +175,24 @@ fn ctor_field_descs(c: &IrClass) -> String {
         .collect()
 }
 
+/// `String` literals a class `init_body` assigns to a field, by field index. kotlinc interns each as
+/// an `ldc` constant just before that property's store.
+fn init_body_string_consts(ir: &IrFile, c: &IrClass) -> std::collections::HashMap<u32, String> {
+    let mut out = std::collections::HashMap::new();
+    let Some(body) = c.init_body else { return out };
+    let IrExpr::Block { stmts, .. } = ir.expr(body) else {
+        return out;
+    };
+    for &s in stmts {
+        if let IrExpr::SetField { index, value, .. } = ir.expr(s) {
+            if let IrExpr::Const(crate::ir::IrConst::String(t)) = ir.expr(*value) {
+                out.insert(*index, t.clone());
+            }
+        }
+    }
+    out
+}
+
 fn init_body_constant_fields(ir: &IrFile, c: &IrClass) -> std::collections::HashSet<u32> {
     let mut out = std::collections::HashSet::new();
     let Some(body) = c.init_body else { return out };
@@ -525,10 +543,18 @@ fn seed_plain_class_pool(
     };
     let is_nonnull_ref = |t: Ty| ann_kind(t) == 1;
     let ctor_desc = format!("({})V", ctor_field_descs(c));
-    let fields: Vec<(String, String, u8)> = c
+    let body_consts = init_body_string_consts(ir, c);
+    let fields: Vec<crate::jvm::classfile::SeedField> = c
         .fields
         .iter()
-        .map(|f| (f.name.clone(), desc(f.ty), ann_kind(f.ty)))
+        .enumerate()
+        .map(|(i, f)| crate::jvm::classfile::SeedField {
+            name: f.name.clone(),
+            desc: desc(f.ty),
+            ann_kind: ann_kind(f.ty),
+            is_ctor_param: i < c.ctor_param_count as usize,
+            string_const: body_consts.get(&(i as u32)).cloned(),
+        })
         .collect();
     // (name, descriptor, setter_kind): 0 getter, 1 primitive setter, 2 non-null reference setter.
     let mut accessors: Vec<(String, String, u8)> = Vec::new();
@@ -941,7 +967,14 @@ fn attach_synth_nullability(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
         }
     }
     // Primary constructor: one parameter annotation slot per property-backed parameter.
-    let ctor_params: Vec<Option<&str>> = c.fields.iter().map(|f| ann(f.ty)).collect();
+    // Constructor PARAMETERS only — a body property is a field, never an argument, so it must not
+    // contribute a parameter-annotation slot (an all-body-property class has a `()V` ctor).
+    let ctor_params: Vec<Option<&str>> = c
+        .fields
+        .iter()
+        .take(c.ctor_param_count as usize)
+        .map(|f| ann(f.ty))
+        .collect();
     if ctor_params.iter().any(|p| p.is_some()) {
         let ctor_desc = format!("({})V", ctor_field_descs(c));
         cw.set_method_nullability("<init>", &ctor_desc, None, &ctor_params);
