@@ -3523,13 +3523,6 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
     };
     let str_const =
         |ir: &mut IrFile, s: String| ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(s)));
-    let str_plus = |ir: &mut IrFile, acc: ExprId, arg: ExprId| {
-        ir.add_expr(IrExpr::Call {
-            callee: Callee::External("kotlin/String.plus".to_string()),
-            dispatch_receiver: Some(acc),
-            args: vec![arg],
-        })
-    };
     let ret_block = |ir: &mut IrFile, v: ExprId| {
         let r = ir.add_expr(IrExpr::Return(Some(v)));
         ir.add_expr(IrExpr::Block {
@@ -3683,10 +3676,11 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
             .unwrap_or(&internal)
             .replace('$', ".");
         let v = ir.add_expr(IrExpr::GetValue(0));
-        let mut acc = str_const(ir, format!("{simple}({fname}="));
-        acc = str_plus(ir, acc, v);
+        // ONE `StringConcat` (not nested `+`): kotlinc builds a single `StringBuilder` and appends the
+        // 1-char closing paren via `append(C)` — a nested concat would emit a second builder.
+        let prefix = str_const(ir, format!("{simple}({fname}="));
         let close = str_const(ir, ")".to_string());
-        acc = str_plus(ir, acc, close);
+        let acc = ir.add_expr(IrExpr::StringConcat(vec![prefix, v, close]));
         let sbody = ret_block(ir, acc);
         let impl_fid = add_static(ir, "toString-impl", vec![u_ir], str_ir, sbody);
         ir.open_methods.insert(impl_fid);
@@ -3709,7 +3703,19 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
     // hashCode-impl(U v): v.hashCode() ; hashCode(): return hashCode-impl(this.field)
     {
         let v = ir.add_expr(IrExpr::GetValue(0));
-        let h = field_hash_ir(ir, v, &final_fq);
+        // A NON-NULL reference underlying hashes through its OWN `hashCode()` (kotlinc's shape,
+        // `String.hashCode()`), not the null-safe `Objects.hashCode` — that is only for a nullable (or
+        // boxed-primitive) underlying, which can actually be null.
+        // Only a real non-null reference CLASS underlying: an ARRAY has no such class (`kotlin/IntArray`
+        // is not a JVM type — a virtual call on it is a `NoClassDefFoundError`), and a nullable or
+        // boxed-primitive underlying must keep the null-safe `Objects.hashCode`.
+        let nonnull_ref_owner: Option<String> = (is_ref_under
+            && !eu.is_nullable()
+            && !eu.non_null().is_array()
+            && matches!(eu.non_null(), Ty::String | Ty::Obj(..)))
+        .then(|| eu.non_null().kotlin_class_internal().map(|s| s.to_string()))
+        .flatten();
+        let h = field_hash_ir(ir, v, &final_fq, nonnull_ref_owner.as_deref());
         let sbody = ret_block(ir, h);
         let impl_fid = add_static(ir, "hashCode-impl", vec![u_ir], int_ir, sbody);
         ir.open_methods.insert(impl_fid);
@@ -3866,7 +3872,7 @@ fn guard_false(ir: &mut IrFile, cond: ExprId) -> ExprId {
 }
 
 /// `field.hashCode()` for an underlying fq name (primitive → native, reference → `Objects.hashCode`).
-fn field_hash_ir(ir: &mut IrFile, v: ExprId, fq: &str) -> ExprId {
+fn field_hash_ir(ir: &mut IrFile, v: ExprId, fq: &str, nonnull_ref_owner: Option<&str>) -> ExprId {
     let call = |ir: &mut IrFile, owner: &str, desc: &str, v: ExprId| {
         ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
@@ -3887,7 +3893,20 @@ fn field_hash_ir(ir: &mut IrFile, v: ExprId, fq: &str) -> ExprId {
         "kotlin/Long" | "kotlin/ULong" => call(ir, "java/lang/Long", "(J)I", v),
         "kotlin/Double" => call(ir, "java/lang/Double", "(D)I", v),
         "kotlin/Float" => call(ir, "java/lang/Float", "(F)I", v),
-        _ => call(ir, "java/util/Objects", "(Ljava/lang/Object;)I", v),
+        _ => match nonnull_ref_owner {
+            // `v.hashCode()` on the underlying's own class.
+            Some(owner) => ir.add_expr(IrExpr::Call {
+                callee: Callee::Virtual {
+                    owner: owner.into(),
+                    name: "hashCode".into(),
+                    descriptor: "()I".into(),
+                    interface: false,
+                },
+                dispatch_receiver: Some(v),
+                args: vec![],
+            }),
+            None => call(ir, "java/util/Objects", "(Ljava/lang/Object;)I", v),
+        },
     }
 }
 
