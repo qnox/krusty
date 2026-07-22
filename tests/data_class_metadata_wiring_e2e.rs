@@ -70,6 +70,15 @@ fn assert_byte_identical(src: &str, class_internal: &str, cp: &[PathBuf]) {
 
 // ---- Byte-identity (the end-to-end goal) ----------------------------------------------------------
 
+/// A `sealed class` — kotlinc marks the class SEALED (`Class.flags`) and its primary ctor PROTECTED
+/// (`Constructor.flags`), and pairs the private ctor with a PUBLIC|SYNTHETIC
+/// `(DefaultConstructorMarker)` accessor that carries its own LocalVariableTable (`this` +
+/// `$constructor_marker`). The accessor's descriptor also interns BEFORE its body's Methodref.
+#[test]
+fn sealed_class_is_byte_identical() {
+    assert_byte_identical("package demo\nsealed class S\n", "demo/S", &[]);
+}
+
 /// A `data class` with a NULLABLE-PRIMITIVE field (`Int?` → boxed `Integer`) — its `component1`/`copy`
 /// carry a `JvmMethodSignature` (`@Metadata` f100) recording the boxed descriptor, which the proto type
 /// alone (`Int?`) does not pin. Non-null `Int` needs none; this pins the boxed-signature emission.
