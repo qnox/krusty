@@ -2450,6 +2450,10 @@ pub fn lower_file_at_reporting(
                     let overload_idx = c.methods[..mi].iter().filter(|x| x.name == m.name).count();
                     let (_, fid, _) =
                         *lo.class_info(&internal)?.methods[&m.name].get(overload_idx)?;
+                    // Remember the declaration line for this method's `LineNumberTable`.
+                    if m.decl_line != 0 {
+                        lo.ir.fn_decl_lines.insert(fid, m.decl_line);
+                    }
                     lo.scope.clear();
                     lo.boxed_elem.clear();
                     lo.next_value = 0;

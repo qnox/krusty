@@ -67,8 +67,17 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
         }
     };
     for decl in &mut file.decl_arena {
-        if let Decl::Class(c) = decl {
-            c.decl_line = line_at(c.span.lo);
+        match decl {
+            Decl::Class(c) => {
+                c.decl_line = line_at(c.span.lo);
+                // A class's methods live INSIDE the class decl, not in `decl_arena` — walk them too,
+                // or every member method keeps line 0 and gets no `LineNumberTable`.
+                for m in &mut c.methods {
+                    m.decl_line = line_at(m.span.lo);
+                }
+            }
+            Decl::Fun(f) => f.decl_line = line_at(f.span.lo),
+            _ => {}
         }
     }
 }
@@ -2230,6 +2239,7 @@ impl<'a> Parser<'a> {
                 is_suspend: false,
                 is_tailrec: false,
                 annotations,
+                decl_line: 0, // filled by the parser post-pass
             };
         }
         let (type_params, non_null_type_params, reified_type_params, type_param_bounds) =
@@ -2379,6 +2389,7 @@ impl<'a> Parser<'a> {
             is_suspend,
             is_tailrec,
             annotations,
+            decl_line: 0, // filled by the parser post-pass
         }
     }
 
