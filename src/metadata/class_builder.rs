@@ -26,6 +26,9 @@ pub struct PropMeta {
     /// modality in `Property.flags` and, since there is no backing field, omits the
     /// `JvmPropertySignature.field` entry entirely.
     pub is_abstract: bool,
+    /// Index of the class type parameter this property is declared as (`class C<T>(val a: T)` → 0).
+    /// `None` for an ordinary type.
+    pub tparam: Option<u32>,
     pub getter: (String, String),         // (jvm name, jvm descriptor)
     pub setter: Option<(String, String)>, // present iff `var`
 }
@@ -219,6 +222,17 @@ fn builtin_name_index(internal: &str) -> Option<u64> {
 }
 
 fn type_pb(st: &mut StringTable, t: Ty) -> Pb {
+    type_pb_tp(st, t, None)
+}
+
+/// [`type_pb`], but a `Some(id)` encodes the type as `Type.typeParameter` (f7) — a bare type parameter
+/// (`val a: T`), which kotlinc records by INDEX rather than by the erased `java/lang/Object` class name.
+fn type_pb_tp(st: &mut StringTable, t: Ty, tparam: Option<u32>) -> Pb {
+    if let Some(id) = tparam {
+        let mut p = Pb::new();
+        p.field_varint(7, id as u64); // Type.type_parameter = 7
+        return p;
+    }
     let mut p = Pb::new();
     // `T?` sets `Type.nullable` (f3) and encodes the underlying type's class-name.
     let (nullable, base) = match t {
@@ -270,6 +284,7 @@ fn build_ctor(
     desc: &str,
     flags: u64,
     param_defaults: &[bool],
+    param_tparams: &[Option<u32>],
     sig_name: Option<&str>,
 ) -> Pb {
     let mut ctor = Pb::new();
@@ -284,7 +299,7 @@ fn build_ctor(
             vp.field_varint(1, DECLARES_DEFAULT_VALUE);
         }
         vp.field_varint(2, st.local(pname) as u64); // ValueParameter.name = 2
-        let ty = type_pb(st, *pty);
+        let ty = type_pb_tp(st, *pty, param_tparams.get(i).copied().flatten());
         vp.field_message(3, &ty); // ValueParameter.type = 3
         ctor.repeated_message(2, &vp); // Constructor.value_parameter = 2
     }
@@ -331,6 +346,9 @@ pub struct ClassTail<'a> {
     /// with a default (`routes: List<String> = emptyList()`) gets the flag, as kotlinc emits. Empty ⇒
     /// no param has a default.
     pub ctor_param_defaults: &'a [bool],
+    /// Per-primary-constructor-parameter class type-parameter index, for a parameter declared as a
+    /// bare type parameter (`class C<T>(val a: T)` → `[Some(0)]`).
+    pub ctor_param_tparams: &'a [Option<u32>],
     /// A `@JvmInline value class`'s sole underlying property `(name, type)` → `Class`
     /// `inlineClassUnderlyingPropertyName` (f17, the name's string-table id) +
     /// `inlineClassUnderlyingType` (f18, an inline `Type`). `None` for an ordinary class.
@@ -347,6 +365,9 @@ pub struct ClassTail<'a> {
     /// The primary constructor's `JvmMethodSignature` NAME — a value class's primary ctor is realized as
     /// the static `constructor-impl`, not `<init>`. `None` ⇒ `<init>` (the ordinary shape).
     pub ctor_sig_name: Option<&'a str>,
+    /// Declared type-parameter names in order (`class C<T>` → `["T"]`), recorded as
+    /// `Class.typeParameter` so the metadata describes the class as generic.
+    pub type_params: &'a [String],
 }
 
 impl Default for ClassTail<'_> {
@@ -358,11 +379,13 @@ impl Default for ClassTail<'_> {
             module_name: None,
             secondary_ctors: &[],
             ctor_param_defaults: &[],
+            ctor_param_tparams: &[],
             inline_underlying: None,
             ctor_sig_name: None,
             jvm_class_flags: None,
             emit_primary_ctor: true,
             primary_ctor_flags: 0,
+            type_params: &[],
         }
     }
 }
@@ -389,6 +412,20 @@ pub fn build_class(
     // f3 = fq_name: a class-id derived from the `L...;` descriptor.
     let fq = st.class_id_from_desc(&format!("L{class_internal};"));
 
+    // f5 = typeParameter: `{ id, name }` per declared parameter, in order. kotlinc interns the names
+    // right after the fq_name, before any member signature.
+    let tparam_msgs: Vec<Pb> = tail
+        .type_params
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let mut tp = Pb::new();
+            tp.field_varint(1, i as u64); // TypeParameter.id = 1
+            tp.field_varint(2, st.local(name) as u64); // TypeParameter.name = 2
+            tp
+        })
+        .collect();
+
     // f6 = supertype kotlin/Any.
     let mut supertype = Pb::new();
     supertype.field_varint(6, st.builtin(ANY_PREDEFINED) as u64);
@@ -402,13 +439,22 @@ pub fn build_class(
             ctor_desc,
             tail.primary_ctor_flags,
             tail.ctor_param_defaults,
+            tail.ctor_param_tparams,
             tail.ctor_sig_name,
         )]
     } else {
         Vec::new()
     };
     for sc in tail.secondary_ctors {
-        ctor_msgs.push(build_ctor(&mut st, sc.params, sc.desc, sc.flags, &[], None));
+        ctor_msgs.push(build_ctor(
+            &mut st,
+            sc.params,
+            sc.desc,
+            sc.flags,
+            &[],
+            &[],
+            None,
+        ));
     }
 
     // Properties BEFORE functions (kotlinc interns property JVM signatures before function names).
@@ -417,7 +463,7 @@ pub fn build_class(
         .map(|p| {
             let mut prop = Pb::new();
             prop.field_varint(2, st.local(&p.name) as u64); // Property.name = 2
-            let ty = type_pb(&mut st, p.ty);
+            let ty = type_pb_tp(&mut st, p.ty, p.tparam);
             prop.field_message(3, &ty); // Property.return_type = 3
             let pflags = DEFAULT_PROPERTY_FLAGS
                 | if p.is_var {
@@ -457,6 +503,10 @@ pub fn build_class(
                     | Ty::Char
                     | Ty::Boolean,
                 ) => p.getter.1.rsplit(')').next().map(str::to_string),
+                // A bare type-parameter property erases to `Ljava/lang/Object;`, which the reader
+                // cannot derive from the type `T` — so kotlinc records the descriptor explicitly, the
+                // same way it does for a boxed nullable primitive.
+                _ if p.tparam.is_some() => p.getter.1.rsplit(')').next().map(str::to_string),
                 _ => None,
             };
             let mut field = Pb::new();
@@ -542,6 +592,9 @@ pub fn build_class(
         class.field_varint(1, class_flags);
     }
     class.field_varint(3, fq as u64);
+    for tp in &tparam_msgs {
+        class.repeated_message(5, tp); // Class.type_parameter = 5
+    }
     if let Some(ci) = companion_idx {
         class.field_varint(4, ci as u64); // Class.companion_object_name = 4
     }
@@ -629,6 +682,7 @@ mod tests {
                 is_var: false,
                 has_constant: false,
                 is_abstract: false,
+                tparam: None,
                 getter: ("getX".into(), "()I".into()),
                 setter: None,
             }],
@@ -725,6 +779,7 @@ mod tests {
                 is_var: false,
                 has_constant: false,
                 is_abstract: false,
+                tparam: None,
                 getter: ("getX".into(), "()I".into()),
                 setter: None,
             },
@@ -734,6 +789,7 @@ mod tests {
                 is_var: true,
                 has_constant: false,
                 is_abstract: false,
+                tparam: None,
                 getter: ("getY".into(), "()Ljava/lang/String;".into()),
                 setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
             },
@@ -792,6 +848,7 @@ mod tests {
                 is_var: false,
                 has_constant: false,
                 is_abstract: false,
+                tparam: None,
                 getter: ("getR".into(), "()Ljava/util/List;".into()),
                 setter: None,
             }],
@@ -896,6 +953,7 @@ mod tests {
                 is_var: false,
                 has_constant: false,
                 is_abstract: false,
+                tparam: None,
                 getter: ("getX".into(), "()I".into()),
                 setter: None,
             }],
@@ -941,6 +999,7 @@ mod tests {
                 is_var: false,
                 has_constant: false,
                 is_abstract: false,
+                tparam: None,
                 getter: ("getX".into(), "()I".into()),
                 setter: None,
             }],
@@ -990,6 +1049,7 @@ mod tests {
                     is_var: false,
                     has_constant: false,
                     is_abstract: false,
+                    tparam: None,
                     getter: ("getX".into(), "()I".into()),
                     setter: None,
                 },
@@ -999,6 +1059,7 @@ mod tests {
                     is_var: true,
                     has_constant: false,
                     is_abstract: false,
+                    tparam: None,
                     getter: ("getY".into(), "()Ljava/lang/String;".into()),
                     setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
                 },
