@@ -177,7 +177,7 @@ pub struct ClassSig {
     pub props: Vec<(String, Ty, bool)>, // backing-field properties (name, type, is_var)
     /// Full primary-constructor parameter types in order (includes non-property params).
     pub ctor_params: Vec<Ty>,
-    pub methods: HashMap<String, Signature>,
+    pub methods: MethodMap,
     /// True if this is an `interface` (calls dispatch via `invokeinterface`).
     pub is_interface: bool,
     /// True if declared `object` (a singleton).
@@ -299,8 +299,159 @@ impl ClassSig {
     }
 
     pub fn single_method(&self) -> Option<&Signature> {
-        (self.methods.len() == 1).then(|| self.methods.values().next().unwrap())
+        let mut all = self.methods.values().flatten();
+        match (all.next(), all.next()) {
+            (Some(one), None) => Some(one),
+            _ => None,
+        }
     }
+
+    /// The SOLE signature declared under `name` — `None` when the name is absent OR overloaded
+    /// (an overloaded name needs [`Self::method_matching`] with the call's argument types; callers
+    /// without arguments in hand must not guess an overload).
+    pub fn method(&self, name: &str) -> Option<&Signature> {
+        match self.methods.get(name)?.as_slice() {
+            [one] => Some(one),
+            _ => None,
+        }
+    }
+
+    /// The overload of `name` matching `args` (same arity/assignability scoring as top-level
+    /// [`pick_overload`]); ambiguity resolves to `None` so the caller skips rather than misdispatches.
+    pub fn method_matching(&self, name: &str, args: &[Ty]) -> Option<&Signature> {
+        let sigs = self.methods.get(name)?;
+        pick_overload(sigs, args).map(|i| &sigs[i])
+    }
+
+    /// All signatures declared under `name`, in declaration order (empty slice if none).
+    pub fn methods_named(&self, name: &str) -> &[Signature] {
+        self.methods.get(name).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn has_method(&self, name: &str) -> bool {
+        self.methods.get(name).is_some_and(|v| !v.is_empty())
+    }
+
+    /// Append an overload under `name` (declaration order preserved per name).
+    pub fn add_method(&mut self, name: String, sig: Signature) {
+        self.methods.entry(name).or_default().push(sig);
+    }
+}
+
+/// Per-name overload lists (declaration order within a name). One `Vec` per name keeps the common
+/// single-overload case cheap while letting member overloading resolve by argument types.
+pub type MethodMap = HashMap<String, Vec<Signature>>;
+
+/// Narrow a member-overload candidate list to the overloads that FIT the call's argument types —
+/// the member analog of [`pick_overload`]. Keeps every candidate tied for the best score, in input
+/// (DFS, most-derived-first) order, so an override chain (same signature on several hierarchy
+/// rungs) still resolves to the most-derived rung and the caller's defaults-preference logic still
+/// applies. Named-argument calls are left untouched (the named-mapping path validates arity
+/// itself). Returns an EMPTY list when an erased-`Any` argument sits at a position where viable
+/// candidates' parameter types differ — krusty cannot reproduce kotlinc's precise-type selection
+/// there, and an unresolved member (skip) beats a misdispatch.
+/// Per-position score of `params` against `arg_tys` (2 exact, 1 assignable), `None` if any position is
+/// not assignable. The shared scoring kernel of `pick_overload` and `pick_member_overloads` — the
+/// selection rule must not drift between the top-level and member paths.
+fn positional_score(params: &[Ty], arg_tys: &[Ty]) -> Option<usize> {
+    let mut sc = 0;
+    for (&p, &a) in params.iter().zip(arg_tys.iter()) {
+        if !arg_assignable_simple(p, a) {
+            return None;
+        }
+        sc += if p == a { 2 } else { 1 };
+    }
+    Some(sc)
+}
+
+/// Soundness guard shared by `pick_overload` and `pick_member_overloads`: krusty erases generics, so a
+/// generic value reads as `kotlin/Any`. An erased-`Any` ARGUMENT at a position where the candidates'
+/// parameter types DIFFER defeats selection — kotlinc selects on the precise type krusty no longer has —
+/// so the caller must bail (leave unresolved / skip, never dispatch wrongly).
+fn erased_arg_defeats_selection<'a>(
+    arg_tys: &[Ty],
+    param_lists: impl Iterator<Item = &'a [Ty]> + Clone,
+) -> bool {
+    for (i, &a) in arg_tys.iter().enumerate() {
+        if a.is_erased_top() {
+            let mut params_here = param_lists.clone().filter_map(|ps| ps.get(i));
+            if let Some(first) = params_here.next() {
+                if params_here.any(|p| p != first) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn pick_member_overloads(
+    members: Vec<crate::libraries::LibraryMember>,
+    arg_tys: &[Ty],
+    named: bool,
+) -> Vec<crate::libraries::LibraryMember> {
+    use std::collections::HashSet;
+    let distinct: HashSet<&Vec<Ty>> = members.iter().map(|m| &m.params).collect();
+    if members.len() <= 1 || named || distinct.len() <= 1 {
+        return members;
+    }
+    let arity_ok = |m: &crate::libraries::LibraryMember| {
+        if m.call_sig.vararg {
+            arg_tys.len() + 1 >= m.params.len()
+        } else {
+            arg_tys.len() == m.params.len()
+                || (arg_tys.len() < m.params.len()
+                    && m.call_sig.can_map_omitted_args(m.params.len()))
+        }
+    };
+    let viable: Vec<&crate::libraries::LibraryMember> =
+        members.iter().filter(|m| arity_ok(m)).collect();
+    if viable.is_empty() {
+        return members; // keep the original list so the arity diagnostic names the call shape
+    }
+    // TRUE SIBLINGS (two overloads on the SAME owner) whose params differ at a position where
+    // either side is an erased type variable (`foo(x: T)` vs `foo(x: A<T>)` — both erase, but
+    // kotlinc selects on the SUBSTITUTED types krusty no longer has) → unresolved (skip, never
+    // wrong). Candidates on DIFFERENT owners are an override CHAIN (`Z.foo(String)` over
+    // `A<T>.foo(T)`) — the most-derived-first order below handles those, erasure differences and
+    // all.
+    for (vi, m) in viable.iter().enumerate() {
+        for other in &viable[vi + 1..] {
+            if m.owner != other.owner || m.params == other.params {
+                continue;
+            }
+            let erased_involved = m
+                .params
+                .iter()
+                .zip(&other.params)
+                .any(|(p, q)| p != q && (p.is_erased_top() || q.is_erased_top()));
+            if erased_involved {
+                return Vec::new();
+            }
+        }
+    }
+    if erased_arg_defeats_selection(arg_tys, viable.iter().map(|m| m.params.as_slice())) {
+        return Vec::new();
+    }
+    let score = |m: &crate::libraries::LibraryMember| -> Option<usize> {
+        if m.params.len() != arg_tys.len() {
+            return Some(1); // omitted-arg/vararg candidate: viable but never beats an exact fit
+        }
+        // +2 baseline: any exact-arity assignable fit outranks every omitted-arg/vararg candidate.
+        positional_score(&m.params, arg_tys).map(|sc| sc + 2)
+    };
+    let scored: Vec<(usize, &crate::libraries::LibraryMember)> = viable
+        .iter()
+        .filter_map(|&m| score(m).map(|sc| (sc, m)))
+        .collect();
+    let Some(&(best, _)) = scored.iter().max_by_key(|&&(sc, _)| sc) else {
+        return members; // nothing assignable: keep the list for the ordinary type-error diagnostics
+    };
+    scored
+        .into_iter()
+        .filter(|&(sc, _)| sc == best)
+        .map(|(_, m)| m.clone())
+        .collect()
 }
 
 /// Simple type name → JVM internal name, split into a SHARED read-only base (the library/classpath
@@ -534,6 +685,66 @@ impl SymbolTable {
             .map(|(_, sig)| sig)
     }
 
+    /// Whether every supertype of `internal` (transitively) is a MODULE class — i.e. the
+    /// supertype member set visible to [`Self::supertype_methods_name`] is COMPLETE. A hierarchy
+    /// touching a classpath type has members that walk cannot see, so completeness-based checks
+    /// (an `override` must override something) must not fire.
+    pub fn hierarchy_is_module_closed(&self, internal: TypeName) -> bool {
+        self.hierarchy_is_module_closed_inner(internal, &mut std::collections::HashSet::new())
+    }
+
+    fn hierarchy_is_module_closed_inner(
+        &self,
+        internal: TypeName,
+        seen: &mut std::collections::HashSet<TypeName>,
+    ) -> bool {
+        if !seen.insert(internal) {
+            return true; // a supertype cycle is ill-formed source; don't recurse forever on it
+        }
+        let Some(c) = self.class_by_type_name(internal) else {
+            // `kotlin/Any` / `java/lang/Object` roots aren't module classes but add no members a
+            // source `override` could target beyond the universal ones.
+            let n = internal.render();
+            return n == "kotlin/Any" || n == "java/lang/Object";
+        };
+        c.super_internal
+            .into_iter()
+            .chain(c.interfaces.iter_ids())
+            .all(|p| self.hierarchy_is_module_closed_inner(p, seen))
+    }
+
+    /// The overload of `name` on `internal` (or up its base chain) that could OVERRIDE a supertype
+    /// method with parameters `want_params` — same arity, each param equal or erasable to the
+    /// super's `Object`. A same-name overload with an unrelated shape is a SIBLING, not an
+    /// override, and must not be paired (`None` = the super method is inherited untouched).
+    pub fn override_impl_of_name(
+        &self,
+        internal: TypeName,
+        name: &str,
+        want_params: &[Ty],
+    ) -> Option<Signature> {
+        let obj = Ty::obj("kotlin/Any");
+        let mut seen = std::collections::HashSet::new();
+        let mut cur = Some(internal);
+        while let Some(ci_name) = cur {
+            if !seen.insert(ci_name) {
+                return None; // supertype cycle (ill-formed source) — stop
+            }
+            let c = self.class_by_type_name(ci_name)?;
+            if let Some(found) = c.methods_named(name).iter().find(|sig| {
+                sig.params.len() == want_params.len()
+                    && want_params
+                        .iter()
+                        .zip(&sig.params)
+                        .all(|(e, c)| e == c || *e == obj)
+            }) {
+                return Some(found.clone());
+            }
+            cur = c.super_internal;
+        }
+        None
+    }
+
     /// A method (own or inherited up the base-class chain) with the internal name of the class that
     /// declares it. Call resolution records this owner so lowering can dispatch to a cross-file base method
     /// instead of pretending the receiver class declares it.
@@ -549,8 +760,13 @@ impl SymbolTable {
         name: &str,
     ) -> Option<(TypeName, Signature)> {
         let c = self.class_by_type_name(internal)?;
-        if let Some(sig) = c.methods.get(name) {
-            return Some((c.internal_name(), sig.clone()));
+        if let Some(sigs) = c.methods.get(name) {
+            // Overloaded name: there is no single "the method" — the caller must select by
+            // argument types (`method_matching`); returning one arbitrarily would misdispatch.
+            return match sigs.as_slice() {
+                [one] => Some((c.internal_name(), one.clone())),
+                _ => None,
+            };
         }
         self.method_of_with_owner_name(c.super_internal?, name)
     }
@@ -567,8 +783,9 @@ impl SymbolTable {
         let Some(c) = self.class_by_type_name(internal) else {
             return false;
         };
-        if let Some(sig) = c.methods.get(name) {
-            return sig.vararg;
+        if let Some(sigs) = c.methods.get(name) {
+            // The flag is only trustworthy when the name has a sole overload.
+            return matches!(sigs.as_slice(), [one] if one.vararg);
         }
         c.super_internal
             .is_some_and(|s| self.method_is_vararg_name(s, name))
@@ -602,8 +819,10 @@ impl SymbolTable {
         parents.extend(c.interfaces.iter_ids());
         for p in parents {
             if let Some(pc) = self.class_by_type_name(p) {
-                for (n, sig) in &pc.methods {
-                    out.push((n.clone(), sig.clone()));
+                for (n, sigs) in &pc.methods {
+                    for sig in sigs {
+                        out.push((n.clone(), sig.clone()));
+                    }
                 }
             }
             self.collect_super_methods(p, out);
@@ -757,33 +976,12 @@ pub fn pick_overload(sigs: &[Signature], arg_tys: &[Ty]) -> Option<usize> {
     if cands.len() <= 1 {
         return cands.first().copied();
     }
-    // Soundness guard: krusty erases generics, so a generic value reads as `kotlin/Any`. If an argument
-    // is the erased `Any` at a position where the candidates' parameter types DIFFER, krusty cannot
-    // reproduce kotlinc's precise-type overload selection (kotlinc may see a concrete type there). Bail
-    // (`None`) so the call is left unresolved and the file is skipped rather than dispatched wrongly.
-    for (i, &a) in arg_tys.iter().enumerate() {
-        if a.is_erased_top() {
-            let mut params_here = cands.iter().filter_map(|&c| sigs[c].params.get(i));
-            if let Some(first) = params_here.next() {
-                if params_here.any(|p| p != first) {
-                    return None;
-                }
-            }
-        }
+    if erased_arg_defeats_selection(arg_tys, cands.iter().map(|&c| sigs[c].params.as_slice())) {
+        return None;
     }
-    let score = |s: &Signature| -> Option<usize> {
-        let mut sc = 0;
-        for (&p, &a) in s.params.iter().zip(arg_tys.iter()) {
-            if !arg_assignable_simple(p, a) {
-                return None;
-            }
-            sc += if p == a { 2 } else { 1 };
-        }
-        Some(sc)
-    };
     cands
         .iter()
-        .filter_map(|&i| score(&sigs[i]).map(|sc| (sc, i)))
+        .filter_map(|&i| positional_score(&sigs[i].params, arg_tys).map(|sc| (sc, i)))
         .max_by_key(|&(sc, _)| sc)
         .map(|(_, i)| i)
         .or_else(|| cands.first().copied())
@@ -1951,72 +2149,70 @@ pub fn collect_signatures_with_cp(
                                 .insert(m.name.clone(), ty_of_ref(r, &class_names, &mtp, diags));
                         }
                     }
-                    let mut methods: HashMap<String, Signature> = c
-                        .methods
-                        .iter()
-                        .map(|m| {
-                            let mtp =
-                                ctp.extended_with(&m.type_params, &m.type_param_bounds, &|n| {
-                                    class_names.get(n)
-                                });
-                            // A `vararg` parameter's runtime type is `Array<elem>` (mirrors the
-                            // top-level-function path) — without this a member `vararg s: String`
-                            // erases to a single `String` and a call passes the element where the
-                            // `String[]` is expected (a `ClassCastException`).
-                            let ret = m
-                                .ret
-                                .as_ref()
-                                .map(|r| ty_of_ref(r, &class_names, &mtp, diags))
-                                .unwrap_or_else(|| {
-                                    // These overridable Object/Comparable members have fixed Kotlin
-                                    // contract returns. Do not let erased generic body inference widen
-                                    // `toString() = privateFun()` to `Any`, which would emit
-                                    // `toString(): Object` and fail to override `Object.toString`.
-                                    match (m.name.as_str(), m.params.len()) {
-                                        ("compareTo", 1) => return Ty::Int,
-                                        ("equals", 1) => return Ty::Boolean,
-                                        ("hashCode", 0) => return Ty::Int,
-                                        ("toString", 0) => return Ty::String,
-                                        _ => {}
+                    let mut methods: MethodMap = MethodMap::new();
+                    for (mname, msig) in c.methods.iter().map(|m| {
+                        let mtp = ctp.extended_with(&m.type_params, &m.type_param_bounds, &|n| {
+                            class_names.get(n)
+                        });
+                        // A `vararg` parameter's runtime type is `Array<elem>` (mirrors the
+                        // top-level-function path) — without this a member `vararg s: String`
+                        // erases to a single `String` and a call passes the element where the
+                        // `String[]` is expected (a `ClassCastException`).
+                        let ret = m
+                            .ret
+                            .as_ref()
+                            .map(|r| ty_of_ref(r, &class_names, &mtp, diags))
+                            .unwrap_or_else(|| {
+                                // These overridable Object/Comparable members have fixed Kotlin
+                                // contract returns. Do not let erased generic body inference widen
+                                // `toString() = privateFun()` to `Any`, which would emit
+                                // `toString(): Object` and fail to override `Object.toString`.
+                                match (m.name.as_str(), m.params.len()) {
+                                    ("compareTo", 1) => return Ty::Int,
+                                    ("equals", 1) => return Ty::Boolean,
+                                    ("hashCode", 0) => return Ty::Int,
+                                    ("toString", 0) => return Ty::String,
+                                    _ => {}
+                                }
+                                if let FunBody::Expr(e) = &m.body {
+                                    // The method's own parameters are in scope for its expression body, so
+                                    // `fun m(x: Int) = x + 1` infers `Int`. Parameters come FIRST: a
+                                    // parameter shadows a class property of the same name in the body (the
+                                    // scope lookup returns the first match), matching Kotlin.
+                                    let mut scope: Vec<(String, Ty, bool)> = m
+                                        .params
+                                        .iter()
+                                        .map(|p| {
+                                            (
+                                                p.name.clone(),
+                                                ty_of_ref(&p.ty, &class_names, &mtp, diags),
+                                                false,
+                                            )
+                                        })
+                                        .collect();
+                                    scope.extend(props.iter().cloned());
+                                    let t = infer_lit_ty_scoped(
+                                        file,
+                                        *e,
+                                        &class_names,
+                                        &local_rets,
+                                        &scope,
+                                        &*libraries,
+                                        &table,
+                                    );
+                                    if t != Ty::Error {
+                                        return t;
                                     }
-                                    if let FunBody::Expr(e) = &m.body {
-                                        // The method's own parameters are in scope for its expression body, so
-                                        // `fun m(x: Int) = x + 1` infers `Int`. Parameters come FIRST: a
-                                        // parameter shadows a class property of the same name in the body (the
-                                        // scope lookup returns the first match), matching Kotlin.
-                                        let mut scope: Vec<(String, Ty, bool)> = m
-                                            .params
-                                            .iter()
-                                            .map(|p| {
-                                                (
-                                                    p.name.clone(),
-                                                    ty_of_ref(&p.ty, &class_names, &mtp, diags),
-                                                    false,
-                                                )
-                                            })
-                                            .collect();
-                                        scope.extend(props.iter().cloned());
-                                        let t = infer_lit_ty_scoped(
-                                            file,
-                                            *e,
-                                            &class_names,
-                                            &local_rets,
-                                            &scope,
-                                            &*libraries,
-                                            &table,
-                                        );
-                                        if t != Ty::Error {
-                                            return t;
-                                        }
-                                    }
-                                    Ty::Unit
-                                });
-                            (
-                                m.name.clone(),
-                                member_signature(m, ret, &class_names, &mtp, diags),
-                            )
-                        })
-                        .collect();
+                                }
+                                Ty::Unit
+                            });
+                        (
+                            m.name.clone(),
+                            member_signature(m, ret, &class_names, &mtp, diags),
+                        )
+                    }) {
+                        methods.entry(mname).or_default().push(msig);
+                    }
                     // Record the un-erased shape of each generic higher-order method (a function-typed
                     // parameter, an explicit return, and a type parameter — the class's or the method's
                     // own — somewhere in its signature), so a call site can substitute the receiver's
@@ -2052,7 +2248,7 @@ pub fn collect_signatures_with_cp(
                         for (i, (_, ty, _)) in props.iter().enumerate() {
                             methods.insert(
                                 format!("component{}", i + 1),
-                                Signature {
+                                vec![Signature {
                                     params: vec![],
                                     ret: *ty,
                                     vararg: false,
@@ -2069,14 +2265,14 @@ pub fn collect_signatures_with_cp(
                                     source_decl: None,
                                     source_file: None,
                                     package: String::new(),
-                                },
+                                }],
                             );
                         }
                         // Every `copy` parameter has a default (the receiver's property) — so `required`
                         // is 0 and any subset may be passed, by name or position.
                         methods.insert(
                             "copy".into(),
-                            Signature {
+                            vec![Signature {
                                 params: props.iter().map(|(_, t, _)| *t).collect(),
                                 ret: self_ty,
                                 vararg: false,
@@ -2093,7 +2289,7 @@ pub fn collect_signatures_with_cp(
                                 source_decl: None,
                                 source_file: None,
                                 package: String::new(),
-                            },
+                            }],
                         );
                     }
                     if c.is_object() {
@@ -2401,7 +2597,10 @@ pub fn collect_signatures_with_cp(
                                 internal: comp_internal_ref,
                                 props: Vec::new(),
                                 ctor_params: Vec::new(),
-                                methods: companion_methods_sigs,
+                                methods: companion_methods_sigs
+                                    .into_iter()
+                                    .map(|(n, sig)| (n, vec![sig]))
+                                    .collect(),
                                 is_interface: false,
                                 is_object: false,
                                 is_abstract: false,
@@ -5026,7 +5225,7 @@ pub fn check_file_at(
             if let Some(sig) = syms
                 .class_by_type_name_mut(internal)
                 .and_then(|c| c.methods.get_mut(&name))
-                .filter(|s| s.params == params)
+                .and_then(|ov| ov.iter_mut().find(|s| s.params == params))
             {
                 changed |= sig.ret != ret;
                 sig.ret = ret;
@@ -5050,7 +5249,7 @@ pub fn check_file_at(
             }
         })
         .collect();
-    c.check_no_erased_clash(&top_funs, true);
+    c.check_no_erased_clash(&top_funs);
 
     // Each top-level declaration is checked in its OWN scope. Reset to the base depth (file-level
     // scope, e.g. top-level properties) before each one so a prior decl's leftover scope can't leak —
@@ -5252,8 +5451,36 @@ pub fn check_file_at(
                     label_depth += 1;
                 }
                 let methods: Vec<&FunDecl> = cl.methods.iter().collect();
-                c.check_no_erased_clash(&methods, false);
+                c.check_no_erased_clash(&methods);
                 if let Some(internal) = syms.classes.get(&cl.name).map(ClassSig::internal_name) {
+                    // An `override` member must MATCH a supertype member (same name + arity) —
+                    // kotlinc rejects an `override` that overrides nothing. With member overloads a
+                    // same-name sibling of a different arity no longer pairs, so check explicitly.
+                    // Only when the hierarchy is MODULE-closed: a classpath supertype's members are
+                    // invisible to this walk, so absence there proves nothing (properties and
+                    // property-overrides are likewise out of scope — this checks methods only).
+                    if c.syms.hierarchy_is_module_closed(internal) {
+                        let supers = c.syms.supertype_methods_name(internal);
+                        // `kotlin/Any`'s universal members are overridable in every class but never
+                        // appear in the module supertype walk.
+                        let is_any_member = |m: &FunDecl| {
+                            matches!(
+                                (m.name.as_str(), m.params.len()),
+                                ("toString", 0) | ("hashCode", 0) | ("equals", 1)
+                            )
+                        };
+                        for m in &cl.methods {
+                            if m.is_override
+                                && !is_any_member(m)
+                                && !supers
+                                    .iter()
+                                    .any(|(n, s)| *n == m.name && s.params.len() == m.params.len())
+                            {
+                                c.diags
+                                    .error(m.span, format!("'{}' overrides nothing", m.name));
+                            }
+                        }
+                    }
                     c.check_no_bridge_needed(internal, cl.span);
                     // A `data class` implementing an interface that declares `copy`/`componentN` would
                     // need bridges for its *synthesized* members (which return the class itself, not
@@ -5750,7 +5977,7 @@ pub fn check_file_at(
         if let Some(sig) = syms
             .class_by_type_name_mut(internal)
             .and_then(|c| c.methods.get_mut(&name))
-            .filter(|s| s.params == params)
+            .and_then(|ov| ov.iter_mut().find(|s| s.params == params))
         {
             sig.ret = ret;
         }
@@ -7417,7 +7644,13 @@ impl<'a> Checker<'a> {
         let supers = self.syms.supertype_methods_name(internal);
         let obj = Ty::obj("kotlin/Any");
         for (name, ssig) in &supers {
-            let Some(impl_sig) = self.syms.method_of_name(internal, name) else {
+            // Pair the super method with the overload that could actually OVERRIDE it (same arity,
+            // params equal or erasure-compatible) — a same-name SIBLING overload (`f(Int)` next to
+            // an inherited `f()`) is not an override and needs no bridge.
+            let Some(impl_sig) = self
+                .syms
+                .override_impl_of_name(internal, name, &ssig.params)
+            else {
                 continue;
             };
             // A supertype method wants a `@JvmInline value class` return (unboxed), but the concrete
@@ -7459,14 +7692,12 @@ impl<'a> Checker<'a> {
         // which the lowering synthesizes (boxing a primitive own type in the bridge as needed).
     }
 
-    /// Report (and thereby skip the file for) functions whose signatures collide. An EXACT erased-signature
-    /// duplicate is always a JVM `ClassFormatError` and is rejected. When `allow_overload` is true
-    /// (top-level functions), same-name functions with DIFFERENT erased signatures are legal overloads,
-    /// dispatched at the call site by argument types ([`pick_overload`]). When false (class members), they
-    /// are rejected — member overloading needs erasure/bridge handling krusty doesn't model, so the file
-    /// is skipped rather than miscompiled.
-    fn check_no_erased_clash(&mut self, funs: &[&FunDecl], allow_overload: bool) {
-        let mut by_name: HashMap<String, ErasedSigKey> = HashMap::new(); // name → first erased key
+    /// Report (and thereby skip the file for) functions whose signatures collide: an EXACT
+    /// erased-signature duplicate is always a JVM `ClassFormatError`. Same-name functions with
+    /// DIFFERENT erased signatures are legal overloads — top-level AND class members — dispatched
+    /// at the call site by argument types ([`pick_overload`] / `ClassSig::method_matching`, with
+    /// the member overload lists flowing through `module_symbols` into the `SymbolResolver`).
+    fn check_no_erased_clash(&mut self, funs: &[&FunDecl]) {
         let mut seen: HashMap<ErasedSigKey, Span> = HashMap::new();
         for f in funs {
             // `erased_sig_key` includes the name and (for extensions) the receiver, so distinct names and
@@ -7478,20 +7709,6 @@ impl<'a> Checker<'a> {
                     format!("conflicting overloads: function '{}' has the same JVM signature as another after type erasure", f.name),
                 );
             } else {
-                if !allow_overload && f.receiver.is_none() {
-                    if let std::collections::hash_map::Entry::Occupied(e) =
-                        by_name.entry(f.name.clone())
-                    {
-                        if e.get() != &key {
-                            self.diags.error(
-                                f.span,
-                                format!("krusty: function '{}' has multiple overloads with different erased signatures (overload dispatch not supported)", f.name),
-                            );
-                        }
-                    } else {
-                        by_name.insert(f.name.clone(), key.clone());
-                    }
-                }
                 seen.insert(key, f.span);
             }
         }
@@ -8082,7 +8299,7 @@ impl<'a> Checker<'a> {
                     if let Some(sig) = self
                         .syms
                         .class_by_type_name(internal)
-                        .and_then(|c| c.methods.get(&f.name))
+                        .and_then(|c| c.method(&f.name))
                     {
                         return sig.ret;
                     }
@@ -8225,8 +8442,12 @@ impl<'a> Checker<'a> {
 
     fn lookup_method_name(&self, internal: TypeName, name: &str) -> Option<Signature> {
         let c = self.syms.class_by_type_name(internal)?;
-        if let Some(sig) = c.methods.get(name) {
-            return Some(sig.clone());
+        if let Some(sigs) = c.methods.get(name) {
+            // Sole overload only: this lookup has no argument types to select with.
+            return match sigs.as_slice() {
+                [one] => Some(one.clone()),
+                _ => None,
+            };
         }
         // A class provides its implemented interfaces' methods — directly overridden, inherited, or (for
         // `: I by d`) delegated. Resolving them here lets a delegating class's calls type-check.
@@ -8310,7 +8531,7 @@ impl<'a> Checker<'a> {
         // (built from the erased interface method) and the erased lambda parameter types both match. A
         // value-class method is still excluded (mangled name / boxing not modeled).
         c.is_fun_interface
-            && c.methods.values().all(|sig| {
+            && c.methods.values().flatten().all(|sig| {
                 !self.ty_is_value_class(sig.ret)
                     && sig.params.iter().all(|p| !self.ty_is_value_class(*p))
             })
@@ -10353,7 +10574,7 @@ impl<'a> Checker<'a> {
                             && !self.syms.objects.contains(&rn)
                         {
                             if let Some(cls) = self.syms.classes.get(&rn).cloned() {
-                                if let Some(sig) = cls.methods.get(&name).cloned() {
+                                if let Some(sig) = cls.method(&name).cloned() {
                                     if sig.requires_all_args() {
                                         let cls_internal = cls.internal();
                                         let mut params = vec![Ty::obj(&cls_internal)];
@@ -10392,7 +10613,7 @@ impl<'a> Checker<'a> {
                             && self.syms.objects.contains(&rn)
                         {
                             if let Some(cls) = self.syms.classes.get(&rn).cloned() {
-                                if let Some(sig) = cls.methods.get(&name).cloned() {
+                                if let Some(sig) = cls.method(&name).cloned() {
                                     if sig.requires_all_args() {
                                         return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                                     }
@@ -11483,10 +11704,12 @@ impl<'a> Checker<'a> {
         if !self.current_file_declares_class_name(owner) {
             return None;
         }
-        let sig = self.syms.class_by_type_name(owner)?.methods.get(name)?;
-        if sig.params.as_slice() != params {
-            return None;
-        }
+        let sig = self
+            .syms
+            .class_by_type_name(owner)?
+            .methods_named(name)
+            .iter()
+            .find(|s| s.params.as_slice() == params)?;
         Some(DestructureComponentTarget::ModuleMember {
             owner,
             name: name.to_string(),
@@ -11503,10 +11726,10 @@ impl<'a> Checker<'a> {
     ) -> Option<DestructureComponentTarget> {
         let owner = recv.obj_internal()?;
         let sig = self.syms.class_by_type_name(owner)?;
-        let method = sig.methods.get(name)?;
-        if method.params.as_slice() != params {
-            return None;
-        }
+        let method = sig
+            .methods_named(name)
+            .iter()
+            .find(|s| s.params.as_slice() == params)?;
         Some(DestructureComponentTarget::CrossFileModuleMember {
             owner,
             name: name.to_string(),
@@ -13038,7 +13261,7 @@ impl<'a> Checker<'a> {
                                 .syms
                                 .classes
                                 .get(&cls)
-                                .and_then(|c| c.methods.get(&name))
+                                .and_then(|c| c.method_matching(&name, &arg_tys))
                                 .cloned()
                             {
                                 Some(sig) => {
@@ -13518,8 +13741,12 @@ impl<'a> Checker<'a> {
                     // `resolve_instance_member` above (by argument fit); querying the federated members here
                     // would arity-bind a Java member (`Iterable.forEach(Consumer)`) and reject the Kotlin
                     // lambda, shadowing the extension the classpath selectors pick.
-                    let members = crate::module_symbols::ModuleSymbols::new(self.syms)
-                        .instance_members(rt, &name);
+                    let members = pick_member_overloads(
+                        crate::module_symbols::ModuleSymbols::new(self.syms)
+                            .instance_members(rt, &name),
+                        &arg_tys,
+                        arg_names.is_some(),
+                    );
                     // The first Member overload is the most-derived override (for dispatch/return). For an
                     // OMITTED-argument call, the default may be declared on a SUPERTYPE (an interface
                     // method's default isn't redeclared on the override) — prefer an overload that records
