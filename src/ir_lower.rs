@@ -7260,12 +7260,12 @@ impl<'a> Lower<'a> {
         if arity > 0 && n_cap > 0 {
             return None;
         }
-        // A VALUE-CLASS parameter is not modeled: the param spill field erases to the underlying, but
-        // the erased `invoke` stores the BOXED object without an unbox (VerifyError). Skip, never
-        // miscompile (corpus coroutines/inlineClasses/direct/createMangling.kt).
+        // A NULLABLE value-class parameter stays unmodeled (its boxed/null spill interplay isn't
+        // covered by the value-class pass's SetField boundary); a plain value-class parameter is —
+        // the erased `invoke`'s boxed argument unboxes at the param spill store.
         if params
             .iter()
-            .any(|p| self.value_class_underlying(p.non_null()).is_some())
+            .any(|p| p.is_nullable() && self.value_class_underlying(p.non_null()).is_some())
         {
             return None;
         }

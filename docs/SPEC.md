@@ -1851,3 +1851,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `createMangling.kt`), and a machine that combines a real suspension state with a
   `suspendCoroutineUninterceptedOrReturn` block (re-entry after the intrinsic's external resume
   misdrives the label — `suspendCoroutineFromStateMachine.kt` loops forever).
+
+- **A field store is a value-class representation boundary, decided by the field's PRE-erasure
+  declared type.** The value-class pass's boundary list covered locals (`Variable`/`SetValue`) and
+  shared cells (`RefNew`/`RefSet`) but not `SetField` — so a suspend lambda's synthesized
+  `invoke`/`create`, which casts each erased `Object` argument to the value class and stores it into
+  the param spill field the erasure just retyped to the underlying, stored the BOXED object into an
+  underlying-typed field (VerifyError). The `SetField` boundary pairs the stored value with the
+  field's pre-erasure type; `Boxed → UnboxedX` then unboxes exactly like a local store. kotlinc
+  parity: its erased bridge `unbox-impl`s each value-class argument before the spill (verified on
+  `createMangling.kt`). NULLABLE value-class lambda parameters stay declined in
+  `lower_suspend_lambda` (boxed/null spill interplay unmodeled).
+  (`suspend_lambda_with_value_class_params`; corpus
+  `coroutines/inlineClasses/direct/createMangling.kt` box-OK, 2921 → 2922, FAIL 0.)
