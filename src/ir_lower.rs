@@ -14855,24 +14855,9 @@ impl<'a> Lower<'a> {
                     Decl::Property(dp) => Some(dp.name.clone()),
                 })
                 .collect();
-            // Sibling FN references combined with a `return`-carrying body: the do-while wrapper's
-            // frames in ARGUMENT position expose an emitter spill gap (lambdaPropertyExtracted) —
-            // gate the combination until the operand spill covers it.
-            let fn_names: std::collections::HashSet<String> = callee_file
-                .decls
-                .iter()
-                .filter_map(|&d| match callee_file.decl(d) {
-                    Decl::Fun(df) => Some(df.name.clone()),
-                    _ => None,
-                })
-                .collect();
-            let callee_has_return = body_has_return(callee_file, body);
             let mut clash = false;
             collect_bare_names(callee_file, body, &mut |n| {
-                if param_names.contains(n) {
-                    return;
-                }
-                if own_decl_names.contains(n) || (callee_has_return && fn_names.contains(n)) {
+                if !param_names.contains(n) && own_decl_names.contains(n) {
                     clash = true;
                 }
             });
@@ -20412,17 +20397,7 @@ fn sibling_inline_body_expandable(file: &ast::File, e: AstExprId) -> bool {
         ) {
             return false;
         }
-        // An INTERPOLATING template (`"buzz($x)"`) concatenates a possibly tparam-typed part: the
-        // sibling info typed it erased while the expansion specializes the slot — the concat
-        // emission then reads the wrong repr (stack-map mismatch). Literal-only templates are fine.
-        if let Expr::Template(parts) = file.expr(e) {
-            if parts
-                .iter()
-                .any(|p| matches!(p, ast::TemplatePart::Expr(_)))
-            {
-                return false;
-            }
-        }
+
         !file.any_child_expr(e, &mut |x| !expr_ok(file, x), &mut |s| !stmt_ok(file, s))
     }
     expr_ok(file, e)

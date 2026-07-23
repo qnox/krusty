@@ -175,6 +175,20 @@ fn cross_file_interface_resolves_as_module_symbol() {
 }
 
 #[test]
+fn frame_recording_arg_inside_function_invoke_spills_earlier_operands() {
+    if common::java_home().is_none() || common::stdlib_jar().is_none() {
+        return;
+    }
+    // `take(3, A(idr(1)).plus(idr(2)))`: the inlined `idr` (a body WITH returns → a do-while that
+    // records frames) sits inside a FUNCTION-VALUE invoke — `records_frame` missed
+    // `IrExpr::InvokeFunction`, so the boxed `3` stayed on the stack under the wrapper's merge
+    // frames ("Instruction type does not match stack map").
+    let a = "inline fun idr(x: Int): Int { if (x < 0) return 0; return x }\n";
+    let b = "class A(val a: Int) {\n    val plus: (Int)->Int\n        get() {\n            return { a + it }\n        }\n}\nfun take(x: Any, y: Any): String = \"$x$y\"\nfun box(): String = if (take(3, A(idr(1)).plus(idr(2))) == \"33\") \"OK\" else \"F\"\n";
+    assert_eq!(run_two(a, b).as_deref(), Some("OK"));
+}
+
+#[test]
 fn cross_file_inferred_return_inline_call_boxes_the_any_result() {
     if common::java_home().is_none() || common::stdlib_jar().is_none() {
         return;

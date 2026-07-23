@@ -7322,6 +7322,16 @@ impl<'a> Emitter<'a> {
                         .iter()
                         .any(|a| a.map_or(false, |x| self.records_frame(x)))
             }
+            // A function-value invoke (`f(x)` on a `FunctionN`): a branchy callee expression or
+            // argument records frames at this position exactly like a plain call's would — without
+            // this arm a parent operand sequence never spills (a boxed value left on the stack under
+            // an inlined do-while's merge frames: "Instruction type does not match stack map").
+            IrExpr::InvokeFunction { func, args, .. } => {
+                self.records_frame(*func) || args.iter().any(|&a| self.records_frame(a))
+            }
+            // A lambda's CAPTURE expressions emit at the construction site — a branchy capture
+            // records frames there like any operand.
+            IrExpr::Lambda { captures, .. } => captures.iter().any(|&c| self.records_frame(c)),
             IrExpr::New { args, .. } => args.iter().any(|&a| self.records_frame(a)),
             IrExpr::GetField { receiver, .. } => self.records_frame(*receiver),
             IrExpr::SetField {
