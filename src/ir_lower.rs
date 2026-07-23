@@ -158,6 +158,7 @@ pub fn lower_file_in_module_reporting<'a>(
 ) -> Option<IrFile> {
     let mut lo = Lower {
         afile: file,
+        root_file_index: file_index,
         module,
         file_index,
         info,
@@ -4781,6 +4782,11 @@ struct ForeachOpts<'a> {
 pub(crate) struct Lower<'a> {
     afile: &'a ast::File,
     file_index: u32,
+    /// The file this IR is BUILT for — never touched by `swap_src_context`. A module-resolved call
+    /// lowers as a same-file `Callee::Local` only when its source is THIS file; inside a swapped
+    /// (cross-file inline) context a sibling-internal call must route through its facade instead
+    /// (`fun_ids_by_decl` is the root file's registry — a sibling decl id would hit a WRONG fid).
+    root_file_index: u32,
     info: &'a FrontendTypeInfo,
     /// The compilation's file/info arrays (empty when unavailable). `afile`/`info`/`file_index` form
     /// the ACTIVE source context; a cross-file inline expansion swaps them to the callee's file for
@@ -14839,15 +14845,34 @@ impl<'a> Lower<'a> {
             let own_decl_names: std::collections::HashSet<String> = callee_file
                 .decls
                 .iter()
-                .map(|&d| match callee_file.decl(d) {
-                    Decl::Fun(df) => df.name.clone(),
-                    Decl::Class(dc) => dc.name.clone(),
-                    Decl::Property(dp) => dp.name.clone(),
+                .filter_map(|&d| match callee_file.decl(d) {
+                    // A sibling-internal FN call routes through its facade (the same-file
+                    // `Callee::Local` arm keys on `root_file_index`) — only classes/objects and
+                    // top-level properties (per-IR statics/class ids) remain unreconciled.
+                    Decl::Fun(df) if !df.is_inline && !df.visibility.is_private() => None,
+                    Decl::Fun(df) => Some(df.name.clone()),
+                    Decl::Class(dc) => Some(dc.name.clone()),
+                    Decl::Property(dp) => Some(dp.name.clone()),
                 })
                 .collect();
+            // Sibling FN references combined with a `return`-carrying body: the do-while wrapper's
+            // frames in ARGUMENT position expose an emitter spill gap (lambdaPropertyExtracted) —
+            // gate the combination until the operand spill covers it.
+            let fn_names: std::collections::HashSet<String> = callee_file
+                .decls
+                .iter()
+                .filter_map(|&d| match callee_file.decl(d) {
+                    Decl::Fun(df) => Some(df.name.clone()),
+                    _ => None,
+                })
+                .collect();
+            let callee_has_return = body_has_return(callee_file, body);
             let mut clash = false;
             collect_bare_names(callee_file, body, &mut |n| {
-                if !param_names.contains(n) && own_decl_names.contains(n) {
+                if param_names.contains(n) {
+                    return;
+                }
+                if own_decl_names.contains(n) || (callee_has_return && fn_names.contains(n)) {
                     clash = true;
                 }
             });
@@ -14877,7 +14902,10 @@ impl<'a> Lower<'a> {
             for &a in args {
                 match self.afile.expr(a) {
                     Expr::Lambda { body: lb, .. } => {
-                        if body_has_return(self.afile, *lb) || body_has_assign(self.afile, *lb) {
+                        if body_has_return(self.afile, *lb)
+                            || body_has_assign(self.afile, *lb)
+                            || body_has_callable_ref(self.afile, *lb)
+                        {
                             return None;
                         }
                     }
@@ -14952,6 +14980,12 @@ impl<'a> Lower<'a> {
         // position and fill each omitted parameter with its default expression (an inline fn substitutes the
         // default directly — no `$default` method). A vararg call keeps the raw list (packed below).
         let eff_storage: Vec<AstExprId>;
+        // Parallel to the effective args: `true` when the position is a REAL caller argument (vs a
+        // default-filled callee expression). A real argument must be evaluated in the CALLER's
+        // scope BEFORE any parameter binding enters it — a parameter named like a caller local
+        // otherwise SHADOWS it (`test(sideEffect(), a.x)` with params `(a, b)`: the second
+        // argument's `a` read the first parameter's temp — VerifyError/wrong value).
+        let real_arg: Vec<bool>;
         let has_named = self
             .afile
             .call_arg_names
@@ -14961,6 +14995,7 @@ impl<'a> Lower<'a> {
             if args.len() < n_fixed {
                 return None;
             }
+            real_arg = vec![true; args.len()];
             args
         } else if has_default || has_named {
             let names = self
@@ -14994,6 +15029,7 @@ impl<'a> Lower<'a> {
                 }
             }
             let mut eff = Vec::with_capacity(np);
+            real_arg = (0..np).map(|k| slot[k].is_some()).collect();
             for (k, p) in f.params.iter().enumerate() {
                 match slot[k] {
                     Some(a) => eff.push(a),
@@ -15009,6 +15045,7 @@ impl<'a> Lower<'a> {
             if sig_params.len() != args.len() {
                 return None;
             }
+            real_arg = vec![true; args.len()];
             args
         };
         // A genuinely recursive inline call re-enters the SAME call site, expanding without bound — bail
@@ -15067,6 +15104,30 @@ impl<'a> Lower<'a> {
         let depth = self.scope.len();
         let lam_depth = self.inline_lambdas.len();
         let mut stmts = Vec::new();
+        // Pre-lower plain REAL arguments in the caller's scope, before any parameter binding is
+        // pushed (see `real_arg`). Function-typed and vararg positions keep their in-loop handling;
+        // a default-filled position is a CALLEE expression that needs earlier params in scope.
+        let mut prelowered: Vec<Option<u32>> = vec![None; args.len()];
+        if !vararg {
+            for i in 0..args.len().min(sig_params.len()) {
+                if !real_arg.get(i).copied().unwrap_or(false) || matches!(sig_params[i], Ty::Fun(_))
+                {
+                    continue;
+                }
+                let spty = tbinds
+                    .get(f.params[i].ty.name.as_str())
+                    .copied()
+                    .unwrap_or(sig_params[i]);
+                let Some(v) = self.lower_arg(args[i], &ty_to_ir(spty)) else {
+                    self.scope.truncate(depth);
+                    self.inline_lambdas.truncate(lam_depth);
+                    self.inline_active.truncate(active_depth);
+                    self.reified_subst.truncate(reif_depth);
+                    return None;
+                };
+                prelowered[i] = Some(v);
+            }
+        }
         // An extension fn binds its receiver as `this`: evaluate it once into a temp, visible as `this`
         // in the body (so `this`, `this.member`, and implicit-receiver member access all resolve to it).
         if let Some(rt) = &recv_ty {
@@ -15234,7 +15295,11 @@ impl<'a> Lower<'a> {
                     .copied()
                     .unwrap_or(*pty);
                 let slot = self.fresh_value();
-                let val = match self.lower_arg(args[i], &ty_to_ir(spty)) {
+                let val = match prelowered
+                    .get_mut(i)
+                    .and_then(|p| p.take())
+                    .or_else(|| self.lower_arg(args[i], &ty_to_ir(spty)))
+                {
                     Some(v) => v,
                     None => {
                         self.scope.truncate(depth);
@@ -18489,7 +18554,8 @@ impl<'a> Lower<'a> {
                         .cloned()
                         .filter(|target| target.name == fname)
                         .and_then(|target| {
-                            (target.source_file == Some(self.file_index))
+                            (target.source_file == Some(self.root_file_index)
+                                && self.file_index == self.root_file_index)
                                 .then(|| {
                                     target
                                         .source_decl
@@ -18609,22 +18675,36 @@ impl<'a> Lower<'a> {
                         };
                         let ret = self.ir.functions[fid as usize].ret.clone();
                         self.coerce_erased_call_result(e, call, &ret, target.ret_is_tparam)
-                    } else if let Some((target, facade)) =
-                        self.info
-                            .resolved_module_top_level(e)
-                            .cloned()
-                            .filter(|target| target.name == fname)
-                            .and_then(|target| {
-                                target.source_file.zip(target.source_decl).and_then(
-                                    |(file, decl)| {
-                                        self.syms
-                                            .fn_facades_by_decl
-                                            .get(&(file, decl.0))
-                                            .cloned()
-                                            .map(|facade| (target, facade))
-                                    },
-                                )
-                            })
+                    } else if let Some((target, facade)) = self
+                        .info
+                        .resolved_module_top_level(e)
+                        .cloned()
+                        .filter(|target| target.name == fname)
+                        .and_then(|target| {
+                            target
+                                .source_file
+                                .zip(target.source_decl)
+                                .and_then(|(file, decl)| {
+                                    // An INLINE target has NO emitted method — a facade call
+                                    // would be a NoSuchMethodError (or worse). Such a call is
+                                    // only valid as an expansion; when the expansion declined
+                                    // (a soundness gate), the file must skip, not call.
+                                    if self
+                                        .module
+                                        .files
+                                        .get(file as usize)
+                                        .map(|f| f.decl(decl))
+                                        .is_some_and(|d| matches!(d, Decl::Fun(df) if df.is_inline))
+                                    {
+                                        return None;
+                                    }
+                                    self.syms
+                                        .fn_facades_by_decl
+                                        .get(&(file, decl.0))
+                                        .cloned()
+                                        .map(|facade| (target, facade))
+                                })
+                        })
                     {
                         self.lower_cross_file_module_call(e, &target, facade, &args)?
                     } else if let Some(r) = {
@@ -20332,6 +20412,17 @@ fn sibling_inline_body_expandable(file: &ast::File, e: AstExprId) -> bool {
         ) {
             return false;
         }
+        // An INTERPOLATING template (`"buzz($x)"`) concatenates a possibly tparam-typed part: the
+        // sibling info typed it erased while the expansion specializes the slot — the concat
+        // emission then reads the wrong repr (stack-map mismatch). Literal-only templates are fine.
+        if let Expr::Template(parts) = file.expr(e) {
+            if parts
+                .iter()
+                .any(|p| matches!(p, ast::TemplatePart::Expr(_)))
+            {
+                return false;
+            }
+        }
         !file.any_child_expr(e, &mut |x| !expr_ok(file, x), &mut |s| !stmt_ok(file, s))
     }
     expr_ok(file, e)
@@ -20399,6 +20490,15 @@ fn collect_bare_names(file: &ast::File, e: AstExprId, f: &mut dyn FnMut(&str)) {
             false
         },
     );
+}
+
+/// Whether `e` contains a callable reference (`::f`) — its synthesized ref class naming/binding is
+/// not reconciled across the cross-file inline context swap.
+fn body_has_callable_ref(file: &ast::File, e: AstExprId) -> bool {
+    matches!(file.expr(e), Expr::CallableRef { .. })
+        || file.any_child_expr(e, &mut |x| body_has_callable_ref(file, x), &mut |s| {
+            file.any_child_stmt(s, &mut |x| body_has_callable_ref(file, x))
+        })
 }
 
 /// Whether `e` contains any assignment or in/decrement (mutation a cross-file inline splice can't
