@@ -5086,6 +5086,7 @@ pub(crate) fn function_scope_packages_with(
 
 fn make_checker<'a>(
     file: &'a File,
+    module_files: &'a [File],
     file_index: u32,
     syms: &'a SymbolTable,
     diags: &'a mut DiagSink,
@@ -5095,6 +5096,7 @@ fn make_checker<'a>(
     let fn_scope = function_scope_packages(file, syms);
     Checker {
         file,
+        module_files,
         syms,
         module: crate::module_symbols::ModuleSymbols::new(syms),
         file_index,
@@ -5157,6 +5159,30 @@ pub fn check_file_at(
     syms: &mut SymbolTable,
     diags: &mut DiagSink,
 ) -> TypeInfo {
+    // No sibling list — pass EMPTY, not `from_ref(file)`: `source_key` file indexes are
+    // compilation-wide, so a 1-element slice would mis-map them onto the wrong file (decl-arena OOB).
+    check_file_in_module(file, &[], file_index, syms, diags)
+}
+
+/// [`check_file_at`] with the FULL module file list (indexed by the compilation's file numbering —
+/// `module_files[i]` MUST be file `i`): a sibling file's top-level generic fn decl is then visible to
+/// the call-site inference (`user_generic_call`); the current file is always searched first.
+pub fn check_file_in_module(
+    file: &File,
+    module_files: &[File],
+    file_index: u32,
+    syms: &mut SymbolTable,
+    diags: &mut DiagSink,
+) -> TypeInfo {
+    // Contract: a non-empty `module_files` is the compilation's file list, indexed by its file
+    // numbering — `module_files[file_index]` must be THIS file (source_key indexes map through it).
+    debug_assert!(
+        module_files.is_empty()
+            || module_files
+                .get(file_index as usize)
+                .is_some_and(|f| std::ptr::eq(f, file)),
+        "module_files must be indexed by the compilation's file numbering"
+    );
     // Pre-infer EXPRESSION-body return types (top-level functions AND class methods) and patch the
     // signature table BEFORE the main check — so a call to `fun m() = f()` resolves to its real return,
     // not the collection default `Unit`. Without this, a method whose return couldn't be inferred at
@@ -5167,7 +5193,7 @@ pub fn check_file_at(
     // dependency chain is shallow; an unresolvable case simply stops improving).
     for _pass in 0..8 {
         let mut scratch = DiagSink::new();
-        let mut pre = make_checker(file, file_index, &*syms, &mut scratch);
+        let mut pre = make_checker(file, module_files, file_index, &*syms, &mut scratch);
         for &d in &file.decls {
             if let Decl::Fun(f) = file.decl(d) {
                 if f.ret.is_none() && matches!(f.body, FunBody::Expr(_)) {
@@ -5237,7 +5263,7 @@ pub fn check_file_at(
         }
     }
 
-    let mut c = make_checker(file, file_index, &*syms, diags);
+    let mut c = make_checker(file, module_files, file_index, &*syms, diags);
     // Top-level functions that erase to the same JVM signature collide in the facade class.
     let top_funs: Vec<&FunDecl> = file
         .decls
@@ -6018,6 +6044,11 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
 
 struct Checker<'a> {
     file: &'a File,
+    /// ALL files of this compilation (the current one included) — a `// FILE:` split / multi-file
+    /// module. Call-site generic machinery (`user_generic_call`/`module_top_level_return`) needs a
+    /// sibling top-level fn's DECL with its un-erased `TypeRef`s; the `Signature` channel erases the
+    /// type-parameter structure (`R` → `Any`), so a cross-file generic HOF's lambda would type erased.
+    module_files: &'a [File],
     syms: &'a SymbolTable,
     /// This compilation's declarations as a [`SymbolSource`], federated OVER the classpath by the resolver
     /// so a user function/type shadows a library one of the same name. Borrows the same `syms`.
@@ -6851,14 +6882,19 @@ impl<'a> Checker<'a> {
         {
             ret_ty = inferred;
         }
-        if let Some(f) = selected
-            .source_key
-            .filter(|(file, _)| *file == self.file_index)
-            .and_then(|(_, decl)| match self.file.decl(DeclId(decl)) {
+        if let Some(f) = selected.source_key.and_then(|(file, decl)| {
+            // The current file, or a SIBLING file of this compilation (a `// FILE:` split) —
+            // the generic-return inference needs the decl's un-erased TypeRefs either way.
+            let src = if file == self.file_index {
+                Some(self.file)
+            } else {
+                self.module_files.get(file as usize)
+            }?;
+            match src.decl(DeclId(decl)) {
                 Decl::Fun(f) => Some(f),
                 _ => None,
-            })
-        {
+            }
+        }) {
             if let Some(r) = self.user_generic_return(f, arg_tys) {
                 ret_ty = r;
             }
@@ -11276,20 +11312,44 @@ impl<'a> Checker<'a> {
     /// types `it` as `Int` and the call as `Int`, not the erased `Any`. `None` when no matching user
     /// function or it isn't generic. `partial[i]` is `Some(ty)` for a non-lambda arg, `None` for a lambda.
     fn user_generic_call(&mut self, fname: &str, partial: &[Option<Ty>]) -> Option<Vec<Vec<Ty>>> {
-        let f = self
-            .file
-            .decls
-            .iter()
-            .find_map(|&d| match self.file.decl(d) {
+        // Current file first, then the compilation's SIBLING files (a `// FILE:` split): the erased
+        // `Signature` channel loses the type-parameter structure, so a cross-file generic HOF's
+        // lambda needs the decl itself. Top-level fn names are unique per compilation (the
+        // conflicting-declarations check), so first match wins.
+        let (f, sibling) = std::iter::once((self.file, false))
+            .chain(
+                self.module_files
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i as u32 != self.file_index)
+                    .map(|(_, f)| (f, true)),
+            )
+            .flat_map(|(file, sib)| file.decls.iter().map(move |&d| (file.decl(d), sib)))
+            .find_map(|(d, sib)| match d {
                 Decl::Fun(f)
                     if f.name == fname
                         && f.receiver.is_none()
                         && f.params.len() == partial.len() =>
                 {
-                    Some(f.clone())
+                    Some((f.clone(), sib))
                 }
                 _ => None,
             })?;
+        // A SIBLING decl's TypeRefs would resolve through the CURRENT file's imports/class names — a
+        // same-simple-name class from another package could silently bind the WRONG type. Only accept a
+        // sibling decl whose function-typed params mention nothing but its own type parameters and
+        // primitive/builtin names (the corpus HOF shape); anything else stays erased (sound skip).
+        if sibling {
+            let known = |n: &str| {
+                f.type_params.iter().any(|tp| tp == n) || Ty::from_name(n).is_some() || n == "<fun>"
+            };
+            let ok = f.params.iter().all(|p| {
+                p.ty.fun_params.is_empty() || p.ty.fun_params.iter().all(|fp| known(&fp.name))
+            });
+            if !ok {
+                return None;
+            }
+        }
         // Only an INLINE function specializes its type params at the call site (the body is spliced with
         // concrete types); a NON-inline one materializes its lambda as an erased `Function1` whose `it`
         // arrives as `Object`, but the synthesized invoke `checkcast`s to the bound type — sound for a
@@ -17982,6 +18042,31 @@ fun box(): String {
         assert_eq!(target.source_file, Some(0));
         assert_eq!(target.source_decl, Some(helper_decl));
         assert!(target.param_meta.is_empty());
+    }
+
+    #[test]
+    fn cross_file_generic_inline_hof_types_lambda_param_from_value_arg() {
+        // `inline fun <R> foo(x: R, block: (R) -> R): R` in one file, `foo(1) { x -> x + 1 }` in a
+        // sibling: the erased `Signature` channel loses `R`, so the lambda param must come from the
+        // sibling DECL via `user_generic_call` — without the cross-file decl search, `x` typed `Any`
+        // and `x + 1` errored ("operator cannot be applied").
+        let mut d = DiagSink::new();
+        let files = vec![
+            parse_file(
+                "inline fun <R> foo(x: R, block: (R) -> R): R { return block(x) }",
+                &mut d,
+            ),
+            parse_file("fun box(): Int = foo(1) { x -> x + 1 }", &mut d),
+        ];
+        let mut syms = collect_signatures(&files, &mut d);
+        let foo_decl = top_level_fun_decl(&files[0], "foo", |_| true);
+        syms.fn_facades_by_decl
+            .insert((0, foo_decl.0), crate::types::type_name("AKt"));
+        syms.fn_facades
+            .insert("foo".to_string(), crate::types::type_name("AKt"));
+        d.set_file(1);
+        let _info = check_file_in_module(&files[1], &files, 1, &mut syms, &mut d);
+        assert_no_diags(&d);
     }
 
     #[test]
