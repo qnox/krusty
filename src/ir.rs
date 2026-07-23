@@ -754,6 +754,12 @@ pub enum FrDispatch {
     /// argument of `invokestatic call_owner.call_name(receiver, args…)`. `target_param_tys` leads with
     /// the receiver type; `param_tys` (the invoke args) map to `target_param_tys[1..]`.
     StaticBound,
+    /// Suspend conversion: a NON-suspend function VALUE captured as the receiver, adapted to a
+    /// `suspend` function type. `invoke((args…), continuation)` delegates
+    /// `invokeinterface call_owner(=Function{n}).invoke(args…)` with the trailing continuation
+    /// DROPPED (a plain function never suspends; its erased result is returned as the completion
+    /// value). The class also implements the `kotlin/coroutines/jvm/internal/SuspendFunction` marker.
+    SuspendConvert,
 }
 
 /// A synthesized function-reference subclass of `kotlin/jvm/internal/FunctionReferenceImpl`. See
