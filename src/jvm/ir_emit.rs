@@ -3240,6 +3240,10 @@ fn emit_func_ref_class(
     let mut cw = new_writer(&fq, &superclass, opts);
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER
     cw.add_interface(&format!("kotlin/jvm/functions/Function{}", fr.arity));
+    if matches!(fr.dispatch, FrDispatch::SuspendConvert) {
+        // The suspend-conversion adapter also carries kotlinc's suspend-function marker interface.
+        cw.add_interface("kotlin/coroutines/jvm/internal/SuspendFunction");
+    }
 
     // The call argument param types begin AFTER the receiver for an unbound member ref.
     let first_arg = match fr.dispatch {
@@ -3269,18 +3273,30 @@ fn emit_func_ref_class(
     signature_desc.push_str(&signature_ret);
     let signature = format!("{}{}", fr.fn_name, signature_desc);
 
-    let mut call_desc = String::from("(");
-    for pt in fr.target_param_tys.iter().skip(first_arg) {
-        call_desc.push_str(&ir_type_desc(pt));
-    }
-    call_desc.push(')');
     let target_ret_jvm = ir_ty_to_jvm(&fr.target_ret_ty);
-    let ret_desc = if returns_void {
-        "V".to_string()
+    let call_desc = if matches!(fr.dispatch, FrDispatch::SuspendConvert) {
+        // The delegated call is the wrapped value's ERASED `Function{n}.invoke` — `n` erased Object
+        // parameters (the invoke's trailing continuation is dropped), Object return.
+        let mut d = String::from("(");
+        for _ in 0..fr.arity as usize - 1 {
+            d.push_str("Ljava/lang/Object;");
+        }
+        d.push_str(")Ljava/lang/Object;");
+        d
     } else {
-        type_descriptor(target_ret_jvm)
+        let mut d = String::from("(");
+        for pt in fr.target_param_tys.iter().skip(first_arg) {
+            d.push_str(&ir_type_desc(pt));
+        }
+        d.push(')');
+        let ret_desc = if returns_void {
+            "V".to_string()
+        } else {
+            type_descriptor(target_ret_jvm)
+        };
+        d.push_str(&ret_desc);
+        d
     };
-    call_desc.push_str(&ret_desc);
 
     if fr.bound {
         // `<init>(Object)V`: super(arity, receiver, owner.class, name, sig, flags).
@@ -3341,7 +3357,7 @@ fn emit_func_ref_class(
     let mut inv = CodeBuilder::new(1 + arity);
     // Push the receiver for a member dispatch (`first_arg`, computed above, skips it in the arg loop).
     match fr.dispatch {
-        FrDispatch::VirtualBound => {
+        FrDispatch::VirtualBound | FrDispatch::SuspendConvert => {
             inv.aload(0);
             let recv_f = cw.fieldref(&superclass, "receiver", "Ljava/lang/Object;");
             inv.getfield(recv_f, 1);
@@ -3396,6 +3412,11 @@ fn emit_func_ref_class(
         _ => 0,
     };
     for (k, pt) in fr.param_tys.iter().enumerate().skip(first_arg) {
+        // Suspend conversion: the trailing continuation parameter is NOT forwarded — the wrapped
+        // plain function never suspends and takes only the value arguments.
+        if matches!(fr.dispatch, FrDispatch::SuspendConvert) && k == fr.param_tys.len() - 1 {
+            continue;
+        }
         inv.aload(1 + k as u16);
         let jt = ir_ty_to_jvm(pt);
         if jt.is_jvm_scalar() {
@@ -3508,7 +3529,8 @@ fn func_ref_call_stack_prefix(
         crate::ir::FrDispatch::Static => Vec::new(),
         crate::ir::FrDispatch::VirtualBound
         | crate::ir::FrDispatch::VirtualUnbound
-        | crate::ir::FrDispatch::StaticBound => {
+        | crate::ir::FrDispatch::StaticBound
+        | crate::ir::FrDispatch::SuspendConvert => {
             vec![VerifType::Object(cw.class_ref(call_owner))]
         }
     }
@@ -6145,6 +6167,11 @@ impl<'a> Emitter<'a> {
         scratch: &mut CodeBuilder,
     ) -> Option<(Vec<crate::jvm::inline::Insn>, ResolvedFrames)> {
         let fr = self.ir.classes[class as usize].func_ref.clone()?;
+        // A suspend-conversion adapter is driven as a coroutine (continuation-aware), never inlined
+        // as a plain function-reference body — decline so the caller keeps the real class.
+        if matches!(fr.dispatch, crate::ir::FrDispatch::SuspendConvert) {
+            return None;
+        }
         let call_owner = fr.call_owner_or_facade(&self.facade);
         let first_call_arg = match fr.dispatch {
             crate::ir::FrDispatch::VirtualUnbound => 1usize,
@@ -6201,6 +6228,8 @@ impl<'a> Emitter<'a> {
                     scratch.checkcast(cref);
                 }
             }
+            // Declined above — a suspend-conversion adapter is never inlined.
+            crate::ir::FrDispatch::SuspendConvert => return None,
         }
 
         let mut call_desc = String::from("(");
