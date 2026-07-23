@@ -408,6 +408,33 @@ pub fn lower_value_classes(
                     }
                 }
             }
+            // A MANGLED member returning a non-null value class (`foo-<hash>(): X`) physically
+            // yields the UNBOXED underlying — record its result repr so a generic/`Object` consumer
+            // (`foo(qux(…))`) `box-impl`s it. An UNMANGLED member with the same logical return (a
+            // boxing override / interface dispatch) returns the BOXED `X` and stays out of the map
+            // (its `NotVc` fallthrough repr was already correct).
+            for (mi, &fid) in c.methods.iter().enumerate() {
+                let f = &ir.functions[fid as usize];
+                let ret = &f.ret;
+                // A GENERIC value class (`Z<T>`) has box/unbox conventions this repr shortcut can't
+                // model (see `generic_vcs` below) — leave its members out.
+                let vc_ret = !ret.is_nullable()
+                    && ret.non_null().obj_internal().is_some_and(|fq| {
+                        under.contains_key(&fq)
+                            && !ir.classes.iter().any(|vc| {
+                                vc.fq_name == fq && vc.is_value && !vc.type_params.is_empty()
+                            })
+                    });
+                if !vc_ret {
+                    continue;
+                }
+                let is_suspend = ir.suspend_funs.contains(&fid);
+                let mangled =
+                    vc_mangle(&f.name, &f.params, ret, &under, false, is_suspend) != f.name;
+                if mangled {
+                    m.entry((ci as u32, mi as u32)).or_insert(*ret);
+                }
+            }
         }
         m
     };
@@ -510,16 +537,52 @@ pub fn lower_value_classes(
             .obj_internal()
             .is_some_and(|fq| under.contains_key(&fq))
     };
-    // Only a NON-NULL value-class RETURN is unmodeled (the resume-side `checkcast X` meets the raw
-    // underlying); VC PARAMS pass unboxed through the mangled CPS signature and work, and a nullable
-    // `X?` return is already the boxed form.
+    // Only a CROSS-UNIT suspend call's non-null value-class return remains unmodeled; VC PARAMS pass
+    // unboxed through the mangled CPS signature and work, a nullable `X?` return is already the boxed
+    // form, and a SAME-FILE suspend fn's non-null VC return is handled by the COROUTINE pass (which
+    // runs after this one): record fid → (X, underlying) so it can apply kotlinc's boxed-resume ABI —
+    // the callee's user returns `box-impl`, a caller's resume bind `checkcast X` + `unbox-impl`.
     let vc_ret = |t: &Ty| !t.is_nullable() && mentions_vc(t);
-    let suspend_vc = suspend_fids
-        .iter()
-        .any(|&fid| orig_rets.get(fid as usize).is_some_and(vc_ret))
-        || ir.suspend_calls.values().any(vc_ret);
-    if suspend_vc {
+    if ir.suspend_calls.values().any(vc_ret) {
         return false;
+    }
+    let vc_ret_fids: Vec<(u32, TypeName)> = suspend_fids
+        .iter()
+        .filter_map(|&fid| {
+            orig_rets
+                .get(fid as usize)
+                .filter(|t| vc_ret(t))
+                .and_then(|t| t.non_null().obj_internal())
+                .map(|x| (fid, x))
+        })
+        .collect();
+    if !vc_ret_fids.is_empty() {
+        // Two boxed-resume shapes are NOT yet covered — bail (skip the file, never miscompile):
+        // a PRIMITIVE-underlying value class (`box-impl(I)` vs the int slot family), and a file
+        // whose suspend fns use the RAW intrinsic (`CurrentContinuation` — external resume delivers
+        // through a state layout the boxed binds don't model yet).
+        let prim_under = vc_ret_fids.iter().any(|(_, x)| {
+            under.get(x).is_some_and(|u| {
+                // …nor a NESTED value-class underlying (`IC(val s: I0)` — its box/unbox chains
+                // compose through two impls).
+                !is_ref(&erase(u, &under))
+                    || u.non_null()
+                        .obj_internal()
+                        .is_some_and(|iu| under.contains_key(&iu))
+            })
+        });
+        let uses_raw_intrinsic = ir
+            .exprs
+            .iter()
+            .any(|e| matches!(e, IrExpr::CurrentContinuation));
+        if prim_under || uses_raw_intrinsic {
+            return false;
+        }
+        for (fid, x) in vc_ret_fids {
+            if let Some(u) = under.get(&x) {
+                ir.suspend_vc_rets.insert(fid, (x, *u));
+            }
+        }
     }
     let slot_types: Vec<HashMap<u32, Ty>> = ir
         .functions
@@ -2715,6 +2778,7 @@ fn repr(
         {
             repr_of_ty(&field_getters[&(*class, *index)], under)
         }
+
         IrExpr::Call {
             callee: Callee::Static { owner, name, .. },
             ..

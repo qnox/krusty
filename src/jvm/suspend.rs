@@ -78,6 +78,7 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
         let fn_unit_ret = orig_rets[fid as usize] == Ty::Unit;
         let forward =
             body.and_then(|b| tail_forward_call(ir, b, &suspend_set, fn_unit_ret, &orig_rets));
+        crate::trace_compiler!("suspend", "fn fid={fid} forward={:?}", forward.is_some());
         // Capture the per-suspension lexical scope lists BEFORE splice/hoist reshape the body:
         // `splice_return_blocks` flattens block STATEMENTS into their parent, which would leak a
         // block-scoped local (a `for`-loop iterator) into every later suspension's scope. Suspend-call
@@ -237,6 +238,9 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
             // returns its boxed value, a `Unit` body runs for effect then returns `Unit.INSTANCE`.
             if let Some(b) = body {
                 rewrite_current_continuation(ir, b, p_old);
+                if let Some((x, u)) = ir.suspend_vc_rets.get(&fid).cloned() {
+                    box_vc_returns(ir, b, x, &u, &[]);
+                }
                 if !box_returns(ir, b) {
                     return false;
                 }
@@ -857,6 +861,26 @@ fn hoist_stmt(
 /// Replace each unconditional suspension call in `e` with a fresh `tmp`, appending `val tmp = <call>` to
 /// `prelude`. Recurses through value nodes that always evaluate their children; stops at conditional
 /// nodes (an inner `if`/`when`/elvis), leaving suspensions there for the flattener (or a later skip).
+/// Whether `x`'s subtree contains a control-flow node (`when`/loop/`try`) — the flattener's own
+/// structural machinery owns those shapes; the pure-bind block hoist leaves them intact.
+fn contains_ctrl(ir: &IrFile, x: ExprId) -> bool {
+    let mut stack = vec![x];
+    let mut seen: HashSet<ExprId> = HashSet::new();
+    while let Some(y) = stack.pop() {
+        if !seen.insert(y) {
+            continue;
+        }
+        if matches!(
+            ir.exprs[y as usize],
+            IrExpr::When { .. } | IrExpr::While { .. } | IrExpr::Try { .. }
+        ) {
+            return true;
+        }
+        for_each_child(&ir.exprs, y, &mut |c| stack.push(c));
+    }
+    false
+}
+
 fn hoist_expr(
     ir: &mut IrFile,
     e: ExprId,
@@ -906,6 +930,7 @@ fn hoist_expr(
             })
             .unwrap_or_else(object_ty);
         let tmp = max_value_index(ir) + 1;
+        crate::trace_compiler!("suspend", "hoist suspension e={e} -> tmp={tmp}");
         let var = ir.add_expr(IrExpr::Variable {
             index: tmp,
             ty,
@@ -1003,6 +1028,29 @@ fn hoist_expr(
             ir.exprs[e as usize] = IrExpr::Return(Some(nv));
             e
         }
+        // A PURE-BIND value-position block — the value-class pass's boundary rewrites bind their
+        // operands in one (`{ val t = …; box-impl(t) }`): every statement is a plain temp
+        // declaration and nothing branches, so hoisting a suspension out preserves evaluation
+        // order. Any other statement-carrying block stays with the flattener (lifting its
+        // statements would reorder them — the empty-stmts arm below handles pure grouping).
+        IrExpr::Block { stmts, value } => {
+            let pure_binds = stmts.iter().all(|&st| {
+                matches!(ir.exprs[st as usize], IrExpr::Variable { .. }) && !contains_ctrl(ir, st)
+            });
+            if !pure_binds || value.is_none() || value.is_some_and(|v| contains_ctrl(ir, v)) {
+                return e;
+            }
+            let ns: Vec<ExprId> = stmts
+                .iter()
+                .map(|&st| hoist_expr(ir, st, suspend_set, orig_rets, prelude))
+                .collect();
+            let nv = value.map(|v| hoist_expr(ir, v, suspend_set, orig_rets, prelude));
+            ir.exprs[e as usize] = IrExpr::Block {
+                stmts: ns,
+                value: nv,
+            };
+            e
+        }
         // A write to a captured `var` (a `Ref`-cell holder) whose right-hand side suspends
         // (`result = await(…)` for a captured `result`): hoist the holder then the value, so the
         // suspension becomes a preceding bound temp (`val tmp = await(…); ref.element = tmp`).
@@ -1074,16 +1122,6 @@ fn hoist_expr(
             };
             e
         }
-        // A STATEMENT-LESS `Block` in VALUE position — an INLINE function's body spliced into a `return`/
-        // `val =`/argument position collapses to `{ <value> }` (`return myRun { await() }` →
-        // `return { await() }`). Hoist a suspension in its trailing value; the block is just grouping. An
-        // inline fn does not break the suspend context, so the spliced tail suspension is an ordinary
-        // bound-local suspension here. A block WITH statements is left for the flattener (lifting its
-        // statements out would reorder them — e.g. a suspend body spliced inside a loop).
-        IrExpr::Block {
-            stmts,
-            value: Some(v),
-        } if stmts.is_empty() => hoist_expr(ir, v, suspend_set, orig_rets, prelude),
         // A leaf or a conditional/unhandled node: leave it (any suspension inside surfaces to the
         // flattener, which restructures it or skips the file).
         _ => e,
@@ -2027,6 +2065,11 @@ fn build_state_machine(
         },
     );
     ir.functions[fid as usize].body = Some(new_body);
+    // Boxed-resume ABI, callee side: a machine whose original return is a non-null value class
+    // re-boxes each USER return; the sentinel/`r` protocol returns stay raw.
+    if let Some((x, u)) = ir.suspend_vc_rets.get(&fid).cloned() {
+        box_vc_returns(ir, new_body, x, &u, &[suspended_v, r_v]);
+    }
     box_returns(ir, new_body)
 }
 
@@ -2450,6 +2493,11 @@ fn build_lambda_state_machine(
         },
     );
     ir.functions[fid as usize].body = Some(new_body);
+    // Boxed-resume ABI, callee side: a machine whose original return is a non-null value class
+    // re-boxes each USER return; the sentinel/`r` protocol returns stay raw.
+    if let Some((x, u)) = ir.suspend_vc_rets.get(&fid).cloned() {
+        box_vc_returns(ir, new_body, x, &u, &[suspended_v, r_v]);
+    }
     box_returns(ir, new_body)
 }
 
@@ -2648,14 +2696,36 @@ impl Flat<'_> {
     /// Bind a suspension result from `cont.result` (loaded into `r`) at a resume state's entry.
     /// A spilled local's slot is pre-declared in the machine PROLOGUE (zero-initialized), so assign
     /// it; a non-spilled local is declared here.
-    fn bind_from_r(&mut self, out: &mut Vec<ExprId>, local: u32, ty: &Ty, _resume: usize) {
+    fn bind_from_r(&mut self, out: &mut Vec<ExprId>, local: u32, ty: &Ty, call: ExprId) {
         crate::trace_compiler!(
             "suspend",
             "bind_from_r local={local} ty={ty:?} spilled={}",
             self.is_spilled(local)
         );
         let rg = self.gv(self.r_v);
-        let unb = unbox(self.ir, rg, ty);
+        // Boxed-resume ABI: a callee whose original return is a non-null value class delivers a
+        // BOXED `x` — `checkcast x` then `unbox-impl` back to the underlying slot convention.
+        let unb = if let Some((x, u)) = call_vc_ret(self.ir, call, self.suspend) {
+            let cast = self.add(IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg: rg,
+                type_operand: Ty::obj_name(x),
+            });
+            let u_jvm = super::ir_emit::ir_ty_to_jvm(&u);
+            let desc = crate::jvm::names::method_descriptor(&[], u_jvm);
+            self.add(IrExpr::Call {
+                callee: Callee::Virtual {
+                    owner: x,
+                    name: "unbox-impl".to_string(),
+                    descriptor: desc,
+                    interface: false,
+                },
+                dispatch_receiver: Some(cast),
+                args: vec![],
+            })
+        } else {
+            unbox(self.ir, rg, ty)
+        };
         self.mark_assigned(local);
         if self.is_spilled(local) {
             out.push(self.add(IrExpr::SetValue {
@@ -2863,7 +2933,7 @@ impl Flat<'_> {
                 let br_resume = self.new_state();
                 self.emit_call(&mut bb, *value, br_resume);
                 let mut rs: Vec<ExprId> = Vec::new();
-                self.bind_from_r(&mut rs, local, ty, br_resume);
+                self.bind_from_r(&mut rs, local, ty, *value);
                 self.goto(&mut rs, merge);
                 self.states[br_resume] = rs;
             } else if let IrExpr::Block { stmts, value } = self.ir.exprs[*value as usize].clone() {
@@ -3059,7 +3129,7 @@ impl Flat<'_> {
                 self.states[cur] = out;
                 let mut rs: Vec<ExprId> = Vec::new();
                 if let Some((local, ty)) = bind {
-                    self.bind_from_r(&mut rs, local, &ty, resume);
+                    self.bind_from_r(&mut rs, local, &ty, call);
                 }
                 self.states[resume] = rs;
                 self.flatten(&stmts[i + 1..], resume, after);
@@ -4576,6 +4646,60 @@ fn unbox(ir: &mut IrFile, value: ExprId, target: &Ty) -> ExprId {
         arg: value,
         type_operand: target.clone(),
     })
+}
+
+/// kotlinc's boxed-resume ABI, callee side: a suspend fn whose ORIGINAL return is the non-null
+/// value class `x` re-boxes each USER return (`box-impl(underlying)`) before the CPS `Object`
+/// coercion. Protocol returns — the COROUTINE_SUSPENDED sentinel and the dispatch's `r` forward
+/// (`skip` value-indices), the `Unit` singleton — are not user values and stay untouched.
+fn box_vc_returns(ir: &mut IrFile, body: ExprId, x: TypeName, u: &Ty, skip: &[u32]) {
+    let mut stack = vec![body];
+    let mut seen: HashSet<ExprId> = HashSet::new();
+    let mut rets: Vec<ExprId> = Vec::new();
+    while let Some(e) = stack.pop() {
+        if !seen.insert(e) {
+            continue;
+        }
+        if matches!(ir.exprs[e as usize], IrExpr::Return(Some(_))) {
+            rets.push(e);
+        }
+        for_each_child(&ir.exprs, e, &mut |c| stack.push(c));
+    }
+    let u_jvm = super::ir_emit::ir_ty_to_jvm(u);
+    let x_jvm = super::ir_emit::ir_ty_to_jvm(&Ty::obj_name(x));
+    let desc = crate::jvm::names::method_descriptor(&[u_jvm], x_jvm);
+    for r in rets {
+        let IrExpr::Return(Some(v)) = ir.exprs[r as usize] else {
+            continue;
+        };
+        let protocol = match &ir.exprs[v as usize] {
+            IrExpr::GetValue(i) => skip.contains(i),
+            IrExpr::UnitInstance => true,
+            _ => false,
+        };
+        if protocol {
+            continue;
+        }
+        let boxed = ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: x,
+                name: "box-impl".to_string(),
+                descriptor: desc.clone(),
+                inline: InlineKind::None,
+            },
+            dispatch_receiver: None,
+            args: vec![v],
+        });
+        ir.exprs[r as usize] = IrExpr::Return(Some(boxed));
+    }
+}
+
+/// Boxed-resume ABI, caller side: the suspension call's fid (or a cross-unit record) says the
+/// resumed value is a BOXED `x` — the bind then `checkcast x` + `unbox-impl`s back to the
+/// underlying, keeping the whole-pass "a value-class slot holds the unboxed underlying" convention.
+fn call_vc_ret(ir: &IrFile, call: ExprId, suspend_set: &HashSet<u32>) -> Option<(TypeName, Ty)> {
+    let fid = suspend_call_fid(ir, call, suspend_set)?;
+    ir.suspend_vc_rets.get(&fid).map(|(x, u)| (*x, *u))
 }
 
 /// Whether narrowing an erased `Object` resume value to `t` needs an explicit `checkcast` — a concrete

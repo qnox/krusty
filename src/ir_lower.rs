@@ -1329,7 +1329,7 @@ pub fn lower_file_in_module_reporting<'a>(
                             };
                             let fid = lo.ir.add_fun(IrFunction {
                                 name: sname.clone(),
-                                params: vec![fty_ir.clone()],
+                                params: vec![fty_ir],
                                 ret: Ty::Unit,
                                 body: Some(body),
                                 is_static: false,

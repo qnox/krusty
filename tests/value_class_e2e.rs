@@ -288,3 +288,46 @@ fun box(): String {
         Some("OK")
     );
 }
+
+#[test]
+fn generic_arg_boxes_a_mangled_member_call_result() {
+    // `foo(qux(quz(IC("OK"))))` — `qux` is a MANGLED member returning non-null `IC` (physically the
+    // unboxed underlying); flowing it into a GENERIC `Object` parameter must `box-impl`. The repr
+    // analysis missed plain member calls (`NotVc`), so the raw String crossed the boundary (CCE at
+    // the caller's `checkcast IC`).
+    let src = r#"
+inline class IC(val s: String)
+class T1 {
+    fun <T> quz(t: T): T = t
+    fun qux(ss: IC): IC = IC(ss.s)
+    fun <T> foo(value: T): T = value
+    fun bar(): IC { return foo(qux(quz(IC("OK")))) }
+}
+fun box(): String = T1().bar().s
+"#;
+    common::assert_box_ok_with_stdlib(src, "Main");
+}
+
+#[test]
+fn suspend_fn_returning_value_class_boxes_across_the_resume_boundary() {
+    // kotlinc's boxed-resume ABI: a suspend fn whose declared return is a non-null value class
+    // re-boxes at every return (`box-impl` before the CPS Object coercion) and the caller's resume
+    // bind `checkcast X` + `unbox-impl`s back to the underlying slot convention.
+    let src = r#"
+import kotlin.coroutines.*
+fun builder(c: suspend () -> Unit) {
+    c.startCoroutine(object : Continuation<Unit> {
+        override val context: CoroutineContext = EmptyCoroutineContext
+        override fun resumeWith(result: Result<Unit>) { result.getOrThrow() }
+    })
+}
+inline class IC(val s: String)
+class T2 {
+    suspend fun mk(s: String): IC = IC(s)
+    suspend fun pass(v: IC): IC = v
+    suspend fun run2(): IC { val a = mk("OK"); return pass(a) }
+}
+fun box(): String { var r = "FAIL"; builder { r = T2().run2().s }; return r }
+"#;
+    common::assert_box_ok_with_stdlib(src, "Main");
+}

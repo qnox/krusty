@@ -1874,3 +1874,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   yields a raw primitive where the consumer expects a reference. Exactly that case takes an
   `ImplicitCoercion` to the erased type; a value-class or `Nothing` result keeps its own convention.
   (`cross_file_inferred_return_inline_call_boxes_the_any_result`.)
+
+- **A suspend fn returning a non-null value class uses kotlinc's boxed-resume ABI (guarded shapes).**
+  The value-class pass (which runs first and erases the types) records fid → (X, underlying) in
+  `IrFile.suspend_vc_rets`; the coroutine pass then re-boxes each USER return (`box-impl` before the
+  CPS `Object` coercion — the sentinel/`r` protocol returns stay raw) and a caller's resume bind
+  `checkcast X` + `unbox-impl`s back to the unboxed slot convention. Covered: reference-underlying,
+  non-generic, non-nested value classes in files without the raw intrinsic
+  (`suspendCoroutineUninterceptedOrReturn`); everything else keeps the file-level skip. A mangled
+  member's call result now also reprs as the UNBOXED underlying (via the `field_getters` channel), so
+  a generic `Object` consumer boxes it — a plain member call previously read `NotVc` and leaked the
+  raw underlying (CCE). The pure-bind block hoist lets a suspension under the VC pass's boundary
+  wrappers (`{ val t = …; box-impl(t) }`) reach the flattener.
+  (`generic_arg_boxes_a_mangled_member_call_result`,
+  `suspend_fn_returning_value_class_boxes_across_the_resume_boundary`; corpus 3018 → 3023, the
+  `coroutines/inlineClasses/direct` slice.)

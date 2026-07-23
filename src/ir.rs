@@ -1056,6 +1056,12 @@ pub struct IrFile {
     /// Instance methods kotlinc emits `private` — currently a property's `private set` setter. The JVM
     /// backend uses `ACC_PRIVATE` instead of `ACC_PUBLIC` for a `FunId` in this set.
     pub private_methods: std::collections::HashSet<u32>,
+    /// Suspend fns whose ORIGINAL (pre-erasure) return is a NON-NULL value class: fid → (the value
+    /// class, its underlying type). Recorded by the value-class pass (which erases the types before
+    /// the coroutine pass runs) so the coroutine pass can apply kotlinc's boxed-resume ABI: the
+    /// callee's user returns `box-impl` before crossing the `Continuation` `Object` boundary, and a
+    /// caller's resume bind `checkcast X` + `unbox-impl` back to the underlying slot convention.
+    pub suspend_vc_rets: std::collections::HashMap<u32, (TypeName, Ty)>,
     /// Methods kotlinc emits with DEFAULT (package-private) visibility — currently the
     /// `<name>$suspendImpl` static split of an open member suspend fn (kotlinc: `0x1008`
     /// STATIC|SYNTHETIC, no visibility bits). The JVM backend emits no visibility flag for these.
