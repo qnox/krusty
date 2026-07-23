@@ -879,10 +879,11 @@ pub struct File {
     /// `typealias Name = Target` — maps alias simple name → target simple name.
     /// Generic type aliases are stored with the raw target name (type args erased).
     pub type_aliases: Vec<(String, String)>,
-    /// `typealias Name = (A) -> R` — aliases whose target is a FUNCTION type, kept as the full
-    /// `TypeRef` (parameters, return, `suspend`, receiver). Only NON-generic aliases are recorded;
-    /// a generic function-type alias stays unexpanded (→ unresolved, cleanly skipped).
-    pub type_alias_fun: Vec<(String, TypeRef)>,
+    /// `typealias Name<T…> = (A) -> R` — aliases whose target is a FUNCTION type: the alias name,
+    /// its declared type-parameter names (empty for a non-generic alias), and the full target
+    /// `TypeRef` (parameters, return, `suspend`, receiver). A generic alias expands by substituting
+    /// the use site's type arguments for the parameter names in a clone of the target.
+    pub type_alias_fun: Vec<(String, Vec<String>, TypeRef)>,
     /// File-level annotations (`@file:Foo(args…)`) as `(simple_name, arg ExprIds)`. Lets a plugin read
     /// e.g. `@file:UseContextualSerialization(MyDate::class)` to mark matching property types contextual.
     pub file_annotations: Vec<(String, Vec<ExprId>)>,

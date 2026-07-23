@@ -15835,6 +15835,15 @@ impl<'a> Checker<'a> {
                     );
                 }
                 let declared = ty.as_ref().map(|r| self.resolve_ty(r));
+                // An UNRESOLVED annotation must fail the file, not silently bind `Error`: the local
+                // would otherwise take its initializer's shape while every use site's checks are
+                // Error-suppressed — a cross-module `val b: Bar<String> = { "OK" }` (alias declared in
+                // another module) then SAM-converts the lambda by ITS OWN arity and miscompiles
+                // (IncompatibleClassChangeError at the call expecting the annotated shape).
+                if let (Some(Ty::Error), Some(r)) = (declared, ty.as_ref()) {
+                    self.diags
+                        .error(r.span, format!("unresolved reference '{}'.", r.name));
+                }
                 // An initializer with a declared FUNCTION type takes its parameter types from the
                 // annotation, so `val f: (Int) -> Int = { it * 2 }` types `it`/`x` as `Int` (not the
                 // erased `Object`). Propagating the expectation also reaches a lambda that is the
@@ -15890,7 +15899,16 @@ impl<'a> Checker<'a> {
                 let dt = self.expr(delegate);
                 let delegate_ret = self.record_delegate_getvalue(delegate, dt);
                 let prop_ty = match ty.as_ref() {
-                    Some(r) => self.resolve_ty(r),
+                    Some(r) => {
+                        let t = self.resolve_ty(r);
+                        // Same rule as `Stmt::Local`: an unresolved annotation errors instead of
+                        // silently binding `Error` (every use-site check would be suppressed).
+                        if t == Ty::Error {
+                            self.diags
+                                .error(r.span, format!("unresolved reference '{}'.", r.name));
+                        }
+                        t
+                    }
                     None => delegate_ret.unwrap_or(Ty::Error),
                 };
                 self.declare(&name, prop_ty, is_var);
@@ -15905,6 +15923,11 @@ impl<'a> Checker<'a> {
                 // A `lateinit var`: a mutable local of the (non-null) annotation type, initialized later.
                 // No initializer to check; reads before assignment are allowed (they throw at runtime).
                 let prop_ty = self.resolve_ty(&ty);
+                // Same rule as `Stmt::Local`: an unresolved annotation errors, never a silent `Error`.
+                if prop_ty == Ty::Error {
+                    self.diags
+                        .error(ty.span, format!("unresolved reference '{}'.", ty.name));
+                }
                 self.local_decl_types.insert(s, prop_ty);
                 self.declare(&name, prop_ty, true);
             }
