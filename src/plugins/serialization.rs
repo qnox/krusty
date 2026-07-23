@@ -1504,10 +1504,12 @@ impl IrPlugin for SerializationPlugin {
                 let args: Vec<ExprId> = (0..n_tp)
                     .map(|k| ir.add_expr(IrExpr::GetValue(k as u32)))
                     .collect();
+                let ser_internal = ir.classes[ser_id as usize].fq_name_id();
                 let new_ser = ir.add_expr(IrExpr::New {
-                    class: ser_id,
+                    internal: ser_internal,
                     args,
                     ctor_params: Some(vec![kserializer_of(class_ty("kotlin/Any")); n_tp]),
+                    ctor_desc: None,
                 });
                 let ret = ir.add_expr(IrExpr::Return(Some(new_ser)));
                 (
@@ -2203,10 +2205,12 @@ impl IrPlugin for SerializationPlugin {
                             dispatch_receiver: Some(inline_dec),
                             args: vec![],
                         });
+                        let foo_internal = ir.classes[foo_id as usize].fq_name_id();
                         let new = ir.add_expr(IrExpr::New {
-                            class: foo_id,
+                            internal: foo_internal,
                             args: vec![u],
                             ctor_params: None,
+                            ctor_desc: None,
                         });
                         let ret = ir.add_expr(IrExpr::Return(Some(new)));
                         let body = ir.add_expr(IrExpr::Block {
@@ -2531,10 +2535,12 @@ impl IrPlugin for SerializationPlugin {
                             let args: Vec<ExprId> = (0..fields.len())
                                 .map(|k| ir.add_expr(IrExpr::GetValue(slots[k])))
                                 .collect();
+                            let foo_internal = ir.classes[foo_id as usize].fq_name_id();
                             let new = ir.add_expr(IrExpr::New {
-                                class: foo_id,
+                                internal: foo_internal,
                                 args,
                                 ctor_params: None,
+                                ctor_desc: None,
                             });
                             stmts.push(ir.add_expr(IrExpr::Return(Some(new))));
                             ir.add_expr(IrExpr::Block { stmts, value: None })
@@ -2553,10 +2559,12 @@ impl IrPlugin for SerializationPlugin {
                                     ir.add_expr(IrExpr::Const(dc))
                                 })
                                 .collect();
+                            let foo_internal = ir.classes[foo_id as usize].fq_name_id();
                             let new = ir.add_expr(IrExpr::New {
-                                class: foo_id,
+                                internal: foo_internal,
                                 args,
                                 ctor_params: None,
+                                ctor_desc: None,
                             });
                             let ret = ir.add_expr(IrExpr::Return(Some(new)));
                             ir.add_expr(IrExpr::Block {

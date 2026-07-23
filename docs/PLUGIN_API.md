@@ -758,14 +758,14 @@ reproduce by compiling each `boxIr/*.kt` with the serialization runtime on `-cla
 
 The plugin's critical path is **gap #7 alone**: the plugin must build correct IR for the `$serializer`
 (an `object` implementing the generic `KSerializer<Foo>` interface — `descriptor` field initialized in
-the object's `<init>`/`<clinit>` via `NewExternal(PluginGeneratedSerialDescriptor)` + `addElement`
+the object's `<init>`/`<clinit>` via `New(PluginGeneratedSerialDescriptor, ctor_desc)` + `addElement`
 calls, `serialize` via `invokeinterface` `beginStructure`/`encode*Element`/`endStructure`,
 `deserialize` via a `decodeElementIndex` loop, `childSerializers` of builtin serializer singletons,
 **plus the erased generic bridges** `serialize(Encoder, Object)` / `deserialize(Decoder): Object`),
 and krusty's emitter must accept all of it. Then a **real-kotlinc-compiled `box()` driver** does the
 Json round-trip against krusty's classes (eliminating the Json cluster #3). This is one focused
 codegen track — substantial, but a single track, and the emit primitives (objects, interface calls,
-`while`/`when`, `NewExternal`, bridges) largely exist. The next session should target gap #7 directly.
+`while`/`when`, external `New`, bridges) largely exist. The next session should target gap #7 directly.
 
 Plus: real `serialize`/`deserialize` bytecode bodies and wiring the plugin into the emit path. And the
 full 69 `testData/boxIr` corpus additionally needs sealed/polymorphic/generic/inline-class/contextual

@@ -178,7 +178,7 @@ Evidence:
 
 - `src/ir.rs` claims no JVM descriptors in IR, but `Callee::Static`, `Virtual`, and `Special` carry
   `owner`, `name`, and `descriptor`.
-- `IrExpr::ClassConst`, `NewExternal`, `ExternalStaticField`, and comments around `INSTANCE`,
+- `IrExpr::ClassConst`, external `New`, `ExternalStaticField`, and comments around `INSTANCE`,
   `$default`, and `PropertyReference*Impl` are JVM-specific.
 - `ir_lower.rs` builds descriptors and JVM owners before the backend gets control.
 
@@ -3001,7 +3001,7 @@ box()-run-verified — blocked by a SEPARATE gap (below). Design that worked thr
 - New leaf node `IrExpr::CurrentContinuation` (placeholder for the enclosing continuation; `for_each_child`
   treats it as a no-child leaf).
 - `ir_lower` arm for `suspendCoroutine { c -> body }`: emit
-  `Block { stmts: [ var safe = NewExternal SafeContinuation (ctor "(Lkotlin/coroutines/Continuation;)V")
+  `Block { stmts: [ var safe = New SafeContinuation (ctor "(Lkotlin/coroutines/Continuation;)V")
   with arg CurrentContinuation ], <body with c bound to `safe` (slot typed SafeContinuation, scope-typed
   Continuation so `c.resume` resolves)> ], value: Some(Virtual SafeContinuation.getOrThrow ()Ljava/lang/Object;) }`.
   (`intercepted()` is identity for the corpus's un-intercepted `EmptyContinuation`, so the raw 1-arg ctor
@@ -3277,7 +3277,7 @@ share `empty_array` instead of rebuilding `0`-sized array literals inline.
 
 Classpath object construction now goes through `emit_new_external`; property references, constructors,
 assertion/runtime exceptions, range objects, and runtime collection helpers no longer rebuild
-`NewExternal` nodes at their feature sites.
+external `New` nodes at their feature sites.
 
 ### Same-File Method Call Emitter Merge
 
