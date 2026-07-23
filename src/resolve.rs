@@ -225,6 +225,11 @@ pub struct ClassSig {
     /// Lets a member read substitute the receiver's type arguments for a property whose declared
     /// type is one of these parameters.
     pub tparam_names: Vec<String>,
+    /// Each class type parameter's BOUND erasure, parallel to `tparam_names` (`<T: Int>` → `Int`,
+    /// `<T: Box<Int>>` → `Box`, unbounded → `Any`). A `generic_props` read on a receiver whose type
+    /// arguments were NOT recorded (a raw `Obj(C, [])`) types at the bound instead of `Any`, so a
+    /// chained read keeps resolving.
+    pub tparam_bound_erasures: Vec<Ty>,
     /// Properties whose *declared* type is exactly one of this class's type parameters, mapped to
     /// that parameter's index (`class Box<T>(val x: T)` → `{"x": 0}`). A read of such a property on
     /// `Box<Int>` substitutes the argument at that index (`Int`) for the erased `Object`.
@@ -2523,6 +2528,15 @@ pub fn collect_signatures_with_cp(
                     // generic instantiation can substitute the corresponding type argument. A nullable
                     // parameter (`T?`) is skipped — substituting a primitive there would need boxing.
                     let tparam_names = c.type_params.clone();
+                    // Each parameter's bound erasure (see `ClassSig::tparam_bound_erasures`); shares
+                    // the bound-chasing logic every declaration-scope erasure uses.
+                    let tparam_bound_erasures: Vec<Ty> = {
+                        let tp =
+                            TParams::from_decl_with(&c.type_params, &c.type_param_bounds, &|n| {
+                                class_names.get(n)
+                            });
+                        tparam_names.iter().map(|n| tp.erase(n)).collect()
+                    };
                     let tparam_index = |r: &TypeRef| -> Option<usize> {
                         if r.nullable || !r.targs.is_empty() || r.arg.is_some() {
                             return None;
@@ -2616,6 +2630,7 @@ pub fn collect_signatures_with_cp(
                             ctor_defaults,
                             secondary_ctors,
                             tparam_names,
+                            tparam_bound_erasures,
                             generic_props,
                             prop_visibility,
                             fn_visibility,
@@ -2664,6 +2679,7 @@ pub fn collect_signatures_with_cp(
                                 ctor_defaults: Vec::new(),
                                 secondary_ctors: Vec::new(),
                                 tparam_names: Vec::new(),
+                                tparam_bound_erasures: Vec::new(),
                                 generic_props: HashMap::new(),
                                 value_field: None,
                                 generic_methods: HashMap::new(),
@@ -12415,6 +12431,15 @@ impl<'a> Checker<'a> {
                     if let Some(&i) = cs.generic_props.get(name) {
                         if let Some(&arg) = args.get(i) {
                             return Some(arg);
+                        }
+                        // No recorded type argument (a raw `Obj(C, [])` receiver, e.g. a ctor call
+                        // whose inference didn't capture the argument): type at the parameter's
+                        // BOUND erasure when it says more than `Any`, so a primitive-bounded read
+                        // computes and a class-bounded chained read keeps resolving.
+                        if let Some(bound) = cs.tparam_bound_erasures.get(i) {
+                            if *bound != Ty::obj("kotlin/Any") {
+                                return Some(*bound);
+                            }
                         }
                     }
                 }

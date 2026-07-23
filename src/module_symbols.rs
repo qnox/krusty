@@ -485,6 +485,7 @@ mod tests {
             ctor_defaults: vec![],
             secondary_ctors: vec![],
             tparam_names: vec![],
+            tparam_bound_erasures: vec![],
             generic_props: HashMap::new(),
             value_field: None,
             generic_methods: HashMap::new(),
