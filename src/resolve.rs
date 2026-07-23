@@ -14678,11 +14678,32 @@ impl<'a> Checker<'a> {
                             return *t;
                         }
                         if let Some(ref sig) = known_sig {
+                            // The PARAMETER index this argument binds — not always the positional `i`:
+                            // a NAMED argument binds its named parameter, and a SYNTACTIC trailing
+                            // lambda always binds the LAST parameter (omitted middles take their
+                            // defaults: `ef("m") { … }` on `ef(msg, chk = null, action)` puts the
+                            // lambda in `action`, not `chk`). Without this the lambda pre-types
+                            // against the WRONG parameter's function shape (arity mismatch).
+                            let pi = arg_names
+                                .as_ref()
+                                .and_then(|ns| ns.get(i))
+                                .and_then(|n| n.as_ref())
+                                .and_then(|n| sig.param_names.iter().position(|p| p == n))
+                                .unwrap_or_else(|| {
+                                    if self.file.call_has_trailing_lambda.contains(&call.0)
+                                        && i + 1 == args.len()
+                                        && args.len() <= sig.params.len()
+                                    {
+                                        sig.params.len() - 1
+                                    } else {
+                                        i
+                                    }
+                                });
                             // An ADAPTED function reference argument: `::foo` (a same-file top-level
                             // function with trailing defaults) passed to a function-typed parameter of
                             // SMALLER arity. Type it as the expected function type and record the
                             // adaptation (the lowerer synthesizes an arity-matching adapter).
-                            if let Some(&Ty::Fun(exp)) = sig.params.get(i) {
+                            if let Some(&Ty::Fun(exp)) = sig.params.get(pi) {
                                 if let Expr::CallableRef {
                                     receiver: None,
                                     name,
@@ -14697,15 +14718,16 @@ impl<'a> Checker<'a> {
                             // is inlined into the caller, so it may capture a mutable local (like the stdlib
                             // `repeat`/`forEach`). This also covers zero-parameter lambdas (`() -> Unit`),
                             // whose `lambda_param_types[i]` is empty.
-                            if i < sig.params.len()
-                                && matches!(sig.params[i], Ty::Fun(_))
+                            if pi < sig.params.len()
+                                && matches!(sig.params[pi], Ty::Fun(_))
                                 && matches!(self.file.expr(a), Expr::Lambda { .. })
                             {
-                                let pt = sig.lambda_param_types.get(i).cloned().unwrap_or_default();
+                                let pt =
+                                    sig.lambda_param_types.get(pi).cloned().unwrap_or_default();
                                 // A RECEIVER function-type param (`Recv.(A) -> R`): bind `pt[0]` as the
                                 // lambda's implicit `this`; the rest are its value params.
                                 return self.with_lambda_mutation(sig.is_inline, |c| {
-                                    if sig.lambda_recv.get(i).copied().unwrap_or(false)
+                                    if sig.lambda_recv.get(pi).copied().unwrap_or(false)
                                         && !pt.is_empty()
                                     {
                                         c.check_lambda_with_receiver_labeled(
@@ -14722,10 +14744,10 @@ impl<'a> Checker<'a> {
                             // A lambda argument SAM-converted to a simple `fun interface` parameter:
                             // type it with the interface abstract method's parameter types so its
                             // params resolve concretely and the lowered impl matches the SAM descriptor.
-                            if i < sig.params.len()
+                            if pi < sig.params.len()
                                 && matches!(self.file.expr(a), Expr::Lambda { .. })
                             {
-                                if let Some(internal) = sig.params[i].obj_internal() {
+                                if let Some(internal) = sig.params[pi].obj_internal() {
                                     if self.simple_fun_interface_name(internal) {
                                         if let Some(sp) =
                                             self.fun_interface_sam_params_name(internal)

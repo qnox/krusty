@@ -1864,3 +1864,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `lower_suspend_lambda` (boxed/null spill interplay unmodeled).
   (`suspend_lambda_with_value_class_params`; corpus
   `coroutines/inlineClasses/direct/createMangling.kt` box-OK, 2921 → 2922, FAIL 0.)
+
+- **An argument's lambda pre-typing binds the parameter it actually fills, not its positional
+  index.** A named lambda argument binds its named parameter; a syntactic trailing lambda binds the
+  LAST parameter (omitted middles take their defaults). The known-signature pre-typing paired
+  `args[i]` with `sig.params[i]`, so `ef("m") { … }` on
+  `ef(msg: String? = null, chk: ((Int) -> Unit)? = null, action: () -> Unit)` typed the lambda
+  against `chk`'s shape (a nullable FUNCTION type resolves to a plain `Ty::Fun` — reference
+  nullability is a no-op there — so the fn-param branch fired) and the argument check then reported
+  "Function but Function was expected" against `action`. The mapping mirrors
+  `trailing_default_arg_indices` / the arg-slotting the CHECK side already used.
+  (`tests/trailing_lambda_middle_default_e2e.rs`; unblocks the checker for corpus
+  `fakeInlinerVariables.kt`-class `expectFailure(msg) { … }` calls — their remaining gap is the
+  omitted fn-typed default's lowering.)
