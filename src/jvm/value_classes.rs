@@ -2176,6 +2176,22 @@ pub fn lower_value_classes(
                     Some(t) => vec![(*v, t.clone())],
                     None => continue,
                 },
+                // A FIELD store is the same boundary, decided by the field's PRE-erasure declared
+                // type: a suspend lambda's synthesized `invoke`/`create` stores its (boxed, cast from
+                // the erased `Object` argument) value-class parameter into the param spill field the
+                // erasure just retyped to the underlying — `Boxed → UnboxedX` unboxes it there.
+                IrExpr::SetField {
+                    class,
+                    index,
+                    value,
+                    ..
+                } => match orig_fields
+                    .get(*class as usize)
+                    .and_then(|fs| fs.get(*index as usize))
+                {
+                    Some(t) => vec![(*value, *t)],
+                    None => continue,
+                },
                 IrExpr::SetValue { var, value } => match slots.get(var) {
                     Some(t) => vec![(*value, *t)],
                     None => continue,

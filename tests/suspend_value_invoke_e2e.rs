@@ -51,3 +51,30 @@ fun box(): String {\n\
     let out = run(SRC).expect("really-suspending value invoke should compile + run");
     assert_eq!(out, "OK");
 }
+
+#[test]
+fn suspend_lambda_with_value_class_params() {
+    // Corpus coroutines/inlineClasses/direct/createMangling.kt: a suspend lambda whose parameters
+    // are value classes — the erased invoke's boxed args must unbox into the underlying-typed param
+    // spill fields (the value-class pass's SetField boundary).
+    const SRC: &str = "import kotlin.coroutines.*\n\
+fun builder(c: suspend () -> Unit) {\n\
+    c.startCoroutine(Continuation(EmptyCoroutineContext) {\n\
+        it.getOrThrow()\n\
+    })\n\
+}\n\
+@JvmInline\n\
+value class IC(val s: String)\n\
+fun box(): String {\n\
+    var res = \"FAIL\"\n\
+    val lambda: suspend (IC, IC) -> String = { a, b ->\n\
+        a.s + b.s\n\
+    }\n\
+    builder {\n\
+        res = lambda(IC(\"O\"), IC(\"K\"))\n\
+    }\n\
+    return res\n\
+}\n";
+    let out = run(SRC).expect("value-class-param suspend lambda should compile + run");
+    assert_eq!(out, "OK");
+}
