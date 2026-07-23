@@ -407,3 +407,33 @@ fun box(): String {{ var r = \"\"; builder {{ r = go() }}; return if (r == \"v0v
     );
     assert_eq!(run(&src).expect("diverging elvis arm runs"), "OK");
 }
+
+#[test]
+fn suspend_coroutine_wrapper_desugars_to_safe_continuation() {
+    // `suspendCoroutine { c -> … }` — the stdlib inline wrapper: a `SafeContinuation` over the
+    // INTERCEPTED enclosing continuation, the block run with it, `getOrThrow()` returned (probing
+    // `probeCoroutineSuspended` on the sentinel) — kotlinc's inlined reference shape.
+    let src = format!(
+        "{BUILDER}\
+var saved: Continuation<String>? = null\n\
+suspend fun suspendMe(): String = suspendCoroutine {{ saved = it }}\n\
+suspend fun go(): String = suspendMe()\n\
+fun box(): String {{ var r = \"\"; builder {{ r = go() }}; saved?.resume(\"OK\"); return r }}\n"
+    );
+    assert_eq!(run(&src).expect("suspendCoroutine wrapper runs"), "OK");
+}
+
+#[test]
+fn suspend_coroutine_primitive_return_stays_boxed() {
+    // An `Int`-returning `suspendCoroutine` body: `getOrThrow()`'s reference result IS the CPS
+    // return value — the return-boxing pass must not wrap it in an `Integer.valueOf` (the block's
+    // value carries an explicit reference coercion so a colliding `var_types` entry can't retype it).
+    let src = format!(
+        "{BUILDER}\
+var saved: Continuation<Int>? = null\n\
+suspend fun suspendMe(): Int = suspendCoroutine {{ saved = it }}\n\
+suspend fun go(): Int = suspendMe() + 1\n\
+fun box(): String {{ var r = 0; builder {{ r = go() }}; saved?.resume(41); return if (r == 42) \"OK\" else \"fail: $r\" }}\n"
+    );
+    assert_eq!(run(&src).expect("primitive suspendCoroutine runs"), "OK");
+}

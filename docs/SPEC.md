@@ -1824,3 +1824,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `when`s/blocks in arm position recurse under the same rule.
   (`elvis_break_in_suspend_loop_binds_or_jumps`, `diverging_elvis_arm_emits_no_dead_bind`; unlocks
   `kt83728` + the `suspend*InsideElvis` corpus tests.)
+
+- **`suspendCoroutine { c -> … }` desugars to the reference compiler's inlined shape.** The stdlib
+  wrapper is `@InlineOnly` (no callable method) — recognized via the coroutine-intrinsic registry and
+  lowered to: `val safe = SafeContinuation(intercepted(<continuation>)); <block>(safe);
+  safe.getOrThrow()`, with `DebugProbesKt.probeCoroutineSuspended(<continuation>)` invoked when the
+  result is the suspension sentinel — exactly kotlinc's inlined bytecode. The `getOrThrow()` result
+  (a reference: the value or `COROUTINE_SUSPENDED`) IS the CPS return — a primitive-returning
+  function must NOT re-box it. (`suspend_coroutine_wrapper_desugars_to_safe_continuation`,
+  `suspend_coroutine_primitive_return_stays_boxed`; unlocks the `suspendCoroutine` corpus slice.)

@@ -12562,7 +12562,8 @@ impl<'a> Lower<'a> {
         let b = match body {
             FunBody::Expr(e) => {
                 let diverges = self.info.ty(*e) == Ty::Nothing;
-                // A suspend fn whose whole body is `suspendCoroutineUninterceptedOrReturn { … }`:
+                // A suspend fn whose whole body is `suspendCoroutineUninterceptedOrReturn { … }` (or
+                // the stdlib `suspendCoroutine { … }` wrapper, whose desugar tails `getOrThrow()`):
                 // the intrinsic's value IS the suspension protocol result (`COROUTINE_SUSPENDED` or
                 // an immediate value). Return it even from a declared-`Unit` fn — the CPS return is
                 // `Any?`, and swallowing it (returning `Unit`) would signal completion to the caller
@@ -12571,8 +12572,9 @@ impl<'a> Lower<'a> {
                     && matches!(self.afile.expr(*e), Expr::Call { callee, args }
                         if args.len() == 1
                             && matches!(self.afile.expr(*callee), ast::Expr::Name(n)
-                                if crate::libraries::coroutine_intrinsic(n)
-                                    == Some(crate::libraries::CoroutineIntrinsic::SuspendCoroutineUninterceptedOrReturn)));
+                                if matches!(crate::libraries::coroutine_intrinsic(n),
+                                    Some(crate::libraries::CoroutineIntrinsic::SuspendCoroutineUninterceptedOrReturn
+                                        | crate::libraries::CoroutineIntrinsic::SuspendCoroutine))));
                 let stmts = if is_suspend_intrinsic_body {
                     let ve = self.expr(*e)?;
                     // An EMPTY intrinsic block (`suspendCoroutineUninterceptedOrReturn { c -> }`)
@@ -17970,6 +17972,102 @@ impl<'a> Lower<'a> {
                 } else {
                     self.expr(body)?
                 }
+            }
+            // `suspendCoroutine { c -> … }` — the stdlib inline wrapper (recognized via the registry).
+            // kotlinc inlines its `@InlineOnly` body; mirror the reference shape: build a
+            // `SafeContinuation` over the enclosing function's INTERCEPTED continuation, run the block
+            // with it bound as the parameter, return `safe.getOrThrow()` — probing the debugger
+            // (`DebugProbesKt.probeCoroutineSuspended`) when the result is the suspension sentinel.
+            Expr::Call { callee, args }
+                if args.len() == 1
+                    && matches!(self.afile.expr(callee), ast::Expr::Name(n)
+                        if crate::libraries::coroutine_intrinsic(n)
+                            == Some(crate::libraries::CoroutineIntrinsic::SuspendCoroutine)
+                            && !self.module_declares(n)) =>
+            {
+                let ast::Expr::Lambda { params, body } = self.afile.expr(args[0]).clone() else {
+                    return None;
+                };
+                let cont_ty = Ty::obj("kotlin/coroutines/Continuation");
+                let cur = self.ir.add_expr(IrExpr::CurrentContinuation);
+                let intercepted = self.emit_call(
+                    Callee::Static {
+                        owner: type_name("kotlin/coroutines/intrinsics/IntrinsicsKt"),
+                        name: "intercepted".to_string(),
+                        descriptor:
+                            "(Lkotlin/coroutines/Continuation;)Lkotlin/coroutines/Continuation;"
+                                .to_string(),
+                        inline: InlineKind::None,
+                    },
+                    None,
+                    vec![cur],
+                );
+                let safe_new = self.ir.new_external(
+                    "kotlin/coroutines/SafeContinuation",
+                    "(Lkotlin/coroutines/Continuation;)V",
+                    vec![intercepted],
+                );
+                let safe_slot = self.fresh_value();
+                let safe_var = self.emit_variable(
+                    safe_slot,
+                    Ty::obj("kotlin/coroutines/SafeContinuation"),
+                    Some(safe_new),
+                );
+                // The block runs with the `SafeContinuation` bound as its parameter; its value (the
+                // lambda returns `Unit`) is discarded.
+                let cont_name = ast::first_lambda_param_or_it(&params);
+                let depth = self.scope.len();
+                self.scope.push((cont_name, safe_slot, cont_ty));
+                let body_val = self.expr(body);
+                self.scope.truncate(depth);
+                let body_val = body_val?;
+                let safe_get = self.emit_get_value(safe_slot);
+                let get_or_throw = self.emit_call(
+                    Callee::Virtual {
+                        owner: type_name("kotlin/coroutines/SafeContinuation"),
+                        name: "getOrThrow".to_string(),
+                        descriptor: "()Ljava/lang/Object;".to_string(),
+                        interface: false,
+                    },
+                    Some(safe_get),
+                    vec![],
+                );
+                let r_slot = self.fresh_value();
+                let r_var = self.emit_variable(
+                    r_slot,
+                    Ty::nullable(Ty::obj("kotlin/Any")),
+                    Some(get_or_throw),
+                );
+                let r_get = self.emit_get_value(r_slot);
+                let sentinel =
+                    self.runtime_call(RuntimeOp::CoroutineSuspended, Ty::Unit, vec![])?;
+                let suspended = self.emit_primitive_bin_op(IrBinOp::RefEq, r_get, sentinel);
+                let cur2 = self.ir.add_expr(IrExpr::CurrentContinuation);
+                let probe = self.emit_call(
+                    Callee::Static {
+                        owner: type_name("kotlin/coroutines/jvm/internal/DebugProbesKt"),
+                        name: "probeCoroutineSuspended".to_string(),
+                        descriptor: "(Lkotlin/coroutines/Continuation;)V".to_string(),
+                        inline: InlineKind::None,
+                    },
+                    None,
+                    vec![cur2],
+                );
+                let probe_block = self.emit_block(vec![probe], None);
+                let when = self.ir.add_expr(IrExpr::When {
+                    branches: vec![(Some(suspended), probe_block)],
+                });
+                let r_val = self.emit_get_value(r_slot);
+                // Type the block's value explicitly (`value_ty` of a coercion is its operand type):
+                // after the block's slot scope pops, a bare `GetValue` would fall back to the file-wide
+                // `var_types` map, where per-function value indexes collide — a colliding primitive
+                // declaration would make the CPS return-boxing wrap this reference in a `valueOf`.
+                let r_obj = self.emit_type_op(
+                    IrTypeOp::ImplicitCoercion,
+                    r_val,
+                    Ty::nullable(Ty::obj("kotlin/Any")),
+                );
+                self.emit_block(vec![safe_var, body_val, r_var, when], Some(r_obj))
             }
             Expr::Call { args, .. }
                 if matches!(
