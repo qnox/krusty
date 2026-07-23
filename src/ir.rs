@@ -1546,26 +1546,59 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
 /// shape is rejected, so the caller falls back to the unchanged inline call-site fill (never a miscompile).
 pub fn toplevel_default_stub_safe(ir: &IrFile, fid: u32) -> bool {
     let f = &ir.functions[fid as usize];
-    if f.name.contains('-') {
-        return false;
-    }
     // This gate runs at TWO times: during lowering (call-site routing, before the value-class pass)
-    // and at emission (stub gating, after it). The value-class pass MANGLES any function whose
-    // signature mentions a value class (`foo` → `foo-<hash>`) and erases those parameter types, so
-    // the post-pass run is caught by the `-` check above — but the pre-pass run still sees the plain
-    // name and must predict the mangling, or a call is routed to a `$default` stub that is never
-    // emitted (NoSuchMethodError). The mangled `foo-<hash>$default` stub kotlinc emits is not
-    // modeled yet, so a value-class-mentioning signature rejects at both times.
-    // (Only the PARAMETERS matter: a file-class function's value-class RETURN does not mangle its
-    // name — see `vc_mangle` — so a value-class return keeps routing through the stub as before.)
-    let mentions_vc = |t: &Ty| {
-        t.non_null().obj_internal().is_some_and(|n| {
+    // and at emission (stub gating, after it). The value-class pass MANGLES a function whose
+    // parameters mention a value class (`foo` → `foo-<hash>`) and erases those parameter types; the
+    // stub follows along (`foo-<hash>$default(erased params…)`, kotlinc's shape), so a value-class
+    // signature is allowed — with carve-outs the erased stub can't model, checked by whichever
+    // evidence the current time has: pre-pass by the still-value-class-typed parameters, post-pass
+    // by the mangled name / the pass's own records. Both runs must agree for every carve-out the
+    // POST-pass can see, or a call is routed to a stub that is never emitted (NoSuchMethodError);
+    // a pre-pass-only rejection merely leaves an uncalled stub. (Only the PARAMETERS matter: a
+    // file-class function's value-class return does not mangle its name — see `vc_mangle`.)
+    let vc_of = |t: &Ty| {
+        t.non_null().obj_internal().filter(|&n| {
             ir.has_external_value_class_name(n)
                 || ir.classes.iter().any(|c| c.is_value && c.fq_name == n)
         })
     };
-    if f.params.iter().any(mentions_vc) {
-        return false;
+    let vc_params: Vec<TypeName> = f.params.iter().filter_map(vc_of).collect();
+    if f.name.contains('-') || !vc_params.is_empty() {
+        // A `suspend` function's CPS rewrite appends a `Continuation` parameter the stub shape
+        // doesn't model — reject a suspend function whose name/params show value-class mangling.
+        if ir.suspend_funs.contains(&fid) {
+            return false;
+        }
+        // A NULLABLE-underlying value-class param stays BOXED in kotlinc's stub signature; the plain
+        // facade stub emits fully erased params — not modeled. Post-pass evidence: the value-class
+        // pass recorded the boxed stub params (`vc_underlying_nullable`, which also recurses through
+        // a nested-VC underlying). Pre-pass evidence: the underlying's DIRECT nullability — the
+        // recursive nested case is covered by the nested-VC reject below, so the two runs agree.
+        if ir
+            .default_stub_boxed_params
+            .get(&fid)
+            .is_some_and(|v| !v.is_empty())
+        {
+            return false;
+        }
+        for &n in &vc_params {
+            let same_file = ir.classes.iter().find(|c| c.is_value && c.fq_name == n);
+            // A GENERIC value class (`X<T>(val s: T)`) or a NESTED value-class underlying erases
+            // through extra layers the placeholder/adaptation here doesn't cover — conservative
+            // pre-pass reject (post-pass still emits the stub; it just gets no routed calls).
+            if same_file.is_some_and(|c| !c.type_params.is_empty()) {
+                return false;
+            }
+            let underlying: Option<&Ty> = ir
+                .external_value_class_name(n)
+                .or_else(|| same_file.and_then(|c| c.fields.first().map(|fld| &fld.ty)));
+            match underlying {
+                Some(u) if u.is_nullable() => return false,
+                Some(u) if vc_of(u).is_some() => return false,
+                Some(_) => {}
+                None => return false,
+            }
+        }
     }
     // A user function literally named `<name>$default` (a back-ticked identifier) would collide with the
     // synthetic — don't emit the stub (kotlinc also treats that as a conflicting declaration).
@@ -1884,12 +1917,19 @@ mod tests {
     }
 
     #[test]
-    fn toplevel_default_stub_safe_rejects_mangled_and_missing_defaults() {
+    fn toplevel_default_stub_safe_accepts_mangled_and_rejects_missing_defaults() {
+        // A value-class-MANGLED name (the post-pass view of a VC-param function) emits the mangled
+        // `foo-<hash>$default` stub, kotlinc's shape — accepted since the erased params carry no
+        // extra carve-out evidence.
         let mut f = IrFile::default();
         let fid = add_toplevel_fn(&mut f, "greet-abc123", Ty::Int);
         let def = f.add_expr(IrExpr::Const(IrConst::Int(5)));
         f.fn_params
             .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(def)]));
+        assert!(toplevel_default_stub_safe(&f, fid));
+
+        // A mangled SUSPEND function's CPS-appended Continuation param is not modeled — rejected.
+        f.suspend_funs.push(fid);
         assert!(!toplevel_default_stub_safe(&f, fid));
 
         let mut g = IrFile::default();
@@ -1964,18 +2004,31 @@ mod tests {
     }
 
     #[test]
-    fn toplevel_default_stub_safe_rejects_a_value_class_signature_pre_mangling() {
-        // Before the value-class pass the function still has its PLAIN name and value-class-typed
-        // params; the pass will mangle it (`foo-<hash>`), and no mangled `$default` stub is emitted —
-        // so the pre-pass gate (call routing) must already reject a value-class-mentioning signature.
+    fn toplevel_default_stub_safe_value_class_param_pre_mangling() {
+        // The PRE-pass view of a VC-param function: plain name, value-class-typed param. A plain
+        // non-nullable underlying routes through the (soon-mangled) stub; a NULLABLE underlying stays
+        // boxed in kotlinc's stub signature (not modeled) — rejected.
         let mut f = IrFile::default();
         let mut c = blank_class("X");
         c.is_value = true;
+        c.fields.push(IrField {
+            name: "s".to_string(),
+            ty: Ty::String,
+            type_param: None,
+            default: None,
+            has_default: false,
+            is_final: true,
+            is_lateinit: false,
+            is_private: false,
+        });
         f.add_class(c);
         let fid = add_toplevel_fn(&mut f, "foo", Ty::obj("X"));
         let def = f.add_expr(IrExpr::Const(IrConst::Int(5)));
         f.fn_params
             .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(def)]));
+        assert!(toplevel_default_stub_safe(&f, fid));
+
+        f.classes[0].fields[0].ty = Ty::nullable(Ty::String);
         assert!(!toplevel_default_stub_safe(&f, fid));
     }
 }
