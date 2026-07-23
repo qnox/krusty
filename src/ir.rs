@@ -1549,6 +1549,24 @@ pub fn toplevel_default_stub_safe(ir: &IrFile, fid: u32) -> bool {
     if f.name.contains('-') {
         return false;
     }
+    // This gate runs at TWO times: during lowering (call-site routing, before the value-class pass)
+    // and at emission (stub gating, after it). The value-class pass MANGLES any function whose
+    // signature mentions a value class (`foo` → `foo-<hash>`) and erases those parameter types, so
+    // the post-pass run is caught by the `-` check above — but the pre-pass run still sees the plain
+    // name and must predict the mangling, or a call is routed to a `$default` stub that is never
+    // emitted (NoSuchMethodError). The mangled `foo-<hash>$default` stub kotlinc emits is not
+    // modeled yet, so a value-class-mentioning signature rejects at both times.
+    // (Only the PARAMETERS matter: a file-class function's value-class RETURN does not mangle its
+    // name — see `vc_mangle` — so a value-class return keeps routing through the stub as before.)
+    let mentions_vc = |t: &Ty| {
+        t.non_null().obj_internal().is_some_and(|n| {
+            ir.has_external_value_class_name(n)
+                || ir.classes.iter().any(|c| c.is_value && c.fq_name == n)
+        })
+    };
+    if f.params.iter().any(mentions_vc) {
+        return false;
+    }
     // A user function literally named `<name>$default` (a back-ticked identifier) would collide with the
     // synthetic — don't emit the stub (kotlinc also treats that as a conflicting declaration).
     let stub_name = format!("{}$default", f.name);
@@ -1591,11 +1609,14 @@ fn default_expr_stub_safe(ir: &IrFile, e: ExprId, n: u32) -> bool {
         {
             return false
         }
-        // A closure (`Lambda`/`RefNew`) or an `invoke` reaches captured/spilled state the static stub
-        // layout doesn't carry.
-        IrExpr::Lambda { .. } | IrExpr::RefNew { .. } | IrExpr::InvokeFunction { .. } => {
-            return false
-        }
+        // A default LAMBDA (`f: (Int) -> Int = { it + 1 }`) is re-emittable: the closure construction
+        // only reads its captures, and those are checked as children (a capture of a spilled temp /
+        // enclosing local — any value `>= n` — rejects above). Its `inline_body` is in the lambda's OWN
+        // value numbering, but it is never emitted by the stub (the stub instantiates the closure), so
+        // a false child rejection there is merely conservative. A callable-ref (`RefNew`) or an
+        // `invoke` still reaches state the static stub layout doesn't carry.
+        IrExpr::Lambda { .. } => {}
+        IrExpr::RefNew { .. } | IrExpr::InvokeFunction { .. } => return false,
         IrExpr::Call {
             callee: Callee::Static { name, .. },
             ..
@@ -1892,5 +1913,69 @@ mod tests {
         g.fn_params
             .insert(gid, FnParamInfo::defaults(Vec::new(), vec![Some(bad)]));
         assert!(!toplevel_default_stub_safe(&g, gid));
+    }
+
+    #[test]
+    fn toplevel_default_stub_safe_accepts_a_lambda_capturing_only_parameters() {
+        // `fun foo(base: Int, f: () -> Int = { base })` — the default lambda captures a PARAMETER
+        // (value 0, in scope inside the stub), so the stub can re-emit the closure construction.
+        let mut f = IrFile::default();
+        let fid = f.add_fun(IrFunction {
+            name: "foo".to_string(),
+            params: vec![Ty::Int, Ty::obj("kotlin/jvm/functions/Function0")],
+            ret: Ty::Int,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let cap = f.add_expr(IrExpr::GetValue(0));
+        let lam = f.add_expr(IrExpr::Lambda {
+            impl_fn: 0,
+            arity: 0,
+            captures: vec![cap],
+            sam: None,
+            inline_body: None,
+        });
+        f.fn_params.insert(
+            fid,
+            FnParamInfo::defaults(Vec::new(), vec![None, Some(lam)]),
+        );
+        assert!(toplevel_default_stub_safe(&f, fid));
+    }
+
+    #[test]
+    fn toplevel_default_stub_safe_rejects_a_lambda_capturing_a_spilled_temp() {
+        // A capture beyond the parameter range (a spilled temp / enclosing local) is not in scope in
+        // the static stub frame — rejected.
+        let mut f = IrFile::default();
+        let fid = add_toplevel_fn(&mut f, "foo", Ty::Int);
+        let cap = f.add_expr(IrExpr::GetValue(7));
+        let lam = f.add_expr(IrExpr::Lambda {
+            impl_fn: 0,
+            arity: 0,
+            captures: vec![cap],
+            sam: None,
+            inline_body: None,
+        });
+        f.fn_params
+            .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(lam)]));
+        assert!(!toplevel_default_stub_safe(&f, fid));
+    }
+
+    #[test]
+    fn toplevel_default_stub_safe_rejects_a_value_class_signature_pre_mangling() {
+        // Before the value-class pass the function still has its PLAIN name and value-class-typed
+        // params; the pass will mangle it (`foo-<hash>`), and no mangled `$default` stub is emitted —
+        // so the pre-pass gate (call routing) must already reject a value-class-mentioning signature.
+        let mut f = IrFile::default();
+        let mut c = blank_class("X");
+        c.is_value = true;
+        f.add_class(c);
+        let fid = add_toplevel_fn(&mut f, "foo", Ty::obj("X"));
+        let def = f.add_expr(IrExpr::Const(IrConst::Int(5)));
+        f.fn_params
+            .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(def)]));
+        assert!(!toplevel_default_stub_safe(&f, fid));
     }
 }
