@@ -7438,7 +7438,13 @@ impl<'a> Lower<'a> {
                 stmts.push(self.emit_variable(lv, ty_to_ir(pty), Some(getf)));
                 self.scope.push((name.clone(), lv, pty));
             }
+            // A LEAF suspend lambda's invokeSuspend has the same frame constraints as the machine
+            // form — mark the context so frame-sensitive expansions (a cross-file multi-return
+            // `do…while` wrapper) bail here too.
+            let saved_in_sl = self.in_suspend_lambda_body;
+            self.in_suspend_lambda_body = true;
             let body_val = self.expr(body);
+            self.in_suspend_lambda_body = saved_in_sl;
             self.scope = saved_scope;
             self.next_value = saved_next;
             let body_val = body_val?;
@@ -14848,11 +14854,14 @@ impl<'a> Lower<'a> {
             if clash {
                 return None;
             }
-            // A cross-file `do…while` return-wrapper trips frame bookkeeping in wrapped contexts (a
-            // suspend lambda's machine: operand-stack underflow). Only the SINGLE-TAIL-return body
-            // (`{ return block(x) }`) — which the wrapper handles as one exit — expands; multi-return
-            // bodies skip.
-            if body_has_return(callee_file, body) && !single_tail_return(callee_file, body) {
+            // A cross-file `do…while` return-wrapper trips frame bookkeeping inside a SUSPEND
+            // LAMBDA's machine (operand-stack underflow) — there only the SINGLE-TAIL-return body
+            // (`{ return block(x) }`), which the wrapper handles as one exit, expands. In an
+            // ordinary context the wrapper is the same machinery same-file inlines use.
+            if self.in_suspend_lambda_body
+                && body_has_return(callee_file, body)
+                && !single_tail_return(callee_file, body)
+            {
                 return None;
             }
 
