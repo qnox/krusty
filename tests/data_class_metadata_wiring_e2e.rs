@@ -205,6 +205,20 @@ fn string_template_is_byte_identical() {
     );
 }
 
+/// A `suspend` function returning a NULLABLE value class — the port shape `suspend fun resolve(k):
+/// OrgId?`. The value-class pass (which runs before the coroutine pass) erases the return to the
+/// underlying, but kotlinc keeps the value class in the continuation's generic type argument
+/// (`Continuation<? super OrgId>`, not `<? super String>`). The declared return is recovered from the
+/// value-class pass's record.
+#[test]
+fn suspend_returning_nullable_value_class_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\n@JvmInline\nvalue class Id(val v: String)\ninterface R {\n    suspend fun resolve(k: String): Id?\n}\n",
+        "demo/R",
+        &[],
+    );
+}
+
 /// A `private val` in the primary constructor — the everyday dependency-injection shape. A private
 /// property has NO accessor, so kotlinc interns no `getX` name/descriptor and records the property as
 /// private in `@Metadata`; krusty leaked both (orphan pool entries plus public property flags).
