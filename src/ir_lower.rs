@@ -6187,25 +6187,31 @@ impl<'a> Lower<'a> {
         call: AstExprId,
         args: &[AstExprId],
     ) -> Option<u32> {
-        // A user class defined in ANOTHER file of this compilation (found by internal name in the global
-        // symbol table, but not in THIS file's IR classes) → construct via `NewCrossFile` from its
-        // `ClassSig` ctor params. Only the simple exact-arity primary-ctor case (defaults/secondary bail).
-        if let Some(cs) = self.syms.class_by_internal(internal) {
-            // A sibling-file value class (unboxed — no instance `<init>`), annotation (an interface +
-            // synthetic impl), or inner class (needs an outer instance) isn't constructed via a plain
-            // cross-file `new`; bail those (the test skips rather than miscompiles).
-            if cs.value_field.is_some() || cs.is_annotation || cs.inner_of.is_some() {
-                return None;
-            }
-            if !cs.is_interface && cs.ctor_params.len() == args.len() {
-                let params = tys_to_ir(&cs.ctor_params);
-                let mut a = Vec::new();
-                for (arg, pty) in args.iter().zip(&params) {
-                    a.push(self.lower_arg(*arg, pty)?);
+        // The resolver is the single source of construction resolution. Whenever it recorded a
+        // resolved constructor for this call — value classes and classpath ctors alike, with NO
+        // distinction between classpath, sibling-module, and same-file — lower via that one reference
+        // (the `match` below). Only when nothing was recorded do we fall back to the symbol-table path
+        // for a plain in-module regular class the resolver does not yet hand us a reference for.
+        if self.info.resolved_constructor(call).is_none() {
+            // A user class defined in ANOTHER file of this compilation (found by internal name in the
+            // global symbol table, but not in THIS file's IR classes) → construct via `NewCrossFile`
+            // from its `ClassSig` ctor params. Only the simple exact-arity primary-ctor case.
+            if let Some(cs) = self.syms.class_by_internal(internal) {
+                // An annotation (an interface + synthetic impl) or inner class (needs an outer
+                // instance) isn't constructed via a plain cross-file `new`; bail (skip, not miscompile).
+                if cs.value_field.is_some() || cs.is_annotation || cs.inner_of.is_some() {
+                    return None;
                 }
-                return Some(self.ir.new_cross_file(internal, params, a));
+                if !cs.is_interface && cs.ctor_params.len() == args.len() {
+                    let params = tys_to_ir(&cs.ctor_params);
+                    let mut a = Vec::new();
+                    for (arg, pty) in args.iter().zip(&params) {
+                        a.push(self.lower_arg(*arg, pty)?);
+                    }
+                    return Some(self.ir.new_cross_file(internal, params, a));
+                }
+                return None; // in-module regular class but arity/defaults/secondary not modeled here
             }
-            return None; // sibling-file user class but arity/defaults/secondary not modeled cross-file
         }
         match self.info.resolved_constructor(call).cloned()? {
             // A classpath `@JvmInline value class` is constructed via its static

@@ -865,9 +865,14 @@ impl SymbolTable {
     }
 
     pub fn subclass_names_of(&self, internal: TypeName) -> Vec<TypeName> {
+        // Direct subtypes: a subclass names the sealed base in `super_internal` (`class B : S()`),
+        // but an implementer of a sealed INTERFACE names it in `interfaces` (`class B : S`) — cover
+        // both, so a `when` over a sealed interface is proven exhaustive like a sealed class.
         self.classes
             .values()
-            .filter(|c| c.super_internal == Some(internal))
+            .filter(|c| {
+                c.super_internal == Some(internal) || c.interfaces.iter_ids().any(|i| i == internal)
+            })
             .map(ClassSig::internal_name)
             .collect()
     }
@@ -1499,6 +1504,26 @@ pub fn collect_signatures_with_cp(
                             &*libraries,
                         )
                         .map(|internal| type_name(&internal))
+                    })
+                    .or_else(|| {
+                        // A SAME-MODULE nested-type import (`import demo.Outer.Inner` → the hoisted
+                        // class `demo/Outer$Inner`). The classpath-only `resolve_nested_internal_name`
+                        // can't see a module-local nested class, so match the import path's `$`-flattened
+                        // form (from the right, kotlinc's nesting separator) against a user-declared
+                        // internal — nested classes are hoisted to top-level decls and recorded in
+                        // `user_defined` during the class-name seed above.
+                        imap.get(&name).and_then(|fq| {
+                            let mut cand = fq.clone();
+                            loop {
+                                if user_defined.contains(&cand) {
+                                    return Some(type_name(&cand));
+                                }
+                                match cand.rfind('/') {
+                                    Some(pos) => cand.replace_range(pos..=pos, "$"),
+                                    None => return None,
+                                }
+                            }
+                        })
                     });
                 if let Some(full) = full {
                     match from_import.get(&name) {
@@ -14842,9 +14867,49 @@ impl<'a> Checker<'a> {
                                 .find(|s| s.internal_matches(&nested))
                                 .cloned()
                         })
-                        .or_else(|| self.syms.classes.get(&fname).cloned());
+                        .or_else(|| self.syms.classes.get(&fname).cloned())
+                        .or_else(|| {
+                            // An IMPORTED nested class (`import demo.Outer.Inner` → `Inner`): the
+                            // ClassSig is keyed by its hoisted name (`Outer.Inner`), not the simple
+                            // name, so resolve the simple name through imports to its internal and find
+                            // the sig by that — the same reference qualified `Outer.Inner(…)` uses.
+                            self.imported_type_name(&fname).and_then(|internal| {
+                                self.syms.class_by_type_name(internal).cloned()
+                            })
+                        });
                     if let Some(cls) = ctor_cls {
                         let ctor_params: Vec<Ty> = cls.ctor_params.clone();
+                        // A value class (`@JvmInline`) constructs via its static `constructor-impl`
+                        // (`constructor-impl$default` when a defaulted param is omitted) — the SAME
+                        // resolved-constructor reference a classpath value class produces. The resolver
+                        // is the single source of construction resolution; `lower_external_new` only
+                        // consumes it, with no separate classpath / sibling-module / same-file handling.
+                        // Recording it here also lets `Vid()` (whose sole param has a non-const default
+                        // like `generate()`) lower like kotlinc instead of erroring on omitted arity.
+                        // Only the OMITTED-default construction — `Vid()` where the sole param has a
+                        // default (const or not, e.g. `= generate()`) — needs the resolved-constructor
+                        // path: it lowers to `constructor-impl$default`, exactly as a classpath value
+                        // class does. A fully-supplied `Vid(x)` is left to the existing lowering
+                        // (routing it here would mishandle the unboxed-underlying method-call cases).
+                        // Restricted to a single-field value class; a multi-field value class lowers to
+                        // several fields, not one `constructor-impl`. `ctor_defaults` only records
+                        // const-emittable defaults, so the has-default bit in `ctor_param_names` is what
+                        // tells us a non-const default exists.
+                        if let Some((_, underlying)) = cls.value_field.clone() {
+                            if ctor_params.len() == 1
+                                && arg_tys.is_empty()
+                                && cls.ctor_param_names.first().is_some_and(|(_, d)| *d)
+                            {
+                                self.resolved_constructors.insert(
+                                    call,
+                                    ResolvedConstructor::ValueClass {
+                                        underlying,
+                                        arg: None,
+                                    },
+                                );
+                                return self.ctor_result_name(call, cls.internal_name());
+                            }
+                        }
                         // Named-argument constructor call (`C(b = 9)`): map names → positions using the
                         // primary ctor's parameter names + per-parameter defaults, the same path a
                         // top-level function uses. An omitted parameter falls back to its default (the

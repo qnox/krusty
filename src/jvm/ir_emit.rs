@@ -7357,7 +7357,12 @@ impl<'a> Emitter<'a> {
                         if spliced {
                             return;
                         }
-                        if inline.must_inline() {
+                        // A `@InlineOnly` (`must_inline`) callee has no callable body — a failed splice
+                        // must bail. So must a REIFIED inline (non-empty reified substitution): its
+                        // compiled body carries a `reifiedOperationMarker` and throws
+                        // `throwUndefinedForReified` when invoked directly, so a direct-call fallback is a
+                        // miscompile, not a legal call. Bail (skip the file) instead.
+                        if inline.must_inline() || !self.reified_type_map(e).is_empty() {
                             self.run.set_inline_bail(format!(
                                 "inline splice failed for {owner}.{name}{descriptor}"
                             ));
