@@ -182,6 +182,144 @@ fn cross_file_top_level_function_and_property() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// A `when` over a sealed INTERFACE subject, exhaustive via positive `is` arms over its implementers,
+/// is an EXPRESSION (its branch type), not a statement (`Unit`). A sealed interface records its
+/// subtypes in each implementer's `interfaces` list (not `super_internal` as a sealed class does), so
+/// exhaustiveness must consult both. Here the `when` is the single-expression body of `visible`, so a
+/// wrong `Unit` typing is a `Boolean`-vs-`Unit` return-type error. Runs `box()` under `-Xverify:all`.
+#[test]
+fn exhaustive_when_over_sealed_interface_is_an_expression() {
+    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+        return;
+    };
+    let java = format!("{java_home}/bin/java");
+    let javac = format!("{java_home}/bin/javac");
+    if !std::path::Path::new(&javac).exists() {
+        return;
+    }
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let stdlib = stdlib.to_str().unwrap().to_string();
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_swhen_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("A.kt"),
+        "sealed interface Scope {\n  object OrgWide : Scope\n  data class Specific(val id: Int) : Scope\n}\n\
+         fun visible(s: Scope, target: Int): Boolean =\n  when (s) {\n    is Scope.OrgWide -> true\n    is Scope.Specific -> s.id == target\n  }\n\
+         fun box(): String {\n  if (!visible(Scope.OrgWide, 0)) return \"f1\"\n  if (visible(Scope.Specific(1), 2)) return \"f2\"\n  if (!visible(Scope.Specific(3), 3)) return \"f3\"\n  return \"OK\"\n}\n",
+    )
+    .unwrap();
+    let kc = Command::new(krusty)
+        .args(["-d", dir.to_str().unwrap()])
+        .arg(dir.join("A.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        kc.status.success(),
+        "krusty failed sealed-interface when compile: {}",
+        String::from_utf8_lossy(&kc.stderr)
+    );
+    fs::write(
+        dir.join("M.java"),
+        "public class M { public static void main(String[] a) { System.out.println(AKt.box()); } }",
+    )
+    .unwrap();
+    assert!(Command::new(&javac)
+        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    let r = Command::new(&java)
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&r.stdout).trim(),
+        "OK",
+        "stderr={}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Multi-file: a NESTED class (`data class Add` inside `sealed interface Op`) declared in one file is
+/// imported by `import demo.Op.Add` and both TYPE-referenced and CONSTRUCTED by its simple name in
+/// ANOTHER file of the same module. The import must resolve the simple name to the hoisted internal
+/// `demo/Op$Add` (a same-module nested class the classpath can't see), for the type AND the ctor — the
+/// same reference qualified `Op.Add(…)` already uses. Runs `box()` under `-Xverify:all`.
+#[test]
+fn cross_file_nested_class_import_type_and_construction() {
+    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+        return;
+    };
+    let java = format!("{java_home}/bin/java");
+    let javac = format!("{java_home}/bin/javac");
+    if !std::path::Path::new(&javac).exists() {
+        return;
+    }
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let stdlib = stdlib.to_str().unwrap().to_string();
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_xnest_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("A.kt"),
+        "package demo\nsealed interface Op {\n  data class Add(val x: Int) : Op\n  data class Rem(val y: String) : Op\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("B.kt"),
+        "package demo\nimport demo.Op.Add\nimport demo.Op.Rem\n\
+         fun box(): String {\n  val a: Op = Add(1)\n  val r: Op = Rem(\"z\")\n\
+         \x20 if (a !is Add || a.x != 1) return \"f1\"\n  if (r !is Rem || r.y != \"z\") return \"f2\"\n  return \"OK\"\n}\n",
+    )
+    .unwrap();
+    let kc = Command::new(krusty)
+        .args(["-d", dir.to_str().unwrap()])
+        .arg(dir.join("A.kt"))
+        .arg(dir.join("B.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        kc.status.success(),
+        "krusty failed cross-file nested-import compile: {}",
+        String::from_utf8_lossy(&kc.stderr)
+    );
+    fs::write(
+        dir.join("M.java"),
+        "public class M { public static void main(String[] a) { System.out.println(demo.BKt.box()); } }",
+    )
+    .unwrap();
+    assert!(Command::new(&javac)
+        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    let r = Command::new(&java)
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&r.stdout).trim(),
+        "OK",
+        "stderr={}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// Multi-file: a `@JvmInline value class` whose sole parameter has a NON-CONST default (`= gen()`) is
 /// constructed with NO arguments (`Vid()`) from ANOTHER file of the same module. The resolver hands the
 /// lowerer a `ValueClass` construction reference — the SAME reference a classpath value class produces,
