@@ -515,3 +515,73 @@ fn cross_file_destructuring() {
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// A constructor call that OMITS a parameter with a NON-CONST default (`labels: List<String> =
+/// emptyList()`) must dispatch to the `<init>$default(args…, mask, DefaultConstructorMarker)` synthetic
+/// (kotlinc's shape) — krusty could only inline CONST-literal defaults and bailed on a non-const one
+/// ("not yet supported by the IR backend"). Tested cross-file (the class in another file) since that is
+/// where a domain `data class` with defaults is constructed. Runs `box()` under `-Xverify:all`.
+#[test]
+fn ctor_omitted_non_const_default_uses_init_default() {
+    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+        return;
+    };
+    let java = format!("{java_home}/bin/java");
+    let javac = format!("{java_home}/bin/javac");
+    if !std::path::Path::new(&javac).exists() {
+        return;
+    }
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let stdlib = stdlib.to_str().unwrap().to_string();
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_ctordef_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("A.kt"),
+        "package demo\ndata class Server(val name: String, val labels: List<String> = emptyList())\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("B.kt"),
+        "package demo\nfun box(): String {\n  val s = Server(name = \"n\")\n  return if (s.name == \"n\" && s.labels.isEmpty()) \"OK\" else \"FAIL\"\n}\n",
+    )
+    .unwrap();
+    let kc = Command::new(krusty)
+        .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
+        .arg(dir.join("B.kt"))
+        .arg(dir.join("A.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        kc.status.success(),
+        "krusty failed omitted-default ctor compile: {}",
+        String::from_utf8_lossy(&kc.stderr)
+    );
+    fs::write(
+        dir.join("M.java"),
+        "public class M { public static void main(String[] argv) { System.out.println(demo.BKt.box()); } }",
+    )
+    .unwrap();
+    assert!(Command::new(&javac)
+        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    let r = Command::new(&java)
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&r.stdout).trim(),
+        "OK",
+        "stderr={}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    let _ = fs::remove_dir_all(&dir);
+}

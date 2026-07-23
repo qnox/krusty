@@ -6202,13 +6202,28 @@ impl<'a> Lower<'a> {
                 if cs.value_field.is_some() || cs.is_annotation || cs.inner_of.is_some() {
                     return None;
                 }
-                if !cs.is_interface && cs.ctor_params.len() == args.len() {
-                    let params = tys_to_ir(&cs.ctor_params);
+                // Snapshot the sig's ctor shape before any `&mut self` lowering call (drops the borrow).
+                let is_interface = cs.is_interface;
+                let params = tys_to_ir(&cs.ctor_params);
+                let ctor_param_names = cs.ctor_param_names.clone();
+                if !is_interface && params.len() == args.len() {
                     let mut a = Vec::new();
                     for (arg, pty) in args.iter().zip(&params) {
                         a.push(self.lower_arg(*arg, pty)?);
                     }
                     return Some(self.ir.new_cross_file(internal, params, a));
+                }
+                // Omitted default(s) on an in-module class — the cross-file analog of the same-file
+                // construction path: dispatch to the `<init>$default(args…, mask, marker)` synthetic.
+                if !is_interface {
+                    if let Some((mut a, omitted)) =
+                        self.lower_ctor_default_slots(call, &ctor_param_names, args, &params)
+                    {
+                        self.append_default_masks_marker(&mut a, params.len(), omitted);
+                        let dparams = Self::ctor_default_param_tys(&params);
+                        let desc = self.runtime.method_descriptor(&dparams, Ty::Unit)?;
+                        return Some(self.emit_new_external(internal, desc, a));
+                    }
                 }
                 return None; // in-module regular class but arity/defaults/secondary not modeled here
             }
@@ -8520,6 +8535,90 @@ impl<'a> Lower<'a> {
     /// the temps in slot order. The caller wraps the built call expression in `Block { stmts: prelude,
     /// value: call }` so the temps live in the enclosing scope (a temp declared in a value-position
     /// `Block` used AS an argument would be scoped away before a later argument reads it).
+    /// Slot-map a constructor call for the `<init>$default` synthetic: place each argument in its slot
+    /// (positional / named), fill each OMITTED slot with a zero placeholder, and report the omitted
+    /// indices — so the caller emits `<init>(args…, mask, DefaultConstructorMarker)` (kotlinc's shape for
+    /// a call that omits a default). Unlike [`lower_args_defaulted`], which inlines only CONST-literal
+    /// defaults and bails on a non-const one (`= emptyList()`/`= generate()`), this defers the default to
+    /// the synthetic. `None` if: arity exceeds params, a named arg is unknown/duplicate, a positional
+    /// follows a named one, the args reorder (source-order spill not modeled here), an omitted slot has
+    /// no default, or NOTHING is omitted (a full call — the ordinary path handles it byte-for-byte).
+    fn lower_ctor_default_slots(
+        &mut self,
+        call: AstExprId,
+        param_meta: &[(String, bool)],
+        args: &[AstExprId],
+        ir_params: &[Ty],
+    ) -> Option<(Vec<u32>, Vec<usize>)> {
+        let n = ir_params.len();
+        if args.len() > n {
+            return None;
+        }
+        let names = self
+            .afile
+            .call_arg_names
+            .get(&call.0)
+            .cloned()
+            .unwrap_or_default();
+        let mut slot: Vec<Option<AstExprId>> = vec![None; n];
+        let mut arg_slot: Vec<usize> = Vec::with_capacity(args.len());
+        let mut pos = 0;
+        let mut seen_named = false;
+        for (i, &arg) in args.iter().enumerate() {
+            match names.get(i).and_then(|o| o.as_ref()) {
+                None => {
+                    if seen_named || pos >= n {
+                        return None;
+                    }
+                    slot[pos] = Some(arg);
+                    arg_slot.push(pos);
+                    pos += 1;
+                }
+                Some(nm) => {
+                    seen_named = true;
+                    let idx = param_meta.iter().position(|(name, _)| name == nm)?;
+                    if idx >= n || slot[idx].is_some() {
+                        return None;
+                    }
+                    slot[idx] = Some(arg);
+                    arg_slot.push(idx);
+                }
+            }
+        }
+        if arg_slot.windows(2).any(|w| w[0] > w[1]) {
+            return None;
+        }
+        let mut out = Vec::with_capacity(n);
+        let mut omitted = Vec::new();
+        for (k, pt) in ir_params.iter().enumerate() {
+            match slot[k] {
+                Some(arg) => out.push(self.lower_arg(arg, pt)?),
+                None => {
+                    if !param_meta.get(k).map_or(false, |(_, d)| *d) {
+                        return None;
+                    }
+                    omitted.push(k);
+                    out.push(self.zero_placeholder(*pt));
+                }
+            }
+        }
+        if omitted.is_empty() {
+            return None;
+        }
+        Some((out, omitted))
+    }
+
+    /// Append the mask word(s) + `DefaultConstructorMarker` to `field_tys` for an `<init>$default`
+    /// construction descriptor, given the real parameter count.
+    fn ctor_default_param_tys(field_tys: &[Ty]) -> Vec<Ty> {
+        let mut params = field_tys.to_vec();
+        for _ in 0..default_mask_count(field_tys.len()) {
+            params.push(Ty::Int);
+        }
+        params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
+        params
+    }
+
     fn lower_args_defaulted(
         &mut self,
         call: AstExprId,
@@ -19003,6 +19102,24 @@ impl<'a> Lower<'a> {
                         {
                             let new = self.emit_new(class, a, None);
                             self.wrap_arg_prelude(new, prelude)
+                        } else if let Some((mut a, omitted)) = {
+                            // A `@JvmInline value class` uses `constructor-impl$default`, NOT `<init>$default`
+                            // — its omitted-default construction is the value-class path's; skip it here.
+                            if self.class_decl(&fname).is_some_and(|c| c.is_value) {
+                                None
+                            } else {
+                                let meta_hd: Vec<(String, bool)> =
+                                    meta.iter().map(|(n, d)| (n.clone(), d.is_some())).collect();
+                                self.lower_ctor_default_slots(e, &meta_hd, &args, &field_tys)
+                            }
+                        } {
+                            // Omitted NON-CONST default(s) — dispatch to the `<init>$default` synthetic
+                            // (present args + placeholders, then mask word(s) + `DefaultConstructorMarker`),
+                            // exactly as a defaulted function call does. The stub is already emitted for a
+                            // class that registers ctor defaults.
+                            self.append_default_masks_marker(&mut a, field_tys.len(), omitted);
+                            let params = Self::ctor_default_param_tys(&field_tys);
+                            self.emit_new(class, a, Some(params))
                         } else if let Some(sc) = no_named
                             .then(|| {
                                 self.ir.classes[class as usize]
