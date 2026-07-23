@@ -169,6 +169,14 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
         }
         let has_susp =
             forward.is_none() && body.is_some_and(|b| expr_calls_suspend(ir, b, &suspend_set));
+        // A body that combines a real suspension STATE with a `suspendCoroutineUninterceptedOrReturn`
+        // whose block runs STATEMENTS (parks the continuation for an external resume) is not modeled:
+        // the machine's re-entry after the intrinsic's resume misdrives the label and the coroutine
+        // never completes (corpus coroutines/suspendCoroutineFromStateMachine.kt loops forever under
+        // its driver). Skip, never miscompile.
+        if has_susp && body.is_some_and(|b| contains_current_continuation(ir, b)) {
+            return false;
+        }
         crate::trace_compiler!(
             "suspend",
             "fn fid={fid} name={} has_susp={has_susp}",
@@ -4563,11 +4571,18 @@ fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
         IrExpr::PrimitiveBinOp { lhs, rhs, .. } => box_returns(ir, lhs) && box_returns(ir, rhs),
         IrExpr::SetValue { value, .. } => box_returns(ir, value),
         IrExpr::SetField { value, .. } => box_returns(ir, value),
+        // A top-level `var` write (`saved = c` inside an intrinsic block) — traverse the value.
+        IrExpr::SetStatic { value, .. } => box_returns(ir, value),
         IrExpr::RefGet { holder, .. } => box_returns(ir, holder),
         IrExpr::RefSet { holder, value, .. } => box_returns(ir, holder) && box_returns(ir, value),
         IrExpr::Variable { init, .. } => init.is_none_or(|i| box_returns(ir, i)),
         IrExpr::GetField { receiver, .. } => box_returns(ir, receiver),
         IrExpr::Call { args, .. } => args.into_iter().all(|a| box_returns(ir, a)),
+        // A function-value invoke (`f(x)` on a `Function{n}` value) — traverse like a call; the
+        // machine has already threaded its continuation if it suspends.
+        IrExpr::InvokeFunction { func, args, .. } => {
+            box_returns(ir, func) && args.into_iter().all(|a| box_returns(ir, a))
+        }
         IrExpr::MethodCall { receiver, args, .. } => {
             box_returns(ir, receiver) && args.into_iter().flatten().all(|a| box_returns(ir, a))
         }
@@ -4739,6 +4754,24 @@ fn shift_locals(ir: &mut IrFile, e: ExprId, threshold: u32) {
     // from 0 to 1, leaving `GetValue(1)` unallocated in the extracted lambda method (a class method escaped
     // because its lambda `it`=0 was below the threshold 1).
     crate::ir::shift_value_indices(ir, e, threshold, 1);
+}
+
+/// Whether `e`'s subtree contains a `CurrentContinuation` placeholder — the marker `ir_lower` leaves
+/// for the lambda parameter of `suspendCoroutineUninterceptedOrReturn { c -> … }`. Iterative walk with
+/// a visited set (the arena shares nodes; recursion overflows on deep bodies).
+fn contains_current_continuation(ir: &IrFile, e: ExprId) -> bool {
+    let mut seen: HashSet<ExprId> = HashSet::new();
+    let mut stack = vec![e];
+    while let Some(cur) = stack.pop() {
+        if !seen.insert(cur) {
+            continue;
+        }
+        if matches!(ir.exprs[cur as usize], IrExpr::CurrentContinuation) {
+            return true;
+        }
+        for_each_child(&ir.exprs, cur, &mut |c| stack.push(c));
+    }
+    false
 }
 
 /// Resolve every `CurrentContinuation` placeholder in `e` to read the continuation value at `slot` (the
