@@ -5107,9 +5107,18 @@ fn method_signature(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -> Option<
         .get(&fid)
         .and_then(|g| jvm_method_signature(g, f))
         .or_else(|| {
-            ir.suspend_declared_sigs
-                .get(&fid)
-                .and_then(|(p, r)| suspend_method_sig(p, r))
+            ir.suspend_declared_sigs.get(&fid).and_then(|(p, r)| {
+                // A value-class RETURN survives in the continuation's type argument as the value class
+                // itself (`Continuation<? super OrganizationId>`), not its erasure. The VC pass ran
+                // before the suspend pass and already erased `r` to the underlying, so recover the
+                // declared return from `vc_declared_sigs` when this function had one.
+                let ret = ir
+                    .vc_declared_sigs
+                    .get(&fid)
+                    .map(|(_, _, vr)| vr)
+                    .unwrap_or(r);
+                suspend_method_sig(p, ret)
+            })
         })
         .or_else(|| method_parameterized_sig(&f.params, &f.ret))
 }
@@ -5120,6 +5129,12 @@ fn method_signature(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -> Option<
 /// `(Ljava/lang/String;Lkotlin/coroutines/Continuation<-Lkotlin/Unit;>;)Ljava/lang/Object;`, the `-`
 /// being `? super`. Takes the DECLARED parameters and return, not the rewritten ones.
 fn suspend_method_sig(params: &[Ty], ret: &Ty) -> Option<String> {
+    // A type argument drops nullability (`OrganizationId?` and `String?` both sign as the bare type),
+    // so unwrap before formatting.
+    let ret = match ret {
+        Ty::Nullable(inner) => inner,
+        t => t,
+    };
     let ret_arg = ty_generic_sig(ret)?;
     let mut s = String::from("(");
     for p in params {
