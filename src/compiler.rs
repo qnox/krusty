@@ -3,7 +3,7 @@
 use crate::ast::File;
 use crate::backend::{Artifact, Backend};
 use crate::diag::DiagSink;
-use crate::frontend::{check_file_at, CheckedFile, FrontendSymbols};
+use crate::frontend::{check_file_at, preinfer_module_returns, CheckedFile, FrontendSymbols};
 
 /// Check each parsed file and hand it to the backend.
 pub fn compile<B: Backend>(
@@ -16,6 +16,10 @@ pub fn compile<B: Backend>(
 ) -> Vec<Artifact> {
     let mut outputs = Vec::new();
     let mut state = B::State::default();
+    // Pre-infer expression-body return types across ALL files first, so a call in one file to an
+    // expression-body function/method defined in ANOTHER resolves to its real (inferred) return rather
+    // than the erased collection default — `check_file_at` alone only pre-infers its own file.
+    preinfer_module_returns(files, syms, diags);
     for (i, file) in files.iter().enumerate() {
         diags.set_file(i as u32);
         let info = check_file_at(file, i as u32, syms, diags);

@@ -515,3 +515,45 @@ fn cross_file_destructuring() {
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// Cross-file inferred RETURN type: an `object` method with an expression body (`fun all() =
+/// listOf(...)`) whose return type is inferred, called from ANOTHER file that the compiler happens to
+/// check FIRST. Without a global pre-inference pass, the caller's file resolves `all()` against the
+/// erased collection default (`java/util/List`, element `Any`) — so an element access reads `Any` and
+/// fails with "unresolved member". `preinfer_module_returns` patches every file's inferred returns into
+/// the shared signature table before any file's main check, so the element type resolves cross-file.
+///
+/// Resolution-only: this asserts the ELEMENT TYPE resolves (no "unresolved member" error). Lowering a
+/// cross-file `object`-member call is a separate, not-yet-implemented shape, so the file does not fully
+/// compile — the guarantee here is that the return type is no longer erased.
+#[test]
+fn cross_file_object_inferred_return_element_resolves() {
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_xinfer_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("A.kt"),
+        "package demo\nclass Role(val name: String)\nobject R { fun all() = listOf(Role(\"a\"), Role(\"b\")) }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("B.kt"),
+        "package demo\nfun box(): String = R.all()[0].name\n",
+    )
+    .unwrap();
+    // Pass B.kt BEFORE A.kt so the caller is checked before the definer — the order that, without a
+    // GLOBAL pre-inference, leaves `all()`'s inferred return erased when B reads it.
+    let out = Command::new(krusty)
+        .args(["-d", dir.to_str().unwrap()])
+        .arg(dir.join("B.kt"))
+        .arg(dir.join("A.kt"))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr) + String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !err.contains("unresolved member"),
+        "cross-file object inferred return should resolve its element type (got: {err})"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
