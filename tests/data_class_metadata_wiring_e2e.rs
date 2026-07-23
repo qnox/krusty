@@ -231,6 +231,30 @@ fn concrete_suspend_method_continuation_is_named_completion() {
     );
 }
 
+/// A method with a NULLABLE reference parameter (`fun f(a: String?)`). The checker `Ty` drops
+/// nullability and `IrFunction::params` is kept non-null (it feeds the value-class name mangle, which
+/// must not shift), so a nullable parameter read as non-null: `@NotNull` where kotlinc emits
+/// `@Nullable`, and non-null in `@Metadata`. A side-table now carries the declared nullability for the
+/// annotation + metadata paths without touching the mangle.
+#[test]
+fn nullable_reference_parameter_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C { fun f(a: String?) {} }\n",
+        "demo/C",
+        &[],
+    );
+}
+
+/// The same on an interface abstract method (a separate annotation path).
+#[test]
+fn nullable_reference_parameter_on_interface_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\ninterface I { fun f(a: String?) }\n",
+        "demo/I",
+        &[],
+    );
+}
+
 /// A `private val` in the primary constructor — the everyday dependency-injection shape. A private
 /// property has NO accessor, so kotlinc interns no `getX` name/descriptor and records the property as
 /// private in `@Metadata`; krusty leaked both (orphan pool entries plus public property flags).

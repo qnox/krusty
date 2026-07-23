@@ -973,6 +973,14 @@ pub fn lower_file_at_reporting(
                     dispatch_receiver: Some(type_name(&internal)),
                     param_checks,
                 });
+                // Record the declared nullability of each parameter for `@Metadata`/annotations (see
+                // `IrFile::fn_param_declared_nullable`) — kept off `IrFunction::params` so the mangle
+                // is untouched. Only when at least one parameter is nullable (else the non-null default).
+                if m.params.iter().any(|p| p.ty.nullable) {
+                    lo.ir
+                        .fn_param_declared_nullable
+                        .insert(fid, m.params.iter().map(|p| p.ty.nullable).collect());
+                }
                 // A `private` method is NON-VIRTUAL: a call to it (even the unqualified `foo()` inside a
                 // sibling default method) must be `invokespecial`, not `invokevirtual`/`invokeinterface` —
                 // else it dispatches to a same-named override (`interface A { private fun foo(); fun bar() =
