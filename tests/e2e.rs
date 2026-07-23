@@ -816,6 +816,8 @@ mod try_catch_e2e;
 mod try_catch_expr_generic_merge_e2e;
 #[path = "type_param_vararg_check_e2e.rs"]
 mod type_param_vararg_check_e2e;
+#[path = "typealias_function_type_e2e.rs"]
+mod typealias_function_type_e2e;
 #[path = "typeparam_cast_e2e.rs"]
 mod typeparam_cast_e2e;
 #[path = "unit_as_any_e2e.rs"]

@@ -1005,15 +1005,6 @@ fn kotlin_codegen_box_conformance() {
                     if krusty::conformance::needs_unmodeled_compiler_flag(&src) {
                         return (file.clone(), TestResult::Skip);
                     }
-                    // Skip tests that rely on unsigned-integer-to-string conversion with unsigned semantics.
-                    if src.contains("U.toString()") || src.contains("UL.toString()") {
-                        return (file.clone(), TestResult::Skip);
-                    }
-                    // Skip tests that combine typealias-of-function-type with suspend conversion:
-                    // krusty doesn't resolve typealiases, so the lambda arity is wrong.
-                    if src.contains("typealias") && src.contains(": suspend (") {
-                        return (file.clone(), TestResult::Skip);
-                    }
 
                     // In-process compilation. A `// WITH_STDLIB` test gets the kotlin-stdlib jar on krusty's
                     // classpath (so stdlib aliases/types resolve); others compile with no stdlib.
