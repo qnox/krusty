@@ -1046,6 +1046,13 @@ pub struct IrFile {
     pub logical_types: std::collections::HashMap<u32, Ty>,
     /// `FunId` → source parameter names and, when present, default-value expressions.
     pub fn_params: std::collections::HashMap<u32, FnParamInfo>,
+    /// Per declared method/function, whether each SOURCE parameter was declared nullable (`a: String?`).
+    /// The checker `Ty` drops nullability and `IrFunction::params` is kept non-null on purpose — it feeds
+    /// the value-class name mangle, which must NOT see recovered nullability (a nullable-VC param mangles
+    /// like a non-null one; perturbing it renames the method away from its call sites). `@Metadata` and
+    /// the `@NotNull`/`@Nullable` parameter annotations, which DO need the declared nullability, consult
+    /// this side-table instead. Empty ⇒ treat every parameter as non-null (the prior behavior).
+    pub fn_param_declared_nullable: std::collections::HashMap<u32, Vec<bool>>,
     /// Value-class internal name → the lowered default expression of its single primary-constructor
     /// property, when it has one (`value class ServerId(val value: String = UuidGen.generate())`).
     /// Lowered in the STATIC `constructor-impl` frame (the sole param is value-index 0, no `this`); the

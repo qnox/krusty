@@ -516,6 +516,9 @@ fn build_class_metadata(
                     });
                 let (name, params, ret) =
                     declared.unwrap_or((f.name.as_str(), f.params.as_slice(), f.ret));
+                // A parameter's declared `?` lives in a side-table, not in `params` (which stays
+                // non-null so the value-class mangle is undisturbed) — re-apply it for `@Metadata`.
+                let declared_nullable = ir.fn_param_declared_nullable.get(&fid);
                 Some(FnMeta {
                     name: name.to_string(),
                     params: params
@@ -525,7 +528,16 @@ fn build_class_metadata(
                             let n = names
                                 .and_then(|ns| ns.get(i).cloned())
                                 .unwrap_or_else(|| format!("p{i}"));
-                            (n, *t)
+                            let ty = if declared_nullable
+                                .and_then(|v| v.get(i))
+                                .copied()
+                                .unwrap_or(false)
+                            {
+                                crate::types::Ty::nullable(*t)
+                            } else {
+                                *t
+                            };
+                            (n, ty)
                         })
                         .collect(),
                     ret,
@@ -4230,7 +4242,25 @@ fn emit_interface_class(
                     "Lorg/jetbrains/annotations/NotNull;"
                 })
             };
-            let params: Vec<Option<&str>> = f.params.iter().map(|t| ann(*t)).collect();
+            // Declared parameter nullability lives in the side-table (kept off `f.params` for the
+            // mangle) — apply it so a nullable reference parameter reads `@Nullable`.
+            let declared_nullable = ir.fn_param_declared_nullable.get(&fid);
+            let params: Vec<Option<&str>> = f
+                .params
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    if declared_nullable
+                        .and_then(|v| v.get(i))
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        ann(Ty::nullable(*t))
+                    } else {
+                        ann(*t)
+                    }
+                })
+                .collect();
             if ann(f.ret).is_some() || params.iter().any(Option::is_some) {
                 cw.set_method_nullability(&f.name, &desc, ann(f.ret), &params);
             }
@@ -4911,6 +4941,9 @@ fn emit_method_inner(
         .is_none_or(|g| g.ret_tparam.is_none())
         .then(|| ann_of(f.ret))
         .flatten();
+    // A parameter's declared `?` lives in a side-table (not in `f.params`, which stays non-null for the
+    // mangle); consult it so a nullable reference parameter is annotated `@Nullable`, not `@NotNull`.
+    let declared_nullable = ir.fn_param_declared_nullable.get(&fid);
     let param_anns: Vec<Option<&str>> = f
         .params
         .iter()
@@ -4923,6 +4956,12 @@ fn emit_method_inner(
             });
             if is_tparam {
                 None
+            } else if declared_nullable
+                .and_then(|v| v.get(i))
+                .copied()
+                .unwrap_or(false)
+            {
+                ann_of(Ty::nullable(*t))
             } else {
                 ann_of(*t)
             }
