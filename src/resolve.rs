@@ -5186,6 +5186,101 @@ fn make_checker<'a>(
     }
 }
 
+/// One pre-inference pass over `file`: check every EXPRESSION-body top-level function / class method
+/// whose return type is not declared, and patch the inferred return into `syms` (funs, extension funs,
+/// class methods). Returns `true` if any signature's return type changed — so a caller can iterate to a
+/// fixpoint (a body that calls another expr-body decl declared later, or in another file). Runs on a
+/// scratch `DiagSink` (inference diagnostics are not the real check's).
+fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -> bool {
+    let mut scratch = DiagSink::new();
+    let mut pre = make_checker(file, file_index, &*syms, &mut scratch);
+    for &d in &file.decls {
+        if let Decl::Fun(f) = file.decl(d) {
+            if f.ret.is_none() && matches!(f.body, FunBody::Expr(_)) {
+                let resolve = class_internal_resolver(pre.syms);
+                pre.tparams =
+                    TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &resolve);
+                pre.reified_tparams = f.reified_type_params.iter().cloned().collect();
+                pre.check_fun(f, Some(d));
+                pre.tparams.clear();
+                pre.reified_tparams.clear();
+            }
+        } else if let Decl::Class(cl) = file.decl(d) {
+            let Some(internal) = pre.syms.classes.get(&cl.name).map(ClassSig::internal) else {
+                continue;
+            };
+            pre.this_ty = Some(Ty::obj(&internal));
+            for m in &cl.methods {
+                if m.ret.is_none() && matches!(m.body, FunBody::Expr(_)) {
+                    let resolve = class_internal_resolver(pre.syms);
+                    pre.tparams =
+                        TParams::from_decl_with(&m.type_params, &m.type_param_bounds, &resolve);
+                    pre.reified_tparams = m.reified_type_params.iter().cloned().collect();
+                    pre.check_method(m, &[]);
+                    pre.tparams.clear();
+                    pre.reified_tparams.clear();
+                }
+            }
+            pre.this_ty = None;
+        }
+    }
+    let fun_rets = std::mem::take(&mut pre.inferred_fun_rets);
+    let ext_rets = std::mem::take(&mut pre.inferred_ext_fun_rets);
+    let method_rets = std::mem::take(&mut pre.inferred_method_rets);
+    drop(pre);
+    let mut changed = false;
+    for ((file, decl), ret) in fun_rets {
+        if let Some(sig) = syms.funs.values_mut().find_map(|sigs| {
+            sigs.iter_mut()
+                .find(|s| s.source_file == Some(file) && s.source_decl == Some(DeclId(decl)))
+        }) {
+            changed |= sig.ret != ret;
+            sig.ret = ret;
+        }
+    }
+    for ((recv, name, params), ret) in ext_rets {
+        if let Some(sig) = syms
+            .ext_funs
+            .get_mut(&(recv, name))
+            .and_then(|ov| ov.iter_mut().find(|s| s.params == params))
+        {
+            changed |= sig.ret != ret;
+            sig.ret = ret;
+        }
+    }
+    for ((internal, name, params), ret) in method_rets {
+        if let Some(sig) = syms
+            .class_by_type_name_mut(internal)
+            .and_then(|c| c.methods.get_mut(&name))
+            .and_then(|ov| ov.iter_mut().find(|s| s.params == params))
+        {
+            changed |= sig.ret != ret;
+            sig.ret = ret;
+        }
+    }
+    changed
+}
+
+/// Pre-infer EXPRESSION-body return types across the WHOLE module (every file), patching `syms` before
+/// any file's main check. Per-file `check_file_at` only pre-infers its own file, so a call in file A to
+/// an expression-body method defined in file B (`Obj.all() = listOf(...)` in another file, read as its
+/// erased `java/util/List` instead of the inferred `List<Role>`) would resolve against the collection
+/// default until B is processed. Iterating a global fixpoint over all files closes that cross-file gap.
+pub fn preinfer_module_returns(files: &[File], syms: &mut SymbolTable, diags: &mut DiagSink) {
+    let saved = diags.current_file();
+    for _pass in 0..8 {
+        let mut changed = false;
+        for (i, file) in files.iter().enumerate() {
+            diags.set_file(i as u32);
+            changed |= preinfer_returns_pass(file, i as u32, syms);
+        }
+        if !changed {
+            break;
+        }
+    }
+    diags.set_file(saved);
+}
+
 pub fn check_file_at(
     file: &File,
     file_index: u32,
@@ -5201,73 +5296,7 @@ pub fn check_file_at(
     // declared LATER (forward reference) needs a second pass, so iterate to a FIXPOINT (bounded — the
     // dependency chain is shallow; an unresolvable case simply stops improving).
     for _pass in 0..8 {
-        let mut scratch = DiagSink::new();
-        let mut pre = make_checker(file, file_index, &*syms, &mut scratch);
-        for &d in &file.decls {
-            if let Decl::Fun(f) = file.decl(d) {
-                if f.ret.is_none() && matches!(f.body, FunBody::Expr(_)) {
-                    let resolve = class_internal_resolver(pre.syms);
-                    pre.tparams =
-                        TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &resolve);
-                    pre.reified_tparams = f.reified_type_params.iter().cloned().collect();
-                    pre.check_fun(f, Some(d));
-                    pre.tparams.clear();
-                    pre.reified_tparams.clear();
-                }
-            } else if let Decl::Class(cl) = file.decl(d) {
-                let Some(internal) = pre.syms.classes.get(&cl.name).map(ClassSig::internal) else {
-                    continue;
-                };
-                pre.this_ty = Some(Ty::obj(&internal));
-                for m in &cl.methods {
-                    if m.ret.is_none() && matches!(m.body, FunBody::Expr(_)) {
-                        let resolve = class_internal_resolver(pre.syms);
-                        pre.tparams =
-                            TParams::from_decl_with(&m.type_params, &m.type_param_bounds, &resolve);
-                        pre.reified_tparams = m.reified_type_params.iter().cloned().collect();
-                        pre.check_method(m, &[]);
-                        pre.tparams.clear();
-                        pre.reified_tparams.clear();
-                    }
-                }
-                pre.this_ty = None;
-            }
-        }
-        let fun_rets = std::mem::take(&mut pre.inferred_fun_rets);
-        let ext_rets = std::mem::take(&mut pre.inferred_ext_fun_rets);
-        let method_rets = std::mem::take(&mut pre.inferred_method_rets);
-        drop(pre);
-        let mut changed = false;
-        for ((file, decl), ret) in fun_rets {
-            if let Some(sig) = syms.funs.values_mut().find_map(|sigs| {
-                sigs.iter_mut()
-                    .find(|s| s.source_file == Some(file) && s.source_decl == Some(DeclId(decl)))
-            }) {
-                changed |= sig.ret != ret;
-                sig.ret = ret;
-            }
-        }
-        for ((recv, name, params), ret) in ext_rets {
-            if let Some(sig) = syms
-                .ext_funs
-                .get_mut(&(recv, name))
-                .and_then(|ov| ov.iter_mut().find(|s| s.params == params))
-            {
-                changed |= sig.ret != ret;
-                sig.ret = ret;
-            }
-        }
-        for ((internal, name, params), ret) in method_rets {
-            if let Some(sig) = syms
-                .class_by_type_name_mut(internal)
-                .and_then(|c| c.methods.get_mut(&name))
-                .and_then(|ov| ov.iter_mut().find(|s| s.params == params))
-            {
-                changed |= sig.ret != ret;
-                sig.ret = ret;
-            }
-        }
-        if !changed {
+        if !preinfer_returns_pass(file, file_index, syms) {
             break;
         }
     }
