@@ -429,3 +429,72 @@ fn cross_file_object_member_call_lowers() {
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// Cross-package `object` referenced as a VALUE: `val h = Helper` where `Helper` is a same-module
+/// `object` declared in ANOTHER package/file. The signature-phase property inference recognizes it as
+/// the object's own type (not the library-only object-check, which misses a module object), and the
+/// backend reads the singleton via `getstatic Helper.INSTANCE`. Runs `box()`.
+#[test]
+fn cross_module_object_as_value() {
+    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+        return;
+    };
+    let java = format!("{java_home}/bin/java");
+    let javac = format!("{java_home}/bin/javac");
+    if !std::path::Path::new(&javac).exists() {
+        return;
+    }
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let stdlib = stdlib.to_str().unwrap().to_string();
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_objval_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("A.kt"),
+        "package d.svc\nobject Helper { fun tag(): String = \"OK\" }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("B.kt"),
+        "package a.app\nimport d.svc.Helper\nclass C {\n  private val h = Helper\n  fun run(): String = h.tag()\n}\nfun box(): String = C().run()\n",
+    )
+    .unwrap();
+    let kc = Command::new(krusty)
+        .args(["-d", dir.to_str().unwrap()])
+        .arg(dir.join("B.kt"))
+        .arg(dir.join("A.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        kc.status.success(),
+        "krusty failed cross-module object-value compile: {}",
+        String::from_utf8_lossy(&kc.stderr)
+    );
+    fs::write(
+        dir.join("M.java"),
+        "public class M { public static void main(String[] argv) { System.out.println(a.app.BKt.box()); } }",
+    )
+    .unwrap();
+    assert!(Command::new(&javac)
+        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    let r = Command::new(&java)
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&r.stdout).trim(),
+        "OK",
+        "stderr={}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
