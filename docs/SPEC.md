@@ -1833,3 +1833,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (a reference: the value or `COROUTINE_SUSPENDED`) IS the CPS return — a primitive-returning
   function must NOT re-box it. (`suspend_coroutine_wrapper_desugars_to_safe_continuation`,
   `suspend_coroutine_primitive_return_stays_boxed`; unlocks the `suspendCoroutine` corpus slice.)
+
+- **An open member suspend fn splits into a virtual delegator + static `<name>$suspendImpl`.**
+  kotlinc's ABI for every open (overridable-class) member suspend fn, leaf or machine: the CPS body
+  lives in a package-private `static <name>$suspendImpl(Owner, params…, Continuation)` (flags
+  `0x1008` STATIC|SYNTHETIC) and the virtual method delegates to it. The continuation's re-entry
+  targets the STATIC — resuming through virtual dispatch on an overridden method re-enters the
+  OVERRIDE, hijacking the resumed frame (`super.<fn>(…)` chains then NPE in `releaseIntercepted`).
+  `super.<suspend fn>(…)` itself is a `Callee::Special` the flattener now recognizes as a suspension
+  (owner+name+arity against the logical descriptor) and threads like a `Virtual` callee. An interface
+  super target (needs `DefaultImpls` + `access$…$jd` bridges) skips the file. Continuation classes
+  number sequentially per `owner$name` (`B$f$1`, `B$f$2` for overloads — a fixed `$1` collided).
+  (`super_suspend_call_resumes_the_base_frame`,
+  `same_name_suspend_overloads_get_distinct_continuation_classes`; unlocks the
+  `suspendFunctionAsCoroutine/superCall*` corpus tests.)
+
+- **A suspend receiver lambda may combine its bound receiver, own parameters, and captures.** The
+  SuspendLambda synthesis threads captures through the constructor (`create()` copies them from
+  `this`) and own parameters through `create()`/`invoke()` field stores — the leaf-only gate
+  rejecting a params-plus-captures combination was stale.
+  (`receiver_suspend_lambda_with_capture_runs_machine`; unlocks the receiver-builder corpus slice,
+  coroutines 60 → 76 box-OK.)

@@ -4934,6 +4934,11 @@ impl<'a> Lower<'a> {
     /// Record why lowering last bailed, into the caller-owned `bail` sink (a survey diagnostic + the
     /// internal `deep*`-phase refinement). Replaces the former free `set_bail` thread-local write.
     fn set_bail(&self, reason: &str) {
+        crate::trace_compiler!(
+            "suspend",
+            "set_bail {reason} bt={}",
+            std::backtrace::Backtrace::force_capture()
+        );
         *self.bail.borrow_mut() = reason.to_string();
     }
 
@@ -7176,11 +7181,6 @@ impl<'a> Lower<'a> {
         }
         captures.reverse();
         let n_cap = captures.len() as u32;
-        // Own parameters are modeled only for a LEAF lambda (no captures, no internal suspension) for
-        // now — a param + capture/suspension combination needs the general lambda-mode machine.
-        if arity > 0 && n_cap > 0 {
-            return None;
-        }
         // Does the lambda body call a `suspend` function? (AST-level, like the file's suspend gate.)
         // If so its `invokeSuspend` is a state machine with the lambda instance as the continuation —
         // for now only a single TAIL suspend call (`{ foo() }`) with no captures is modeled; anything

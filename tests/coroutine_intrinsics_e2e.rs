@@ -437,3 +437,77 @@ fun box(): String {{ var r = 0; builder {{ r = go() }}; saved?.resume(41); retur
     );
     assert_eq!(run(&src).expect("primitive suspendCoroutine runs"), "OK");
 }
+
+#[test]
+fn receiver_suspend_lambda_with_capture_runs_machine() {
+    // A `suspend R.() -> Unit` lambda that BOTH binds its receiver (params[0] as `this`) and
+    // captures an enclosing local: the SuspendLambda synthesis threads captures through the ctor and
+    // own params through create()/invoke() fields — the leaf-only gate rejecting the combination was
+    // stale.
+    let src = format!(
+        "{BUILDER}\
+class Controller {{\n\
+    suspend fun <T> suspendHere(v: T): T = suspendCoroutineUninterceptedOrReturn {{ x -> x.resume(v); COROUTINE_SUSPENDED }}\n\
+}}\n\
+fun rbuilder(c: suspend Controller.() -> Unit) {{ c.startCoroutine(Controller(), Done()) }}\n\
+var result = \"\"\n\
+fun <T : Any> foo(v: T) {{\n\
+    rbuilder {{\n\
+        val r = suspendHere(v)\n\
+        suspendHere(\"\")\n\
+        result = r.toString()\n\
+    }}\n\
+}}\n\
+fun box(): String {{ foo(\"OK\"); return result }}\n"
+    );
+    assert_eq!(run(&src).expect("receiver+capture lambda runs"), "OK");
+}
+
+#[test]
+fn super_suspend_call_resumes_the_base_frame() {
+    // `super.suspendHere(x)` from an override: the open fn's machine lives in the static
+    // `<name>$suspendImpl` (kotlinc's split) and the continuation re-enters THAT — a virtual
+    // re-dispatch on resume would re-enter the OVERRIDE (wrong frame: NPE in releaseIntercepted).
+    // The super call itself threads the continuation (`Callee::Special` was invisible before).
+    let src = format!(
+        "{BUILDER}\
+open class A(val v: String) {{\n\
+    suspend fun suspendThere(v: String): String = suspendCoroutineUninterceptedOrReturn {{ x -> x.resume(v); COROUTINE_SUSPENDED }}\n\
+    open suspend fun suspendHere(x: String): String = suspendThere(x) + suspendThere(v)\n\
+}}\n\
+class B(v: String) : A(v) {{\n\
+    override suspend fun suspendHere(x: String): String = super.suspendHere(x) + suspendThere(\"56\")\n\
+}}\n\
+fun rbuilder(c: suspend A.() -> Unit) {{ c.startCoroutine(B(\"K\"), Done()) }}\n\
+var result = \"\"\n\
+fun box(): String {{ rbuilder {{ result = suspendHere(\"O\") }}; return if (result == \"OK56\") \"OK\" else \"fail: $result\" }}\n"
+    );
+    assert_eq!(run(&src).expect("super suspend resume runs"), "OK");
+}
+
+#[test]
+fn same_name_suspend_overloads_get_distinct_continuation_classes() {
+    // Two same-named suspend overloads with machines: continuation classes number sequentially
+    // (`B$f$1`, `B$f$2`, kotlinc's scheme) — a fixed `$1` suffix collided them and the second
+    // machine resumed through the first's shape.
+    let src = format!(
+        "{BUILDER}\
+open class A(val v: String) {{\n\
+    suspend fun suspendThere(v: String): String = suspendCoroutineUninterceptedOrReturn {{ x -> x.resume(v); COROUTINE_SUSPENDED }}\n\
+    open suspend fun suspendHere(): String = suspendThere(\"O\") + suspendThere(v)\n\
+}}\n\
+class B(v: String) : A(v) {{\n\
+    override suspend fun suspendHere(): String = super.suspendHere() + suspendThere(\"56\")\n\
+    suspend fun suspendHere(s: String): String = super.suspendHere() + suspendThere(s)\n\
+}}\n\
+fun rbuilder(c: suspend A.() -> Unit) {{ c.startCoroutine(B(\"K\"), Done()) }}\n\
+var result = \"\"\n\
+fun box(): String {{\n\
+    rbuilder {{ result = suspendHere() }}\n\
+    if (result != \"OK56\") return \"fail 1: $result\"\n\
+    rbuilder {{ result = (this as B).suspendHere(\"OK\") }}\n\
+    return if (result == \"OKOK\") \"OK\" else \"fail 2: $result\"\n\
+}}\n"
+    );
+    assert_eq!(run(&src).expect("overload continuation classes run"), "OK");
+}

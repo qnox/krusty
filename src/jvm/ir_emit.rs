@@ -4090,6 +4090,8 @@ fn emit_method_inner(
             .any(|o| o.fq_name_matches(owner) && o.is_interface);
         let vis = if ir.private_methods.contains(&fid) {
             0x0002
+        } else if ir.package_private_methods.contains(&fid) {
+            0x0000 // package-private (an open suspend fn's `$suspendImpl` split — kotlinc 0x1008)
         } else {
             0x0001
         };

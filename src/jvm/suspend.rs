@@ -170,6 +170,16 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
         }
         let has_susp =
             forward.is_none() && body.is_some_and(|b| expr_calls_suspend(ir, b, &suspend_set));
+        // kotlinc splits EVERY open member suspend fn (leaf or machine) into a virtual delegator +
+        // static `$suspendImpl`; decide before the transform, apply after (the impl carries the
+        // transformed body, the resume re-enters the static).
+        let split = should_split_open(ir, fid);
+        // A `super.<suspend fn>(…)` whose target lives on an INTERFACE needs kotlinc's
+        // `DefaultImpls` + `$suspendImpl` + `access$…$jd` bridge ABI — not yet modeled. Skip the
+        // file rather than resume the wrong frame through a virtual re-dispatch.
+        if body.is_some_and(|b| has_interface_super_suspend(ir, b, &suspend_set)) {
+            return false;
+        }
         crate::trace_compiler!(
             "suspend",
             "fn fid={fid} name={} has_susp={has_susp}",
@@ -235,9 +245,12 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
             }
         } else {
             let unit_ret = orig_rets[fid as usize] == Ty::Unit;
-            if !build_state_machine(ir, facade, fid, body.unwrap(), unit_ret) {
+            if !build_state_machine(ir, facade, fid, body.unwrap(), unit_ret, split) {
                 return false;
             }
+        }
+        if split {
+            split_open_suspend(ir, fid);
         }
     }
     // Suspend LAMBDAS with multiple suspensions / control flow: their `invokeSuspend` is a state machine
@@ -1088,6 +1101,33 @@ fn suspend_call_fid(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> Optio
             callee: Callee::Local(fid),
             ..
         } if suspend_set.contains(fid) => Some(*fid),
+        // A `super.<suspend fn>(…)` call — an invokespecial on a SAME-FILE base class. Resolve the
+        // target by owner + name (+ argument count against the logical descriptor, for overloads);
+        // without this arm the super call is invisible to the flattener: no continuation threaded, no
+        // suspension point — the caller completes while the callee's continuation is still pending.
+        IrExpr::Call {
+            callee: Callee::Special { owner, name, .. },
+            args,
+            ..
+        } => {
+            let class = ir.classes.iter().find(|c| c.fq_name == *owner)?;
+            class
+                .methods
+                .iter()
+                .copied()
+                .filter(|fid| suspend_set.contains(fid))
+                .find(|&fid| {
+                    let f = &ir.functions[fid as usize];
+                    // The fn's params may already carry the appended CPS `Continuation` (pass order
+                    // over fns is unspecified) — compare against the LOGICAL count.
+                    let has_cont = f.params.last().is_some_and(|t| {
+                        t.obj_internal()
+                            .is_some_and(|n| n.matches("kotlin/coroutines/Continuation"))
+                    });
+                    let logical = f.params.len() - usize::from(has_cont);
+                    f.name == *name && logical == args.len()
+                })
+        }
         IrExpr::MethodCall { class, index, .. } => {
             let fid = *ir.classes[*class as usize].methods.get(*index as usize)?;
             suspend_set.contains(&fid).then_some(fid)
@@ -1285,12 +1325,13 @@ fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId 
             *ret = object_ty();
             args.push(cont);
         }
-        // A classpath `suspend` MEMBER (`repo.getConfig(id)`, an invokevirtual/invokeinterface): its
-        // physical CPS method appends the `Continuation` and erases the return to `Object`, so rewrite the
-        // (logical) descriptor to the CPS form before threading the continuation argument.
+        // A classpath `suspend` MEMBER (`repo.getConfig(id)`, an invokevirtual/invokeinterface) or a
+        // `super.<suspend fn>(…)` invokespecial: the physical CPS method appends the `Continuation` and
+        // erases the return to `Object`, so rewrite the (logical) descriptor to the CPS form before
+        // threading the continuation argument.
         IrExpr::Call {
             args,
-            callee: Callee::Virtual { descriptor, .. },
+            callee: Callee::Virtual { descriptor, .. } | Callee::Special { descriptor, .. },
             ..
         } => {
             *descriptor = cps_descriptor(descriptor);
@@ -1376,7 +1417,14 @@ fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> boo
 /// local live across any suspension point is spilled to a continuation field (restored at the loop top so
 /// its slot is frame-consistent on every dispatch path). Returns `false` (skip, never miscompile) for a
 /// shape the flattener doesn't handle yet (a suspension nested deeper than a branch value, in a loop, …).
-fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_ret: bool) -> bool {
+fn build_state_machine(
+    ir: &mut IrFile,
+    facade: &str,
+    fid: u32,
+    b: ExprId,
+    unit_ret: bool,
+    split: bool,
+) -> bool {
     // Normalize a block-valued initializer (`val a = (x ?: foo())`, `a?.b ?: foo()` — elvis / safe-call
     // lower to `Variable{ init: Block{ prelude…, value: When } }`) into `prelude…; Variable{ init: When }`,
     // so the conditional suspension surfaces as a `Variable{init: When}` the flattener handles.
@@ -1627,7 +1675,17 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
     // kotlinc names `create-SCm-oBs`'s continuation `<Owner>$create$1`. `-` can't occur in a Kotlin
     // identifier, so it only ever separates the mangle hash — strip from the first `-`.
     let cont_fname = fname.split('-').next().unwrap_or(&fname);
-    let cont_internal = format!("{cont_owner}${cont_fname}$1");
+    // Suffix numbering is sequential PER `owner$name` (kotlinc: overloads get `$1`, `$2`, …) — a fixed
+    // `$1` would collide two same-named overloads' continuation classes (the second clobbers the first;
+    // its resume then drives the WRONG machine).
+    let mut cont_n = 1;
+    let cont_internal = loop {
+        let cand = format!("{cont_owner}${cont_fname}${cont_n}");
+        if !ir.classes.iter().any(|c| c.fq_name.matches(&cand)) {
+            break cand;
+        }
+        cont_n += 1;
+    };
     let cont_ty = Ty::obj(&cont_internal);
 
     let base = max_value_index(ir) + 1;
@@ -1717,9 +1775,9 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
         &cont_internal,
         fid,
         &layout,
-        &param_caps,
         receiver,
         &real_params,
+        split,
     );
 
     // Flatten the body into a state graph.
@@ -4013,14 +4071,106 @@ fn coroutine_suspended(ir: &mut IrFile) -> ExprId {
     )
 }
 
+/// Whether `e` contains a `super.<suspend fn>(…)` call (a `Callee::Special`) whose owner is an
+/// INTERFACE declared in this file — a shape needing kotlinc's `DefaultImpls`/`access$…$jd` ABI.
+fn has_interface_super_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
+    let mut stack = vec![e];
+    let mut seen: HashSet<ExprId> = HashSet::new();
+    while let Some(x) = stack.pop() {
+        if !seen.insert(x) {
+            continue;
+        }
+        if let IrExpr::Call {
+            callee: Callee::Special { owner, .. },
+            ..
+        } = &ir.exprs[x as usize]
+        {
+            let iface = ir
+                .classes
+                .iter()
+                .any(|c| c.fq_name == *owner && c.is_interface);
+            if iface && suspend_call_fid(ir, x, suspend_set).is_some() {
+                return true;
+            }
+        }
+        for_each_child(&ir.exprs, x, &mut |c| stack.push(c));
+    }
+    false
+}
+
+/// Whether an open member suspend fn gets kotlinc's `$suspendImpl` static split: the transformed body
+/// (machine or leaf) moves into a package-private `static <name>$suspendImpl(Owner, params…,
+/// Continuation)` and the virtual method becomes a thin delegator. The continuation's re-entry targets
+/// the STATIC — resuming through a virtual dispatch on an overridden method would re-enter the OVERRIDE,
+/// not the frame being resumed (a `super.<fn>(…)` chain then loops or NPEs).
+fn should_split_open(ir: &IrFile, fid: u32) -> bool {
+    let f = &ir.functions[fid as usize];
+    let Some(owner) = f.dispatch_receiver else {
+        return false;
+    };
+    if f.body.is_none() || !ir.open_methods.contains(&fid) {
+        return false;
+    }
+    ir.classes.iter().any(|c| {
+        c.fq_name == owner && !c.is_interface && (c.is_open || c.is_abstract || c.is_sealed)
+    })
+}
+
+/// Perform the `$suspendImpl` split (see [`should_split_open`]) AFTER the CPS transform: move the
+/// transformed body into the static impl and leave a `return Owner.<name>$suspendImpl(this, p…,
+/// $completion)` delegator. kotlinc emits the impl `0x1008` (package-private STATIC SYNTHETIC).
+fn split_open_suspend(ir: &mut IrFile, fid: u32) {
+    let f = &ir.functions[fid as usize];
+    let Some(owner) = f.dispatch_receiver else {
+        return;
+    };
+    let Some(body) = f.body else { return };
+    let name = f.name.clone();
+    let params = f.params.clone(); // already CPS'd: value params…, Continuation
+    let Some(cid) = ir.classes.iter().position(|c| c.fq_name == owner) else {
+        return;
+    };
+    let mut iparams = vec![Ty::obj_name(owner)];
+    iparams.extend(params.iter().copied());
+    let impl_name = format!("{name}$suspendImpl");
+    let impl_fid = ir.add_fun(IrFunction {
+        name: impl_name.clone(),
+        params: iparams.clone(),
+        ret: object_ty(),
+        body: Some(body),
+        is_static: true,
+        dispatch_receiver: Some(owner),
+        param_checks: Vec::new(),
+    });
+    ir.classes[cid].methods.push(impl_fid);
+    ir.synthetic_methods.insert(impl_fid);
+    ir.open_methods.insert(impl_fid); // static branch: suppresses ACC_FINAL
+    ir.package_private_methods.insert(impl_fid);
+    // Delegator body. Value-indices of the instance method: this=0, params 1..=n (incl. the
+    // continuation) — forwarded in order as the static's arguments.
+    let ip_jvm: Vec<Ty> = iparams.iter().map(super::ir_emit::ir_ty_to_jvm).collect();
+    let idesc =
+        crate::jvm::names::method_descriptor(&ip_jvm, super::ir_emit::ir_ty_to_jvm(&object_ty()));
+    let args: Vec<ExprId> = (0..=params.len() as u32)
+        .map(|i| ir.add_expr(IrExpr::GetValue(i)))
+        .collect();
+    let call = add_static_call(ir, &owner.render(), &impl_name, &idesc, args);
+    let ret = ir.add_expr(IrExpr::Return(Some(call)));
+    let nb = ir.add_expr(IrExpr::Block {
+        stmts: vec![ret],
+        value: None,
+    });
+    ir.functions[fid as usize].body = Some(nb);
+}
+
 fn build_continuation_class(
     ir: &mut IrFile,
     internal: &str,
     outer_fid: u32,
     layout: &SpillLayout,
-    _param_caps: &[(u32, Ty)],
     receiver: Option<TypeName>,
     params: &[Ty],
+    split: bool,
 ) -> ClassId {
     let class_id = ir.classes.len() as ClassId;
     let layout_fields = layout.fields();
@@ -4097,7 +4247,27 @@ fn build_continuation_class(
             let owner_cid = ir.classes.iter().position(|c| c.fq_name == owner);
             let owner_midx = owner_cid
                 .and_then(|cid| ir.classes[cid].methods.iter().position(|&m| m == outer_fid));
-            if let (true, Some(cid), Some(midx)) = (
+            if split {
+                // The open fn's machine lives in the static `<name>$suspendImpl` (see
+                // `split_open_suspend`) — re-enter THAT, never the virtual (an override would hijack
+                // the resumed frame).
+                let mut ip_jvm: Vec<crate::types::Ty> =
+                    vec![super::ir_emit::ir_ty_to_jvm(&Ty::obj_name(owner))];
+                ip_jvm.extend(p_jvm.iter().copied());
+                let idesc = crate::jvm::names::method_descriptor(
+                    &ip_jvm,
+                    super::ir_emit::ir_ty_to_jvm(&object_ty()),
+                );
+                let mut sargs = vec![recv];
+                sargs.extend(reentry_args);
+                add_static_call(
+                    ir,
+                    &owner_internal,
+                    &format!("{name}$suspendImpl"),
+                    &idesc,
+                    sargs,
+                )
+            } else if let (true, Some(cid), Some(midx)) = (
                 ir.private_methods.contains(&outer_fid),
                 owner_cid,
                 owner_midx,
