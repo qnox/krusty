@@ -267,9 +267,9 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             let name = &ir.classes[*class as usize].fields[*index as usize].name;
             format!("{}.{}", emit_expr(ir, *receiver, inst), name)
         }
-        IrExpr::New { class, args, .. } => {
-            let fq_name = ir.classes[*class as usize].fq_name();
-            let name = class_simple(&fq_name);
+        IrExpr::New { internal, args, .. } => {
+            let fq = internal.render();
+            let name = class_simple(&fq);
             format!("new {}({})", name, emit_args(ir, args, inst))
         }
         IrExpr::MethodCall {

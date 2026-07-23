@@ -255,12 +255,23 @@ pub enum IrExpr {
         value: ExprId,
     },
     /// Construct an instance (`IrConstructorCall`) of `class` with constructor `args` (in field order).
-    /// `ctor_params` is `None` for the primary constructor (the descriptor covers the leading
-    /// parameter fields); `Some(types)` selects a secondary constructor with that parameter list.
+    /// Construct a class: `new <internal>; dup; <args>; invokespecial <init>`. The owner is named by
+    /// `internal` — resolve the in-IR class (`classes.get`/`class_info_name`) only where a consumer needs
+    /// its `ClassId`; a name with no in-IR class is an external (classpath or other-module-file)
+    /// construction. This is the SOLE construction node — there is no cp/module/local variant split.
+    ///
+    /// The constructor descriptor comes from exactly one source, checked in order:
+    /// - `ctor_desc: Some(d)` — a verbatim JVM descriptor for a classpath construction whose signature
+    ///   krusty does not model as `Ty`s (erased/library types). Wins; `ctor_params` is then ignored.
+    /// - else the owner is an in-IR class — `ctor_params: None` selects its primary constructor (descriptor
+    ///   derived from the class, after the value-class pass), `Some(types)` a secondary with that list.
+    /// - else (an other-file/module class not in this IR) — `ctor_params: Some(types)` gives the parameter
+    ///   types krusty builds the descriptor from.
     New {
-        class: ClassId,
+        internal: TypeName,
         args: Vec<ExprId>,
         ctor_params: Option<Vec<Ty>>,
+        ctor_desc: Option<String>,
     },
     /// A virtual call to a class instance method `methods[index]` of `class` on `receiver`. `args[i] =
     /// None` means parameter `i` is omitted and takes its default (`p.copy(y=5)`, `f(a)` of `f(a, b=…)`);
@@ -347,13 +358,6 @@ pub enum IrExpr {
         operand: ExprId,
         name: String,
     },
-    /// Construct an instance of a classpath (non-IR) class — `RuntimeException("x")`, `StringBuilder()`.
-    /// `internal` is the JVM internal name, `ctor_desc` the `(…)V` constructor descriptor.
-    NewExternal {
-        internal: TypeName,
-        ctor_desc: String,
-        args: Vec<ExprId>,
-    },
     /// Read a static field holding a singleton on a class defined OUTSIDE this compilation (a classpath
     /// class with no `IrClass`): `getstatic <owner>.<field>:L<ty>;`. Like `StaticInstance` but the owner
     /// and field type are given by internal name directly, not resolved through `ir.classes`.
@@ -361,15 +365,6 @@ pub enum IrExpr {
         owner: TypeName,
         ty: TypeName,
         field: String,
-    },
-    /// Construct a class defined in ANOTHER file of the same compilation — `new internal; dup; <args>;
-    /// invokespecial internal.<init>(params)V`. Like `NewExternal` but carries the ctor parameter types
-    /// as `Ty`s (the JVM backend builds the descriptor) since it's a sibling-file user class, not a
-    /// classpath one with a library-provided descriptor.
-    NewCrossFile {
-        internal: TypeName,
-        params: Vec<Ty>,
-        args: Vec<ExprId>,
     },
     /// A `kotlin/jvm/internal/Ref$XxxRef` holder boxing a mutable local that a closure captures: a
     /// new `Ref$IntRef`/`Ref$ObjectRef`/… whose `element` field is initialized to `init`. `elem` is
@@ -1279,19 +1274,21 @@ impl IrFile {
         args: Vec<ExprId>,
     ) -> ExprId {
         let internal = crate::types::type_name(internal);
-        self.add_expr(IrExpr::NewExternal {
+        self.add_expr(IrExpr::New {
             internal,
-            ctor_desc: ctor_desc.into(),
             args,
+            ctor_params: None,
+            ctor_desc: Some(ctor_desc.into()),
         })
     }
 
     pub fn new_cross_file(&mut self, internal: &str, params: Vec<Ty>, args: Vec<ExprId>) -> ExprId {
         let internal = crate::types::type_name(internal);
-        self.add_expr(IrExpr::NewCrossFile {
+        self.add_expr(IrExpr::New {
             internal,
-            params,
             args,
+            ctor_params: Some(params),
+            ctor_desc: None,
         })
     }
 
@@ -1394,6 +1391,26 @@ impl IrFile {
         self.external_value_class_name(internal).is_some()
     }
 
+    /// The in-IR (same-file) `ClassId` for `internal`, or `None` when the name is an external/other-module
+    /// class not compiled in this file. The bridge from the unified [`IrExpr::New`]'s owner name back to a
+    /// `ClassId` for consumers that need the in-IR class (emit, function/property-reference detection).
+    pub fn class_id_by_name(&self, internal: TypeName) -> Option<ClassId> {
+        self.classes
+            .iter()
+            .position(|c| c.fq_name == internal)
+            .map(|i| i as ClassId)
+    }
+
+    /// Whether `internal` names a value class — an in-IR (same-file) one OR an external/other-module one.
+    /// The single name-keyed value-class test for the unified [`IrExpr::New`] (which no longer carries a
+    /// same-file `ClassId` to branch on).
+    pub fn is_value_class_name(&self, internal: TypeName) -> bool {
+        self.classes
+            .iter()
+            .any(|c| c.is_value && c.fq_name == internal)
+            || self.has_external_value_class_name(internal)
+    }
+
     pub fn insert_external_value_class_getter_name(&mut self, internal: TypeName, getter: String) {
         self.external_value_class_getters.insert(internal, getter);
     }
@@ -1491,10 +1508,9 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
             f(*func);
             args.iter().for_each(|&a| f(a));
         }
-        IrExpr::New { args, .. }
-        | IrExpr::NewExternal { args, .. }
-        | IrExpr::NewCrossFile { args, .. }
-        | IrExpr::Vararg { elements: args, .. } => args.iter().for_each(|&a| f(a)),
+        IrExpr::New { args, .. } | IrExpr::Vararg { elements: args, .. } => {
+            args.iter().for_each(|&a| f(a))
+        }
         IrExpr::Lambda {
             captures,
             inline_body,
@@ -1632,16 +1648,7 @@ fn default_expr_stub_safe(ir: &IrFile, e: ExprId, n: u32) -> bool {
         // VALUE/inline-class construction is NOT: it erases to its unboxed underlying (and mangles the
         // owning function's `$default` name), which the plain static stub doesn't box/unbox — so keep it
         // excluded (the file falls back to the inline call-site fill / skip).
-        IrExpr::New { class, .. }
-            if ir.classes.get(*class as usize).is_some_and(|c| c.is_value) =>
-        {
-            return false
-        }
-        IrExpr::NewExternal { internal, .. } | IrExpr::NewCrossFile { internal, .. }
-            if ir.has_external_value_class_name(*internal) =>
-        {
-            return false
-        }
+        IrExpr::New { internal, .. } if ir.is_value_class_name(*internal) => return false,
         // A default LAMBDA (`f: (Int) -> Int = { it + 1 }`) is re-emittable: the closure construction
         // only reads its captures, and those are checked as children (a capture of a spilled temp /
         // enclosing local — any value `>= n` — rejects above). Its `inline_body` is in the lambda's OWN

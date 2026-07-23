@@ -6169,10 +6169,13 @@ impl<'a> Emitter<'a> {
 
     fn function_ref_class_and_captures(&self, expr: u32) -> Option<(crate::ir::ClassId, Vec<u32>)> {
         match self.ir.expr(expr) {
-            IrExpr::New { class, args, .. }
-                if self.ir.classes[*class as usize].func_ref.is_some() =>
+            IrExpr::New { internal, args, .. }
+                if self
+                    .ir
+                    .class_id_by_name(*internal)
+                    .is_some_and(|c| self.ir.classes[c as usize].func_ref.is_some()) =>
             {
-                Some((*class, args.clone()))
+                Some((self.ir.class_id_by_name(*internal).unwrap(), args.clone()))
             }
             IrExpr::StaticInstance { ty, .. }
                 if self.ir.classes[*ty as usize].func_ref.is_some() =>
@@ -6185,10 +6188,13 @@ impl<'a> Emitter<'a> {
 
     fn property_ref_class_and_captures(&self, expr: u32) -> Option<(crate::ir::ClassId, Vec<u32>)> {
         match self.ir.expr(expr) {
-            IrExpr::New { class, args, .. }
-                if self.ir.classes[*class as usize].prop_ref.is_some() =>
+            IrExpr::New { internal, args, .. }
+                if self
+                    .ir
+                    .class_id_by_name(*internal)
+                    .is_some_and(|c| self.ir.classes[c as usize].prop_ref.is_some()) =>
             {
-                Some((*class, args.clone()))
+                Some((self.ir.class_id_by_name(*internal).unwrap(), args.clone()))
             }
             IrExpr::StaticInstance { ty, .. }
                 if self.ir.classes[*ty as usize].prop_ref.is_some() =>
@@ -7033,31 +7039,48 @@ impl<'a> Emitter<'a> {
                 }
             }
             IrExpr::New {
-                class,
+                internal,
                 args,
                 ctor_params,
+                ctor_desc,
             } => {
-                let c = &self.ir.classes[*class as usize];
-                let owner = c.fq_name();
-                // The constructor takes only the parameter fields (primary), or a secondary
-                // constructor's explicit parameter types; body properties are set inside it.
-                let mut field_tys: Vec<Ty> = match ctor_params {
-                    Some(ps) => jvm_tys(ps),
-                    None => class_ctor_jvm_tys(c),
-                };
-                // A class whose primary ctor takes a value-class param has a PRIVATE primary + a
-                // PUBLIC|SYNTHETIC accessor `(…args, DefaultConstructorMarker)`. Construction from ANOTHER
-                // class must route through the accessor (a trailing `null` marker) — the private primary is
-                // inaccessible. Same-class construction (a secondary ctor, `box-impl`) keeps the primary.
-                let use_accessor = ctor_params.is_none()
-                    && self.owner != owner
-                    && self.ir.has_value_param_ctor(&owner);
-                if use_accessor {
-                    field_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
-                }
+                let owner = internal.render();
                 let args = args.clone();
-                let aw: i32 = field_tys.iter().map(|t| slot_words(*t) as i32).sum();
-                let desc = method_descriptor(&field_tys, Ty::Unit);
+                // The constructor descriptor + its argument-word count come from ONE source, identified by
+                // the owner NAME (no same-file/other-file/classpath control-flow split):
+                //  - a verbatim descriptor (`ctor_desc`) for a classpath ctor whose signature isn't modeled
+                //    as `Ty`s — arg words come from each argument's own value type; OR
+                //  - the known parameter types: the node's `ctor_params`, else the named in-IR class's
+                //    primary-ctor field types.
+                let (desc, aw, use_accessor) = if let Some(d) = ctor_desc {
+                    let aw = args
+                        .iter()
+                        .map(|&a| slot_words(self.value_ty(a)) as i32)
+                        .sum();
+                    (d.clone(), aw, false)
+                } else {
+                    let mut field_tys: Vec<Ty> = match ctor_params {
+                        Some(ps) => jvm_tys(ps),
+                        None => self
+                            .ir
+                            .class_id_by_name(*internal)
+                            .map(|c| class_ctor_jvm_tys(&self.ir.classes[c as usize]))
+                            .unwrap_or_default(),
+                    };
+                    // A class whose primary ctor takes a value-class param has a PRIVATE primary + a
+                    // PUBLIC|SYNTHETIC accessor `(…args, DefaultConstructorMarker)`. Construction from
+                    // ANOTHER class routes through the accessor (a trailing `null`) — JVM `private` is
+                    // a per-CLASS boundary (independent of file/package), so the test is `self.owner !=
+                    // owner`. Same-class construction (a secondary ctor, `box-impl`) keeps the primary.
+                    let use_accessor = ctor_params.is_none()
+                        && self.owner != owner
+                        && self.ir.has_value_param_ctor(&owner);
+                    if use_accessor {
+                        field_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
+                    }
+                    let aw = field_tys.iter().map(|t| slot_words(*t) as i32).sum();
+                    (method_descriptor(&field_tys, Ty::Unit), aw, use_accessor)
+                };
                 if args.iter().any(|&a| self.records_frame(a)) {
                     // A branchy argument can't run with `[new, dup]` on the stack — its merge frame
                     // would omit them. Evaluate all args into temps first (clean stack), then build.
@@ -7942,56 +7965,6 @@ impl<'a> Emitter<'a> {
                 let result = result.clone();
                 self.emit_try(*body, &catches, *finally, &result, code);
             }
-            IrExpr::NewExternal {
-                internal,
-                ctor_desc,
-                args,
-            } => {
-                let owner = internal.render();
-                let desc = ctor_desc.clone();
-                let args = args.clone();
-                // Arguments were coerced to the constructor's parameter types in lowering, so each
-                // argument's `value_ty` is its parameter — the descriptor's argument-word count.
-                let aw: i32 = args
-                    .iter()
-                    .map(|&a| slot_words(self.value_ty(a)) as i32)
-                    .sum();
-                self.emit_external_new(&owner, &desc, &args, aw, code);
-            }
-            IrExpr::NewCrossFile {
-                internal,
-                params,
-                args,
-            } => {
-                let owner = internal.render();
-                let param_tys = jvm_tys(params);
-                let desc = method_descriptor(&param_tys, Ty::Unit);
-                let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
-                let args = args.clone();
-                if args.iter().any(|&a| self.records_frame(a)) {
-                    let temps = self.spill_to_temps(&args, code);
-                    let ci = self.cw.class_ref(&owner);
-                    code.new_obj(ci);
-                    code.dup();
-                    for &(slot, t, _) in &temps {
-                        load(t, slot, code);
-                    }
-                    for &(_, _, key) in &temps {
-                        self.slots.remove(&key);
-                    }
-                    let m = self.cw.methodref(&owner, "<init>", &desc);
-                    code.invokespecial(m, aw, 0);
-                } else {
-                    let ci = self.cw.class_ref(&owner);
-                    code.new_obj(ci);
-                    code.dup();
-                    for &a in &args {
-                        self.emit_value(a, code);
-                    }
-                    let m = self.cw.methodref(&owner, "<init>", &desc);
-                    code.invokespecial(m, aw, 0);
-                }
-            }
             IrExpr::RefNew { elem, init } => {
                 let (cls, fdesc) = ref_class(elem);
                 let ew = slot_words(ir_ty_to_jvm(elem)) as i32;
@@ -8540,8 +8513,6 @@ impl<'a> Emitter<'a> {
             // A `lateinit` read emits an `ifnonnull` merge frame, so a parent must spill other operands
             // first (else the frame at the join would omit them).
             IrExpr::LateinitCheck { .. } => true,
-            IrExpr::NewExternal { args, .. } => args.iter().any(|&a| self.records_frame(a)),
-            IrExpr::NewCrossFile { args, .. } => args.iter().any(|&a| self.records_frame(a)),
             IrExpr::RefGet { holder, .. } => self.records_frame(*holder),
             IrExpr::RefSet { holder, value, .. } => {
                 self.records_frame(*holder) || self.records_frame(*value)
@@ -8622,41 +8593,6 @@ impl<'a> Emitter<'a> {
             for &arg in args {
                 self.emit_value(arg, code);
             }
-        }
-    }
-
-    fn emit_external_new(
-        &mut self,
-        owner: &str,
-        desc: &str,
-        args: &[u32],
-        aw: i32,
-        code: &mut CodeBuilder,
-    ) {
-        if args.iter().any(|&a| self.records_frame(a)) {
-            // A branchy argument can't run with `[new, dup]` on the stack (its merge frame would omit
-            // them) — evaluate args into temps first, then build.
-            let temps = self.spill_to_temps(args, code);
-            let ci = self.cw.class_ref(owner);
-            code.new_obj(ci);
-            code.dup();
-            for &(slot, t, _) in &temps {
-                load(t, slot, code);
-            }
-            for &(_, _, key) in &temps {
-                self.slots.remove(&key);
-            }
-            let m = self.cw.methodref(owner, "<init>", desc);
-            code.invokespecial(m, aw, 0);
-        } else {
-            let ci = self.cw.class_ref(owner);
-            code.new_obj(ci);
-            code.dup();
-            for &a in args {
-                self.emit_value(a, code);
-            }
-            let m = self.cw.methodref(owner, "<init>", desc);
-            code.invokespecial(m, aw, 0);
         }
     }
 
@@ -9734,7 +9670,7 @@ impl<'a> Emitter<'a> {
                 ir_ty_to_jvm(&self.ir.classes[*class as usize].fields[*index as usize].ty)
             }
             IrExpr::GetStatic(i) => ir_ty_to_jvm(&self.ir.statics[*i as usize].ty),
-            IrExpr::New { class, .. } => Ty::obj(&self.ir.classes[*class as usize].fq_name()),
+            IrExpr::New { internal, .. } => Ty::obj(&internal.render()),
             IrExpr::MethodCall { class, index, .. } => {
                 let fid = self.ir.classes[*class as usize].methods[*index as usize];
                 call_ret_ty(&self.ir.functions[fid as usize].ret)
@@ -9836,8 +9772,6 @@ impl<'a> Emitter<'a> {
             IrExpr::InvokeFunction { ret, .. } => ir_ty_to_jvm(ret),
             IrExpr::NotNullAssert { operand } => self.value_ty(*operand),
             IrExpr::LateinitCheck { operand, .. } => self.value_ty(*operand),
-            IrExpr::NewExternal { internal, .. } => Ty::obj(&internal.render()),
-            IrExpr::NewCrossFile { internal, .. } => Ty::obj(&internal.render()),
             IrExpr::Throw { .. } | IrExpr::Break { .. } | IrExpr::Continue { .. } => Ty::Nothing,
             IrExpr::Vararg { array_type, .. } => ir_ty_to_jvm(array_type),
             IrExpr::NewArray { array_type, .. } => ir_ty_to_jvm(array_type),

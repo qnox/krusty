@@ -120,8 +120,7 @@ fn referenced_class_names(ir: &IrFile) -> Vec<TypeName> {
             IrExpr::New {
                 ctor_params: Some(ps),
                 ..
-            }
-            | IrExpr::NewCrossFile { params: ps, .. } => {
+            } => {
                 for p in ps {
                     collect_obj_names(*p, &mut out);
                 }
@@ -425,6 +424,10 @@ pub fn lower_value_classes(
     // Per-class id metadata (parallel to ir.classes).
     let is_vc: Vec<bool> = ir.classes.iter().map(|c| c.is_value).collect();
     let fq: Vec<TypeName> = ir.classes.iter().map(|c| c.fq_name).collect();
+    // Resolve an `IrExpr::New`'s owner NAME back to its in-IR `ClassId` (the node no longer carries the
+    // index). Only SAME-FILE classes are present; an external/other-module owner yields `None`.
+    let cls_by_name: HashMap<TypeName, usize> =
+        fq.iter().enumerate().map(|(i, n)| (*n, i)).collect();
     // Getter method name for each value class's sole field (`getV`), to recognize property access.
     let getter: Vec<Option<String>> = ir
         .classes
@@ -1506,13 +1509,14 @@ pub fn lower_value_classes(
             // PARAMETER types come from the actual constructor arguments (a secondary constructor's
             // signature differs from the primary, e.g. `Sc(String)` delegating to `Sc(Int)`).
             IrExpr::New {
-                class,
+                internal,
                 args,
                 ctor_params,
-            } if is_vc[*class as usize] => {
-                let cls = *class as usize;
+                ctor_desc: None,
+            } if under.contains_key(internal) => {
+                let owner = *internal;
                 let u = under
-                    .get(&fq[cls])
+                    .get(&owner)
                     .map(|t| erase(t, &under))
                     .unwrap_or(Ty::Error);
                 let ret = desc(&u);
@@ -1522,7 +1526,7 @@ pub fn lower_value_classes(
                 };
                 Some(Rw::Ctor(IrExpr::Call {
                     callee: Callee::Static {
-                        owner: fq[cls],
+                        owner,
                         name: "constructor-impl".to_string(),
                         descriptor: format!("({params}){ret}"),
                         inline: InlineKind::None,
@@ -2186,24 +2190,30 @@ pub fn lower_value_classes(
             }
             // Each `(value expr, target type)` boundary in this expression.
             let pairs: Vec<(ExprId, Ty)> = match &ir.exprs[id as usize] {
-                // A synthesized ctor whose args don't map 1:1 to fields — a `FunctionReferenceImpl` subclass
-                // stores a BOUND value-class receiver as its `Object` capture but has NO field of its own —
-                // uses its explicit `ctor_params` (`[kotlin/Any]`) as the boundary targets, so the unboxed
-                // value-class receiver captured into `obj::ext` boxes at that `Object` param.
+                // The boundary target types are the constructor's parameter types, read from wherever they
+                // are known — the same for any owner: the named class's own field types when it has them
+                // (an in-IR primary ctor), otherwise the node's explicit `ctor_params` (a fieldless
+                // synthesized ctor like a `FunctionReferenceImpl` subclass, OR an other-file/module ctor
+                // whose param types krusty carries on the node). No same-file/other-file branch.
                 IrExpr::New {
-                    class,
+                    internal,
                     args,
-                    ctor_params: Some(cps),
-                } if orig_fields[*class as usize].is_empty() => args
-                    .iter()
-                    .zip(cps.iter())
-                    .map(|(a, p)| (*a, p.clone()))
-                    .collect(),
-                IrExpr::New { class, args, .. } => args
-                    .iter()
-                    .zip(orig_fields[*class as usize].iter())
-                    .map(|(a, p)| (*a, p.clone()))
-                    .collect(),
+                    ctor_params,
+                    ..
+                } => {
+                    let fields;
+                    let targets: &[Ty] = match cls_by_name.get(internal) {
+                        Some(&c) if !orig_fields[c].is_empty() => {
+                            fields = orig_fields[c].clone();
+                            &fields
+                        }
+                        _ => ctor_params.as_deref().unwrap_or(&[]),
+                    };
+                    args.iter()
+                        .zip(targets.iter())
+                        .map(|(a, p)| (*a, p.clone()))
+                        .collect()
+                }
                 IrExpr::Call {
                     callee: Callee::Local(cfid),
                     args,
@@ -3739,10 +3749,12 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
     // box-impl(U): X  — `new X(u)`. Also ACC_SYNTHETIC.
     {
         let arg = ir.add_expr(IrExpr::GetValue(0));
+        let box_internal = ir.classes[class_id as usize].fq_name_id();
         let new = ir.add_expr(IrExpr::New {
-            class: class_id,
+            internal: box_internal,
             args: vec![arg],
             ctor_params: Some(vec![u_ir]),
+            ctor_desc: None,
         });
         let body = ret_block(ir, new);
         let fid = add_static(ir, "box-impl", vec![u_ir], x_ir, body);
