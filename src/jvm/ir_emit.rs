@@ -880,6 +880,9 @@ fn attach_synth_debug_tables(
     if !ctor_lines.is_empty() {
         let mut entries = vec![(ctor_pc, line)];
         entries.extend_from_slice(ctor_lines);
+        // kotlinc never emits two consecutive entries for the same line — a run of stores on the
+        // class-declaration line (a single-line `class C(val a: Int)`) collapses to one entry.
+        entries.dedup_by_key(|(_, l)| *l);
         cw.set_method_lines("<init>", &ctor_desc, &entries);
     }
     // A SEALED class's primary ctor is private; kotlinc pairs it with a PUBLIC|SYNTHETIC
@@ -2362,6 +2365,15 @@ fn emit_class(
                         let name = &c.fields[field_i].name;
                         // `this$0` is already stored BEFORE `super(…)` above — don't store it again.
                         if name != "this$0" {
+                            // kotlinc maps this field store to the parameter's own source line —
+                            // capture the pc where it starts.
+                            let pc = ctor.bytes.len() as u16;
+                            if let Some(&pl) = ir.prop_decl_lines.get(&(c.fq_name(), name.clone()))
+                            {
+                                if pl != 0 {
+                                    ctor_lines.push((pc, pl));
+                                }
+                            }
                             ctor.aload(0);
                             load(*t, slot, &mut ctor);
                             let fref = e.cw.fieldref(&fq_name, name, &type_descriptor(*t));

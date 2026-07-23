@@ -520,6 +520,13 @@ pub fn lower_file_at_reporting(
                     .prop_decl_lines
                     .insert((internal.clone(), p.name.clone()), p.decl_line);
             }
+            // Primary-constructor `val`/`var` parameters carry a line too — kotlinc maps each one's
+            // field store in `<init>` to the parameter's own source line.
+            for p in c.props.iter().filter(|p| p.is_property) {
+                lo.ir
+                    .prop_decl_lines
+                    .insert((internal.clone(), p.name.clone()), p.decl_line);
+            }
             for p in c.body_props.iter().filter(|p| is_field_accessor_prop(p)) {
                 lo.field_accessor_props
                     .insert((type_name(&internal), p.name.clone()));

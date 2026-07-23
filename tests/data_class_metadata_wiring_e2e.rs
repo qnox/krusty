@@ -178,6 +178,18 @@ fn multiline_signature_expression_body_is_byte_identical() {
     );
 }
 
+/// A constructor property declared on its own line (the wrapped-signature shape). kotlinc's `<init>`
+/// `LineNumberTable` maps the super call and the trailing return to the class-declaration line, and the
+/// property's field store to the PROPERTY's own line — three entries where krusty emitted one.
+#[test]
+fn multiline_constructor_property_line_table_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C(\n    val a: Int,\n) {\n    fun g(): Int = a\n}\n",
+        "demo/C",
+        &[],
+    );
+}
+
 /// A `private val` in the primary constructor — the everyday dependency-injection shape. A private
 /// property has NO accessor, so kotlinc interns no `getX` name/descriptor and records the property as
 /// private in `@Metadata`; krusty leaked both (orphan pool entries plus public property flags).
