@@ -5238,10 +5238,12 @@ impl<'a> Lower<'a> {
     }
 
     fn emit_new(&mut self, class: u32, args: Vec<u32>, ctor_params: Option<Vec<Ty>>) -> u32 {
+        let internal = self.ir.classes[class as usize].fq_name_id();
         self.ir.add_expr(IrExpr::New {
-            class,
+            internal,
             args,
             ctor_params,
+            ctor_desc: None,
         })
     }
 
@@ -6243,8 +6245,9 @@ impl<'a> Lower<'a> {
         // for a plain in-module regular class the resolver does not yet hand us a reference for.
         if self.info.resolved_constructor(call).is_none() {
             // A user class defined in ANOTHER file of this compilation (found by internal name in the
-            // global symbol table, but not in THIS file's IR classes) → construct via `NewCrossFile`
-            // from its `ClassSig` ctor params. Only the simple exact-arity primary-ctor case.
+            // global symbol table, but not in THIS file's IR classes) → construct via `new_cross_file`
+            // (a `New` with the ctor param types) from its `ClassSig` ctor params. Only the simple
+            // exact-arity primary-ctor case.
             if let Some(cs) = self.syms.class_by_internal(internal) {
                 // An annotation (an interface + synthetic impl) or inner class (needs an outer
                 // instance) isn't constructed via a plain cross-file `new`; bail (skip, not miscompile).
