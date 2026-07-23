@@ -5614,6 +5614,55 @@ impl<'a> Lower<'a> {
             return Some(self.coerce_generic_read(mc, call_expr, ret));
         }
         let internal_name = internal.render();
+        // A SIBLING-file (same-module, different-file) object: not in THIS file's IR (the same-file path
+        // above) and not on the classpath (the resolved-member path below). Read its singleton via an
+        // external `getstatic <internal>.INSTANCE` and invoke the member cross-file (`invokevirtual`),
+        // the same shape a cross-file instance call uses.
+        let arg_tys: Vec<Ty> = args.iter().map(|a| self.info.ty(*a)).collect();
+        let sib_sig = self
+            .syms
+            .class_by_internal(&internal_name)
+            .filter(|cs| cs.is_object)
+            .and_then(|cs| cs.method_matching(name, &arg_tys).cloned());
+        // A value-class return/parameter mangles the method NAME and/or erases the JVM descriptor, so
+        // the `CrossFileVirtual` descriptor built from the LOGICAL types would mismatch the emitted
+        // method — leave those (and suspend, whose CPS shape differs) to the existing paths.
+        let sib_ok = sib_sig.as_ref().is_some_and(|s| {
+            !s.is_suspend
+                && !std::iter::once(&s.ret).chain(s.params.iter()).any(|t| {
+                    t.obj_internal().is_some_and(|n| {
+                        self.syms
+                            .class_by_type_name(n)
+                            .is_some_and(|c| c.value_field.is_some())
+                            || self.syms.libraries.value_underlying_name(n).is_some()
+                    })
+                })
+        });
+        if let Some(sig) = sib_sig.filter(|_| sib_ok) {
+            let params = tys_to_ir(&sig.params);
+            let ret_ir = ty_to_ir(sig.ret);
+            let recv = self.emit_external_static_field(
+                internal_name.clone(),
+                "INSTANCE",
+                format!("L{internal_name};"),
+            );
+            let mut a = Vec::with_capacity(args.len());
+            for (arg, pt) in args.iter().zip(&sig.params) {
+                a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
+            }
+            let call = self.emit_call(
+                Callee::CrossFileVirtual {
+                    owner: internal,
+                    name: name.to_string(),
+                    params,
+                    ret: ret_ir,
+                    interface: false,
+                },
+                Some(recv),
+                a,
+            );
+            return Some(self.coerce_generic_read(call, call_expr, sig.ret));
+        }
         let resolved = self.info.resolved_member(call_expr).cloned()?;
         let m = resolved.member;
         if m.name != name || m.params.len() != args.len() {
