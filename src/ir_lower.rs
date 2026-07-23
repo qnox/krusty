@@ -11877,6 +11877,18 @@ impl<'a> Lower<'a> {
                 }
             }
         }
+        // Reading a value class's sole underlying field on a cross-file receiver is the identity
+        // in the erased representation (the receiver IS the unboxed underlying).
+        if let Ty::Obj(i, _) = rt {
+            if self
+                .syms
+                .class_by_type_name(i)
+                .and_then(|cs| cs.value_field.as_ref())
+                .is_some_and(|(fname, _)| fname == name)
+            {
+                return Some(recv);
+            }
+        }
         // A Kotlin property is a zero-arg member. Resolve the semantic property name through the
         // library source first; mapped builtins supply their physical owner/name/descriptor there.
         let internal = match rt {

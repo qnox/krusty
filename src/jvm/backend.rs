@@ -60,8 +60,17 @@ pub fn run_backend_passes(
         &vc_module,
         &[],
     );
+    // Same-module SOURCE value classes (internal name → sole-field underlying) for the value-class pass's
+    // erasure/mangle map — a value class declared in ANOTHER file of this module. Read from the frontend
+    // symbols directly, NOT surfaced through the resolver's library view (which would change the checker's
+    // construction/member resolution for source value classes).
+    let module_value_classes: std::collections::HashMap<_, _> = syms
+        .classes
+        .values()
+        .filter_map(|c| c.value_field.as_ref().map(|(_, t)| (c.internal_name(), *t)))
+        .collect();
     crate::jvm::value_classes::apply_override_final_drop(ir, &vc_resolver);
-    if !crate::jvm::value_classes::lower_value_classes(ir, &vc_resolver) {
+    if !crate::jvm::value_classes::lower_value_classes(ir, &vc_resolver, &module_value_classes) {
         return Err(SkipReason::ValueClasses);
     }
     if !crate::jvm::suspend::lower_suspend(ir, facade) {
