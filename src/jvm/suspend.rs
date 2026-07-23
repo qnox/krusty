@@ -3648,10 +3648,12 @@ fn build_get_or_create(
             args.push(ir.add_expr(IrExpr::GetValue(this_idx)));
         }
         args.push(ir.add_expr(IrExpr::GetValue(completion_idx)));
+        let cont_internal = ir.classes[cont_id as usize].fq_name_id();
         let new = ir.add_expr(IrExpr::New {
-            class: cont_id,
+            internal: cont_internal,
             args,
             ctor_params: None,
+            ctor_desc: None,
         });
         if param_caps.is_empty() {
             return new;
@@ -4586,9 +4588,7 @@ fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
         IrExpr::MethodCall { receiver, args, .. } => {
             box_returns(ir, receiver) && args.into_iter().flatten().all(|a| box_returns(ir, a))
         }
-        IrExpr::New { args, .. } | IrExpr::NewExternal { args, .. } => {
-            args.into_iter().all(|a| box_returns(ir, a))
-        }
+        IrExpr::New { args, .. } => args.into_iter().all(|a| box_returns(ir, a)),
         IrExpr::While {
             cond, body, update, ..
         } => {
