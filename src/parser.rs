@@ -88,6 +88,11 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
                 for m in &mut c.methods {
                     m.decl_line = body_line(&m.body, line_at(m.span.lo));
                 }
+                for p in &mut c.props {
+                    if p.span.lo != 0 || p.span.hi != 0 {
+                        p.decl_line = line_at(p.span.lo);
+                    }
+                }
                 for p in &mut c.body_props {
                     p.decl_line = line_at(p.span.lo);
                 }
@@ -497,6 +502,8 @@ fn rewrite_anon_captures(file: &mut File) {
                 c.props.push(PropParam {
                     name,
                     ty,
+                    span: Span::new(0, 0),
+                    decl_line: 0,
                     is_vararg: false,
                     is_var: false,
                     is_property: true,
@@ -1843,6 +1850,7 @@ impl<'a> Parser<'a> {
                 if is_property {
                     self.bump();
                 }
+                let pspan = self.tok().span;
                 let pname = self.ident_or_error("parameter name");
                 self.expect(TokenKind::Colon, "':'");
                 self.skip_newlines(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
@@ -1863,6 +1871,8 @@ impl<'a> Parser<'a> {
                 props.push(PropParam {
                     name: pname,
                     ty,
+                    span: pspan,
+                    decl_line: 0,
                     is_vararg,
                     is_var,
                     is_property,
@@ -2700,6 +2710,7 @@ impl<'a> Parser<'a> {
                     }
                     _ => (false, false), // a plain constructor parameter (not a property)
                 };
+                let pspan = self.tok().span;
                 let pname = self.ident_or_error("parameter name");
                 self.expect(TokenKind::Colon, "':'");
                 self.skip_newlines(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
@@ -2718,6 +2729,8 @@ impl<'a> Parser<'a> {
                 props.push(PropParam {
                     name: pname,
                     ty,
+                    span: pspan,
+                    decl_line: 0,
                     is_vararg,
                     is_var,
                     is_property,

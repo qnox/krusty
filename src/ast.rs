@@ -520,6 +520,12 @@ pub struct PropParam {
     /// extension can const-fold a value (`@SerialName("$prefix.bar")`). Empty inner vec for a no-arg
     /// annotation.
     pub annotation_args: Vec<Vec<ExprId>>,
+    /// Source span of the parameter name (zero when synthesized, e.g. an inner class's captured
+    /// outer). Filled by the parser; the post-pass derives `decl_line` from it.
+    pub span: Span,
+    /// 1-based source line of this parameter (0 = unknown). kotlinc's primary-constructor
+    /// `LineNumberTable` maps each property parameter's field store to the parameter's own line.
+    pub decl_line: u32,
 }
 
 /// One entry of an `enum class` (`RED(0xFF0000) { override fun m() = … }`). Groups what were parallel
