@@ -219,6 +219,18 @@ fn suspend_returning_nullable_value_class_is_byte_identical() {
     );
 }
 
+/// A CONCRETE `suspend` method with a body. kotlinc names the synthesized continuation parameter
+/// `$completion` in the LocalVariableTable; krusty had emitted the positional `p1` fallback. (An
+/// abstract suspend member has no Code, hence no LVT, so this only shows up on a method with a body.)
+#[test]
+fn concrete_suspend_method_continuation_is_named_completion() {
+    assert_byte_identical(
+        "package demo\nclass C {\n    suspend fun f(a: String): String = a\n}\n",
+        "demo/C",
+        &[],
+    );
+}
+
 /// A `private val` in the primary constructor — the everyday dependency-injection shape. A private
 /// property has NO accessor, so kotlinc interns no `getX` name/descriptor and records the property as
 /// private in `@Metadata`; krusty leaked both (orphan pool entries plus public property flags).

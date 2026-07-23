@@ -187,6 +187,13 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
         f.params.push(continuation_ty());
         f.param_checks.push(None);
         f.ret = object_ty();
+        // kotlinc names the synthesized continuation parameter `$completion` in the method's
+        // LocalVariableTable. Append it to the recorded parameter names so the debug-table emitter
+        // uses it instead of the positional `p{n}` fallback. `@Metadata` describes the DECLARED
+        // function (no continuation parameter — it reads only the leading names), so this is inert there.
+        if let Some(info) = ir.fn_params.get_mut(&fid) {
+            info.names.push("$completion".to_string());
+        }
         // kotlinc emits NO `checkNotNullParameter` on a suspend fn: the state-machine RE-ENTRY call
         // (`foo(null, continuation)`) passes null for every value parameter (the real values live in
         // the continuation's spill fields), so an entry null-check would throw on resume.
