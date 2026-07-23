@@ -255,6 +255,20 @@ fn nullable_reference_parameter_on_interface_is_byte_identical() {
     );
 }
 
+/// A suspend function whose body is a pure tail-call forward to another suspend function
+/// (`suspend fun f(a) = other.f(a)`). kotlinc emits no state machine and `areturn`s the callee's
+/// `Object` result verbatim; krusty was appending a redundant `checkcast` to the declared return type
+/// (the CPS return is already `Object`), interning a spurious class constant. Now returns the peeled
+/// call directly.
+#[test]
+fn suspend_tail_forward_returns_object_verbatim() {
+    assert_byte_identical(
+        "package demo\ninterface P { suspend fun g(a: String): String }\nclass C(val p: P) {\n    suspend fun g(a: String): String = p.g(a)\n}\n",
+        "demo/C",
+        &[],
+    );
+}
+
 /// A `private val` in the primary constructor — the everyday dependency-injection shape. A private
 /// property has NO accessor, so kotlinc interns no `getX` name/descriptor and records the property as
 /// private in `@Metadata`; krusty leaked both (orphan pool entries plus public property flags).

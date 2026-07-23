@@ -1145,10 +1145,14 @@ fn make_forward_body(ir: &mut IrFile, b: ExprId, call: ExprId) {
     match ir.exprs[b as usize].clone() {
         IrExpr::Block {
             stmts,
-            value: Some(v),
+            value: Some(_),
         } => {
+            // Return the PEELED `call`, not the block's value expr — the value is the callee call still
+            // wrapped in the redundant reference `Cast` that `tail_forward_call` stripped for detection.
+            // A tail-forward `areturn`s the callee's `Object` result verbatim (no `checkcast`); returning
+            // the wrapper would re-emit the cast that kotlinc omits.
             let mut stmts = stmts;
-            stmts.push(ir.add_expr(IrExpr::Return(Some(v))));
+            stmts.push(ir.add_expr(IrExpr::Return(Some(call))));
             ir.exprs[b as usize] = IrExpr::Block { stmts, value: None };
         }
         IrExpr::Block {
