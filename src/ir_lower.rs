@@ -7260,6 +7260,15 @@ impl<'a> Lower<'a> {
         if arity > 0 && n_cap > 0 {
             return None;
         }
+        // A VALUE-CLASS parameter is not modeled: the param spill field erases to the underlying, but
+        // the erased `invoke` stores the BOXED object without an unbox (VerifyError). Skip, never
+        // miscompile (corpus coroutines/inlineClasses/direct/createMangling.kt).
+        if params
+            .iter()
+            .any(|p| self.value_class_underlying(p.non_null()).is_some())
+        {
+            return None;
+        }
         // Does the lambda body call a `suspend` function? (AST-level, like the file's suspend gate.)
         // If so its `invokeSuspend` is a state machine with the lambda instance as the continuation —
         // for now only a single TAIL suspend call (`{ foo() }`) with no captures is modeled; anything
