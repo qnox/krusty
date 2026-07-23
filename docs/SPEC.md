@@ -1863,7 +1863,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   bodies with locals/loops/`try`/casts/callable-refs/`break`/`continue`, multi-`return` bodies,
   references to the callee file's own declarations (they would lower as wrong-file indices),
   bounded type parameters (incl. `where` clauses — now retained on `FunDecl.where_bounds`),
-  defaults/varargs, value-used (materialized) lambdas, lambda arguments that return or mutate, and
-  callers that are inferred-return expression bodies.
+  defaults/varargs, value-used (materialized) lambdas, and lambda arguments that return or mutate
+  (inferred-return expression-body callers work — the fall-through boxes to the erased type).
   (`cross_file_generic_inline_hof_expands_at_the_sibling_call_site`; box corpus 2946 → 3002, the
   `boxingOptimization`/`callableReference` cross-file slices.)
+
+- **An inline expansion's fall-through value boxes when the call's checked type is the erased
+  `Any`.** A generic inline fn with an INFERRED return (`inline fun <T> id(x: T) = x`) types calls
+  by the erased `Any` while the expansion specializes parameter slots — an identity-shaped body then
+  yields a raw primitive where the consumer expects a reference. Exactly that case takes an
+  `ImplicitCoercion` to the erased type; a value-class or `Nothing` result keeps its own convention.
+  (`cross_file_inferred_return_inline_call_boxes_the_any_result`.)

@@ -6876,6 +6876,12 @@ impl<'a> Checker<'a> {
         arg_tys: &[Ty],
     ) -> Ty {
         let mut ret_ty = selected.callable.ret;
+        crate::trace_compiler!(
+            "resolve",
+            "module_top_level_return {} src={:?} ret={ret_ty:?} args={arg_tys:?}",
+            selected.callable.name,
+            selected.source_key
+        );
         if let Some(&inferred) = selected
             .source_key
             .and_then(|source_key| self.inferred_fun_rets.get(&source_key))

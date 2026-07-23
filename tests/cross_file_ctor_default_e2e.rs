@@ -173,3 +173,17 @@ fn cross_file_interface_resolves_as_module_symbol() {
              fun box(): String = if (Impl() is Marker) \"OK\" else \"fail\"\n";
     assert_eq!(run_two(a, b).as_deref(), Some("OK"));
 }
+
+#[test]
+fn cross_file_inferred_return_inline_call_boxes_the_any_result() {
+    if common::java_home().is_none() || common::stdlib_jar().is_none() {
+        return;
+    }
+    // `inline fun <T> id(x: T) = x` has an INFERRED return (erased `Any`); the caller's expansion
+    // specializes the parameter slot to `int`, so the identity body yields a raw primitive where the
+    // checker typed `Any` — the fall-through must box (`areturn` on an int was a VerifyError).
+    let a = "inline fun <T> id(x: T) = x\n";
+    let b =
+        "fun test(arg: Int) = id(arg)\nfun box(): String = if (test(10) == 10) \"OK\" else \"F\"\n";
+    assert_eq!(run_two(a, b).as_deref(), Some("OK"));
+}

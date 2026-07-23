@@ -14855,17 +14855,7 @@ impl<'a> Lower<'a> {
             if body_has_return(callee_file, body) && !single_tail_return(callee_file, body) {
                 return None;
             }
-            // An enclosing expression-body fn with an INFERRED return can desync its emitted
-            // descriptor (the collection-time erased `Object`) from the specialized body (`int`) —
-            // VerifyError. Skip until the signature patch and the specialization agree.
-            let enclosing_inferred_expr = self.afile.decls.iter().any(|&d| {
-                matches!(self.afile.decl(d), Decl::Fun(ef)
-                    if ef.name == self.cur_fn_name && ef.ret.is_none()
-                        && matches!(ef.body, FunBody::Expr(_)))
-            });
-            if enclosing_inferred_expr {
-                return None;
-            }
+
             // A callee with BOUNDED type parameters (`<T : E>` / `where T : A, T : B`): the
             // erasure of the bound differs between the two files' views — skip.
             if !f.type_param_bounds.is_empty() || !f.where_bounds.is_empty() {
@@ -15344,10 +15334,27 @@ impl<'a> Lower<'a> {
                 self.emit_get_value(slot)
             };
             Some(self.emit_block(stmts, Some(value)))
-        } else if stmts.is_empty() {
-            Some(body_val)
         } else {
-            Some(self.emit_block(stmts, Some(body_val)))
+            // An `Any`-typed call result must carry a REFERENCE: the body is lowered with
+            // SPECIALIZED parameter slots (`T` bound to `Int`), so an identity-shaped body yields
+            // the raw specialized primitive while the checker typed the call by the callee's
+            // erased/inferred `Any` return — the consumer then treats it as a reference (`areturn`
+            // on an int: VerifyError). Box exactly that case; anything else (a value-class return's
+            // box-impl convention, a diverging `Nothing` body) keeps its own handling.
+            let erased_any = ret_ty
+                .non_null()
+                .obj_internal()
+                .is_some_and(|n| n.matches("kotlin/Any"));
+            let coerced = if erased_any {
+                self.emit_type_op(IrTypeOp::ImplicitCoercion, body_val, ret_ty)
+            } else {
+                body_val
+            };
+            if stmts.is_empty() {
+                Some(coerced)
+            } else {
+                Some(self.emit_block(stmts, Some(coerced)))
+            }
         }
     }
 
