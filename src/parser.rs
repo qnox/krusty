@@ -778,21 +778,65 @@ fn expand_fun_type_aliases(file: &mut File) {
     if file.type_alias_fun.is_empty() {
         return;
     }
-    let aliases: HashMap<String, TypeRef> = file.type_alias_fun.iter().cloned().collect();
+    let aliases: HashMap<String, (Vec<String>, TypeRef)> = file
+        .type_alias_fun
+        .iter()
+        .map(|(n, ps, t)| (n.clone(), (ps.clone(), t.clone())))
+        .collect();
 
-    fn expand(tr: &mut TypeRef, aliases: &HashMap<String, TypeRef>, depth: u32) {
+    /// Replace every leaf reference to one of `params` in `tr` with the corresponding use-site type
+    /// argument (the use site's `?` on the reference survives onto the substituted argument).
+    fn substitute(tr: &mut TypeRef, params: &[String], args: &[TypeRef]) {
+        if tr.fun_params.is_empty() && tr.name != "<fun>" && tr.targs.is_empty() {
+            if let Some(k) = params.iter().position(|p| *p == tr.name) {
+                let nullable = tr.nullable;
+                let span = tr.span;
+                *tr = args[k].clone();
+                tr.nullable |= nullable;
+                tr.span = span;
+                return; // a use-site type argument carries no alias type parameters of its own
+            }
+        }
+        if let Some(a) = &mut tr.arg {
+            substitute(a, params, args);
+        }
+        for t in &mut tr.targs {
+            substitute(t, params, args);
+        }
+        for t in &mut tr.fun_params {
+            substitute(t, params, args);
+        }
+    }
+
+    fn expand(tr: &mut TypeRef, aliases: &HashMap<String, (Vec<String>, TypeRef)>, depth: u32) {
         if depth > 8 {
             return;
         }
-        if tr.fun_params.is_empty() && tr.name != "<fun>" && tr.targs.is_empty() {
-            if let Some(target) = aliases.get(&tr.name) {
-                let nullable = tr.nullable;
-                let span = tr.span;
-                *tr = target.clone();
-                // The use site's `?` survives (`Listener?` = nullable function type); the span stays
-                // the USE site so diagnostics on the expanded type point at the source that wrote it.
-                tr.nullable |= nullable;
-                tr.span = span;
+        if tr.fun_params.is_empty() && tr.name != "<fun>" {
+            if let Some((tparams, target)) = aliases.get(&tr.name) {
+                if tr.targs.len() == tparams.len() {
+                    // Expand any alias reference INSIDE the use-site type arguments first — the
+                    // substitution clones them into the target, after which the originals are gone.
+                    for a in &mut tr.targs {
+                        expand(a, aliases, depth + 1);
+                    }
+                    let nullable = tr.nullable;
+                    let span = tr.span;
+                    let mut expanded = target.clone();
+                    if !tparams.is_empty() {
+                        substitute(&mut expanded, tparams, &tr.targs);
+                    }
+                    *tr = expanded;
+                    // The use site's `?` survives (`Listener?` = nullable function type); the span
+                    // stays the USE site so diagnostics point at the source that wrote it.
+                    tr.nullable |= nullable;
+                    tr.span = span;
+                    // The expansion (or a substitution result) may itself be an alias reference
+                    // (`typealias A<T> = B<T>` with `B` a fn-type alias) — re-expand the whole node;
+                    // the depth cap bounds a (kotlinc-rejected) recursive chain.
+                    expand(tr, aliases, depth + 1);
+                    return;
+                }
             }
         }
         if let Some(a) = &mut tr.arg {
@@ -805,33 +849,36 @@ fn expand_fun_type_aliases(file: &mut File) {
             expand(t, aliases, depth + 1);
         }
     }
-    fn expand_opt(tr: &mut Option<TypeRef>, aliases: &HashMap<String, TypeRef>) {
+    fn expand_opt(tr: &mut Option<TypeRef>, aliases: &HashMap<String, (Vec<String>, TypeRef)>) {
         if let Some(t) = tr {
             expand(t, aliases, 0);
         }
     }
-    fn expand_params(params: &mut [Param], aliases: &HashMap<String, TypeRef>) {
+    fn expand_params(params: &mut [Param], aliases: &HashMap<String, (Vec<String>, TypeRef)>) {
         for p in params {
             expand(&mut p.ty, aliases, 0);
         }
     }
-    fn expand_bounds(bounds: &mut [(String, TypeRef)], aliases: &HashMap<String, TypeRef>) {
+    fn expand_bounds(
+        bounds: &mut [(String, TypeRef)],
+        aliases: &HashMap<String, (Vec<String>, TypeRef)>,
+    ) {
         for (_, t) in bounds {
             expand(t, aliases, 0);
         }
     }
-    fn expand_fun(f: &mut FunDecl, aliases: &HashMap<String, TypeRef>) {
+    fn expand_fun(f: &mut FunDecl, aliases: &HashMap<String, (Vec<String>, TypeRef)>) {
         expand_opt(&mut f.receiver, aliases);
         expand_params(&mut f.params, aliases);
         expand_opt(&mut f.ret, aliases);
         expand_bounds(&mut f.type_param_bounds, aliases);
     }
-    fn expand_prop(p: &mut PropDecl, aliases: &HashMap<String, TypeRef>) {
+    fn expand_prop(p: &mut PropDecl, aliases: &HashMap<String, (Vec<String>, TypeRef)>) {
         expand_opt(&mut p.receiver, aliases);
         expand_opt(&mut p.ty, aliases);
         expand_bounds(&mut p.type_param_bounds, aliases);
     }
-    fn expand_class(c: &mut ClassDecl, aliases: &HashMap<String, TypeRef>) {
+    fn expand_class(c: &mut ClassDecl, aliases: &HashMap<String, (Vec<String>, TypeRef)>) {
         expand_bounds(&mut c.type_param_bounds, aliases);
         for p in &mut c.props {
             expand(&mut p.ty, aliases, 0);
@@ -1280,30 +1327,54 @@ impl<'a> Parser<'a> {
                     };
                     let alias_targs = self.parse_type_args(); // `<T, R>` if present
                     self.eat(TokenKind::Eq);
-                    // A function-type target (`(A) -> R`, `suspend (A) -> R`, `context(C) (A) -> R`):
-                    // parse the full type and record it in `type_alias_fun` (non-generic aliases only —
-                    // a generic alias's expansion would need use-site type-arg substitution, which
-                    // isn't modeled).
-                    let fn_target = self.at(TokenKind::LParen)
-                        || (self.at(TokenKind::Ident)
-                            && (self.text() == "suspend" || self.text() == "context")
-                            && self
-                                .t
-                                .get(self.i + 1)
-                                .is_some_and(|t| t.kind == TokenKind::LParen));
+                    // A function-type target (`(A) -> R`, `suspend (A) -> R`, `context(C) (A) -> R`,
+                    // a receiver form `R.() -> T`): parse the full type and record it in
+                    // `type_alias_fun`. Every function-type spelling — and no class-name target —
+                    // carries an `->` before the end of the line, so detect by scanning ahead. A
+                    // GENERIC alias records its declared type-parameter NAMES (each `<T, R>` entry
+                    // parses as a simple type) so the expansion pass substitutes use-site arguments.
+                    let fn_target = self.t[self.i..]
+                        .iter()
+                        .take_while(|t| t.kind != TokenKind::Newline && t.kind != TokenKind::Eof)
+                        .any(|t| t.kind == TokenKind::Arrow);
                     // Parse the target type name, including dotted FQNs (e.g. java.lang.Exception).
                     let target = if fn_target {
                         let t = self.parse_type();
-                        if !alias.is_empty()
-                            && alias_targs.is_empty()
-                            && (!t.fun_params.is_empty() || t.name == "<fun>")
-                        {
-                            self.file.type_alias_fun.push((alias.clone(), t));
+                        // Every declared type parameter must be a SIMPLE name (no bounds/variance are
+                        // parsed into `parse_type_args` results beyond the name; a non-simple entry —
+                        // e.g. a `*` projection — declines recording).
+                        let tparam_names: Option<Vec<String>> = alias_targs
+                            .iter()
+                            .map(|a| {
+                                (a.fun_params.is_empty()
+                                    && a.targs.is_empty()
+                                    && !a.name.is_empty()
+                                    && a.name != "<fun>"
+                                    && a.name != "*")
+                                    .then(|| a.name.clone())
+                            })
+                            .collect();
+                        let is_fun = !t.fun_params.is_empty() || t.name == "<fun>";
+                        if let Some(tparam_names) = tparam_names {
+                            if !alias.is_empty() && is_fun {
+                                self.file.type_alias_fun.push((
+                                    alias.clone(),
+                                    tparam_names,
+                                    t.clone(),
+                                ));
+                            }
                         }
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
                             self.bump();
                         }
-                        String::new()
+                        if is_fun {
+                            String::new()
+                        } else {
+                            // The Arrow that triggered the scan sat inside a CLASS target's type
+                            // argument (`Map<String, (Int) -> Int>`) — keep the class-name alias
+                            // exactly as the plain-name path records it.
+                            t.name.clone()
+                        }
                     } else if self.at(TokenKind::Ident) {
                         let mut name = self.text().to_string();
                         self.bump();

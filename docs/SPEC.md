@@ -1886,3 +1886,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Mirrors the checker's slotting (same rule, #153).
   (`inline_fn_trailing_lambda_with_omitted_default`; advances the corpus
   `fakeInlinerVariables.kt` chain to its next blocker.)
+
+- **Generic FUNCTION-type aliases expand by use-site type-argument substitution.**
+  `typealias Mapper<T, R> = (T) -> R` records its type-parameter NAMES; a use site
+  `Mapper<Int, String>` clones the target and substitutes each parameter-named leaf with the
+  corresponding (recursively pre-expanded) use-site argument. Function-type targets are detected by
+  an `->` ahead of the end of the alias line (covers `suspend`/`context(...)`/receiver `R.() -> T`
+  spellings uniformly); a class TARGET whose type argument carries the `->`
+  (`Map<String, (Int) -> Int>`) keeps its plain class-name alias. An alias whose target is ITSELF a
+  generic fn alias reference (`typealias Chain<T> = Mapper<T, String>` — no `->` on the line) is not
+  expanded (unresolved → skip). (`generic_fun_type_alias_substitutes_use_site_args`,
+  `generic_suspend_fun_type_alias`, `class_target_alias_with_fn_type_argument_is_preserved`.)
+
+- **An UNRESOLVED local type annotation is an error, not a silent `Error` bind.** `resolve_ty` is
+  deliberately lenient (returns `Ty::Error` with no diagnostic) for expression positions, but a
+  local whose annotation fails to resolve would take its initializer's shape with every use-site
+  check Error-suppressed — a cross-module `val b: Bar<String> = { "OK" }` (alias declared in another
+  module, not importable) SAM-converts the lambda by its own arity and throws
+  `IncompatibleClassChangeError` at the call expecting the annotated shape (corpus
+  `typeAliasesKt13181.kt`, unlocked by the generic-alias expansion). kotlinc rejects the unresolved
+  annotation; krusty now does too. (`unresolved_local_type_annotation_is_rejected`.)

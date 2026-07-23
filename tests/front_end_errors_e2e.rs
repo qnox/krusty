@@ -337,3 +337,14 @@ fn missing_when_subject_branch_type() {
     let d = diags("fun box(): String { val x = 1; return when (x) { 1 -> 100; else -> 200 } }");
     assert_rejected(&d, "when-expression branch type mismatch");
 }
+
+#[test]
+fn unresolved_local_type_annotation_is_rejected() {
+    // A local whose ANNOTATION doesn't resolve must fail the file — silently binding `Error` lets
+    // the local take its initializer's shape while every use site's checks are Error-suppressed
+    // (a lambda then SAM-converts by its own arity → IncompatibleClassChangeError at runtime).
+    let d = parse_diags(
+        "fun f(): String {\n    val b: Nonexist<String> = { \"OK\" }\n    return b(\"x\")\n}\n",
+    );
+    assert_rejected(&d, "an unresolved local type annotation");
+}
