@@ -10312,7 +10312,16 @@ impl<'a> Lower<'a> {
         // so its signature has one more entry than the (invoke) `param_tys`. `None` ⇒ same as `param_tys`.
         target_override: Option<Vec<Ty>>,
     ) -> Option<u32> {
-        let synth_fq = class_internal(self.afile, &format!("{}$fnref${}", self.cur_fn_name, uniq));
+        // A suspend-conversion adapter gets its own name space: its `uniq` is the ARG expr id, which
+        // the wrapped value (a callable reference lowered from the same arg) may already have claimed
+        // as `$fnref$<uniq>` — a shared suffix would emit two classes under one name (the survivor has
+        // the wrong arity/shape → CCE / missing INSTANCE at runtime).
+        let marker = if matches!(dispatch, crate::ir::FrDispatch::SuspendConvert) {
+            "$suspendConversion$"
+        } else {
+            "$fnref$"
+        };
+        let synth_fq = class_internal(self.afile, &format!("{}{marker}{}", self.cur_fn_name, uniq));
         let superclass = self
             .runtime
             .function_reference_impl_type()?
@@ -11165,6 +11174,42 @@ impl<'a> Lower<'a> {
                         .unwrap_or_else(|| vec![Ty::obj("kotlin/Any"); params.len()]);
                     if bind_names.len() == params.len() {
                         return self.lower_suspend_lambda(body, &ty_params, bind_names);
+                    }
+                }
+                // Suspend conversion: a NON-suspend function VALUE flowing into the suspend
+                // parameter wraps in a `FunctionReferenceImpl` adapter implementing `Function{n+1}`
+                // + the `SuspendFunction` marker, whose `invoke` DROPS the continuation and
+                // delegates to the value's `Function{n}.invoke` — a plain function never suspends,
+                // so its erased result is the completion value. All slots stay erased `Object`
+                // (the wrapped invoke is erased too), so no per-parameter casts are needed.
+                if let Ty::Fun(vs) = self.info.ty(arg) {
+                    // A SUSPEND function value into a suspend parameter is the identity — both erase
+                    // to the same `Function{n+1}`; no adaptation.
+                    if vs.suspend && vs.params.len() == params.len() {
+                        return self.expr(arg);
+                    }
+                    if !vs.suspend && vs.params.len() == params.len() {
+                        let v = self.expr(arg)?;
+                        let n = params.len();
+                        let mut param_tys: Vec<Ty> = vec![Ty::obj("kotlin/Any"); n];
+                        param_tys.push(Ty::obj("kotlin/coroutines/Continuation"));
+                        let target_param_tys = param_tys.clone();
+                        return self.make_func_ref(
+                            arg.0,
+                            true,
+                            (n + 1) as u8,
+                            Some(type_name("kotlin/jvm/internal/Intrinsics$Kotlin")),
+                            "suspendConversion0".to_string(),
+                            0,
+                            crate::ir::FrDispatch::SuspendConvert,
+                            Some(type_name(&format!("kotlin/jvm/functions/Function{n}"))),
+                            "invoke".to_string(),
+                            true,
+                            param_tys,
+                            Ty::obj("kotlin/Any"),
+                            Some(v),
+                            Some(target_param_tys),
+                        );
                     }
                 }
                 return None;

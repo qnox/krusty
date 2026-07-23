@@ -1226,8 +1226,14 @@ fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId 
         IrExpr::Call { args, .. } => args.push(cont),
         IrExpr::MethodCall { args, .. } => args.push(Some(cont)),
         // A suspend function VALUE call (`block(a)`): the value implements `Function{N+1}`, so append the
-        // continuation — the emitter picks `Function{N+1}.invoke` from the arg count.
-        IrExpr::InvokeFunction { args, .. } => args.push(cont),
+        // continuation — the emitter picks `Function{N+1}.invoke` from the arg count. The CPS result is
+        // the raw erased `Object` (COROUTINE_SUSPENDED or the boxed value): erase `ret` so the emitter
+        // does NOT unbox it — a tail-forward `areturn`s it verbatim, and the flattener re-applies the
+        // logical coercion from `ir.suspend_calls` when it binds the resume value.
+        IrExpr::InvokeFunction { args, ret, .. } => {
+            *ret = object_ty();
+            args.push(cont);
+        }
         _ => {}
     }
     call_e

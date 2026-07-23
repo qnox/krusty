@@ -1824,3 +1824,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   survives expansion (`L?` = nullable function type) and the span stays the use site.
   (`tests/typealias_function_type_e2e.rs`; corpus `suspendConversion/suspendConversionOfAliasedType.kt`
   advances from `unresolved` to the separate suspend-conversion gap.)
+
+- **Suspend conversion: a NON-suspend function value flowing into a `suspend` function-type parameter
+  wraps in a synthesized adapter.** kotlinc's shape: a `FunctionReferenceImpl` subclass implementing
+  `Function{n+1}` plus the `kotlin/coroutines/jvm/internal/SuspendFunction` marker, whose `invoke`
+  DROPS the trailing continuation and delegates to the wrapped value's erased `Function{n}.invoke` —
+  a plain function never suspends, so its erased result (for `Unit`, the `Unit.INSTANCE` an erased
+  Unit lambda already returns) is the completion value verbatim. The adapter class lives in the
+  `$suspendConversion$` name space: its `uniq` is the arg expr id, which a callable-ref VALUE lowered
+  from the same arg already claims under `$fnref$` (a shared name emits two classes under one name —
+  the survivor has the wrong arity → CCE). A SUSPEND value into a suspend parameter passes through
+  unchanged (both erase to `Function{n+1}`). A suspend function VALUE call in CPS position erases its
+  `InvokeFunction` ret to `Object` when the continuation is threaded — a tail-forward `areturn`s the
+  raw erased result (COROUTINE_SUSPENDED or the boxed value); the flattener re-applies the logical
+  coercion from `ir.suspend_calls`. (`tests/suspend_conversion_e2e.rs`; corpus
+  `suspendConversion/` + `callableReference/adaptedReferences/suspendConversion/` — box-OK +10.)
