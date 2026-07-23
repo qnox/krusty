@@ -1877,3 +1877,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`tests/trailing_lambda_middle_default_e2e.rs`; unblocks the checker for corpus
   `fakeInlinerVariables.kt`-class `expectFailure(msg) { … }` calls — their remaining gap is the
   omitted fn-typed default's lowering.)
+
+- **The inline expansion's argument slotting honors the trailing-lambda rule.** A syntactic
+  trailing lambda binds the LAST parameter; omitted middles take their default expressions
+  (substituted directly — an inline fn has no `$default` method). The positional fill previously put
+  the lambda in the first free slot, so `g { … }` on `inline fun g(x: Int = 5, action: () -> Int)`
+  slotted the lambda into `x`, found `action` argument-less and default-less, and bailed the file.
+  Mirrors the checker's slotting (same rule, #153).
+  (`inline_fn_trailing_lambda_with_omitted_default`; advances the corpus
+  `fakeInlinerVariables.kt` chain to its next blocker.)

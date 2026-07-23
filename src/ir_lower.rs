@@ -14950,9 +14950,20 @@ impl<'a> Lower<'a> {
             }
             let mut slot: Vec<Option<AstExprId>> = vec![None; np];
             let mut pos = 0;
+            let trailing = self.afile.call_has_trailing_lambda.contains(&call_id);
             for (i, &arg) in args.iter().enumerate() {
                 match names.get(i).and_then(|o| o.as_ref()) {
                     None => {
+                        // A SYNTACTIC trailing lambda always binds the LAST parameter — the omitted
+                        // middle parameters take their defaults (`g { … }` on `g(x = 5, action)`
+                        // puts the lambda in `action`, mirroring the checker's slotting).
+                        if trailing && i + 1 == args.len() && np > 0 {
+                            if slot[np - 1].is_some() {
+                                return None;
+                            }
+                            slot[np - 1] = Some(arg);
+                            continue;
+                        }
                         if pos >= np {
                             return None;
                         }

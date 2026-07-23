@@ -38,3 +38,23 @@ fun box(): String {\n\
 // A NON-nullable fn-typed middle default (`chk: (Int) -> Unit = {}`) now passes the CHECKER with the
 // same mapping, but the omitted-default LOWERING can't fill a lambda default yet (`lower: call ef`)
 // — that's a separate gap; no test until it lands (this file's cases stay runnable end-to-end).
+
+#[test]
+fn inline_fn_trailing_lambda_with_omitted_default() {
+    // The INLINE expansion's arg slotting: a syntactic trailing lambda binds the LAST parameter;
+    // the omitted `x` takes its default expression (substituted directly — no $default method).
+    const SRC: &str = "inline fun g(x: Int = 5, action: () -> Int): Int = x + action()\n\
+fun box(): String = if (g { 37 } == 42) \"OK\" else \"no\"\n";
+    let out = run(SRC).expect("inline trailing lambda with omitted default should compile + run");
+    assert_eq!(out, "OK");
+}
+
+#[test]
+fn inline_fn_trailing_lambda_with_omitted_fn_typed_default() {
+    // The fakeInlinerVariables.kt shape: an inline fn with an omitted fn-typed middle default.
+    const SRC: &str = "inline fun g(x: Int = 5, noinline chk: ((Int) -> Unit)? = null, action: () -> Int): Int = x + action()\n\
+fun box(): String = if (g { 37 } == 42) \"OK\" else \"no\"\n";
+    let out =
+        run(SRC).expect("inline trailing lambda with omitted fn default should compile + run");
+    assert_eq!(out, "OK");
+}
