@@ -14845,6 +14845,37 @@ impl<'a> Checker<'a> {
                         .or_else(|| self.syms.classes.get(&fname).cloned());
                     if let Some(cls) = ctor_cls {
                         let ctor_params: Vec<Ty> = cls.ctor_params.clone();
+                        // A value class (`@JvmInline`) constructs via its static `constructor-impl`
+                        // (`constructor-impl$default` when a defaulted param is omitted) — the SAME
+                        // resolved-constructor reference a classpath value class produces. The resolver
+                        // is the single source of construction resolution; `lower_external_new` only
+                        // consumes it, with no separate classpath / sibling-module / same-file handling.
+                        // Recording it here also lets `Vid()` (whose sole param has a non-const default
+                        // like `generate()`) lower like kotlinc instead of erroring on omitted arity.
+                        // Only the OMITTED-default construction — `Vid()` where the sole param has a
+                        // default (const or not, e.g. `= generate()`) — needs the resolved-constructor
+                        // path: it lowers to `constructor-impl$default`, exactly as a classpath value
+                        // class does. A fully-supplied `Vid(x)` is left to the existing lowering
+                        // (routing it here would mishandle the unboxed-underlying method-call cases).
+                        // Restricted to a single-field value class; a multi-field value class lowers to
+                        // several fields, not one `constructor-impl`. `ctor_defaults` only records
+                        // const-emittable defaults, so the has-default bit in `ctor_param_names` is what
+                        // tells us a non-const default exists.
+                        if let Some((_, underlying)) = cls.value_field.clone() {
+                            if ctor_params.len() == 1
+                                && arg_tys.is_empty()
+                                && cls.ctor_param_names.first().is_some_and(|(_, d)| *d)
+                            {
+                                self.resolved_constructors.insert(
+                                    call,
+                                    ResolvedConstructor::ValueClass {
+                                        underlying,
+                                        arg: None,
+                                    },
+                                );
+                                return self.ctor_result_name(call, cls.internal_name());
+                            }
+                        }
                         // Named-argument constructor call (`C(b = 9)`): map names → positions using the
                         // primary ctor's parameter names + per-parameter defaults, the same path a
                         // top-level function uses. An omitted parameter falls back to its default (the

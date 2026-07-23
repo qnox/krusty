@@ -182,6 +182,66 @@ fn cross_file_top_level_function_and_property() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Multi-file: a `@JvmInline value class` whose sole parameter has a NON-CONST default (`= gen()`) is
+/// constructed with NO arguments (`Vid()`) from ANOTHER file of the same module. The resolver hands the
+/// lowerer a `ValueClass` construction reference — the SAME reference a classpath value class produces,
+/// with no module/classpath/local distinction — so the call lowers to the static
+/// `constructor-impl$default(null, 1, DefaultConstructorMarker)` exactly as kotlinc does, instead of
+/// erroring on the omitted non-const default. Guards the exact instruction shape (kotlinc-identical).
+#[test]
+fn cross_file_value_class_omitted_default_construction() {
+    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+        return;
+    };
+    let javap = format!("{java_home}/bin/javap");
+    if !std::path::Path::new(&javap).exists() {
+        return;
+    }
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_xvc_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("A.kt"),
+        "object Rng { fun gen(): String = \"OK\" }\n\
+         @JvmInline\nvalue class Vid(val value: String = Rng.gen())\n",
+    )
+    .unwrap();
+    // `Vid()` is a SIBLING-file construction with the sole (defaulted) argument omitted.
+    fs::write(dir.join("B.kt"), "fun make(): Vid = Vid()\n").unwrap();
+    let kc = Command::new(krusty)
+        .args(["-d", dir.to_str().unwrap()])
+        .arg(dir.join("A.kt"))
+        .arg(dir.join("B.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        kc.status.success(),
+        "krusty failed cross-file value-class compile: {}",
+        String::from_utf8_lossy(&kc.stderr)
+    );
+    let jp = Command::new(&javap)
+        .args(["-p", "-c"])
+        .arg(dir.join("BKt.class"))
+        .output()
+        .unwrap();
+    let asm = String::from_utf8_lossy(&jp.stdout);
+    // The omitted-default construction is the static default dispatch, NOT a `new`/`<init>`: a null
+    // placeholder for the value, a `1` bitmask (sole param defaulted), a null `DefaultConstructorMarker`.
+    assert!(
+        asm.contains(
+            "constructor-impl$default\":\
+             (Ljava/lang/String;ILkotlin/jvm/internal/DefaultConstructorMarker;)Ljava/lang/String;"
+        ),
+        "make() must call Vid.constructor-impl$default (kotlinc's omitted-default shape); got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("new           #") && !asm.contains("\"<init>\""),
+        "value-class construction must not emit `new`/`<init>`; got:\n{asm}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// Multi-file: construct a class declared in ANOTHER file, read a property, CALL a method, and WRITE a
 /// `var` — all lower to cross-file bytecode (`new`/`invokespecial <init>`, `getX`, `invokevirtual`,
 /// `setX`), not a bail. Compile both files, run `box()`.
