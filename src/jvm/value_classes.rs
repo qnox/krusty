@@ -553,6 +553,13 @@ pub fn lower_value_classes(
                 .get(fid as usize)
                 .filter(|t| vc_ret(t))
                 .and_then(|t| t.non_null().obj_internal())
+                // A GENERIC value class already inhabits the Object representation — the boxed-resume
+                // ABI would be a no-op round-trip (same exclusion as the `field_getters` channel).
+                .filter(|x| {
+                    !ir.classes
+                        .iter()
+                        .any(|vc| vc.fq_name == *x && vc.is_value && !vc.type_params.is_empty())
+                })
                 .map(|x| (fid, x))
         })
         .collect();
@@ -560,17 +567,16 @@ pub fn lower_value_classes(
         // Boxed-resume shapes NOT yet covered — bail (skip the file, never miscompile): a
         // PRIMITIVE-underlying value class (`box-impl(I)` vs the int slot family) and a NESTED
         // value-class underlying.
-        let prim_under = vc_ret_fids.iter().any(|(_, x)| {
+        let nested_under = vc_ret_fids.iter().any(|(_, x)| {
             under.get(x).is_some_and(|u| {
-                // …nor a NESTED value-class underlying (`IC(val s: I0)` — its box/unbox chains
-                // compose through two impls).
-                !is_ref(&erase(u, &under))
-                    || u.non_null()
-                        .obj_internal()
-                        .is_some_and(|iu| under.contains_key(&iu))
+                // A NESTED value-class underlying (`IC(val s: I0)`) — its box/unbox chains compose
+                // through two impls; not modeled.
+                u.non_null()
+                    .obj_internal()
+                    .is_some_and(|iu| under.contains_key(&iu))
             })
         });
-        if prim_under {
+        if nested_under {
             return false;
         }
         for (fid, x) in vc_ret_fids {

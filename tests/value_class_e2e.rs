@@ -331,3 +331,26 @@ fun box(): String { var r = "FAIL"; builder { r = T2().run2().s }; return r }
 "#;
     common::assert_box_ok_with_stdlib(src, "Main");
 }
+
+#[test]
+fn suspend_fn_returning_primitive_underlying_value_class_boxes() {
+    // Boxed-resume ABI with a PRIMITIVE underlying: `box-impl(I)` at user returns, resume bind
+    // `checkcast X` + `unbox-impl()I` back to the int slot convention.
+    let src = r#"
+import kotlin.coroutines.*
+fun builder(c: suspend () -> Unit) {
+    c.startCoroutine(object : Continuation<Unit> {
+        override val context: CoroutineContext = EmptyCoroutineContext
+        override fun resumeWith(result: Result<Unit>) { result.getOrThrow() }
+    })
+}
+inline class N(val i: Int)
+class T3 {
+    suspend fun mk(i: Int): N = N(i)
+    suspend fun add(a: N, b: N): N = N(a.i + b.i)
+    suspend fun run3(): N { val x = mk(40); val y = mk(2); return add(x, y) }
+}
+fun box(): String { var r = 0; builder { r = T3().run3().i }; return if (r == 42) "OK" else "fail: $r" }
+"#;
+    common::assert_box_ok_with_stdlib(src, "Main");
+}
