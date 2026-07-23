@@ -7543,6 +7543,8 @@ impl<'a> Emitter<'a> {
                             .methodref("java/lang/String", "valueOf", valueof_desc(pty));
                         code.invokestatic(m, slot_words(pty) as i32, 1);
                     }
+                } else if self.try_emit_indy_concat(&parts, code) {
+                    // Emitted `invokedynamic makeConcatWithConstants` (kotlinc's Java-9+ form).
                 } else {
                     let sb = self.cw.class_ref("java/lang/StringBuilder");
                     let init = self
@@ -8244,6 +8246,67 @@ impl<'a> Emitter<'a> {
             "()Ljava/lang/String;",
         );
         code.invokevirtual(ts, 0, 1);
+    }
+
+    /// kotlinc compiles a multi-part string template (and a synthesized `toString`) to a single
+    /// `invokedynamic makeConcatWithConstants` when targeting JVM 9+ — a `StringConcatFactory`
+    /// bootstrap with a recipe string, `` marking each dynamic argument and literal text inline.
+    /// Below JVM 9 (and for the branchy-operand shape, whose frame handling this doesn't model yet)
+    /// returns `false` so the caller keeps the `StringBuilder` form.
+    fn try_emit_indy_concat(&mut self, parts: &[u32], code: &mut CodeBuilder) -> bool {
+        const TAG_ARG: char = '\u{1}';
+        const TAG_CONST: char = '\u{2}';
+        // JVM 9 = major 53; kotlinc's `-Xstring-concat` default flips to `indy-with-constants` there.
+        if self.cw.major() < 53 {
+            return false;
+        }
+        // A branchy part records a merge frame mid-build; matching kotlinc's operand-stack shape across
+        // that is the same open problem as elsewhere, so leave those on the StringBuilder path.
+        if parts.iter().any(|&p| self.records_frame(p)) {
+            return false;
+        }
+        let mut recipe = String::new();
+        let mut arg_parts: Vec<u32> = Vec::new();
+        for &p in parts {
+            if let IrExpr::Const(IrConst::String(s)) = self.ir.expr(p) {
+                // A literal carrying a recipe tag would have to move to the constants array — rare;
+                // fall back rather than encode it wrong.
+                if s.contains(TAG_ARG) || s.contains(TAG_CONST) {
+                    return false;
+                }
+                recipe.push_str(s);
+            } else {
+                recipe.push(TAG_ARG);
+                arg_parts.push(p);
+            }
+        }
+        let arg_descs: String = arg_parts
+            .iter()
+            .map(|&p| type_descriptor(self.value_ty(p)))
+            .collect();
+        // kotlinc interns the recipe (the bootstrap's static argument) BEFORE the bootstrap method
+        // handle, so intern in that order to match its constant-pool layout.
+        let recipe_const = self.cw.const_string(&recipe);
+        let mh = self.cw.method_handle_static(
+            "java/lang/invoke/StringConcatFactory",
+            "makeConcatWithConstants",
+            "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;\
+             Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;",
+        );
+        let bsm = self.cw.add_bootstrap(mh, vec![recipe_const]);
+        let indy = self.cw.invoke_dynamic(
+            bsm,
+            "makeConcatWithConstants",
+            &format!("({arg_descs})Ljava/lang/String;"),
+        );
+        let mut arg_words = 0i32;
+        for &p in &arg_parts {
+            let ty = self.value_ty(p);
+            self.emit_value(p, code);
+            arg_words += slot_words(ty) as i32;
+        }
+        code.invokedynamic(indy, arg_words, 1);
+        true
     }
 
     /// Append one string-template part to the `StringBuilder` beneath it. A single-character string
