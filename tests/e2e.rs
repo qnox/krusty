@@ -864,6 +864,8 @@ mod var_extension_property_e2e;
 mod var_smartcast_after_assign_e2e;
 #[path = "vararg_e2e.rs"]
 mod vararg_e2e;
+#[path = "vc_mangled_default_e2e.rs"]
+mod vc_mangled_default_e2e;
 #[path = "when_branch_if_no_else_e2e.rs"]
 mod when_branch_if_no_else_e2e;
 #[path = "when_lambda_branch_e2e.rs"]

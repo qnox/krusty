@@ -701,6 +701,11 @@ pub fn lower_value_classes(
     // `(fid, declared name, declared params, declared ret)` — collected while `ir.functions` is borrowed
     // mutably, moved into `ir.vc_declared_sigs` once the loop releases it.
     let mut declared_sigs: Vec<(u32, String, Vec<Ty>, Ty)> = Vec::new();
+    // `(fid, param slot, value class, erased underlying)` for a REFERENCE-underlying lambda own-param
+    // kept boxed: the body was lowered against the erased convention (the slot IS the underlying), so
+    // every read of the slot gains an `unbox-impl` after the loop (kotlinc reaches the same state via
+    // its lambda-class `invoke` bridge; here the unbox is fused into the impl at each use).
+    let mut boxed_own_reads: Vec<(u32, u32, TypeName, Ty)> = Vec::new();
     for (fid, f) in ir.functions.iter_mut().enumerate() {
         let is_box_impl = f.name == "box-impl";
         // A USER value-class member function's body runs on the BOXED object; its value-class-typed
@@ -787,17 +792,29 @@ pub fn lower_value_classes(
         let own_from = ir.lambda_own_params_from.get(&(fid as u32)).copied();
         for (idx, p) in f.params.iter_mut().enumerate() {
             // A lifted lambda's OWN value-class parameter arrives BOXED through the `FunctionN`
-            // generic invoke slot. A scalar-underlying one must KEEP the boxed `LX;` in the impl
-            // signature — erased to the scalar, the indy adapter would cast the incoming box to the
-            // scalar's wrapper (`checkcast Integer` on a `W`) and CCE. A reference-underlying one
-            // erases to its underlying reference as before (the adapter's `Object` cast is benign).
+            // generic invoke slot, so it must KEEP the boxed `LX;` in the impl signature — erased
+            // to the underlying, the indy adapter would cast the incoming box straight to the
+            // underlying (`checkcast Integer` on a `W`, `checkcast String` on an `X`) and CCE.
+            // (kotlinc instead falls back to a lambda CLASS whose `invoke` bridge unbox-impls
+            // before a mangled erased `invoke-<hash>` — the boxed-impl indy here is sound but
+            // byte-divergent; the class shape is a separate parity work item.)
             if own_from.is_some_and(|s| idx as u32 >= s)
                 && !p.is_nullable()
                 && p.non_null()
                     .obj_internal()
                     .is_some_and(|fq| under.contains_key(&fq))
-                && !is_ref(&erase(p, &under))
             {
+                // A scalar underlying is covered by the boxed-slot repr (`X?` over a scalar IS the
+                // box, so `repr_of_ty` reads `Boxed` and each use unboxes). `X?` over a reference
+                // is NOT boxed (it erases to the underlying reference), so the repr machinery would
+                // read the slot as already-unboxed — record it for the explicit use-site unbox
+                // rewrite below instead.
+                if let Some(x) = p.non_null().obj_internal() {
+                    let u = erase(p, &under);
+                    if is_ref(&u) && !nullable_is_boxed(x, &under) {
+                        boxed_own_reads.push((fid as u32, idx as u32, x, u));
+                    }
+                }
                 *p = Ty::nullable(*p);
                 continue;
             }
@@ -834,6 +851,35 @@ pub fn lower_value_classes(
             .entry(fid)
             .or_default()
             .push((idx, ty));
+    }
+    // A reference-underlying lambda own-param now arrives BOXED (`LX;`) but its body was lowered
+    // against the erased convention (the slot as the underlying) — rewrite every read of the slot to
+    // `unbox-impl` so each use sees the underlying again. In-place: the `GetValue` node itself becomes
+    // the unbox call over a fresh `GetValue`, so every reference to the node (including a nested
+    // lambda's capture list) picks up the unboxed value.
+    for (fid, slot, x, u) in boxed_own_reads {
+        let Some(root) = ir.functions[fid as usize].body else {
+            continue;
+        };
+        let mut reads = HashSet::new();
+        collect_reachable_scoped(&ir.exprs, &ir.inline_only_fns, root, &mut reads);
+        let targets: Vec<ExprId> = reads
+            .into_iter()
+            .filter(|&id| matches!(&ir.exprs[id as usize], IrExpr::GetValue(i) if *i == slot))
+            .collect();
+        for id in targets {
+            let get = ir.add_expr(IrExpr::GetValue(slot));
+            ir.exprs[id as usize] = IrExpr::Call {
+                callee: Callee::Virtual {
+                    owner: x,
+                    name: "unbox-impl".to_string(),
+                    descriptor: format!("(){}", desc(&u)),
+                    interface: false,
+                },
+                dispatch_receiver: Some(get),
+                args: vec![],
+            };
+        }
     }
 
     // 1a′. A `@Serializable` property's `get<X>$annotations()` marker follows its getter's value-class
