@@ -511,3 +511,25 @@ fun box(): String {{\n\
     );
     assert_eq!(run(&src).expect("overload continuation classes run"), "OK");
 }
+
+#[test]
+fn tail_forward_of_a_generic_suspend_call_returns_the_raw_result() {
+    // `suspend fun quz(): String = suspendMe<String>()` — a tail-call forward of a GENERIC callee:
+    // the erased result is cast to the declared type at normal call sites, but a forward must return
+    // the callee's Object result VERBATIM. `make_forward_body` returned the original (cast-wrapped)
+    // tail — a `checkcast String` on COROUTINE_SUSPENDED when the callee suspends (runtime CCE on
+    // the sentinel).
+    let src = format!(
+        "{BUILDER}\
+var saved: Continuation<Any>? = null\n\
+suspend fun <T> suspendMe(): T = suspendCoroutineUninterceptedOrReturn {{ x ->\n\
+    @Suppress(\"UNCHECKED_CAST\")\n\
+    saved = x as Continuation<Any>\n\
+    COROUTINE_SUSPENDED\n\
+}}\n\
+suspend fun quz(): String = suspendMe<String>()\n\
+var result = \"FAIL\"\n\
+fun box(): String {{ builder {{ result = quz() }}; saved?.resume(\"OK\"); return result }}\n"
+    );
+    assert_eq!(run(&src).expect("generic tail-forward runs"), "OK");
+}

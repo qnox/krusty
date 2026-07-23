@@ -1293,19 +1293,23 @@ fn callee_ret_unit(ir: &IrFile, e: ExprId, set: &HashSet<u32>, orig_rets: &[Ty])
 /// call STATEMENT (the `Unit` forward) is replaced with `return <call>`; an existing `return <call>` is
 /// already in the right shape.
 fn make_forward_body(ir: &mut IrFile, b: ExprId, call: ExprId) {
+    // Always return the PEELED `call` verbatim — the tail may still be wrapped in the erased-generic
+    // `checkcast` the detection peeled (`= suspendMe<String>()`): returning the wrapper would
+    // `checkcast String` the raw forward result, which is COROUTINE_SUSPENDED when the callee
+    // suspends (a runtime CCE on the sentinel).
     match ir.exprs[b as usize].clone() {
         IrExpr::Block {
             stmts,
-            value: Some(v),
+            value: Some(_),
         } => {
             let mut stmts = stmts;
-            stmts.push(ir.add_expr(IrExpr::Return(Some(v))));
+            stmts.push(ir.add_expr(IrExpr::Return(Some(call))));
             ir.exprs[b as usize] = IrExpr::Block { stmts, value: None };
         }
         IrExpr::Block {
             mut stmts,
             value: None,
-        } if stmts.last() == Some(&call) => {
+        } if stmts.last().is_some() => {
             stmts.pop();
             stmts.push(ir.add_expr(IrExpr::Return(Some(call))));
             ir.exprs[b as usize] = IrExpr::Block { stmts, value: None };

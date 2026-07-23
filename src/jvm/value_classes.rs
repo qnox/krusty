@@ -557,10 +557,9 @@ pub fn lower_value_classes(
         })
         .collect();
     if !vc_ret_fids.is_empty() {
-        // Two boxed-resume shapes are NOT yet covered — bail (skip the file, never miscompile):
-        // a PRIMITIVE-underlying value class (`box-impl(I)` vs the int slot family), and a file
-        // whose suspend fns use the RAW intrinsic (`CurrentContinuation` — external resume delivers
-        // through a state layout the boxed binds don't model yet).
+        // Boxed-resume shapes NOT yet covered — bail (skip the file, never miscompile): a
+        // PRIMITIVE-underlying value class (`box-impl(I)` vs the int slot family) and a NESTED
+        // value-class underlying.
         let prim_under = vc_ret_fids.iter().any(|(_, x)| {
             under.get(x).is_some_and(|u| {
                 // …nor a NESTED value-class underlying (`IC(val s: I0)` — its box/unbox chains
@@ -571,11 +570,7 @@ pub fn lower_value_classes(
                         .is_some_and(|iu| under.contains_key(&iu))
             })
         });
-        let uses_raw_intrinsic = ir
-            .exprs
-            .iter()
-            .any(|e| matches!(e, IrExpr::CurrentContinuation));
-        if prim_under || uses_raw_intrinsic {
+        if prim_under {
             return false;
         }
         for (fid, x) in vc_ret_fids {
