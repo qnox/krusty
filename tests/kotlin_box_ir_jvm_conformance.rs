@@ -545,15 +545,36 @@ fn compile_blocks(
     }
 
     let mut all = Vec::new();
+    // Two phases (mirrors `compiler::compile`): check EVERY file first, then lower — a cross-file
+    // inline expansion lowers a SIBLING body and needs that sibling's checked info.
+    let mut infos = Vec::with_capacity(files.len());
     for (i, file) in files.iter().enumerate() {
         diags.set_file(i as u32);
-        let info = check_file(file, &mut syms, &mut diags);
+        infos.push(krusty::frontend::check_file_in_module(
+            file, &files, i as u32, &mut syms, &mut diags,
+        ));
         if diags.has_errors() {
             return None;
         }
+    }
+    for (i, file) in files.iter().enumerate() {
+        diags.set_file(i as u32);
+        let info = &infos[i];
         let facade = file_class_name(&blocks[i].0, file.package.as_deref());
         let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
-        let mut ir = krusty::ir_lower::lower_file_at(file, i as u32, &info, &syms, &runtime)?;
+        let bail = std::cell::RefCell::new(String::new());
+        let mut ir = krusty::ir_lower::lower_file_in_module_reporting(
+            file,
+            i as u32,
+            info,
+            &syms,
+            &runtime,
+            &bail,
+            krusty::ir_lower::ModuleCtx {
+                files: &files,
+                infos: &infos,
+            },
+        )?;
         // Shared post-lowering pass pipeline (jvm/backend.rs); unlowerable shape → skip, don't miscompile.
         krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms).ok()?;
         // Facade `@Metadata` (top-level fn/extension records), as the CLI backend writes — a later

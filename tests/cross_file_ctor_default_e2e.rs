@@ -8,7 +8,7 @@
 use super::common;
 
 use krusty::diag::DiagSink;
-use krusty::frontend::{check_file, collect_signatures_with_cp};
+use krusty::frontend::collect_signatures_with_cp;
 use krusty::jvm::names::file_class_name;
 
 /// Compile two sources as one module (mirrors the conformance harness's `compile_multifile`): parse
@@ -49,20 +49,56 @@ fn compile_two(a: &str, b: &str) -> Option<Vec<(String, Vec<u8>)>> {
         }
     }
     let mut all = Vec::new();
+    // Two phases with the module context (mirrors `compiler::compile`): cross-file inline bodies
+    // then expand at sibling call sites.
+    let mut infos = Vec::with_capacity(files.len());
     for (i, file) in files.iter().enumerate() {
         diags.set_file(i as u32);
-        let info = check_file(file, &mut syms, &mut diags);
+        infos.push(krusty::frontend::check_file_in_module(
+            file, &files, i as u32, &mut syms, &mut diags,
+        ));
         if diags.has_errors() {
             return None;
         }
+    }
+    for (i, file) in files.iter().enumerate() {
+        diags.set_file(i as u32);
         let facade = file_class_name(stems[i], file.package.as_deref());
         let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
-        let mut ir = krusty::ir_lower::lower_file_at(file, i as u32, &info, &syms, &runtime)?;
+        let bail = std::cell::RefCell::new(String::new());
+        let mut ir = krusty::ir_lower::lower_file_in_module_reporting(
+            file,
+            i as u32,
+            &infos[i],
+            &syms,
+            &runtime,
+            &bail,
+            krusty::ir_lower::ModuleCtx {
+                files: &files,
+                infos: &infos,
+            },
+        )?;
         // Shared post-lowering pass pipeline (jvm/backend.rs); unlowerable shape → skip.
         krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms).ok()?;
         all.extend(krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None)?);
     }
     Some(all)
+}
+
+#[test]
+fn cross_file_generic_inline_hof_expands_at_the_sibling_call_site() {
+    if common::java_home().is_none() || common::stdlib_jar().is_none() {
+        return;
+    }
+    // `inline fun <R> foo(x, block)` declared in file A, called with a trailing lambda from file B:
+    // the call-site inference types the lambda param from the sibling DECL (part 1) and the lowering
+    // splices the sibling body in the callee's source context (part 2) — previously the file skipped
+    // ("call foo").
+    let a = "inline fun <R> foo(x: R, block: (R) -> R): R { return block(x) }
+";
+    let b = "fun box(): String { val r = foo(1) { x -> x + 1 }; return if (r == 2) \"OK\" else \"fail: $r\" }
+";
+    assert_eq!(run_two(a, b).as_deref(), Some("OK"));
 }
 
 fn run_two(a: &str, b: &str) -> Option<String> {

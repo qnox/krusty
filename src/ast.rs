@@ -453,6 +453,10 @@ pub struct FunDecl {
     /// parameter specialized to that primitive (kotlinc emits `(I)I`, not `(Object)Object`), like a
     /// value class's underlying type — see `ClassDecl::type_param_bounds`.
     pub type_param_bounds: Vec<(String, TypeRef)>,
+    /// Bounds from a trailing `where T : A, T : B` clause. Parsed but ERASED (krusty keeps `where`
+    /// params `Any`-erased); kept so cross-file machinery can detect a bound-erased declaration
+    /// (specializing its return would desync from the compiled method's descriptor).
+    pub where_bounds: Vec<(String, TypeRef)>,
     /// Subset of `type_params` that carry an `Any` upper bound (`T: Any`) — non-nullable on JVM.
     pub non_null_type_params: std::collections::HashSet<String>,
     /// Subset of `type_params` declared `reified` (only meaningful on an `inline` function): the body

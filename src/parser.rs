@@ -2117,12 +2117,13 @@ impl<'a> Parser<'a> {
     /// primitive bound is rejected for the same reason as an inline bound — kotlinc specializes it
     /// (see `parse_type_params`). `where` may sit on a following line, so newlines are skipped only
     /// when the clause is actually present (otherwise the position is restored).
-    fn parse_where_clause(&mut self) {
+    fn parse_where_clause(&mut self) -> Vec<(String, TypeRef)> {
+        let mut out: Vec<(String, TypeRef)> = Vec::new();
         let save = self.i;
         self.skip_newlines();
         if !(self.at(TokenKind::Ident) && self.text() == "where") {
             self.i = save;
-            return;
+            return out;
         }
         self.bump(); // 'where'
                      // Track per-name FUNCTION-TYPE bounds: an intersection (`where T : () -> Unit,
@@ -2140,6 +2141,7 @@ impl<'a> Parser<'a> {
             }
             if self.eat(TokenKind::Colon) {
                 let bound = self.parse_type();
+                out.push((tp_name.clone(), bound.clone()));
                 if !bound.fun_params.is_empty() || bound.name == "<fun>" {
                     let n = fn_bounds.entry(tp_name.clone()).or_default();
                     *n += 1;
@@ -2176,6 +2178,7 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
+        out
     }
 
     fn parse_qualified_name(&mut self) -> String {
@@ -2235,6 +2238,7 @@ impl<'a> Parser<'a> {
                 body: FunBody::None,
                 type_params: vec![],
                 type_param_bounds: Vec::new(),
+                where_bounds: Vec::new(),
                 non_null_type_params: Default::default(),
                 reified_type_params: Default::default(),
                 span: start,
@@ -2358,7 +2362,7 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        self.parse_where_clause();
+        let where_bounds = self.parse_where_clause();
         // A `=`-body or block body may sit on a following line (`fun f(): T\n{ … }`). Skip plain line
         // breaks to find it, restoring the position if what follows is neither — an abstract/no-body
         // function (no valid member/declaration begins with a bare `=` or `{`, so this is unambiguous).
@@ -2384,6 +2388,7 @@ impl<'a> Parser<'a> {
             body,
             type_params,
             type_param_bounds,
+            where_bounds,
             non_null_type_params,
             reified_type_params,
             span: Span::new(start.lo, end.hi),
@@ -2706,7 +2711,7 @@ impl<'a> Parser<'a> {
             self.parse_supertypes();
         // `class Derived<T> : Base<T>() where T : I1, T : I2` — generic constraints after the
         // supertype list, before the body.
-        self.parse_where_clause();
+        let _ = self.parse_where_clause();
         // Optional class body: member `fun`s, body properties (`val`/`var`), and `init { }` blocks.
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();

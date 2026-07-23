@@ -6884,14 +6884,23 @@ impl<'a> Checker<'a> {
         }
         if let Some(f) = selected.source_key.and_then(|(file, decl)| {
             // The current file, or a SIBLING file of this compilation (a `// FILE:` split) —
-            // the generic-return inference needs the decl's un-erased TypeRefs either way.
-            let src = if file == self.file_index {
-                Some(self.file)
-            } else {
+            // the generic-return inference needs the decl's un-erased TypeRefs either way. A
+            // SIBLING decl with BOUNDED type params stays erased: specializing its return would
+            // desync the call from the bound-erased compiled method (`fun <T> useE(…): T
+            // where T : A, T : B` erases to the bound, not to the argument type).
+            let sibling = file != self.file_index;
+            let src = if sibling {
                 self.module_files.get(file as usize)
+            } else {
+                Some(self.file)
             }?;
             match src.decl(DeclId(decl)) {
-                Decl::Fun(f) => Some(f),
+                Decl::Fun(f)
+                    if !sibling
+                        || (f.type_param_bounds.is_empty() && f.where_bounds.is_empty()) =>
+                {
+                    Some(f)
+                }
                 _ => None,
             }
         }) {

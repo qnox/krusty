@@ -29,6 +29,11 @@ pub struct CheckedFile<'a> {
     /// The compilation's module name (kotlinc `-module-name`), for the serialization plugin's
     /// `write$Self$<module>` helper. `"main"` by default.
     pub module_name: &'a str,
+    /// ALL files of the compilation, indexed by its file numbering, with their checked
+    /// `TypeInfo`s (parallel). Empty when unavailable (single-file entry points) — a sibling-file
+    /// inline body is then simply not expandable (skip, never miscompile).
+    pub module_files: &'a [File],
+    pub module_infos: &'a [FrontendTypeInfo],
 }
 
 /// Multiplatform `expect`/`actual` resolution over ONE compiled source set (kotlinc's JVM MPP

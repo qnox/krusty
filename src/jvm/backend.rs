@@ -174,13 +174,17 @@ impl Backend for JvmBackend {
         let facade_name = file_class_name(stem, file.package.as_deref());
         let runtime = crate::jvm::jvm_libraries::JvmLibraries::new(self.cp.clone());
         let lower_bail = std::cell::RefCell::new(String::new());
-        let Some(mut ir) = crate::ir_lower::lower_file_at_reporting(
+        let Some(mut ir) = crate::ir_lower::lower_file_in_module_reporting(
             file,
             checked.file_index,
             info,
             syms,
             &runtime,
             &lower_bail,
+            crate::ir_lower::ModuleCtx {
+                files: checked.module_files,
+                infos: checked.module_infos,
+            },
         ) else {
             crate::trace_compiler!("lower", "bail: {}", lower_bail.borrow());
             diags.error(

@@ -187,22 +187,35 @@ fn first_error_blocks(
     }
 
     let mut all = Vec::new();
+    // Two phases (mirrors `compiler::compile`): check every file, then lower with the module
+    // context so a cross-file inline body expands (see the gate's identical loop).
+    let mut infos = Vec::with_capacity(files.len());
     for (i, file) in files.iter().enumerate() {
         d.set_file(i as u32);
-        let info = check_file(file, &mut syms, &mut d);
+        infos.push(krusty::frontend::check_file_in_module(
+            file, &files, i as u32, &mut syms, &mut d,
+        ));
         if d.has_errors() {
             return Err(d.diags[0].msg.clone());
         }
+    }
+    for (i, file) in files.iter().enumerate() {
+        d.set_file(i as u32);
+        let info = &infos[i];
         let facade = file_class_name(&blocks[i].0, file.package.as_deref());
         let runtime = JvmLibraries::new(cp.clone());
         let lower_bail = std::cell::RefCell::new(String::new());
-        let mut ir = match krusty::ir_lower::lower_file_at_reporting(
+        let mut ir = match krusty::ir_lower::lower_file_in_module_reporting(
             file,
             i as u32,
-            &info,
+            info,
             &syms,
             &runtime,
             &lower_bail,
+            krusty::ir_lower::ModuleCtx {
+                files: &files,
+                infos: &infos,
+            },
         ) {
             Some(ir) => ir,
             None => return Err(format!("lower: {}", lower_bail.borrow())),

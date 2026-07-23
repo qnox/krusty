@@ -1854,3 +1854,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   rejecting a params-plus-captures combination was stale.
   (`receiver_suspend_lambda_with_capture_runs_machine`; unlocks the receiver-builder corpus slice,
   coroutines 60 → 76 box-OK.)
+
+- **A sibling file's `inline fun` body expands at cross-file call sites (guarded shapes).** The
+  compilation carries every file's AST + checked `TypeInfo` (a two-phase check-then-lower driver);
+  `lower_inline_fn_call` resolves a module-target declaration from its source file and lowers the
+  body with the SOURCE CONTEXT swapped to the callee's file — spliced lambda arguments swap back to
+  the file where each literal was written. Not-yet-reconciled shapes SKIP (never miscompile): callee
+  bodies with locals/loops/`try`/casts/callable-refs/`break`/`continue`, multi-`return` bodies,
+  references to the callee file's own declarations (they would lower as wrong-file indices),
+  bounded type parameters (incl. `where` clauses — now retained on `FunDecl.where_bounds`),
+  defaults/varargs, value-used (materialized) lambdas, lambda arguments that return or mutate, and
+  callers that are inferred-return expression bodies.
+  (`cross_file_generic_inline_hof_expands_at_the_sibling_call_site`; box corpus 2946 → 3002, the
+  `boxingOptimization`/`callableReference` cross-file slices.)

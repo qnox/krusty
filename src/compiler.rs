@@ -16,19 +16,28 @@ pub fn compile<B: Backend>(
 ) -> Vec<Artifact> {
     let mut outputs = Vec::new();
     let mut state = B::State::default();
+    // Two phases: check EVERY file first (collecting each file's `TypeInfo`), then lower. A
+    // cross-file inline-fn expansion lowers a SIBLING file's body expressions, which needs that
+    // sibling's checked types — interleaved check/lower would only have infos for earlier files.
+    let mut infos: Vec<crate::frontend::FrontendTypeInfo> = Vec::with_capacity(files.len());
     for (i, file) in files.iter().enumerate() {
         diags.set_file(i as u32);
-        let info = check_file_in_module(file, files, i as u32, syms, diags);
+        infos.push(check_file_in_module(file, files, i as u32, syms, diags));
+    }
+    for (i, file) in files.iter().enumerate() {
         if diags.has_errors() {
-            continue;
+            break;
         }
+        diags.set_file(i as u32);
         outputs.extend(backend.lower_file(
             CheckedFile {
                 file,
                 file_index: i as u32,
-                info: &info,
+                info: &infos[i],
                 symbols: syms,
                 module_name,
+                module_files: files,
+                module_infos: &infos,
             },
             &stems[i],
             &mut state,

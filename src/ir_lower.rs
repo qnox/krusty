@@ -116,6 +116,14 @@ pub fn lower_file_at(
     lower_file_at_reporting(file, file_index, info, syms, runtime, &bail)
 }
 
+/// The compilation's full file/info arrays (indexed by its file numbering), for cross-file
+/// inline-body expansion. `Default` (empty) = siblings unavailable — such an expansion then skips.
+#[derive(Default, Clone, Copy)]
+pub struct ModuleCtx<'a> {
+    pub files: &'a [ast::File],
+    pub infos: &'a [FrontendTypeInfo],
+}
+
 /// [`lower_file_at`] with a caller-owned `bail` sink (see [`lower_file_reporting`]).
 pub fn lower_file_at_reporting(
     file: &ast::File,
@@ -125,8 +133,32 @@ pub fn lower_file_at_reporting(
     runtime: &dyn TargetRuntime,
     bail: &std::cell::RefCell<String>,
 ) -> Option<IrFile> {
+    lower_file_in_module_reporting(
+        file,
+        file_index,
+        info,
+        syms,
+        runtime,
+        bail,
+        ModuleCtx::default(),
+    )
+}
+
+/// [`lower_file_at_reporting`] with the compilation's module context — a sibling file's inline fn
+/// body is then expandable at call sites in THIS file.
+#[allow(clippy::too_many_arguments)]
+pub fn lower_file_in_module_reporting<'a>(
+    file: &'a ast::File,
+    file_index: u32,
+    info: &'a FrontendTypeInfo,
+    syms: &'a FrontendSymbols,
+    runtime: &'a dyn TargetRuntime,
+    bail: &'a std::cell::RefCell<String>,
+    module: ModuleCtx<'a>,
+) -> Option<IrFile> {
     let mut lo = Lower {
         afile: file,
+        module,
         file_index,
         info,
         syms,
@@ -4707,7 +4739,10 @@ fn is_field_accessor_prop(p: &ast::PropDecl) -> bool {
 
 /// One active inlined-lambda parameter: `(param name, lambda parameter names, lambda body, lambda
 /// parameter types, the inline fn's name — the implicit label for a `return@<fn>` local return)`.
-type InlineLambda = (String, Vec<String>, AstExprId, Vec<Ty>, String);
+/// `(param name, lambda params, lambda body, param types, enclosing inline-fn label, owning file)`.
+/// `owning file` = the ACTIVE source context when the lambda literal was recorded — its AST ids
+/// belong to that file, so a cross-file inline body splicing it must swap context back.
+type InlineLambda = (String, Vec<String>, AstExprId, Vec<Ty>, String, u32);
 
 /// Lowering info for a local delegated property (`val x by Del()` in a function body). Reads compile to
 /// `<delegate>.getValue(null, propref)`, a `var`'s writes to `setValue(null, propref, value)`.
@@ -4747,6 +4782,10 @@ pub(crate) struct Lower<'a> {
     afile: &'a ast::File,
     file_index: u32,
     info: &'a FrontendTypeInfo,
+    /// The compilation's file/info arrays (empty when unavailable). `afile`/`info`/`file_index` form
+    /// the ACTIVE source context; a cross-file inline expansion swaps them to the callee's file for
+    /// the body (and back to the recorded owner around each spliced lambda) via `swap_src_context`.
+    module: ModuleCtx<'a>,
     syms: &'a FrontendSymbols,
     runtime: &'a dyn TargetRuntime,
     /// Caller-owned sink for the reason `lower_file_at` last returned `None` — a survey/box-corpus
@@ -4900,11 +4939,13 @@ pub(crate) struct Lower<'a> {
     /// Active inlined-lambda parameters while expanding an `inline fun` body, as a stack so nested
     /// inline calls compose: a call `param(args)` in the inline body inlines the lambda body in place.
     inline_lambdas: Vec<InlineLambda>,
-    /// Call-site expression ids currently being inline-expanded. A genuinely recursive inline call
-    /// re-enters the SAME call site (the `rec(n-1)` in `rec`'s own body), which would expand forever —
-    /// so re-entering an active call id bails (the file skips). Source-level NESTING (`a { a { 5 } }`)
-    /// uses DISTINCT call sites, so it is allowed. (kotlinc rejects only genuine recursion.)
-    inline_active: Vec<u32>,
+    /// `(file, call expr id)` pairs currently being inline-expanded. A genuinely recursive inline
+    /// call re-enters the SAME call site (the `rec(n-1)` in `rec`'s own body), which would expand
+    /// forever — so re-entering an active pair bails (the file skips). Source-level NESTING
+    /// (`a { a { 5 } }`) uses DISTINCT call sites, so it is allowed; keyed WITH the file index
+    /// because a cross-file expansion swaps contexts and per-file expr ids collide numerically.
+    /// (kotlinc rejects only genuine recursion.)
+    inline_active: Vec<(u32, u32)>,
     /// Active reified type-parameter bindings while expanding a `<reified T>` inline fn: `T` → the
     /// call's actual type argument. Consulted by `subst_type_ref` so `is T`/`as T`/`T::class` in the
     /// inlined body specialize to the concrete type. A stack — nested reified inline calls compose.
@@ -14659,6 +14700,22 @@ impl<'a> Lower<'a> {
     /// arguments, register its lambda arguments for inlining at their invoke sites, then lower its body
     /// in place — exactly what kotlinc's inliner does. Returns `None` (the file bails, never miscompiles)
     /// for anything outside the supported subset. `call_id` is the call expression (for reified type args).
+    /// Switch the ACTIVE source context (`afile`/`info`/`file_index`) to compilation file `idx`,
+    /// returning the previous triple for `restore_src_context`. Caller must know `idx` is in range
+    /// (a cross-file expansion checks availability up front).
+    fn swap_src_context(&mut self, idx: u32) -> (&'a ast::File, &'a FrontendTypeInfo, u32) {
+        let saved = (self.afile, self.info, self.file_index);
+        self.afile = &self.module.files[idx as usize];
+        self.info = &self.module.infos[idx as usize];
+        self.file_index = idx;
+        saved
+    }
+    fn restore_src_context(&mut self, saved: (&'a ast::File, &'a FrontendTypeInfo, u32)) {
+        self.afile = saved.0;
+        self.info = saved.1;
+        self.file_index = saved.2;
+    }
+
     fn lower_inline_fn_call(
         &mut self,
         fname: &str,
@@ -14669,18 +14726,28 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         // Find the selected source declaration. Receiver-less module calls carry the checker's
         // declaration key; extension inline calls still use the receiver-qualified declaration path.
-        let f = if let Some(target) = module_target {
-            if recv.is_some() || target.name != fname || target.source_file != Some(self.file_index)
-            {
+        let (f, callee_ctx) = if let Some(target) = module_target {
+            if recv.is_some() || target.name != fname {
                 return None;
             }
             let decl = target.source_decl?;
-            match self.afile.decl(decl) {
-                Decl::Fun(f) if f.name == fname && f.receiver.is_none() => f.clone(),
+            let sf = target.source_file?;
+            let (src, ctx) = if sf == self.file_index {
+                (self.afile, None)
+            } else {
+                // A SIBLING file's inline fn: expandable only when the module context carries both
+                // the file and its checked info (the body's exprs are typed by the SIBLING's info).
+                let file = self.module.files.get(sf as usize)?;
+                self.module.infos.get(sf as usize)?;
+                (file, Some(sf))
+            };
+            match src.decl(decl) {
+                Decl::Fun(f) if f.name == fname && f.receiver.is_none() => (f.clone(), ctx),
                 _ => return None,
             }
         } else {
-            self.afile
+            let f = self
+                .afile
                 .decls
                 .iter()
                 .find_map(|&d| match self.afile.decl(d) {
@@ -14689,8 +14756,15 @@ impl<'a> Lower<'a> {
                     }
                     _ => None,
                 })?
-                .clone()
+                .clone();
+            (f, None)
         };
+        // The callee's OWN data (body walks, param TypeRefs) reads through its file/info; everything
+        // argument-side stays in the caller's context.
+        let callee_file: &ast::File =
+            callee_ctx.map_or(self.afile, |i| &self.module.files[i as usize]);
+        let callee_info: &FrontendTypeInfo =
+            callee_ctx.map_or(self.info, |i| &self.module.infos[i as usize]);
         // A non-extension call must hit a non-extension fn and vice versa. An extension binds its receiver
         // as `this` (below). No default/vararg params. Non-reified generic type params are SPECIALIZED
         // from the actual argument types; REIFIED type params are bound to the call's explicit type
@@ -14721,6 +14795,11 @@ impl<'a> Lower<'a> {
         // isn't a type parameter or a function type. The two aren't combined (rare) — bail on the overlap.
         let has_default = f.params.iter().any(|p| p.default.is_some());
         let vararg = f.params.last().is_some_and(|p| p.is_vararg);
+        // A sibling callee's DEFAULT expressions (and vararg packing) would mix callee-file expr ids
+        // into the caller-context argument lowering — not modeled yet; skip (sound).
+        if callee_ctx.is_some() && (has_default || vararg) {
+            return None;
+        }
         if has_default && vararg {
             return None;
         }
@@ -14738,15 +14817,85 @@ impl<'a> Lower<'a> {
             FunBody::Expr(e) | FunBody::Block(e) => e,
             FunBody::None => return None,
         };
+        // A sibling body expands only in the reconciled shapes (see the predicate) — everything else
+        // skips, never miscompiles.
+        if callee_ctx.is_some() {
+            if !sibling_inline_body_expandable(callee_file, body) {
+                return None;
+            }
+            // The body must reference NOTHING declared in its own file besides the fn's parameters:
+            // inside the swapped context a call/read of a callee-file sibling (`inline fun a(x) =
+            // b(x)`, a private helper, an `object` singleton) lowers as a SAME-FILE reference with
+            // file-relative indices into the CALLER's IR — a wrong function entirely (the corpus
+            // `ternaryConditional` emitted self-recursion: runtime StackOverflow).
+            let param_names: std::collections::HashSet<&str> =
+                f.params.iter().map(|p| p.name.as_str()).collect();
+            let own_decl_names: std::collections::HashSet<String> = callee_file
+                .decls
+                .iter()
+                .map(|&d| match callee_file.decl(d) {
+                    Decl::Fun(df) => df.name.clone(),
+                    Decl::Class(dc) => dc.name.clone(),
+                    Decl::Property(dp) => dp.name.clone(),
+                })
+                .collect();
+            let mut clash = false;
+            collect_bare_names(callee_file, body, &mut |n| {
+                if !param_names.contains(n) && own_decl_names.contains(n) {
+                    clash = true;
+                }
+            });
+            if clash {
+                return None;
+            }
+            // A cross-file `do…while` return-wrapper trips frame bookkeeping in wrapped contexts (a
+            // suspend lambda's machine: operand-stack underflow). Only the SINGLE-TAIL-return body
+            // (`{ return block(x) }`) — which the wrapper handles as one exit — expands; multi-return
+            // bodies skip.
+            if body_has_return(callee_file, body) && !single_tail_return(callee_file, body) {
+                return None;
+            }
+            // An enclosing expression-body fn with an INFERRED return can desync its emitted
+            // descriptor (the collection-time erased `Object`) from the specialized body (`int`) —
+            // VerifyError. Skip until the signature patch and the specialization agree.
+            let enclosing_inferred_expr = self.afile.decls.iter().any(|&d| {
+                matches!(self.afile.decl(d), Decl::Fun(ef)
+                    if ef.name == self.cur_fn_name && ef.ret.is_none()
+                        && matches!(ef.body, FunBody::Expr(_)))
+            });
+            if enclosing_inferred_expr {
+                return None;
+            }
+            // A callee with BOUNDED type parameters (`<T : E>` / `where T : A, T : B`): the
+            // erasure of the bound differs between the two files' views — skip.
+            if !f.type_param_bounds.is_empty() || !f.where_bounds.is_empty() {
+                return None;
+            }
+            // CALLER-side shapes not yet reconciled with a cross-file splice: a lambda argument
+            // whose body RETURNS (the non-local-return frame interplay) or ASSIGNS (captured-local
+            // mutation through the splice), and a callable-reference argument (its synthesized
+            // `$boundref` class naming collides across the file swap).
+            for &a in args {
+                match self.afile.expr(a) {
+                    Expr::Lambda { body: lb, .. } => {
+                        if body_has_return(self.afile, *lb) || body_has_assign(self.afile, *lb) {
+                            return None;
+                        }
+                    }
+                    Expr::CallableRef { .. } => return None,
+                    _ => {}
+                }
+            }
+        }
         let pnames: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
         // A body with `return`s is wrapped in a `do { … } while(false)` and each `return` becomes
         // `result = x; break` (see below). A `return` lexically inside a *nested lambda* of the body
         // would be a non-local return targeting the WRONG inline level — but a lambda argument carrying a
         // return is already pre-bailed at registration, so the only returns that survive are direct.
-        let has_return = body_has_return(self.afile, body);
+        let has_return = body_has_return(callee_file, body);
         // Whether every path through the body returns/throws (its checked type is `Nothing`) — then the
         // `do…while` wrapper omits the unreachable fall-through (avoids an unframed dead `goto` tail).
-        let body_diverges = self.info.ty(body) == Ty::Nothing;
+        let body_diverges = callee_info.ty(body) == Ty::Nothing;
         // Value-parameter types + return type. An extension is keyed in `ext_funs` by `(erased
         // receiver, name)` with value params only; a GENERIC extension isn't registered there (its
         // receiver erased to `Any`), so derive from the decl.
@@ -14866,7 +15015,7 @@ impl<'a> Lower<'a> {
         // A genuinely recursive inline call re-enters the SAME call site, expanding without bound — bail
         // (skip). Source-level NESTING of the same fn (`a { a { 5 } }`) uses DISTINCT call sites, so it is
         // allowed. (kotlinc rejects only genuine recursion.)
-        if self.inline_active.contains(&call_id) {
+        if self.inline_active.contains(&(self.file_index, call_id)) {
             return None;
         }
         // Specialize non-reified type params from the actual arguments: a parameter declared `T` binds
@@ -14894,7 +15043,7 @@ impl<'a> Lower<'a> {
             }
         }
         let active_depth = self.inline_active.len();
-        self.inline_active.push(call_id);
+        self.inline_active.push((self.file_index, call_id));
         // Bind each reified type parameter to the call's explicit type argument (resolved through any
         // enclosing reified binding, so nested reified inlines compose). A missing arg (e.g. a purely
         // inferred reified type) bails — the file skips, never miscompiles.
@@ -14996,7 +15145,18 @@ impl<'a> Lower<'a> {
                 // argument is never a body to splice.
                 let arg_expr = self.afile.expr(args[i]).clone();
                 let splice = matches!(arg_expr, Expr::Lambda { .. })
-                    && !name_used_as_value(self.afile, body, &pnames[i]);
+                    && !name_used_as_value(callee_file, body, &pnames[i]);
+                // A cross-file expansion MATERIALIZING a function value (a value-used/`noinline`
+                // lambda, a fn-valued variable) synthesizes closure classes across the context swap —
+                // naming/capture bookkeeping not reconciled (duplicate `$boundref`, `Unit` CCE). Only
+                // the splice form expands.
+                if callee_ctx.is_some() && !splice {
+                    self.scope.truncate(depth);
+                    self.inline_lambdas.truncate(lam_depth);
+                    self.inline_active.truncate(active_depth);
+                    self.reified_subst.truncate(reif_depth);
+                    return None;
+                }
                 if let (
                     true,
                     Expr::Lambda {
@@ -15029,7 +15189,7 @@ impl<'a> Lower<'a> {
                             tbinds
                                 .get(fp.name.as_str())
                                 .copied()
-                                .unwrap_or_else(|| ty_of(self.afile, fp, &*self.syms.libraries))
+                                .unwrap_or_else(|| ty_of(callee_file, fp, &*self.syms.libraries))
                         })
                         .collect();
                     let lam_param_tys = if lam_param_tys.len() == fnsig.params.len() {
@@ -15043,6 +15203,7 @@ impl<'a> Lower<'a> {
                         lbody,
                         lam_param_tys,
                         fname.to_string(),
+                        self.file_index,
                     ));
                 } else {
                     // A function-typed argument that is NOT a lambda literal — a callable reference
@@ -15118,7 +15279,13 @@ impl<'a> Lower<'a> {
         } else {
             None
         };
+        // The body's AST ids belong to the CALLEE file — lower it in that context (spliced lambda
+        // invokes swap back to each lambda's recorded owner). Restored before any exit.
+        let ctx_saved = callee_ctx.map(|i| self.swap_src_context(i));
         let body_val = self.expr(body);
+        if let Some(sv) = ctx_saved {
+            self.restore_src_context(sv);
+        }
         self.scope.truncate(depth);
         self.inline_lambdas.truncate(lam_depth);
         self.inline_active.truncate(active_depth);
@@ -15305,7 +15472,8 @@ impl<'a> Lower<'a> {
     }
 
     fn lower_inline_lambda_invoke(&mut self, idx: usize, args: &[AstExprId]) -> Option<u32> {
-        let (_, lam_params, lam_body, lam_param_tys, lam_label) = self.inline_lambdas[idx].clone();
+        let (_, lam_params, lam_body, lam_param_tys, lam_label, lam_ctx) =
+            self.inline_lambdas[idx].clone();
         if args.len() != lam_params.len() || lam_params.len() != lam_param_tys.len() {
             return None;
         }
@@ -15324,6 +15492,11 @@ impl<'a> Lower<'a> {
             stmts.push(var);
             self.scope.push((pname.clone(), slot, *pty));
         }
+        // The lambda body's AST ids belong to the file where the literal was WRITTEN (recorded at
+        // registration): splicing inside a cross-file inline body must swap the source context back
+        // for the body (invoke-site args above lowered in the CURRENT context). `lam_saved` is Copy —
+        // restored on every exit below.
+        let lam_saved = (lam_ctx != self.file_index).then(|| self.swap_src_context(lam_ctx));
         // A `return@<inlineFn>` in the lambda body is a LOCAL return from this lambda invocation. Wrap the
         // spliced body in a `while(true){ … break }` labeled `brk` and register a frame so the labeled
         // return lowers to `break@brk` — exactly the inline-fn return mechanism, one level in. Only a
@@ -15351,6 +15524,9 @@ impl<'a> Lower<'a> {
                 ));
                 let body_val = self.expr(lam_body);
                 self.inline_lambda_ret.pop();
+                if let Some(sv) = lam_saved {
+                    self.restore_src_context(sv);
+                }
                 self.scope.truncate(depth);
                 let body_val = body_val?;
                 // Normal fall-through: the body's own value is the result.
@@ -15368,6 +15544,9 @@ impl<'a> Lower<'a> {
                 .push((lam_label.clone(), 0, brk.clone(), Ty::Unit, false));
             let body_val = self.expr(lam_body);
             self.inline_lambda_ret.pop();
+            if let Some(sv) = lam_saved {
+                self.restore_src_context(sv);
+            }
             self.scope.truncate(depth);
             let body_val = body_val?;
             let brk_stmt = self.emit_break(Some(brk.clone()));
@@ -15386,6 +15565,9 @@ impl<'a> Lower<'a> {
         let saved_inl_ret = std::mem::take(&mut self.inline_return);
         let body_val = self.expr(lam_body);
         self.inline_return = saved_inl_ret;
+        if let Some(sv) = lam_saved {
+            self.restore_src_context(sv);
+        }
         self.scope.truncate(depth);
         let body_val = body_val?;
         if stmts.is_empty() {
@@ -20100,6 +20282,125 @@ fn body_has_bare_return(file: &ast::File, e: AstExprId) -> bool {
     file.any_child_expr(e, &mut |x| body_has_bare_return(file, x), &mut |s| {
         stmt_bare(file, s)
     })
+}
+
+/// Whether a SIBLING-file inline fn's body is safe to expand at a caller in another file. The
+/// cross-file splice re-lowers the body against the sibling's GENERICALLY-checked info while the
+/// caller specializes type-parameter slots — shapes where those two views meet a mutable boundary are
+/// not yet reconciled and MISCOMPILE (VerifyError/CCE in the corpus): local declarations (a
+/// tparam-typed `var y = x` slot types erased while the param slot specialized), `try` expressions
+/// and `break`/`continue` (frame shapes), callable references and explicit casts (erasure
+/// mismatches). Reject those; everything else (the plain HOF-forwarding shape) expands.
+fn sibling_inline_body_expandable(file: &ast::File, e: AstExprId) -> bool {
+    fn stmt_ok(file: &ast::File, s: ast::StmtId) -> bool {
+        !matches!(
+            file.stmt(s),
+            Stmt::Local { .. }
+                | Stmt::LocalLateinit { .. }
+                | Stmt::LocalDelegate { .. }
+                | Stmt::Destructure { .. }
+                | Stmt::While { .. }
+                | Stmt::DoWhile { .. }
+                | Stmt::For { .. }
+        ) && !file.any_child_stmt(s, &mut |x| !expr_ok(file, x))
+    }
+    fn expr_ok(file: &ast::File, e: AstExprId) -> bool {
+        if matches!(
+            file.expr(e),
+            Expr::Try { .. }
+                | Expr::CallableRef { .. }
+                | Expr::As { .. }
+                | Expr::Lambda { .. }
+                | Expr::Break { .. }
+                | Expr::Continue { .. }
+        ) {
+            return false;
+        }
+        !file.any_child_expr(e, &mut |x| !expr_ok(file, x), &mut |s| !stmt_ok(file, s))
+    }
+    expr_ok(file, e)
+}
+
+/// Whether a body's ONLY return is a single tail `return <expr>` — the last statement of the
+/// top-level block (or the block itself being that return), with no other return anywhere.
+fn single_tail_return(file: &ast::File, body: AstExprId) -> bool {
+    fn count_returns(file: &ast::File, e: AstExprId) -> usize {
+        let n = std::cell::Cell::new(0usize);
+        fn walk_e(file: &ast::File, e: AstExprId, n: &std::cell::Cell<usize>) {
+            file.any_child_expr(
+                e,
+                &mut |x| {
+                    walk_e(file, x, n);
+                    false
+                },
+                &mut |s| {
+                    walk_s(file, s, n);
+                    false
+                },
+            );
+        }
+        fn walk_s(file: &ast::File, s: ast::StmtId, n: &std::cell::Cell<usize>) {
+            if matches!(file.stmt(s), Stmt::Return(..)) {
+                n.set(n.get() + 1);
+            }
+            file.any_child_stmt(s, &mut |x| {
+                walk_e(file, x, n);
+                false
+            });
+        }
+        walk_e(file, e, &n);
+        n.get()
+    }
+    if count_returns(file, body) != 1 {
+        return false;
+    }
+    match file.expr(body) {
+        Expr::Block { stmts, .. } => stmts
+            .last()
+            .is_some_and(|&s| matches!(file.stmt(s), Stmt::Return(..))),
+        _ => false,
+    }
+}
+
+/// Visit every bare `Name` occurrence (including call callees) under `e`, not descending past
+/// nothing — a syntactic over-approximation for the cross-file inline reference gate.
+fn collect_bare_names(file: &ast::File, e: AstExprId, f: &mut dyn FnMut(&str)) {
+    if let Expr::Name(n) = file.expr(e) {
+        f(n);
+    }
+    let inner = std::cell::RefCell::new(f);
+    file.any_child_expr(
+        e,
+        &mut |x| {
+            collect_bare_names(file, x, *inner.borrow_mut());
+            false
+        },
+        &mut |s| {
+            file.any_child_stmt(s, &mut |x| {
+                collect_bare_names(file, x, *inner.borrow_mut());
+                false
+            });
+            false
+        },
+    );
+}
+
+/// Whether `e` contains any assignment or in/decrement (mutation a cross-file inline splice can't
+/// yet carry through a captured local).
+fn body_has_assign(file: &ast::File, e: AstExprId) -> bool {
+    fn stmt_has(file: &ast::File, s: ast::StmtId) -> bool {
+        matches!(
+            file.stmt(s),
+            Stmt::Assign { .. }
+                | Stmt::IncDec { .. }
+                | Stmt::AssignMember { .. }
+                | Stmt::AssignIndex { .. }
+        ) || file.any_child_stmt(s, &mut |x| body_has_assign(file, x))
+    }
+    matches!(file.expr(e), Expr::IncDec { .. })
+        || file.any_child_expr(e, &mut |x| body_has_assign(file, x), &mut |s| {
+            stmt_has(file, s)
+        })
 }
 
 fn body_has_return(file: &ast::File, e: AstExprId) -> bool {
