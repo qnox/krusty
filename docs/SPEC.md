@@ -1814,3 +1814,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   captured `var x: X?` is always the `ObjectRef` (a nullable value class never holds the raw scalar).
   Generic arguments compare by class (the non-null `Obj` rule ignores them too).
   (`assignment_to_nullable_value_class_var_boxes`.)
+
+- **A FUNCTION-type `typealias` expands structurally at the parse seam.** `typealias L = (A) -> R`
+  (incl. `suspend`/`context(...)` forms) records the full target `TypeRef` in `File.type_alias_fun`;
+  a post-parse pass rewrites every `TypeRef` naming the alias into the arrow form, so all downstream
+  raw-`TypeRef` function-type tests (checker invoke detection, lowerer, metadata) see the ordinary
+  shape. Per-file only — a sibling file's alias stays unresolved (skip, never mis-grade); generic
+  function-type aliases are not expanded (use-site substitution unmodeled). The use site's `?`
+  survives expansion (`L?` = nullable function type) and the span stays the use site.
+  (`tests/typealias_function_type_e2e.rs`; corpus `suspendConversion/suspendConversionOfAliasedType.kt`
+  advances from `unresolved` to the separate suspend-conversion gap.)

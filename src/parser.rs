@@ -44,6 +44,7 @@ pub fn parse_with_features(
     fixup_parenless_base_classes(&mut p.file);
     rewrite_anon_captures(&mut p.file);
     fill_class_decl_lines(&mut p.file, src);
+    expand_fun_type_aliases(&mut p.file);
     p.file
 }
 
@@ -766,6 +767,140 @@ fn fixup_parenless_base_classes(file: &mut File) {
     }
 }
 
+/// Expand the file's FUNCTION-type aliases (`typealias L = (A) -> R`) structurally: every `TypeRef`
+/// naming such an alias is rewritten to the target function type, so all downstream consumers (the
+/// checker's raw-`TypeRef` function-type tests, the lowerer, metadata) see the ordinary arrow form.
+/// Runs per file at the parse seam — an alias declared in a SIBLING file is not expanded (unresolved
+/// → the test skips, as before). Nested alias references inside a substituted target expand through
+/// the recursion; the depth cap only guards a (kotlinc-rejected) recursive alias from looping.
+fn expand_fun_type_aliases(file: &mut File) {
+    use std::collections::HashMap;
+    if file.type_alias_fun.is_empty() {
+        return;
+    }
+    let aliases: HashMap<String, TypeRef> = file.type_alias_fun.iter().cloned().collect();
+
+    fn expand(tr: &mut TypeRef, aliases: &HashMap<String, TypeRef>, depth: u32) {
+        if depth > 8 {
+            return;
+        }
+        if tr.fun_params.is_empty() && tr.name != "<fun>" && tr.targs.is_empty() {
+            if let Some(target) = aliases.get(&tr.name) {
+                let nullable = tr.nullable;
+                let span = tr.span;
+                *tr = target.clone();
+                // The use site's `?` survives (`Listener?` = nullable function type); the span stays
+                // the USE site so diagnostics on the expanded type point at the source that wrote it.
+                tr.nullable |= nullable;
+                tr.span = span;
+            }
+        }
+        if let Some(a) = &mut tr.arg {
+            expand(a, aliases, depth + 1);
+        }
+        for t in &mut tr.targs {
+            expand(t, aliases, depth + 1);
+        }
+        for t in &mut tr.fun_params {
+            expand(t, aliases, depth + 1);
+        }
+    }
+    fn expand_opt(tr: &mut Option<TypeRef>, aliases: &HashMap<String, TypeRef>) {
+        if let Some(t) = tr {
+            expand(t, aliases, 0);
+        }
+    }
+    fn expand_params(params: &mut [Param], aliases: &HashMap<String, TypeRef>) {
+        for p in params {
+            expand(&mut p.ty, aliases, 0);
+        }
+    }
+    fn expand_bounds(bounds: &mut [(String, TypeRef)], aliases: &HashMap<String, TypeRef>) {
+        for (_, t) in bounds {
+            expand(t, aliases, 0);
+        }
+    }
+    fn expand_fun(f: &mut FunDecl, aliases: &HashMap<String, TypeRef>) {
+        expand_opt(&mut f.receiver, aliases);
+        expand_params(&mut f.params, aliases);
+        expand_opt(&mut f.ret, aliases);
+        expand_bounds(&mut f.type_param_bounds, aliases);
+    }
+    fn expand_prop(p: &mut PropDecl, aliases: &HashMap<String, TypeRef>) {
+        expand_opt(&mut p.receiver, aliases);
+        expand_opt(&mut p.ty, aliases);
+        expand_bounds(&mut p.type_param_bounds, aliases);
+    }
+    fn expand_class(c: &mut ClassDecl, aliases: &HashMap<String, TypeRef>) {
+        expand_bounds(&mut c.type_param_bounds, aliases);
+        for p in &mut c.props {
+            expand(&mut p.ty, aliases, 0);
+        }
+        for t in &mut c.supertypes {
+            expand(t, aliases, 0);
+        }
+        for m in c.methods.iter_mut().chain(c.companion_methods.iter_mut()) {
+            expand_fun(m, aliases);
+        }
+        for p in c.body_props.iter_mut().chain(c.companion_props.iter_mut()) {
+            expand_prop(p, aliases);
+        }
+        for sc in &mut c.secondary_ctors {
+            expand_params(&mut sc.params, aliases);
+        }
+        for e in &mut c.enum_entries {
+            for m in &mut e.methods {
+                expand_fun(m, aliases);
+            }
+            for p in &mut e.props {
+                expand_prop(p, aliases);
+            }
+        }
+    }
+
+    let aliases = &aliases;
+    for decl in &mut file.decl_arena {
+        match decl {
+            Decl::Fun(f) => expand_fun(f, aliases),
+            Decl::Property(p) => expand_prop(p, aliases),
+            Decl::Class(c) => expand_class(c, aliases),
+        }
+    }
+    for expr in &mut file.expr_arena {
+        match expr {
+            Expr::Is { ty, .. } | Expr::As { ty, .. } => expand(ty, aliases, 0),
+            Expr::Try { catches, .. } => {
+                for c in catches {
+                    expand(&mut c.ty, aliases, 0);
+                }
+            }
+            _ => {}
+        }
+    }
+    for stmt in &mut file.stmt_arena {
+        match stmt {
+            Stmt::Local { ty, .. } | Stmt::LocalDelegate { ty, .. } => expand_opt(ty, aliases),
+            Stmt::LocalLateinit { ty, .. } => expand(ty, aliases, 0),
+            Stmt::LocalFun(f) => expand_fun(f, aliases),
+            Stmt::LocalClass(c) => expand_class(c, aliases),
+            _ => {}
+        }
+    }
+    for trs in file.call_type_args.values_mut() {
+        for t in trs {
+            expand(t, aliases, 0);
+        }
+    }
+    for trs in file.lambda_param_types.values_mut() {
+        for t in trs.iter_mut().flatten() {
+            expand(t, aliases, 0);
+        }
+    }
+    for t in file.anon_fun_ret.values_mut() {
+        expand(t, aliases, 0);
+    }
+}
+
 struct Parser<'a> {
     src: &'a str,
     t: &'a [Token],
@@ -1143,11 +1278,28 @@ impl<'a> Parser<'a> {
                     } else {
                         String::new()
                     };
-                    self.parse_type_args(); // skip `<T, R>` if present
+                    let alias_targs = self.parse_type_args(); // `<T, R>` if present
                     self.eat(TokenKind::Eq);
+                    // A function-type target (`(A) -> R`, `suspend (A) -> R`, `context(C) (A) -> R`):
+                    // parse the full type and record it in `type_alias_fun` (non-generic aliases only —
+                    // a generic alias's expansion would need use-site type-arg substitution, which
+                    // isn't modeled).
+                    let fn_target = self.at(TokenKind::LParen)
+                        || (self.at(TokenKind::Ident)
+                            && (self.text() == "suspend" || self.text() == "context")
+                            && self
+                                .t
+                                .get(self.i + 1)
+                                .is_some_and(|t| t.kind == TokenKind::LParen));
                     // Parse the target type name, including dotted FQNs (e.g. java.lang.Exception).
-                    let target = if self.at(TokenKind::LParen) {
-                        // function type — skip entire line
+                    let target = if fn_target {
+                        let t = self.parse_type();
+                        if !alias.is_empty()
+                            && alias_targs.is_empty()
+                            && (!t.fun_params.is_empty() || t.name == "<fun>")
+                        {
+                            self.file.type_alias_fun.push((alias.clone(), t));
+                        }
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
                             self.bump();
                         }
