@@ -1001,53 +1001,96 @@ impl ClassWriter {
         let copy_default_desc = format!("({self_ref}{}ILjava/lang/Object;){self_ref}", params);
         self.cp.utf8(&copy_default_desc);
         self.cp.methodref(this_internal, "copy", &copy_desc);
-        // toString — StringBuilder chain: `"Simple(f0="` append, each field append, then `)` + toString.
+        // toString. kotlinc's shape depends on the target: `invokedynamic makeConcatWithConstants`
+        // (JVM 9+) or a `StringBuilder` chain (below). The body emitter picks the same fork on the
+        // class major; seed to match so the pool positions line up.
         self.cp.utf8("toString");
         self.cp.utf8("()Ljava/lang/String;");
-        self.cp
-            .methodref("java/lang/StringBuilder", "<init>", "()V");
-        for (i, (name, desc)) in fields.iter().enumerate() {
-            let prefix = if i == 0 {
-                format!("{simple}({name}=")
-            } else {
-                format!(", {name}=")
-            };
-            self.cp.string(&prefix);
+        let arrays_to_string_desc = |d: &str| -> &'static str {
+            match d {
+                "[Z" => "([Z)Ljava/lang/String;",
+                "[C" => "([C)Ljava/lang/String;",
+                "[B" => "([B)Ljava/lang/String;",
+                "[S" => "([S)Ljava/lang/String;",
+                "[I" => "([I)Ljava/lang/String;",
+                "[J" => "([J)Ljava/lang/String;",
+                "[F" => "([F)Ljava/lang/String;",
+                "[D" => "([D)Ljava/lang/String;",
+                _ => "([Ljava/lang/Object;)Ljava/lang/String;",
+            }
+        };
+        if self.major >= 53 {
+            // The recipe: literal segments with a `\u{1}` where each field value interpolates. An
+            // array field is rendered by `Arrays.toString` first (interned in field order, before the
+            // bootstrap), so its argument type is `String` like any other value.
+            let mut recipe = String::new();
+            let mut arg_descs = String::new();
+            for (i, (name, desc)) in fields.iter().enumerate() {
+                recipe.push_str(&if i == 0 {
+                    format!("{simple}({name}=")
+                } else {
+                    format!(", {name}=")
+                });
+                recipe.push('\u{1}');
+                if desc.starts_with('[') {
+                    self.cp
+                        .methodref("java/util/Arrays", "toString", arrays_to_string_desc(desc));
+                    arg_descs.push_str("Ljava/lang/String;");
+                } else {
+                    arg_descs.push_str(desc);
+                }
+            }
+            recipe.push(')');
+            let recipe_idx = self.const_string(&recipe);
+            let mh = self.method_handle_static(
+                "java/lang/invoke/StringConcatFactory",
+                "makeConcatWithConstants",
+                "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;\
+                 Ljava/lang/invoke/MethodType;Ljava/lang/String;[Ljava/lang/Object;)\
+                 Ljava/lang/invoke/CallSite;",
+            );
+            let bsm = self.add_bootstrap(mh, vec![recipe_idx]);
+            self.invoke_dynamic(
+                bsm,
+                "makeConcatWithConstants",
+                &format!("({arg_descs})Ljava/lang/String;"),
+            );
+        } else {
+            self.cp
+                .methodref("java/lang/StringBuilder", "<init>", "()V");
+            for (i, (name, desc)) in fields.iter().enumerate() {
+                let prefix = if i == 0 {
+                    format!("{simple}({name}=")
+                } else {
+                    format!(", {name}=")
+                };
+                self.cp.string(&prefix);
+                self.cp.methodref(
+                    "java/lang/StringBuilder",
+                    "append",
+                    append_desc("Ljava/lang/String;"),
+                );
+                if desc.starts_with('[') {
+                    // An ARRAY field content-prints via `java.util.Arrays.toString`; its `String`
+                    // result reuses the `append(String)` methodref above.
+                    self.cp
+                        .methodref("java/util/Arrays", "toString", arrays_to_string_desc(desc));
+                } else {
+                    self.cp
+                        .methodref("java/lang/StringBuilder", "append", append_desc(desc));
+                }
+            }
             self.cp.methodref(
                 "java/lang/StringBuilder",
                 "append",
-                append_desc("Ljava/lang/String;"),
+                "(C)Ljava/lang/StringBuilder;",
             );
-            if desc.starts_with('[') {
-                // An ARRAY field content-prints via `java.util.Arrays.toString` (kotlinc's data-class
-                // shape); its `String` result reuses the `append(String)` methodref above.
-                let ts = match desc.as_str() {
-                    "[Z" => "([Z)Ljava/lang/String;",
-                    "[C" => "([C)Ljava/lang/String;",
-                    "[B" => "([B)Ljava/lang/String;",
-                    "[S" => "([S)Ljava/lang/String;",
-                    "[I" => "([I)Ljava/lang/String;",
-                    "[J" => "([J)Ljava/lang/String;",
-                    "[F" => "([F)Ljava/lang/String;",
-                    "[D" => "([D)Ljava/lang/String;",
-                    _ => "([Ljava/lang/Object;)Ljava/lang/String;",
-                };
-                self.cp.methodref("java/util/Arrays", "toString", ts);
-            } else {
-                self.cp
-                    .methodref("java/lang/StringBuilder", "append", append_desc(desc));
-            }
+            self.cp.methodref(
+                "java/lang/StringBuilder",
+                "toString",
+                "()Ljava/lang/String;",
+            );
         }
-        self.cp.methodref(
-            "java/lang/StringBuilder",
-            "append",
-            "(C)Ljava/lang/StringBuilder;",
-        );
-        self.cp.methodref(
-            "java/lang/StringBuilder",
-            "toString",
-            "()Ljava/lang/String;",
-        );
         // hashCode — kotlinc interns the method NAME and its `()I` descriptor together at method
         // entry (both no-ops when an `Int` getter already interned them), then the per-field hash
         // refs in body order: a primitive via its boxing class's static, an ARRAY via
