@@ -299,6 +299,36 @@ fn anon_body_writes(file: &File, did: DeclId, n: &str) -> bool {
 
 /// Whether the anonymous class `did`'s body (method bodies, body-property initializers, super-call
 /// arguments) reads the name `n`.
+/// Whether the anon class body contains a member-syntax CALL named `n` (`b.n(…)` / `b?.n(…)`).
+/// Companion to [`anon_body_uses`] for RECEIVER-function-typed captures (`bar: Bar.() -> Unit`),
+/// whose only use may sit in member position — `Expr::Member`/`Expr::SafeCall` carry the name as
+/// data, which `expr_uses_name` does not see as a name reference. Mirrors that scan's
+/// stop-at-nested-lambda behavior.
+fn anon_body_member_call_named(file: &File, did: DeclId, n: &str) -> bool {
+    fn walk(file: &File, e: ExprId, n: &str) -> bool {
+        if matches!(file.expr(e), Expr::Lambda { .. }) {
+            return false;
+        }
+        let hit = match file.expr(e) {
+            Expr::SafeCall { name, .. } => name == n,
+            Expr::Call { callee, .. } => {
+                matches!(file.expr(*callee), Expr::Member { name, .. } if name == n)
+            }
+            _ => false,
+        };
+        hit || file.any_child_expr(e, &mut |c| walk(file, c, n), &mut |s| {
+            file.any_child_stmt(s, &mut |c| walk(file, c, n))
+        })
+    }
+    let Decl::Class(c) = file.decl(did) else {
+        return false;
+    };
+    c.methods
+        .iter()
+        .filter_map(|m| fun_body_root(&m.body))
+        .any(|root| walk(file, root, n))
+}
+
 fn anon_body_uses(file: &File, did: DeclId, n: &str) -> bool {
     let Decl::Class(c) = file.decl(did) else {
         return false;
@@ -479,7 +509,13 @@ fn rewrite_anon_captures(file: &mut File) {
                 if anon_body_writes(file, did, pn) {
                     continue;
                 }
-                if anon_body_uses(file, did, pn) {
+                // A RECEIVER-function-typed parameter's only use may be MEMBER-syntax (`b.bar()` /
+                // `b?.bar()`), where the name is call data, not an `Expr::Name` — scan for that form
+                // too, gated on the receiver-fn type so a same-named ordinary member call (`b.size()`
+                // with an enclosing `size: Int`) never over-captures.
+                if anon_body_uses(file, did, pn)
+                    || (pty.fun_has_receiver && anon_body_member_call_named(file, did, pn))
+                {
                     // A captured type that mentions an enclosing type parameter (`x: (T) -> Unit`) is
                     // captured with the type parameter erased to `Any` — the synth-class field/ctor/use
                     // all agree on the erased type, matching krusty's generic erasure.

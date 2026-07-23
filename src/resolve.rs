@@ -5026,6 +5026,16 @@ pub enum ExprLowering {
     /// literal on a value expression (`x::class`, `this::class`) — lowers to `expr.getClass()`. krusty
     /// models the result as `java/lang/Class` (its identity makes `==` agree with kotlinc's `KClass`).
     ClassLiteral { unbound: Option<Ty> },
+    /// Member-syntax invoke of a RECEIVER-function-typed value in lexical scope: `b.f()` / `b?.f()`
+    /// where `f: Bar.() -> R` is a local/parameter and `Bar` has no member `f`. The receiver becomes
+    /// the function value's folded-first argument: lowering reads the local `name` and emits
+    /// `InvokeFunction(f, [recv, args…])`. `params` is the FULL folded parameter list (receiver
+    /// first), `ret` the function type's return.
+    ReceiverFnInvoke {
+        name: String,
+        params: Vec<Ty>,
+        ret: Ty,
+    },
 }
 
 /// How a selected [`ExprLowering::Invoke`] is realized: the receiver is either a function value or an
@@ -9733,6 +9743,38 @@ impl<'a> Checker<'a> {
                 } else {
                     result
                 };
+                // A RECEIVER-function-typed value in scope reached by `?.` (`b?.f()` where
+                // `f: Bar.() -> R` is a local/parameter — `(x as? Bar)?.bar()`): no member or
+                // extension matched above; resolve `f` lexically with the NON-NULL receiver as the
+                // folded-first argument, mirroring the plain `b.f()` member-call path. Non-`suspend`
+                // only (no continuation threading here).
+                let result = if result == Ty::Error {
+                    let arg_tys = args.as_deref().map_or_else(Vec::new, |a| self.arg_tys(a));
+                    self.lookup(&name)
+                        .and_then(|l| match l.narrowed.unwrap_or(l.ty) {
+                            Ty::Fun(sig) if !sig.suspend => Some(sig),
+                            _ => None,
+                        })
+                        .and_then(|sig| {
+                            let (&first, rest) = sig.params.split_first()?;
+                            (rest.len() == arg_tys.len()
+                                && arg_assignable_simple(first, rt.non_null()))
+                            .then(|| {
+                                self.expr_lowers.insert(
+                                    e,
+                                    ExprLowering::ReceiverFnInvoke {
+                                        name: name.clone(),
+                                        params: sig.params.clone(),
+                                        ret: sig.ret,
+                                    },
+                                );
+                                sig.ret
+                            })
+                        })
+                        .unwrap_or(Ty::Error)
+                } else {
+                    result
+                };
                 // The safe-call result is nullable: a primitive member result becomes `Int?`
                 // (`s?.length`); the member value is boxed (or `null`) in lowering. A non-boxable
                 // primitive (unsigned/value) stays unsupported.
@@ -14343,6 +14385,34 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
+                // Member-syntax invoke of a RECEIVER-function-typed value in scope: `b.f()` where
+                // `f: Bar.() -> R` is a local/parameter and `Bar` has no member `f`. Kotlin then
+                // resolves `f` lexically; the receiver becomes the function value's folded-first
+                // argument. Non-`suspend` only (a suspend invoke needs continuation threading this
+                // path doesn't model — leave it unresolved so the file skips).
+                if let Some(sig) =
+                    self.lookup(&name)
+                        .and_then(|l| match l.narrowed.unwrap_or(l.ty) {
+                            Ty::Fun(sig) if !sig.suspend => Some(sig),
+                            _ => None,
+                        })
+                {
+                    if let Some((&first, rest)) = sig.params.split_first() {
+                        if rest.len() == arg_tys.len() && arg_assignable_simple(first, rt) {
+                            let rest = rest.to_vec();
+                            self.expect_call_args(&rest, false, args, &arg_tys);
+                            self.expr_lowers.insert(
+                                call,
+                                ExprLowering::ReceiverFnInvoke {
+                                    name: name.clone(),
+                                    params: sig.params.clone(),
+                                    ret: sig.ret,
+                                },
+                            );
+                            return sig.ret;
+                        }
+                    }
+                }
                 // Invoking a function-typed MEMBER PROPERTY: `obj.func(args)` where `func` is a
                 // `val func: (…) -> R` property (e.g. an enum entry's `func`). No method `func` exists;
                 // read the property (its type is `Ty::Fun`) and invoke it through the one invoke
@@ -14662,17 +14732,38 @@ impl<'a> Checker<'a> {
                 // binds its parameter types from that parameter's `Ty::Fun`, exactly like a top-level
                 // function call — without this the lambda parameters erase to `Any` and the body fails
                 // (`x + y` → "operator cannot be applied to Any and Any").
-                let ctor_lambda_pts: Option<Vec<Vec<Ty>>> = if !self.lexical_value_declares(&fname)
+                let ctor_lambda_pts: Option<Vec<(Vec<Ty>, bool)>> = if !self
+                    .lexical_value_declares(&fname)
                     && args
                         .iter()
                         .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
                 {
+                    // `Ty::Fun` folds a receiver into the first parameter and drops the marker, so a
+                    // RECEIVER function-type ctor param (`config: Pipeline.() -> Unit`) reads its
+                    // `fun_has_receiver` flag from the same-file class declaration — the lambda then
+                    // binds `this`, not `it` (KT-606: a bare member call inside the lambda must
+                    // dispatch on the receiver, not fall back to a stdlib top-level).
+                    let recv_flags: Vec<bool> = self
+                        .file
+                        .decls
+                        .iter()
+                        .find_map(|&d| match self.file.decl(d) {
+                            Decl::Class(c) if c.name == fname => {
+                                Some(c.props.iter().map(|p| p.ty.fun_has_receiver).collect())
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_default();
                     self.syms.classes.get(&fname).map(|cls| {
                         cls.ctor_params
                             .iter()
-                            .map(|p| match p {
-                                Ty::Fun(s) => s.params.clone(),
-                                _ => Vec::new(),
+                            .enumerate()
+                            .map(|(i, p)| match p {
+                                Ty::Fun(s) => (
+                                    s.params.clone(),
+                                    recv_flags.get(i).copied().unwrap_or(false),
+                                ),
+                                _ => (Vec::new(), false),
                             })
                             .collect()
                     })
@@ -14686,12 +14777,21 @@ impl<'a> Checker<'a> {
                         if array_init_lambda && i == 1 {
                             return self.check_lambda_with_types(a, &[Ty::Int]);
                         }
-                        // Constructor lambda argument → typed from the ctor parameter's function type.
+                        // Constructor lambda argument → typed from the ctor parameter's function type;
+                        // a RECEIVER function-type param binds the folded-first param as `this`.
                         if let Some(ref pts) = ctor_lambda_pts {
-                            if pts.get(i).is_some_and(|v| !v.is_empty())
+                            if pts.get(i).is_some_and(|(v, _)| !v.is_empty())
                                 && matches!(self.file.expr(a), Expr::Lambda { .. })
                             {
-                                let pt = pts[i].clone();
+                                let (pt, has_recv) = pts[i].clone();
+                                if has_recv {
+                                    return self.check_lambda_with_receiver_labeled(
+                                        a,
+                                        pt[0],
+                                        &pt[1..],
+                                        None,
+                                    );
+                                }
                                 return self.check_lambda_with_types(a, &pt);
                             }
                         }

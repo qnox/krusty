@@ -11822,6 +11822,27 @@ impl<'a> Lower<'a> {
     /// `java/lang/String.length()` just like `uppercase()`). `recv` is the already-lowered receiver
     /// value. `e` is the source property read, so lowering reuses checker-selected handles and applies
     /// expression-specific generic coercions. Returns `None` when the type exposes no such member.
+    /// The function VALUE named by a checker-selected [`ExprLowering::ReceiverFnInvoke`]: a scope
+    /// local/parameter, or — inside a class member (an anonymous object whose capture was desugared
+    /// to a ctor `val`) — a property read off the implicit `this`. The checker resolved the name in
+    /// its implicit-this-inclusive scope; the lowerer's scope only holds real slots, so the member
+    /// case reads the field here.
+    fn receiver_fn_value(&mut self, name: &str, e: AstExprId) -> Option<u32> {
+        if let Some((slot, _)) = self.lookup(name) {
+            return Some(self.emit_get_value(slot));
+        }
+        let internal = self.cur_class?;
+        // Same-class access reads the backing field directly (an anon-object capture is a ctor
+        // `val` on this very class); a cross-file/library shape resolves through the member-read
+        // path like any qualified property.
+        if let Some((fclass, idx, _)) = self.resolve_field_name(internal, name) {
+            let this_v = self.emit_get_value(0);
+            return Some(self.emit_get_field(this_v, fclass, idx));
+        }
+        let this_v = self.emit_get_value(0);
+        self.lower_member_read_on(this_v, Ty::obj_name(internal), name, e)
+    }
+
     fn lower_member_read_on(&mut self, recv: u32, rt: Ty, name: &str, e: AstExprId) -> Option<u32> {
         // Resolve against the NON-NULL type. A receiver whose static type keeps its `?` (a smart-cast /
         // `!!` value bound to a call-result local, whose narrowing krusty doesn't propagate to the read
@@ -16028,8 +16049,27 @@ impl<'a> Lower<'a> {
                 // non-null arm diverges — the gate that keeps a collection HOF (`forEach`) out of the
                 // divergence guard below.
                 let mut from_scope_fn = false;
-                let member = if let Some(m) = self.lower_safe_scope_member(recv2, rty, &name, &args)
+                // A receiver-function-typed value in scope reached by `?.` (`b?.f()`, checker-selected
+                // [`ExprLowering::ReceiverFnInvoke`]): invoke the local function value with the
+                // non-null receiver as the folded-first argument.
+                let member = if let Some(ExprLowering::ReceiverFnInvoke { name, params, ret }) =
+                    self.info.expr_lowers.get(&e).cloned()
                 {
+                    let arg_list = args.clone().unwrap_or_default();
+                    if arg_list.len() + 1 != params.len() {
+                        return None;
+                    }
+                    let func = self.receiver_fn_value(&name, e)?;
+                    let mut a = vec![recv2];
+                    for (&arg, p) in arg_list.iter().zip(&params[1..]) {
+                        a.push(self.lower_arg(arg, &ty_to_ir(*p))?);
+                    }
+                    self.ir.add_expr(IrExpr::InvokeFunction {
+                        func,
+                        args: a,
+                        ret: ty_to_ir(ret),
+                    })
+                } else if let Some(m) = self.lower_safe_scope_member(recv2, rty, &name, &args) {
                     from_scope_fn = true;
                     m
                 } else {
@@ -18279,6 +18319,39 @@ impl<'a> Lower<'a> {
                     self.expr(body)?
                 }
             }
+            // Member-syntax invoke of a RECEIVER-function-typed value in scope (`b.f()` where
+            // `f: Bar.() -> R` is a local/param): read the local function value and invoke it with
+            // the receiver as the folded-first argument (checker-selected, see
+            // [`ExprLowering::ReceiverFnInvoke`]).
+            Expr::Call { callee, args }
+                if matches!(
+                    self.info.expr_lowers.get(&e),
+                    Some(ExprLowering::ReceiverFnInvoke { .. })
+                ) =>
+            {
+                let Some(ExprLowering::ReceiverFnInvoke { name, params, ret }) =
+                    self.info.expr_lowers.get(&e).cloned()
+                else {
+                    return None;
+                };
+                let Expr::Member { receiver, .. } = self.afile.expr(callee).clone() else {
+                    return None;
+                };
+                if args.len() + 1 != params.len() {
+                    return None;
+                }
+                let recv = self.lower_arg(receiver, &ty_to_ir(params[0]))?;
+                let func = self.receiver_fn_value(&name, e)?;
+                let mut ir_args = vec![recv];
+                for (&arg, p) in args.iter().zip(&params[1..]) {
+                    ir_args.push(self.lower_arg(arg, &ty_to_ir(*p))?);
+                }
+                self.ir.add_expr(IrExpr::InvokeFunction {
+                    func,
+                    args: ir_args,
+                    ret: ty_to_ir(ret),
+                })
+            }
             Expr::Call { args, .. }
                 if matches!(
                     self.info.expr_lowers.get(&e),
@@ -18428,10 +18501,16 @@ impl<'a> Lower<'a> {
                         }
                     }
                     // SAM conversion `Pred { lambda }`: constructor syntax for a functional interface.
+                    // Only when the callee NAMES that interface — any other unresolved one-lambda call
+                    // that merely RETURNS a SAM-able interface (`buildFoo({})` returning `Foo`) must
+                    // not silently become an interface instance of its argument (a miscompile: the
+                    // callee is never invoked). Those fall through to the honest bail below.
                     if let (Some((arg, params, body)), true) =
                         (one_lambda_arg.as_ref(), self.lookup(&fname).is_none())
                     {
-                        if let Some(internal) = self.info.ty(e).obj_internal() {
+                        if let Some(internal) = self.info.ty(e).obj_internal().filter(|i| {
+                            i.render().rsplit(['/', '$']).next() == Some(fname.as_str())
+                        }) {
                             let internal = internal.render();
                             let target = self.sam_target(&internal).or_else(|| {
                                 self.syms
