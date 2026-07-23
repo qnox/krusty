@@ -568,3 +568,72 @@ fn ctor_omitted_non_const_default_uses_init_default() {
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// Cross-file value-class property read: mangled getter, erased return type, identity read of `.value`.
+/// A green run under `-Xverify:all` proves correct compilation.
+#[test]
+fn cross_file_value_class_property_read_uses_mangled_getter() {
+    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+        return;
+    };
+    let java = format!("{java_home}/bin/java");
+    let javac = format!("{java_home}/bin/javac");
+    if !std::path::Path::new(&javac).exists() {
+        return;
+    }
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let stdlib = stdlib.to_str().unwrap().to_string();
+    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let dir = std::env::temp_dir().join(format!("krusty_xfilevc_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("Domain.kt"),
+        "package demo\n@JvmInline value class Id(val value: String)\nclass Holder(val id: Id)\nfun make(): Holder = Holder(Id(\"OK\"))\n",
+    )
+    .unwrap();
+    // The read (`h.id` mangled getter → erased underlying, then `.value` identity) is in ANOTHER file
+    // from the value class and its holder; `make()` keeps the construction same-file (a separate shape).
+    fs::write(
+        dir.join("Read.kt"),
+        "package demo\nfun box(): String = make().id.value\n",
+    )
+    .unwrap();
+    let kc = Command::new(krusty)
+        .args(["-d", dir.to_str().unwrap()])
+        .arg(dir.join("Read.kt"))
+        .arg(dir.join("Domain.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        kc.status.success(),
+        "krusty failed cross-file value-class property read: {}",
+        String::from_utf8_lossy(&kc.stderr)
+    );
+    fs::write(
+        dir.join("M.java"),
+        "public class M { public static void main(String[] argv) { System.out.println(demo.ReadKt.box()); } }",
+    )
+    .unwrap();
+    assert!(Command::new(&javac)
+        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let cp = format!("{}:{}", dir.to_str().unwrap(), stdlib);
+    let r = Command::new(&java)
+        .args(["-Xverify:all", "-cp", &cp, "M"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&r.stdout).trim(),
+        "OK",
+        "stderr={}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    let _ = fs::remove_dir_all(&dir);
+}

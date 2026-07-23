@@ -250,6 +250,12 @@ pub(crate) fn apply_override_final_drop(
 pub fn lower_value_classes(
     ir: &mut IrFile,
     resolver: &crate::symbol_resolver::SymbolResolver,
+    // Same-module SOURCE value classes (internal name → sole-field underlying), collected from the
+    // frontend symbols. A value class declared in ANOTHER file of this module is neither in `ir.classes`
+    // (a different file) nor reported by the resolver (whose `value_underlying` only decodes classpath
+    // `@Metadata`), so its erasure/mangle map entry comes from here — without leaking value-class-ness
+    // into the CHECKER's library view (which drives construction/member resolution).
+    module_value_classes: &std::collections::HashMap<TypeName, Ty>,
 ) -> bool {
     // internal name → underlying (single-field) type, before erasure. NOTE: the `Object` underlying for a
     // generic value class is a deliberate approximation — the correct BOUND (`S<T: String>` → `String`)
@@ -295,10 +301,14 @@ pub fn lower_value_classes(
         if crate::types::prim_array_element(&rendered).is_some() {
             continue;
         }
-        if let Some(u) = resolver.value_underlying_name(fq) {
-            // The resolver carries the underlying's declared nullability (decoded from `@Metadata`) —
-            // trust it: a NON-NULL reference underlying (`ChangeId(val value: String)`) means `ChangeId?`
-            // stays UNBOXED (null carried by the reference), exactly like a same-file value class.
+        if let Some(u) = resolver
+            .value_underlying_name(fq)
+            .or_else(|| module_value_classes.get(&fq).copied())
+        {
+            // The underlying carries its own declared nullability — trust it: a NON-NULL reference
+            // underlying (`ChangeId(val value: String)`) means `ChangeId?` stays UNBOXED (null carried by
+            // the reference), exactly like a same-file value class. Classpath VCs come from the resolver
+            // (decoded from `@Metadata`); same-module source VCs from `module_value_classes`.
             let ir_under = u.scalar_value_repr().unwrap_or(u);
             under.insert(fq, ir_under);
         }
@@ -936,6 +946,28 @@ pub fn lower_value_classes(
                 if let Some(mangled) = mangle_map.get(&(*owner, name.clone(), args.len())) {
                     *name = mangled.clone();
                     *descriptor = erase_descriptor(descriptor, &under);
+                }
+            }
+        }
+    }
+    // Rewrite cross-file member calls with value-class signatures to use mangled names and erased types.
+    if !under.is_empty() {
+        for e in &mut ir.exprs {
+            if let IrExpr::Call {
+                callee:
+                    Callee::CrossFileVirtual {
+                        name, params, ret, ..
+                    },
+                ..
+            } = e
+            {
+                let mangled = vc_mangle(name, params, ret, &under, false, false);
+                if &mangled != name {
+                    *name = mangled;
+                    for p in params.iter_mut() {
+                        *p = erase(p, &under);
+                    }
+                    *ret = erase(ret, &under);
                 }
             }
         }
