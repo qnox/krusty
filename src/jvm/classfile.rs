@@ -485,6 +485,11 @@ impl ClassWriter {
     pub fn set_major(&mut self, major: u16) {
         self.major = major;
     }
+    /// The class-file major version (52 = Java 8, 53 = Java 9, …). Codegen that is gated on the target
+    /// — e.g. `invokedynamic` string concatenation, which kotlinc emits only for Java 9+ — reads it.
+    pub fn major(&self) -> u16 {
+        self.major
+    }
 
     /// Set the source-file simple name for the `SourceFile` attribute (e.g. `Foo.kt`). `None` (the
     /// default) emits no attribute.
@@ -1647,28 +1652,12 @@ impl ClassWriter {
         } else {
             None
         };
-        // Build the `BootstrapMethods` attribute body before serializing the pool (its name + any
-        // remaining indices must already be interned). All handle/argument indices were interned
-        // when `add_bootstrap` ran during code emission.
         // Each optional class attribute is BUILT here (interning its name/values before the pool is
         // serialized) but held in a local, then written in kotlinc's fixed class-attribute order below:
         //   InnerClasses, Signature, SourceFile, Deprecated, RuntimeVisibleAnnotations, BootstrapMethods.
-        // (krusty does not yet emit InnerClasses / class-level Signature.)
-        let bootstrap_attr = if !self.bootstrap_methods.is_empty() {
-            let name = self.cp.utf8("BootstrapMethods");
-            let mut body = Vec::new();
-            u2(&mut body, self.bootstrap_methods.len() as u16);
-            for (mh, args) in &self.bootstrap_methods {
-                u2(&mut body, *mh);
-                u2(&mut body, args.len() as u16);
-                for &a in args {
-                    u2(&mut body, a);
-                }
-            }
-            Some((name, body))
-        } else {
-            None
-        };
+        // (krusty does not yet emit InnerClasses / class-level Signature.) kotlinc interns the
+        // `BootstrapMethods` NAME after `SourceFile`/`RuntimeVisibleAnnotations`, so it is built below
+        // them even though its handle/argument indices were interned when `add_bootstrap` ran.
         // `SourceFile`: name_index + a 2-byte body = the CP index of the source-file UTF8 (its VALUE was
         // interned at the top of `finish`). kotlinc interns the `SourceFile` name BEFORE the
         // `RuntimeVisibleAnnotations` name, so build this attribute first.
@@ -1686,6 +1675,23 @@ impl ClassWriter {
             u2(&mut body, self.runtime_annotations.len() as u16);
             for a in &self.runtime_annotations {
                 body.extend_from_slice(a);
+            }
+            Some((name, body))
+        } else {
+            None
+        };
+        // `BootstrapMethods` — its name interns AFTER `SourceFile`/`RuntimeVisibleAnnotations` (kotlinc's
+        // order); handle/argument indices were already interned by `add_bootstrap` during emission.
+        let bootstrap_attr = if !self.bootstrap_methods.is_empty() {
+            let name = self.cp.utf8("BootstrapMethods");
+            let mut body = Vec::new();
+            u2(&mut body, self.bootstrap_methods.len() as u16);
+            for (mh, args) in &self.bootstrap_methods {
+                u2(&mut body, *mh);
+                u2(&mut body, args.len() as u16);
+                for &a in args {
+                    u2(&mut body, a);
+                }
             }
             Some((name, body))
         } else {

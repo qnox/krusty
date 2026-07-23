@@ -190,6 +190,21 @@ fn multiline_constructor_property_line_table_is_byte_identical() {
     );
 }
 
+/// A string template compiled for a Java-9+ target. kotlinc emits `invokedynamic
+/// makeConcatWithConstants` (a `StringConcatFactory` bootstrap with a recipe) rather than a
+/// `StringBuilder`; the class carries a `BootstrapMethods` attribute whose name interns after
+/// `SourceFile`/`RuntimeVisibleAnnotations`. NOTE: assert_byte_identical compiles kotlinc at its
+/// default target, where BOTH sides still use StringBuilder — this asserts they agree there; the
+/// target-25 form is exercised through the Gradle gate.
+#[test]
+fn string_template_is_byte_identical() {
+    assert_byte_identical(
+        "package demo\nclass C {\n    fun f(a: String): String = \"x=$a\"\n}\n",
+        "demo/C",
+        &[],
+    );
+}
+
 /// A `private val` in the primary constructor — the everyday dependency-injection shape. A private
 /// property has NO accessor, so kotlinc interns no `getX` name/descriptor and records the property as
 /// private in `@Metadata`; krusty leaked both (orphan pool entries plus public property flags).
