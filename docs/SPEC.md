@@ -1839,3 +1839,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   raw erased result (COROUTINE_SUSPENDED or the boxed value); the flattener re-applies the logical
   coercion from `ir.suspend_calls`. (`tests/suspend_conversion_e2e.rs`; corpus
   `suspendConversion/` + `callableReference/adaptedReferences/suspendConversion/` — box-OK +10.)
+
+- **A suspend function VALUE invoked in statement position mid-body gets its own resume state.**
+  The machine already threads the continuation and parks/resumes correctly; the leaf/machine
+  validation walk (`box_returns`) was just missing traversal arms for `InvokeFunction` and
+  `SetStatic`, so the whole file skipped. Verified with a REALLY-suspending value (parks its
+  continuation, driver resumes it — completion must not happen before the resume).
+  (`tests/suspend_value_invoke_e2e.rs`.) Two shapes the arms would otherwise unlock stay guarded as
+  skips, never miscompiles: a suspend LAMBDA with a value-class parameter (the param spill field
+  erases to the underlying but the erased `invoke` stores the boxed object — VerifyError,
+  `createMangling.kt`), and a machine that combines a real suspension state with a
+  `suspendCoroutineUninterceptedOrReturn` block (re-entry after the intrinsic's external resume
+  misdrives the label — `suspendCoroutineFromStateMachine.kt` loops forever).
