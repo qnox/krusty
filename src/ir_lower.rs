@@ -16534,6 +16534,20 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
+                // A SAME-MODULE `object` referenced as a value (`val h = Helper`): not on the classpath
+                // and not a local — read its singleton via `getstatic <internal>.INSTANCE`.
+                if self.lookup(&n).is_none() {
+                    if let Some(cls) = self.syms.classes.get(&n) {
+                        if cls.is_object {
+                            let internal = cls.internal();
+                            return Some(self.emit_external_static_field(
+                                internal.clone(),
+                                "INSTANCE",
+                                format!("L{internal};"),
+                            ));
+                        }
+                    }
+                }
                 // A local delegated property: read through the delegate's `getValue(null, propref)`.
                 if let Some(ld) = self.local_delegated.get(&n).cloned() {
                     // Resolve the `$delegate` slot via the CURRENT scope (so a capture-remapped value

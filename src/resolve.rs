@@ -1615,6 +1615,17 @@ pub fn collect_signatures_with_cp(
 
     // Pass 2: resolve signatures/properties against the now-complete type universe.
     let mut table = SymbolTable::default();
+    // Pre-seed object names from ALL files so a property-initializer's inference recognizes a
+    // same-module `object` used as a value (`val h = Helper`) regardless of file order.
+    for file in files {
+        for &d in &file.decls {
+            if let Decl::Class(c) = file.decl(d) {
+                if c.is_object() {
+                    table.objects.insert(c.name.clone());
+                }
+            }
+        }
+    }
     // Same-name top-level functions are kept as overloads; a real "conflicting declarations" clash
     // is a same-*package* same-erasure duplicate. Keyed by (package, name, erased params) so a
     // cross-package homonym (a star-imported function shadowed by a local one) is not a conflict.
@@ -3557,6 +3568,7 @@ fn infer_lit_ty(
     let env = InferEnv {
         up: &|_, _| None,
         inferring: &inferring,
+        is_object: &|_| false,
     };
     infer_lit_ty_p(file, e, class_names, fun_rets, &[], src, &env)
 }
@@ -3644,6 +3656,9 @@ struct InferEnv<'a> {
     /// Expression-body ids currently on the inference stack — a companion method whose inferred return
     /// recurses back to itself (`a()=C.b(); b()=C.a()`) yields `Error` (skip) instead of looping.
     inferring: &'a std::cell::RefCell<std::collections::HashSet<u32>>,
+    /// True if a simple name is a SAME-MODULE `object` (`val h = Helper`) — the library source can't
+    /// see it, so the `Name` arm's classpath object-check misses it; this closes that gap.
+    is_object: &'a dyn Fn(&str) -> bool,
 }
 
 /// Infer a declaration initializer's type with a fresh cycle-guard, using `table` to resolve
@@ -3658,10 +3673,12 @@ fn infer_lit_ty_scoped(
     table: &SymbolTable,
 ) -> Ty {
     let up = |ci: &str, cn: &str| table.prop_of(ci, cn).map(|(pt, _)| pt);
+    let is_object = |name: &str| table.objects.contains(name);
     let inferring = std::cell::RefCell::new(std::collections::HashSet::new());
     let env = InferEnv {
         up: &up,
         inferring: &inferring,
+        is_object: &is_object,
     };
     infer_lit_ty_p(file, e, class_names, fun_rets, props, src, &env)
 }
@@ -3736,6 +3753,7 @@ fn infer_lit_ty_p(
                     .filter(|internal| {
                         src.resolve_type_name(*internal)
                             .is_some_and(|t| t.is_object())
+                            || (env.is_object)(n)
                     })
                     .map(Ty::obj_name)
             })
