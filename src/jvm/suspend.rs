@@ -1540,6 +1540,15 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
     }
     spill_idx.sort_unstable();
     spill_idx.dedup();
+    // A COMPILER TEMP bound to a `When` with a suspending branch VALUE (`val t = b?.f() ?: -1`
+    // where `f` is a suspend value: `when { b != null -> f.invoke(b), else -> null }`): the
+    // flattener state-splits the binding (`emit_cond` binds `t` in each branch's own resume
+    // state, the reads live in the merge state), so the value MUST cross states through a spill
+    // field — the liveness rule above ("a suspension inside the temp's own initializer runs
+    // before the store") only holds for the straight-line binding shape.
+    collect_cond_susp_temp_bindings(ir, b, &suspend_set, &mut spill_idx);
+    spill_idx.sort_unstable();
+    spill_idx.dedup();
     let mut spilled: Vec<(u32, Ty)> = Vec::new();
     for idx in spill_idx {
         if let Some(ty) = param_ty(idx).or_else(|| find_local_ty(ir, b, idx)) {
@@ -2625,9 +2634,18 @@ impl Flat<'_> {
             return None;
         };
         let branches = branches.clone();
-        let any_susp = branches
-            .iter()
-            .any(|(_, v)| is_suspend_call(self.ir, *v, self.suspend));
+        // A branch value may wrap the suspension in a redundant `Cast`/`ImplicitCoercion` (the
+        // safe-call lowering boxes a primitive member result so both arms are references:
+        // `b?.f()` → `when { b != null -> box(f.invoke(b)), else -> null }`). Post-CPS the call
+        // returns `Object` and `bind_from_r` unboxes to the DECLARED ty, so the wrapper is
+        // redundant — see through it here and in `emit_cond`.
+        let any_susp = branches.iter().any(|(_, v)| {
+            is_suspend_call(
+                self.ir,
+                unwrap_suspend_cast(self.ir, *v, self.suspend, /* ref_only */ false),
+                self.suspend,
+            )
+        });
         // `val v = expr ?: continue` lowers to `val v = when { c -> expr; else -> continue }` — a branch
         // whose VALUE is a loop-jump binds nothing and diverges to the loop's cont/break state. Route the
         // whole binding through `emit_cond` (state-split) so the jump becomes a tail `goto`; otherwise the
@@ -2651,13 +2669,15 @@ impl Flat<'_> {
             }
             return None;
         }
-        // A branch value must be either a direct suspension, a direct loop-jump, or free of both.
+        // A branch value must be either a direct suspension (possibly cast/coercion-wrapped),
+        // a direct loop-jump, or free of both.
         for (_, v) in &branches {
             let direct_jump = matches!(
                 self.ir.exprs[*v as usize],
                 IrExpr::Break { .. } | IrExpr::Continue { .. }
             );
-            if !is_suspend_call(self.ir, *v, self.suspend)
+            let uv = unwrap_suspend_cast(self.ir, *v, self.suspend, /* ref_only */ false);
+            if !is_suspend_call(self.ir, uv, self.suspend)
                 && !direct_jump
                 && (expr_calls_suspend(self.ir, *v, self.suspend) || self.expr_has_loop_jump(*v))
             {
@@ -2684,15 +2704,19 @@ impl Flat<'_> {
                 IrExpr::Continue { label } => Some((label.clone(), false)),
                 _ => None,
             };
+            // A cast/coercion-wrapped direct suspension binds the RAW call — `bind_from_r` already
+            // unboxes the resumed `Object` to the declared ty (see `stmt_cond_suspension`).
+            let uvalue =
+                unwrap_suspend_cast(self.ir, *value, self.suspend, /* ref_only */ false);
             if let Some((label, is_break)) = jump {
                 // A loop-jump branch: transfer to the loop's cont/break state; bind nothing (it diverges).
                 let target = self
                     .loop_jump_target(label.as_deref(), is_break)
                     .unwrap_or(merge);
                 self.goto(&mut bb, target);
-            } else if is_suspend_call(self.ir, *value, self.suspend) {
+            } else if is_suspend_call(self.ir, uvalue, self.suspend) {
                 let br_resume = self.new_state();
-                self.emit_call(&mut bb, *value, br_resume);
+                self.emit_call(&mut bb, uvalue, br_resume);
                 let mut rs: Vec<ExprId> = Vec::new();
                 self.bind_from_r(&mut rs, local, ty, br_resume);
                 self.goto(&mut rs, merge);
@@ -3550,6 +3574,37 @@ fn collect_suspend_calls(
 
 /// Every NAMED source variable (`IrExpr::Variable { named: true, .. }`) declared anywhere under `e`
 /// — the set the suspend scope-spill rule applies to (compiler temps follow pure liveness).
+/// Value-indices of `Variable` bindings whose init is a `When` with a suspension in a branch
+/// VALUE — the flattener's `emit_cond` state-splits these (bind in a branch resume state, read in
+/// the merge state), so they must be spilled regardless of the straight-line liveness rules.
+fn collect_cond_susp_temp_bindings(
+    ir: &IrFile,
+    e: ExprId,
+    suspend_set: &HashSet<u32>,
+    out: &mut Vec<u32>,
+) {
+    let mut stack = vec![e];
+    let mut seen: HashSet<u32> = HashSet::new();
+    while let Some(cur) = stack.pop() {
+        if !seen.insert(cur) {
+            continue;
+        }
+        if let IrExpr::Variable {
+            index,
+            init: Some(init),
+            ..
+        } = ir.exprs[cur as usize]
+        {
+            if matches!(ir.exprs[init as usize], IrExpr::When { .. })
+                && expr_calls_suspend(ir, init, suspend_set)
+            {
+                out.push(index);
+            }
+        }
+        for_each_child(&ir.exprs, cur, &mut |c| stack.push(c));
+    }
+}
+
 fn collect_named_vars(ir: &IrFile, e: ExprId, out: &mut HashSet<u32>) {
     let mut stack = vec![e];
     let mut seen: HashSet<u32> = HashSet::new();
@@ -4201,7 +4256,12 @@ fn unbox(ir: &mut IrFile, value: ExprId, target: &Ty) -> ExprId {
 /// later primitive use (`istore`/`iadd`) would fail verification.
 fn reference_needs_checkcast(t: &Ty) -> bool {
     match t {
-        Ty::Nullable(inner) | Ty::TyParam(_, inner) => reference_needs_checkcast(inner),
+        // A NULLABLE PRIMITIVE (`Int?`) is a boxed reference (`Integer`): the resume value must be
+        // checkcast to the wrapper — `ImplicitCoercion` would no-op (it can't unbox to a nullable),
+        // leaving the slot `Object` while the spill restore's frame type is the wrapper (VerifyError
+        // at the state merge). A nullable REFERENCE keeps the inner type's own answer.
+        Ty::Nullable(inner) => t.nullable_primitive().is_some() || reference_needs_checkcast(inner),
+        Ty::TyParam(_, inner) => reference_needs_checkcast(inner),
         Ty::String => true,
         Ty::Obj(i, _) => !i.matches("kotlin/Any") && !is_boxed_primitive_internal(&i.render()),
         _ => false,

@@ -88,6 +88,77 @@ fun box(): String {\n\
 }
 
 #[test]
+fn suspend_receiver_fn_param_invoke() {
+    // The suspend form: `f: suspend Bar.() -> Int` invoked with member syntax inside a suspend
+    // function — the invoke is a suspension point (Function2.invoke with the continuation), so the
+    // checker must mark it and the coroutine pass must thread the continuation.
+    const SRC: &str = "import kotlin.coroutines.*\n\
+class Bar { val v = 41 }\n\
+suspend fun call(b: Bar, f: suspend Bar.() -> Int): Int = b.f()\n\
+fun box(): String {\n\
+    var res = 0\n\
+    val block: suspend () -> Int = { call(Bar()) { v + 1 } }\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it.getOrThrow() })\n\
+    return if (res == 42) \"OK\" else \"FAIL: $res\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("suspend receiver fn invoke"), "OK");
+}
+
+#[test]
+fn suspend_receiver_fn_invoke_parks_and_resumes() {
+    // The receiver-fn value REALLY suspends: park its continuation, ensure the enclosing state
+    // machine re-enters after resume instead of falling through on COROUTINE_SUSPENDED.
+    const SRC: &str = "import kotlin.coroutines.*\n\
+import kotlin.coroutines.intrinsics.*\n\
+var saved: Continuation<Unit>? = null\n\
+var order = \"\"\n\
+suspend fun pause(): Unit = suspendCoroutineUninterceptedOrReturn { c ->\n\
+    saved = c\n\
+    order += \"parked;\"\n\
+    COROUTINE_SUSPENDED\n\
+}\n\
+class Bar { val v = 40 }\n\
+suspend fun call(b: Bar, f: suspend Bar.(Int) -> Int): Int = b.f(2)\n\
+fun box(): String {\n\
+    var res = 0\n\
+    val block: suspend () -> Int = { call(Bar()) { n -> pause(); v + n } }\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it.getOrThrow() })\n\
+    if (res != 0) return \"fail: completed before resume (res=$res, order=$order)\"\n\
+    order += \"resuming;\"\n\
+    saved!!.resume(Unit)\n\
+    if (res != 42) return \"fail: after resume res=$res order=$order\"\n\
+    if (order != \"parked;resuming;\") return \"fail order: $order\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("suspend receiver fn parks/resumes"), "OK");
+}
+
+#[test]
+fn suspend_receiver_fn_safe_call_invoke() {
+    // The `?.` form on a nullable receiver with a `suspend Bar.() -> Int` value: the suspension
+    // point sits inside the null-check arm; the null receiver must skip the invoke entirely.
+    const SRC: &str = "import kotlin.coroutines.*\n\
+class Bar { val v = 41 }\n\
+suspend fun call(b: Bar?, f: suspend Bar.() -> Int): Int = b?.f() ?: -1\n\
+fun box(): String {\n\
+    var res = 0\n\
+    var nres = 0\n\
+    val block: suspend () -> Unit = {\n\
+        res = call(Bar()) { v + 1 }\n\
+        nres = call(null) { v + 1 }\n\
+    }\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+    if (res != 42) return \"FAIL 1: $res\"\n\
+    if (nres != -1) return \"FAIL 2: $nres\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("suspend safe-call receiver fn invoke"),
+        "OK"
+    );
+}
+
+#[test]
 fn real_member_still_wins_over_scope_value() {
     // `Bar` HAS a member `f` — member resolution must win over the same-named scope value.
     const SRC: &str = "class Bar { fun f(): Int = 1 }\n\

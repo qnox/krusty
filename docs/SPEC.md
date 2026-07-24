@@ -1918,3 +1918,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `IncompatibleClassChangeError` at the call expecting the annotated shape (corpus
   `typeAliasesKt13181.kt`, unlocked by the generic-alias expansion). kotlinc rejects the unresolved
   annotation; krusty now does too. (`unresolved_local_type_annotation_is_rejected`.)
+
+- **A `suspend Bar.() -> R` value invoked with member syntax is a suspension point.** `b.f()` /
+  `b?.f()` where `f: suspend Bar.() -> R` is in lexical scope resolves like the non-suspend
+  receiver-fn invoke (receiver folded first), and the lowering records the `InvokeFunction` in
+  `suspend_calls` so the coroutine pass threads the continuation (`Function{N+1}.invoke`) and parks
+  on `COROUTINE_SUSPENDED`; the enclosing-body suspension scan recognizes the checker-selected
+  `ReceiverFnInvoke` the same way it does a suspend function VALUE. Two state-machine gaps this
+  exposed, both fixed generally: (a) a compiler TEMP bound to a `when` with a suspending branch
+  VALUE (the safe-call materialization `val t = when { b != null -> f.invoke(b), else -> null }`)
+  is force-spilled — the flattener binds it in a branch's resume state and reads it in the merge
+  state, so the straight-line "suspension inside the initializer is consumed before the store"
+  liveness rule does not apply; the cond-suspension detector and `emit_cond` additionally see
+  through a redundant `Cast`/`ImplicitCoercion` wrapper over the branch's direct suspension (the
+  boxing the safe-call lowering adds so both arms are references). (b) a resume value bound at a
+  NULLABLE-PRIMITIVE type (`Int?`) gets a real `checkcast` to its wrapper (`Integer`) —
+  `ImplicitCoercion` cannot unbox to a nullable and would leave the slot `Object` while the spill
+  restore's frame type is the wrapper (VerifyError at the state merge).
+  (`suspend_receiver_fn_param_invoke`, `suspend_receiver_fn_invoke_parks_and_resumes`,
+  `suspend_receiver_fn_safe_call_invoke`.)

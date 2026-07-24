@@ -5031,6 +5031,10 @@ pub enum ExprLowering {
         name: String,
         params: Vec<Ty>,
         ret: Ty,
+        /// The function type is `suspend Bar.() -> R`: the invoke is a suspension point — lowering
+        /// records it in `suspend_calls` so the coroutine pass threads the continuation
+        /// (`Function{N+1}.invoke`) and parks on COROUTINE_SUSPENDED.
+        suspend: bool,
     },
 }
 
@@ -9806,13 +9810,13 @@ impl<'a> Checker<'a> {
                 // A RECEIVER-function-typed value in scope reached by `?.` (`b?.f()` where
                 // `f: Bar.() -> R` is a local/parameter — `(x as? Bar)?.bar()`): no member or
                 // extension matched above; resolve `f` lexically with the NON-NULL receiver as the
-                // folded-first argument, mirroring the plain `b.f()` member-call path. Non-`suspend`
-                // only (no continuation threading here).
+                // folded-first argument, mirroring the plain `b.f()` member-call path. A `suspend`
+                // value is a suspension point the lowerer records for the coroutine pass.
                 let result = if result == Ty::Error {
                     let arg_tys = args.as_deref().map_or_else(Vec::new, |a| self.arg_tys(a));
                     self.lookup(&name)
                         .and_then(|l| match l.narrowed.unwrap_or(l.ty) {
-                            Ty::Fun(sig) if !sig.suspend => Some(sig),
+                            Ty::Fun(sig) => Some(sig),
                             _ => None,
                         })
                         .and_then(|sig| {
@@ -9826,6 +9830,7 @@ impl<'a> Checker<'a> {
                                         name: name.clone(),
                                         params: sig.params.clone(),
                                         ret: sig.ret,
+                                        suspend: sig.suspend,
                                     },
                                 );
                                 sig.ret
@@ -14440,12 +14445,12 @@ impl<'a> Checker<'a> {
                 // Member-syntax invoke of a RECEIVER-function-typed value in scope: `b.f()` where
                 // `f: Bar.() -> R` is a local/parameter and `Bar` has no member `f`. Kotlin then
                 // resolves `f` lexically; the receiver becomes the function value's folded-first
-                // argument. Non-`suspend` only (a suspend invoke needs continuation threading this
-                // path doesn't model — leave it unresolved so the file skips).
+                // argument. A `suspend Bar.() -> R` value is a suspension point — the lowerer
+                // records it so the coroutine pass threads the continuation.
                 if let Some(sig) =
                     self.lookup(&name)
                         .and_then(|l| match l.narrowed.unwrap_or(l.ty) {
-                            Ty::Fun(sig) if !sig.suspend => Some(sig),
+                            Ty::Fun(sig) => Some(sig),
                             _ => None,
                         })
                 {
@@ -14459,6 +14464,7 @@ impl<'a> Checker<'a> {
                                     name: name.clone(),
                                     params: sig.params.clone(),
                                     ret: sig.ret,
+                                    suspend: sig.suspend,
                                 },
                             );
                             return sig.ret;

@@ -7281,6 +7281,13 @@ impl<'a> Lower<'a> {
                     _ => {}
                 }
             }
+            // Member-syntax invoke of a `suspend Bar.() -> R` value in scope (`b.f()`,
+            // checker-selected `ReceiverFnInvoke`): a suspension point like a suspend fn value.
+            if let Some(ExprLowering::ReceiverFnInvoke { suspend: true, .. }) =
+                self.info.expr_lowers.get(&call)
+            {
+                return true;
+            }
             // A classpath top-level `suspend fun` called by name (`delay(…)`): the CHECKER recorded
             // the resolved callable with its suspend flag.
             if self
@@ -16115,8 +16122,12 @@ impl<'a> Lower<'a> {
                 // A receiver-function-typed value in scope reached by `?.` (`b?.f()`, checker-selected
                 // [`ExprLowering::ReceiverFnInvoke`]): invoke the local function value with the
                 // non-null receiver as the folded-first argument.
-                let member = if let Some(ExprLowering::ReceiverFnInvoke { name, params, ret }) =
-                    self.info.expr_lowers.get(&e).cloned()
+                let member = if let Some(ExprLowering::ReceiverFnInvoke {
+                    name,
+                    params,
+                    ret,
+                    suspend,
+                }) = self.info.expr_lowers.get(&e).cloned()
                 {
                     let arg_list = args.clone().unwrap_or_default();
                     if arg_list.len() + 1 != params.len() {
@@ -16127,11 +16138,17 @@ impl<'a> Lower<'a> {
                     for (&arg, p) in arg_list.iter().zip(&params[1..]) {
                         a.push(self.lower_arg(arg, &ty_to_ir(*p))?);
                     }
-                    self.ir.add_expr(IrExpr::InvokeFunction {
+                    let invoke = self.ir.add_expr(IrExpr::InvokeFunction {
                         func,
                         args: a,
                         ret: ty_to_ir(ret),
-                    })
+                    });
+                    // Suspension point (`b?.f()` on a `suspend Bar.() -> R` value): record for the
+                    // coroutine pass, same as the plain member-syntax site.
+                    if suspend {
+                        self.ir.suspend_calls.insert(invoke, ret);
+                    }
+                    invoke
                 } else if let Some(m) = self.lower_safe_scope_member(recv2, rty, &name, &args) {
                     from_scope_fn = true;
                     m
@@ -18412,8 +18429,12 @@ impl<'a> Lower<'a> {
                     Some(ExprLowering::ReceiverFnInvoke { .. })
                 ) =>
             {
-                let Some(ExprLowering::ReceiverFnInvoke { name, params, ret }) =
-                    self.info.expr_lowers.get(&e).cloned()
+                let Some(ExprLowering::ReceiverFnInvoke {
+                    name,
+                    params,
+                    ret,
+                    suspend,
+                }) = self.info.expr_lowers.get(&e).cloned()
                 else {
                     return None;
                 };
@@ -18429,11 +18450,18 @@ impl<'a> Lower<'a> {
                 for (&arg, p) in args.iter().zip(&params[1..]) {
                     ir_args.push(self.lower_arg(arg, &ty_to_ir(*p))?);
                 }
-                self.ir.add_expr(IrExpr::InvokeFunction {
+                let invoke = self.ir.add_expr(IrExpr::InvokeFunction {
                     func,
                     args: ir_args,
                     ret: ty_to_ir(ret),
-                })
+                });
+                // A `suspend Bar.() -> R` value implements `Function{N+1}` (trailing `Continuation`)
+                // and is a suspension point — record it for the coroutine pass (see
+                // [`InvokeKind::Function`]'s identical handling).
+                if suspend {
+                    self.ir.suspend_calls.insert(invoke, ret);
+                }
+                invoke
             }
             Expr::Call { args, .. }
                 if matches!(
