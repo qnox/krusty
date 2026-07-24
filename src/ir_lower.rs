@@ -12517,6 +12517,38 @@ impl<'a> Lower<'a> {
         args: &[AstExprId],
         e: AstExprId,
     ) -> Option<u32> {
+        // The checker resolved this as a MODULE member and recorded the argument→parameter mapping in
+        // `resolved_call_arg_slots` — the very record the qualified `recv.m(args)` path consumes. An
+        // implicit receiver is only sugar for `this.`, so honour that mapping here rather than re-deriving
+        // the binding from the raw argument labels below: the duplicate could not fill a NON-CONSTANT
+        // default (a data class `copy`'s defaults are `this.<field>` reads), so `copy(field = v)` bailed
+        // the whole file. An omitted slot stays `None` and the backend emits `<name>$default(…, mask,
+        // marker)`, exactly as it does for the qualified call.
+        if let Some(ResolvedCall::ModuleMember {
+            owner,
+            name: target,
+            params,
+            ..
+        }) = self.info.resolved_calls.get(&e).cloned()
+        {
+            if target == name {
+                if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
+                    let owner = owner.render();
+                    if let Some((class, index, _fid, mret)) =
+                        self.link_local_method(&owner, &target, &params)
+                    {
+                        let (provided, prelude) =
+                            self.lower_method_slot_args_source_order(args, &slots, &params)?;
+                        let recv = self.emit_get_value(this_v);
+                        let call = self.emit_method_call(class, index, recv, provided);
+                        // A generic higher-order member erases its `<R>` return to `Object`; the checker
+                        // records the concrete result, so insert the `checkcast`/unbox kotlinc emits.
+                        let call = self.coerce_generic_read(call, e, mret);
+                        return Some(self.wrap_arg_prelude(call, prelude));
+                    }
+                }
+            }
+        }
         // A user instance method on the receiver's class — `this.m(args)`.
         if let Some(internal) = this_ty.obj_internal() {
             // Arity-aware resolution first — with overloads split across the hierarchy the plain
