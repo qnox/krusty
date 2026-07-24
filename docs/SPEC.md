@@ -732,6 +732,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   OUT OF SCOPE (documented residuals): inline-function SMAP line mapping, `LocalVariableTable` for
   top-level fns (next slice), the loop-head extra StackMapTable `same` frame.
   `tests/lnt_parity_e2e.rs` (6 full-byte + 3 javap-level pins).
+- **`LocalVariableTable` for regular function bodies** (kotlinc parity, byte-verified): entries in
+  SCOPE-CLOSE order — block-scoped locals first (start = pc after the initializing store, length =
+  to their block's close), then method-scope locals in declaration order (length to the method
+  end), then `this` (instance) and the parameters (start 0). Plumbed as `IrFile::value_names`
+  (Variable ExprId → source name, only REAL source locals) → the emitter's `open_locals`/
+  `block_depth` scope tracker → `CodeBuilder::local_entries`. Gated by `Emitter::record_locals`
+  (parsed + non-suspend fns only — an unflushed method would ship a partial block-locals table;
+  the suspend transform loses `value_names` keys). `<init>`/`<clinit>` and mark-less synthesized
+  bodies keep their curated tables. Two adjacent parity fixes ride along: the metadata string
+  table RANGE-MERGES only consecutive PLAIN records (`Record.range = n`; operation/predefined
+  records are never coalesced — kotlinc's rule, matching `class_builder`); the per-method
+  attribute-name intern order is `StackMapTable` before `LineNumberTable`/`LocalVariableTable`
+  (ASM interns it at the first visited frame, during code emission). RESIDUALS: kotlinc's dead
+  slot REUSE (a later local takes a dead scoped local's slot — krusty never reuses) and the branch
+  fall-through `goto` elision block nested-scope byte parity; inline-spliced callee locals surface
+  under their plain name (kotlinc mangles `$iv`). `tests/lvt_parity_e2e.rs`.
 - **Receiver scope functions `run`/`apply`** (the receiver is `this`, not `it`): the lowerer inlines the
   body binding the receiver to a `this` slot with `cur_class` cleared, so the body's bare member reads
   (getter), writes (setter), and method calls (`invokevirtual`) all resolve against the receiver through

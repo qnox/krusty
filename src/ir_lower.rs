@@ -5335,6 +5335,14 @@ impl<'a> Lower<'a> {
         })
     }
 
+    /// [`Self::emit_named_variable`] for a REAL source local: additionally records its name for the
+    /// `LocalVariableTable` (synthesized temps/receivers stay unnamed and get no debug entry).
+    fn emit_source_local(&mut self, name: &str, index: u32, ty: Ty, init: Option<u32>) -> u32 {
+        let e = self.emit_named_variable(index, ty, init);
+        self.ir.value_names.insert(e, name.to_string());
+        e
+    }
+
     fn emit_set_value(&mut self, var: u32, value: u32) -> u32 {
         self.ir.add_expr(IrExpr::SetValue { var, value })
     }
@@ -13928,7 +13936,7 @@ impl<'a> Lower<'a> {
                     let seq = self.emit_block(vec![side], Some(unit_val));
                     let v = self.fresh_value();
                     self.scope.push((name.clone(), v, unit_ty));
-                    return Some(self.emit_named_variable(v, ty_to_ir(unit_ty), Some(seq)));
+                    return Some(self.emit_source_local(&name, v, ty_to_ir(unit_ty), Some(seq)));
                 }
                 // Use the declared type only when it's a builtin krusty `Ty`; for a user/class type
                 // (`val en: En`) `Ty::from_name` is `None`, so fall back to the checker's inferred
@@ -14073,7 +14081,7 @@ impl<'a> Lower<'a> {
                 if nullable {
                     var_ty = mark_nullable(var_ty);
                 }
-                Some(self.emit_named_variable(v, var_ty, Some(it)))
+                Some(self.emit_source_local(&name, v, var_ty, Some(it)))
             }
             Stmt::LocalDelegate {
                 is_var,

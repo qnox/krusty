@@ -1031,6 +1031,11 @@ pub struct IrFile {
     /// updates, and the implicit `Unit` return (the block's closing-brace line, kotlinc's mapping).
     /// Absent = no line mark starts at that expression.
     pub expr_lines: std::collections::HashMap<u32, u32>,
+    /// Sparse `ExprId` of an `IrExpr::Variable` → the SOURCE name of the local it declares, for the
+    /// `LocalVariableTable`. Only real source locals are recorded (synthesized temps/receivers are
+    /// absent and get no debug entry). Keyed by the Variable's expr id — globally unique, so no
+    /// per-function value-index disambiguation is needed.
+    pub value_names: std::collections::HashMap<u32, String>,
     /// `ExprId` → the expression's LOGICAL (source) type as the checker inferred it, recorded verbatim by
     /// the lowerer — NOT erased. The value-class pass consults it to recover the representation of a value
     /// whose IR node alone is ambiguous: a library call returns a physical `Object` descriptor, but its
