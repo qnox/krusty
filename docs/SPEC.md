@@ -1544,22 +1544,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   by the differential `diagnostics_match_kotlinc` tests, which compile the snippets with both
   compilers, report all mismatches in one run, cover cross-file generic signatures, and assert the
   first `error:` text matches exactly. LSP diagnostics identify their source as `Kotlin`, matching
-  the official Kotlin server.
+  the official Kotlin server. The official server sentence-cases those messages for display; the
+  LSP boundary uppercases the first ASCII byte in place while the compiler-owned CLI message remains
+  byte-for-byte compatible with kotlinc.
 
 - **Semantic highlighting follows the official Kotlin LSP symbol model.** Data classes highlight as
   `struct`; ordinary classes, enums, interfaces, annotations, and objects use `class`, `enum`,
   `interface`, `decorator`, and `type`. Kotlin properties remain `property` even at top level;
-  constructor value parameters are `parameter` unless declared `val`/`var`, in which case they are
-  properties. Top-level callables carry `static`; immutable values carry `readonly`; mutable values
-  carry `modification`; suspend functions carry `async`; abstract declarations carry `abstract`;
-  deprecated declarations carry `deprecated`; operator functions use `operator`; Kotlin builtins and
-  resolved `kotlin.*` library symbols carry `defaultLibrary`. Every declaration also carries
-  `declaration`. References select the narrowest enclosing lexical binding, and range responses
-  include tokens intersecting either boundary. Qualified references use the checked receiver class,
-  so same-named members on different classes retain distinct categories and mutability modifiers.
-  Source-only flags (`data`, `operator`, and source deprecation) are shared across every file in the
-  analyzed source set.
+  every primary-constructor declaration is a readonly `parameter`, including `val`/`var` property
+  parameters, while references to those property parameters are `property` and retain their actual
+  mutability. Top-level callables carry `static`; source enum entries are readonly `enumMember`s
+  without `static`; immutable values carry `readonly`; mutable values carry `modification`; suspend
+  functions carry `async`; abstract declarations carry `abstract`; deprecated declarations carry
+  `deprecated`; operator functions use `operator`; Kotlin builtins and resolved `kotlin.*` library
+  symbols carry `defaultLibrary`. Every declaration also carries `declaration`. References select
+  the narrowest enclosing lexical binding, and range responses include tokens intersecting either
+  boundary. Qualified references use the checked receiver class, so same-named members on different
+  classes retain distinct categories and mutability modifiers. Source-only flags (`data`, `operator`,
+  and source deprecation) are shared across every file in the analyzed source set.
   (`semantic_tokens_match_official_kotlin_symbol_classification`,
+  `semantic_tokens_match_official_constructor_and_enum_modifiers`,
   `semantic_tokens_respect_lexical_shadowing_between_functions`,
   `semantic_tokens_resolve_qualified_members_and_deprecated_references`,
   `semantic_tokens_preserve_source_set_metadata_across_files`,
