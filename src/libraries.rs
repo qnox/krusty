@@ -475,14 +475,20 @@ impl CallSig {
         }
     }
 
-    pub fn metadata_member(param_count: usize, names: Vec<String>, defaults: Vec<bool>) -> Self {
-        CallSig::metadata_base(param_count, names, defaults)
+    pub fn metadata_member(
+        param_count: usize,
+        names: Vec<String>,
+        defaults: Vec<bool>,
+        vararg: bool,
+    ) -> Self {
+        CallSig::metadata_base(param_count, names, defaults, vararg)
     }
 
     pub fn metadata_plain(param_count: usize) -> Self {
-        CallSig::metadata_base(param_count, Vec::new(), Vec::new())
+        CallSig::metadata_base(param_count, Vec::new(), Vec::new(), false)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn metadata_top_level(
         param_count: usize,
         names: Vec<String>,
@@ -490,8 +496,9 @@ impl CallSig {
         lambda_receivers: Vec<Option<Ty>>,
         lambda_receiver_params: Vec<bool>,
         lambda_materialized: Vec<bool>,
+        vararg: bool,
     ) -> Self {
-        let mut sig = CallSig::metadata_base(param_count, names, defaults);
+        let mut sig = CallSig::metadata_base(param_count, names, defaults, vararg);
         sig.lambda_receivers = vec_for_arity(lambda_receivers, param_count);
         sig.lambda_receiver_params = vec_for_arity(lambda_receiver_params, param_count);
         sig.lambda_materialized = vec_for_arity(lambda_materialized, param_count);
@@ -502,17 +509,23 @@ impl CallSig {
         physical_param_count: usize,
         names: Vec<String>,
         defaults: Vec<bool>,
+        vararg: bool,
     ) -> Self {
         // The physical param count includes the extension receiver; the source VALUE params (with their
         // default flags — an `inline fun Mutex.withLock(owner: Any? = null, action)` needs them so an
         // omitted-default trailing-lambda call resolves) follow it.
         physical_param_count
             .checked_sub(1)
-            .map(|param_count| CallSig::metadata_base(param_count, names, defaults))
+            .map(|param_count| CallSig::metadata_base(param_count, names, defaults, vararg))
             .unwrap_or_default()
     }
 
-    fn metadata_base(param_count: usize, names: Vec<String>, defaults: Vec<bool>) -> Self {
+    fn metadata_base(
+        param_count: usize,
+        names: Vec<String>,
+        defaults: Vec<bool>,
+        vararg: bool,
+    ) -> Self {
         let mut names = vec_for_arity(names, param_count);
         if names.iter().any(String::is_empty) {
             names.clear();
@@ -527,6 +540,7 @@ impl CallSig {
             required: required_arity(param_count, &defaults),
             param_names: names,
             param_defaults: defaults,
+            vararg,
             ..Default::default()
         }
     }

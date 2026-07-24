@@ -20873,6 +20873,27 @@ impl<'a> Lower<'a> {
                                 &args,
                                 trailing_lambda,
                             )?;
+                        } else if let Some((fixed, arr_ty, elem)) = c
+                            .vararg_elem
+                            .zip(explicit_params.len().checked_sub(1))
+                            .map(|(elem, fixed)| (fixed, explicit_params[fixed], elem))
+                            .filter(|&(fixed, _, _)| args.len() >= fixed)
+                        {
+                            // A `vararg` extension SPREAD over the trailing arguments: the callee's last
+                            // parameter is the packed array, so `"a.b.".trimEnd('.')` must build a
+                            // `CharArray` holding `'.'`. Passing the argument straight through (what the
+                            // positional loop below does) puts a `Character` where the descriptor spells
+                            // `[C` — krusty exited 0 and the JVM rejected the class with "Bad type on
+                            // operand stack ... not assignable to '[C'". The CHECKER decides this (it set
+                            // `vararg_elem`); a parameter list merely ENDING in an array is not enough.
+                            for (&arg, &pt) in args[..fixed].iter().zip(&explicit_params[..fixed]) {
+                                a.push(self.lower_arg(arg, &ty_to_ir(pt))?);
+                            }
+                            let mut elems = Vec::with_capacity(args.len() - fixed);
+                            for &arg in &args[fixed..] {
+                                elems.push(self.lower_arg(arg, &ty_to_ir(elem))?);
+                            }
+                            a.push(self.emit_vararg(ty_to_ir(arr_ty), elems));
                         } else {
                             for (i, &arg) in args.iter().enumerate() {
                                 match explicit_params.get(i) {
