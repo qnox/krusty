@@ -226,6 +226,8 @@ mod data_class_metadata_wiring_e2e;
 mod data_class_param_check_e2e;
 #[path = "data_copy_e2e.rs"]
 mod data_copy_e2e;
+#[path = "data_object_e2e.rs"]
+mod data_object_e2e;
 #[path = "dataclass_hash_and_sam_e2e.rs"]
 mod dataclass_hash_and_sam_e2e;
 #[path = "decl_body_on_next_line_e2e.rs"]

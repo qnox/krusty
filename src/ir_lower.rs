@@ -8301,11 +8301,17 @@ impl<'a> Lower<'a> {
                 }
                 parts.push(fv);
             }
-            if fields.is_empty() {
-                parts.push(self.ir_const_str(prefix));
-            }
-            parts.push(self.ir_const_str(")".to_string()));
-            let acc = self.ir.add_expr(IrExpr::StringConcat(parts));
+            // A `data object`'s `toString` is its BARE simple name — no parentheses and no fields
+            // (`data object A` renders `A`, not `A()`), unlike a field-less `data class`.
+            let acc = if is_object {
+                self.ir_const_str(simple.to_string())
+            } else {
+                if fields.is_empty() {
+                    parts.push(self.ir_const_str(prefix));
+                }
+                parts.push(self.ir_const_str(")".to_string()));
+                self.ir.add_expr(IrExpr::StringConcat(parts))
+            };
             let ret = self.emit_return(Some(acc));
             let body = self.emit_block(vec![ret], None);
             if let Some(fid) = self.add_synth_method(
