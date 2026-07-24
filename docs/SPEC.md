@@ -598,6 +598,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   consistently across all three; a key rebuilt from the raw AST in codegen (`ty_of`, which erases a bare
   type parameter to `Object`) would diverge and make codegen miss the override
   (`tests/generic_inferred_return_e2e.rs`).
+- **An inferred generic return bound to a primitive types as the plain primitive** (`fun <T> fizz(x: T): T;
+  fizz(1)` is `Int` — usable at an `Int` parameter, in arithmetic, as an `Int` initializer), matching
+  kotlinc's static type. The runtime value behind the erased `Object` return is still the boxed wrapper;
+  the lowerer's erased-return coercion (`has_scalar_value_repr(st)` on an erased-top physical return)
+  unboxes the call result once, so every use sees the real scalar and a reference context re-boxes it
+  (`tests/generic_inferred_primitive_return_e2e.rs`).
+- **A tail-call-forwarded suspend fn boxes its EARLY returns.** The tail-forward shape (no state machine,
+  `$completion` threaded to the callee, callee's `Object` result `areturn`ed verbatim) also admits bodies
+  with early exits (`if (n == 0) return true; return odd(n - 1)`); the CPS method returns `Object`, so the
+  early primitive return boxes and a bare `return` in a `Unit` fn yields `Unit.INSTANCE`, exactly as in a
+  leaf body — only the forwarded tail stays verbatim (kotlinc's shape). Previously the forward path
+  skipped return boxing entirely (`iconst_1; areturn` → VerifyError)
+  (`tail_forward_with_early_returns_boxes_them` in `tests/feature_coverage_s_e2e.rs`).
 - **`return` inside a `try { … } finally { … }`** now runs each enclosing `finally` (innermost first)
   before transferring control, instead of bailing. The lowerer pushes the `finally` AST onto a
   `try_finally_stack` while lowering the body/catches, and a `Stmt::Return` inside inlines those finallys:
