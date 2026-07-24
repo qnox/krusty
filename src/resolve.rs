@@ -16095,26 +16095,44 @@ impl<'a> Checker<'a> {
                                 return self.ctor_result_name(call, cls.internal_name());
                             }
                         }
-                        // Omitted trailing arguments are allowed when those parameters have a default
-                        // that is a *simple literal of the parameter's exact type* — the call site can
-                        // emit it directly. Adapting defaults (`Long = 0`) or complex defaults
-                        // (anonymous objects, `emptyArray()`) aren't modeled yet → skip those.
                         let got = arg_tys.len();
-                        // Omitting a trailing parameter is allowed when either: it has a directly-emittable
-                        // literal default (any class, filled at the call site), OR the class is a VALUE
-                        // class and the param simply HAS a default — a value class's non-const default
-                        // (`ItemId(val v = IdGen.next())`) lowers via `constructor-impl$default`.
+                        // Omitting a trailing parameter is allowed when it simply HAS a default. The
+                        // predicate is "does the class get an `<init>$default`", not "can the call site
+                        // inline the default value": a class with any defaulted primary-ctor parameter
+                        // gets kotlinc's synthetic `<init>(params…, int mask, DefaultConstructorMarker)`
+                        // (a value class, the same thing under `constructor-impl$default`), and the call
+                        // lowers to it with the omitted slots masked off. Whether the default is a literal
+                        // the caller could have emitted itself is irrelevant to whether the call resolves —
+                        // requiring that rejected every non-constant default (`= emptyList()`, `= one()`),
+                        // which is most of them.
+                        // An omission has to be REALIZABLE, by one of two mechanisms: inline-fill from a
+                        // default value krusty captured, or the `<init>$default(…, mask, marker)`
+                        // synthetic, which evaluates the default INSIDE the constructor so the call site
+                        // never needs its value. The `$default` synthetic is what makes a non-constant
+                        // default (`= emptyList()`) omittable at all — requiring an inline-fillable value
+                        // rejected most real defaults.
+                        //
+                        // Two shapes do NOT get the synthetic and must stay rejected, or the call
+                        // miscompiles into a NoSuchMethodError/VerifyError at runtime:
+                        //   - an annotation class, which is emitted as an INTERFACE (no ctor stub);
+                        //   - an omitted parameter whose TYPE is a value class, where the stub's
+                        //     descriptor and its stackmap disagree about the erased underlying type.
+                        // A value class being CONSTRUCTED is fine — that is `constructor-impl$default`.
+                        let realizable_via_stub = !cls.is_annotation && !cls.is_interface;
                         let ok_arity = got <= ctor_params.len()
                             && (got..ctor_params.len()).all(|i| {
-                                cls.ctor_defaults
+                                let inline_fillable = cls
+                                    .ctor_defaults
                                     .get(i)
                                     .and_then(|o| o.as_ref())
-                                    .is_some_and(|dv| dv.fills_param_ty(ctor_params[i]))
-                                    || (cls.value_field.is_some()
-                                        && cls
-                                            .ctor_param_names
-                                            .get(i)
-                                            .is_some_and(|(_, has_default)| *has_default))
+                                    .is_some_and(|dv| dv.fills_param_ty(ctor_params[i]));
+                                let via_stub = realizable_via_stub
+                                    && !self.ty_is_value_class(ctor_params[i])
+                                    && cls
+                                        .ctor_param_names
+                                        .get(i)
+                                        .is_some_and(|(_, has_default)| *has_default);
+                                inline_fillable || via_stub
                             });
                         let primary_applicable = ok_arity
                             && ctor_params.iter().zip(&arg_tys).all(|(parameter, actual)| {

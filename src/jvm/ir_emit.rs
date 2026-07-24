@@ -2473,7 +2473,7 @@ fn emit_class(
         // `<init>(params…, int mask, DefaultConstructorMarker)` overload (fills the masked slots from the
         // defaults, then `invokespecial` the real `<init>`).
         if let Some(defaults) = ir.class_ctor_defaults(&fq_name) {
-            emit_ctor_default_stub(ir, &fq_name, &param_tys, defaults, &mut cw, env);
+            emit_ctor_default_stub(ir, &fq_name, facade, &param_tys, defaults, &mut cw, env);
             // EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
             // (`AuditFilters()` in Java/reflection), delegating to the `$default` overload with a
             // full mask.
@@ -5645,6 +5645,7 @@ fn emit_facade_default_stub(
 fn emit_ctor_default_stub(
     ir: &IrFile,
     owner: &str,
+    facade: &str,
     real_params: &[Ty],
     defaults: &[Option<u32>],
     cw: &mut ClassWriter,
@@ -5658,7 +5659,12 @@ fn emit_ctor_default_stub(
         bodies,
         run: env.run,
         owner: owner.to_string(),
-        facade: owner.to_string(),
+        // The FILE facade, not the class. A default initializer is ordinary file-level code that
+        // happens to be evaluated inside the constructor, so a same-file top-level call in it
+        // (`val a: String = ev()`) belongs to the facade. Resolving it against the class emitted
+        // `P.ev()` for a function living in `UKt` — a reference to nothing, which verifies fine and
+        // dies as a NoSuchMethodError the first time the defaulted constructor runs.
+        facade: facade.to_string(),
         slots: HashMap::new(),
         var_types: collect_var_types(ir),
         next_slot: 0,
