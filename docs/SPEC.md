@@ -636,6 +636,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Long`). This is what compiles the large `kotlin.test`-based slice of the box corpus.
 - **A nullable-primitive *field* smart-cast** (`if (value != null) value` where `value: Int?`) unboxes the
   wrapper on read, like the local-variable path — else the `Integer` reaches an `int` context (verify error).
+- **`x ?: return` smart-casts `x` for the code that follows** (also `?: throw`/`break`/`continue`/a
+  `Nothing`-typed call): completing an elvis whose right-hand side is `Nothing` proves a stable
+  `val`/parameter non-null, exactly like an `if (x == null) return` guard. A nullable-primitive local
+  narrows to its unboxed primitive (the lowerer's `Name` path unboxes the reference slot on use); a
+  nullable reference already reads as its non-null type. `var`s are not narrowed (a closure could reset
+  them to null), and unsigned stays unnarrowed (its value-box unbox isn't modeled).
+  `tests/elvis_return_smartcast_e2e.rs`.
+- **`x is Int? && x != null` narrows to the non-null primitive** (either leaf order): the `is Int?` leaf
+  narrows to the nullable-primitive wrapper and a `x != null` leaf anywhere in the same `&&` chain strips
+  the `?`. The refinement is pushed last, so the innermost-last declare keeps it over the `Int?` binding.
+  `is Int?` alone still reads as `Int?`, and unsigned stays unnarrowed.
+  `tests/is_nullable_and_notnull_smartcast_e2e.rs`.
 - **A `finally { return … }` / `finally { throw … }`** that itself transfers control suppresses the
   catch-all's exception re-raise (emitting the dead `athrow` left an unframed instruction → verify error).
 - **`is`/`as`/`as?` to `IntArray`/`CharArray`/…** resolves to the primitive array type before the

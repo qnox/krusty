@@ -8177,15 +8177,61 @@ impl<'a> Checker<'a> {
     /// && y is Int? && x == y` narrows BOTH `x` and `y` for the `==`). A non-`&&` leaf contributes its own
     /// (positive) narrowing, if any.
     fn collect_and_narrowings(&self, cond: ExprId, out: &mut Vec<(String, Ty)>) {
+        let mut nonnull = std::collections::HashSet::new();
+        self.collect_and_narrowings_inner(cond, out, &mut nonnull);
+        // A `x != null` leaf ANYWHERE in the chain combines with a nullable-primitive narrowing from
+        // another leaf: `x is Int? && x != null` (either order) proves the non-null `Int`. Refinements
+        // are pushed LAST so the consumers' innermost-last declare keeps them over the `Int?` binding.
+        // Only `Ty::Nullable` (which wraps primitives exclusively — a nullable REFERENCE is modeled as
+        // its non-null type) can be refined, so references never reach the strip. Unsigned stays
+        // unnarrowed — its value-box unbox to `kotlin.UInt` isn't modeled.
+        if !nonnull.is_empty() {
+            let refined: Vec<(String, Ty)> = out
+                .iter()
+                .filter_map(|(n, t)| match t {
+                    Ty::Nullable(inner) if nonnull.contains(n.as_str()) && !inner.is_unsigned() => {
+                        Some((n.clone(), **inner))
+                    }
+                    _ => None,
+                })
+                .collect();
+            out.extend(refined);
+        }
+    }
+
+    fn collect_and_narrowings_inner(
+        &self,
+        cond: ExprId,
+        out: &mut Vec<(String, Ty)>,
+        nonnull: &mut std::collections::HashSet<String>,
+    ) {
         if let Expr::Binary {
             op: BinOp::And,
             lhs,
             rhs,
         } = self.file.expr(cond).clone()
         {
-            self.collect_and_narrowings(lhs, out);
-            self.collect_and_narrowings(rhs, out);
-        } else if let Some(b) = self.smartcast_binding(cond, false) {
+            self.collect_and_narrowings_inner(lhs, out, nonnull);
+            self.collect_and_narrowings_inner(rhs, out, nonnull);
+            return;
+        }
+        // Record the names a `x != null` leaf proves non-null (the narrowing refinement above only
+        // fires on a STABLE binding — the `is`-leaf that produced the `Int?` narrowing already
+        // enforces val/parameter stability, so the name alone suffices here).
+        if let Expr::Binary {
+            op: BinOp::Ne,
+            lhs,
+            rhs,
+        } = self.file.expr(cond).clone()
+        {
+            match (self.file.expr(lhs).clone(), self.file.expr(rhs).clone()) {
+                (Expr::Name(n), Expr::NullLit) | (Expr::NullLit, Expr::Name(n)) => {
+                    nonnull.insert(n);
+                }
+                _ => {}
+            }
+        }
+        if let Some(b) = self.smartcast_binding(cond, false) {
             out.push(b);
         }
     }
@@ -9550,6 +9596,24 @@ impl<'a> Checker<'a> {
                     );
                 }
                 if rt == Ty::Nothing {
+                    // `x ?: return` (or throw/break/continue/a `Nothing` call): completing the elvis
+                    // proves a stable `x` non-null for the code that follows, exactly like an
+                    // `if (x == null) return` guard. Narrow a nullable-primitive local to its unboxed
+                    // primitive (the lowerer's `Name` path unboxes the reference slot at each use);
+                    // a nullable reference already reads as its non-null type. Mirrors
+                    // `smartcast_binding`'s `x != null` case: stable `val`/parameter only. Unsigned
+                    // stays unnarrowed — its value-box unbox to `kotlin.UInt` isn't modeled.
+                    if let Expr::Name(n) = self.file.expr(lhs).clone() {
+                        if let Some(l) = self.lookup(&n) {
+                            if !l.is_var {
+                                if let Some(p) =
+                                    l.ty.nullable_primitive().filter(|p| !p.is_unsigned())
+                                {
+                                    self.declare(&n, p, false);
+                                }
+                            }
+                        }
+                    }
                     match lt0 {
                         Ty::Nullable(inner) => *inner,
                         _ => lt,
