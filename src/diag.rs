@@ -1,7 +1,7 @@
 //! Diagnostics: spans plus messages, with line/column rendering.
 
 /// A byte range into the source file. `u32` offsets keep this 8 bytes (data-oriented).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Span {
     pub lo: u32,
     pub hi: u32,
