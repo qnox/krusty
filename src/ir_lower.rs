@@ -5130,6 +5130,7 @@ impl<'a> Lower<'a> {
                 owner: owner.into(),
                 name,
                 descriptor,
+                params: None,
                 interface,
             },
             Some(recv),
@@ -5627,7 +5628,7 @@ impl<'a> Lower<'a> {
             .filter(|cs| cs.is_object)
             .and_then(|cs| cs.method_matching(name, &arg_tys).cloned());
         // A value-class return/parameter mangles the method NAME and/or erases the JVM descriptor, so
-        // the `CrossFileVirtual` descriptor built from the LOGICAL types would mismatch the emitted
+        // the `Virtual` (Ty-carrying) descriptor built from the LOGICAL types would mismatch the emitted
         // method — leave those (and suspend, whose CPS shape differs) to the existing paths.
         let sib_ok = sib_sig.as_ref().is_some_and(|s| {
             !s.is_suspend
@@ -5653,11 +5654,11 @@ impl<'a> Lower<'a> {
                 a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
             }
             let call = self.emit_call(
-                Callee::CrossFileVirtual {
+                Callee::Virtual {
                     owner: internal,
                     name: name.to_string(),
-                    params,
-                    ret: ret_ir,
+                    descriptor: String::new(),
+                    params: Some((params, ret_ir)),
                     interface: false,
                 },
                 Some(recv),
@@ -6251,17 +6252,60 @@ impl<'a> Lower<'a> {
             if let Some(cs) = self.syms.class_by_internal(internal) {
                 // An annotation (an interface + synthetic impl) or inner class (needs an outer
                 // instance) isn't constructed via a plain cross-file `new`; bail (skip, not miscompile).
-                if cs.value_field.is_some() || cs.is_annotation || cs.inner_of.is_some() {
+                if cs.is_annotation || cs.inner_of.is_some() {
                     return None;
                 }
                 // Snapshot the sig's ctor shape before any `&mut self` lowering call (drops the borrow).
                 let is_interface = cs.is_interface;
+                let is_value = cs.value_field.is_some();
+                // A GENERIC value class (`value class Z<T>(val v: T)`) has an `Object`-approximated
+                // underlying krusty does not model soundly across a file boundary (the value flows boxed);
+                // such construction was UNSUPPORTED (skipped) before construction unified through `New`, so
+                // keep skipping it here — never miscompile. (Non-generic value classes lower fine.)
+                let is_generic_value = is_value && !cs.tparam_names.is_empty();
                 let params = tys_to_ir(&cs.ctor_params);
                 let ctor_param_names = cs.ctor_param_names.clone();
+                // A (regular) class whose primary ctor takes a value-class param has a PRIVATE primary + a
+                // PUBLIC synthetic accessor `(…, DefaultConstructorMarker)`. Cross-file construction must
+                // call the accessor (same-file uses the emit-time `use_accessor` path, which can't fire
+                // cross-file — `has_value_param_ctor` sees only this file's IR). Detected here via the
+                // module symbols; the marker param + a trailing `null` arg are appended below.
+                let has_vc_ctor_param = !is_value
+                    && cs.ctor_params.iter().any(|t| {
+                        t.non_null().obj_internal().is_some_and(|i| {
+                            self.syms
+                                .class_by_type_name(i)
+                                .is_some_and(|c| c.value_field.is_some())
+                        })
+                    });
+                // A value class is constructed the same as any class — a `New` (via `new_cross_file`) that
+                // the value-class PASS realizes as `<owner>.constructor-impl(args)`, or (the sole param
+                // omitted) `constructor-impl$default`. ir_lower stays value-class-agnostic: it emits only
+                // the provided args (fewer than the params = the omitted-default case the pass detects).
+                if is_generic_value {
+                    return None; // cross-file generic value-class construction stays unsupported (skip)
+                }
+                if is_value && !is_interface {
+                    let mut a = Vec::new();
+                    for (arg, pty) in args.iter().zip(&params) {
+                        a.push(self.lower_arg(*arg, pty)?);
+                    }
+                    return Some(self.ir.new_cross_file(internal, params, a));
+                }
                 if !is_interface && params.len() == args.len() {
                     let mut a = Vec::new();
                     for (arg, pty) in args.iter().zip(&params) {
                         a.push(self.lower_arg(*arg, pty)?);
+                    }
+                    if has_vc_ctor_param {
+                        // Route through the public `(…, DefaultConstructorMarker)` accessor.
+                        let mut params = params;
+                        params.push(ty_to_ir(Ty::obj(
+                            "kotlin/jvm/internal/DefaultConstructorMarker",
+                        )));
+                        let null_marker = self.emit_const(IrConst::Null);
+                        a.push(null_marker);
+                        return Some(self.ir.new_cross_file(internal, params, a));
                     }
                     return Some(self.ir.new_cross_file(internal, params, a));
                 }
@@ -6281,42 +6325,24 @@ impl<'a> Lower<'a> {
             }
         }
         match self.info.resolved_constructor(call).cloned()? {
-            // A classpath `@JvmInline value class` is constructed via its static
-            // `constructor-impl(U): U`, which returns the UNBOXED underlying value.
-            ResolvedConstructor::ValueClass {
-                underlying: under,
-                arg,
-            } => {
-                if let Some(source_arg) = arg {
-                    let desc = self.runtime.method_descriptor(&[under], under)?;
-                    let arg = self.lower_arg(source_arg, &ty_to_ir(under))?;
-                    return Some(self.emit_static_call(
-                        internal.to_string(),
-                        "constructor-impl".to_string(),
-                        desc,
-                        InlineKind::None,
-                        vec![arg],
-                    ));
-                }
-                let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
-                let desc = self
-                    .runtime
-                    .method_descriptor(&[under, Ty::Int, marker], under)?;
-                let dummy = self.emit_const(IrConst::Null);
-                let mask = self.emit_const(IrConst::Int(1));
-                let null_marker = self.emit_const(IrConst::Null);
-                Some(self.emit_static_call(
-                    internal.to_string(),
-                    "constructor-impl$default".to_string(),
-                    desc,
-                    InlineKind::None,
-                    vec![dummy, mask, null_marker],
-                ))
-            }
             ResolvedConstructor::Plain { member, args } => {
                 let mut lowered = Vec::new();
                 for (arg, pty) in args.iter().zip(&member.params) {
                     lowered.push(self.lower_arg(*arg, &ty_to_ir(*pty))?);
+                }
+                // A value-class ctor is marked by an EMPTY descriptor: emit a `New` carrying the ctor
+                // parameter TYPES so the value-class pass realizes `constructor-impl` (arg supplied) or
+                // `constructor-impl$default` (arg omitted). A value class is single-field, so use its
+                // DECLARED underlying as the sole param — `member.params` reflects the CALL arity (empty
+                // for a no-arg defaulted `Vid()`), which would wrongly pick the arg-less `constructor-impl`.
+                if member.descriptor.is_empty() {
+                    let params = self
+                        .syms
+                        .libraries
+                        .value_underlying_name(crate::types::type_name(internal))
+                        .map(|u| vec![ty_to_ir(u)])
+                        .unwrap_or_else(|| tys_to_ir(&member.params));
+                    return Some(self.ir.new_cross_file(internal, params, lowered));
                 }
                 Some(self.emit_new_external(internal, member.descriptor, lowered))
             }
@@ -6695,11 +6721,11 @@ impl<'a> Lower<'a> {
                     return None;
                 }
                 let c = self.emit_call(
-                    Callee::CrossFileVirtual {
+                    Callee::Virtual {
                         owner,
                         name,
-                        params,
-                        ret: ty_to_ir(ret),
+                        descriptor: String::new(),
+                        params: Some((params, ty_to_ir(ret))),
                         interface,
                     },
                     Some(recv),
@@ -6754,11 +6780,11 @@ impl<'a> Lower<'a> {
                     return Some((self.emit_method_call(class, method, recv, vec![]), ret));
                 }
                 let c = self.emit_call(
-                    Callee::CrossFileVirtual {
+                    Callee::Virtual {
                         owner,
                         name: getter,
-                        params: vec![],
-                        ret: ty_to_ir(ret),
+                        descriptor: String::new(),
+                        params: Some((vec![], ty_to_ir(ret))),
                         interface,
                     },
                     Some(recv),
@@ -8504,11 +8530,11 @@ impl<'a> Lower<'a> {
                 .ir
                 .external_static_instance(&c_internal_rendered, &comp, "Companion");
             return self.ir.add_expr(IrExpr::Call {
-                callee: Callee::CrossFileVirtual {
+                callee: Callee::Virtual {
                     owner: type_name(&comp),
                     name: "serializer".to_string(),
-                    params: vec![],
-                    ret,
+                    descriptor: String::new(),
+                    params: Some((vec![], ret)),
                     interface: false,
                 },
                 dispatch_receiver: Some(recv),
@@ -10671,11 +10697,11 @@ impl<'a> Lower<'a> {
                     Some((call, selected_ret))
                 } else {
                     let call = self.emit_call(
-                        Callee::CrossFileVirtual {
+                        Callee::Virtual {
                             owner: type_name(&owner),
                             name: target,
-                            params: tys_to_ir(&selected_params),
-                            ret: ty_to_ir(selected_ret),
+                            descriptor: String::new(),
+                            params: Some((tys_to_ir(&selected_params), ty_to_ir(selected_ret))),
                             interface,
                         },
                         Some(recv_v),
@@ -11867,11 +11893,11 @@ impl<'a> Lower<'a> {
                     })
                 {
                     return Some(self.emit_call(
-                        Callee::CrossFileVirtual {
+                        Callee::Virtual {
                             owner,
                             name: property_getter_name(name),
-                            params: vec![],
-                            ret: ty_to_ir(ret_ty),
+                            descriptor: String::new(),
+                            params: Some((vec![], ty_to_ir(ret_ty))),
                             interface: is_iface,
                         },
                         Some(recv),
@@ -14781,11 +14807,11 @@ impl<'a> Lower<'a> {
                     let r = self.expr(receiver)?;
                     let v = self.lower_arg(value, &ty_to_ir(pty))?;
                     return Some(self.emit_call(
-                        Callee::CrossFileVirtual {
+                        Callee::Virtual {
                             owner,
                             name: property_setter_name(name),
-                            params: vec![ty_to_ir(pty)],
-                            ret: Ty::Unit,
+                            descriptor: String::new(),
+                            params: Some((vec![ty_to_ir(pty)], Ty::Unit)),
                             interface,
                         },
                         Some(r),
@@ -19808,11 +19834,11 @@ impl<'a> Lower<'a> {
                                             "Companion",
                                         );
                                         return Some(self.ir.add_expr(IrExpr::Call {
-                                            callee: Callee::CrossFileVirtual {
+                                            callee: Callee::Virtual {
                                                 owner: type_name(&comp),
                                                 name: "serializer".to_string(),
-                                                params: vec![kser; args.len()],
-                                                ret,
+                                                descriptor: String::new(),
+                                                params: Some((vec![kser; args.len()], ret)),
                                                 interface: false,
                                             },
                                             dispatch_receiver: Some(recv),
@@ -20109,11 +20135,11 @@ impl<'a> Lower<'a> {
                             }
                             let a = self.lower_args(&args, &params)?;
                             self.emit_call(
-                                Callee::CrossFileVirtual {
+                                Callee::Virtual {
                                     owner: type_name(&owner),
                                     name: target,
-                                    params: tys_to_ir(&params),
-                                    ret: ty_to_ir(ret),
+                                    descriptor: String::new(),
+                                    params: Some((tys_to_ir(&params), ty_to_ir(ret))),
                                     interface,
                                 },
                                 Some(recv),

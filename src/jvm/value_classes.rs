@@ -118,11 +118,18 @@ fn referenced_class_names(ir: &IrFile) -> Vec<TypeName> {
             IrExpr::Variable { ty, .. } => collect_obj_names(*ty, &mut out),
             IrExpr::InvokeFunction { ret, .. } => collect_obj_names(*ret, &mut out),
             IrExpr::New {
-                ctor_params: Some(ps),
+                internal,
+                ctor_params,
                 ..
             } => {
-                for p in ps {
-                    collect_obj_names(*p, &mut out);
+                // The constructed class itself — so a value class being constructed (`Id(x)`, incl. a
+                // classpath/other-module one) enters `under` and its `New` is rewritten to
+                // `constructor-impl` rather than emitted as a raw (private-`<init>`) `new`.
+                out.push(*internal);
+                if let Some(ps) = ctor_params {
+                    for p in ps {
+                        collect_obj_names(*p, &mut out);
+                    }
                 }
             }
             IrExpr::RefNew { elem, .. }
@@ -132,9 +139,22 @@ fn referenced_class_names(ir: &IrFile) -> Vec<TypeName> {
                 collect_obj_names(*array_type, &mut out)
             }
             IrExpr::Call {
-                callee: Callee::CrossFile { ret, .. } | Callee::CrossFileVirtual { ret, .. },
+                callee: Callee::CrossFile { ret, .. },
                 ..
             } => collect_obj_names(*ret, &mut out),
+            IrExpr::Call {
+                callee:
+                    Callee::Virtual {
+                        params: Some((ps, ret)),
+                        ..
+                    },
+                ..
+            } => {
+                for p in ps {
+                    collect_obj_names(*p, &mut out);
+                }
+                collect_obj_names(*ret, &mut out);
+            }
             _ => {}
         }
     }
@@ -856,6 +876,50 @@ pub fn lower_value_classes(
             }
         }
     }
+    // `(class, method-index)` → the value class a member's RETURN keeps BOXED. A user value-class member
+    // runs on / returns the boxed object (the erasure loop above left its VC return un-erased), so its
+    // `MethodCall` result is a boxed `X` — a following unboxed-slot use (`val b: X = x.inc()`) must unbox.
+    // (Getters are intercepted earlier in `repr` via `field_getters`; the static `-impl`s are `Call`s.)
+    let boxed_ret_methods: HashMap<(u32, u32), TypeName> = {
+        let mut m = HashMap::new();
+        for (ci, c) in ir.classes.iter().enumerate() {
+            for (mi, &fid) in c.methods.iter().enumerate() {
+                if let Some(fq) = ir.functions[fid as usize].ret.non_null().obj_internal() {
+                    if under.contains_key(&fq) {
+                        m.insert((ci as u32, mi as u32), fq);
+                    }
+                }
+            }
+        }
+        m
+    };
+    // A value class with a USER instance member that RETURNS a value class (`value class Foo { fun
+    // inc(): Foo }`) is not yet modeled: the member hands back a boxed `X`, and threading that through a
+    // chained call / an unboxed-slot store (or the spliced body of an `inline` such member) needs a
+    // box/unbox dance krusty doesn't do here. SKIP the file — never miscompile — as it was before
+    // value-class construction unified. The value class's own synthesized members (`box-impl`, the
+    // `Any`-overrides) are excluded; a member returning a NON-value-class lowers fine.
+    let vc_member_returns_vc = boxed_ret_methods.keys().any(|&(ci, mi)| {
+        let c = &ir.classes[ci as usize];
+        c.is_value
+            && c.methods
+                .get(mi as usize)
+                .and_then(|&fid| ir.functions.get(fid as usize))
+                .is_some_and(|f| {
+                    let n = f.name.as_str();
+                    // Exclude synthesized members and PROPERTY GETTERS (`getZ` for a value-class-typed
+                    // field is the legitimate unboxed field read, handled via `field_getters`).
+                    !n.contains("-impl")
+                        && !n.starts_with("get")
+                        && !matches!(
+                            n,
+                            "box-impl" | "equals" | "hashCode" | "toString" | "<init>"
+                        )
+                })
+    });
+    if vc_member_returns_vc {
+        return false;
+    }
     for (fid, name, params, ret) in declared_sigs {
         ir.vc_declared_sigs.insert(fid, (name, params, ret));
     }
@@ -887,6 +951,7 @@ pub fn lower_value_classes(
                     owner: x,
                     name: "unbox-impl".to_string(),
                     descriptor: format!("(){}", desc(&u)),
+                    params: None,
                     interface: false,
                 },
                 dispatch_receiver: Some(get),
@@ -958,8 +1023,10 @@ pub fn lower_value_classes(
         for e in &mut ir.exprs {
             if let IrExpr::Call {
                 callee:
-                    Callee::CrossFileVirtual {
-                        name, params, ret, ..
+                    Callee::Virtual {
+                        name,
+                        params: Some((params, ret)),
+                        ..
                     },
                 ..
             } = e
@@ -1503,6 +1570,13 @@ pub fn lower_value_classes(
                 owner: TypeName,
                 descriptor: String,
             },
+            /// Constructing a value class with its sole (defaulted) param omitted (`Id()`) →
+            /// `constructor-impl$default(<underlying>, 1, DefaultConstructorMarker)` — mask `1` because a
+            /// value class is single-field. `u` is the erased underlying.
+            VcCtorDefault {
+                owner: TypeName,
+                u: Ty,
+            },
         }
         let rw = match &ir.exprs[i] {
             // `new X(args)` → `X.constructor-impl(args): U`. The return is the underlying `U`; the
@@ -1519,21 +1593,31 @@ pub fn lower_value_classes(
                     .get(&owner)
                     .map(|t| erase(t, &under))
                     .unwrap_or(Ty::Error);
-                let ret = desc(&u);
-                let params: String = match ctor_params {
-                    Some(ps) => ps.iter().map(|p| desc(&erase(p, &under))).collect(),
-                    None => ret.clone(),
-                };
-                Some(Rw::Ctor(IrExpr::Call {
-                    callee: Callee::Static {
-                        owner,
-                        name: "constructor-impl".to_string(),
-                        descriptor: format!("({params}){ret}"),
-                        inline: InlineKind::None,
-                    },
-                    dispatch_receiver: None,
-                    args: args.clone(),
-                }))
+                // A krusty-unboxed value class has ONE underlying param. No args + exactly one declared
+                // param = that sole (defaulted) param omitted (`Id()`), realized by the
+                // `constructor-impl$default` synthetic with mask `1`. Guarded on `len() == 1` so a
+                // multi-field value class (experimental `@JvmInlineMultiFieldValueClasses`, whose mask
+                // would need several bits) does NOT take this single-bit path. Any args = ordinary
+                // `constructor-impl(args)`.
+                if args.is_empty() && ctor_params.as_ref().is_some_and(|p| p.len() == 1) {
+                    Some(Rw::VcCtorDefault { owner, u })
+                } else {
+                    let ret = desc(&u);
+                    let params: String = match ctor_params {
+                        Some(ps) => ps.iter().map(|p| desc(&erase(p, &under))).collect(),
+                        None => ret.clone(),
+                    };
+                    Some(Rw::Ctor(IrExpr::Call {
+                        callee: Callee::Static {
+                            owner,
+                            name: "constructor-impl".to_string(),
+                            descriptor: format!("({params}){ret}"),
+                            inline: InlineKind::None,
+                        },
+                        dispatch_receiver: None,
+                        args: args.clone(),
+                    }))
+                }
             }
             // An explicit coercion of an UNBOXED value class to a nullable `X?` (`a?.foo()` : `Z?`, the
             // `when`-branch reconciliation): `box-impl` it, so the boxed `X?` merges with the `null` branch.
@@ -1661,6 +1745,26 @@ pub fn lower_value_classes(
         };
         let rewrite = match rw {
             Some(Rw::Ctor(e)) => Some(e),
+            Some(Rw::VcCtorDefault { owner, u }) => {
+                // `constructor-impl$default(<underlying dummy>, mask=1, DefaultConstructorMarker=null)`:
+                // the stub fills the omitted param from the class's default; the dummy underlying is a
+                // zero/null placeholder, the marker a trailing `null`.
+                let ud = desc(&u);
+                let marker = "Lkotlin/jvm/internal/DefaultConstructorMarker;";
+                let dummy = ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(u)));
+                let mask = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(1)));
+                let null_marker = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
+                Some(IrExpr::Call {
+                    callee: Callee::Static {
+                        owner,
+                        name: "constructor-impl$default".to_string(),
+                        descriptor: format!("({ud}I{marker}){ud}"),
+                        inline: InlineKind::None,
+                    },
+                    dispatch_receiver: None,
+                    args: vec![dummy, mask, null_marker],
+                })
+            }
             Some(Rw::Prop(receiver, x)) => Some(prop_access(
                 ir,
                 receiver,
@@ -2020,18 +2124,20 @@ pub fn lower_value_classes(
                     ops.push((*recv, repr_ctx.box_op(*recv, x)));
                 }
             }
-            // A virtual/interface dispatch whose owner is NOT the value class itself (an INTERFACE the value
-            // class implements — e.g. an `IFoo by Z(x)` delegation forwarder calling `invokeinterface
-            // IFoo.foo` on the unboxed `Z` delegate field) must box the receiver: only the boxed value
-            // is-a `IFoo`. (A call to the value class's OWN `-impl` keeps it unboxed — handled below where
-            // `under.contains_key(owner)`.)
+            // A virtual/interface dispatch on an UNBOXED value-class receiver must box it — the dispatch
+            // needs the boxed object. Two cases: (1) the owner is NOT the value class (an INTERFACE it
+            // implements — an `IFoo by Z(x)` delegation forwarder), or (2) the owner IS the value class and
+            // the callee is a SIBLING-FILE user instance method (`params: Some`; krusty emits a value
+            // class's own user methods as boxed-`this` instance methods). A same-file member call takes the
+            // index-resolved `MethodCall` path (boxed above); the value class's static `-impl`s are
+            // `Callee::Static`, not `Virtual`, so they never reach here.
             if let IrExpr::Call {
-                callee: Callee::Virtual { owner, .. } | Callee::CrossFileVirtual { owner, .. },
+                callee: Callee::Virtual { owner, params, .. },
                 dispatch_receiver: Some(recv),
                 ..
             } = &ir.exprs[id as usize]
             {
-                if !is_value_class_internal(*owner, &under) {
+                if !is_value_class_internal(*owner, &under) || params.is_some() {
                     if let Repr::Unboxed(x) = repr_ctx.repr(*recv) {
                         ops.push((*recv, repr_ctx.box_op(*recv, x)));
                     }
@@ -3011,6 +3117,7 @@ fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
             owner: x,
             name: "unbox-impl".to_string(),
             descriptor: format!("(){d}"),
+            params: None,
             interface: false,
         },
         dispatch_receiver: Some(cast),
@@ -3058,6 +3165,7 @@ fn prop_access(
                 owner: x,
                 name: "unbox-impl".to_string(),
                 descriptor: format!("(){d}"),
+                params: None,
                 interface: false,
             },
             dispatch_receiver: Some(receiver),
@@ -3112,7 +3220,15 @@ fn is_boxed_vc(
         // facade/owner exposes the boxed wrapper across the file boundary (like a classpath member). So a
         // nullable-VC-return tail that is such a call is already boxed and must NOT be re-boxed.
         IrExpr::Call {
-            callee: Callee::CrossFile { ret, .. } | Callee::CrossFileVirtual { ret, .. },
+            callee: Callee::CrossFile { ret, .. },
+            ..
+        } => is_x(ret),
+        IrExpr::Call {
+            callee:
+                Callee::Virtual {
+                    params: Some((_, ret)),
+                    ..
+                },
             ..
         } => is_x(ret),
         // A function-value invocation (`fn.invoke(..)`) whose logical return is a value class `x`: the
@@ -3925,6 +4041,7 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
                 owner: internal_name,
                 name: "unbox-impl".to_string(),
                 descriptor: format!("(){udesc}"),
+                params: None,
                 interface: false,
             },
             dispatch_receiver: Some(ocast),
@@ -4121,6 +4238,7 @@ fn field_hash_ir(ir: &mut IrFile, v: ExprId, fq: &str, nonnull_ref_owner: Option
                     owner: owner.into(),
                     name: "hashCode".into(),
                     descriptor: "()I".into(),
+                    params: None,
                     interface: false,
                 },
                 dispatch_receiver: Some(v),

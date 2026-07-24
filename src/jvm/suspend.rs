@@ -3935,6 +3935,7 @@ fn build_continuation_class(
                         owner,
                         name,
                         descriptor,
+                        params: None,
                         interface: false,
                     },
                     dispatch_receiver: Some(recv),

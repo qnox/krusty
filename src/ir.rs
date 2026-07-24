@@ -48,17 +48,6 @@ pub enum Callee {
         params: Vec<Ty>,
         ret: Ty,
     },
-    /// An instance method (or property accessor) of a class defined in ANOTHER file of the same
-    /// compilation — `invokevirtual`/`invokeinterface owner.name(params)ret` on the `dispatch_receiver`.
-    /// Like `Virtual` but carries `Ty`s (the JVM backend builds the descriptor), so `ir_lower` needs
-    /// no JVM descriptor for a sibling-file user class (resolved from its `ClassSig`).
-    CrossFileVirtual {
-        owner: TypeName,
-        name: String,
-        params: Vec<Ty>,
-        ret: Ty,
-        interface: bool,
-    },
     /// A resolved classpath static method — `invokestatic owner.name:descriptor`. Used for stdlib
     /// extension/top-level functions resolved from the classpath (`StringsKt.repeat`, `RangesKt.until`),
     /// carrying the exact JVM descriptor so no name is hardcoded in the backend.
@@ -74,12 +63,18 @@ pub enum Callee {
         descriptor: String,
         inline: InlineKind,
     },
-    /// A resolved classpath *instance* method — `invokevirtual`/`invokeinterface owner.name:descriptor`
-    /// on the `dispatch_receiver`. `owner` is the receiver's static type; `interface` ⇒ `invokeinterface`.
+    /// An instance method (or property accessor) — `invokevirtual`/`invokeinterface owner.name(sig)` on
+    /// the `dispatch_receiver`; `interface` ⇒ `invokeinterface`. `owner` is the receiver's static type.
+    /// The SOLE virtual-dispatch callee (classpath, same-file, and sibling-file all unified — no
+    /// cp/module/local split). The descriptor comes from ONE source, like [`IrExpr::New`]:
+    /// - `params: Some((param_tys, ret))` — a user method (typically sibling-file) whose descriptor the
+    ///   JVM backend builds from `Ty`s, and whose value-class name-mangle/erasure the pass applies.
+    /// - else `descriptor` — a verbatim JVM descriptor (classpath, or an already-resolved same-file form).
     Virtual {
         owner: TypeName,
         name: String,
         descriptor: String,
+        params: Option<(Vec<Ty>, Ty)>,
         interface: bool,
     },
     /// A non-virtual instance call — `invokespecial owner.name:descriptor` on the `dispatch_receiver`.
