@@ -3995,6 +3995,18 @@ impl<'a> Parser<'a> {
             if !qname.is_empty() {
                 type_anns.push(qname.rsplit('.').next().unwrap_or(&qname).to_string());
             }
+            // The grammar is `annotation NL*` — a line break may separate the annotation from the type
+            // it annotates (and from a following annotation), as in a wrapped type-argument list:
+            //     List<
+            //         @Ann(with = S::class)
+            //         Outer.Inner,
+            //     >
+            // Skip those breaks so the type is parsed next; `span` below then still points at the TYPE
+            // token, which is the key `type_annotations` is recorded under. A `;` is NOT a line break
+            // here (it cannot separate an annotation from its type), so leave it to fail as before.
+            while self.at(TokenKind::Newline) && !self.at_semicolon() {
+                self.bump();
+            }
         }
         let span = self.tok().span;
         if !type_anns.is_empty() {
