@@ -315,10 +315,10 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
         let platform = Box::new(JvmLibraries::new(classpath.clone()));
         let source_set = compiler_analysis::analyze_source_set(&sources, platform);
         let highlight_symbols =
-            HighlightSymbols::from_source_set(&sources, &source_set.files, &source_set.symbols);
+            HighlightSymbols::from_source_set(&source_set.files, &source_set.symbols);
         let definition_symbols =
             DefinitionSymbols::from_source_set(&sources, &source_set.files, &source_set.symbols);
-        let completion_symbols = CompletionSymbols::from_source_set(&sources, &source_set.files);
+        let completion_symbols = CompletionSymbols::from_source_set(&source_set.files);
         let indexes = SourceSetIndexes::new(
             &source_set.symbols,
             &highlight_symbols,

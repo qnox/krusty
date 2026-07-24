@@ -3,9 +3,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::compiler_analysis::{
-    analyze_standalone_source_set, hover_wire_cost, CompletionSymbols, DefinitionOccurrence,
-    DefinitionSymbols, DefinitionTarget, FileAnalysis, FrontendSymbols, HighlightOccurrence,
-    HighlightSymbols, HoverOccurrence, SemanticLimits,
+    analyze_standalone_source_set, hover_wire_cost, CompletionDetails, CompletionKind,
+    CompletionSymbols, DefinitionOccurrence, DefinitionSymbols, DefinitionTarget, FileAnalysis,
+    FrontendSymbols, HighlightOccurrence, HighlightSymbols, HoverOccurrence, SemanticLimits,
 };
 use krusty::diag::{Diagnostic, Span};
 use serde::{Deserialize, Serialize};
@@ -26,7 +26,6 @@ pub struct Hover<'a> {
 }
 
 const NO_COMPLETION_TYPE: u32 = 0x003f_ffff;
-const MEMBER_COMPLETION_SLOT: u32 = 1 << 31;
 const MAX_SOURCE_SET_COMPLETION_ENTRIES: usize = 32 * 1024;
 const MAX_SOURCE_SET_COMPLETION_WIRE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SOURCE_SET_DEFINITION_ENTRIES: usize = 256 * 1024;
@@ -77,10 +76,17 @@ impl DefinitionBudget {
 }
 
 impl CompletionBudget {
-    fn reserve(&mut self, label: &str, detail: &str, result_type: Option<&str>) -> bool {
+    fn reserve(
+        &mut self,
+        label: &str,
+        details: &CompletionDetails,
+        result_type: Option<&str>,
+    ) -> bool {
         let string_bytes = label
             .len()
-            .saturating_add(detail.len())
+            .saturating_add(details.detail.len())
+            .saturating_add(details.description.len())
+            .saturating_add(1)
             .saturating_add(result_type.map_or(0, str::len));
         let wire_bytes = 96usize.saturating_add(string_bytes.saturating_mul(6));
         if self.entries >= MAX_SOURCE_SET_COMPLETION_ENTRIES
@@ -105,13 +111,13 @@ pub struct CompletionIndex {
     entries: Vec<CompletionEntry>,
     members: Vec<CompletionMemberEntry>,
     strings: Vec<String>,
-    incomplete: bool,
 }
 
 pub struct Completion<'a> {
-    pub slot: u32,
     pub label: &'a str,
     pub kind: u8,
+    pub label_detail: Option<&'a str>,
+    pub label_description: Option<&'a str>,
 }
 
 /// `(source lo, source hi, target file, target lo, target hi)`.
@@ -240,16 +246,18 @@ impl CompletionIndex {
                 id
             }
         };
-        let mut incomplete = false;
         let entries = scoped
             .into_iter()
             .filter_map(|symbol| {
-                if !budget.reserve(&symbol.label, &symbol.detail, symbol.result_type.as_deref()) {
-                    incomplete = true;
+                if !budget.reserve(
+                    &symbol.label,
+                    &symbol.details,
+                    symbol.result_type.as_deref(),
+                ) {
                     return None;
                 }
                 let label = intern(&symbol.label);
-                let detail = intern(&symbol.detail);
+                let label_details = intern(&pack_completion_details(&symbol.details));
                 let result_type = symbol
                     .result_type
                     .as_deref()
@@ -260,7 +268,7 @@ impl CompletionIndex {
                     symbol.scope.hi,
                     symbol.declared_at,
                     label,
-                    detail,
+                    label_details,
                     symbol.kind as u32 | result_type << 8 | u32::from(symbol.priority) << 30,
                 ])
             })
@@ -268,19 +276,22 @@ impl CompletionIndex {
         let members = symbols
             .members()
             .filter(|(owner, _, _, _)| member_owners.contains(*owner))
-            .filter_map(|(owner, label, detail, kind)| {
-                if !budget.reserve(label, detail, Some(owner)) {
-                    incomplete = true;
+            .filter_map(|(owner, label, details, kind)| {
+                if !budget.reserve(label, details, Some(owner)) {
                     return None;
                 }
-                Some([intern(owner), intern(label), intern(detail), kind as u32])
+                Some([
+                    intern(owner),
+                    intern(label),
+                    intern(&pack_completion_details(details)),
+                    kind as u32,
+                ])
             })
             .collect();
         Self {
             entries,
             members,
             strings,
-            incomplete,
         }
     }
 
@@ -317,15 +328,26 @@ impl CompletionIndex {
                     entry[0] == receiver_type
                         && self.strings[entry[1] as usize].starts_with(context.prefix)
                 })
-                .map(|(index, entry)| Completion {
-                    slot: MEMBER_COMPLETION_SLOT | index as u32,
-                    label: &self.strings[entry[1] as usize],
-                    kind: entry[3] as u8,
+                .map(|(index, entry)| {
+                    let (label_detail, label_description) =
+                        completion_label_details(&self.strings[entry[2] as usize]);
+                    (
+                        index,
+                        Completion {
+                            label: &self.strings[entry[1] as usize],
+                            kind: entry[3] as u8,
+                            label_detail,
+                            label_description,
+                        },
+                    )
                 })
                 .collect();
-            result.sort_unstable_by_key(|candidate| candidate.label);
-            result.dedup_by_key(|candidate| candidate.label);
-            return result;
+            result.sort_unstable_by_key(|(index, candidate)| {
+                (completion_kind_group(candidate.kind), *index)
+            });
+            let mut seen = HashSet::new();
+            result.retain(|(_, candidate)| seen.insert(candidate.label));
+            return result.into_iter().map(|(_, candidate)| candidate).collect();
         }
 
         let mut best_by_label = HashMap::<&str, (usize, u32, u32)>::new();
@@ -351,38 +373,78 @@ impl CompletionIndex {
         }
         let mut result: Vec<_> = best_by_label
             .into_iter()
-            .map(|(label, (index, _, _))| Completion {
-                slot: index as u32,
-                label,
-                kind: self.entries[index][5] as u8,
+            .map(|(label, (index, width, priority))| {
+                let entry = &self.entries[index];
+                let (label_detail, label_description) =
+                    completion_label_details(&self.strings[entry[4] as usize]);
+                (
+                    Completion {
+                        label,
+                        kind: entry[5] as u8,
+                        label_detail,
+                        label_description,
+                    },
+                    width,
+                    priority,
+                    index,
+                )
             })
             .collect();
-        result.sort_unstable_by_key(|candidate| candidate.label);
+        result.sort_unstable_by_key(|(candidate, width, priority, index)| {
+            (
+                completion_kind_group(candidate.kind),
+                std::cmp::Reverse(*priority),
+                *width,
+                candidate.label,
+                *index,
+            )
+        });
         result
-    }
-
-    pub fn resolve(&self, slot: u32, expected_label: &str) -> Option<&str> {
-        let (label, detail) = if slot & MEMBER_COMPLETION_SLOT != 0 {
-            let entry = self
-                .members
-                .get((slot & !MEMBER_COMPLETION_SLOT) as usize)?;
-            (entry[1], entry[2])
-        } else {
-            let entry = self.entries.get(slot as usize)?;
-            (entry[3], entry[4])
-        };
-        (self.strings.get(label as usize)?.as_str() == expected_label)
-            .then(|| self.strings.get(detail as usize).map(String::as_str))
-            .flatten()
+            .into_iter()
+            .map(|(candidate, _, _, _)| candidate)
+            .collect()
     }
 
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
+}
 
-    pub fn is_incomplete(&self) -> bool {
-        self.incomplete
+fn completion_label_details(value: &str) -> (Option<&str>, Option<&str>) {
+    let (detail, description) = value.split_once('\0').unwrap_or((value, ""));
+    (
+        (!detail.is_empty()).then_some(detail),
+        (!description.is_empty()).then_some(description),
+    )
+}
+
+fn completion_kind_group(kind: u8) -> u8 {
+    if [
+        CompletionKind::Variable,
+        CompletionKind::Property,
+        CompletionKind::EnumMember,
+        CompletionKind::Constant,
+    ]
+    .iter()
+    .any(|candidate| *candidate as u8 == kind)
+    {
+        0
+    } else if [
+        CompletionKind::Method,
+        CompletionKind::Function,
+        CompletionKind::Operator,
+    ]
+    .iter()
+    .any(|candidate| *candidate as u8 == kind)
+    {
+        1
+    } else {
+        2
     }
+}
+
+fn pack_completion_details(details: &CompletionDetails) -> String {
+    format!("{}\0{}", details.detail, details.description)
 }
 
 struct CompletionContext<'a> {
@@ -499,7 +561,7 @@ impl SemanticTokenIndex {
         symbols: &FrontendSymbols,
     ) -> Self {
         let highlight_symbols =
-            HighlightSymbols::from_source_set(&[source], std::slice::from_ref(analysis), symbols);
+            HighlightSymbols::from_source_set(std::slice::from_ref(analysis), symbols);
         Self::from_source_set_file_analysis(source, analysis, symbols, &highlight_symbols)
     }
 
@@ -783,11 +845,10 @@ impl DocumentAnalysis {
 /// Analyze one source in an open source set and retain only data needed by editor queries.
 pub fn analyze_for_lsp(sources: &[&str]) -> Vec<DocumentAnalysis> {
     let analysis = analyze_standalone_source_set(sources);
-    let highlight_symbols =
-        HighlightSymbols::from_source_set(sources, &analysis.files, &analysis.symbols);
+    let highlight_symbols = HighlightSymbols::from_source_set(&analysis.files, &analysis.symbols);
     let definition_symbols =
         DefinitionSymbols::from_source_set(sources, &analysis.files, &analysis.symbols);
-    let completion_symbols = CompletionSymbols::from_source_set(sources, &analysis.files);
+    let completion_symbols = CompletionSymbols::from_source_set(&analysis.files);
     let indexes = SourceSetIndexes::new(
         &analysis.symbols,
         &highlight_symbols,
@@ -1001,6 +1062,25 @@ mod tests {
     }
 
     #[test]
+    fn completion_renders_inferred_nested_returns_as_source_names() {
+        let source = "class Outer { class Inner }\n\
+                      fun nestedFactory() = Outer.Inner()\n\
+                      fun use() = nestedF";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
+        let index = CompletionIndex::from_file_analysis(source, &analysis.files[0], &symbols);
+        let candidate = index
+            .complete(source, source.len() as u32)
+            .into_iter()
+            .find(|candidate| candidate.label == "nestedFactory")
+            .expect("inferred-return completion");
+
+        assert_eq!(candidate.label_description, Some("Outer.Inner"));
+        assert!(!candidate.label_description.unwrap().contains('$'));
+        assert!(!candidate.label_description.unwrap().contains('/'));
+    }
+
+    #[test]
     fn hover_uses_checked_destructuring_component_types() {
         let source = "data class Parts(val number: Int, val text: String)\n\
                       fun use(parts: Parts): Int { val (number, text) = parts; return number }";
@@ -1053,12 +1133,12 @@ mod tests {
             analysis.files[0].types.is_none(),
             "the test must exercise the parser-recovery snapshot"
         );
-        let symbols = CompletionSymbols::from_source_set(&[source], &analysis.files);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
         let index = CompletionIndex::from_file_analysis(source, &analysis.files[0], &symbols);
         let candidates = index.complete(source, source.len() as u32);
 
         assert!(candidates.iter().any(|candidate| candidate.label == "name"
-            && candidate.kind == CompletionKind::Property as u8));
+            && candidate.kind == CompletionKind::Variable as u8));
         assert!(candidates
             .iter()
             .any(|candidate| candidate.label == "greeting"
@@ -1069,7 +1149,7 @@ mod tests {
     fn completion_snapshot_interns_strings_into_compact_array_entries() {
         let source = "fun demo(user: String) { val local: String = user; loc }";
         let analysis = analyze_standalone_source_set(&[source]);
-        let symbols = CompletionSymbols::from_source_set(&[source], &analysis.files);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
         let index = CompletionIndex::from_file_analysis(source, &analysis.files[0], &symbols);
         let offset = source.rfind("loc").unwrap() as u32 + 3;
         let candidates = index.complete(source, offset);
@@ -1099,14 +1179,14 @@ mod tests {
             "fun demo(child: Child) = child."
         );
         let analysis = analyze_standalone_source_set(&[source]);
-        let symbols = CompletionSymbols::from_source_set(&[source], &analysis.files);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
         let index = CompletionIndex::from_file_analysis(source, &analysis.files[0], &symbols);
         let candidates = index.complete(source, source.len() as u32);
 
         assert!(candidates
             .iter()
             .any(|candidate| candidate.label == "inherited"
-                && candidate.kind == CompletionKind::Property as u8));
+                && candidate.kind == CompletionKind::Variable as u8));
     }
 
     #[test]
@@ -1117,7 +1197,7 @@ mod tests {
             "package consumer\nimport hidden.secret\nfun use(): Int = sec",
         ];
         let analysis = analyze_standalone_source_set(&sources);
-        let symbols = CompletionSymbols::from_source_set(&sources, &analysis.files);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
         let index = CompletionIndex::from_file_analysis(sources[1], &analysis.files[1], &symbols);
         let candidates = index.complete(sources[1], sources[1].len() as u32);
 
@@ -1137,7 +1217,7 @@ mod tests {
     fn completion_matches_the_official_constant_item_kind() {
         let source = "const val FLAG: Int = 1\nfun use(): Int = FL";
         let analysis = analyze_standalone_source_set(&[source]);
-        let symbols = CompletionSymbols::from_source_set(&[source], &analysis.files);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
         let index = CompletionIndex::from_file_analysis(source, &analysis.files[0], &symbols);
 
         assert!(index
@@ -1151,8 +1231,7 @@ mod tests {
     fn completion_keeps_class_and_companion_lexical_contexts_distinct() {
         let class_source = "class Box<T> { fun value() = T }";
         let class_analysis = analyze_standalone_source_set(&[class_source]);
-        let class_symbols =
-            CompletionSymbols::from_source_set(&[class_source], &class_analysis.files);
+        let class_symbols = CompletionSymbols::from_source_set(&class_analysis.files);
         let class_index = CompletionIndex::from_file_analysis(
             class_source,
             &class_analysis.files[0],
@@ -1170,8 +1249,7 @@ mod tests {
             "val shared: Int = 2; fun use(): Int = sh } }"
         );
         let companion_analysis = analyze_standalone_source_set(&[companion_source]);
-        let companion_symbols =
-            CompletionSymbols::from_source_set(&[companion_source], &companion_analysis.files);
+        let companion_symbols = CompletionSymbols::from_source_set(&companion_analysis.files);
         let companion_index = CompletionIndex::from_file_analysis(
             companion_source,
             &companion_analysis.files[0],
@@ -1195,7 +1273,7 @@ mod tests {
             "fun use(alpha: Alpha) = alpha.",
         ];
         let analysis = analyze_standalone_source_set(&sources);
-        let symbols = CompletionSymbols::from_source_set(&sources, &analysis.files);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
         let index = CompletionIndex::from_file_analysis(sources[2], &analysis.files[2], &symbols);
         let json = serde_json::to_value(&index).unwrap();
         let member_labels: Vec<_> = json["members"]
@@ -1225,7 +1303,7 @@ mod tests {
             "package visible\nfun use(text: String) = text.",
         ];
         let analysis = analyze_standalone_source_set(&sources);
-        let symbols = CompletionSymbols::from_source_set(&sources, &analysis.files);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
         let index = CompletionIndex::from_file_analysis(sources[1], &analysis.files[1], &symbols);
         let candidates = index.complete(sources[1], sources[1].len() as u32);
 
@@ -1255,7 +1333,7 @@ mod tests {
             "package wildcard\nimport q.*\nfun use(value: Same) = value.",
         ];
         let analysis = analyze_standalone_source_set(&sources);
-        let symbols = CompletionSymbols::from_source_set(&sources, &analysis.files);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
         let index = CompletionIndex::from_file_analysis(sources[2], &analysis.files[2], &symbols);
         let candidates = index.complete(sources[2], sources[2].len() as u32);
 
@@ -1281,7 +1359,7 @@ mod tests {
     fn completion_prefers_a_root_block_local_over_a_class_member() {
         let source = "class C(val x: Int) { fun use() { val x: String = \"\"; x } }";
         let analysis = analyze_standalone_source_set(&[source]);
-        let symbols = CompletionSymbols::from_source_set(&[source], &analysis.files);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
         let index = CompletionIndex::from_file_analysis(source, &analysis.files[0], &symbols);
         let offset = source.rfind('x').unwrap() as u32 + 1;
         let candidate = index
@@ -1290,7 +1368,9 @@ mod tests {
             .find(|candidate| candidate.label == "x")
             .unwrap();
 
-        assert_eq!(index.resolve(candidate.slot, "x"), Some("val x: String"));
+        assert_eq!(candidate.kind, 6);
+        assert_eq!(candidate.label_detail, None);
+        assert_eq!(candidate.label_description, Some("String"));
     }
 
     #[test]
@@ -1303,7 +1383,7 @@ mod tests {
             "fun topUse() = top."
         );
         let analysis = analyze_standalone_source_set(&[source]);
-        let symbols = CompletionSymbols::from_source_set(&[source], &analysis.files);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
         let index = CompletionIndex::from_file_analysis(source, &analysis.files[0], &symbols);
         for marker in ["other.", "top."] {
             let offset = source.find(marker).unwrap() as u32 + marker.len() as u32;
@@ -1322,7 +1402,7 @@ mod tests {
             "class C(val x: A) { fun use() { val x: B = B(1); x. } }"
         );
         let analysis = analyze_standalone_source_set(&[source]);
-        let symbols = CompletionSymbols::from_source_set(&[source], &analysis.files);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
         let index = CompletionIndex::from_file_analysis(source, &analysis.files[0], &symbols);
         let offset = source.rfind("x.").unwrap() as u32 + 2;
         let candidates = index.complete(source, offset);
@@ -1343,7 +1423,7 @@ mod tests {
         );
         let analysis = analyze_standalone_source_set(&[source]);
         assert!(analysis.files[0].types.is_none());
-        let symbols = CompletionSymbols::from_source_set(&[source], &analysis.files);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
         let index = CompletionIndex::from_file_analysis(source, &analysis.files[0], &symbols);
         let offset = source.rfind("user.").unwrap() as u32 + 5;
 
@@ -1362,7 +1442,7 @@ mod tests {
         );
         let analysis = analyze_standalone_source_set(&[source]);
         assert!(analysis.files[0].types.is_none());
-        let symbols = CompletionSymbols::from_source_set(&[source], &analysis.files);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
         let index = CompletionIndex::from_file_analysis(source, &analysis.files[0], &symbols);
         let offset = source.rfind("x.").unwrap() as u32 + 2;
 
@@ -1379,8 +1459,7 @@ mod tests {
         );
         let value_analysis = analyze_standalone_source_set(&[value_source]);
         assert!(value_analysis.files[0].types.is_none());
-        let value_symbols =
-            CompletionSymbols::from_source_set(&[value_source], &value_analysis.files);
+        let value_symbols = CompletionSymbols::from_source_set(&value_analysis.files);
         let value_index = CompletionIndex::from_file_analysis(
             value_source,
             &value_analysis.files[0],
@@ -1400,8 +1479,7 @@ mod tests {
         );
         let parameter_analysis = analyze_standalone_source_set(&[parameter_source]);
         assert!(parameter_analysis.files[0].types.is_none());
-        let parameter_symbols =
-            CompletionSymbols::from_source_set(&[parameter_source], &parameter_analysis.files);
+        let parameter_symbols = CompletionSymbols::from_source_set(&parameter_analysis.files);
         let parameter_index = CompletionIndex::from_file_analysis(
             parameter_source,
             &parameter_analysis.files[0],
@@ -1418,7 +1496,7 @@ mod tests {
     fn completion_does_not_publish_parser_hoisted_local_classes_globally() {
         let source = "fun local() { class Inner }\nfun other() = In";
         let analysis = analyze_standalone_source_set(&[source]);
-        let symbols = CompletionSymbols::from_source_set(&[source], &analysis.files);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
         let index = CompletionIndex::from_file_analysis(source, &analysis.files[0], &symbols);
 
         assert!(index
@@ -1428,10 +1506,10 @@ mod tests {
     }
 
     #[test]
-    fn completion_budget_marks_truncated_source_set_snapshots_incomplete() {
+    fn completion_budget_truncates_source_set_snapshots() {
         let source = "fun answer(): Int = 42";
         let analysis = analyze_standalone_source_set(&[source]);
-        let symbols = CompletionSymbols::from_source_set(&[source], &analysis.files);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
         let mut budget = CompletionBudget {
             entries: MAX_SOURCE_SET_COMPLETION_ENTRIES,
             wire_bytes: 0,
@@ -1443,7 +1521,6 @@ mod tests {
             &mut budget,
         );
 
-        assert!(index.is_incomplete());
         assert_eq!(index.entry_count(), 0);
     }
 
@@ -1624,7 +1701,7 @@ mod tests {
         let sources = [declaration, usage];
         let analysis = analyze_standalone_source_set(&sources);
         let highlight_symbols =
-            HighlightSymbols::from_source_set(&sources, &analysis.files, &analysis.symbols);
+            HighlightSymbols::from_source_set(&analysis.files, &analysis.symbols);
         let index = SemanticTokenIndex::from_source_set_file_analysis(
             usage,
             &analysis.files[1],

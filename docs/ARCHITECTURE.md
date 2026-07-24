@@ -61,13 +61,15 @@ boundary.
   entry is a 12-byte `(source lo, source hi, declaration-signature id)` record; official-format
   signature strings are deduplicated per document and bounded across the source set. No AST node or
   hover entry retains a source-text copy. A scoped completion
-  entry is a 24-byte packed array of scope bounds, declaration position, interned label/detail IDs,
-  item kind, and optional receiver type; member entries are 16 bytes. Completion and item resolution
-  filter these cached records, including parser-recovered `receiver.`/`receiver?.` expressions,
-  without retaining the AST or invoking the worker. A document retains member catalogs only for
+  entry is a 24-byte packed array of scope bounds, declaration position, interned label/label-details
+  IDs, item kind, and optional receiver type; member entries are 16 bytes. Completion filters these
+  cached records, including parser-recovered `receiver.`/`receiver?.` expressions, without retaining
+  the AST or invoking the worker; source-item resolution returns the already complete item unchanged.
+  A document retains member catalogs only for
   receiver types referenced by its own lexical symbols/source, rather than duplicating every member
   in the open source set. A shared source-set budget caps completion at 32,768 records and a
-  conservative 4 MiB wire estimate; a truncated snapshot reports `isIncomplete: true`. Each
+  conservative 4 MiB wire estimate; the response follows the official server's refinable
+  `isIncomplete: true` contract. Each
   semantic token is a 16-byte `(UTF-16 line, start, length, type, modifiers)` record, positioned once
   in the compiler worker so full/range requests neither rerun analysis nor rescan source. Worker JSON
   uses packed array entries rather than repeating object keys, and range encoding binary-searches

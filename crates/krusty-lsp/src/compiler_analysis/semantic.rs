@@ -166,11 +166,7 @@ pub struct HighlightSymbols {
 }
 
 impl HighlightSymbols {
-    pub fn from_source_set(
-        sources: &[&str],
-        files: &[FileAnalysis],
-        symbols: &FrontendSymbols,
-    ) -> Self {
+    pub fn from_source_set(files: &[FileAnalysis], symbols: &FrontendSymbols) -> Self {
         let mut metadata = Self {
             class_kinds: symbols
                 .classes
@@ -193,17 +189,17 @@ impl HighlightSymbols {
             class_modifiers: HashMap::new(),
             members: HashMap::new(),
         };
-        for (source, file) in sources.iter().copied().zip(files) {
+        for file in files {
             for &declaration in &file.file.decls {
                 if let Decl::Class(class) = file.file.decl(declaration) {
-                    metadata.collect_class(source, class);
+                    metadata.collect_class(class);
                 }
             }
         }
         metadata
     }
 
-    fn collect_class(&mut self, source: &str, class: &ClassDecl) {
+    fn collect_class(&mut self, class: &ClassDecl) {
         self.class_kinds.insert(
             class.name.clone(),
             match class.kind {
@@ -246,7 +242,7 @@ impl HighlightSymbols {
             self.members.insert(
                 (class.name.clone(), function.name.clone()),
                 MemberHighlight {
-                    kind: if source_has_modifier_before(source, function.span.lo, "operator") {
+                    kind: if function.is_operator {
                         HighlightKind::Operator
                     } else {
                         HighlightKind::Method
@@ -675,7 +671,7 @@ impl<'a> SemanticClassifier<'a> {
     }
 
     fn mark_function(&mut self, function: &FunDecl, member: bool, static_member: bool) {
-        let kind = if self.has_modifier_before_name(function.span, &function.name, "operator") {
+        let kind = if function.is_operator {
             HighlightKind::Operator
         } else if member {
             HighlightKind::Method
@@ -1055,12 +1051,11 @@ impl<'a> SemanticClassifier<'a> {
                 let definition = self
                     .find_named(function.span, &function.name, None, None, false)
                     .map(|index| definition_name_span(self.source, self.tokens[index].span));
-                let kind =
-                    if self.has_modifier_before_name(function.span, &function.name, "operator") {
-                        HighlightKind::Operator
-                    } else {
-                        HighlightKind::Function
-                    };
+                let kind = if function.is_operator {
+                    HighlightKind::Operator
+                } else {
+                    HighlightKind::Function
+                };
                 self.add_binding(
                     &function.name,
                     self.enclosing_block_scope(span),
@@ -2009,7 +2004,7 @@ impl<'a> SemanticClassifier<'a> {
         function: &FunDecl,
         static_member: bool,
     ) {
-        let kind = if self.has_modifier_before_name(function.span, &function.name, "operator") {
+        let kind = if function.is_operator {
             HighlightKind::Operator
         } else {
             HighlightKind::Method
@@ -2141,19 +2136,6 @@ impl<'a> SemanticClassifier<'a> {
         }
     }
 
-    fn has_modifier_before_name(&self, owner: Span, name: &str, modifier: &str) -> bool {
-        let Some(name_index) = self.find_named(owner, name, None, None, false) else {
-            return false;
-        };
-        self.tokens[..name_index]
-            .iter()
-            .rev()
-            .take_while(|token| token.kind != FrontendNameTokenKind::Newline)
-            .any(|token| {
-                token.kind == FrontendNameTokenKind::Ident && token.text(self.source) == modifier
-            })
-    }
-
     fn mark_index(&mut self, index: usize, kind: HighlightKind, modifiers: u16) {
         self.classified[index] = Some(HighlightOccurrence {
             span: self.tokens[index].span,
@@ -2189,15 +2171,6 @@ fn function_modifiers(function: &FunDecl) -> u16 {
         modifiers |= HighlightModifiers::DEPRECATED;
     }
     modifiers
-}
-
-fn source_has_modifier_before(source: &str, at: u32, modifier: &str) -> bool {
-    let before = &source[..at as usize];
-    let line = before.rsplit_once('\n').map_or(before, |(_, line)| line);
-    let declaration_prefix = line.rsplit([';', '{', '}']).next().unwrap_or(line);
-    declaration_prefix
-        .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
-        .any(|word| word == modifier)
 }
 
 fn is_kotlin_builtin_type(name: &str) -> bool {
