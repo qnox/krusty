@@ -12311,6 +12311,7 @@ impl<'a> Lower<'a> {
     /// functions; captures and implicit context parameters become leading arguments.
     fn lower_local_function_call(
         &mut self,
+        call: AstExprId,
         target: &ResolvedLocalFunctionCall,
         args: &[AstExprId],
     ) -> Option<u32> {
@@ -12338,8 +12339,33 @@ impl<'a> Lower<'a> {
             let (v, _) = self.lookup(src)?;
             lowered.push(self.emit_get_value(v));
         }
-        for (arg, pt) in args.iter().zip(&params[ncap + ctx_n..]) {
-            lowered.push(self.lower_arg(*arg, pt)?);
+        let mut arg_prelude = Vec::new();
+        if let Some(slots) = self.info.resolved_call_arg_slots.get(&call).cloned() {
+            let (provided, prelude) = self.lower_method_slot_args_source_order(
+                args,
+                &slots,
+                &target.sig.params[ctx_n..],
+            )?;
+            let crate::ast::Stmt::LocalFun(function) = self.afile.stmt(stmt_id) else {
+                return None;
+            };
+            for (index, value) in provided.into_iter().enumerate() {
+                match value {
+                    Some(value) => lowered.push(value),
+                    None => {
+                        let parameter = function.params.get(ctx_n + index)?;
+                        lowered.push(self.lower_arg(
+                            parameter.default?,
+                            &ty_to_ir(target.sig.params[ctx_n + index]),
+                        )?);
+                    }
+                }
+            }
+            arg_prelude = prelude;
+        } else {
+            for (arg, pt) in args.iter().zip(&params[ncap + ctx_n..]) {
+                lowered.push(self.lower_arg(*arg, pt)?);
+            }
         }
         if lowered.len() < params.len() {
             let crate::ast::Stmt::LocalFun(f) = self.afile.stmt(stmt_id) else {
@@ -12351,7 +12377,8 @@ impl<'a> Lower<'a> {
                 lowered.push(self.lower_arg(def, pt)?);
             }
         }
-        Some(self.emit_local_call(fid, lowered))
+        let call = self.emit_local_call(fid, lowered);
+        Some(self.wrap_arg_prelude(call, arg_prelude))
     }
 
     /// Lower a CALL `recv.name(args)` that resolves to a top-level EXTENSION function on `rt` — the
@@ -18734,7 +18761,7 @@ impl<'a> Lower<'a> {
                     }
                     // A call to a lifted local function — the checker mapped this call to its decl.
                     if let Some(target) = self.info.resolved_local_function(e).cloned() {
-                        return self.lower_local_function_call(&target, &args);
+                        return self.lower_local_function_call(e, &target, &args);
                     }
                     // A call `param(args)` where `param` is a lambda parameter of the `inline fun`
                     // currently being expanded: inline the passed lambda's body in place.

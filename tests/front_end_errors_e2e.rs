@@ -170,8 +170,9 @@ fn named_arg_missing_required_parameter() {
     let d = diags("fun f(a: Int, b: Int): Int = a\nfun box(): Int = f(a = 1)");
     assert_rejected(&d, "missing required parameter");
     assert!(
-        d.iter().any(|m| m.contains("required parameter")),
-        "expected 'required parameter': {d:?}"
+        d.iter()
+            .any(|m| m.contains("no value passed for parameter 'b'.")),
+        "expected canonical missing-parameter diagnostic: {d:?}"
     );
 }
 

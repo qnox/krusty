@@ -273,6 +273,10 @@ mod tests {
                 .len(),
             1
         );
+        assert_eq!(
+            opened.messages[0]["params"]["diagnostics"][0]["source"],
+            "Kotlin"
+        );
         assert_eq!(server.open_document_count(), 1);
 
         let changed = server.handle(notification(

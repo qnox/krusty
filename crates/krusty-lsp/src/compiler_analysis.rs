@@ -73,13 +73,13 @@ pub fn analyze_source_set(
     let types: Vec<_> = files
         .iter()
         .enumerate()
-        .map(|(index, file)| {
+        .map(|(index, _file)| {
             if parse_errors[index] {
                 None
             } else {
                 diags.set_file(index as u32);
-                Some(frontend::check_file_at(
-                    file,
+                Some(frontend::check_file_in_source_set(
+                    &files,
                     index as u32,
                     &mut symbols,
                     &mut diags,
