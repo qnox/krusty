@@ -398,6 +398,8 @@ mod generic_delegate_e2e;
 mod generic_fn_e2e;
 #[path = "generic_hof_method_check.rs"]
 mod generic_hof_method_check;
+#[path = "generic_inferred_primitive_return_e2e.rs"]
+mod generic_inferred_primitive_return_e2e;
 #[path = "generic_inferred_return_e2e.rs"]
 mod generic_inferred_return_e2e;
 #[path = "generic_return_inference_e2e.rs"]

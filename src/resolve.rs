@@ -11666,12 +11666,11 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            // The runtime value of a primitive binding is its BOXED wrapper — type it as `Wrapper?` (as
-            // `explicit_generic_return` does) so a use site unboxes through the normal nullable-primitive
-            // machinery rather than the emitter calling a primitive method on a boxed value.
-            if !bound.is_reference() {
-                return bound.nullable_boxed();
-            }
+            // A primitive binding types as the plain primitive — kotlinc's static type (`fizz(1)` is
+            // `Int`, usable at an `Int` parameter / in arithmetic). The runtime value is still the
+            // BOXED wrapper behind the erased `Object` return; the lowerer's erased-return coercion
+            // (`has_scalar_value_repr(st) && phys.is_erased_top()`) unboxes the call result once, so
+            // every use sees the real scalar.
         }
         Some(bound)
     }
