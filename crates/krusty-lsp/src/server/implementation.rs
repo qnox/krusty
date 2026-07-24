@@ -139,7 +139,6 @@ impl Dispatch {
 struct OpenDocument {
     text: String,
     version: i64,
-    completion_generation: u64,
     hover: HoverIndex,
     completion: CompletionIndex,
     semantic_tokens: SemanticTokenIndex,
@@ -152,7 +151,6 @@ pub struct LspService<A> {
     documents: HashMap<String, OpenDocument>,
     analyze: A,
     analysis_dirty: bool,
-    completion_generation: u64,
     initialized: bool,
     shutdown_requested: bool,
 }
@@ -166,7 +164,6 @@ where
             documents: HashMap::new(),
             analyze,
             analysis_dirty: false,
-            completion_generation: 0,
             initialized: false,
             shutdown_requested: false,
         }
@@ -226,14 +223,10 @@ where
                 })
                 .collect();
         }
-        self.completion_generation = self.completion_generation.wrapping_add(1);
-        let completion_generation = self.completion_generation;
-
         uris.into_iter()
             .zip(analyses)
             .map(|(uri, analysis)| {
                 let open = self.documents.get_mut(&uri).unwrap();
-                open.completion_generation = completion_generation;
                 open.hover = analysis.hover;
                 open.completion = analysis.completion;
                 open.semantic_tokens = analysis.semantic_tokens;
@@ -385,7 +378,6 @@ where
                     OpenDocument {
                         text: String::new(),
                         version,
-                        completion_generation: 0,
                         hover: HoverIndex::default(),
                         completion: CompletionIndex::default(),
                         semantic_tokens: SemanticTokenIndex::default(),
@@ -410,7 +402,6 @@ where
             OpenDocument {
                 text: params.text_document.text,
                 version,
-                completion_generation: 0,
                 hover: HoverIndex::default(),
                 completion: CompletionIndex::default(),
                 semantic_tokens: SemanticTokenIndex::default(),
@@ -538,27 +529,38 @@ where
         let Some(offset) = position_to_byte_offset(&open.text, params.position) else {
             return invalid_params(Some(id));
         };
-        let is_incomplete = open.completion.is_incomplete();
         let items: Vec<_> = open
             .completion
             .complete(&open.text, offset)
             .into_iter()
-            .map(|candidate| {
-                json!({
+            .enumerate()
+            .map(|(rank, candidate)| {
+                let mut label_details = serde_json::Map::new();
+                if let Some(detail) = candidate.label_detail {
+                    label_details.insert("detail".to_string(), Value::String(detail.to_string()));
+                }
+                if let Some(description) = candidate.label_description {
+                    label_details.insert(
+                        "description".to_string(),
+                        Value::String(description.to_string()),
+                    );
+                }
+                let mut item = json!({
                     "label": candidate.label,
                     "kind": candidate.kind,
-                    "data": {
-                        "uri": params.text_document.uri,
-                        "version": open.version,
-                        "generation": open.completion_generation,
-                        "slot": candidate.slot,
-                    }
-                })
+                    "sortText": format!("{rank:010}"),
+                });
+                if !label_details.is_empty() {
+                    item.as_object_mut()
+                        .unwrap()
+                        .insert("labelDetails".to_string(), Value::Object(label_details));
+                }
+                item
             })
             .collect();
         Dispatch::messages(vec![rpc_result(
             id,
-            json!({"isIncomplete": is_incomplete, "items": items}),
+            json!({"isIncomplete": true, "items": items}),
         )])
     }
 
@@ -609,48 +611,12 @@ where
         Dispatch::messages(vec![rpc_result(id, Value::Array(locations))])
     }
 
-    fn resolve_completion(&self, id: Option<Value>, mut item: Value) -> Dispatch {
+    fn resolve_completion(&self, id: Option<Value>, item: Value) -> Dispatch {
         let Some(id) = id else {
             return Dispatch::none();
         };
-        let Some(object) = item.as_object_mut() else {
+        if !item.is_object() {
             return invalid_params(Some(id));
-        };
-        let Some(label) = object
-            .get("label")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-        else {
-            return invalid_params(Some(id));
-        };
-        let Some(data) = object.get("data") else {
-            return Dispatch::messages(vec![rpc_result(id, item)]);
-        };
-        let Some(uri) = data.get("uri").and_then(Value::as_str) else {
-            return Dispatch::messages(vec![rpc_result(id, item)]);
-        };
-        let Some(version) = data.get("version").and_then(Value::as_i64) else {
-            return Dispatch::messages(vec![rpc_result(id, item)]);
-        };
-        let Some(generation) = data.get("generation").and_then(Value::as_u64) else {
-            return Dispatch::messages(vec![rpc_result(id, item)]);
-        };
-        let Some(slot) = data
-            .get("slot")
-            .and_then(Value::as_u64)
-            .and_then(|slot| u32::try_from(slot).ok())
-        else {
-            return Dispatch::messages(vec![rpc_result(id, item)]);
-        };
-        if let Some(detail) = self
-            .documents
-            .get(uri)
-            .filter(|document| {
-                document.version == version && document.completion_generation == generation
-            })
-            .and_then(|document| document.completion.resolve(slot, &label))
-        {
-            object.insert("detail".to_string(), Value::String(detail.to_string()));
         }
         Dispatch::messages(vec![rpc_result(id, item)])
     }

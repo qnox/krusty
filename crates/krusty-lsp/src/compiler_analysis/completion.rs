@@ -8,7 +8,10 @@ use krusty::ast::{
 use krusty::diag::Span;
 use krusty::types::{Ty, Visibility};
 
-use super::{rendering::render_type, FileAnalysis};
+use super::{
+    rendering::{render_ty, render_type},
+    FileAnalysis,
+};
 
 /// LSP 3.17 completion-item-kind discriminants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,9 +34,15 @@ pub(crate) enum CompletionKind {
 #[derive(Clone)]
 struct Symbol {
     label: String,
-    detail: String,
+    details: CompletionDetails,
     kind: CompletionKind,
     result_type: Option<String>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct CompletionDetails {
+    pub detail: String,
+    pub description: String,
 }
 
 struct GlobalSymbol {
@@ -42,12 +51,19 @@ struct GlobalSymbol {
     symbol: Symbol,
 }
 
+#[derive(Clone, Copy)]
+enum FunctionContext<'a> {
+    TopLevel(&'a str),
+    Member,
+    Local,
+}
+
 /// One scoped symbol before it is interned into the long-lived completion snapshot.
 pub(crate) struct ScopedCompletionSymbol {
     pub scope: Span,
     pub declared_at: u32,
     pub label: String,
-    pub detail: String,
+    pub details: CompletionDetails,
     pub kind: CompletionKind,
     pub result_type: Option<String>,
     pub priority: u8,
@@ -62,7 +78,7 @@ pub(crate) struct CompletionSymbols {
 }
 
 impl CompletionSymbols {
-    pub fn from_source_set(sources: &[&str], files: &[FileAnalysis]) -> Self {
+    pub fn from_source_set(files: &[FileAnalysis]) -> Self {
         let mut result = Self {
             globals: Vec::new(),
             members: HashMap::new(),
@@ -101,7 +117,7 @@ impl CompletionSymbols {
             }
         }
         let mut inheritance = Vec::new();
-        for (_source, file) in sources.iter().copied().zip(files) {
+        for file in files {
             let package = file.file.package.clone().unwrap_or_default();
             let local_classes: std::collections::HashSet<_> = file
                 .file
@@ -117,7 +133,11 @@ impl CompletionSymbols {
             for &declaration in &file.file.decls {
                 match file.file.decl(declaration) {
                     Decl::Fun(function) => {
-                        let symbol = function_symbol(function, false);
+                        let symbol = function_symbol(
+                            function,
+                            FunctionContext::TopLevel(&package),
+                            file.inferred_function_return(function),
+                        );
                         if function.receiver.is_none() {
                             result.globals.push(GlobalSymbol {
                                 package: package.clone(),
@@ -135,7 +155,7 @@ impl CompletionSymbols {
                             continue;
                         }
                         let owner = result.owner_for_name(&file.file, &class.name);
-                        result.add_class(&package, &owner, &file.file, class);
+                        result.add_class(&package, &owner, file, class);
                         inheritance.extend(
                             class
                                 .base_class
@@ -149,7 +169,7 @@ impl CompletionSymbols {
                         );
                     }
                     Decl::Property(property) => {
-                        let mut symbol = property_symbol(property);
+                        let mut symbol = property_symbol(property, Some(&package));
                         symbol.result_type = property
                             .ty
                             .as_ref()
@@ -165,12 +185,14 @@ impl CompletionSymbols {
                 }
             }
             for (alias, target) in &file.file.type_aliases {
+                let package_detail = package_label_detail(&package);
+                let target = target.to_string();
                 result.globals.push(GlobalSymbol {
                     package: package.clone(),
                     visibility: Visibility::Public,
                     symbol: Symbol {
                         label: alias.clone(),
-                        detail: format!("typealias {alias} = {target}"),
+                        details: completion_details(package_detail.as_deref(), Some(&target)),
                         kind: CompletionKind::Class,
                         result_type: Some(format!("@{alias}")),
                     },
@@ -178,15 +200,14 @@ impl CompletionSymbols {
             }
             for (alias, parameters, result_type) in &file.file.type_alias_fun {
                 let params = parameters.join(", ");
+                let package_detail = package_label_detail(&package);
+                let description = format!("({params}) -> {}", render_type(result_type));
                 result.globals.push(GlobalSymbol {
                     package: package.clone(),
                     visibility: Visibility::Public,
                     symbol: Symbol {
                         label: alias.clone(),
-                        detail: format!(
-                            "typealias {alias} = ({params}) -> {}",
-                            render_type(result_type)
-                        ),
+                        details: completion_details(package_detail.as_deref(), Some(&description)),
                         kind: CompletionKind::Interface,
                         result_type: Some(format!("@{alias}")),
                     },
@@ -215,20 +236,34 @@ impl CompletionSymbols {
         result
     }
 
-    fn add_class(&mut self, package: &str, owner: &str, file: &File, class: &ClassDecl) {
+    fn add_class(&mut self, package: &str, owner: &str, file: &FileAnalysis, class: &ClassDecl) {
         let kind = class_kind(class);
+        let package_detail = package_label_detail(package);
         self.globals.push(GlobalSymbol {
             package: package.to_string(),
             visibility: class.visibility,
             symbol: Symbol {
                 label: class.name.clone(),
-                detail: class_detail(class),
+                details: completion_details(package_detail.as_deref(), None),
                 kind,
                 result_type: Some(format!("@{owner}")),
             },
         });
 
         let mut instance = Vec::new();
+        for property in &class.body_props {
+            if matches!(
+                property.visibility,
+                Visibility::Public | Visibility::Internal
+            ) {
+                let mut symbol = property_symbol(property, None);
+                symbol.result_type = property
+                    .ty
+                    .as_ref()
+                    .map(|ty| self.owner_for_type(&file.file, ty));
+                instance.push(symbol);
+            }
+        }
         for property in &class.props {
             if property.is_property
                 && matches!(
@@ -236,27 +271,13 @@ impl CompletionSymbols {
                     Visibility::Public | Visibility::Internal
                 )
             {
+                let rendered_type = render_type(&property.ty);
                 instance.push(Symbol {
                     label: property.name.clone(),
-                    detail: format!(
-                        "{} {}: {}",
-                        if property.is_var { "var" } else { "val" },
-                        property.name,
-                        render_type(&property.ty)
-                    ),
-                    kind: CompletionKind::Property,
-                    result_type: Some(self.owner_for_type(file, &property.ty)),
+                    details: completion_details(None, Some(&rendered_type)),
+                    kind: CompletionKind::Variable,
+                    result_type: Some(self.owner_for_type(&file.file, &property.ty)),
                 });
-            }
-        }
-        for property in &class.body_props {
-            if matches!(
-                property.visibility,
-                Visibility::Public | Visibility::Internal
-            ) {
-                let mut symbol = property_symbol(property);
-                symbol.result_type = property.ty.as_ref().map(|ty| self.owner_for_type(file, ty));
-                instance.push(symbol);
             }
         }
         for function in &class.methods {
@@ -264,7 +285,11 @@ impl CompletionSymbols {
                 function.visibility,
                 Visibility::Public | Visibility::Internal
             ) {
-                instance.push(function_symbol(function, true));
+                instance.push(function_symbol(
+                    function,
+                    FunctionContext::Member,
+                    file.inferred_function_return(function),
+                ));
             }
         }
         self.members
@@ -279,8 +304,11 @@ impl CompletionSymbols {
                 property.visibility,
                 Visibility::Public | Visibility::Internal
             ) {
-                let mut symbol = property_symbol(property);
-                symbol.result_type = property.ty.as_ref().map(|ty| self.owner_for_type(file, ty));
+                let mut symbol = property_symbol(property, None);
+                symbol.result_type = property
+                    .ty
+                    .as_ref()
+                    .map(|ty| self.owner_for_type(&file.file, ty));
                 static_members.push(symbol);
             }
         }
@@ -289,13 +317,17 @@ impl CompletionSymbols {
                 function.visibility,
                 Visibility::Public | Visibility::Internal
             ) {
-                static_members.push(function_symbol(function, true));
+                static_members.push(function_symbol(
+                    function,
+                    FunctionContext::Member,
+                    file.inferred_function_return(function),
+                ));
             }
         }
         for entry in &class.enum_entries {
             static_members.push(Symbol {
                 label: entry.name.clone(),
-                detail: format!("enum entry {}.{}", class.name, entry.name),
+                details: completion_details(None, Some(&class.name)),
                 kind: CompletionKind::EnumMember,
                 result_type: Some(owner.to_string()),
             });
@@ -306,13 +338,15 @@ impl CompletionSymbols {
             .extend(static_members);
     }
 
-    pub(crate) fn members(&self) -> impl Iterator<Item = (&str, &str, &str, CompletionKind)> {
+    pub(crate) fn members(
+        &self,
+    ) -> impl Iterator<Item = (&str, &str, &CompletionDetails, CompletionKind)> {
         self.members.iter().flat_map(|(owner, symbols)| {
             symbols.iter().map(|symbol| {
                 (
                     owner.as_str(),
                     symbol.label.as_str(),
-                    symbol.detail.as_str(),
+                    &symbol.details,
                     symbol.kind,
                 )
             })
@@ -458,13 +492,13 @@ impl FileAnalysis {
                 .unwrap_or(file_span);
             match statement {
                 Stmt::Local {
-                    is_var,
+                    is_var: _,
                     name,
                     ty,
                     init,
                 }
                 | Stmt::LocalDelegate {
-                    is_var,
+                    is_var: _,
                     name,
                     ty,
                     delegate: init,
@@ -477,7 +511,7 @@ impl FileAnalysis {
                         scope: enclosing_scope,
                         declared_at: statement_span.hi,
                         label: name.clone(),
-                        detail: value_detail(*is_var, name, inferred.as_deref()),
+                        details: value_details(inferred.as_deref()),
                         kind: CompletionKind::Variable,
                         result_type: inferred,
                         priority: 3,
@@ -488,20 +522,20 @@ impl FileAnalysis {
                         scope: enclosing_scope,
                         declared_at: statement_span.hi,
                         label: name.clone(),
-                        detail: format!("lateinit var {name}: {}", render_type(ty)),
+                        details: value_details(Some(render_type(ty).as_str())),
                         kind: CompletionKind::Variable,
                         result_type: Some(symbols.owner_for_type(&self.file, ty)),
                         priority: 3,
                     });
                 }
                 Stmt::Destructure { entries, .. } => {
-                    for (name, is_var) in entries {
+                    for (name, _) in entries {
                         if name != "_" {
                             result.push(ScopedCompletionSymbol {
                                 scope: enclosing_scope,
                                 declared_at: statement_span.hi,
                                 label: name.clone(),
-                                detail: value_detail(*is_var, name, None),
+                                details: value_details(None),
                                 kind: CompletionKind::Variable,
                                 result_type: None,
                                 priority: 3,
@@ -515,7 +549,7 @@ impl FileAnalysis {
                         scope,
                         declared_at: scope.lo,
                         label: name.clone(),
-                        detail: format!("val {name}"),
+                        details: CompletionDetails::default(),
                         kind: CompletionKind::Variable,
                         result_type: None,
                         priority: 3,
@@ -523,7 +557,11 @@ impl FileAnalysis {
                 }
                 Stmt::LocalFun(function) => {
                     result.push(scoped(
-                        &function_symbol(function, false),
+                        &function_symbol(
+                            function,
+                            FunctionContext::Local,
+                            self.inferred_function_return(function),
+                        ),
                         enclosing_scope,
                         statement_span.lo,
                         3,
@@ -535,7 +573,7 @@ impl FileAnalysis {
                         scope: enclosing_scope,
                         declared_at: statement_span.lo,
                         label: class.name.clone(),
-                        detail: class_detail(class),
+                        details: CompletionDetails::default(),
                         kind: class_kind(class),
                         result_type: Some(format!("@{}", class.name)),
                         priority: 3,
@@ -558,10 +596,7 @@ impl FileAnalysis {
                             scope,
                             declared_at: scope.lo,
                             label: name.clone(),
-                            detail: ty.map_or_else(
-                                || name.clone(),
-                                |ty| format!("{name}: {}", render_type(ty)),
-                            ),
+                            details: completion_details(None, ty.map(render_type).as_deref()),
                             kind: CompletionKind::Variable,
                             result_type: ty.map(|ty| symbols.owner_for_type(&self.file, ty)),
                             priority: 2,
@@ -575,7 +610,10 @@ impl FileAnalysis {
                             scope,
                             declared_at: scope.lo,
                             label: catch.name.clone(),
-                            detail: format!("{}: {}", catch.name, render_type(&catch.ty)),
+                            details: completion_details(
+                                None,
+                                Some(render_type(&catch.ty).as_str()),
+                            ),
                             kind: CompletionKind::Variable,
                             result_type: Some(symbols.owner_for_type(&self.file, &catch.ty)),
                             priority: 3,
@@ -598,6 +636,21 @@ impl FileAnalysis {
             .and_then(|types| types.expr_types.get(expression.0 as usize))
             .and_then(ty_key)
             .or_else(|| self.constructor_result_type(expression, symbols))
+    }
+
+    fn inferred_function_return(&self, function: &FunDecl) -> Option<Ty> {
+        if function.ret.is_some() {
+            return None;
+        }
+        let body = match function.body {
+            FunBody::Expr(body) | FunBody::Block(body) => body,
+            FunBody::None => return None,
+        };
+        self.types
+            .as_ref()
+            .and_then(|types| types.expr_types.get(body.0 as usize))
+            .copied()
+            .filter(|ty| *ty != Ty::Error)
     }
 
     fn constructor_result_type(
@@ -766,7 +819,7 @@ fn add_function_scope(
             scope,
             declared_at: scope.lo,
             label: name.clone(),
-            detail: format!("type parameter {name}"),
+            details: CompletionDetails::default(),
             kind: CompletionKind::TypeParameter,
             result_type: None,
             priority: 2,
@@ -780,7 +833,7 @@ fn add_function_scope(
             scope,
             declared_at: scope.lo,
             label: "this".to_string(),
-            detail: format!("this: {rendered_owner}"),
+            details: completion_details(None, Some(&rendered_owner)),
             kind: CompletionKind::Variable,
             result_type: Some(owner.to_string()),
             priority: 2,
@@ -804,7 +857,7 @@ fn add_type_parameters(
         scope,
         declared_at: scope.lo,
         label: name.clone(),
-        detail: format!("type parameter {name}"),
+        details: CompletionDetails::default(),
         kind: CompletionKind::TypeParameter,
         result_type: None,
         priority: 2,
@@ -821,7 +874,7 @@ fn parameter_symbol(
         scope,
         declared_at: scope.lo,
         label: parameter.name.clone(),
-        detail: format!("{}: {}", parameter.name, render_type(&parameter.ty)),
+        details: completion_details(None, Some(render_type(&parameter.ty).as_str())),
         kind: CompletionKind::Variable,
         result_type: Some(symbols.owner_for_type(file, &parameter.ty)),
         priority: 2,
@@ -833,7 +886,7 @@ fn scoped(symbol: &Symbol, scope: Span, declared_at: u32, priority: u8) -> Scope
         scope,
         declared_at,
         label: symbol.label.clone(),
-        detail: symbol.detail.clone(),
+        details: symbol.details.clone(),
         kind: symbol.kind,
         result_type: symbol.result_type.clone(),
         priority,
@@ -847,7 +900,11 @@ fn function_scope(function: &FunDecl, file: &File) -> Span {
     }
 }
 
-fn function_symbol(function: &FunDecl, member: bool) -> Symbol {
+fn function_symbol(
+    function: &FunDecl,
+    context: FunctionContext<'_>,
+    inferred_return: Option<Ty>,
+) -> Symbol {
     let params = function
         .params
         .iter()
@@ -858,13 +915,21 @@ fn function_symbol(function: &FunDecl, member: bool) -> Symbol {
     let rendered_result = function
         .ret
         .as_ref()
-        .map_or_else(|| "<inferred>".to_string(), render_type);
+        .map(render_type)
+        .or_else(|| inferred_return.map(render_ty));
+    let package = match context {
+        FunctionContext::TopLevel(package) if !package.is_empty() => format!(" ({package})"),
+        _ => String::new(),
+    };
     Symbol {
         label: function.name.clone(),
-        detail: format!("fun {}({params}): {rendered_result}", function.name),
+        details: completion_details(
+            Some(format!("({params}){package}").as_str()),
+            rendered_result.as_deref(),
+        ),
         kind: if function.is_operator {
             CompletionKind::Operator
-        } else if member {
+        } else if matches!(context, FunctionContext::Member) {
             CompletionKind::Method
         } else {
             CompletionKind::Function
@@ -873,11 +938,14 @@ fn function_symbol(function: &FunDecl, member: bool) -> Symbol {
     }
 }
 
-fn property_symbol(property: &PropDecl) -> Symbol {
+fn property_symbol(property: &PropDecl, package: Option<&str>) -> Symbol {
     let result_type = property.ty.as_ref().map(type_key);
+    let package = package
+        .filter(|package| !package.is_empty())
+        .map(|package| format!(" ({package})"));
     Symbol {
         label: property.name.clone(),
-        detail: value_detail(property.is_var, &property.name, result_type.as_deref()),
+        details: completion_details(package.as_deref(), result_type.as_deref()),
         kind: if property.is_const {
             CompletionKind::Constant
         } else {
@@ -887,10 +955,18 @@ fn property_symbol(property: &PropDecl) -> Symbol {
     }
 }
 
-fn value_detail(is_var: bool, name: &str, ty: Option<&str>) -> String {
-    match ty {
-        Some(ty) => format!("{} {name}: {ty}", if is_var { "var" } else { "val" }),
-        None => format!("{} {name}", if is_var { "var" } else { "val" }),
+fn value_details(ty: Option<&str>) -> CompletionDetails {
+    completion_details(None, ty)
+}
+
+fn package_label_detail(package: &str) -> Option<String> {
+    (!package.is_empty()).then(|| format!(" ({package})"))
+}
+
+fn completion_details(detail: Option<&str>, description: Option<&str>) -> CompletionDetails {
+    CompletionDetails {
+        detail: detail.unwrap_or_default().to_string(),
+        description: description.unwrap_or_default().to_string(),
     }
 }
 
@@ -901,18 +977,6 @@ fn class_kind(class: &ClassDecl) -> CompletionKind {
         ClassKind::Class if class.is_data => CompletionKind::Struct,
         ClassKind::Class | ClassKind::Object | ClassKind::Annotation => CompletionKind::Class,
     }
-}
-
-fn class_detail(class: &ClassDecl) -> String {
-    let prefix = match class.kind {
-        ClassKind::Interface => "interface",
-        ClassKind::Enum => "enum class",
-        ClassKind::Object => "object",
-        ClassKind::Annotation => "annotation class",
-        ClassKind::Class if class.is_data => "data class",
-        ClassKind::Class => "class",
-    };
-    format!("{prefix} {}", class.name)
 }
 
 fn type_key(reference: &TypeRef) -> String {

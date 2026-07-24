@@ -1656,7 +1656,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_is_scoped_compiler_backed_and_resolvable() {
+    fn completion_is_scoped_compiler_backed_and_matches_kotlin_item_metadata() {
         let calls = Rc::new(Cell::new(0));
         let calls_for_analyzer = calls.clone();
         let mut server = LspService::new(move |sources: &[&str]| {
@@ -1700,7 +1700,7 @@ mod tests {
             }),
         ));
         assert_eq!(calls.get(), 1, "completion must use the cached snapshot");
-        assert_eq!(completion.messages[0]["result"]["isIncomplete"], false);
+        assert_eq!(completion.messages[0]["result"]["isIncomplete"], true);
         let items = completion.messages[0]["result"]["items"]
             .as_array()
             .unwrap();
@@ -1708,21 +1708,24 @@ mod tests {
             .iter()
             .find(|item| item["label"] == "name")
             .expect("constructor property completion");
-        assert_eq!(name["kind"], 10);
+        assert_eq!(name["kind"], 6);
+        assert_eq!(name["labelDetails"], json!({"description": "String"}));
+        assert_eq!(name["sortText"], "0000000000");
         let greeting = items
             .iter()
             .find(|item| item["label"] == "greeting")
             .expect("method completion");
         assert_eq!(greeting["kind"], 2);
+        assert_eq!(
+            greeting["labelDetails"],
+            json!({"detail": "()", "description": "String"})
+        );
+        assert_eq!(greeting["sortText"], "0000000001");
         assert!(items.iter().all(|item| item["label"] != "later"));
 
         let resolved = server.handle(request(3, "completionItem/resolve", greeting.clone()));
-        assert_eq!(resolved.messages[0]["result"]["label"], "greeting");
-        assert_eq!(
-            resolved.messages[0]["result"]["detail"],
-            "fun greeting(): String"
-        );
-        assert_eq!(calls.get(), 1, "resolve must use the cached snapshot");
+        assert_eq!(&resolved.messages[0]["result"], greeting);
+        assert_eq!(calls.get(), 1, "resolve must not rerun compiler analysis");
 
         server.handle(notification(
             "textDocument/didOpen",
@@ -1736,10 +1739,7 @@ mod tests {
             }),
         ));
         let stale = server.handle(request(4, "completionItem/resolve", greeting.clone()));
-        assert!(
-            stale.messages[0]["result"]["detail"].is_null(),
-            "a source-set refresh must invalidate old positional completion slots"
-        );
+        assert_eq!(&stale.messages[0]["result"], greeting);
         assert_eq!(calls.get(), 2);
     }
 
@@ -1778,6 +1778,88 @@ mod tests {
         assert!(items
             .iter()
             .any(|item| item["label"] == "answer" && item["kind"] == 3));
+    }
+
+    #[test]
+    fn unqualified_completion_has_exact_kotlin_metadata_and_ranking() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///CompletionParity.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "package completionparity\n\
+                             fun krustyParityTop(): Int = 1\n\
+                             fun krustyParityInferred() = 3\n\
+                             val krustyParityGlobal: Int = 2\n\
+                             fun use(): Int {\n\
+                             \u{20}\u{20}val krustyParityLocal: Int = 1\n\
+                             \u{20}\u{20}fun krustyParityNested(): Int = 2\n\
+                             \u{20}\u{20}return krustyParity\n\
+                             }\n"
+                }
+            }),
+        ));
+
+        let completion = server.handle(request(
+            2,
+            "textDocument/completion",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 7, "character": 21}
+            }),
+        ));
+        assert_eq!(
+            completion.messages[0]["result"],
+            json!({
+                "isIncomplete": true,
+                "items": [
+                    {
+                        "label": "krustyParityLocal",
+                        "kind": 6,
+                        "labelDetails": {"description": "Int"},
+                        "sortText": "0000000000"
+                    },
+                    {
+                        "label": "krustyParityGlobal",
+                        "kind": 10,
+                        "labelDetails": {
+                            "detail": " (completionparity)",
+                            "description": "Int"
+                        },
+                        "sortText": "0000000001"
+                    },
+                    {
+                        "label": "krustyParityNested",
+                        "kind": 3,
+                        "labelDetails": {"detail": "()", "description": "Int"},
+                        "sortText": "0000000002"
+                    },
+                    {
+                        "label": "krustyParityInferred",
+                        "kind": 3,
+                        "labelDetails": {
+                            "detail": "() (completionparity)",
+                            "description": "Int"
+                        },
+                        "sortText": "0000000003"
+                    },
+                    {
+                        "label": "krustyParityTop",
+                        "kind": 3,
+                        "labelDetails": {
+                            "detail": "() (completionparity)",
+                            "description": "Int"
+                        },
+                        "sortText": "0000000004"
+                    }
+                ]
+            })
+        );
     }
 
     #[test]
