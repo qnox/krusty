@@ -568,6 +568,8 @@ mod nested_class_supertype_e2e;
 mod nested_class_unqualified_e2e;
 #[path = "nested_ctor_named_args_e2e.rs"]
 mod nested_ctor_named_args_e2e;
+#[path = "nested_data_class_tostring_e2e.rs"]
+mod nested_data_class_tostring_e2e;
 #[path = "nested_decls_in_object_e2e.rs"]
 mod nested_decls_in_object_e2e;
 #[path = "nested_enum_access_e2e.rs"]
