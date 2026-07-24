@@ -1,6 +1,6 @@
 //! Process options specific to the language-server executable.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use krusty::jvm::classpath::platform_jdk_modules;
 
@@ -45,6 +45,22 @@ impl LspOptions {
             }
         }
         classpath
+    }
+
+    /// The classpath passed explicitly with `-cp`, without JDK modules. Empty means "no explicit
+    /// classpath" — the trigger for the server to resolve one from the build tool.
+    pub fn explicit_classpath(&self) -> &[PathBuf] {
+        &self.classpath
+    }
+
+    /// The `-jdk-home` hint, if one was given.
+    pub fn jdk_home(&self) -> Option<&Path> {
+        self.jdk_home.as_deref()
+    }
+
+    /// Whether `-no-jdk` was passed: the server must not attach a JDK.
+    pub fn no_jdk(&self) -> bool {
+        self.no_jdk
     }
 }
 

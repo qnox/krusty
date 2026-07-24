@@ -10,6 +10,7 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::*;
+    use crate::DocumentAnalysis;
     use krusty::diag::{Diagnostic, Severity, Span};
 
     fn request(id: i64, method: &str, params: Value) -> Value {
@@ -27,6 +28,143 @@ mod tests {
             "method": method,
             "params": params,
         })
+    }
+
+    #[derive(Default)]
+    struct RecordingHost {
+        root: Option<std::path::PathBuf>,
+        globs: Vec<String>,
+        refreshes: u32,
+        pending: bool,
+        feedback_reanalyze: bool,
+        feedback_message: Option<(ProjectMessageKind, String)>,
+    }
+
+    impl Analysis for RecordingHost {
+        fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+            sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+        }
+
+        fn set_workspace_root(&mut self, root: Option<std::path::PathBuf>) {
+            self.root = root;
+        }
+
+        fn watched_globs(&mut self) -> Vec<String> {
+            self.globs.clone()
+        }
+
+        fn note_project_change(&mut self) {
+            self.pending = true;
+        }
+
+        fn project_refresh_due_in(&self) -> Option<std::time::Duration> {
+            self.pending.then(std::time::Duration::default)
+        }
+
+        fn refresh_project(&mut self) -> ProjectFeedback {
+            self.pending = false;
+            self.refreshes += 1;
+            ProjectFeedback {
+                reanalyze: self.feedback_reanalyze,
+                message: self.feedback_message.take(),
+            }
+        }
+    }
+
+    #[test]
+    fn initialized_registers_a_file_watcher_for_the_backend_globs() {
+        let host = RecordingHost {
+            globs: vec!["**/*.gradle.kts".to_string(), "**/pom.xml".to_string()],
+            ..RecordingHost::default()
+        };
+        let mut server = LspService::new(host);
+        server.handle(request(1, "initialize", json!({})));
+
+        let dispatch = server.handle(notification("initialized", json!({})));
+        let registration = &dispatch.messages[0];
+        assert_eq!(registration["method"], "client/registerCapability");
+        let watcher = &registration["params"]["registrations"][0];
+        assert_eq!(watcher["method"], "workspace/didChangeWatchedFiles");
+        assert_eq!(
+            watcher["registerOptions"]["watchers"][0]["globPattern"],
+            "**/*.gradle.kts"
+        );
+    }
+
+    #[test]
+    fn a_backend_without_globs_registers_no_watcher() {
+        let mut server = LspService::new(RecordingHost::default());
+        server.handle(request(1, "initialize", json!({})));
+        assert!(server
+            .handle(notification("initialized", json!({})))
+            .messages
+            .is_empty());
+    }
+
+    #[test]
+    fn a_watched_file_change_defers_the_refresh_then_shows_the_status_message_when_due() {
+        let host = RecordingHost {
+            feedback_message: Some((ProjectMessageKind::Warning, "sync failed".to_string())),
+            ..RecordingHost::default()
+        };
+        let mut server = LspService::new(host);
+        server.handle(request(1, "initialize", json!({})));
+        server.handle(notification("initialized", json!({})));
+
+        let dispatch = server.handle(notification(
+            "workspace/didChangeWatchedFiles",
+            json!({ "changes": [{ "uri": "file:///p/build.gradle.kts", "type": 2 }] }),
+        ));
+        assert!(dispatch.messages.is_empty());
+        assert_eq!(
+            server.project_refresh_due_in(),
+            Some(std::time::Duration::ZERO)
+        );
+
+        let messages = server.run_due_project_refresh();
+        assert_eq!(messages[0]["method"], "window/showMessage");
+        assert_eq!(messages[0]["params"]["type"], 2);
+        assert_eq!(messages[0]["params"]["message"], "sync failed");
+        assert_eq!(server.project_refresh_due_in(), None);
+    }
+
+    #[test]
+    fn a_project_change_reanalyzes_open_documents_when_the_refresh_runs() {
+        let host = RecordingHost {
+            feedback_reanalyze: true,
+            ..RecordingHost::default()
+        };
+        let mut server = LspService::new(host);
+        server.handle(request(1, "initialize", json!({})));
+        server.handle(notification("initialized", json!({})));
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({ "textDocument": {
+                "uri": "file:///p/A.kt", "languageId": "kotlin", "version": 1, "text": "fun a() {}"
+            }}),
+        ));
+
+        server.handle(notification(
+            "workspace/didChangeWatchedFiles",
+            json!({ "changes": [{ "uri": "file:///p/build.gradle.kts", "type": 2 }] }),
+        ));
+        let messages = server.run_due_project_refresh();
+        assert!(messages.iter().any(|message| {
+            message["method"] == "textDocument/publishDiagnostics"
+                && message["params"]["uri"] == "file:///p/A.kt"
+        }));
+    }
+
+    #[test]
+    fn a_response_to_a_server_request_is_ignored_rather_than_answered() {
+        let mut server = LspService::new(RecordingHost::default());
+        server.handle(request(1, "initialize", json!({})));
+        let dispatch = server.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "krusty/registerWatchers",
+            "result": null,
+        }));
+        assert!(dispatch.messages.is_empty());
     }
 
     #[test]

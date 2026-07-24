@@ -1,0 +1,11 @@
+id = "krusty"
+name = "Krusty"
+version = "0.0.1"
+schema_version = 1
+authors = ["Anton Efimchuk <anton.efimchuk@gmail.com>"]
+description = "Krusty language server for Kotlin."
+repository = "https://github.com/qnox/krusty"
+
+[language_servers.krusty-lsp]
+name = "Krusty"
+language = "Kotlin"

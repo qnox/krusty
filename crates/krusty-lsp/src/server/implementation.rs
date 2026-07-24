@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, Read, Write};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,7 @@ use super::super::{
     CompletionIndex, DefinitionIndex, DocumentAnalysis, HoverIndex, SemanticTokenIndex,
     SemanticTokenRange, SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
 };
+use crate::uri::file_uri_to_path;
 use crate::worker::{source_set_fits, MAX_SOURCE_SET_BYTES};
 use krusty::diag::{Diagnostic, Severity};
 
@@ -33,6 +35,68 @@ const SERVER_VERSION: &str = match option_env!("KRUSTY_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
 };
+
+/// Severity of a message the analysis backend asks the server to show the user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectMessageKind {
+    Info,
+    Warning,
+    Error,
+}
+
+impl ProjectMessageKind {
+    /// LSP `MessageType` code.
+    fn message_type(self) -> i64 {
+        match self {
+            ProjectMessageKind::Error => 1,
+            ProjectMessageKind::Warning => 2,
+            ProjectMessageKind::Info => 3,
+        }
+    }
+}
+
+/// What a project refresh tells the session to do.
+#[derive(Default)]
+pub struct ProjectFeedback {
+    /// Re-analyze every open document — the classpath or module layout changed.
+    pub reanalyze: bool,
+    /// A one-line status to surface with `window/showMessage`.
+    pub message: Option<(ProjectMessageKind, String)>,
+}
+
+/// Analysis and project-model operations behind an LSP session.
+pub trait Analysis {
+    fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis>;
+
+    /// Adopt the workspace root reported in `initialize`; the initial project probe happens here.
+    fn set_workspace_root(&mut self, _root: Option<PathBuf>) {}
+
+    /// Glob patterns whose changes should trigger a project refresh, registered with the client
+    /// after `initialized`. Globs rather than fixed paths so a newly created build file is caught
+    /// too.
+    fn watched_globs(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn note_project_change(&mut self) {}
+
+    fn project_refresh_due_in(&self) -> Option<Duration> {
+        None
+    }
+
+    fn refresh_project(&mut self) -> ProjectFeedback {
+        ProjectFeedback::default()
+    }
+}
+
+impl<F> Analysis for F
+where
+    F: FnMut(&[&str]) -> Vec<DocumentAnalysis>,
+{
+    fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+        self(sources)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Position {
@@ -157,7 +221,7 @@ pub struct LspService<A> {
 
 impl<A> LspService<A>
 where
-    A: FnMut(&[&str]) -> Vec<DocumentAnalysis>,
+    A: Analysis,
 {
     pub fn new(analyze: A) -> Self {
         Self {
@@ -195,7 +259,7 @@ where
                 .iter()
                 .map(|uri| documents[uri].text.as_str())
                 .collect();
-            (self.analyze)(&sources)
+            self.analyze.analyze(&sources)
         };
         if analyses.len() != uris.len() {
             for uri in &uris {
@@ -264,6 +328,11 @@ where
             .remove("method")
             .and_then(|method| method.as_str().map(str::to_owned))
         else {
+            // A message with an id but no method is the client's response to a request the server
+            // made (e.g. our `client/registerCapability`). There is nothing to reply to.
+            if id.is_some() && (object.contains_key("result") || object.contains_key("error")) {
+                return Dispatch::none();
+            }
             return Dispatch::messages(vec![rpc_error(
                 id.unwrap_or(Value::Null),
                 -32600,
@@ -309,6 +378,7 @@ where
                     )]);
                 }
                 self.initialized = true;
+                self.analyze.set_workspace_root(workspace_root(&params));
                 Dispatch::messages(vec![rpc_result(
                     id,
                     json!({
@@ -337,7 +407,15 @@ where
                     }),
                 )])
             }
-            "initialized" => Dispatch::none(),
+            "initialized" => {
+                let globs = self.analyze.watched_globs();
+                if globs.is_empty() {
+                    Dispatch::none()
+                } else {
+                    Dispatch::messages(vec![register_watched_files(&globs)])
+                }
+            }
+            "workspace/didChangeWatchedFiles" => self.did_change_watched_files(),
             "textDocument/didOpen" => self.did_open(id, params, defer_analysis),
             "textDocument/didChange" => self.did_change(id, params, defer_analysis),
             "textDocument/didClose" => self.did_close(id, params, defer_analysis),
@@ -359,6 +437,28 @@ where
                 None => Dispatch::none(),
             },
         }
+    }
+
+    fn did_change_watched_files(&mut self) -> Dispatch {
+        self.analyze.note_project_change();
+        Dispatch::none()
+    }
+
+    pub fn project_refresh_due_in(&self) -> Option<Duration> {
+        self.analyze.project_refresh_due_in()
+    }
+
+    pub fn run_due_project_refresh(&mut self) -> Vec<Value> {
+        let feedback = self.analyze.refresh_project();
+        let mut messages = Vec::new();
+        if let Some((kind, text)) = feedback.message {
+            messages.push(show_message(kind, &text));
+        }
+        if feedback.reanalyze {
+            self.analysis_dirty = true;
+            messages.extend(self.flush_analysis());
+        }
+        messages
     }
 
     fn did_open(&mut self, id: Option<Value>, params: Value, defer_analysis: bool) -> Dispatch {
@@ -733,6 +833,55 @@ fn rpc_result(id: Value, result: Value) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "result": result})
 }
 
+/// The workspace root from an `initialize` request: `rootUri`, else the first `workspaceFolders`
+/// entry, else the deprecated `rootPath`.
+fn workspace_root(params: &Value) -> Option<PathBuf> {
+    params
+        .get("rootUri")
+        .and_then(Value::as_str)
+        .and_then(file_uri_to_path)
+        .or_else(|| {
+            params
+                .pointer("/workspaceFolders/0/uri")
+                .and_then(Value::as_str)
+                .and_then(file_uri_to_path)
+        })
+        .or_else(|| {
+            params
+                .get("rootPath")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+        })
+}
+
+/// A `client/registerCapability` request for `workspace/didChangeWatchedFiles` over `globs`.
+fn register_watched_files(globs: &[String]) -> Value {
+    let watchers: Vec<Value> = globs
+        .iter()
+        .map(|glob| json!({ "globPattern": glob }))
+        .collect();
+    json!({
+        "jsonrpc": "2.0",
+        "id": "krusty/registerWatchers",
+        "method": "client/registerCapability",
+        "params": {
+            "registrations": [{
+                "id": "krusty/watchedFiles",
+                "method": "workspace/didChangeWatchedFiles",
+                "registerOptions": { "watchers": watchers },
+            }],
+        },
+    })
+}
+
+fn show_message(kind: ProjectMessageKind, text: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "window/showMessage",
+        "params": { "type": kind.message_type(), "message": text },
+    })
+}
+
 fn rpc_error(id: Value, code: i32, message: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
@@ -880,7 +1029,7 @@ pub fn run_connection_with<R, W, A>(reader: &mut R, writer: &mut W, analyze: A) 
 where
     R: BufRead,
     W: Write,
-    A: FnMut(&[&str]) -> Vec<DocumentAnalysis>,
+    A: Analysis,
 {
     let mut service = LspService::new(analyze);
     loop {
@@ -1043,7 +1192,7 @@ pub(super) fn dispatch_document_batch<W, A>(
 ) -> io::Result<Option<i32>>
 where
     W: Write,
-    A: FnMut(&[&str]) -> Vec<DocumentAnalysis>,
+    A: Analysis,
 {
     for change in changes {
         if let Some(code) = dispatch_messages(writer, service.handle_deferred(change))? {
@@ -1057,7 +1206,7 @@ where
 /// bursts can be applied together before invoking the compiler worker.
 pub fn run_stdio_connection_with<A>(analyze: A) -> io::Result<i32>
 where
-    A: FnMut(&[&str]) -> Vec<DocumentAnalysis>,
+    A: Analysis,
 {
     let (sender, incoming) = mpsc::sync_channel(INPUT_QUEUE_CAPACITY);
     std::thread::spawn(move || {
@@ -1086,7 +1235,21 @@ where
     loop {
         let event = match pending.pop_front() {
             Some(event) => event,
-            None => incoming.recv().unwrap_or(Incoming::Eof),
+            None => match service.project_refresh_due_in() {
+                Some(due) if due.is_zero() => {
+                    for message in service.run_due_project_refresh() {
+                        let encoded = serde_json::to_vec(&message).map_err(json_io)?;
+                        write_framed(&mut writer, &encoded)?;
+                    }
+                    continue;
+                }
+                Some(due) => match incoming.recv_timeout(due) {
+                    Ok(event) => event,
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => Incoming::Eof,
+                },
+                None => incoming.recv().unwrap_or(Incoming::Eof),
+            },
         };
         let messages = match event {
             Incoming::Message(message) => {
@@ -1121,4 +1284,44 @@ where
 
 fn json_io(error: serde_json::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
+}
+
+#[cfg(test)]
+mod uri_tests {
+    use super::*;
+
+    #[test]
+    fn a_file_uri_decodes_percent_escapes_and_drops_the_scheme() {
+        assert_eq!(
+            file_uri_to_path("file:///home/qnox/pro%20ject"),
+            Some(PathBuf::from("/home/qnox/pro ject"))
+        );
+    }
+
+    #[test]
+    fn a_non_local_file_authority_is_not_treated_as_a_local_path() {
+        assert_eq!(file_uri_to_path("file://host/srv/code"), None);
+        assert_eq!(file_uri_to_path("untitled:Untitled-1"), None);
+        assert_eq!(file_uri_to_path("file://"), None);
+    }
+
+    #[test]
+    fn the_workspace_root_prefers_root_uri_then_folders_then_root_path() {
+        assert_eq!(
+            workspace_root(&json!({ "rootUri": "file:///a" })),
+            Some(PathBuf::from("/a"))
+        );
+        assert_eq!(
+            workspace_root(&json!({
+                "rootUri": "untitled:workspace",
+                "workspaceFolders": [{ "uri": "file:///b" }]
+            })),
+            Some(PathBuf::from("/b"))
+        );
+        assert_eq!(
+            workspace_root(&json!({ "rootPath": "/c" })),
+            Some(PathBuf::from("/c"))
+        );
+        assert_eq!(workspace_root(&json!({})), None);
+    }
 }

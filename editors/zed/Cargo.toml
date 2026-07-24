@@ -1,0 +1,15 @@
+# Standalone crate: compiled to wasm by Zed, not part of the compiler workspace.
+[workspace]
+
+[package]
+name = "zed_krusty"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/krusty.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.5.0"

@@ -92,6 +92,9 @@ jobs:
           ver=$(just version)
           echo "ver=$ver"  >> "$GITHUB_OUTPUT"
           echo "tag=v$ver" >> "$GITHUB_OUTPUT"
+      - name: package Zed extension
+        shell: bash
+        run: just package-zed
       - name: publish
         uses: softprops/action-gh-release@v3
         with:
