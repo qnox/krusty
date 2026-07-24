@@ -375,9 +375,7 @@ impl SymbolSource for ModuleSymbols<'_> {
         } else {
             Vec::new()
         };
-        // Module EXTENSIONS of `name`, receiver as an ATTRIBUTE (fqn resolution is receiver-agnostic; the
-        // resolver's `receiver_extensions` filters by receiver applicability). Keyed by erased receiver in
-        // `ext_funs` — the exact-receiver key is rung 0, the universal `Any` key rung 1.
+        // Receiver applicability is selected above this package-scoped source boundary.
         let any = Ty::obj("kotlin/Any");
         for ((recv, en), sigs) in &self.syms.ext_funs {
             if en == &name {
@@ -385,6 +383,9 @@ impl SymbolSource for ModuleSymbols<'_> {
                 // Surface EVERY overload registered for this (receiver, name) so the resolver's
                 // overload picker can choose by arity/argument types (`fun R.f()` vs `fun R.f(x)`).
                 for sig in sigs {
+                    if !pkg.matches(&sig.package) {
+                        continue;
+                    }
                     overloads.push(fn_info(
                         FnKind::Extension,
                         sig,

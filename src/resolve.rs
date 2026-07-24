@@ -950,6 +950,42 @@ impl SymbolTable {
         self.method_of_with_owner_name(c.super_internal?, name)
     }
 
+    /// Select a source-module overload and return its declaring class.
+    pub fn method_matching_with_owner_name(
+        &self,
+        internal: TypeName,
+        name: &str,
+        args: &[Ty],
+    ) -> Option<(TypeName, Signature)> {
+        let mut owners = Vec::new();
+        let mut signatures = Vec::new();
+        let mut seen_owners = std::collections::HashSet::new();
+        let mut seen_params = std::collections::HashSet::new();
+        let mut current = Some(internal);
+        while let Some(owner) = current {
+            if !seen_owners.insert(owner) {
+                break;
+            }
+            let class = self.class_by_type_name(owner)?;
+            for signature in class.methods_named(name) {
+                // An override has the same JVM parameter signature as its parent. Keep the
+                // most-derived declaration while retaining genuinely inherited overloads.
+                if seen_params.insert(signature.params.clone()) {
+                    owners.push(class.internal_name());
+                    signatures.push(signature.clone());
+                }
+            }
+            current = class.super_internal;
+        }
+        let selected = pick_overload(&signatures, args)?;
+        let owner = owners[selected];
+        let signature = signatures
+            .into_iter()
+            .nth(selected)
+            .expect("selected overload index must exist");
+        Some((owner, signature))
+    }
+
     /// Whether `internal`'s method `name` (or one inherited up the base chain) is `vararg` — a
     /// clone-free probe for the hot call paths, which only need the flag (`method_of` clones the whole
     /// `Signature`, an allocation per call when used merely to read one bool).
@@ -4861,6 +4897,7 @@ pub struct TypeInfo {
     /// [`ResolvedCall`] for the target kinds and the typed accessors ([`Self::resolved_member`],
     /// [`Self::resolved_top_level`], …).
     pub resolved_calls: HashMap<ExprId, ResolvedCall>,
+    resolved_source_calls: HashMap<ExprId, (u32, u32)>,
     /// Synthetic operator calls selected while checking a source expression that does not itself contain
     /// a call node for every desugared operation. Example: reference `x in a..b` resolves both
     /// `a.rangeTo(b)` and `<range>.contains(x)` from one `Expr::InRange`; lowering reads these selections
@@ -5156,6 +5193,23 @@ impl TypeInfo {
                     | ResolvedCall::LambdaReturnMember(_)
             )
         )
+    }
+
+    /// Return the selected source-module member signature.
+    pub fn resolved_module_member_signature(&self, e: ExprId) -> Option<(TypeName, &str, &[Ty])> {
+        match self.resolved_calls.get(&e) {
+            Some(ResolvedCall::ModuleMember {
+                owner,
+                name,
+                params,
+                ..
+            }) => Some((*owner, name, params)),
+            _ => None,
+        }
+    }
+
+    pub fn resolved_source_call(&self, e: ExprId) -> Option<(u32, u32)> {
+        self.resolved_source_calls.get(&e).copied()
     }
 
     /// The resolved classpath instance member at call `e`, if the checker recorded one.
@@ -5580,6 +5634,7 @@ fn make_checker<'a>(
         resolved_call_type_args: HashMap::new(),
         narrowed_this_member: HashMap::new(),
         resolved_calls: HashMap::new(),
+        resolved_source_calls: HashMap::new(),
         resolved_operator_calls: HashMap::new(),
         resolved_stmt_operator_calls: HashMap::new(),
         resolved_index_store_get_returns: HashMap::new(),
@@ -6428,6 +6483,7 @@ fn check_file_at_impl(
         resolved_call_type_args,
         narrowed_this_member,
         resolved_calls,
+        resolved_source_calls,
         resolved_operator_calls,
         resolved_stmt_operator_calls,
         resolved_index_store_get_returns,
@@ -6488,6 +6544,7 @@ fn check_file_at_impl(
         resolved_call_type_args,
         narrowed_this_member,
         resolved_calls,
+        resolved_source_calls,
         resolved_operator_calls,
         resolved_stmt_operator_calls,
         resolved_index_store_get_returns,
@@ -6619,6 +6676,7 @@ struct Checker<'a> {
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
     resolved_calls: HashMap<ExprId, ResolvedCall>,
+    resolved_source_calls: HashMap<ExprId, (u32, u32)>,
     resolved_operator_calls: HashMap<(ExprId, SyntheticOperatorCall), ResolvedCall>,
     resolved_stmt_operator_calls: HashMap<(StmtId, SyntheticOperatorCall), ResolvedCall>,
     resolved_index_store_get_returns: HashMap<StmtId, Ty>,
@@ -7570,6 +7628,11 @@ impl<'a> Checker<'a> {
             })),
         );
     }
+    fn mark_source_call(&mut self, call: ExprId, source_key: Option<(u32, u32)>) {
+        if let Some(source_key) = source_key {
+            self.resolved_source_calls.insert(call, source_key);
+        }
+    }
     fn mark_module_top_level_call(
         &mut self,
         call: ExprId,
@@ -7580,6 +7643,7 @@ impl<'a> Checker<'a> {
     ) {
         let source_file = selected.source_key.map(|(file, _)| file);
         let source_decl = selected.source_key.map(|(_, decl)| DeclId(decl));
+        self.mark_source_call(call, selected.source_key);
         let source_fun = selected
             .source_key
             .filter(|(file, _)| *file == self.file_index)
@@ -12166,6 +12230,12 @@ impl<'a> Checker<'a> {
             .find(|s| !s.vararg && s.params.len() == arg_tys.len())
             .cloned()
         {
+            self.mark_source_call(
+                call,
+                sig.source_file
+                    .zip(sig.source_decl)
+                    .map(|(file, decl)| (file, decl.0)),
+            );
             for (i, (p, a)) in sig.params.iter().zip(arg_tys).enumerate() {
                 self.expect_assignable(*p, *a, self.span(args[i]), "argument");
             }
@@ -14227,16 +14297,16 @@ impl<'a> Checker<'a> {
                             .and_then(|c| c.super_internal);
                         if let Some(sup) = sup.filter(|s| matches_qual(*s)) {
                             // A user base-class method.
-                            if let Some(sig) = self
+                            if let Some((owner, sig)) = self
                                 .syms
-                                .method_of_name(sup, &name)
+                                .method_matching_with_owner_name(sup, &name, &arg_tys)
                                 .filter(|_| !self.class_method_is_abstract_name(sup, &name))
                             {
                                 self.expect_call_args(&sig.params, false, args, &arg_tys);
                                 self.resolved_super_calls.insert(
                                     call,
                                     ResolvedSuperCall {
-                                        owner: sup,
+                                        owner,
                                         interface: false,
                                         params: sig.params.clone(),
                                         ret: sig.ret,
@@ -14272,8 +14342,7 @@ impl<'a> Checker<'a> {
                             .filter(|iface| matches_qual(*iface))
                             .filter_map(|iface| {
                                 self.syms
-                                    .method_of_name(iface, &name)
-                                    .map(|sig| (iface, sig.clone()))
+                                    .method_matching_with_owner_name(iface, &name, &arg_tys)
                             })
                             .collect();
                         if let [(iface, sig)] = matches.as_slice() {
@@ -15086,6 +15155,7 @@ impl<'a> Checker<'a> {
                         .or_else(|| exts.first())
                         .cloned();
                     if let Some(fi) = module_ext {
+                        self.mark_source_call(call, fi.source_key);
                         let logical = fi.extension_value_params().to_vec();
                         let cs = &fi.call_sig;
                         if (arg_names.is_some() || arg_tys.len() != logical.len())
@@ -15131,8 +15201,17 @@ impl<'a> Checker<'a> {
                         .map(crate::symbol_resolver::Symbol::overloads)
                         .unwrap_or_default()
                         .into_iter()
-                        .find(|o| o.is_extension() && o.receiver_rank == 1);
+                        .find(|o| {
+                            let params = o.extension_value_params();
+                            o.is_extension()
+                                && o.receiver_rank == 1
+                                && params.len() == arg_tys.len()
+                                && params.iter().zip(&arg_tys).all(|(param, arg)| {
+                                    crate::symbol_resolver::arg_fits(param, arg)
+                                })
+                        });
                     if let Some(fi) = module_ext {
+                        self.mark_source_call(call, fi.source_key);
                         let logical = fi.extension_value_params().to_vec();
                         if logical.len() == arg_tys.len() {
                             if let Some(decl) =
@@ -17975,6 +18054,129 @@ mod tests {
     fn ok(src: &str) {
         let (errs, _) = check(src);
         assert!(errs.is_empty(), "unexpected errors: {errs:?}");
+    }
+
+    #[test]
+    fn super_calls_record_the_exact_source_overload() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            r#"
+open class Base {
+    open fun pick(value: Int): Int = value
+    open fun pick(value: String): Int = value.length
+}
+class Child : Base() {
+    fun pickInt(): Int = super.pick(1)
+    fun pickString(): Int = super.pick("x")
+}
+"#,
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert!(
+            diagnostics.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
+        );
+
+        let mut targets = info
+            .resolved_super_calls
+            .values()
+            .map(|target| (target.owner.render(), target.params.clone()))
+            .collect::<Vec<_>>();
+        targets.sort_by_key(|(_, params)| format!("{params:?}"));
+        assert_eq!(
+            targets,
+            vec![
+                ("Base".to_string(), vec![Ty::Int]),
+                ("Base".to_string(), vec![Ty::String]),
+            ]
+        );
+    }
+
+    #[test]
+    fn super_call_finds_an_inherited_overload_behind_unrelated_overloads() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            r#"
+open class Base {
+    open fun pick(value: Int): Int = value
+}
+open class Middle : Base() {
+    fun pick(left: String, right: String): Int = left.length + right.length
+    fun pick(left: Boolean, right: Boolean): Int = if (left == right) 1 else 0
+}
+class Child : Middle() {
+    fun parent(): Int = super.pick(1)
+}
+"#,
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert!(
+            diagnostics.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(info.resolved_super_calls.len(), 1);
+        let target = info
+            .resolved_super_calls
+            .values()
+            .next()
+            .expect("checker must record the super-call target");
+        assert_eq!(target.owner.render(), "Base");
+        assert_eq!(target.params, vec![Ty::Int]);
+    }
+
+    #[test]
+    fn super_call_selects_an_inherited_overload_over_a_nearer_namesake() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            r#"
+open class Grand {
+    open fun pick(value: Int): Int = value
+}
+open class Base : Grand() {
+    open fun pick(value: String): Int = value.length
+}
+class Child : Base() {
+    fun parent(): Int = super.pick(1)
+}
+"#,
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert!(
+            diagnostics.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(info.resolved_super_calls.len(), 1);
+        let target = info
+            .resolved_super_calls
+            .values()
+            .next()
+            .expect("checker must record the super-call target");
+        assert_eq!(target.owner.render(), "Grand");
+        assert_eq!(target.params, vec![Ty::Int]);
     }
 
     #[test]
