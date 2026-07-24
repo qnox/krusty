@@ -1333,6 +1333,7 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
     // lower to `Variable{ init: Block{ prelude…, value: When } }`) into `prelude…; Variable{ init: When }`,
     // so the conditional suspension surfaces as a `Variable{init: When}` the flattener handles.
     normalize_block_inits(ir, b);
+    split_unit_conditional_returns(ir, b, unit_ret);
     let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
     // Give the body a terminal `return`. A value-less body that FALLS THROUGH (a `Unit` fn whose last
     // statement is a suspension / loop, with no explicit `return`) needs `return Unit.INSTANCE` —
@@ -1936,6 +1937,7 @@ fn build_lambda_state_machine(
     // suspension nested in an expression (`res = foo().a`) into a preceding `val tmp = foo()`, so the
     // flattener meets it as a bound-local suspension typed by the callee's logical return.
     normalize_block_inits(ir, b);
+    split_unit_conditional_returns(ir, b, orig_rets.get(fid as usize) == Some(&Ty::Unit));
     hoist_suspensions(ir, b, &suspend_set, orig_rets);
     if binds_value_class_suspension(ir, b, &suspend_set) {
         crate::trace_compiler!(
@@ -4297,6 +4299,66 @@ fn is_boxed_primitive_internal(internal: &str) -> bool {
             | "java/lang/Float"
             | "java/lang/Double"
     )
+}
+
+/// A STATEMENT-shaped `When` (an `if` whose branches are statements) used as a `Unit` VALUE leaves
+/// nothing on the operand stack, so any consumer's `astore` underflows (VerifyError). Two shapes
+/// reach the suspend flattener: a `Unit` fn/lambda's `return <when>` (only when `unit_ret` — a
+/// value-carrying return keeps its forwarding shape, e.g. the tail `return <suspend call>`
+/// Unit-forward), and a `Unit`-typed local bound to the conditional (`Variable{ty: Unit, init:
+/// When}` — a lambda tail `if` bound before its coerced return). Both split into `<when as stmt>`
+/// followed by the `Unit` singleton as the actual value (kotlinc's shape). Top-level statements
+/// only — the same shape nested inside a branch block (`if (a) { return if (sh() != x) … }`) is a
+/// known residual left to the flattener's own bail.
+fn split_unit_conditional_returns(ir: &mut IrFile, body: ExprId, unit_ret: bool) {
+    let unwrap_when = |ir: &IrFile, mut e: ExprId| {
+        while let IrExpr::TypeOp { arg, .. } = ir.exprs[e as usize] {
+            e = arg;
+        }
+        matches!(ir.exprs[e as usize], IrExpr::When { .. }).then_some(e)
+    };
+    let IrExpr::Block { stmts, value } = ir.exprs[body as usize].clone() else {
+        return;
+    };
+    let mut out = Vec::with_capacity(stmts.len() + 1);
+    let mut changed = false;
+    for s in stmts {
+        match ir.exprs[s as usize].clone() {
+            IrExpr::Return(Some(v)) if unit_ret => {
+                if let Some(when) = unwrap_when(ir, v) {
+                    out.push(when);
+                    let unit = ir.add_expr(IrExpr::UnitInstance);
+                    out.push(ir.add_expr(IrExpr::Return(Some(unit))));
+                    changed = true;
+                    continue;
+                }
+            }
+            IrExpr::Variable {
+                index,
+                ty,
+                init: Some(init),
+                named,
+            } if ty == Ty::Unit => {
+                if let Some(when) = unwrap_when(ir, init) {
+                    out.push(when);
+                    let unit = ir.add_expr(IrExpr::UnitInstance);
+                    out.push(ir.add_expr(IrExpr::Variable {
+                        index,
+                        ty,
+                        init: Some(unit),
+                        named,
+                    }));
+                    changed = true;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        out.push(s);
+    }
+    if changed {
+        ir.exprs[body as usize] = IrExpr::Block { stmts: out, value };
+    }
 }
 
 /// Wrap the value of every `Return` reachable from `e` in an `ImplicitCoercion` to `Object`.
