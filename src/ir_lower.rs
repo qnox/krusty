@@ -12070,6 +12070,26 @@ impl<'a> Lower<'a> {
 
     /// Lower a classpath instance-member call with omitted arguments through the member's `$default`
     /// synthetic, using the checker-recorded argument slots.
+    /// Erase a value-class type to its unboxed underlying (recursively over nested value classes) — for
+    /// building a physical descriptor. A non-value-class type is returned unchanged (keeping nullability).
+    fn vc_erase_ty(&self, t: Ty) -> Ty {
+        let mut cur = t;
+        loop {
+            let Some(i) = cur.non_null().obj_internal() else {
+                return cur;
+            };
+            let under = self
+                .syms
+                .class_by_type_name(i)
+                .and_then(|c| c.value_field.as_ref().map(|(_, u)| *u))
+                .or_else(|| self.syms.libraries.value_underlying_name(i));
+            match under {
+                Some(u) => cur = u,
+                None => return cur,
+            }
+        }
+    }
+
     fn lower_library_default_member_call(
         &mut self,
         recv: u32,
@@ -20124,13 +20144,52 @@ impl<'a> Lower<'a> {
                             let call = self.coerce_generic_read(call, e, mret);
                             self.wrap_arg_prelude(call, prelude)
                         } else {
-                            if args.len() != params.len()
-                                || self
-                                    .info
-                                    .resolved_call_arg_slots
-                                    .get(&e)
-                                    .is_some_and(|slots| slots.iter().any(Option::is_none))
-                            {
+                            // A cross-file member call with OMITTED defaults (a sibling-file data class's
+                            // `w.copy(field = v)`) dispatches to the static `<owner>.<name>$default(recv,
+                            // <params…>, mask, marker)`: provided args in slot order (a zero placeholder for
+                            // each omitted one), then the mask + null marker. The physical descriptor erases
+                            // value-class fields to their underlying (kotlinc's synthetic); the return is
+                            // the owner class. Same-file goes through the index `MethodCall` path above. An
+                            // INTERFACE owner's `$default` is a STATIC INTERFACE method (needs an
+                            // `InterfaceMethodref`, which `emit_static_call` can't express) — left to skip.
+                            if !interface {
+                                if let Some(slots) =
+                                    self.info.resolved_call_arg_slots.get(&e).cloned()
+                                {
+                                    if slots.iter().any(Option::is_none) {
+                                        let (slot_args, prelude) = self
+                                            .lower_call_slot_args_source_order(
+                                                &args, &slots, &params, true,
+                                            )?;
+                                        let mut a = vec![recv];
+                                        a.extend(slot_args);
+                                        let mask: i32 = slots
+                                            .iter()
+                                            .enumerate()
+                                            .filter(|(_, s)| s.is_none())
+                                            .map(|(i, _)| 1i32 << i)
+                                            .sum();
+                                        self.append_default_mask_marker(&mut a, mask);
+                                        let owner_ty = Ty::obj(&owner);
+                                        let mut dparams = vec![owner_ty];
+                                        dparams.extend(params.iter().map(|&t| self.vc_erase_ty(t)));
+                                        dparams.push(Ty::Int);
+                                        dparams.push(Ty::obj("java/lang/Object"));
+                                        let desc = self
+                                            .runtime
+                                            .method_descriptor(&dparams, ty_to_ir(ret))?;
+                                        let call = self.emit_static_call(
+                                            owner.clone(),
+                                            format!("{target}$default"),
+                                            desc,
+                                            InlineKind::None,
+                                            a,
+                                        );
+                                        return Some(self.wrap_arg_prelude(call, prelude));
+                                    }
+                                }
+                            }
+                            if args.len() != params.len() {
                                 return None;
                             }
                             let a = self.lower_args(&args, &params)?;
