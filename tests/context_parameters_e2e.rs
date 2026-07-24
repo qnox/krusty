@@ -62,3 +62,90 @@ fn implicit_receiver_member_shadows_top_level() {
         }\n";
     assert_eq!(run(SRC).expect("member shadows top-level"), "OK");
 }
+
+#[test]
+fn context_top_level_function_maps_reordered_named_arguments() {
+    const SRC: &str = "class C\n\
+        context(c: C) fun combine(a: String, b: String): String = a + b\n\
+        fun box(): String = with(C()) { combine(b = \"K\", a = \"O\") }\n";
+    assert_eq!(run(SRC).expect("context named arguments"), "OK");
+}
+
+#[test]
+fn context_local_function_maps_reordered_named_arguments() {
+    const SRC: &str = "class C\n\
+        fun box(): String {\n\
+        \x20 context(c: C) fun combine(a: String, b: String): String = a + b\n\
+        \x20 return with(C()) { combine(b = \"K\", a = \"O\") }\n\
+        }\n";
+    assert_eq!(
+        common::front_end_diagnostics(SRC, &[], None),
+        Vec::<String>::new()
+    );
+    assert_eq!(run(SRC).expect("local context named arguments"), "OK");
+}
+
+#[test]
+fn context_top_level_function_maps_named_argument_past_default() {
+    const SRC: &str = "class C\n\
+        context(c: C) fun choose(a: Int = 7, b: String): String = b\n\
+        fun box(): String = with(C()) { choose(b = \"OK\") }\n";
+    assert_eq!(
+        common::front_end_diagnostics(SRC, &[], None),
+        Vec::<String>::new()
+    );
+    assert_eq!(run(SRC).expect("context named argument past default"), "OK");
+}
+
+#[test]
+fn context_local_function_maps_named_argument_past_default() {
+    const SRC: &str = "class C\n\
+        fun box(): String {\n\
+        \x20 context(c: C) fun choose(a: Int = 7, b: String): String = b\n\
+        \x20 return with(C()) { choose(b = \"OK\") }\n\
+        }\n";
+    assert_eq!(
+        common::front_end_diagnostics(SRC, &[], None),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        run(SRC).expect("local context named argument past default"),
+        "OK"
+    );
+}
+
+#[test]
+fn context_local_default_cannot_bind_same_named_caller_local() {
+    const SRC: &str = "class C\n\
+        fun box(): String {\n\
+        \x20 val a = 5\n\
+        \x20 context(c: C) fun combine(a: Int, b: Int = a): Int = a * 10 + b\n\
+        \x20 val actual = with(C()) { combine(a = 1) }\n\
+        \x20 return if (actual == 11) \"OK\" else actual.toString()\n\
+        }\n";
+    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
+    assert!(
+        diagnostics.iter().any(|message| message.contains(
+            "local function default argument that references another parameter is not supported"
+        )),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn context_local_positional_default_cannot_bind_same_named_caller_local() {
+    const SRC: &str = "class C\n\
+        fun box(): String {\n\
+        \x20 val a = 5\n\
+        \x20 context(c: C) fun combine(a: Int, b: Int = a): Int = a * 10 + b\n\
+        \x20 val actual = with(C()) { combine(1) }\n\
+        \x20 return if (actual == 11) \"OK\" else actual.toString()\n\
+        }\n";
+    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
+    assert!(
+        diagnostics.iter().any(|message| message.contains(
+            "local function default argument that references another parameter is not supported"
+        )),
+        "{diagnostics:?}"
+    );
+}

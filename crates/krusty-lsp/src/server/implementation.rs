@@ -730,7 +730,7 @@ fn publish_diagnostics(
                     Severity::Error => 1,
                     Severity::Warning => 2,
                 },
-                "source": "krusty",
+                "source": "Kotlin",
                 "message": diagnostic.msg,
             })
         })
