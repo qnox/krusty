@@ -226,6 +226,8 @@ mod data_class_metadata_wiring_e2e;
 mod data_class_param_check_e2e;
 #[path = "data_copy_e2e.rs"]
 mod data_copy_e2e;
+#[path = "data_object_e2e.rs"]
+mod data_object_e2e;
 #[path = "dataclass_hash_and_sam_e2e.rs"]
 mod dataclass_hash_and_sam_e2e;
 #[path = "decl_body_on_next_line_e2e.rs"]
@@ -568,6 +570,8 @@ mod nested_class_supertype_e2e;
 mod nested_class_unqualified_e2e;
 #[path = "nested_ctor_named_args_e2e.rs"]
 mod nested_ctor_named_args_e2e;
+#[path = "nested_data_class_tostring_e2e.rs"]
+mod nested_data_class_tostring_e2e;
 #[path = "nested_decls_in_object_e2e.rs"]
 mod nested_decls_in_object_e2e;
 #[path = "nested_enum_access_e2e.rs"]

@@ -3117,17 +3117,24 @@ impl<'a> Parser<'a> {
                         self.file.decls.push(id);
                     }
                     // Nested `data class Inner(…)` → hoist like a plain nested class (`Outer.Inner`),
-                    // constructed as `Outer.Inner(…)`; its data members emit normally.
+                    // constructed as `Outer.Inner(…)`; its data members emit normally. `data object Inner`
+                    // hoists the same way — `data` is just a modifier on either, exactly as at the file top
+                    // level, and a sealed hierarchy's singleton cases
+                    // (`sealed class S { data object A : S() }`) are that shape.
                     TokenKind::Ident
                         if self.text() == "data"
-                            && self
-                                .t
-                                .get(self.i + 1)
-                                .map_or(false, |t| t.kind == TokenKind::KwClass) =>
+                            && self.t.get(self.i + 1).is_some_and(|t| {
+                                t.kind == TokenKind::KwClass
+                                    || (t.kind == TokenKind::Ident && t.text(self.src) == "object")
+                            }) =>
                     {
                         self.bump(); // 'data'
                         let start = self.file.decls.len();
-                        let mut nested = self.parse_class();
+                        let mut nested = if self.at(TokenKind::Ident) && self.text() == "object" {
+                            self.parse_object()
+                        } else {
+                            self.parse_class()
+                        };
                         self.reprefix_hoisted(&name, start);
                         nested.is_data = true;
                         nested.name = format!("{}.{}", name, nested.name);

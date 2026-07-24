@@ -8274,11 +8274,10 @@ impl<'a> Lower<'a> {
 
         // toString(): `"Simple(f1=" + f1 + ", f2=" + f2 + ")"`.
         {
-            let simple = internal
-                .rsplit('/')
-                .next()
-                .unwrap_or(internal)
-                .replace('$', ".");
+            // kotlinc's `toString` names the class by its INNERMOST simple name — a nested
+            // `sealed class S { data class P(val n: Int) }` renders `P(n=3)`, not `S.P(n=3)`. Split on
+            // `$` as well as `/` so a hoisted nested class (`pkg/S$P`) drops its outer prefix.
+            let simple = internal.rsplit(['/', '$']).next().unwrap_or(internal);
             // Build ONE `StringConcat` (kotlinc emits a single `StringBuilder`): the class-name prefix is
             // merged with the first field's `name=` (`"P(x="`), then each field value, `", name="`
             // separators, and a closing `")"`.
@@ -8302,11 +8301,17 @@ impl<'a> Lower<'a> {
                 }
                 parts.push(fv);
             }
-            if fields.is_empty() {
-                parts.push(self.ir_const_str(prefix));
-            }
-            parts.push(self.ir_const_str(")".to_string()));
-            let acc = self.ir.add_expr(IrExpr::StringConcat(parts));
+            // A `data object`'s `toString` is its BARE simple name — no parentheses and no fields
+            // (`data object A` renders `A`, not `A()`), unlike a field-less `data class`.
+            let acc = if is_object {
+                self.ir_const_str(simple.to_string())
+            } else {
+                if fields.is_empty() {
+                    parts.push(self.ir_const_str(prefix));
+                }
+                parts.push(self.ir_const_str(")".to_string()));
+                self.ir.add_expr(IrExpr::StringConcat(parts))
+            };
             let ret = self.emit_return(Some(acc));
             let body = self.emit_block(vec![ret], None);
             if let Some(fid) = self.add_synth_method(
