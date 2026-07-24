@@ -2401,7 +2401,9 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn class_literal_type(&self) -> Option<Ty> {
-        Some(Ty::obj("java/lang/Class"))
+        // A Kotlin class-literal expression `X::class` has type `kotlin.reflect.KClass` (emitted via
+        // `Reflection.getOrCreateKotlinClass`); `X::class.java` unwraps it back to `java.lang.Class`.
+        Some(Ty::obj("kotlin/reflect/KClass"))
     }
 
     fn platform_default_import_packages(&self) -> &'static [&'static str] {

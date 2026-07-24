@@ -1596,11 +1596,8 @@ pub fn collect_signatures_with_cp(
         }
     }
 
-    let type_ref_ctx = TypeRefCtx {
-        class_literal_ty: libraries.class_literal_type(),
-    };
     let ty_of_ref = |r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut DiagSink| {
-        ty_of_ref_with(r, classes, tparams, &type_ref_ctx, diags)
+        ty_of_ref_with(r, classes, tparams, diags)
     };
 
     // Top-level function return types (explicit annotations only), collected first so a property
@@ -4286,11 +4283,6 @@ fn tparam_bound_erasure(b: Option<&TypeRef>, resolve: &dyn Fn(&str) -> Option<Ty
     }
 }
 
-#[derive(Clone, Copy, Default)]
-struct TypeRefCtx {
-    class_literal_ty: Option<Ty>,
-}
-
 /// Build a member method's [`Signature`] from its declaration, given an already-resolved return type
 /// `ret` (the two call sites differ only in how they infer `ret`). A `vararg` parameter's runtime type
 /// is its `Array<elem>`; the `vararg` flag, defaults, names, and lambda-parameter shapes follow the
@@ -4389,26 +4381,24 @@ pub(crate) fn typeref_leaf(r: &TypeRef, recurse: &mut dyn FnMut(&TypeRef) -> Ty)
 /// Resolve a syntactic type reference to a `Ty`: a primitive/String/Unit, a declared class
 /// (→ `Ty::Obj`), or a generic type parameter (erased per `TParams`, normally `Any`).
 fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut DiagSink) -> Ty {
-    ty_of_ref_with(r, classes, tparams, &TypeRefCtx::default(), diags)
+    ty_of_ref_with(r, classes, tparams, diags)
 }
 
 fn ty_of_ref_with(
     r: &TypeRef,
     classes: &ClassNames,
     tparams: &TParams,
-    ctx: &TypeRefCtx,
     diags: &mut DiagSink,
 ) -> Ty {
     // Function type, builtin scalar, or primitive array — the leaf shared by every type resolver. A
     // function type is reference-typed, so the nullability handling below is a no-op for it.
-    let base = if let Some(t) =
-        typeref_leaf(r, &mut |x| ty_of_ref_with(x, classes, tparams, ctx, diags))
+    let base = if let Some(t) = typeref_leaf(r, &mut |x| ty_of_ref_with(x, classes, tparams, diags))
     {
         t
     } else if r.name == "Array" {
         match &r.arg {
             Some(a) => {
-                let e = ty_of_ref_with(a, classes, tparams, ctx, diags);
+                let e = ty_of_ref_with(a, classes, tparams, diags);
                 if e.is_reference() {
                     Ty::array(e)
                 } else if e.jvm_boxed_ref().is_some() {
@@ -4432,17 +4422,6 @@ fn ty_of_ref_with(
                 Ty::Error
             }
         }
-    } else if r.name == "KClass" {
-        match ctx.class_literal_ty {
-            Some(t) => t,
-            None => {
-                diags.error(
-                    r.span,
-                    "krusty: KClass is not available on this target".to_string(),
-                );
-                Ty::Error
-            }
-        }
     } else if tparams.contains(&r.name) {
         tparams.erase(&r.name) // erased generic type parameter (primitive if `<T: Int>`)
     } else if let Some(internal) = classes.get(&r.name) {
@@ -4456,7 +4435,7 @@ fn ty_of_ref_with(
             let args: Vec<Ty> = r
                 .targs
                 .iter()
-                .map(|a| ty_of_ref_with(a, classes, tparams, ctx, diags))
+                .map(|a| ty_of_ref_with(a, classes, tparams, diags))
                 .collect();
             Ty::Obj(internal, Box::leak(args.into_boxed_slice()))
         }
@@ -5017,8 +4996,6 @@ pub enum ExprLowering {
         name: String,
         descriptor: String,
     },
-    /// The `.java` member of a class literal.
-    ClassLiteralJava,
     /// A bare-name call `m(args)` resolved to a MEMBER function of a classpath `object` that was imported
     /// unqualified (`import Obj.m; m()`). Kotlin dispatches this on the singleton, so lowering reads
     /// `getstatic <internal>.INSTANCE` as the receiver and invokes the member — the same shape a qualified
@@ -12637,17 +12614,6 @@ impl<'a> Checker<'a> {
                 }
                 return ret;
             }
-        }
-        if name == "java"
-            && rt
-                .non_null()
-                .obj_internal()
-                .is_some_and(|internal| internal.matches("java/lang/Class"))
-        {
-            if let Some(me) = mexpr {
-                self.expr_lowers.insert(me, ExprLowering::ClassLiteralJava);
-            }
-            return rt;
         }
         if let Some(internal) = rt.non_null().obj_internal() {
             if let Some(sf) = self.syms.libraries.static_field_name(internal, name) {
