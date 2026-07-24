@@ -1410,6 +1410,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same-file). Tests: `mpp_expect_actual_e2e`; corpus `multiplatform/` 75 PASS / 0 FAIL
   (box total 2744 → 2825).
 
+- **Operator extensions on nullable PRIMITIVE receivers dispatch by call-site nullability.**
+  `operator fun Int?.inc()`, `Long?.compareTo(Long?)`, `Int?.times(Int)` (the dispatchable set:
+  `plus`/`minus`/`times`/`div`/`rem`/`compareTo`/`inc`/`dec`) are accepted and routed: a receiver
+  statically typed `T?` has no builtin operator (it needs a non-null receiver), so the extension is
+  the only applicable candidate; a non-null receiver keeps the builtin. Sound because
+  `Ty::erased_recv` keys `Nullable(prim)` under the BOXED wrapper class — a non-null primitive
+  operand can never produce that key, so the two never collide (this is exactly kotlinc's
+  member-beats-extension applicability outcome). `x++`/`x--` dispatch on the variable's BINDING
+  type (not a flow-narrowed use type): the update writes back to the (boxed) slot, and checker and
+  lowerer must agree on the representation. `this != null` / `this == null` in the extension body
+  narrows `this` to the unboxed primitive (a smart-cast scope entry that wins over the declared
+  receiver type), so `this.inc()` / `this + 1` inside the body take the builtin — no
+  self-recursion. Nullable REFERENCE receivers (`String?.plus`) and non-dispatchable operator
+  names (`Int?.get`, `Int?.equals`) stay rejected: reference nullability is folded at call sites /
+  those call paths never consult the key, so accepting them would silently keep the builtin — a
+  miscompile. Tests: `nullable_receiver_operator_ext_e2e`; corpus `classes/kt72{3,5}.kt`,
+  `increment/{postfix,prefix}NullableIncrement.kt`,
+  `operatorConventions/compareTo/customCompareTo.kt` compile (box 2975 → 2982).
+  `primitiveTypes/kt75{3,6,7}.kt` (bitwise/unary names) stay skipped on separate gaps
+  (builtin `shl` return typing, safe-call with a primitive result), so those names stay rejected.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
