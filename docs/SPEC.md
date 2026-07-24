@@ -708,6 +708,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   width-wrap (widen to `Int`, op, narrow back). The field's type comes from `syms.prop_of`. (`obj.x++` and
   `arr[i]++` were already parser-desugared to a compound assignment; a non-`var` or external-`this`
   receiver isn't handled here.) `MemberIncDec` in `tests/feature_box_e2e.rs`.
+- **`x++` / `--x` on a TOP-LEVEL `var`** (statement and expression position): the read routes through the
+  computed `getX()` accessor / `getstatic` / another file's facade getter, the write through the computed
+  `setX(v)` / `putstatic` / facade setter (an enclosing class's member of the same name still binds first,
+  kotlinc scoping; the checker rejects a member target in expression position). Bytecode matches kotlinc's
+  shapes exactly: a decrement ADDS a `−1` constant (`iconst_m1`/`ldc2_w −1` + `iadd`, never `isub`); a
+  POSTFIX spills the original value to a temp local (the expression value when used); a PREFIX stores and
+  re-reads (statement position pops the dead re-read — kotlinc emits it too); `Byte`/`Short`/`Char` narrow
+  after the add (`i2s` etc.). `Stmt::IncDec` carries `prefix` solely for this shape parity. Remaining
+  file-level divergences are pre-existing and global (method emission order, local-slot reuse, `<clinit>`
+  zero-init elision). Built-in numeric scalars only — a user/extension `inc`/`dec` operator on a top-level
+  `var` still skips. `tests/toplevel_prop_incdec_e2e.rs`.
 - **Receiver scope functions `run`/`apply`** (the receiver is `this`, not `it`): the lowerer inlines the
   body binding the receiver to a `this` slot with `cur_class` cleared, so the body's bare member reads
   (getter), writes (setter), and method calls (`invokevirtual`) all resolve against the receiver through
@@ -2028,3 +2039,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   restore's frame type is the wrapper (VerifyError at the state merge).
   (`suspend_receiver_fn_param_invoke`, `suspend_receiver_fn_invoke_parks_and_resumes`,
   `suspend_receiver_fn_safe_call_invoke`.)
+
+- **A statement-shaped conditional as a `Unit` value in a suspend body.** A `Unit` suspend
+  lambda/fn whose LAST statement is an `if`/`when` containing the suspension
+  (`builder { if (suspendHere() != "OK") throw … }`, the corpus `coroutines/emptyClosure.kt` shape)
+  reaches the flattener as `Variable{ty: Unit, init: When}` + `return coerce(GetValue)` (lambda) or
+  `return <When>` (fn). A statement-shaped `When`'s VALUE emission leaves nothing on the operand
+  stack, so the consumer's `astore` underflows (VerifyError). `split_unit_conditional_returns`
+  (called from both state-machine builders, before suspension hoisting) rewrites both shapes to
+  `<when as stmt>` + the `Unit` singleton as the actual value — kotlinc's shape. The `return` split
+  is gated on a `Unit` LOGICAL return so a value-carrying tail `return <suspend call>` keeps its
+  forwarding; the `Unit`-local split is unconditional (the bind's value is always the singleton).
+  `tests/suspend_unit_tail_conditional_e2e.rs`.

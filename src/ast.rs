@@ -307,6 +307,10 @@ pub enum Stmt {
     IncDec {
         name: String,
         dec: bool,
+        /// `++name` (true) vs `name++` (false). Semantically irrelevant in statement position, but
+        /// kotlinc's bytecode shape differs (a postfix spills the old value to a temp; a prefix
+        /// re-reads and pops), so it's kept for byte parity.
+        prefix: bool,
     },
     /// `receiver.name = value` — write a (mutable) property via its setter.
     AssignMember {
@@ -1514,7 +1518,7 @@ impl File {
                 self.write_expr(*value, out);
                 out.push(')');
             }
-            Stmt::IncDec { name, dec } => {
+            Stmt::IncDec { name, dec, .. } => {
                 out.push_str(&format!("({} {name})", if *dec { "dec" } else { "inc" }));
             }
             Stmt::AssignMember {
