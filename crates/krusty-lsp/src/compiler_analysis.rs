@@ -10,9 +10,7 @@ use krusty::diag::{DiagSink, Diagnostic};
 use krusty::frontend;
 use krusty::libraries::SemanticPlatform;
 
-#[cfg(test)]
-pub(crate) use completion::CompletionKind;
-pub(crate) use completion::CompletionSymbols;
+pub(crate) use completion::{CompletionDetails, CompletionKind, CompletionSymbols};
 pub use krusty::frontend::{FrontendSymbols, FrontendTypeInfo};
 pub use navigation::{DefinitionOccurrence, DefinitionSymbols, DefinitionTarget};
 pub(crate) use semantic::{hover_wire_cost, SemanticLimits};
