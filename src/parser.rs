@@ -67,9 +67,34 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
             Err(k) => k as u32, // k = count of starts strictly <= off (since off not found)
         }
     };
+    // Per-node start lines for the statement-level `LineNumberTable` mapping (0 stays for a node
+    // with no real span). One pass over the arenas; `line_at` is a binary search.
+    file.expr_lines = file
+        .expr_spans
+        .iter()
+        .map(|s| {
+            if s.lo == 0 && s.hi == 0 {
+                0
+            } else {
+                line_at(s.lo)
+            }
+        })
+        .collect();
+    file.stmt_lines = file
+        .stmt_spans
+        .iter()
+        .map(|s| {
+            if s.lo == 0 && s.hi == 0 {
+                0
+            } else {
+                line_at(s.lo)
+            }
+        })
+        .collect();
     // Snapshot each expression's start offset before the mutable walk of `decl_arena` (a disjoint
     // field, but only borrowck's field-splitting sees that — a helper can't).
     let expr_lo: Vec<u32> = file.expr_spans.iter().map(|s| s.lo).collect();
+    let expr_hi: Vec<u32> = file.expr_spans.iter().map(|s| s.hi).collect();
     // kotlinc attributes a method's `LineNumberTable` to its BODY, not the `fun` keyword — for an
     // EXPRESSION body that is the `=` expression's line, which differs from the declaration line when
     // the signature wraps across lines. A block body is left at the declaration line (its per-statement
@@ -80,6 +105,26 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
             _ => decl,
         }
     };
+    // A BLOCK body's closing `}` line — kotlinc maps a `Unit` fn's implicit `return` there.
+    let body_close = |body: &FunBody| -> u32 {
+        match body {
+            FunBody::Block(e) => {
+                // A synthesized block with the zero span stays "unknown" (mirror the
+                // `expr_lines`/`stmt_lines` guard) — `line_at(0)` would fabricate line 1.
+                let (lo, hi) = expr_lo
+                    .get(e.0 as usize)
+                    .copied()
+                    .zip(expr_hi.get(e.0 as usize).copied())
+                    .unwrap_or((0, 0));
+                if lo == 0 && hi == 0 {
+                    0
+                } else {
+                    line_at(hi.saturating_sub(1))
+                }
+            }
+            _ => 0,
+        }
+    };
     for decl in &mut file.decl_arena {
         match decl {
             Decl::Class(c) => {
@@ -88,6 +133,7 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
                 // or every member method keeps line 0 and gets no `LineNumberTable`.
                 for m in &mut c.methods {
                     m.decl_line = body_line(&m.body, line_at(m.span.lo));
+                    m.body_close_line = body_close(&m.body);
                 }
                 for p in &mut c.props {
                     if p.span.lo != 0 || p.span.hi != 0 {
@@ -101,7 +147,10 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
                     e.decl_line = line_at(e.span.lo);
                 }
             }
-            Decl::Fun(f) => f.decl_line = body_line(&f.body, line_at(f.span.lo)),
+            Decl::Fun(f) => {
+                f.decl_line = body_line(&f.body, line_at(f.span.lo));
+                f.body_close_line = body_close(&f.body);
+            }
             _ => {}
         }
     }
@@ -2573,6 +2622,7 @@ impl<'a> Parser<'a> {
                 is_tailrec: false,
                 annotations,
                 decl_line: 0, // filled by the parser post-pass
+                body_close_line: 0,
             };
         }
         let (type_params, non_null_type_params, reified_type_params, type_param_bounds) =
@@ -2723,6 +2773,7 @@ impl<'a> Parser<'a> {
             is_tailrec,
             annotations,
             decl_line: 0, // filled by the parser post-pass
+            body_close_line: 0,
         }
     }
 
