@@ -1178,7 +1178,8 @@ mod tests {
             index.encode(None),
             vec![
                 0, 11, 4, 4, 1, // data-class declaration: struct + declaration
-                0, 9, 4, 9, 5, // val constructor property: property + declaration + readonly
+                0, 9, 4, 7,
+                5, // val constructor property declaration: parameter + declaration + readonly
                 0, 6, 6, 1, 512, // kotlin.String: class + defaultLibrary
                 1, 4, 5, 12, 9, // top-level function: function + declaration + static
                 0, 6, 4, 7, 5, // value parameter: parameter + declaration + readonly
@@ -1210,6 +1211,27 @@ mod tests {
                 0, 11, 5, 12, 8, // first reference
             ]
         );
+    }
+
+    #[test]
+    fn semantic_tokens_match_official_constructor_and_enum_modifiers() {
+        let source = concat!(
+            "enum class Shade { RED }\n",
+            "class Holder(var mutable: Int, val fixed: Int)\n",
+            "fun paint(holder: Holder): Shade {\n",
+            "holder.mutable = holder.fixed\n",
+            "return Shade.RED\n",
+            "}\n",
+        );
+        let analysis = analyze_standalone_source_set(&[source]);
+        let index =
+            SemanticTokenIndex::from_file_analysis(source, &analysis.files[0], &analysis.symbols);
+        let tokens = decoded_tokens(&index);
+
+        assert!(tokens.contains(&(0, 19, 3, 10, 5))); // enum entry declaration: declaration + readonly
+        assert!(tokens.contains(&(1, 17, 7, 7, 5))); // `var` property parameter: parameter + readonly
+        assert!(tokens.contains(&(3, 7, 7, 9, 128))); // mutable property assignment
+        assert!(tokens.contains(&(4, 13, 3, 10, 4))); // enum entry reference: readonly
     }
 
     #[test]
@@ -1304,7 +1326,7 @@ mod tests {
         assert!(tokens.contains(&(6, lines[6].find("b.value").unwrap() as u32 + 2, 5, 9, 128,))); // B.value: mutable
         assert!(tokens.contains(&(6, lines[6].find("get").unwrap() as u32, 3, 21, 0,))); // qualified operator call
         assert!(tokens.contains(&(7, lines[7].find("target").unwrap() as u32, 6, 13, 0)));
-        assert!(tokens.contains(&(8, lines[8].find("RED").unwrap() as u32, 3, 10, 12)));
+        assert!(tokens.contains(&(8, lines[8].find("RED").unwrap() as u32, 3, 10, 4)));
         assert!(tokens.contains(&(9, lines[9].find("Old").unwrap() as u32, 3, 1, 16)));
         assert!(tokens.contains(&(9, lines[9].rfind("Old").unwrap() as u32, 3, 1, 16)));
     }

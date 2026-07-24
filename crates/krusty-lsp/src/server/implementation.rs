@@ -731,7 +731,7 @@ fn publish_diagnostics(
                     Severity::Warning => 2,
                 },
                 "source": "Kotlin",
-                "message": diagnostic.msg,
+                "message": lsp_diagnostic_message(diagnostic.msg),
             })
         })
         .collect();
@@ -744,6 +744,17 @@ fn publish_diagnostics(
         "method": "textDocument/publishDiagnostics",
         "params": params,
     })
+}
+
+/// IntelliJ's Kotlin LSP sentence-cases compiler diagnostics even though kotlinc's CLI renderer keeps
+/// the same message lowercase. Do this only at the protocol boundary so compiler diagnostics remain
+/// byte-for-byte compatible with kotlinc. Current Kotlin diagnostic prefixes are ASCII; mutating that
+/// byte in place avoids another allocation in the analysis-to-wire path.
+fn lsp_diagnostic_message(mut message: String) -> String {
+    if let Some(first_byte) = message.get_mut(..1) {
+        first_byte.make_ascii_uppercase();
+    }
+    message
 }
 
 fn analysis_limit_diagnostic(uri: &str, version: i64, text: &str) -> Value {
