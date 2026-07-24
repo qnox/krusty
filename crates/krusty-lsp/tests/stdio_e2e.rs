@@ -23,7 +23,10 @@ fn stdio_server_uses_the_compiler_worker_and_exits_cleanly() {
                     "uri": "file:///main.kt",
                     "languageId": "kotlin",
                     "version": 1,
-                    "text": "fun answer(): Int = 42\nfun box(): Int = \"no\"\nfun use(): Int = ans"
+                    "text": "fun answer(): Int = 42\n\
+                             fun box(): Int = \"no\"\n\
+                             fun use(): Int = ans\n\
+                             fun navigate(): Int = answer()"
                 }
             }
         }),
@@ -36,7 +39,16 @@ fn stdio_server_uses_the_compiler_worker_and_exits_cleanly() {
                 "position": {"line": 2, "character": 20}
             }
         }),
-        json!({"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": null}),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": {"uri": "file:///main.kt"},
+                "position": {"line": 3, "character": 23}
+            }
+        }),
+        json!({"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": null}),
         json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
     ];
     {
@@ -67,4 +79,15 @@ fn stdio_server_uses_the_compiler_worker_and_exits_cleanly() {
         .iter()
         .any(|item| item["label"] == "answer" && item["kind"] == 3));
     assert_eq!(output[3]["id"], 3);
+    assert_eq!(
+        output[3]["result"],
+        json!([{
+            "uri": "file:///main.kt",
+            "range": {
+                "start": {"line": 0, "character": 4},
+                "end": {"line": 0, "character": 10}
+            }
+        }])
+    );
+    assert_eq!(output[4]["id"], 4);
 }

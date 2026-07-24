@@ -1603,6 +1603,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `completion_is_scoped_compiler_backed_and_resolvable`,
   `completion_includes_cross_file_top_level_declarations`.)
 
+- **Go-to-definition returns official Kotlin LSP source locations.** The server advertises
+  `definitionProvider` and returns the declaration-name range as an array of LSP `Location`s. Current
+  source navigation covers class/type references, function parameters, constructor and body
+  properties, lexical values/functions, same-package/imported top-level declarations, and the exact
+  checker-selected top-level overload across open files. Query handling never reruns analysis.
+  Long-lived state is an integer-only 20-byte entry `(source lo, source hi, target file, target lo,
+  target hi)`, globally capped at 256K entries per source set; compiler ASTs, source copies, and symbol
+  strings are dropped with the worker analysis. The opt-in official differential compares exact target
+  URI and UTF-16 start/end positions for same-file, cross-file, lexical, member, class, and overload
+  cases. (`definition_matches_official_class_parameter_and_property_ranges`,
+  `definition_resolves_an_exact_cross_file_function_location`,
+  `definition_prefers_local_values_and_functions`,
+  `definition_uses_the_checker_selected_overload`,
+  `definition_keeps_same_named_classes_package_qualified`,
+  `definition_snapshot_uses_compact_file_and_span_entries`.)
+
 - **A property reference is a function value** (`C::n` as a `(C)->Int`). An unbound `Type::prop` has type
   `KProperty1<C, R>` and a bound `obj::prop` has `KProperty0<R>`; both are accepted where a `(C)->R` /
   `()->R` (`kotlin/jvm/functions/Function1`/`Function0`) of the matching arity is expected, because

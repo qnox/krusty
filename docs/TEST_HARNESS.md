@@ -18,8 +18,9 @@ parameters.
 ```
 
 The LSP crate also has an opt-in protocol differential against JetBrains' official Kotlin LSP. It
-compares normalized diagnostic ranges, severity, source, and messages, plus decoded semantic-token
-types and modifiers, rather than raw protocol token indexes whose legends can differ. Point the
+compares normalized diagnostic ranges, severity, source, and messages, decoded semantic-token types
+and modifiers, and exact go-to-definition target URIs/ranges. It does not compare raw protocol token
+indexes whose legends can differ. Point the
 environment variable at an installed official launcher; the regular suite does not download the
 roughly 400 MB, platform-specific distribution. The differential creates a minimal Gradle project
 using the highest version in `kotlin-versions`, because current official servers do not analyze loose

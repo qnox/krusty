@@ -3,8 +3,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::compiler_analysis::{
-    analyze_standalone_source_set, CompletionSymbols, FileAnalysis, FrontendSymbols,
-    HighlightOccurrence, HighlightSymbols,
+    analyze_standalone_source_set, CompletionSymbols, DefinitionOccurrence, DefinitionSymbols,
+    DefinitionTarget, FileAnalysis, FrontendSymbols, HighlightOccurrence, HighlightSymbols,
 };
 use krusty::diag::{Diagnostic, Span};
 use krusty::types::Ty;
@@ -33,11 +33,23 @@ const NO_COMPLETION_TYPE: u32 = 0x003f_ffff;
 const MEMBER_COMPLETION_SLOT: u32 = 1 << 31;
 const MAX_SOURCE_SET_COMPLETION_ENTRIES: usize = 32 * 1024;
 const MAX_SOURCE_SET_COMPLETION_WIRE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_SOURCE_SET_DEFINITION_ENTRIES: usize = 256 * 1024;
 
 #[derive(Default)]
 pub(crate) struct CompletionBudget {
     entries: usize,
     wire_bytes: usize,
+}
+
+#[derive(Default)]
+pub(crate) struct DefinitionBudget {
+    entries: usize,
+}
+
+impl DefinitionBudget {
+    fn remaining(&self) -> usize {
+        MAX_SOURCE_SET_DEFINITION_ENTRIES.saturating_sub(self.entries)
+    }
 }
 
 impl CompletionBudget {
@@ -76,6 +88,89 @@ pub struct Completion<'a> {
     pub slot: u32,
     pub label: &'a str,
     pub kind: u8,
+}
+
+/// `(source lo, source hi, target file, target lo, target hi)`.
+type DefinitionEntry = [u32; 5];
+
+#[derive(Default, Deserialize, Serialize)]
+pub struct DefinitionIndex {
+    entries: Vec<DefinitionEntry>,
+}
+
+pub struct DefinitionTargets<'a> {
+    entries: std::slice::Iter<'a, DefinitionEntry>,
+}
+
+impl Iterator for DefinitionTargets<'_> {
+    type Item = DefinitionTarget;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let entry = self.entries.next()?;
+        Some(DefinitionTarget {
+            file: entry[2],
+            span: Span::new(entry[3], entry[4]),
+        })
+    }
+}
+
+impl DefinitionIndex {
+    fn from_occurrences(
+        occurrences: Vec<DefinitionOccurrence>,
+        budget: &mut DefinitionBudget,
+    ) -> Self {
+        let available = MAX_SOURCE_SET_DEFINITION_ENTRIES.saturating_sub(budget.entries);
+        let mut entries = occurrences
+            .into_iter()
+            .map(|occurrence| {
+                [
+                    occurrence.span.lo,
+                    occurrence.span.hi,
+                    occurrence.target.file,
+                    occurrence.target.span.lo,
+                    occurrence.target.span.hi,
+                ]
+            })
+            .collect::<Vec<_>>();
+        entries.sort_unstable();
+        entries.dedup();
+        entries.truncate(available);
+        budget.entries += entries.len();
+        Self { entries }
+    }
+
+    pub fn get(&self, byte_offset: u32) -> DefinitionTargets<'_> {
+        let upper = self
+            .entries
+            .partition_point(|entry| entry[0] <= byte_offset);
+        let Some(candidate) = upper
+            .checked_sub(1)
+            .and_then(|index| self.entries.get(index))
+        else {
+            return DefinitionTargets {
+                entries: self.entries[0..0].iter(),
+            };
+        };
+        if byte_offset >= candidate[1] {
+            return DefinitionTargets {
+                entries: self.entries[0..0].iter(),
+            };
+        }
+        let source = (candidate[0], candidate[1]);
+        let start = self
+            .entries
+            .partition_point(|entry| (entry[0], entry[1]) < source);
+        let end = self
+            .entries
+            .partition_point(|entry| (entry[0], entry[1]) <= source);
+        DefinitionTargets {
+            entries: self.entries[start..end].iter(),
+        }
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 impl CompletionIndex {
@@ -390,11 +485,15 @@ impl SemanticTokenIndex {
         symbols: &FrontendSymbols,
         highlight_symbols: &HighlightSymbols,
     ) -> Self {
+        Self::from_occurrences(
+            source,
+            analysis.highlight_occurrences(source, symbols, highlight_symbols),
+        )
+    }
+
+    fn from_occurrences(source: &str, occurrences: Vec<HighlightOccurrence>) -> Self {
         Self {
-            entries: position_semantic_tokens(
-                source,
-                analysis.highlight_occurrences(source, symbols, highlight_symbols),
-            ),
+            entries: position_semantic_tokens(source, occurrences),
         }
     }
 
@@ -566,35 +665,78 @@ pub struct DocumentAnalysis {
     pub hover: HoverIndex,
     pub completion: CompletionIndex,
     pub semantic_tokens: SemanticTokenIndex,
+    pub definitions: DefinitionIndex,
+}
+
+pub(crate) struct SourceSetIndexes<'a> {
+    symbols: &'a FrontendSymbols,
+    highlights: &'a HighlightSymbols,
+    definitions: &'a DefinitionSymbols,
+    completions: &'a CompletionSymbols,
+}
+
+impl<'a> SourceSetIndexes<'a> {
+    pub(crate) fn new(
+        symbols: &'a FrontendSymbols,
+        highlights: &'a HighlightSymbols,
+        definitions: &'a DefinitionSymbols,
+        completions: &'a CompletionSymbols,
+    ) -> Self {
+        Self {
+            symbols,
+            highlights,
+            definitions,
+            completions,
+        }
+    }
+}
+
+pub(crate) struct AnalysisBudgets {
+    completion: CompletionBudget,
+    definition: DefinitionBudget,
+}
+
+impl AnalysisBudgets {
+    pub(crate) fn new() -> Self {
+        Self {
+            completion: CompletionBudget::default(),
+            definition: DefinitionBudget::default(),
+        }
+    }
 }
 
 impl DocumentAnalysis {
     pub(crate) fn from_file_analysis(
         source: &str,
         analysis: FileAnalysis,
-        symbols: &FrontendSymbols,
-        highlight_symbols: &HighlightSymbols,
-        completion_symbols: &CompletionSymbols,
-        completion_budget: &mut CompletionBudget,
+        file_index: u32,
+        indexes: &SourceSetIndexes<'_>,
+        budgets: &mut AnalysisBudgets,
     ) -> Self {
         let hover = HoverIndex::from_file_analysis(&analysis);
         let completion = CompletionIndex::from_file_analysis_with_budget(
             source,
             &analysis,
-            completion_symbols,
-            completion_budget,
+            indexes.completions,
+            &mut budgets.completion,
         );
-        let semantic_tokens = SemanticTokenIndex::from_source_set_file_analysis(
+        let semantic = analysis.semantic_occurrences(
             source,
-            &analysis,
-            symbols,
-            highlight_symbols,
+            file_index,
+            indexes.symbols,
+            indexes.highlights,
+            indexes.definitions,
+            budgets.definition.remaining(),
         );
+        let semantic_tokens = SemanticTokenIndex::from_occurrences(source, semantic.highlights);
+        let definitions =
+            DefinitionIndex::from_occurrences(semantic.definitions, &mut budgets.definition);
         Self {
             diagnostics: analysis.diagnostics,
             hover,
             completion,
             semantic_tokens,
+            definitions,
         }
     }
 
@@ -604,6 +746,7 @@ impl DocumentAnalysis {
             hover: HoverIndex::default(),
             completion: CompletionIndex::default(),
             semantic_tokens: SemanticTokenIndex::default(),
+            definitions: DefinitionIndex::default(),
         }
     }
 
@@ -617,20 +760,28 @@ pub fn analyze_for_lsp(sources: &[&str]) -> Vec<DocumentAnalysis> {
     let analysis = analyze_standalone_source_set(sources);
     let highlight_symbols =
         HighlightSymbols::from_source_set(sources, &analysis.files, &analysis.symbols);
+    let definition_symbols =
+        DefinitionSymbols::from_source_set(sources, &analysis.files, &analysis.symbols);
     let completion_symbols = CompletionSymbols::from_source_set(sources, &analysis.files);
-    let mut completion_budget = CompletionBudget::default();
+    let indexes = SourceSetIndexes::new(
+        &analysis.symbols,
+        &highlight_symbols,
+        &definition_symbols,
+        &completion_symbols,
+    );
+    let mut budgets = AnalysisBudgets::new();
     analysis
         .files
         .into_iter()
         .zip(sources)
-        .map(|(file, source)| {
+        .enumerate()
+        .map(|(file_index, (file, source))| {
             DocumentAnalysis::from_file_analysis(
                 source,
                 file,
-                &analysis.symbols,
-                &highlight_symbols,
-                &completion_symbols,
-                &mut completion_budget,
+                file_index as u32,
+                &indexes,
+                &mut budgets,
             )
         })
         .collect()
@@ -709,6 +860,53 @@ mod tests {
                 (line, start, token[2], token[3], token[4])
             })
             .collect()
+    }
+
+    #[test]
+    fn definition_snapshot_uses_compact_file_and_span_entries() {
+        assert_eq!(std::mem::size_of::<DefinitionEntry>(), 20);
+        let source = "data class User(val name: String)\n\
+                      fun greet(user: User): String = user.name\n";
+        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        for (query, target_lo, target_hi) in [
+            (source.rfind("User").unwrap() as u32, 11, 15),
+            (source.rfind("user").unwrap() as u32, 44, 48),
+            (source.rfind("name").unwrap() as u32, 20, 24),
+        ] {
+            assert_eq!(
+                analysis.definitions.get(query).collect::<Vec<_>>(),
+                vec![DefinitionTarget {
+                    file: 0,
+                    span: Span::new(target_lo, target_hi),
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn definition_snapshot_respects_the_source_set_entry_budget() {
+        let mut budget = DefinitionBudget {
+            entries: MAX_SOURCE_SET_DEFINITION_ENTRIES - 1,
+        };
+        let occurrences = vec![
+            DefinitionOccurrence {
+                span: Span::new(0, 1),
+                target: DefinitionTarget {
+                    file: 0,
+                    span: Span::new(4, 5),
+                },
+            },
+            DefinitionOccurrence {
+                span: Span::new(2, 3),
+                target: DefinitionTarget {
+                    file: 0,
+                    span: Span::new(6, 7),
+                },
+            },
+        ];
+        let index = DefinitionIndex::from_occurrences(occurrences, &mut budget);
+        assert_eq!(index.entry_count(), 1);
+        assert_eq!(budget.entries, MAX_SOURCE_SET_DEFINITION_ENTRIES);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Compiler-facing source analysis isolated from the long-lived LSP supervisor.
 
 mod completion;
+mod navigation;
 mod semantic;
 
 use krusty::ast::File;
@@ -12,6 +13,7 @@ use krusty::libraries::SemanticPlatform;
 pub(crate) use completion::CompletionKind;
 pub(crate) use completion::CompletionSymbols;
 pub use krusty::frontend::{FrontendSymbols, FrontendTypeInfo};
+pub use navigation::{DefinitionOccurrence, DefinitionSymbols, DefinitionTarget};
 pub use semantic::{HighlightOccurrence, HighlightSymbols};
 
 pub struct FileAnalysis {
