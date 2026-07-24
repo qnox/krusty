@@ -17,6 +17,17 @@ parameters.
 ./run-tests.sh
 ```
 
+The LSP crate also has an opt-in protocol differential against JetBrains' official Kotlin LSP. It
+compares normalized diagnostic ranges, severity, source, and messages, plus decoded semantic-token
+types and modifiers, rather than raw protocol token indexes whose legends can differ. Point the
+environment variable at an installed official launcher; the regular suite does not download the
+roughly 400 MB, platform-specific distribution:
+
+```sh
+KRUSTY_KOTLIN_LSP=/path/to/kotlin-lsp.sh \
+cargo test --profile gate -p krusty-lsp --test kotlin_lsp_diff -- --nocapture
+```
+
 `just test` is equivalent. When `just` is available, the harness provisions the matching Kotlin
 compiler and codegen/box corpus, exports `KRUSTY_KOTLINC` and `KRUSTY_KOTLIN_BOX_DIR`, builds the test
 binaries once with Cargo's `gate` profile, runs the internally parallel conformance binary alone, then

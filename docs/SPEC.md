@@ -1523,10 +1523,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **Diagnostic wording tracks kotlinc 2.4.0** (a drop-in replacement should print the same errors). An
   unresolved name reads `unresolved reference 'q'.` (quoted, trailing period); a reassigned `val` reads
   `'val' cannot be reassigned.`; a return-position type error (an expression/getter body) reads
-  `return type mismatch: expected 'String', actual 'Int'.`, while a non-return context keeps the general
-  `type mismatch: inferred type is Int but String was expected`. Verified by the differential
-  `diagnostics_match_kotlinc` test, which compiles each snippet with both compilers and asserts the first
-  `error:` text matches exactly.
+  `return type mismatch: expected 'String', actual 'Int'.`; explicit initializers, assignments,
+  arguments, and Boolean conditions use kotlinc's distinct `initializer type mismatch`,
+  `assignment type mismatch`, `argument type mismatch`, and `condition type mismatch` forms. Missing
+  callable arguments name the first absent parameter; excess function/member/constructor arguments
+  render the source signature (including generic and context parameters); and an overloaded or
+  otherwise inapplicable candidate set starts with `none of the following candidates is applicable:`.
+  Unresolved member reads and calls use the same `unresolved reference` form as bare names. Verified
+  by the differential `diagnostics_match_kotlinc` tests, which compile the snippets with both
+  compilers, report all mismatches in one run, cover cross-file generic signatures, and assert the
+  first `error:` text matches exactly. LSP diagnostics identify their source as `Kotlin`, matching
+  the official Kotlin server.
 
 - **Semantic highlighting follows the official Kotlin LSP symbol model.** Data classes highlight as
   `struct`; ordinary classes, enums, interfaces, annotations, and objects use `class`, `enum`,

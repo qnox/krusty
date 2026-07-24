@@ -468,6 +468,171 @@ fn pick_member_overloads(
         .collect()
 }
 
+fn module_member_candidate_applicable(
+    member: &crate::libraries::LibraryMember,
+    args: &[ExprId],
+    arg_tys: &[Ty],
+    arg_names: Option<&[Option<String>]>,
+) -> bool {
+    if let Some(names) = arg_names {
+        let Ok(slots) = map_call_sig_args(args, Some(names), &member.call_sig) else {
+            return false;
+        };
+        return slots.iter().enumerate().all(|(index, argument)| {
+            argument.is_none_or(|argument| {
+                args.iter()
+                    .position(|candidate| *candidate == argument)
+                    .is_some_and(|source_index| {
+                        member.params.get(index).is_some_and(|parameter| {
+                            arg_tys
+                                .get(source_index)
+                                .is_some_and(|actual| arg_assignable_simple(*parameter, *actual))
+                        })
+                    })
+            })
+        });
+    }
+
+    if member.call_sig.vararg {
+        let Some((vararg, fixed)) = member.params.split_last() else {
+            return arg_tys.is_empty();
+        };
+        if arg_tys.len() < fixed.len()
+            && (arg_tys.len()..fixed.len()).any(|index| !member.call_sig.param_has_default(index))
+        {
+            return false;
+        }
+        let fixed_provided = arg_tys.len().min(fixed.len());
+        if fixed[..fixed_provided]
+            .iter()
+            .zip(&arg_tys[..fixed_provided])
+            .any(|(parameter, actual)| !arg_assignable_simple(*parameter, *actual))
+        {
+            return false;
+        }
+        let element = vararg.array_elem().unwrap_or(Ty::Error);
+        return arg_tys[fixed_provided..]
+            .iter()
+            .all(|actual| arg_assignable_simple(element, *actual));
+    }
+
+    if arg_tys.len() > member.params.len()
+        || (arg_tys.len() < member.params.len()
+            && (arg_tys.len()..member.params.len())
+                .any(|index| !member.call_sig.param_has_default(index)))
+    {
+        return false;
+    }
+    member
+        .params
+        .iter()
+        .zip(arg_tys)
+        .all(|(parameter, actual)| arg_assignable_simple(*parameter, *actual))
+}
+
+fn local_function_candidate_score(
+    signature: &Signature,
+    args: &[ExprId],
+    arg_tys: &[Ty],
+    arg_names: Option<&[Option<String>]>,
+) -> Option<(usize, std::cmp::Reverse<usize>, bool)> {
+    let context_count = signature.context_count.min(signature.params.len());
+    let params = &signature.params[context_count..];
+    let names = signature
+        .param_names
+        .get(context_count..)
+        .unwrap_or_default();
+    let defaults = signature
+        .param_defaults
+        .get(context_count..)
+        .unwrap_or_default();
+    if let Some(arg_names) = arg_names {
+        if signature.vararg {
+            return None;
+        }
+        let Ok(slots) = map_call_args(
+            args,
+            Some(arg_names),
+            names,
+            signature.required.saturating_sub(context_count),
+            defaults,
+        ) else {
+            return None;
+        };
+        let mut type_score = 0;
+        let mut omitted = 0;
+        for (index, argument) in slots.iter().enumerate() {
+            let Some(argument) = argument else {
+                omitted += 1;
+                continue;
+            };
+            let source_index = args.iter().position(|candidate| candidate == argument)?;
+            let parameter = *params.get(index)?;
+            let actual = *arg_tys.get(source_index)?;
+            if !arg_assignable_simple(parameter, actual) {
+                return None;
+            }
+            type_score += if parameter == actual { 2 } else { 1 };
+        }
+        return Some((type_score, std::cmp::Reverse(omitted), !signature.vararg));
+    }
+    if signature.vararg {
+        let Some((vararg, fixed)) = params.split_last() else {
+            return arg_tys
+                .is_empty()
+                .then_some((0, std::cmp::Reverse(0), false));
+        };
+        if arg_tys.len() < fixed.len()
+            && (arg_tys.len()..fixed.len())
+                .any(|index| !defaults.get(index).copied().unwrap_or(false))
+        {
+            return None;
+        }
+        let fixed_provided = arg_tys.len().min(fixed.len());
+        let mut type_score = 0;
+        for (parameter, actual) in fixed[..fixed_provided]
+            .iter()
+            .zip(&arg_tys[..fixed_provided])
+        {
+            if !arg_assignable_simple(*parameter, *actual) {
+                return None;
+            }
+            type_score += if parameter == actual { 2 } else { 1 };
+        }
+        let element = vararg.array_elem().unwrap_or(Ty::Error);
+        for actual in &arg_tys[fixed_provided..] {
+            if !arg_assignable_simple(element, *actual) {
+                return None;
+            }
+            type_score += if element == *actual { 2 } else { 1 };
+        }
+        return Some((
+            type_score,
+            std::cmp::Reverse(fixed.len().saturating_sub(fixed_provided)),
+            false,
+        ));
+    }
+    if arg_tys.len() > params.len()
+        || (arg_tys.len() < params.len()
+            && (arg_tys.len()..params.len())
+                .any(|index| !defaults.get(index).copied().unwrap_or(false)))
+    {
+        return None;
+    }
+    let mut type_score = 0;
+    for (parameter, actual) in params.iter().zip(arg_tys) {
+        if !arg_assignable_simple(*parameter, *actual) {
+            return None;
+        }
+        type_score += if parameter == actual { 2 } else { 1 };
+    }
+    Some((
+        type_score,
+        std::cmp::Reverse(params.len().saturating_sub(arg_tys.len())),
+        true,
+    ))
+}
+
 /// Simple type name → JVM internal name, split into a SHARED read-only base (the library/classpath
 /// type universe — tens of thousands of stdlib+JDK names, identical for every file on a classpath) and
 /// a small per-file `user` overlay (the file's own classes + type aliases). Lookups check `user` first
@@ -2914,7 +3079,7 @@ pub fn map_call_args(
         };
         if slot.is_none() && !has_default {
             return Err(format!(
-                "no value passed for required parameter '{}'",
+                "no value passed for parameter '{}'.",
                 param_names.get(i).map(|s| s.as_str()).unwrap_or("?")
             ));
         }
@@ -2934,6 +3099,36 @@ pub fn map_call_sig_args(
         sig.required,
         &sig.param_defaults,
     )
+}
+
+fn call_sig_without_context(sig: &CallSig, context_count: usize) -> CallSig {
+    let start = context_count.min(sig.param_names.len());
+    CallSig {
+        param_names: sig.param_names[start..].to_vec(),
+        param_defaults: sig.param_defaults.get(start..).unwrap_or_default().to_vec(),
+        lambda_param_types: sig
+            .lambda_param_types
+            .get(start..)
+            .unwrap_or_default()
+            .to_vec(),
+        lambda_receivers: sig
+            .lambda_receivers
+            .get(start..)
+            .unwrap_or_default()
+            .to_vec(),
+        lambda_receiver_params: sig
+            .lambda_receiver_params
+            .get(start..)
+            .unwrap_or_default()
+            .to_vec(),
+        lambda_materialized: sig
+            .lambda_materialized
+            .get(start..)
+            .unwrap_or_default()
+            .to_vec(),
+        required: sig.required.saturating_sub(context_count),
+        vararg: sig.vararg,
+    }
 }
 
 pub fn map_param_list_args(
@@ -4304,6 +4499,146 @@ fn tparam_bound_erasure(b: Option<&TypeRef>, resolve: &dyn Fn(&str) -> Option<Ty
     }
 }
 
+fn source_type_display(ty: &TypeRef) -> String {
+    let mut display = if ty.name == "<fun>" {
+        let (receiver, params) = if ty.fun_has_receiver && !ty.fun_params.is_empty() {
+            (
+                Some(source_type_display(&ty.fun_params[0])),
+                &ty.fun_params[1..],
+            )
+        } else {
+            (None, ty.fun_params.as_slice())
+        };
+        let params = params
+            .iter()
+            .map(source_type_display)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ret = ty
+            .arg
+            .as_deref()
+            .map(source_type_display)
+            .unwrap_or_else(|| "Unit".to_string());
+        let suspend = if ty.fun_suspend { "suspend " } else { "" };
+        match receiver {
+            Some(receiver) => format!("{suspend}{receiver}.({params}) -> {ret}"),
+            None => format!("{suspend}({params}) -> {ret}"),
+        }
+    } else {
+        let mut name = ty.name.replace('/', ".");
+        if !ty.targs.is_empty() {
+            let args = ty
+                .targs
+                .iter()
+                .map(source_type_display)
+                .collect::<Vec<_>>()
+                .join(", ");
+            name.push('<');
+            name.push_str(&args);
+            name.push('>');
+        } else if let Some(arg) = ty.arg.as_deref() {
+            name.push('<');
+            name.push_str(&source_type_display(arg));
+            name.push('>');
+        }
+        name
+    };
+    if ty.nullable {
+        display.push('?');
+    }
+    display
+}
+
+fn source_function_display(file: &File, function: &FunDecl, resolved_ret: Ty) -> String {
+    let type_params = function
+        .type_params
+        .iter()
+        .map(|name| {
+            let bound = function
+                .type_param_bounds
+                .iter()
+                .find_map(|(parameter, bound)| {
+                    (parameter == name).then(|| format!("{name} : {}", source_type_display(bound)))
+                })
+                .or_else(|| {
+                    function
+                        .non_null_type_params
+                        .contains(name)
+                        .then(|| format!("{name} : Any"))
+                })
+                .unwrap_or_else(|| name.clone());
+            if function.reified_type_params.contains(name) {
+                format!("reified {bound}")
+            } else {
+                bound
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let context_count = function.context_count.min(function.params.len());
+    let render_params = |params: &[Param]| {
+        params
+            .iter()
+            .map(|parameter| {
+                let vararg = if parameter.is_vararg { "vararg " } else { "" };
+                let default = if parameter.default.is_some() {
+                    " = ..."
+                } else {
+                    ""
+                };
+                format!(
+                    "{vararg}{}: {}{default}",
+                    parameter.name,
+                    source_type_display(&parameter.ty)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let context = if context_count == 0 {
+        String::new()
+    } else {
+        format!(
+            "context({}) ",
+            render_params(&function.params[..context_count])
+        )
+    };
+    let receiver = function
+        .receiver
+        .as_ref()
+        .map(|receiver| format!("{}.", source_type_display(receiver)))
+        .unwrap_or_default();
+    let params = render_params(&function.params[context_count..]);
+    let ret = function
+        .ret
+        .as_ref()
+        .map(source_type_display)
+        .or_else(|| {
+            let FunBody::Expr(body) = function.body else {
+                return None;
+            };
+            let Expr::Name(name) = file.expr(body) else {
+                return None;
+            };
+            function
+                .params
+                .iter()
+                .find(|parameter| parameter.name == *name)
+                .map(|parameter| source_type_display(&parameter.ty))
+        })
+        .unwrap_or_else(|| resolved_ret.name());
+    let suspend = if function.is_suspend { "suspend " } else { "" };
+    let generics = if type_params.is_empty() {
+        String::new()
+    } else {
+        format!("<{type_params}> ")
+    };
+    format!(
+        "{context}{suspend}fun {generics}{receiver}{}({params}): {ret}",
+        function.name,
+    )
+}
+
 /// Build a member method's [`Signature`] from its declaration, given an already-resolved return type
 /// `ret` (the two call sites differ only in how they infer `ret`). A `vararg` parameter's runtime type
 /// is its `Array<elem>`; the `vararg` flag, defaults, names, and lambda-parameter shapes follow the
@@ -5190,6 +5525,7 @@ pub(crate) fn function_scope_packages_with(
 fn make_checker<'a>(
     file: &'a File,
     file_index: u32,
+    source_files: Option<&'a [File]>,
     syms: &'a SymbolTable,
     diags: &'a mut DiagSink,
 ) -> Checker<'a> {
@@ -5201,6 +5537,7 @@ fn make_checker<'a>(
         syms,
         module: crate::module_symbols::ModuleSymbols::new(syms),
         file_index,
+        source_files,
         diags,
         expr_types: vec![Ty::Error; file.expr_arena.len()],
         scopes: Vec::new(),
@@ -5261,7 +5598,7 @@ fn make_checker<'a>(
 /// scratch `DiagSink` (inference diagnostics are not the real check's).
 fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -> bool {
     let mut scratch = DiagSink::new();
-    let mut pre = make_checker(file, file_index, &*syms, &mut scratch);
+    let mut pre = make_checker(file, file_index, None, &*syms, &mut scratch);
     for &d in &file.decls {
         if let Decl::Fun(f) = file.decl(d) {
             if f.ret.is_none() && matches!(f.body, FunBody::Expr(_)) {
@@ -5349,9 +5686,10 @@ pub fn preinfer_module_returns(files: &[File], syms: &mut SymbolTable, diags: &m
     diags.set_file(saved);
 }
 
-pub fn check_file_at(
+fn check_file_at_impl(
     file: &File,
     file_index: u32,
+    source_files: Option<&[File]>,
     syms: &mut SymbolTable,
     diags: &mut DiagSink,
 ) -> TypeInfo {
@@ -5369,7 +5707,7 @@ pub fn check_file_at(
         }
     }
 
-    let mut c = make_checker(file, file_index, &*syms, diags);
+    let mut c = make_checker(file, file_index, source_files, &*syms, diags);
     // Top-level functions that erase to the same JVM signature collide in the facade class.
     let top_funs: Vec<&FunDecl> = file
         .decls
@@ -6148,6 +6486,37 @@ pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> 
     check_file_at(file, diags.current_file(), syms, diags)
 }
 
+pub fn check_file_at(
+    file: &File,
+    file_index: u32,
+    syms: &mut SymbolTable,
+    diags: &mut DiagSink,
+) -> TypeInfo {
+    check_file_at_impl(file, file_index, None, syms, diags)
+}
+
+pub fn check_file_in_source_set(
+    files: &[File],
+    file_index: u32,
+    syms: &mut SymbolTable,
+    diags: &mut DiagSink,
+) -> TypeInfo {
+    let file = &files[file_index as usize];
+    check_file_at_impl(file, file_index, Some(files), syms, diags)
+}
+
+struct DiagnosticFunction<'a> {
+    name: &'a str,
+    params: &'a [Ty],
+    param_names: &'a [String],
+    param_defaults: &'a [bool],
+    required: usize,
+    vararg: bool,
+    context_count: usize,
+    ret: Ty,
+    source_display: Option<String>,
+}
+
 struct Checker<'a> {
     file: &'a File,
     syms: &'a SymbolTable,
@@ -6155,6 +6524,9 @@ struct Checker<'a> {
     /// so a user function/type shadows a library one of the same name. Borrows the same `syms`.
     module: crate::module_symbols::ModuleSymbols<'a>,
     file_index: u32,
+    /// Borrowed source module for lazily rendering diagnostics from declaration ASTs. `None` for
+    /// single-file checker callers; never retained in semantic signatures or the lowering handoff.
+    source_files: Option<&'a [File]>,
     diags: &'a mut DiagSink,
     expr_types: Vec<Ty>,
     scopes: Vec<HashMap<String, Local>>,
@@ -6202,7 +6574,7 @@ struct Checker<'a> {
     /// Stack of frames for local-function scopes; each frame maps name → (StmtId, Signature).
     /// Pushed when entering a function, popped on exit; each `Stmt::LocalFun` registers into the
     /// innermost frame so that sibling local-function calls resolve correctly.
-    local_funs: Vec<HashMap<String, (StmtId, Signature)>>,
+    local_funs: Vec<HashMap<String, Vec<(StmtId, Signature)>>>,
     /// Accumulated output maps (moved into TypeInfo at the end of `check_file`).
     expr_lowers: HashMap<ExprId, ExprLowering>,
     inferred_fun_rets: HashMap<(u32, u32), Ty>,
@@ -7175,6 +7547,50 @@ impl<'a> Checker<'a> {
             })),
         );
     }
+
+    fn module_source_display(
+        &self,
+        selected: &crate::libraries::FunctionInfo,
+        resolved_ret: Ty,
+    ) -> Option<String> {
+        let (file_index, decl) = selected.source_key?;
+        let file = if file_index == self.file_index {
+            self.file
+        } else {
+            self.source_files?.get(file_index as usize)?
+        };
+        let Decl::Fun(function) = file.decl(DeclId(decl)) else {
+            return None;
+        };
+        Some(source_function_display(file, function, resolved_ret))
+    }
+
+    fn member_source_display(
+        &self,
+        internal: TypeName,
+        name: &str,
+        resolved_ret: Ty,
+    ) -> Option<String> {
+        let files = self
+            .source_files
+            .unwrap_or_else(|| std::slice::from_ref(self.file));
+        files.iter().find_map(|file| {
+            file.decls.iter().find_map(|&decl| {
+                let Decl::Class(class) = file.decl(decl) else {
+                    return None;
+                };
+                if class_internal(file, &class.name) != internal.render() {
+                    return None;
+                }
+                class
+                    .methods
+                    .iter()
+                    .find(|method| method.name == name)
+                    .map(|method| source_function_display(file, method, resolved_ret))
+            })
+        })
+    }
+
     /// Select the Kotlin invoke-operator convention for `receiver(args)`. One entry point covers both
     /// a function-value receiver (`Ty::Fun`) and a non-function receiver with a member `operator fun
     /// invoke`, recording a single [`ExprLowering::Invoke`] and returning the call's result type.
@@ -7356,10 +7772,18 @@ impl<'a> Checker<'a> {
         self.local_funs.pop();
     }
     fn lookup_local_fun(&self, name: &str) -> Option<(StmtId, Signature)> {
+        self.local_funs.iter().rev().find_map(|functions| {
+            functions
+                .get(name)
+                .and_then(|entries| entries.last())
+                .cloned()
+        })
+    }
+    fn lookup_local_fun_overloads(&self, name: &str) -> Option<&[(StmtId, Signature)]> {
         self.local_funs
             .iter()
             .rev()
-            .find_map(|f| f.get(name).cloned())
+            .find_map(|functions| functions.get(name).map(Vec::as_slice))
     }
     fn lexical_value_declares(&self, name: &str) -> bool {
         self.lookup(name).is_some() || self.lookup_local_fun(name).is_some()
@@ -7371,7 +7795,10 @@ impl<'a> Checker<'a> {
     }
     fn register_local_fun(&mut self, name: &str, stmt_id: StmtId, sig: Signature) {
         if let Some(frame) = self.local_funs.last_mut() {
-            frame.insert(name.to_string(), (stmt_id, sig));
+            frame
+                .entry(name.to_string())
+                .or_default()
+                .push((stmt_id, sig));
         }
     }
 
@@ -8709,6 +9136,136 @@ impl<'a> Checker<'a> {
         Some(c.single_method()?.params.clone())
     }
 
+    fn report_function_arity(&mut self, span: Span, function: DiagnosticFunction<'_>, got: usize) {
+        let DiagnosticFunction {
+            name,
+            params,
+            param_names,
+            param_defaults,
+            required,
+            vararg,
+            context_count,
+            ret,
+            source_display,
+        } = function;
+        let context_count = context_count.min(params.len());
+        let value_count = params.len() - context_count;
+        let required_end = params.len().saturating_sub(usize::from(vararg));
+        let names_complete = param_names.len() == params.len();
+        if got < value_count {
+            let missing = (context_count + got..required_end).find(|&index| {
+                if param_defaults.is_empty() {
+                    index < required
+                } else {
+                    !param_defaults.get(index).copied().unwrap_or(false)
+                }
+            });
+            if let Some(parameter) =
+                missing.and_then(|index| names_complete.then(|| &param_names[index]))
+            {
+                self.diags.error(
+                    span,
+                    format!("no value passed for parameter '{parameter}'."),
+                );
+                return;
+            }
+        }
+        if !vararg && got > value_count {
+            if let Some(display) = source_display.as_deref() {
+                self.diags
+                    .error(span, format!("too many arguments for '{display}'."));
+                return;
+            }
+        }
+        if !vararg && got > value_count && names_complete {
+            let render_params = |start: usize, end: usize| {
+                param_names[start..end]
+                    .iter()
+                    .zip(&params[start..end])
+                    .enumerate()
+                    .map(|(offset, (parameter, ty))| {
+                        let index = start + offset;
+                        let default = if param_defaults.get(index).copied().unwrap_or(false) {
+                            " = ..."
+                        } else {
+                            ""
+                        };
+                        let vararg = if vararg && index + 1 == params.len() {
+                            "vararg "
+                        } else {
+                            ""
+                        };
+                        format!("{vararg}{parameter}: {}{default}", ty.name())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let context = if context_count == 0 {
+                String::new()
+            } else {
+                format!("context({}) ", render_params(0, context_count))
+            };
+            let values = render_params(context_count, params.len());
+            self.diags.error(
+                span,
+                format!(
+                    "too many arguments for '{context}fun {name}({values}): {}'.",
+                    ret.name()
+                ),
+            );
+            return;
+        }
+        self.diags.error(
+            span,
+            format!("function '{name}' expects {value_count} args, got {got}"),
+        );
+    }
+
+    fn report_constructor_arity(
+        &mut self,
+        span: Span,
+        class_name: &str,
+        params: &[Ty],
+        param_names: &[(String, bool)],
+        got: usize,
+    ) {
+        if got < params.len() {
+            if let Some((parameter, _)) = param_names
+                .get(got..)
+                .and_then(|remaining| remaining.iter().find(|(_, has_default)| !*has_default))
+            {
+                self.diags.error(
+                    span,
+                    format!("no value passed for parameter '{parameter}'."),
+                );
+                return;
+            }
+        }
+        if got > params.len() && param_names.len() == params.len() {
+            let params = param_names
+                .iter()
+                .zip(params)
+                .map(|((parameter, has_default), ty)| {
+                    let default = if *has_default { " = ..." } else { "" };
+                    format!("{parameter}: {}{default}", ty.name())
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.diags.error(
+                span,
+                format!("too many arguments for 'constructor({params}): {class_name}'."),
+            );
+            return;
+        }
+        self.diags.error(
+            span,
+            format!(
+                "constructor '{class_name}' expects {} args, got {got}",
+                params.len()
+            ),
+        );
+    }
+
     /// Check call arguments against a parameter list. For a `vararg`, the fixed parameters match
     /// positionally and every trailing argument matches the vararg array's ELEMENT type (`f(vararg s:
     /// T)` accepts `f(a, b)` with `a, b: T`); a single array argument is also accepted (a spread). For a
@@ -8914,21 +9471,36 @@ impl<'a> Checker<'a> {
             return;
         }
         if expected != actual {
-            // Match kotlinc 2.4.0's phrasing. A return position (an expression body or a getter body)
-            // reads as "return type mismatch: expected 'T', actual 'U'."; every other context keeps the
-            // general inferred-vs-expected wording.
-            let msg = if matches!(ctx, "function body" | "getter body" | "local function body") {
-                format!(
-                    "return type mismatch: expected '{}', actual '{}'.",
-                    expected.name(),
-                    actual.name()
-                )
-            } else {
-                format!(
-                    "type mismatch: inferred type is {} but {} was expected",
-                    actual.name(),
-                    expected.name()
-                )
+            // Match kotlinc 2.4.0's context-specific phrasing. Keep this at the assignability boundary:
+            // callers still know whether a value is an initializer, argument, assignment, condition,
+            // or return, while the LSP and CLI can forward the same compiler diagnostic unchanged.
+            let expected = expected.name();
+            let actual = actual.name();
+            let msg = match ctx {
+                "function body" | "getter body" | "local function body" | "return" => {
+                    format!("return type mismatch: expected '{expected}', actual '{actual}'.")
+                }
+                "initializer" | "property initializer" | "default argument" => {
+                    format!("initializer type mismatch: expected '{expected}', actual '{actual}'.")
+                }
+                "assignment" => {
+                    format!(
+                        "assignment type mismatch: actual type is '{actual}', but '{expected}' was expected."
+                    )
+                }
+                argument if argument.ends_with("argument") => {
+                    format!(
+                        "argument type mismatch: actual type is '{actual}', but '{expected}' was expected."
+                    )
+                }
+                condition if condition.ends_with("condition") => {
+                    format!(
+                        "condition type mismatch: inferred type is '{actual}' but '{expected}' was expected."
+                    )
+                }
+                _ => {
+                    format!("type mismatch: inferred type is {actual} but {expected} was expected")
+                }
             };
             self.diags.error(span, msg);
         }
@@ -12702,10 +13274,8 @@ impl<'a> Checker<'a> {
                 return ty;
             }
         }
-        self.diags.error(
-            span,
-            format!("unresolved member '{name}' on '{}'", rt.name()),
-        );
+        self.diags
+            .error(span, format!("unresolved reference '{name}'."));
         Ty::Error
     }
 
@@ -12950,11 +13520,25 @@ impl<'a> Checker<'a> {
         // `resolve_instance_member` at the call site (by argument fit); querying the federated members here
         // would arity-bind a Java member (`Iterable.forEach(Consumer)`) and reject the Kotlin lambda,
         // shadowing the extension the classpath selectors pick.
-        let members = pick_member_overloads(
-            crate::module_symbols::ModuleSymbols::new(self.syms).instance_members(rt, name),
-            arg_tys,
-            arg_names.is_some(),
-        );
+        let all_members =
+            crate::module_symbols::ModuleSymbols::new(self.syms).instance_members(rt, name);
+        let has_sibling_overloads = all_members.iter().enumerate().any(|(index, member)| {
+            all_members[index + 1..]
+                .iter()
+                .any(|other| member.owner == other.owner && member.params != other.params)
+        });
+        let no_applicable_sibling = has_sibling_overloads
+            && !all_members
+                .iter()
+                .any(|member| module_member_candidate_applicable(member, args, arg_tys, arg_names));
+        let members = pick_member_overloads(all_members, arg_tys, arg_names.is_some());
+        if has_sibling_overloads && no_applicable_sibling {
+            self.diags.error(
+                span,
+                "none of the following candidates is applicable:".to_string(),
+            );
+            return Some(Ty::Error);
+        }
         // The first Member overload is the most-derived override (for dispatch/return). For an
         // OMITTED-argument call, the default may be declared on a SUPERTYPE (an interface method's default
         // isn't redeclared on the override) — prefer an overload that records defaults so the omitted args
@@ -12976,11 +13560,29 @@ impl<'a> Checker<'a> {
         let params = fi.params.clone();
         let cs = &fi.call_sig;
         let mut mapped_slots: Option<Vec<Option<ExprId>>> = None;
+        if !cs.vararg && arg_tys.len() > params.len() {
+            let source_display =
+                self.member_source_display(fi.owner.unwrap_or(internal_name), name, fi.ret);
+            self.report_function_arity(
+                span,
+                DiagnosticFunction {
+                    name,
+                    params: &params,
+                    param_names: &cs.param_names,
+                    param_defaults: &cs.param_defaults,
+                    required: cs.required,
+                    vararg: cs.vararg,
+                    context_count: 0,
+                    ret: fi.ret,
+                    source_display,
+                },
+                arg_tys.len(),
+            );
         // Named or omitted arguments: map each argument onto its parameter position via the parameter
         // names (honouring `required`), then type-check against THAT parameter — a NAMED call may reorder
         // (`z.test(b = …, a = …)`), so a positional check would pair each argument with the wrong
         // parameter. Fires for any named call, and for an omitted-argument call to a method with defaults.
-        if cs.has_param_names()
+        } else if cs.has_param_names()
             && (arg_names.is_some()
                 || (arg_tys.len() != params.len() && cs.required < params.len()))
         {
@@ -12998,18 +13600,25 @@ impl<'a> Checker<'a> {
                     }
                     mapped_slots = Some(slots);
                 }
-                Err(msg) => self.diags.error(span, format!("call to '{name}': {msg}")),
+                Err(msg) => self.diags.error(span, msg),
             }
             // Fall through to the shared return-type logic below (generic `<R>` inference /
             // `inferred_member_ret`) rather than returning the erased `fi.callable.ret`.
         } else if params.len() != arg_tys.len() {
-            self.diags.error(
+            self.report_function_arity(
                 span,
-                format!(
-                    "method '{name}' expects {} args, got {}",
-                    params.len(),
-                    arg_tys.len()
-                ),
+                DiagnosticFunction {
+                    name,
+                    params: &params,
+                    param_names: &cs.param_names,
+                    param_defaults: &cs.param_defaults,
+                    required: cs.required,
+                    vararg: cs.vararg,
+                    context_count: 0,
+                    ret: fi.ret,
+                    source_display: None,
+                },
+                arg_tys.len(),
             );
         } else {
             // A `vararg` member (`fun f(vararg s: T)`) accepts trailing `T` args packed into the array
@@ -13065,6 +13674,9 @@ impl<'a> Checker<'a> {
                 Expr::Name(n) => {
                     self.module_declares(n)
                         || self.syms.classes.contains_key(n.as_str())
+                        || self
+                            .lookup_local_fun(n)
+                            .is_some_and(|(_, signature)| !signature.param_names.is_empty())
                         // A CLASSPATH top-level function whose `@Metadata` records parameter names
                         // (`foo(b = …, a = …)` against a function from a jar/dependency module). Module
                         // top-level functions are covered by `module_declares`; this queries the federated
@@ -14393,9 +15005,7 @@ impl<'a> Checker<'a> {
                                         }
                                     }
                                 }
-                                Err(msg) => {
-                                    self.diags.error(span, format!("call to '{name}': {msg}"))
-                                }
+                                Err(msg) => self.diags.error(span, msg),
                             }
                         } else if logical.len() != arg_tys.len() {
                             self.diags.error(
@@ -14573,9 +15183,18 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
+                let has_inapplicable_candidate = self
+                    .resolver()
+                    .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
+                    .map(crate::symbol_resolver::Symbol::overloads)
+                    .is_some_and(|overloads| !overloads.is_empty());
                 self.diags.error(
                     span,
-                    format!("unresolved method '{name}' on '{}'", rt.name()),
+                    if has_inapplicable_candidate {
+                        "none of the following candidates is applicable:".to_string()
+                    } else {
+                        format!("unresolved reference '{name}'.")
+                    },
                 );
                 Ty::Error
             }
@@ -14607,7 +15226,50 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // Local function call — resolved before top-level funs and constructors.
-                if let Some((stmt_id, sig)) = self.lookup_local_fun(&fname) {
+                let local_overload_count = self
+                    .lookup_local_fun_overloads(&fname)
+                    .map_or(0, <[_]>::len);
+                let local_function = match local_overload_count {
+                    0 => None,
+                    1 => self
+                        .lookup_local_fun_overloads(&fname)
+                        .and_then(|overloads| overloads.last())
+                        .cloned(),
+                    _ => {
+                        let arg_tys = self.arg_tys(args);
+                        let arg_names = arg_names.as_deref();
+                        let applicable = self
+                            .lookup_local_fun_overloads(&fname)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|candidate| {
+                                local_function_candidate_score(
+                                    &candidate.1,
+                                    args,
+                                    &arg_tys,
+                                    arg_names,
+                                )
+                                .map(|score| (score, candidate))
+                            })
+                            .collect::<Vec<_>>();
+                        let best = applicable.iter().map(|(score, _)| *score).max();
+                        let mut applicable = applicable
+                            .into_iter()
+                            .filter(|(score, _)| Some(*score) == best)
+                            .map(|(_, candidate)| candidate);
+                        match (applicable.next(), applicable.next()) {
+                            (Some(selected), None) => Some(selected.clone()),
+                            _ => {
+                                self.diags.error(
+                                    span,
+                                    "none of the following candidates is applicable:".to_string(),
+                                );
+                                return Ty::Error;
+                            }
+                        }
+                    }
+                };
+                if let Some((stmt_id, sig)) = local_function {
                     // Context parameters on a local function (`context(a: A) fun f() = a`): the leading
                     // `context_count` params are supplied implicitly from the enclosing context. When
                     // the explicit args fill the remaining value params and every context param is
@@ -14617,24 +15279,137 @@ impl<'a> Checker<'a> {
                         Stmt::LocalFun(f) => f.context_count,
                         _ => 0,
                     };
-                    if ctx_count > 0
-                        && ctx_count <= sig.params.len()
-                        && args.len() == sig.params.len() - ctx_count
-                    {
+                    if ctx_count > 0 && ctx_count <= sig.params.len() {
                         let ctx_types = &sig.params[..ctx_count];
                         if let Some(sources) = self.resolve_context_args(ctx_types) {
-                            for (i, a) in args.iter().enumerate() {
-                                let p = sig.params[ctx_count + i];
-                                let aty = match p {
-                                    Ty::Fun(fs)
-                                        if matches!(self.file.expr(*a), Expr::Lambda { .. }) =>
-                                    {
-                                        let pts = fs.params.clone();
-                                        self.check_lambda_with_types(*a, &pts)
+                            let value_count = sig.params.len() - ctx_count;
+                            let required_end =
+                                sig.params.len().saturating_sub(usize::from(sig.vararg));
+                            let missing_required = arg_names.is_none()
+                                && args.len() < value_count
+                                && (ctx_count + args.len()..required_end).any(|i| {
+                                    sig.param_defaults
+                                        .get(i)
+                                        .map_or(i < sig.required, |has_default| !*has_default)
+                                });
+                            if (!sig.vararg && args.len() > value_count) || missing_required {
+                                let arg_tys = self.arg_tys(args);
+                                let source_display = match self.file.stmt(stmt_id) {
+                                    Stmt::LocalFun(function) => {
+                                        Some(source_function_display(self.file, function, sig.ret))
                                     }
-                                    _ => self.expr(*a),
+                                    _ => None,
                                 };
-                                self.expect_assignable(p, aty, self.span(*a), "argument");
+                                self.report_function_arity(
+                                    span,
+                                    DiagnosticFunction {
+                                        name: &fname,
+                                        params: &sig.params,
+                                        param_names: &sig.param_names,
+                                        param_defaults: &sig.param_defaults,
+                                        required: sig.required,
+                                        vararg: sig.vararg,
+                                        context_count: ctx_count,
+                                        ret: sig.ret,
+                                        source_display,
+                                    },
+                                    arg_tys.len(),
+                                );
+                                return sig.ret;
+                            }
+                            let mapped_slots = if !sig.vararg {
+                                if let Some(names) = arg_names.as_deref() {
+                                    match map_call_args(
+                                        args,
+                                        Some(names),
+                                        &sig.param_names[ctx_count..],
+                                        sig.required.saturating_sub(ctx_count),
+                                        sig.param_defaults.get(ctx_count..).unwrap_or_default(),
+                                    ) {
+                                        Ok(slots) => Some(slots),
+                                        Err(message) => {
+                                            self.diags.error(span, message);
+                                            return sig.ret;
+                                        }
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            let unsafe_omitted_default = matches!(self.file.stmt(stmt_id), Stmt::LocalFun(function) if {
+                                let parameter_names: std::collections::HashSet<&str> = function
+                                    .params
+                                    .iter()
+                                    .map(|parameter| parameter.name.as_str())
+                                    .collect();
+                                function.params[ctx_count..].iter().enumerate().any(
+                                    |(value_index, parameter)| {
+                                        let omitted = mapped_slots.as_ref().map_or(
+                                            value_index >= args.len(),
+                                            |slots| {
+                                                slots
+                                                    .get(value_index)
+                                                    .is_none_or(Option::is_none)
+                                            },
+                                        );
+                                        omitted
+                                            && parameter.default.is_some_and(|default| {
+                                                self.file.expr_uses_any_name(
+                                                    default,
+                                                    &parameter_names,
+                                                )
+                                            })
+                                    },
+                                )
+                            });
+                            if unsafe_omitted_default {
+                                self.diags.error(
+                                    span,
+                                    "krusty: a local function default argument that references another parameter is not supported",
+                                );
+                                return sig.ret;
+                            }
+                            if let Some(slots) = &mapped_slots {
+                                for (i, argument) in slots.iter().enumerate() {
+                                    if let Some(argument) = argument {
+                                        let p = sig.params[ctx_count + i];
+                                        let aty = self.expr(*argument);
+                                        self.expect_assignable(
+                                            p,
+                                            aty,
+                                            self.span(*argument),
+                                            "argument",
+                                        );
+                                    }
+                                }
+                            } else {
+                                for (i, a) in args.iter().enumerate() {
+                                    let p = if sig.vararg && i >= value_count.saturating_sub(1) {
+                                        sig.params[sig.params.len() - 1]
+                                            .array_elem()
+                                            .unwrap_or(Ty::Error)
+                                    } else {
+                                        sig.params[ctx_count + i]
+                                    };
+                                    let aty = match p {
+                                        Ty::Fun(fs)
+                                            if matches!(
+                                                self.file.expr(*a),
+                                                Expr::Lambda { .. }
+                                            ) =>
+                                        {
+                                            let pts = fs.params.clone();
+                                            self.check_lambda_with_types(*a, &pts)
+                                        }
+                                        _ => self.expr(*a),
+                                    };
+                                    self.expect_assignable(p, aty, self.span(*a), "argument");
+                                }
+                            }
+                            if let Some(slots) = mapped_slots {
+                                self.resolved_call_arg_slots.insert(call, slots);
                             }
                             self.mark_local_function_call(
                                 call,
@@ -14644,6 +15419,70 @@ impl<'a> Checker<'a> {
                                 sources,
                             );
                             return sig.ret;
+                        }
+                    }
+                    if ctx_count == 0 && !sig.vararg {
+                        if let Some(names) = arg_names.as_deref() {
+                            let slots = match map_call_args(
+                                args,
+                                Some(names),
+                                &sig.param_names,
+                                sig.required,
+                                &sig.param_defaults,
+                            ) {
+                                Ok(slots) => slots,
+                                Err(message) => {
+                                    self.diags.error(span, message);
+                                    return sig.ret;
+                                }
+                            };
+                            let unsafe_omitted_default = matches!(self.file.stmt(stmt_id), Stmt::LocalFun(function) if {
+                                let parameter_names: std::collections::HashSet<&str> = function
+                                    .params
+                                    .iter()
+                                    .map(|parameter| parameter.name.as_str())
+                                    .collect();
+                                function.params.iter().enumerate().any(
+                                    |(index, parameter)| {
+                                        slots.get(index).is_none_or(Option::is_none)
+                                            && parameter.default.is_some_and(|default| {
+                                                self.file.expr_uses_any_name(
+                                                    default,
+                                                    &parameter_names,
+                                                )
+                                            })
+                                    },
+                                )
+                            });
+                            if unsafe_omitted_default {
+                                self.diags.error(
+                                    span,
+                                    "krusty: a local function default argument that references another parameter is not supported",
+                                );
+                                return sig.ret;
+                            }
+                            for (index, argument) in slots.iter().enumerate() {
+                                if let Some(argument) = argument {
+                                    let parameter = sig.params[index];
+                                    let actual = self.expr(*argument);
+                                    self.expect_assignable(
+                                        parameter,
+                                        actual,
+                                        self.span(*argument),
+                                        "argument",
+                                    );
+                                }
+                            }
+                            self.resolved_call_arg_slots.insert(call, slots);
+                            let ret = sig.ret;
+                            self.mark_local_function_call(
+                                call,
+                                stmt_id,
+                                sig,
+                                args.len(),
+                                Vec::new(),
+                            );
+                            return ret;
                         }
                     }
                     // A local function may OMIT trailing arguments whose parameters have defaults
@@ -14670,13 +15509,26 @@ impl<'a> Checker<'a> {
                         || (args.len() < sig.params.len() && !omitted_all_default)
                     {
                         let arg_tys = self.arg_tys(args); // still record types for lowering
-                        self.diags.error(
+                        let source_display = match self.file.stmt(stmt_id) {
+                            Stmt::LocalFun(function) => {
+                                Some(source_function_display(self.file, function, sig.ret))
+                            }
+                            _ => None,
+                        };
+                        self.report_function_arity(
                             span,
-                            format!(
-                                "local function '{fname}' expects {} args, got {}",
-                                sig.params.len(),
-                                arg_tys.len()
-                            ),
+                            DiagnosticFunction {
+                                name: &fname,
+                                params: &sig.params,
+                                param_names: &sig.param_names,
+                                param_defaults: &sig.param_defaults,
+                                required: sig.required,
+                                vararg: sig.vararg,
+                                context_count: ctx_count,
+                                ret: sig.ret,
+                                source_display,
+                            },
+                            arg_tys.len(),
                         );
                     } else {
                         // Type each PROVIDED argument against its declared parameter (omitted trailing
@@ -15221,10 +16073,7 @@ impl<'a> Checker<'a> {
                                             }
                                         }
                                     }
-                                    Err(msg) => {
-                                        self.diags
-                                            .error(span, format!("constructor '{fname}': {msg}"));
-                                    }
+                                    Err(msg) => self.diags.error(span, msg),
                                 }
                                 return self.ctor_result_name(call, cls.internal_name());
                             }
@@ -15250,26 +16099,39 @@ impl<'a> Checker<'a> {
                                             .get(i)
                                             .is_some_and(|(_, has_default)| *has_default))
                             });
+                        let primary_applicable = ok_arity
+                            && ctor_params.iter().zip(&arg_tys).all(|(parameter, actual)| {
+                                arg_assignable_simple(*parameter, *actual)
+                            });
+                        let secondary_match = cls.secondary_ctors.iter().find(|parameters| {
+                            parameters.len() == got && self.ctor_args_match(parameters, &arg_tys)
+                        });
+                        if !primary_applicable
+                            && secondary_match.is_none()
+                            && !cls.secondary_ctors.is_empty()
+                        {
+                            self.diags.error(
+                                span,
+                                "none of the following candidates is applicable:".to_string(),
+                            );
+                            return self.ctor_result_name(call, cls.internal_name());
+                        }
                         // The arguments don't match the primary — try a secondary constructor. Prefer one
                         // whose parameter TYPES accept the arguments (`A(123)` is the `Int` secondary, not
                         // the same-arity `String` one); fall back to the first same-arity ctor.
                         if !ok_arity {
-                            let chosen = cls
-                                .secondary_ctors
-                                .iter()
-                                .find(|sp| sp.len() == got && self.ctor_args_match(sp, &arg_tys))
+                            let chosen = secondary_match
                                 .or_else(|| cls.secondary_ctors.iter().find(|sp| sp.len() == got));
                             if let Some(sparams) = chosen {
                                 self.expect_call_args(sparams, false, args, &arg_tys);
                                 return self.ctor_result_name(call, cls.internal_name());
                             }
-                            self.diags.error(
+                            self.report_constructor_arity(
                                 span,
-                                format!(
-                                    "constructor '{fname}' expects {} args, got {}",
-                                    ctor_params.len(),
-                                    got
-                                ),
+                                &fname,
+                                &ctor_params,
+                                &cls.ctor_param_names,
+                                got,
                             );
                         } else {
                             // Primary arity matches but the argument TYPES may not (a same-arity
@@ -15278,11 +16140,7 @@ impl<'a> Checker<'a> {
                             if got == ctor_params.len()
                                 && !self.ctor_args_match(&ctor_params, &arg_tys)
                             {
-                                if let Some(sparams) = cls
-                                    .secondary_ctors
-                                    .iter()
-                                    .find(|sp| self.ctor_args_match(sp, &arg_tys))
-                                {
+                                if let Some(sparams) = secondary_match {
                                     self.expect_call_args(sparams, false, args, &arg_tys);
                                     return self.ctor_result_name(call, cls.internal_name());
                                 }
@@ -15312,9 +16170,7 @@ impl<'a> Checker<'a> {
                                     return self.ctor_result_name(call, internal);
                                 }
                                 Ok(None) => {}
-                                Err(msg) => self
-                                    .diags
-                                    .error(span, format!("constructor '{fname}': {msg}")),
+                                Err(msg) => self.diags.error(span, msg),
                             }
                         }
                     }
@@ -15464,13 +16320,41 @@ impl<'a> Checker<'a> {
                         let params = &fi.callable.params;
                         let ctx_count = fi.context_count;
                         let ret_ty = self.module_top_level_return(call, &fi, &arg_tys);
-                        for (i, a) in arg_tys.iter().enumerate() {
-                            self.expect_assignable(
-                                params[ctx_count + i],
-                                *a,
-                                self.span(args[i]),
-                                "argument",
-                            );
+                        let mapped_slots = if let Some(names) = arg_names.as_deref() {
+                            let value_sig = call_sig_without_context(&fi.call_sig, ctx_count);
+                            match map_call_sig_args(args, Some(names), &value_sig) {
+                                Ok(slots) => Some(slots),
+                                Err(message) => {
+                                    self.diags.error(span, message);
+                                    return ret_ty;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some(slots) = &mapped_slots {
+                            for (i, argument) in slots.iter().enumerate() {
+                                if let Some(argument) = argument {
+                                    self.expect_assignable(
+                                        params[ctx_count + i],
+                                        self.expr_types[argument.0 as usize],
+                                        self.span(*argument),
+                                        "argument",
+                                    );
+                                }
+                            }
+                        } else {
+                            for (i, a) in arg_tys.iter().enumerate() {
+                                self.expect_assignable(
+                                    params[ctx_count + i],
+                                    *a,
+                                    self.span(args[i]),
+                                    "argument",
+                                );
+                            }
+                        }
+                        if let Some(slots) = mapped_slots {
+                            self.resolved_call_arg_slots.insert(call, slots);
                         }
                         self.mark_module_top_level_call(call, &fname, &fi, ret_ty, sources);
                         return ret_ty;
@@ -15482,10 +16366,9 @@ impl<'a> Checker<'a> {
                     let ret_ty = self.module_top_level_return(call, &fi, &arg_tys);
                     // Context parameters (`context(a: A) fun f()`): the leading `context_count`
                     // parameters are supplied IMPLICITLY from the enclosing context, not positionally.
-                    // When the explicit arguments exactly fill the remaining (value) parameters and every
-                    // context parameter is satisfied by an in-scope source (an implicit receiver or an
-                    // enclosing context parameter/local), resolve them and record the sources for the
-                    // lowerer. Otherwise fall through (a missing context → the normal arity error → skip).
+                    // Resolve them before validating EXPLICIT value-argument arity: counting a context
+                    // slot as a source argument would name the context parameter as missing, or consume
+                    // an excess explicit argument as though it were that context value.
                     let ctx_count = fi.context_count;
                     // A member of the enclosing implicit receiver with the same name takes precedence
                     // over a context-parameter function (kotlinc resolution order). krusty resolves the
@@ -15493,24 +16376,82 @@ impl<'a> Checker<'a> {
                     // mis-bind the context function here, decline the context resolution (the call then
                     // hits the normal arity path and the file skips — sound, never a wrong binding).
                     let value_count = params.len().saturating_sub(ctx_count);
-                    let context_value_args_ok = arg_tys.len() <= value_count
-                        && (arg_tys.len()..value_count)
-                            .all(|i| cs.param_has_default(ctx_count + i));
-                    if ctx_count > 0
-                        && !shadowed_by_member
-                        && ctx_count <= params.len()
-                        && context_value_args_ok
-                    {
+                    if ctx_count > 0 && !shadowed_by_member && ctx_count <= params.len() {
                         let ctx_types = &params[..ctx_count];
                         if let Some(sources) = self.resolve_context_args(ctx_types) {
-                            // Type-check the explicit (value) arguments against the trailing parameters.
-                            for (i, a) in arg_tys.iter().enumerate() {
-                                self.expect_assignable(
-                                    params[ctx_count + i],
-                                    *a,
-                                    self.span(args[i]),
-                                    "argument",
+                            let required_end = params.len().saturating_sub(usize::from(cs.vararg));
+                            let missing_required = arg_names.is_none()
+                                && arg_tys.len() < value_count
+                                && (ctx_count + arg_tys.len()..required_end)
+                                    .any(|i| !cs.param_has_default(i));
+                            if (!cs.vararg && arg_tys.len() > value_count) || missing_required {
+                                let source_display = self.module_source_display(&fi, ret_ty);
+                                self.report_function_arity(
+                                    span,
+                                    DiagnosticFunction {
+                                        name: &fname,
+                                        params,
+                                        param_names: &cs.param_names,
+                                        param_defaults: &cs.param_defaults,
+                                        required: cs.required,
+                                        vararg: cs.vararg,
+                                        context_count: ctx_count,
+                                        ret: ret_ty,
+                                        source_display,
+                                    },
+                                    arg_tys.len(),
                                 );
+                                return ret_ty;
+                            }
+                            // Type-check the explicit (value) arguments against the trailing parameters.
+                            let mapped_slots = if !cs.vararg {
+                                if let Some(names) = arg_names.as_deref() {
+                                    let value_sig = call_sig_without_context(cs, ctx_count);
+                                    match map_call_sig_args(args, Some(names), &value_sig) {
+                                        Ok(slots) => Some(slots),
+                                        Err(message) => {
+                                            self.diags.error(span, message);
+                                            return ret_ty;
+                                        }
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            if let Some(slots) = &mapped_slots {
+                                for (i, argument) in slots.iter().enumerate() {
+                                    if let Some(argument) = argument {
+                                        self.expect_assignable(
+                                            params[ctx_count + i],
+                                            self.expr_types[argument.0 as usize],
+                                            self.span(*argument),
+                                            "argument",
+                                        );
+                                    }
+                                }
+                            } else {
+                                for (i, a) in arg_tys.iter().enumerate() {
+                                    let param = if cs.vararg && i >= value_count.saturating_sub(1) {
+                                        params[params.len() - 1].array_elem().unwrap_or(Ty::Error)
+                                    } else {
+                                        params[ctx_count + i]
+                                    };
+                                    self.expect_assignable(
+                                        param,
+                                        *a,
+                                        self.span(args[i]),
+                                        if cs.vararg {
+                                            "vararg argument"
+                                        } else {
+                                            "argument"
+                                        },
+                                    );
+                                }
+                            }
+                            if let Some(slots) = mapped_slots {
+                                self.resolved_call_arg_slots.insert(call, slots);
                             }
                             self.mark_module_top_level_call(call, &fname, &fi, ret_ty, sources);
                             return ret_ty;
@@ -15518,24 +16459,29 @@ impl<'a> Checker<'a> {
                     }
                     if cs.vararg {
                         // The `vararg` is always the LAST parameter (`n_fixed` = its index). The minimum
-                        // positional argument count is the number of LEADING non-default fixed parameters
-                        // — a defaulted fixed parameter (or the vararg) may be omitted. A caller supplies
-                        // fixed parameters first, then vararg elements.
+                        // positional argument count is determined per parameter: a required fixed
+                        // parameter may follow a defaulted one. A caller supplies fixed parameters first,
+                        // then vararg elements.
                         let n_fixed = params.len() - 1;
-                        let min_args = (0..n_fixed)
-                            .take_while(|&i| !cs.param_has_default(i))
-                            .count();
                         // Any omitted fixed parameter must be defaulted (a middle non-default hole can't be
                         // filled positionally by later arguments).
                         let omitted_ok = arg_tys.len() >= n_fixed
                             || (arg_tys.len()..n_fixed).all(|i| cs.param_has_default(i));
-                        if arg_tys.len() < min_args || !omitted_ok {
-                            self.diags.error(
+                        if !omitted_ok {
+                            self.report_function_arity(
                                 span,
-                                format!(
-                                    "function '{fname}' expects at least {min_args} args, got {}",
-                                    arg_tys.len()
-                                ),
+                                DiagnosticFunction {
+                                    name: &fname,
+                                    params,
+                                    param_names: &cs.param_names,
+                                    param_defaults: &cs.param_defaults,
+                                    required: cs.required,
+                                    vararg: true,
+                                    context_count: 0,
+                                    ret: ret_ty,
+                                    source_display: None,
+                                },
+                                arg_tys.len(),
                             );
                         } else {
                             let provided_fixed = arg_tys.len().min(n_fixed);
@@ -15572,7 +16518,7 @@ impl<'a> Checker<'a> {
                                     }
                                 }
                             }
-                            Err(msg) => self.diags.error(span, format!("call to '{fname}': {msg}")),
+                            Err(msg) => self.diags.error(span, msg),
                         }
                     } else if self.file.call_has_trailing_lambda.contains(&call.0)
                         && !args.is_empty()
@@ -15603,20 +16549,26 @@ impl<'a> Checker<'a> {
                                     }
                                 }
                             }
-                            Err(msg) => self.diags.error(span, format!("call to '{fname}': {msg}")),
+                            Err(msg) => self.diags.error(span, msg),
                         }
-                    } else if arg_tys.len() < cs.required || arg_tys.len() > params.len() {
-                        let want = if cs.required == params.len() {
-                            format!("{}", params.len())
-                        } else {
-                            format!("{} to {}", cs.required, params.len())
-                        };
-                        self.diags.error(
+                    } else if arg_tys.len() < cs.required.saturating_sub(ctx_count)
+                        || arg_tys.len() > value_count
+                    {
+                        let source_display = self.module_source_display(&fi, ret_ty);
+                        self.report_function_arity(
                             span,
-                            format!(
-                                "function '{fname}' expects {want} args, got {}",
-                                arg_tys.len()
-                            ),
+                            DiagnosticFunction {
+                                name: &fname,
+                                params,
+                                param_names: &cs.param_names,
+                                param_defaults: &cs.param_defaults,
+                                required: cs.required,
+                                vararg: cs.vararg,
+                                context_count: ctx_count,
+                                ret: ret_ty,
+                                source_display,
+                            },
+                            arg_tys.len(),
                         );
                     } else {
                         for (i, a) in arg_tys.iter().enumerate() {
@@ -15931,8 +16883,18 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                self.diags
-                    .error(span, format!("unresolved function '{fname}'"));
+                let has_inapplicable_candidate = !self
+                    .module
+                    .top_level_overloads_in_scope(&fname, &self.fn_scope)
+                    .is_empty();
+                self.diags.error(
+                    span,
+                    if has_inapplicable_candidate {
+                        "none of the following candidates is applicable:".to_string()
+                    } else {
+                        format!("unresolved function '{fname}'")
+                    },
+                );
                 Ty::Error
             }
             _ => {
@@ -16453,10 +17415,8 @@ impl<'a> Checker<'a> {
                                 self.expect_assignable(pty, vt, span, "assignment");
                                 self.property_setters.insert(s, setter);
                             } else {
-                                self.diags.error(
-                                    span,
-                                    format!("unresolved member '{name}' on '{}'", rt.name()),
-                                );
+                                self.diags
+                                    .error(span, format!("unresolved reference '{name}'."));
                             }
                         }
                         _ => self.diags.error(
@@ -18874,11 +19834,11 @@ fun box(): String {
         ok("fun a(x: Int): Int = x\nfun b(): Int = a(1)");
         err_contains(
             "fun a(x: Int): Int = x\nfun b(): Int = a()",
-            "expects 1 args",
+            "no value passed for parameter 'x'.",
         );
         err_contains(
             "fun a(x: Int): Int = x\nfun b(): Int = a(\"s\")",
-            "type mismatch: inferred type is String but Int was expected",
+            "argument type mismatch: actual type is 'String', but 'Int' was expected.",
         );
     }
 
@@ -18900,9 +19860,12 @@ fun box(): String {
         ok("fun f(s: String): String = s.concat(\"y\")");
         err_contains(
             "fun f(s: String): String = s.substring(\"x\")",
-            "unresolved method",
+            "unresolved reference 'substring'.",
         );
-        err_contains("fun f(a: Int): Int = a.substring(1)", "unresolved method");
+        err_contains(
+            "fun f(a: Int): Int = a.substring(1)",
+            "unresolved reference 'substring'.",
+        );
     }
 
     #[test]
@@ -18920,11 +19883,11 @@ fun box(): String {
     fn reference_type_errors() {
         err_contains(
             "class Point(val x: Int)\nfun f(p: Point): Int = p.z",
-            "unresolved member 'z'",
+            "unresolved reference 'z'.",
         );
         err_contains(
             "class Point(val x: Int)\nfun f(): Point = Point()",
-            "expects 1 args",
+            "no value passed for parameter 'x'.",
         );
         err_contains(
             "fun f(p: Widget): Int = 0",
