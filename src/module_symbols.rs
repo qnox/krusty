@@ -476,6 +476,7 @@ mod tests {
             is_sealed: false,
             inner_of: None,
             static_methods: HashMap::new(),
+            companion_fun_names: HashSet::new(),
             static_props: HashMap::new(),
             lateinit_props: HashSet::new(),
             interfaces: crate::types::TypeNameList::new(),
