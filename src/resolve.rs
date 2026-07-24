@@ -6008,7 +6008,7 @@ fn check_file_at_impl(
                             if let (Some(r), Some(init)) = (&bp.ty, bp.init) {
                                 let declared = c.resolve_ty(r);
                                 let it = c.expr(init);
-                                let sp = c.span(init);
+                                let sp = c.value_operator_span(init);
                                 c.expect_assignable(declared, it, sp, "property initializer");
                             }
                             c.declare(&bp.name, ty, bp.is_var);
@@ -6168,7 +6168,12 @@ fn check_file_at_impl(
                         let it = c.expr(init);
                         if let Some(r) = &bp.ty {
                             let declared = c.resolve_ty(r);
-                            c.expect_assignable(declared, it, c.span(init), "property initializer");
+                            c.expect_assignable(
+                                declared,
+                                it,
+                                c.value_operator_span(init),
+                                "property initializer",
+                            );
                         }
                     }
                     // A delegated member property's delegate expression (`by Del()`) — type-check it so
@@ -6399,7 +6404,12 @@ fn check_file_at_impl(
                         .filter(|(t, _, _)| *t != Ty::Error)
                     {
                         if p.ty.is_some() {
-                            c.expect_assignable(declared, it, c.span(init), "property initializer");
+                            c.expect_assignable(
+                                declared,
+                                it,
+                                c.value_operator_span(init),
+                                "property initializer",
+                            );
                         }
                     }
                 }
@@ -6757,7 +6767,12 @@ impl<'a> Checker<'a> {
         } else {
             self.expr(default)
         };
-        self.expect_assignable(pty, dty, self.span(default), "default argument");
+        self.expect_assignable(
+            pty,
+            dty,
+            self.value_operator_span(default),
+            "default argument",
+        );
     }
 
     /// The arg-binding call-resolution layer over this checker's [`SymbolSource`]. Cheap to construct.
@@ -7444,6 +7459,60 @@ impl<'a> Checker<'a> {
     }
     fn span(&self, e: ExprId) -> Span {
         self.file.expr_spans[e.0 as usize]
+    }
+
+    fn value_operator_span(&self, value: ExprId) -> Span {
+        self.file
+            .value_operator_spans
+            .get(&value.0)
+            .copied()
+            .unwrap_or_else(|| self.span(value))
+    }
+
+    fn member_name_span(&self, member: ExprId, name: &str) -> Span {
+        if let Some(span) = self.file.exact_member_name_spans.get(&member.0) {
+            return *span;
+        }
+        let span = self.span(member);
+        Span::new(span.hi.saturating_sub(name.len() as u32), span.hi)
+    }
+
+    fn call_callee_name_span(&self, call: ExprId) -> Span {
+        let Expr::Call { callee, .. } = self.file.expr(call) else {
+            return self.span(call);
+        };
+        match self.file.expr(*callee) {
+            Expr::Member { name, .. } => self.member_name_span(*callee, name),
+            _ => self.span(*callee),
+        }
+    }
+
+    fn call_open_paren_span(&self, call: ExprId) -> Span {
+        if let Some(span) = self.file.empty_call_open_paren_spans.get(&call.0) {
+            return *span;
+        }
+        let Expr::Call { callee, .. } = self.file.expr(call) else {
+            return self.span(call);
+        };
+        let offset = self.span(*callee).hi;
+        Span::new(offset, offset.saturating_add(1))
+    }
+
+    fn call_argument_list_span(&self, call: ExprId, args: &[ExprId]) -> Span {
+        self.file
+            .call_arg_name_spans
+            .get(&call.0)
+            .and_then(|spans| spans.iter().flatten().next())
+            .copied()
+            .or_else(|| args.first().map(|argument| self.span(*argument)))
+            .unwrap_or_else(|| self.call_open_paren_span(call))
+    }
+
+    fn arity_diagnostic_span(&self, call: ExprId, args: &[ExprId], expected: usize) -> Span {
+        if args.len() > expected {
+            return self.span(args[expected]);
+        }
+        self.call_argument_list_span(call, args)
     }
 
     fn push_scope(&mut self) {
@@ -9153,7 +9222,12 @@ impl<'a> Checker<'a> {
         Some(c.single_method()?.params.clone())
     }
 
-    fn report_function_arity(&mut self, span: Span, function: DiagnosticFunction<'_>, got: usize) {
+    fn report_function_arity(
+        &mut self,
+        call: ExprId,
+        function: DiagnosticFunction<'_>,
+        args: &[ExprId],
+    ) {
         let DiagnosticFunction {
             name,
             params,
@@ -9167,6 +9241,8 @@ impl<'a> Checker<'a> {
         } = function;
         let context_count = context_count.min(params.len());
         let value_count = params.len() - context_count;
+        let got = args.len();
+        let span = self.arity_diagnostic_span(call, args, value_count);
         let required_end = params.len().saturating_sub(usize::from(vararg));
         let names_complete = param_names.len() == params.len();
         if got < value_count {
@@ -9240,12 +9316,14 @@ impl<'a> Checker<'a> {
 
     fn report_constructor_arity(
         &mut self,
-        span: Span,
+        call: ExprId,
         class_name: &str,
         params: &[Ty],
         param_names: &[(String, bool)],
-        got: usize,
+        args: &[ExprId],
     ) {
+        let got = args.len();
+        let span = self.arity_diagnostic_span(call, args, params.len());
         if got < params.len() {
             if let Some((parameter, _)) = param_names
                 .get(got..)
@@ -13291,8 +13369,9 @@ impl<'a> Checker<'a> {
                 return ty;
             }
         }
+        let diagnostic_span = mexpr.map_or(span, |member| self.member_name_span(member, name));
         self.diags
-            .error(span, format!("unresolved reference '{name}'."));
+            .error(diagnostic_span, format!("unresolved reference '{name}'."));
         Ty::Error
     }
 
@@ -13522,7 +13601,6 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &[ExprId],
         arg_tys: &[Ty],
-        span: Span,
     ) -> Option<Ty> {
         let Ty::Obj(internal_name, _) = rt else {
             return None;
@@ -13551,7 +13629,7 @@ impl<'a> Checker<'a> {
         let members = pick_member_overloads(all_members, arg_tys, arg_names.is_some());
         if has_sibling_overloads && no_applicable_sibling {
             self.diags.error(
-                span,
+                self.call_callee_name_span(call),
                 "none of the following candidates is applicable:".to_string(),
             );
             return Some(Ty::Error);
@@ -13581,7 +13659,7 @@ impl<'a> Checker<'a> {
             let source_display =
                 self.member_source_display(fi.owner.unwrap_or(internal_name), name, fi.ret);
             self.report_function_arity(
-                span,
+                call,
                 DiagnosticFunction {
                     name,
                     params: &params,
@@ -13593,7 +13671,7 @@ impl<'a> Checker<'a> {
                     ret: fi.ret,
                     source_display,
                 },
-                arg_tys.len(),
+                args,
             );
         // Named or omitted arguments: map each argument onto its parameter position via the parameter
         // names (honouring `required`), then type-check against THAT parameter — a NAMED call may reorder
@@ -13617,13 +13695,15 @@ impl<'a> Checker<'a> {
                     }
                     mapped_slots = Some(slots);
                 }
-                Err(msg) => self.diags.error(span, msg),
+                Err(msg) => self
+                    .diags
+                    .error(self.call_argument_list_span(call, args), msg),
             }
             // Fall through to the shared return-type logic below (generic `<R>` inference /
             // `inferred_member_ret`) rather than returning the erased `fi.callable.ret`.
         } else if params.len() != arg_tys.len() {
             self.report_function_arity(
-                span,
+                call,
                 DiagnosticFunction {
                     name,
                     params: &params,
@@ -13635,7 +13715,7 @@ impl<'a> Checker<'a> {
                     ret: fi.ret,
                     source_display: None,
                 },
-                arg_tys.len(),
+                args,
             );
         } else {
             // A `vararg` member (`fun f(vararg s: T)`) accepts trailing `T` args packed into the array
@@ -13944,9 +14024,10 @@ impl<'a> Checker<'a> {
                                             }
                                         }
                                     }
-                                    Err(msg) => self
-                                        .diags
-                                        .error(span, format!("constructor '{qname}': {msg}")),
+                                    Err(msg) => self.diags.error(
+                                        self.call_argument_list_span(call, args),
+                                        format!("constructor '{qname}': {msg}"),
+                                    ),
                                 }
                                 return self.ctor_result_name(call, cls.internal_name());
                             }
@@ -14036,8 +14117,10 @@ impl<'a> Checker<'a> {
                                 Ok(Some(_)) => return Ty::obj_name(internal),
                                 Ok(None) => {}
                                 Err(msg) => {
-                                    self.diags
-                                        .error(span, format!("constructor '{qualified}': {msg}"));
+                                    self.diags.error(
+                                        self.call_argument_list_span(call, args),
+                                        format!("constructor '{qualified}': {msg}"),
+                                    );
                                     return Ty::Error;
                                 }
                             }
@@ -14769,7 +14852,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                     if let Some(ret) =
-                        self.check_module_member_call(call, rt, &name, args, &arg_tys, span)
+                        self.check_module_member_call(call, rt, &name, args, &arg_tys)
                     {
                         return ret;
                     }
@@ -15022,7 +15105,9 @@ impl<'a> Checker<'a> {
                                         }
                                     }
                                 }
-                                Err(msg) => self.diags.error(span, msg),
+                                Err(msg) => self
+                                    .diags
+                                    .error(self.call_argument_list_span(call, args), msg),
                             }
                         } else if logical.len() != arg_tys.len() {
                             self.diags.error(
@@ -15206,7 +15291,7 @@ impl<'a> Checker<'a> {
                     .map(crate::symbol_resolver::Symbol::overloads)
                     .is_some_and(|overloads| !overloads.is_empty());
                 self.diags.error(
-                    span,
+                    self.call_callee_name_span(call),
                     if has_inapplicable_candidate {
                         "none of the following candidates is applicable:".to_string()
                     } else {
@@ -15310,7 +15395,7 @@ impl<'a> Checker<'a> {
                                         .map_or(i < sig.required, |has_default| !*has_default)
                                 });
                             if (!sig.vararg && args.len() > value_count) || missing_required {
-                                let arg_tys = self.arg_tys(args);
+                                self.arg_tys(args);
                                 let source_display = match self.file.stmt(stmt_id) {
                                     Stmt::LocalFun(function) => {
                                         Some(source_function_display(self.file, function, sig.ret))
@@ -15318,7 +15403,7 @@ impl<'a> Checker<'a> {
                                     _ => None,
                                 };
                                 self.report_function_arity(
-                                    span,
+                                    call,
                                     DiagnosticFunction {
                                         name: &fname,
                                         params: &sig.params,
@@ -15330,7 +15415,7 @@ impl<'a> Checker<'a> {
                                         ret: sig.ret,
                                         source_display,
                                     },
-                                    arg_tys.len(),
+                                    args,
                                 );
                                 return sig.ret;
                             }
@@ -15345,7 +15430,10 @@ impl<'a> Checker<'a> {
                                     ) {
                                         Ok(slots) => Some(slots),
                                         Err(message) => {
-                                            self.diags.error(span, message);
+                                            self.diags.error(
+                                                self.call_argument_list_span(call, args),
+                                                message,
+                                            );
                                             return sig.ret;
                                         }
                                     }
@@ -15449,7 +15537,8 @@ impl<'a> Checker<'a> {
                             ) {
                                 Ok(slots) => slots,
                                 Err(message) => {
-                                    self.diags.error(span, message);
+                                    self.diags
+                                        .error(self.call_argument_list_span(call, args), message);
                                     return sig.ret;
                                 }
                             };
@@ -15525,7 +15614,7 @@ impl<'a> Checker<'a> {
                     if args.len() > sig.params.len()
                         || (args.len() < sig.params.len() && !omitted_all_default)
                     {
-                        let arg_tys = self.arg_tys(args); // still record types for lowering
+                        self.arg_tys(args); // still record types for lowering
                         let source_display = match self.file.stmt(stmt_id) {
                             Stmt::LocalFun(function) => {
                                 Some(source_function_display(self.file, function, sig.ret))
@@ -15533,7 +15622,7 @@ impl<'a> Checker<'a> {
                             _ => None,
                         };
                         self.report_function_arity(
-                            span,
+                            call,
                             DiagnosticFunction {
                                 name: &fname,
                                 params: &sig.params,
@@ -15545,7 +15634,7 @@ impl<'a> Checker<'a> {
                                 ret: sig.ret,
                                 source_display,
                             },
-                            arg_tys.len(),
+                            args,
                         );
                     } else {
                         // Type each PROVIDED argument against its declared parameter (omitted trailing
@@ -16090,7 +16179,9 @@ impl<'a> Checker<'a> {
                                             }
                                         }
                                     }
-                                    Err(msg) => self.diags.error(span, msg),
+                                    Err(msg) => self
+                                        .diags
+                                        .error(self.call_argument_list_span(call, args), msg),
                                 }
                                 return self.ctor_result_name(call, cls.internal_name());
                             }
@@ -16162,11 +16253,11 @@ impl<'a> Checker<'a> {
                                 return self.ctor_result_name(call, cls.internal_name());
                             }
                             self.report_constructor_arity(
-                                span,
+                                call,
                                 &fname,
                                 &ctor_params,
                                 &cls.ctor_param_names,
-                                got,
+                                args,
                             );
                         } else {
                             // Primary arity matches but the argument TYPES may not (a same-arity
@@ -16205,7 +16296,9 @@ impl<'a> Checker<'a> {
                                     return self.ctor_result_name(call, internal);
                                 }
                                 Ok(None) => {}
-                                Err(msg) => self.diags.error(span, msg),
+                                Err(msg) => self
+                                    .diags
+                                    .error(self.call_argument_list_span(call, args), msg),
                             }
                         }
                     }
@@ -16283,7 +16376,6 @@ impl<'a> Checker<'a> {
                                 &fname,
                                 args,
                                 &arg_tys,
-                                span,
                             ) {
                                 return ret;
                             }
@@ -16360,7 +16452,8 @@ impl<'a> Checker<'a> {
                             match map_call_sig_args(args, Some(names), &value_sig) {
                                 Ok(slots) => Some(slots),
                                 Err(message) => {
-                                    self.diags.error(span, message);
+                                    self.diags
+                                        .error(self.call_argument_list_span(call, args), message);
                                     return ret_ty;
                                 }
                             }
@@ -16422,7 +16515,7 @@ impl<'a> Checker<'a> {
                             if (!cs.vararg && arg_tys.len() > value_count) || missing_required {
                                 let source_display = self.module_source_display(&fi, ret_ty);
                                 self.report_function_arity(
-                                    span,
+                                    call,
                                     DiagnosticFunction {
                                         name: &fname,
                                         params,
@@ -16434,7 +16527,7 @@ impl<'a> Checker<'a> {
                                         ret: ret_ty,
                                         source_display,
                                     },
-                                    arg_tys.len(),
+                                    args,
                                 );
                                 return ret_ty;
                             }
@@ -16445,7 +16538,10 @@ impl<'a> Checker<'a> {
                                     match map_call_sig_args(args, Some(names), &value_sig) {
                                         Ok(slots) => Some(slots),
                                         Err(message) => {
-                                            self.diags.error(span, message);
+                                            self.diags.error(
+                                                self.call_argument_list_span(call, args),
+                                                message,
+                                            );
                                             return ret_ty;
                                         }
                                     }
@@ -16504,7 +16600,7 @@ impl<'a> Checker<'a> {
                             || (arg_tys.len()..n_fixed).all(|i| cs.param_has_default(i));
                         if !omitted_ok {
                             self.report_function_arity(
-                                span,
+                                call,
                                 DiagnosticFunction {
                                     name: &fname,
                                     params,
@@ -16516,7 +16612,7 @@ impl<'a> Checker<'a> {
                                     ret: ret_ty,
                                     source_display: None,
                                 },
-                                arg_tys.len(),
+                                args,
                             );
                         } else {
                             let provided_fixed = arg_tys.len().min(n_fixed);
@@ -16553,7 +16649,9 @@ impl<'a> Checker<'a> {
                                     }
                                 }
                             }
-                            Err(msg) => self.diags.error(span, msg),
+                            Err(msg) => self
+                                .diags
+                                .error(self.call_argument_list_span(call, args), msg),
                         }
                     } else if self.file.call_has_trailing_lambda.contains(&call.0)
                         && !args.is_empty()
@@ -16584,14 +16682,16 @@ impl<'a> Checker<'a> {
                                     }
                                 }
                             }
-                            Err(msg) => self.diags.error(span, msg),
+                            Err(msg) => self
+                                .diags
+                                .error(self.call_argument_list_span(call, args), msg),
                         }
                     } else if arg_tys.len() < cs.required.saturating_sub(ctx_count)
                         || arg_tys.len() > value_count
                     {
                         let source_display = self.module_source_display(&fi, ret_ty);
                         self.report_function_arity(
-                            span,
+                            call,
                             DiagnosticFunction {
                                 name: &fname,
                                 params,
@@ -16603,7 +16703,7 @@ impl<'a> Checker<'a> {
                                 ret: ret_ty,
                                 source_display,
                             },
-                            arg_tys.len(),
+                            args,
                         );
                     } else {
                         for (i, a) in arg_tys.iter().enumerate() {
@@ -17142,7 +17242,12 @@ impl<'a> Checker<'a> {
                 };
                 let bind = match declared {
                     Some(d) => {
-                        self.expect_assignable(d, it, self.span(init), "initializer");
+                        self.expect_assignable(
+                            d,
+                            it,
+                            self.value_operator_span(init),
+                            "initializer",
+                        );
                         d
                     }
                     None => it,
@@ -17339,12 +17444,7 @@ impl<'a> Checker<'a> {
                 // `field = …` inside a setter writes the backing field.
                 if name == "field" && self.lookup(&name).is_none() && self.field_ty.is_some() {
                     let fty = self.field_ty.unwrap();
-                    self.expect_assignable(
-                        fty,
-                        vt,
-                        self.file.stmt_spans[s.0 as usize],
-                        "assignment",
-                    );
+                    self.expect_assignable(fty, vt, self.value_operator_span(value), "assignment");
                 } else {
                     match self.lookup(&name) {
                         Some(l) => {
@@ -17358,7 +17458,7 @@ impl<'a> Checker<'a> {
                             self.expect_assignable(
                                 lty,
                                 vt,
-                                self.file.stmt_spans[s.0 as usize],
+                                self.value_operator_span(value),
                                 "assignment",
                             );
                             // Flow-narrow a nullable `var` to the assigned value's non-null type
@@ -17400,7 +17500,12 @@ impl<'a> Checker<'a> {
                                         self.diags
                                             .error(span, format!("'val' cannot be reassigned."));
                                     }
-                                    self.expect_assignable(lty, vt, span, "assignment");
+                                    self.expect_assignable(
+                                        lty,
+                                        vt,
+                                        self.value_operator_span(value),
+                                        "assignment",
+                                    );
                                 }
                                 None => {
                                     self.diags
@@ -17429,7 +17534,7 @@ impl<'a> Checker<'a> {
                         self.diags
                             .error(span, "'val' cannot be reassigned.".to_string());
                     }
-                    self.expect_assignable(lty, vt, span, "assignment");
+                    self.expect_assignable(lty, vt, self.value_operator_span(value), "assignment");
                 } else {
                     match rt {
                         Ty::Error => {}
@@ -17439,7 +17544,12 @@ impl<'a> Checker<'a> {
                                     self.diags
                                         .error(span, "'val' cannot be reassigned.".to_string());
                                 }
-                                self.expect_assignable(lty, vt, span, "assignment");
+                                self.expect_assignable(
+                                    lty,
+                                    vt,
+                                    self.value_operator_span(value),
+                                    "assignment",
+                                );
                             } else if let Some(setter) = self.resolve_property_setter(rt, &name) {
                                 // A `var` member of a CLASSPATH type: its setter comes from `@Metadata`
                                 // (the `properties` query), not the user-declared `props` map. A setter
@@ -17447,7 +17557,12 @@ impl<'a> Checker<'a> {
                                 // the setter's parameter type. (A classpath `val` exposes no setter →
                                 // falls to the error below, as before.)
                                 let pty = setter.params.first().copied().unwrap_or(Ty::Error);
-                                self.expect_assignable(pty, vt, span, "assignment");
+                                self.expect_assignable(
+                                    pty,
+                                    vt,
+                                    self.value_operator_span(value),
+                                    "assignment",
+                                );
                                 self.property_setters.insert(s, setter);
                             } else {
                                 self.diags
