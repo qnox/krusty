@@ -577,7 +577,8 @@ struct ParsedValueParam {
     /// The raw `ValueParameter.type` (field 3) `Type` message body — decoded to a signature [`Ty`] with the
     /// enclosing type-parameter table (needs `records`/`d2`, so it happens in `decode_functions`).
     type_body: Vec<u8>,
-    /// The raw `ValueParameter.varargElementType` (field 5) `Type` body when the parameter is a `vararg`.
+    /// The raw `ValueParameter.varargElementType` (field 4 as emitted by kotlin-stdlib 2.3.20) `Type`
+    /// body when the parameter is a `vararg`.
     /// Present ⇒ the parameter is a vararg whose LOGICAL gsig is `Array<elem>`; kotlinc stores the element
     /// type here (the JVM descriptor's array-ness lives only in `type`/the descriptor).
     vararg_elem_body: Option<Vec<u8>>,
@@ -703,8 +704,13 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                             recv_ids = parse_type_recv_fun(tb);
                             type_body = tb.to_vec();
                         }
-                        (5, 2) => {
+                        (4, 2) => {
                             // varargElementType — PRESENCE marks a `vararg`; body is the element `Type`.
+                            // Field FOUR, verified against kotlin-stdlib 2.3.20 by dumping every
+                            // (field, wiretype) pair the value-param decoder sees: field 5 never occurs,
+                            // and field 4 wire 2 occurs on exactly the vararg params (167 of ~10525).
+                            // `type_id` also nominally lives at 4 but is a varint (wire 0), so a
+                            // length-delimited 4 is unambiguous.
                             let tn = vp.varint()? as usize;
                             vararg_elem_body = Some(vp.bytes(tn)?.to_vec());
                         }
@@ -895,6 +901,10 @@ pub struct MetaValueParam {
     pub name: String,
     pub has_default: bool,
     pub materialized: bool,
+    /// `vararg elem: T`. Only `@Metadata` records this — the JVM descriptor shows just the packed
+    /// array, so `f(vararg c: Char)` and `f(c: CharArray)` are indistinguishable without it, and
+    /// overload resolution cannot know it may spread trailing arguments into the array.
+    pub vararg: bool,
     pub recv_fun: bool,
     pub recv_fun_receiver: Option<TypeName>,
 }
@@ -942,7 +952,13 @@ impl MetaFn {
             self.value_params.len(),
             self.value_params.iter().map(|p| p.name.clone()).collect(),
             self.value_params.iter().map(|p| p.has_default).collect(),
+            self.last_param_vararg(),
         )
+    }
+
+    /// Only the LAST value parameter can be `vararg` in Kotlin.
+    pub fn last_param_vararg(&self) -> bool {
+        self.value_params.last().is_some_and(|p| p.vararg)
     }
 
     pub fn extension_call_sig(&self) -> CallSig {
@@ -950,6 +966,7 @@ impl MetaFn {
             self.value_params.len() + 1,
             self.value_params.iter().map(|p| p.name.clone()).collect(),
             self.value_params.iter().map(|p| p.has_default).collect(),
+            self.last_param_vararg(),
         )
     }
 }
@@ -1182,6 +1199,7 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64) -> Vec<MetaFn> {
                                     .unwrap_or_default(),
                                 has_default: p.has_default,
                                 materialized: p.materialized,
+                                vararg: p.vararg_elem_body.is_some(),
                                 recv_fun,
                                 recv_fun_receiver: if recv_fun {
                                     p.recv_fun

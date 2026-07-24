@@ -979,6 +979,29 @@ impl<'a> SymbolResolver<'a> {
         o: &FunctionInfo,
     ) -> Option<LibraryCallable> {
         let vparams = logical_value_params(self.lib, o, receiver, type_args);
+        // A `vararg` overload SPREAD over the trailing arguments is NOT a defaulted call — the caller
+        // builds the packed array and the physical argument list still ends in it. Comparing raw arity
+        // reads `"ab..!!".trimEnd('!', '.')` (2 arguments, 1 array parameter) as an omitted-default call
+        // and then hunts for a `$default` synthetic that does not exist, so the whole call fell through
+        // unresolved. Normalize to the PHYSICAL shape — fixed prefix plus the array — so the arity test
+        // below sees what is actually emitted. `f(charArray)` passes the array THROUGH and is untouched.
+        let spread = o
+            .call_sig
+            .vararg
+            .then(|| vparams.len().checked_sub(1))
+            .flatten()
+            .filter(|&fixed| {
+                vparams[fixed].array_elem().is_some()
+                    && args.len() >= fixed
+                    && !(args.len() == vparams.len() && args.last() == vparams.last())
+            })
+            .map(|fixed| {
+                let mut spread = args[..fixed].to_vec();
+                spread.push(vparams[fixed]);
+                (spread, vparams[fixed].array_elem().unwrap())
+            });
+        let spread_elem = spread.as_ref().map(|(_, elem)| *elem);
+        let args: &[Ty] = spread.as_ref().map_or(args, |(a, _)| a.as_slice());
         if vparams.len() == args.len() {
             let c = &o.callable;
             let ret_ty = o
@@ -998,7 +1021,14 @@ impl<'a> SymbolResolver<'a> {
                 c.name,
                 o.generic_sig.is_some()
             );
-            return Some(callable_with_return(c, ret_ty2, false));
+            // `vararg_elem` is what tells the LOWERER to build the packed array. It must come from the
+            // resolved overload's own `vararg` flag, never from the shape of the parameter list: plenty of
+            // non-vararg extensions END in an array parameter (`Array<out T>?.contentEquals(other:
+            // Array<out T>?)`), and packing one of those wraps the caller's array in a fresh 1-element
+            // array — a silent miscompile the box corpus caught as `collectionLiterals/array.kt`.
+            let mut c = callable_with_return(c, ret_ty2, false);
+            c.vararg_elem = spread_elem;
+            return Some(c);
         }
         // Defaulted call — omitted trailing/middle params. Bind the return with default-aware alignment.
         let trailing_lambda = args.last().is_some_and(|a| matches!(a, Ty::Fun(_)));
@@ -2411,6 +2441,28 @@ fn best_by_args<'a>(
                         .iter()
                         .zip(&args[..prefix])
                         .all(|(p, a)| fits(p, a))
+            })
+        })
+        .or_else(|| {
+            // A `vararg` candidate SPREAD over the trailing arguments. Its last logical parameter is the
+            // PACKED ARRAY, so `"a.b.".trimEnd('.')` matches one `Char` against `CharArray` and every pass
+            // above rejects it — leaving the call unresolved and the argument reported as
+            // "inferred type is Char but CharArray was expected" on code that is perfectly well typed.
+            // Tried LAST, so a candidate applicable without spreading still wins (`trimEnd(predicate)` for
+            // a lambda argument, and `f(charArray)` passing the array through as-is).
+            cands.iter().find(|(o, lp)| {
+                if !o.call_sig.vararg {
+                    return false;
+                }
+                let Some(fixed) = lp.len().checked_sub(1) else {
+                    return false;
+                };
+                let Some(elem) = lp[fixed].array_elem() else {
+                    return false;
+                };
+                args.len() >= fixed
+                    && lp[..fixed].iter().zip(args).all(|(p, a)| fits(p, a))
+                    && args[fixed..].iter().all(|a| fits(&elem, a))
             })
         })
         .map(|(o, _)| *o)
