@@ -672,6 +672,8 @@ mod reference_adaptation_e2e;
 mod reference_in_range_e2e;
 #[path = "reified_inline_check_e2e.rs"]
 mod reified_inline_check_e2e;
+#[path = "reified_inline_splice_ldc_wide_e2e.rs"]
+mod reified_inline_splice_ldc_wide_e2e;
 #[path = "require_check_smartcast_e2e.rs"]
 mod require_check_smartcast_e2e;
 #[path = "resolve_parse_deep_coverage_e2e.rs"]
