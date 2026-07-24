@@ -88,11 +88,19 @@ boundary.
 - Input frames are capped at 16 MiB, headers at 8 KiB, and the reader-to-dispatch queue at four
   parsed messages. Open text is capped at 32 MiB across at most 256 documents; worker JSON encoding
   is capped at 64 MiB in both directions. Document-state bursts are capped by count, retained bytes,
-  and elapsed time; their newest changes are applied in one analysis. A worker analysis is terminated
-  and restarted after 30 seconds.
-- The server advertises full-document synchronization. This avoids a second rope/piece-table
-  representation and makes each accepted version replace the prior text allocation; stale versions
-  do not trigger analysis.
+  and elapsed time; ordered changes are applied in one analysis. A later single full-document
+  replacement can supersede an earlier queued change, but incremental changes are never discarded.
+  Coalescing never crosses another document notification. Each notification is capped at 256 edits
+  and cumulative UTF-16 conversion and text-mutation work are each capped at three source-set
+  passes. Replaced text retained for rollback is capped at one source set. A worker analysis is
+  terminated and restarted after 30 seconds.
+- The server advertises incremental synchronization and translates LSP UTF-16 ranges directly into
+  byte ranges in the one retained document `String`. Accepted ranged edits mutate that allocation in
+  place. A request-local undo log keeps only replaced fragments so an invalid multi-edit notification
+  can restore the original version without retaining a second source copy or adding a rope/piece-table.
+  Stale versions do not trigger analysis. If a document was cleared after exceeding the aggregate
+  source-set limit, ranged edits are rejected without advancing its version until a full replacement
+  restores synchronization.
 
 ## Invariants
 
