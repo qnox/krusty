@@ -28,6 +28,10 @@ KRUSTY_KOTLIN_LSP=/path/to/kotlin-lsp.sh \
 cargo test --profile gate -p krusty-lsp --test kotlin_lsp_diff -- --nocapture
 ```
 
+The compiler diagnostic differential uses the provisioned kotlinc and compares each first error's
+source filename, 1-based line and column, and exact message. A matching message at the wrong call,
+argument, member, initializer, or assignment location is a test failure.
+
 `just test` is equivalent. When `just` is available, the harness provisions the matching Kotlin
 compiler and codegen/box corpus, exports `KRUSTY_KOTLINC` and `KRUSTY_KOTLIN_BOX_DIR`, builds the test
 binaries once with Cargo's `gate` profile, runs the internally parallel conformance binary alone, then
