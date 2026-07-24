@@ -15849,6 +15849,8 @@ impl<'a> Lower<'a> {
                     };
                     format!("call {name}")
                 }
+                Expr::Name(n) => format!("name {n}"),
+                Expr::Member { name, .. } => format!("member .{name}"),
                 o => format!("expr {}", bail_variant(&format!("{o:?}"))),
             };
             self.set_bail(&reason);
@@ -17200,6 +17202,26 @@ impl<'a> Lower<'a> {
                             name.clone(),
                             format!("L{enum_internal};"),
                         ));
+                    }
+                    // `Kind.PENDING` on a SAME-MODULE (other-file) enum. The enum isn't in this file's
+                    // IR (so `class_info` above missed) and isn't classpath, but the module symbols know
+                    // `rn` is an enum with the entry `name` -> `getstatic <internal>.PENDING:L<internal>;`.
+                    // `class_names` maps the simple name to the enum's real internal (its own package),
+                    // which `class_internal` above cannot (it assumes the current file's package).
+                    if self
+                        .syms
+                        .enums
+                        .get(&rn)
+                        .is_some_and(|entries| entries.contains(&name))
+                    {
+                        if let Some(internal) = self.syms.class_names.get(&rn) {
+                            let internal = internal.render();
+                            return Some(self.emit_external_static_field(
+                                internal.clone(),
+                                name.clone(),
+                                format!("L{internal};"),
+                            ));
+                        }
                     }
                 }
                 // `Outer.NestedEnum.ENTRY` — receiver is a `Member` chain naming a nested enum. The
