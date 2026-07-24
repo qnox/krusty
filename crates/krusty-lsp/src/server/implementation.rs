@@ -5,8 +5,7 @@
 //! completion, navigation, and highlighting data for each open document; full compiler analysis is
 //! dropped after every open/change notification.
 
-use std::collections::HashMap;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -237,6 +236,17 @@ where
         self.documents.len()
     }
 
+    fn analyzed_uris(&self) -> Vec<&str> {
+        let mut uris = self
+            .documents
+            .iter()
+            .filter(|(_, document)| !document.analysis_blocked)
+            .map(|(uri, _)| uri.as_str())
+            .collect::<Vec<_>>();
+        uris.sort_unstable();
+        uris
+    }
+
     fn accepts_replacement(&self, uri: &str, text_len: usize) -> bool {
         if !self.documents.contains_key(uri) && self.documents.len() >= MAX_OPEN_DOCUMENTS {
             return false;
@@ -250,9 +260,11 @@ where
     }
 
     fn refresh_documents(&mut self) -> Vec<Value> {
-        let mut uris: Vec<_> = self.documents.keys().cloned().collect();
-        uris.retain(|uri| !self.documents[uri].analysis_blocked);
-        uris.sort_unstable();
+        let uris = self
+            .analyzed_uris()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
         let analyses = {
             let documents = &self.documents;
             let sources: Vec<_> = uris
@@ -385,6 +397,7 @@ where
                         "capabilities": {
                             "hoverProvider": true,
                             "definitionProvider": true,
+                            "referencesProvider": true,
                             "completionProvider": {
                                 "resolveProvider": true,
                                 "triggerCharacters": ["."],
@@ -421,6 +434,7 @@ where
             "textDocument/didClose" => self.did_close(id, params, defer_analysis),
             "textDocument/hover" => self.hover(id, params),
             "textDocument/definition" => self.definition(id, params),
+            "textDocument/references" => self.references(id, params),
             "textDocument/completion" => self.completion(id, params),
             "completionItem/resolve" => self.resolve_completion(id, params),
             "textDocument/semanticTokens/full" => self.semantic_tokens(id, params, false),
@@ -681,13 +695,7 @@ where
         if targets.is_empty() {
             return Dispatch::messages(vec![rpc_result(id, json!([]))]);
         }
-        let mut uris = self
-            .documents
-            .iter()
-            .filter(|(_, document)| !document.analysis_blocked)
-            .map(|(uri, _)| uri)
-            .collect::<Vec<_>>();
-        uris.sort_unstable();
+        let uris = self.analyzed_uris();
         let locations = targets
             .into_iter()
             .filter_map(|target| {
@@ -704,6 +712,59 @@ where
                             &target_document.text,
                             target.span.hi as usize
                         ),
+                    }
+                }))
+            })
+            .collect::<Vec<_>>();
+        Dispatch::messages(vec![rpc_result(id, Value::Array(locations))])
+    }
+
+    fn references(&self, id: Option<Value>, params: Value) -> Dispatch {
+        let Some(id) = id else {
+            return Dispatch::none();
+        };
+        let Ok(params) = serde_json::from_value::<ReferenceParams>(params) else {
+            return invalid_params(Some(id));
+        };
+        let Some(open) = self.documents.get(&params.text_document.uri) else {
+            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+        };
+        let Some(offset) = position_to_byte_offset(&open.text, params.position) else {
+            return invalid_params(Some(id));
+        };
+        let targets = open.definitions.get(offset).collect::<Vec<_>>();
+        if targets.is_empty() {
+            return Dispatch::messages(vec![rpc_result(id, json!([]))]);
+        }
+        let target_ids = targets.into_iter().collect::<HashSet<_>>();
+        let uris = self.analyzed_uris();
+
+        let mut occurrences = Vec::new();
+        for (source_file, uri) in uris.iter().enumerate() {
+            let document = &self.documents[*uri];
+            occurrences.extend(
+                document
+                    .definitions
+                    .occurrences_targeting(&target_ids)
+                    .filter(|(span, target)| {
+                        params.context.include_declaration
+                            || source_file as u32 != target.file
+                            || *span != target.span
+                    })
+                    .map(|(span, _)| (*uri, span)),
+            );
+        }
+        occurrences.sort_unstable_by_key(|(uri, span)| (*uri, span.lo, span.hi));
+        occurrences.dedup();
+        let locations = occurrences
+            .into_iter()
+            .filter_map(|(uri, span)| {
+                let document = self.documents.get(uri)?;
+                Some(json!({
+                    "uri": uri,
+                    "range": {
+                        "start": byte_offset_to_position(&document.text, span.lo as usize),
+                        "end": byte_offset_to_position(&document.text, span.hi as usize),
                     }
                 }))
             })
@@ -801,6 +862,20 @@ struct DidCloseParams {
 struct TextDocumentPositionParams {
     text_document: TextDocumentIdentifier,
     position: Position,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReferenceParams {
+    text_document: TextDocumentIdentifier,
+    position: Position,
+    context: ReferenceContext,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReferenceContext {
+    include_declaration: bool,
 }
 
 #[derive(Clone, Copy, Deserialize)]
