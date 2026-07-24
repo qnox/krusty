@@ -457,6 +457,7 @@ fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret
                     .into_iter()
                     .map(|c| crate::ir::IrCatch {
                         var: c.var,
+                        name: c.name,
                         exc_internal: c.exc_internal,
                         body: assign_branch_to_tmp(ir, c.body, tmp, ret_ty, suspend_set),
                     })
@@ -4228,6 +4229,7 @@ fn wrap_dispatch_for_handlers(
     let when = ir.add_expr(IrExpr::When { branches });
     let catch = crate::ir::IrCatch {
         var: catch_var,
+        name: None,
         exc_internal: crate::types::type_name("java/lang/Throwable"),
         body: when,
     };

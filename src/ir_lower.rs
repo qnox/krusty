@@ -5335,6 +5335,13 @@ impl<'a> Lower<'a> {
         })
     }
 
+    /// Record a source local for debug information.
+    fn emit_source_local(&mut self, name: &str, index: u32, ty: Ty, init: Option<u32>) -> u32 {
+        let e = self.emit_named_variable(index, ty, init);
+        self.ir.value_names.insert(e, name.to_string());
+        e
+    }
+
     fn emit_set_value(&mut self, var: u32, value: u32) -> u32 {
         self.ir.add_expr(IrExpr::SetValue { var, value })
     }
@@ -7111,11 +7118,11 @@ impl<'a> Lower<'a> {
             self.scope.push((name.to_string(), holder, holder_ty));
             self.boxed_elem.insert(name.to_string(), elem_ty);
             let new_ref = self.ir.add_expr(IrExpr::RefNew { elem, init: call });
-            out.push(self.emit_named_variable(holder, ty_to_ir(holder_ty), Some(new_ref)));
+            out.push(self.emit_source_local(name, holder, ty_to_ir(holder_ty), Some(new_ref)));
         } else {
             let v = self.fresh_value();
             self.scope.push((name.to_string(), v, log_ty));
-            out.push(self.emit_named_variable(v, ty_to_ir(log_ty), Some(call)));
+            out.push(self.emit_source_local(name, v, ty_to_ir(log_ty), Some(call)));
         }
         Some(())
     }
@@ -11229,7 +11236,7 @@ impl<'a> Lower<'a> {
         let first = getter(self, &loop_info.first);
         let i_v = self.fresh_value();
         self.scope.push((name.to_string(), i_v, elem));
-        let var_i = self.emit_named_variable(i_v, elem_ir.clone(), Some(first));
+        let var_i = self.emit_source_local(name, i_v, elem_ir.clone(), Some(first));
         // last = range.getLast()  (hoisted)
         let last = getter(self, &loop_info.last);
         let n_v = self.fresh_value();
@@ -11309,7 +11316,7 @@ impl<'a> Lower<'a> {
         let first = getter(self, &loop_info.first);
         let i_v = self.fresh_value();
         self.scope.push((name.to_string(), i_v, elem));
-        let var_i = self.emit_named_variable(i_v, elem_ir.clone(), Some(first));
+        let var_i = self.emit_source_local(name, i_v, elem_ir.clone(), Some(first));
         // last = p.getLast()  (hoisted)
         let last = getter(self, &loop_info.last);
         let n_v = self.fresh_value();
@@ -11488,7 +11495,7 @@ impl<'a> Lower<'a> {
             let vx = if name.starts_with("$dest$") {
                 self.emit_variable(x_v, ty_to_ir(elem), Some(x_init))
             } else {
-                self.emit_named_variable(x_v, ty_to_ir(elem), Some(x_init))
+                self.emit_source_local(name, x_v, ty_to_ir(elem), Some(x_init))
             };
             (vx, None)
         };
@@ -11908,6 +11915,7 @@ impl<'a> Lower<'a> {
             body,
             vec![IrCatch {
                 var: catch_var,
+                name: None,
                 exc_internal: type_name(&exc_internal),
                 body: caught,
             }],
@@ -13909,7 +13917,7 @@ impl<'a> Lower<'a> {
                 // The slot defaults to `null` (kotlinc: `aconst_null; astore`); a read while still null
                 // throws via the `LateinitCheck` wrapper (see the local-read path).
                 let null = self.emit_const(IrConst::Null);
-                Some(self.emit_named_variable(v, ty_to_ir(kty), Some(null)))
+                Some(self.emit_source_local(&name, v, ty_to_ir(kty), Some(null)))
             }
             Stmt::Local { name, init, ty, .. } => {
                 let init_ty = self.info.ty(init);
@@ -13928,7 +13936,7 @@ impl<'a> Lower<'a> {
                     let seq = self.emit_block(vec![side], Some(unit_val));
                     let v = self.fresh_value();
                     self.scope.push((name.clone(), v, unit_ty));
-                    return Some(self.emit_named_variable(v, ty_to_ir(unit_ty), Some(seq)));
+                    return Some(self.emit_source_local(&name, v, ty_to_ir(unit_ty), Some(seq)));
                 }
                 // Use the declared type only when it's a builtin krusty `Ty`; for a user/class type
                 // (`val en: En`) `Ty::from_name` is `None`, so fall back to the checker's inferred
@@ -14005,7 +14013,8 @@ impl<'a> Lower<'a> {
                     // A single `Variable` (no scoping block) so the holder's slot lives in the enclosing
                     // scope — the closure's capture reads it later.
                     let new_ref = self.ir.add_expr(IrExpr::RefNew { elem, init: it });
-                    return Some(self.emit_named_variable(
+                    return Some(self.emit_source_local(
+                        &name,
                         holder,
                         ty_to_ir(holder_ty),
                         Some(new_ref),
@@ -14073,7 +14082,7 @@ impl<'a> Lower<'a> {
                 if nullable {
                     var_ty = mark_nullable(var_ty);
                 }
-                Some(self.emit_named_variable(v, var_ty, Some(it)))
+                Some(self.emit_source_local(&name, v, var_ty, Some(it)))
             }
             Stmt::LocalDelegate {
                 is_var,
@@ -14155,7 +14164,12 @@ impl<'a> Lower<'a> {
                         ret_ty: prop_ty,
                     },
                 );
-                Some(self.emit_named_variable(dv, ty_to_ir(delegate_ty), Some(init)))
+                Some(self.emit_source_local(
+                    &format!("{name}$delegate"),
+                    dv,
+                    ty_to_ir(delegate_ty),
+                    Some(init),
+                ))
             }
             Stmt::Destructure { entries, init } => {
                 // A direct `stmt()` call wraps the bindings in a Block; the block builders use
@@ -14505,7 +14519,7 @@ impl<'a> Lower<'a> {
                 let start = self.lower_arg(range.start, &elem_ir)?;
                 let i_v = self.fresh_value();
                 self.scope.push((name.clone(), i_v, elem));
-                let var_i = self.emit_variable(i_v, elem_ir.clone(), Some(start));
+                let var_i = self.emit_source_local(&name, i_v, elem_ir.clone(), Some(start));
                 // The bound. kotlinc folds a CONSTANT bound with unit step into a single `i < C` exclusive
                 // test — no hoisted local, no overflow guard: `1..10` → `i < 11`, `0 until 10` → `i < 10`.
                 // Match that for a literal `Int` bound; every other case hoists the (possibly
@@ -15121,7 +15135,7 @@ impl<'a> Lower<'a> {
         } else {
             self.emit_external_call("kotlin/Array.get", Some(arr_g2), vec![gi2])
         };
-        let var_x = self.emit_variable(x_v, ty_to_ir(elem), Some(elem_get));
+        let var_x = self.emit_source_local(name, x_v, ty_to_ir(elem), Some(elem_get));
         let mut out = vec![var_x];
         if self.append_body_stmts(body, &mut out).is_none() {
             self.scope.truncate(depth);
@@ -16377,6 +16391,7 @@ impl<'a> Lower<'a> {
                     match cbody {
                         Some(cb) => ir_catches.push(crate::ir::IrCatch {
                             var: v,
+                            name: Some(c.name.clone()),
                             exc_internal: type_name(&exc_internal),
                             body: cb,
                         }),

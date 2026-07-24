@@ -419,6 +419,8 @@ pub enum IrExpr {
 pub struct IrCatch {
     /// Value index the caught exception is bound to.
     pub var: u32,
+    /// Source parameter name, absent for compiler-generated handlers.
+    pub name: Option<String>,
     /// JVM internal name of the caught exception type.
     pub exc_internal: TypeName,
     pub body: ExprId,
@@ -1031,6 +1033,9 @@ pub struct IrFile {
     /// updates, and the implicit `Unit` return (the block's closing-brace line, kotlinc's mapping).
     /// Absent = no line mark starts at that expression.
     pub expr_lines: std::collections::HashMap<u32, u32>,
+    /// Source names for `IrExpr::Variable` nodes included in `LocalVariableTable`.
+    /// Compiler-generated temporaries are omitted.
+    pub value_names: std::collections::HashMap<u32, String>,
     /// `ExprId` → the expression's LOGICAL (source) type as the checker inferred it, recorded verbatim by
     /// the lowerer — NOT erased. The value-class pass consults it to recover the representation of a value
     /// whose IR node alone is ambiguous: a library call returns a physical `Object` descriptor, but its
