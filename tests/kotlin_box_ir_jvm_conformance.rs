@@ -963,6 +963,8 @@ fn kotlin_codegen_box_conformance() {
     };
 
     let no_run = env("KRUSTY_NO_RUN").is_some();
+    let byte_diff_on = env("KRUSTY_BYTE_DIFF").is_some();
+    let byte_diffs: Mutex<Vec<(PathBuf, ByteDiff)>> = Mutex::new(Vec::new());
 
     // Heap profiler (`--features dhat-heap`): its `Drop` at end of scope writes `dhat-heap.json` with
     // bytes-alive-at-peak by allocation call stack. Pair with `KRUSTY_NO_RUN=1` to profile the compiler
@@ -1033,6 +1035,10 @@ fn kotlin_codegen_box_conformance() {
                         None => return (file.clone(), TestResult::Skip),
                     };
                     t_compile.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    if byte_diff_on {
+                        let outcome = byte_diff_file(&src, &stem, &compile_cp, &classes);
+                        byte_diffs.lock().unwrap().push((file.clone(), outcome));
+                    }
                     let box_class = match find_box_class(&classes) {
                         Some(c) => c,
                         None => return (file.clone(), TestResult::Skip),
@@ -1189,6 +1195,40 @@ fn kotlin_codegen_box_conformance() {
         files.len(),
         failures.len()
     );
+    if byte_diff_on {
+        let mut diffs = byte_diffs.into_inner().unwrap();
+        diffs.sort_by(|a, b| a.0.cmp(&b.0));
+        let (mut identical, mut divergent, mut ref_fail, mut not_diffed) = (0usize, 0, 0, 0);
+        let report_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/byte_diff_report.txt");
+        let mut report = String::new();
+        for (file, d) in &diffs {
+            let (tag, why) = match d {
+                ByteDiff::Identical => {
+                    identical += 1;
+                    ("IDENTICAL", String::new())
+                }
+                ByteDiff::Divergent(w) => {
+                    divergent += 1;
+                    ("DIVERGENT", w.clone())
+                }
+                ByteDiff::RefFail(w) => {
+                    ref_fail += 1;
+                    ("REF-FAIL", w.clone())
+                }
+                ByteDiff::NotDiffed(w) => {
+                    not_diffed += 1;
+                    ("NOT-DIFFED", w.to_string())
+                }
+            };
+            report.push_str(&format!("{tag}\t{}\t{why}\n", file.display()));
+        }
+        let _ = fs::write(&report_path, &report);
+        eprintln!(
+            "byte-diff: identical {identical} | divergent {divergent} | ref-fail {ref_fail} | not-diffed {not_diffed}  (report: {})",
+            report_path.display()
+        );
+    }
     let fail_cap = env("KRUSTY_FAIL_CAP")
         .and_then(|v| v.parse().ok())
         .unwrap_or(25usize);
@@ -1220,4 +1260,311 @@ enum TestResult {
     Skip,
     Pass,
     Fail(String),
+}
+
+// ===================== Byte-identity differential mode =====================
+//
+// `KRUSTY_BYTE_DIFF=1`: every corpus file krusty compiles is ALSO compiled with the reference
+// kotlinc (persistent in-process server, content-keyed on-disk cache under
+// `target/cache/ref-classes/`) and the two class sets are compared BYTE-FOR-BYTE. Metric line:
+// `byte-diff: identical I | divergent D | ref-fail R | not-diffed N`; per-file detail lands in
+// `target/byte_diff_report.txt`. Multi-module (`// MODULE:`) and mixed-Java tests are not diffed
+// yet (their reference orchestration — module chaining, javac interleaving — isn't mirrored).
+
+enum ByteDiff {
+    Identical,
+    Divergent(String),
+    RefFail(String),
+    NotDiffed(&'static str),
+}
+
+fn fnv64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// Byte-compare krusty's emitted class set against the reference compiler's: the same class-name
+/// set, every class byte-equal. `Err` carries the FIRST difference (one per file keeps the report
+/// scannable; the next run surfaces the next difference).
+fn compare_class_sets(
+    krusty: &[(String, Vec<u8>)],
+    reference: &std::collections::BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    let mut k: std::collections::BTreeMap<&str, &[u8]> = krusty
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect();
+    for (name, rbytes) in reference {
+        let Some(kb) = k.remove(name.as_str()) else {
+            return Err(format!("missing class {name}"));
+        };
+        if kb != rbytes.as_slice() {
+            let off = kb
+                .iter()
+                .zip(rbytes.iter())
+                .position(|(a, b)| a != b)
+                .unwrap_or_else(|| kb.len().min(rbytes.len()));
+            return Err(format!(
+                "class {name}: bytes differ at offset {off} (krusty {} B, kotlinc {} B)",
+                kb.len(),
+                rbytes.len()
+            ));
+        }
+    }
+    if let Some((extra, _)) = k.iter().next() {
+        return Err(format!("extra class {extra}"));
+    }
+    Ok(())
+}
+
+/// `// LANGUAGE: +X -Y` directives → the `-XXLanguage:` flags the reference test runner passes.
+fn language_directive_args(src: &str) -> Vec<String> {
+    src.lines()
+        .filter_map(|l| l.trim().strip_prefix("// LANGUAGE:"))
+        .flat_map(|rest| rest.split_whitespace())
+        .map(|tok| format!("-XXLanguage:{tok}"))
+        .collect()
+}
+
+/// Bump when the cache layout / comparison semantics change — invalidates every cached entry.
+const REF_CACHE_SALT: &str = "ref-classes-v1";
+
+/// Read every `.class` under `dir` into an internal-name → bytes map. `Err` on any read failure
+/// (a concurrently rewritten cache must re-grade as RefFail, not compare against empty bytes).
+fn read_class_tree(dir: &Path) -> Result<std::collections::BTreeMap<String, Vec<u8>>, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let rd = fs::read_dir(&d).map_err(|e| format!("read dir {}: {e}", d.display()))?;
+        for e in rd {
+            let e = e.map_err(|e| format!("read dir entry in {}: {e}", d.display()))?;
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "class") {
+                let rel = p
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .with_extension("")
+                    .to_string_lossy()
+                    .into_owned();
+                let bytes = fs::read(&p).map_err(|e| format!("cache read {rel}: {e}"))?;
+                out.insert(rel, bytes);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Compile `src` with the reference kotlinc into a class-name → bytes map. Results (success AND
+/// definitive compile-failure) are cached on disk, keyed by source content, file stem + block
+/// names (the file name decides kotlinc's facade class name), classpath jar paths, the injected
+/// helpers text, the reference dist identity, and a schema salt — so re-runs pay only for files
+/// whose inputs changed. Transient failures (driver crash, work-dir clobber) are NOT cached.
+/// `Err` = reference compile failed / unavailable.
+///
+/// NOTE: only `.class` artifacts are compared; kotlinc's `META-INF/<m>.kotlin_module` is a known
+/// not-yet-compared artifact (the harness compile path doesn't produce krusty's module file).
+fn reference_compile(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+) -> Result<std::collections::BTreeMap<String, Vec<u8>>, String> {
+    let mut key_material: Vec<u8> = Vec::new();
+    let push = |k: &mut Vec<u8>, part: &[u8]| {
+        k.extend_from_slice(&(part.len() as u64).to_le_bytes());
+        k.extend_from_slice(part);
+    };
+    push(&mut key_material, REF_CACHE_SALT.as_bytes());
+    push(&mut key_material, src.as_bytes());
+    push(&mut key_material, stem.as_bytes());
+    push(&mut key_material, COROUTINE_HELPERS.as_bytes());
+    for j in cp_jars {
+        push(&mut key_material, j.to_string_lossy().as_bytes());
+    }
+    if let Some(jar) = common::kotlin_compiler_jar() {
+        push(&mut key_material, jar.to_string_lossy().as_bytes());
+        let len = fs::metadata(&jar).map(|m| m.len()).unwrap_or(0);
+        push(&mut key_material, &len.to_le_bytes());
+    }
+    let key = fnv64(&key_material);
+    let cache =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/cache/ref-classes/{key:016x}"));
+    if cache.join("FAILED").is_file() {
+        let why = fs::read_to_string(cache.join("FAILED")).unwrap_or_default();
+        return Err(why.lines().next().unwrap_or("?").to_string());
+    }
+    if cache.join("OK").is_file() {
+        return read_class_tree(&cache);
+    }
+
+    let (mut blocks, java_blocks) = krusty::conformance::split_files(src);
+    if !java_blocks.is_empty() {
+        return Err("mixed java (not diffed)".to_string());
+    }
+    if blocks.is_empty() {
+        blocks.push((stem.to_string(), src.to_string()));
+    }
+    if src.contains("// WITH_COROUTINES") {
+        blocks.push(("CoroutineUtil".to_string(), COROUTINE_HELPERS.to_string()));
+    }
+    // Unique work dir per COMPILE (not per key): two rayon threads can race the same key — a
+    // shared dir would let one thread's cleanup delete the other's sources mid-compile. Every
+    // return path below goes through the closure so the work dir is always removed (leaked
+    // `/tmp/krusty_refc_*` dirs fill the shared disk).
+    static WORK_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = WORK_SEQ.fetch_add(1, Ordering::Relaxed);
+    let work = std::env::temp_dir().join(format!(
+        "krusty_refc_{key:016x}_{}_{seq}",
+        std::process::id()
+    ));
+    let result = reference_compile_in(&work, &blocks, src, cp_jars, &cache, key, seq);
+    let _ = fs::remove_dir_all(&work);
+    result
+}
+
+/// The work-dir-scoped body of [`reference_compile`] — the caller removes `work` unconditionally.
+#[allow(clippy::too_many_arguments)]
+fn reference_compile_in(
+    work: &Path,
+    blocks: &[(String, String)],
+    src: &str,
+    cp_jars: &[PathBuf],
+    cache: &Path,
+    key: u64,
+    seq: u64,
+) -> Result<std::collections::BTreeMap<String, Vec<u8>>, String> {
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+    let mut args: Vec<String> = vec!["-d".into(), out_dir.to_string_lossy().into_owned()];
+    if !cp_jars.is_empty() {
+        let joined = cp_jars
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(":");
+        args.push("-cp".into());
+        args.push(joined);
+    }
+    args.extend(language_directive_args(src));
+    for (i, (name, content)) in blocks.iter().enumerate() {
+        // The FILE NAME decides kotlinc's file-facade class name (`arrayElement.kt` →
+        // `ArrayElementKt`), so it must be exactly the block's declared LEAF name
+        // (`split_files` already stripped `.kt`). Each block gets its own numbered subdir so
+        // same-leaf blocks (`a/x.kt` + `b/x.kt`) can't overwrite each other.
+        let leaf = name.rsplit('/').next().unwrap_or(name);
+        let bdir = work.join(format!("{i}"));
+        fs::create_dir_all(&bdir).map_err(|e| e.to_string())?;
+        let path = bdir.join(format!("{leaf}.kt"));
+        fs::write(&path, content).map_err(|e| e.to_string())?;
+        args.push(path.to_string_lossy().into_owned());
+    }
+    let (code, err) =
+        common::kotlinc_compile(&args).ok_or_else(|| "kotlinc unavailable".to_string())?;
+    if code == 0 {
+        let classes = read_class_tree(&out_dir)?;
+        // Publish ATOMICALLY: write the tree + OK marker into a unique staging dir, then rename it
+        // to the cache path. A concurrent publisher's rename simply loses (its staging dir is
+        // discarded); an already-published cache is never deleted out from under a reader.
+        let staging = cache.with_file_name(format!("{key:016x}.stage{}-{seq}", std::process::id()));
+        let _ = fs::remove_dir_all(&staging);
+        fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+        for (name, bytes) in &classes {
+            let p = staging.join(format!("{name}.class"));
+            if let Some(parent) = p.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            fs::write(&p, bytes).map_err(|e| e.to_string())?;
+        }
+        fs::write(staging.join("OK"), b"").map_err(|e| e.to_string())?;
+        if fs::rename(&staging, cache).is_err() {
+            let _ = fs::remove_dir_all(&staging); // another thread published first
+        }
+        Ok(classes)
+    } else {
+        // Cache the failure ONLY for a SOURCE-ANCHORED diagnostic (`….kt:<line>:<col>: error:` —
+        // deterministic for this source). A locationless `error:` (out of disk, output-dir
+        // trouble) or a driver crash (the server returns 2 for any Throwable, no `error:` line)
+        // stays uncached so the next run retries instead of being poisoned.
+        match err
+            .lines()
+            .find(|l| l.contains(": error:") && l.contains(".kt:"))
+        {
+            Some(first) => {
+                let first = first.to_string();
+                let _ = fs::create_dir_all(cache);
+                let _ = fs::write(cache.join("FAILED"), &first);
+                Err(first)
+            }
+            None => Err(format!(
+                "transient: {}",
+                err.lines()
+                    .find(|l| l.contains("error"))
+                    .or_else(|| err.lines().next())
+                    .unwrap_or("?")
+            )),
+        }
+    }
+}
+
+/// The full per-file byte-diff decision: gate un-mirrored shapes, reference-compile, compare.
+fn byte_diff_file(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    classes: &[(String, Vec<u8>)],
+) -> ByteDiff {
+    if src.contains("// MODULE:") {
+        return ByteDiff::NotDiffed("multi-module");
+    }
+    if !krusty::conformance::split_files(src).1.is_empty() {
+        return ByteDiff::NotDiffed("mixed-java");
+    }
+    match reference_compile(src, stem, cp_jars) {
+        Err(e) => ByteDiff::RefFail(e),
+        Ok(ref_classes) => match compare_class_sets(classes, &ref_classes) {
+            Ok(()) => ByteDiff::Identical,
+            Err(why) => ByteDiff::Divergent(why),
+        },
+    }
+}
+
+#[test]
+fn compare_class_sets_identical_and_divergent() {
+    use std::collections::BTreeMap;
+    let k = vec![("A".to_string(), vec![1u8, 2, 3])];
+    let mut r = BTreeMap::new();
+    r.insert("A".to_string(), vec![1u8, 2, 3]);
+    assert!(compare_class_sets(&k, &r).is_ok());
+
+    r.insert("A".to_string(), vec![1u8, 9, 3]);
+    let e = compare_class_sets(&k, &r).unwrap_err();
+    assert!(e.contains("offset 1"), "{e}");
+
+    let mut r2 = BTreeMap::new();
+    r2.insert("A".to_string(), vec![1u8, 2, 3]);
+    r2.insert("B".to_string(), vec![4u8]);
+    assert!(compare_class_sets(&k, &r2)
+        .unwrap_err()
+        .contains("missing class B"));
+
+    let r3 = BTreeMap::new();
+    assert!(compare_class_sets(&k, &r3)
+        .unwrap_err()
+        .contains("extra class A"));
+}
+
+#[test]
+fn language_directive_args_parse() {
+    let src = "// LANGUAGE: +ContextParameters -SomethingElse\nfun box() = \"OK\"\n";
+    assert_eq!(
+        language_directive_args(src),
+        vec![
+            "-XXLanguage:+ContextParameters",
+            "-XXLanguage:-SomethingElse"
+        ]
+    );
 }

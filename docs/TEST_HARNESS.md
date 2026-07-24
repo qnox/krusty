@@ -58,6 +58,24 @@ Any argument switches the harness to Cargo's normal focused runner with `--profi
 useful for development, but use the no-argument harness for full-suite validation because it builds
 once and schedules test binaries to preserve shared JVM runners.
 
+## Byte-Identity Differential Mode
+
+`KRUSTY_BYTE_DIFF=1` makes the box-conformance run ALSO compile every krusty-compiled corpus file
+with the reference kotlinc (persistent in-process compiler server; results cached under
+`target/cache/ref-classes/`, keyed by source + stem + classpath + dist identity) and compare the
+two class sets **byte-for-byte**:
+
+```sh
+KRUSTY_BYTE_DIFF=1 KRUSTY_SERVER_POOL=4 ./run-tests.sh --test conformance -- --nocapture
+```
+
+The summary gains a `byte-diff: identical I | divergent D | ref-fail R | not-diffed N` line, and a
+per-file report (first difference per file) lands in `target/byte_diff_report.txt`. `// MODULE:`
+and mixed-Java tests are `not-diffed` (their reference orchestration isn't mirrored yet), and
+kotlinc's `META-INF/*.kotlin_module` artifact is not yet compared. The first run pays one warm
+kotlinc compile (~0.4 s) per file — raise `KRUSTY_SERVER_POOL` on a large-RAM host; later runs hit
+the on-disk cache. Pair with `KRUSTY_BOX_ONLY=<substring>` for a focused divergence loop.
+
 ## Profiling
 
 For full-suite performance work, run:
