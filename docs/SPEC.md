@@ -992,7 +992,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   or is bound by `member_return` under the receiver's arguments. Test:
   `tests/interface_supertype_members_e2e.rs::concrete_generic_return_keeps_type_argument`.
 
-- **`@JvmStatic` member of a classpath `object` (`UuidGen.of(x)`).** kotlinc emits it as a static
+- **`@JvmStatic` member of a classpath `object` (`IdGen.of(x)`).** kotlinc emits it as a static
   method on the object class, so it lands in the type's `companion` (static) list, NOT as an instance
   member — a call on the object value previously failed as "unresolved method on `<object>`". Both the
   checker (member-call fallthrough) and lowerer now try `resolve_companion` on the receiver's type and,

@@ -4581,7 +4581,7 @@ pub enum ResolvedCall {
     Member(crate::symbol_resolver::ResolvedMember),
     /// A receiver-less top-level library call → `invokestatic` on the facade.
     TopLevel(crate::libraries::LibraryCallable),
-    /// A `@JvmStatic`/companion `object` member (`UuidGen.of(x)`) → STATIC call, never virtual.
+    /// A `@JvmStatic`/companion `object` member (`IdGen.of(x)`) → STATIC call, never virtual.
     Companion(crate::libraries::LibraryMember),
     /// A library EXTENSION call `recv.name(args)` → `invokestatic facade.name(recv, args)`. The checker
     /// is the sole resolver: the lowerer READS this callable and emits it (never re-resolving).
@@ -14448,7 +14448,7 @@ impl<'a> Checker<'a> {
                 {
                     return Ty::Unit;
                 }
-                // A `@JvmStatic` member of a classpath `object` (`UuidGen.of(x)`): kotlinc emits a
+                // A `@JvmStatic` member of a classpath `object` (`IdGen.of(x)`): kotlinc emits a
                 // static method on the object class, so it lands in the type's `companion` (static) list —
                 // not an instance member. Resolve it there as a static call on the receiver's type.
                 if let Some(internal) = rt.obj_internal() {
@@ -15174,7 +15174,7 @@ impl<'a> Checker<'a> {
                         // Omitting a trailing parameter is allowed when either: it has a directly-emittable
                         // literal default (any class, filled at the call site), OR the class is a VALUE
                         // class and the param simply HAS a default — a value class's non-const default
-                        // (`ServerId(val v = Base58Uuid.generate())`) lowers via `constructor-impl$default`.
+                        // (`ItemId(val v = IdGen.next())`) lowers via `constructor-impl$default`.
                         let ok_arity = got <= ctor_params.len()
                             && (got..ctor_params.len()).all(|i| {
                                 cls.ctor_defaults

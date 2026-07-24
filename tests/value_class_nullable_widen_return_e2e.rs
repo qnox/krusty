@@ -1,5 +1,5 @@
 //! A NON-null `@JvmInline value class` value returned where the SAME value class's NULLABLE form is
-//! declared (`fun resolve(di): AppId? = when (di) { … di.applicationId … byDep(…) … }`, every branch a
+//! declared (`fun resolve(di): AppId? = when (di) { … di.ownerId … byDep(…) … }`, every branch a
 //! non-null `AppId`) must compile. A non-null value class is represented UNBOXED (its underlying), the
 //! nullable form BOXED (the wrapper), so the checker rejected the widening ("return type mismatch:
 //! expected 'AppId', actual 'AppId'"). The checker now accepts it in a RETURN position, and the
@@ -11,9 +11,9 @@ use super::common;
 const LIB: &str = "package lib\n\
     @JvmInline value class AppId(val value: String = \"def\")\n\
     sealed interface DI {\n\
-        data class External(val applicationId: AppId) : DI\n\
+        data class External(val ownerId: AppId) : DI\n\
         data class Prov(val deployable: String) : DI\n\
-        data class Managed(val applicationId: AppId) : DI\n\
+        data class Managed(val ownerId: AppId) : DI\n\
     }\n";
 
 fn run(tag: &str, main: &str) -> Option<String> {
@@ -30,9 +30,9 @@ fn non_null_value_class_widens_to_nullable_return() {
     const MAIN: &str = "import lib.AppId\nimport lib.DI\n\
         class R {\n\
             fun resolve(di: DI): AppId? = when (di) {\n\
-                is DI.External -> di.applicationId\n\
+                is DI.External -> di.ownerId\n\
                 is DI.Prov -> byDep(di.deployable)\n\
-                is DI.Managed -> di.applicationId\n\
+                is DI.Managed -> di.ownerId\n\
             }\n\
             fun byDep(d: String): AppId = AppId(\"app-$d\")\n\
         }\n\
