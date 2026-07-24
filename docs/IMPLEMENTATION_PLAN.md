@@ -3064,7 +3064,7 @@ bodies exist only as jar bytecode):
 
 ### Phase 408 — multifile: cross-file class method calls + property writes  ✅
 - Completes cross-file class *use*: an instance method call (`b.m(args)`) and a `var` property write
-  (`b.tag = v`) on a class declared in ANOTHER file now lower to `CrossFileVirtual` (`invokevirtual`
+  (`b.tag = v`) on a class declared in ANOTHER file now lower to `Virtual` (`invokevirtual`
   the method / `setX(v)`), not a bail. `ir_lower`: the member-call arm gets a sibling-file branch (own
   methods, exact arity; inherited/vararg/defaulted bail) after the local user-method branch; the
   `AssignMember` arm gets a sibling-file `var`→`setX` branch before its `class_of(rt)?`. Value-class
@@ -3077,10 +3077,10 @@ bodies exist only as jar bytecode):
 - Constructing a class declared in ANOTHER file and reading its property now lower to cross-file
   bytecode (no bail). New backend-agnostic IR: `IrExpr::NewCrossFile { internal, params, args }` (→ `new
   internal; dup; <args>; invokespecial internal.<init>(desc)`, descriptor built in the JVM emitter) and
-  `Callee::CrossFileVirtual { owner, name, params, ret, interface }` (→ `invokevirtual`/`invokeinterface`).
+  `Callee::Virtual { owner, name, params, ret, interface }` (→ `invokevirtual`/`invokeinterface`).
   `ir_lower`: `lower_external_new` routes a sibling-file user class (found by internal name in
   `syms.class_by_internal`, not in this file's IR classes) to `NewCrossFile`; the member-read arm routes a
-  sibling-file property to its `getX()` via `CrossFileVirtual`. No driver map needed — the class is
+  sibling-file property to its `getX()` via `Virtual`. No driver map needed — the class is
   referenced by its own internal name. **Bails (skip, never miscompile):** a sibling-file value class
   (unboxed, no instance `<init>`), annotation, or inner class.
 - **Box conformance: 1084 → 1085 box()=OK, 0 FAIL** (value-class cross-file shapes correctly skip).
@@ -3089,7 +3089,7 @@ bodies exist only as jar bytecode):
   krusty's facade `@Metadata` doesn't fully describe top-level functions. krusty emits a minimal
   `@Metadata` (jar is JVM-runnable) but full kotlinc-source consumption needs complete `@Metadata` (a
   protobuf blob) — a known gap; the test now skips that step with a note.
-- NEXT cross-file-class steps: instance method calls (`b.m()` → `CrossFileVirtual`) and property writes.
+- NEXT cross-file-class steps: instance method calls (`b.m()` → `Virtual`) and property writes.
 
 ### Phase 406 — multifile: cross-file top-level property access  ✅
 - A read/write of a top-level property declared in ANOTHER file now lowers to the other facade's

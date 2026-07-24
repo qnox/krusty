@@ -1734,12 +1734,6 @@ pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
                 descriptor,
                 ..
             }
-            | Callee::Virtual {
-                owner,
-                name: _,
-                descriptor,
-                ..
-            }
             | Callee::Special {
                 owner,
                 name: _,
@@ -1749,12 +1743,18 @@ pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
                 !mentions_unsupported_stdlib_value_class(&owner.render())
                     && !mentions_unsupported_stdlib_value_class(descriptor)
             }
-            Callee::CrossFileVirtual {
-                owner, params, ret, ..
+            // A user (sibling-file) method carries `Ty`s; a classpath one a descriptor string.
+            Callee::Virtual {
+                owner,
+                descriptor,
+                params,
+                ..
             } => {
                 !mentions_unsupported_stdlib_value_class(&owner.render())
-                    && params.iter().all(ty_ok)
-                    && ty_ok(ret)
+                    && match params {
+                        Some((ps, ret)) => ps.iter().all(ty_ok) && ty_ok(ret),
+                        None => !mentions_unsupported_stdlib_value_class(descriptor),
+                    }
             }
             Callee::CrossFile { params, ret, .. } => params.iter().all(ty_ok) && ty_ok(ret),
             Callee::Local(_) | Callee::LocalDefault(_) | Callee::External(_) => true,
@@ -6917,10 +6917,13 @@ impl<'a> Emitter<'a> {
                     ret_is_nothing(&self.ir.functions[*fid as usize].ret)
                 }
                 Callee::CrossFile { ret, .. } => ret_is_nothing(ret),
-                Callee::Virtual { descriptor, .. } | Callee::Special { descriptor, .. } => {
-                    descriptor.ends_with(")Ljava/lang/Void;")
-                }
-                Callee::CrossFileVirtual { ret, .. } => ret_is_nothing(ret),
+                Callee::Special { descriptor, .. } => descriptor.ends_with(")Ljava/lang/Void;"),
+                Callee::Virtual {
+                    descriptor, params, ..
+                } => match params {
+                    Some((_, ret)) => ret_is_nothing(ret),
+                    None => descriptor.ends_with(")Ljava/lang/Void;"),
+                },
                 Callee::Static {
                     descriptor, inline, ..
                 } => !inline.can_inline() && descriptor.ends_with(")Ljava/lang/Void;"),
@@ -7412,8 +7415,33 @@ impl<'a> Emitter<'a> {
                     owner,
                     name,
                     descriptor,
+                    params,
                     interface,
                 } => {
+                    // A sibling-file user method carries its signature as `Ty`s (`params`): build the
+                    // descriptor and emit a plain virtual/interface call. The classpath-operator
+                    // special-casing below only applies to the `descriptor` form (a classpath receiver).
+                    if let Some((param_tys, ret_ty)) = params {
+                        let owner = owner.render();
+                        let name = name.clone();
+                        let interface = *interface;
+                        let ptys = jvm_tys(param_tys);
+                        let ret = ir_ty_to_jvm(ret_ty);
+                        let descriptor = method_descriptor(&ptys, ret);
+                        let recv = dispatch_receiver.expect("virtual call needs a receiver");
+                        let mut ops = vec![recv];
+                        ops.extend(args.iter().copied());
+                        self.emit_operands(&ops, code);
+                        let aw: i32 = ptys.iter().map(|t| slot_words(*t) as i32).sum();
+                        if interface {
+                            let m = self.cw.interface_methodref(&owner, &name, &descriptor);
+                            code.invokeinterface(m, aw, slot_words(ret) as i32);
+                        } else {
+                            let m = self.cw.methodref(&owner, &name, &descriptor);
+                            code.invokevirtual(m, aw, slot_words(ret) as i32);
+                        }
+                        return;
+                    }
                     let (owner, name, descriptor, interface) =
                         (owner.render(), name.clone(), descriptor.clone(), *interface);
                     let recv = dispatch_receiver.expect("virtual call needs a receiver");
@@ -7481,33 +7509,6 @@ impl<'a> Emitter<'a> {
                         code.invokeinterface(m, aw, slot_words(ret) as i32);
                     } else {
                         let m = self.cw.methodref(&owner, jvm_name, &descriptor);
-                        code.invokevirtual(m, aw, slot_words(ret) as i32);
-                    }
-                }
-                Callee::CrossFileVirtual {
-                    owner,
-                    name,
-                    params,
-                    ret,
-                    interface,
-                } => {
-                    let owner = owner.render();
-                    let name = name.clone();
-                    let interface = *interface;
-                    let param_tys = jvm_tys(params);
-                    let ret = ir_ty_to_jvm(ret);
-                    let descriptor = method_descriptor(&param_tys, ret);
-                    let recv = dispatch_receiver.expect("cross-file virtual call needs a receiver");
-                    let args = args.clone();
-                    let mut ops = vec![recv];
-                    ops.extend(args.iter().copied());
-                    self.emit_operands(&ops, code);
-                    let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
-                    if interface {
-                        let m = self.cw.interface_methodref(&owner, &name, &descriptor);
-                        code.invokeinterface(m, aw, slot_words(ret) as i32);
-                    } else {
-                        let m = self.cw.methodref(&owner, &name, &descriptor);
                         code.invokevirtual(m, aw, slot_words(ret) as i32);
                     }
                 }
@@ -9696,9 +9697,7 @@ impl<'a> Emitter<'a> {
                     Ty::array(prim_array_elem_ty(fq).unwrap())
                 }
                 Callee::External(fq) => intrinsic_ret(fq),
-                Callee::Static { descriptor, .. }
-                | Callee::Virtual { descriptor, .. }
-                | Callee::Special { descriptor, .. } => {
+                Callee::Static { descriptor, .. } | Callee::Special { descriptor, .. } => {
                     // A kotlin `Nothing` return is a `java/lang/Void` JVM descriptor — report it as
                     // `Nothing` so a diverging (inlined `error(...)`) call is treated as never returning
                     // (no value, no dead epilogue after the spliced `athrow`).
@@ -9708,7 +9707,14 @@ impl<'a> Emitter<'a> {
                         ty_from_descriptor_ret(descriptor)
                     }
                 }
-                Callee::CrossFileVirtual { ret, .. } => call_ret_ty(ret),
+                // A user (sibling-file) method carries its return as a `Ty`; a classpath one via descriptor.
+                Callee::Virtual {
+                    descriptor, params, ..
+                } => match params {
+                    Some((_, ret)) => call_ret_ty(ret),
+                    None if descriptor.ends_with(")Ljava/lang/Void;") => Ty::Nothing,
+                    None => ty_from_descriptor_ret(descriptor),
+                },
             },
             IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {
                 IrBinOp::Lt

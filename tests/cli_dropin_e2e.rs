@@ -252,7 +252,7 @@ fn cross_file_class_construct_and_property_read() {
 
 /// A destructuring declaration `val (a, b) = c` where `c`'s class — with `operator fun componentN` —
 /// is defined in ANOTHER file of the same compilation. The componentN calls must resolve cross-file
-/// (`CrossFileVirtual`), like an ordinary cross-file instance call.
+/// (`Virtual`), like an ordinary cross-file instance call.
 #[test]
 fn cross_file_destructuring() {
     let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {

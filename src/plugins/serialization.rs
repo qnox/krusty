@@ -223,11 +223,11 @@ fn companion_serializer_call(
     let comp = companion_fq(class_fq);
     let recv = ir.external_static_instance(class_fq, &comp, "Companion");
     ir.add_expr(IrExpr::Call {
-        callee: Callee::CrossFileVirtual {
+        callee: Callee::Virtual {
             owner: type_name(&comp),
             name: "serializer".to_string(),
-            params,
-            ret,
+            descriptor: String::new(),
+            params: Some((params, ret)),
             interface: false,
         },
         dispatch_receiver: Some(recv),
@@ -315,6 +315,7 @@ fn specialize_reified_placeholders(ir: &mut IrFile) {
                 owner: fmt,
                 name: kind.to_string(),
                 descriptor: descriptor.to_string(),
+                params: None,
                 interface: false,
             },
             dispatch_receiver: Some(recv),
@@ -412,6 +413,7 @@ fn virtual_iface(owner: &str, name: &str, descriptor: &str) -> Callee {
         owner: type_name(owner),
         name: name.to_string(),
         descriptor: descriptor.to_string(),
+        params: None,
         interface: true,
     }
 }
@@ -1060,11 +1062,11 @@ impl SerializationPlugin {
             args: vec![],
         });
         let get_value = ir.add_expr(IrExpr::Call {
-            callee: Callee::CrossFileVirtual {
+            callee: Callee::Virtual {
                 owner: type_name("kotlin/Lazy"),
                 name: "getValue".to_string(),
-                params: vec![],
-                ret: class_ty("kotlin/Any"),
+                descriptor: String::new(),
+                params: Some((vec![], class_ty("kotlin/Any"))),
                 interface: true,
             },
             dispatch_receiver: Some(acc_call),
@@ -1464,6 +1466,7 @@ impl IrPlugin for SerializationPlugin {
                             owner: type_name(pgsd_internal),
                             name: "addElement".to_string(),
                             descriptor: "(Ljava/lang/String;Z)V".to_string(),
+                            params: None,
                             interface: false,
                         },
                         dispatch_receiver: Some(d),
@@ -1893,6 +1896,7 @@ impl IrPlugin for SerializationPlugin {
                                 owner: type_name(&class_internal),
                                 name: property_getter_name(&pname),
                                 descriptor: format!("(){getter_desc}"),
+                                params: None,
                                 interface: false,
                             },
                             dispatch_receiver: Some(vrecv),
@@ -1963,6 +1967,7 @@ impl IrPlugin for SerializationPlugin {
                                     owner: type_name(&class_internal),
                                     name: property_getter_name(pname),
                                     descriptor: format!("(){getter_desc}"),
+                                    params: None,
                                     interface: false,
                                 },
                                 dispatch_receiver: Some(vrecv),
@@ -2122,6 +2127,7 @@ impl IrPlugin for SerializationPlugin {
                                             owner: type_name(&class_internal),
                                             name: property_getter_name(pname),
                                             descriptor: format!("(){getter_desc}"),
+                                            params: None,
                                             interface: false,
                                         },
                                         dispatch_receiver: Some(vr),
@@ -3169,6 +3175,7 @@ mod tests {
                         name,
                         descriptor,
                         interface,
+                        ..
                     },
                 dispatch_receiver,
                 args,

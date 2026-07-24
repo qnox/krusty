@@ -5130,6 +5130,7 @@ impl<'a> Lower<'a> {
                 owner: owner.into(),
                 name,
                 descriptor,
+                params: None,
                 interface,
             },
             Some(recv),
@@ -5627,7 +5628,7 @@ impl<'a> Lower<'a> {
             .filter(|cs| cs.is_object)
             .and_then(|cs| cs.method_matching(name, &arg_tys).cloned());
         // A value-class return/parameter mangles the method NAME and/or erases the JVM descriptor, so
-        // the `CrossFileVirtual` descriptor built from the LOGICAL types would mismatch the emitted
+        // the `Virtual` (Ty-carrying) descriptor built from the LOGICAL types would mismatch the emitted
         // method — leave those (and suspend, whose CPS shape differs) to the existing paths.
         let sib_ok = sib_sig.as_ref().is_some_and(|s| {
             !s.is_suspend
@@ -5653,11 +5654,11 @@ impl<'a> Lower<'a> {
                 a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
             }
             let call = self.emit_call(
-                Callee::CrossFileVirtual {
+                Callee::Virtual {
                     owner: internal,
                     name: name.to_string(),
-                    params,
-                    ret: ret_ir,
+                    descriptor: String::new(),
+                    params: Some((params, ret_ir)),
                     interface: false,
                 },
                 Some(recv),
@@ -6251,17 +6252,60 @@ impl<'a> Lower<'a> {
             if let Some(cs) = self.syms.class_by_internal(internal) {
                 // An annotation (an interface + synthetic impl) or inner class (needs an outer
                 // instance) isn't constructed via a plain cross-file `new`; bail (skip, not miscompile).
-                if cs.value_field.is_some() || cs.is_annotation || cs.inner_of.is_some() {
+                if cs.is_annotation || cs.inner_of.is_some() {
                     return None;
                 }
                 // Snapshot the sig's ctor shape before any `&mut self` lowering call (drops the borrow).
                 let is_interface = cs.is_interface;
+                let is_value = cs.value_field.is_some();
+                // A GENERIC value class (`value class Z<T>(val v: T)`) has an `Object`-approximated
+                // underlying krusty does not model soundly across a file boundary (the value flows boxed);
+                // such construction was UNSUPPORTED (skipped) before construction unified through `New`, so
+                // keep skipping it here — never miscompile. (Non-generic value classes lower fine.)
+                let is_generic_value = is_value && !cs.tparam_names.is_empty();
                 let params = tys_to_ir(&cs.ctor_params);
                 let ctor_param_names = cs.ctor_param_names.clone();
+                // A (regular) class whose primary ctor takes a value-class param has a PRIVATE primary + a
+                // PUBLIC synthetic accessor `(…, DefaultConstructorMarker)`. Cross-file construction must
+                // call the accessor (same-file uses the emit-time `use_accessor` path, which can't fire
+                // cross-file — `has_value_param_ctor` sees only this file's IR). Detected here via the
+                // module symbols; the marker param + a trailing `null` arg are appended below.
+                let has_vc_ctor_param = !is_value
+                    && cs.ctor_params.iter().any(|t| {
+                        t.non_null().obj_internal().is_some_and(|i| {
+                            self.syms
+                                .class_by_type_name(i)
+                                .is_some_and(|c| c.value_field.is_some())
+                        })
+                    });
+                // A value class is constructed the same as any class — a `New` (via `new_cross_file`) that
+                // the value-class PASS realizes as `<owner>.constructor-impl(args)`, or (the sole param
+                // omitted) `constructor-impl$default`. ir_lower stays value-class-agnostic: it emits only
+                // the provided args (fewer than the params = the omitted-default case the pass detects).
+                if is_generic_value {
+                    return None; // cross-file generic value-class construction stays unsupported (skip)
+                }
+                if is_value && !is_interface {
+                    let mut a = Vec::new();
+                    for (arg, pty) in args.iter().zip(&params) {
+                        a.push(self.lower_arg(*arg, pty)?);
+                    }
+                    return Some(self.ir.new_cross_file(internal, params, a));
+                }
                 if !is_interface && params.len() == args.len() {
                     let mut a = Vec::new();
                     for (arg, pty) in args.iter().zip(&params) {
                         a.push(self.lower_arg(*arg, pty)?);
+                    }
+                    if has_vc_ctor_param {
+                        // Route through the public `(…, DefaultConstructorMarker)` accessor.
+                        let mut params = params;
+                        params.push(ty_to_ir(Ty::obj(
+                            "kotlin/jvm/internal/DefaultConstructorMarker",
+                        )));
+                        let null_marker = self.emit_const(IrConst::Null);
+                        a.push(null_marker);
+                        return Some(self.ir.new_cross_file(internal, params, a));
                     }
                     return Some(self.ir.new_cross_file(internal, params, a));
                 }
@@ -6281,42 +6325,24 @@ impl<'a> Lower<'a> {
             }
         }
         match self.info.resolved_constructor(call).cloned()? {
-            // A classpath `@JvmInline value class` is constructed via its static
-            // `constructor-impl(U): U`, which returns the UNBOXED underlying value.
-            ResolvedConstructor::ValueClass {
-                underlying: under,
-                arg,
-            } => {
-                if let Some(source_arg) = arg {
-                    let desc = self.runtime.method_descriptor(&[under], under)?;
-                    let arg = self.lower_arg(source_arg, &ty_to_ir(under))?;
-                    return Some(self.emit_static_call(
-                        internal.to_string(),
-                        "constructor-impl".to_string(),
-                        desc,
-                        InlineKind::None,
-                        vec![arg],
-                    ));
-                }
-                let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
-                let desc = self
-                    .runtime
-                    .method_descriptor(&[under, Ty::Int, marker], under)?;
-                let dummy = self.emit_const(IrConst::Null);
-                let mask = self.emit_const(IrConst::Int(1));
-                let null_marker = self.emit_const(IrConst::Null);
-                Some(self.emit_static_call(
-                    internal.to_string(),
-                    "constructor-impl$default".to_string(),
-                    desc,
-                    InlineKind::None,
-                    vec![dummy, mask, null_marker],
-                ))
-            }
             ResolvedConstructor::Plain { member, args } => {
                 let mut lowered = Vec::new();
                 for (arg, pty) in args.iter().zip(&member.params) {
                     lowered.push(self.lower_arg(*arg, &ty_to_ir(*pty))?);
+                }
+                // A value-class ctor is marked by an EMPTY descriptor: emit a `New` carrying the ctor
+                // parameter TYPES so the value-class pass realizes `constructor-impl` (arg supplied) or
+                // `constructor-impl$default` (arg omitted). A value class is single-field, so use its
+                // DECLARED underlying as the sole param — `member.params` reflects the CALL arity (empty
+                // for a no-arg defaulted `Vid()`), which would wrongly pick the arg-less `constructor-impl`.
+                if member.descriptor.is_empty() {
+                    let params = self
+                        .syms
+                        .libraries
+                        .value_underlying_name(crate::types::type_name(internal))
+                        .map(|u| vec![ty_to_ir(u)])
+                        .unwrap_or_else(|| tys_to_ir(&member.params));
+                    return Some(self.ir.new_cross_file(internal, params, lowered));
                 }
                 Some(self.emit_new_external(internal, member.descriptor, lowered))
             }
@@ -6695,11 +6721,11 @@ impl<'a> Lower<'a> {
                     return None;
                 }
                 let c = self.emit_call(
-                    Callee::CrossFileVirtual {
+                    Callee::Virtual {
                         owner,
                         name,
-                        params,
-                        ret: ty_to_ir(ret),
+                        descriptor: String::new(),
+                        params: Some((params, ty_to_ir(ret))),
                         interface,
                     },
                     Some(recv),
@@ -6754,11 +6780,11 @@ impl<'a> Lower<'a> {
                     return Some((self.emit_method_call(class, method, recv, vec![]), ret));
                 }
                 let c = self.emit_call(
-                    Callee::CrossFileVirtual {
+                    Callee::Virtual {
                         owner,
                         name: getter,
-                        params: vec![],
-                        ret: ty_to_ir(ret),
+                        descriptor: String::new(),
+                        params: Some((vec![], ty_to_ir(ret))),
                         interface,
                     },
                     Some(recv),
@@ -8504,11 +8530,11 @@ impl<'a> Lower<'a> {
                 .ir
                 .external_static_instance(&c_internal_rendered, &comp, "Companion");
             return self.ir.add_expr(IrExpr::Call {
-                callee: Callee::CrossFileVirtual {
+                callee: Callee::Virtual {
                     owner: type_name(&comp),
                     name: "serializer".to_string(),
-                    params: vec![],
-                    ret,
+                    descriptor: String::new(),
+                    params: Some((vec![], ret)),
                     interface: false,
                 },
                 dispatch_receiver: Some(recv),
@@ -10671,11 +10697,11 @@ impl<'a> Lower<'a> {
                     Some((call, selected_ret))
                 } else {
                     let call = self.emit_call(
-                        Callee::CrossFileVirtual {
+                        Callee::Virtual {
                             owner: type_name(&owner),
                             name: target,
-                            params: tys_to_ir(&selected_params),
-                            ret: ty_to_ir(selected_ret),
+                            descriptor: String::new(),
+                            params: Some((tys_to_ir(&selected_params), ty_to_ir(selected_ret))),
                             interface,
                         },
                         Some(recv_v),
@@ -11867,11 +11893,11 @@ impl<'a> Lower<'a> {
                     })
                 {
                     return Some(self.emit_call(
-                        Callee::CrossFileVirtual {
+                        Callee::Virtual {
                             owner,
                             name: property_getter_name(name),
-                            params: vec![],
-                            ret: ty_to_ir(ret_ty),
+                            descriptor: String::new(),
+                            params: Some((vec![], ty_to_ir(ret_ty))),
                             interface: is_iface,
                         },
                         Some(recv),
@@ -12044,6 +12070,26 @@ impl<'a> Lower<'a> {
 
     /// Lower a classpath instance-member call with omitted arguments through the member's `$default`
     /// synthetic, using the checker-recorded argument slots.
+    /// Erase a value-class type to its unboxed underlying (recursively over nested value classes) — for
+    /// building a physical descriptor. A non-value-class type is returned unchanged (keeping nullability).
+    fn vc_erase_ty(&self, t: Ty) -> Ty {
+        let mut cur = t;
+        loop {
+            let Some(i) = cur.non_null().obj_internal() else {
+                return cur;
+            };
+            let under = self
+                .syms
+                .class_by_type_name(i)
+                .and_then(|c| c.value_field.as_ref().map(|(_, u)| *u))
+                .or_else(|| self.syms.libraries.value_underlying_name(i));
+            match under {
+                Some(u) => cur = u,
+                None => return cur,
+            }
+        }
+    }
+
     fn lower_library_default_member_call(
         &mut self,
         recv: u32,
@@ -14781,11 +14827,11 @@ impl<'a> Lower<'a> {
                     let r = self.expr(receiver)?;
                     let v = self.lower_arg(value, &ty_to_ir(pty))?;
                     return Some(self.emit_call(
-                        Callee::CrossFileVirtual {
+                        Callee::Virtual {
                             owner,
                             name: property_setter_name(name),
-                            params: vec![ty_to_ir(pty)],
-                            ret: Ty::Unit,
+                            descriptor: String::new(),
+                            params: Some((vec![ty_to_ir(pty)], Ty::Unit)),
                             interface,
                         },
                         Some(r),
@@ -15803,6 +15849,8 @@ impl<'a> Lower<'a> {
                     };
                     format!("call {name}")
                 }
+                Expr::Name(n) => format!("name {n}"),
+                Expr::Member { name, .. } => format!("member .{name}"),
                 o => format!("expr {}", bail_variant(&format!("{o:?}"))),
             };
             self.set_bail(&reason);
@@ -17154,6 +17202,26 @@ impl<'a> Lower<'a> {
                             name.clone(),
                             format!("L{enum_internal};"),
                         ));
+                    }
+                    // `Kind.PENDING` on a SAME-MODULE (other-file) enum. The enum isn't in this file's
+                    // IR (so `class_info` above missed) and isn't classpath, but the module symbols know
+                    // `rn` is an enum with the entry `name` -> `getstatic <internal>.PENDING:L<internal>;`.
+                    // `class_names` maps the simple name to the enum's real internal (its own package),
+                    // which `class_internal` above cannot (it assumes the current file's package).
+                    if self
+                        .syms
+                        .enums
+                        .get(&rn)
+                        .is_some_and(|entries| entries.contains(&name))
+                    {
+                        if let Some(internal) = self.syms.class_names.get(&rn) {
+                            let internal = internal.render();
+                            return Some(self.emit_external_static_field(
+                                internal.clone(),
+                                name.clone(),
+                                format!("L{internal};"),
+                            ));
+                        }
                     }
                 }
                 // `Outer.NestedEnum.ENTRY` — receiver is a `Member` chain naming a nested enum. The
@@ -19808,11 +19876,11 @@ impl<'a> Lower<'a> {
                                             "Companion",
                                         );
                                         return Some(self.ir.add_expr(IrExpr::Call {
-                                            callee: Callee::CrossFileVirtual {
+                                            callee: Callee::Virtual {
                                                 owner: type_name(&comp),
                                                 name: "serializer".to_string(),
-                                                params: vec![kser; args.len()],
-                                                ret,
+                                                descriptor: String::new(),
+                                                params: Some((vec![kser; args.len()], ret)),
                                                 interface: false,
                                             },
                                             dispatch_receiver: Some(recv),
@@ -20098,22 +20166,61 @@ impl<'a> Lower<'a> {
                             let call = self.coerce_generic_read(call, e, mret);
                             self.wrap_arg_prelude(call, prelude)
                         } else {
-                            if args.len() != params.len()
-                                || self
-                                    .info
-                                    .resolved_call_arg_slots
-                                    .get(&e)
-                                    .is_some_and(|slots| slots.iter().any(Option::is_none))
-                            {
+                            // A cross-file member call with OMITTED defaults (a sibling-file data class's
+                            // `w.copy(field = v)`) dispatches to the static `<owner>.<name>$default(recv,
+                            // <params…>, mask, marker)`: provided args in slot order (a zero placeholder for
+                            // each omitted one), then the mask + null marker. The physical descriptor erases
+                            // value-class fields to their underlying (kotlinc's synthetic); the return is
+                            // the owner class. Same-file goes through the index `MethodCall` path above. An
+                            // INTERFACE owner's `$default` is a STATIC INTERFACE method (needs an
+                            // `InterfaceMethodref`, which `emit_static_call` can't express) — left to skip.
+                            if !interface {
+                                if let Some(slots) =
+                                    self.info.resolved_call_arg_slots.get(&e).cloned()
+                                {
+                                    if slots.iter().any(Option::is_none) {
+                                        let (slot_args, prelude) = self
+                                            .lower_call_slot_args_source_order(
+                                                &args, &slots, &params, true,
+                                            )?;
+                                        let mut a = vec![recv];
+                                        a.extend(slot_args);
+                                        let mask: i32 = slots
+                                            .iter()
+                                            .enumerate()
+                                            .filter(|(_, s)| s.is_none())
+                                            .map(|(i, _)| 1i32 << i)
+                                            .sum();
+                                        self.append_default_mask_marker(&mut a, mask);
+                                        let owner_ty = Ty::obj(&owner);
+                                        let mut dparams = vec![owner_ty];
+                                        dparams.extend(params.iter().map(|&t| self.vc_erase_ty(t)));
+                                        dparams.push(Ty::Int);
+                                        dparams.push(Ty::obj("java/lang/Object"));
+                                        let desc = self
+                                            .runtime
+                                            .method_descriptor(&dparams, ty_to_ir(ret))?;
+                                        let call = self.emit_static_call(
+                                            owner.clone(),
+                                            format!("{target}$default"),
+                                            desc,
+                                            InlineKind::None,
+                                            a,
+                                        );
+                                        return Some(self.wrap_arg_prelude(call, prelude));
+                                    }
+                                }
+                            }
+                            if args.len() != params.len() {
                                 return None;
                             }
                             let a = self.lower_args(&args, &params)?;
                             self.emit_call(
-                                Callee::CrossFileVirtual {
+                                Callee::Virtual {
                                     owner: type_name(&owner),
                                     name: target,
-                                    params: tys_to_ir(&params),
-                                    ret: ty_to_ir(ret),
+                                    descriptor: String::new(),
+                                    params: Some((tys_to_ir(&params), ty_to_ir(ret))),
                                     interface,
                                 },
                                 Some(recv),
