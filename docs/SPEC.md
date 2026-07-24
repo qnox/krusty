@@ -603,7 +603,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc's static type. The runtime value behind the erased `Object` return is still the boxed wrapper;
   the lowerer's erased-return coercion (`has_scalar_value_repr(st)` on an erased-top physical return)
   unboxes the call result once, so every use sees the real scalar and a reference context re-boxes it
-  (`tests/generic_inferred_primitive_return_e2e.rs`).
+  (`tests/generic_inferred_primitive_return_e2e.rs`). An EXPLICIT type argument (`underlying<Int>(a)`)
+  types the same way (`explicit_generic_return`, previously boxed-nullable). Both paths keep a
+  DECLARED-NULLABLE return (`fun <T> foo(...): T?`) boxed (`Int?` — the erased result may be null, an
+  eager unbox would NPE). And a scalar-typed erased call result flowing straight back into a reference
+  context of the SAME primitive (`val v: Int? = uncheckedCastNull<Int>()`) reuses the original boxed
+  reference (`checkcast` only) instead of unbox+re-box — the round-trip is not the identity on `null`
+  (kt84727: `null as T` must survive, kotlinc keeps the reference)
+  (`generic_hof_vc_binding_e2e::nullable_generic_return_keeps_null`).
 - **A tail-call-forwarded suspend fn boxes its EARLY returns.** The tail-forward shape (no state machine,
   `$completion` threaded to the callee, callee's `Object` result `areturn`ed verbatim) also admits bodies
   with early exits (`if (n == 0) return true; return odd(n - 1)`); the CPS method returns `Object`, so the
@@ -1307,10 +1314,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   lambda parameter `it` types as that concrete type and `R` is inferred from the lambda body (the call
   result). The lambda materializes as an erased `Function1` whose `invoke` `checkcast`s its parameter —
   sound for a reference/class binding (as a non-generic HOF already does). `user_generic_call` previously
-  applied only to `inline` HOFs; it now also handles a non-inline one, EXCEPT when a type parameter binds
-  to a `@JvmInline value class` (user or classpath) or an unsigned type — those need UNBOXING of the erased
-  parameter, not a cast, so they stay erased (`ty_is_value_class`/`value_underlying`/`is_unsigned_integer_type`
-  guard). Test: `generic_fn_e2e::non_inline_generic_hof_binds_lambda_param`.
+  applied only to `inline` HOFs; it now also handles a non-inline one. A SAME-MODULE `@JvmInline value
+  class` binding is allowed too: the value crosses the erased boundary BOXED, and the declared-VC
+  function-type machinery types the lambda parameter as the value class with a boxed slot + per-read
+  unboxing (`tests/generic_hof_vc_binding_e2e.rs` — the corpus `unboxGenericParameter/*` bucket). A
+  CLASSPATH value class or an unsigned type still stays erased (`value_underlying`/`is_unsigned` guard):
+  their value-box unbox isn't modeled, so recovering the binding would miscompile.
+  Test: `generic_fn_e2e::non_inline_generic_hof_binds_lambda_param`.
 
 - **Java (non-Kotlin) static method calls, with overload selection (`Logf.make(x)`, `Logf.parse(s, 16)`).**
   A `.class`-read Java class's static methods land in the type's static list; the checker's class-name

@@ -11080,6 +11080,7 @@ impl<'a> Checker<'a> {
     }
 
     fn bin_err(&mut self, _op: BinOp, lt: Ty, rt: Ty, span: Span) -> Ty {
+        crate::trace_compiler!("resolve", "bin_err op={:?} lt={:?} rt={:?}", _op, lt, rt);
         self.diags.error(
             span,
             format!(
@@ -11524,15 +11525,15 @@ impl<'a> Checker<'a> {
         if binds.is_empty() {
             return None;
         }
-        // A value-class binding (`T` = a `@JvmInline value class` — user OR classpath — or an unsigned
-        // type) can't be recovered by a plain `checkcast` on the erased lambda parameter (it needs
-        // unboxing); keep such a call erased rather than miscompile it.
+        // A CLASSPATH value-class or unsigned binding can't be recovered on the erased lambda
+        // parameter (the value-box unbox isn't modeled); keep such a call erased rather than
+        // miscompile it. A SAME-MODULE `@JvmInline value class` binding IS recoverable: the value
+        // crosses the erased boundary BOXED, and the declared-VC function-type machinery already
+        // types the lambda parameter as the value class with a boxed slot + per-read unboxing.
         if !f.is_inline
-            && binds.values().any(|t| {
-                self.ty_is_value_class(*t)
-                    || self.syms.libraries.value_underlying(*t).is_some()
-                    || t.is_unsigned()
-            })
+            && binds
+                .values()
+                .any(|t| self.syms.libraries.value_underlying(*t).is_some() || t.is_unsigned())
         {
             return None;
         }
@@ -11679,6 +11680,13 @@ impl<'a> Checker<'a> {
             // (`has_scalar_value_repr(st) && phys.is_erased_top()`) unboxes the call result once, so
             // every use sees the real scalar.
         }
+        // A declared NULLABLE return (`fun <T> foo(...): T?`) keeps a primitive binding boxed
+        // (`foo(1)` is `Int?` — the erased result may be null, and an eager unbox would NPE);
+        // a reference binding already admits null (`Ty::Nullable` wraps primitives only). A form
+        // with no boxed representation declines (`None`) — the call simply stays erased.
+        if f.ret.as_ref().is_some_and(|r| r.nullable) && !bound.is_reference() {
+            return bound.nullable_boxed();
+        }
         Some(bound)
     }
 
@@ -11693,14 +11701,20 @@ impl<'a> Checker<'a> {
         }
         let ret = f.ret.as_ref()?;
         let idx = f.type_params.iter().position(|tp| tp == &ret.name)?;
-        // The result IS the supplied type argument (`asSeq<String>(…)` is a `String`). A generic slot
-        // is physically a BOXED reference on the JVM, so a primitive argument refines to its boxed
-        // wrapper (`<Int>`/`<Int?>` → `Integer`) — the actual runtime representation of the erased
-        // result. The wrapper is unboxed to the primitive only where a use site demands it, by krusty's
-        // normal nullable-primitive machinery; we never collapse the result to the erased `Any`/`Object`.
+        // The result IS the supplied type argument (`asSeq<String>(…)` is a `String`). A primitive
+        // argument types as the plain primitive — kotlinc's static type (`underlying<Int>(a) + 2`
+        // is `Int` arithmetic). The runtime value is still the boxed wrapper behind the erased
+        // `Object` return; the lowerer's erased-return coercion (`has_scalar_value_repr(st) &&
+        // phys.is_erased_top()`) unboxes the call result once, matching the inferred-binding path
+        // in `user_generic_return`.
         let arg = targs.get(idx)?;
         let t = self.resolve_ty_no_diag(arg);
-        let t = if !t.is_reference() {
+        // A declared NULLABLE return (`fun <T> foo(...): T?`) or a NULLABLE type argument
+        // (`idCast<Int?>(null)` — `resolve_ty_no_diag` drops the TypeRef's own `?`) keeps a
+        // primitive boxed (`Int?` — the erased result may be null); a reference type already
+        // admits null (`Ty::Nullable` wraps primitives only). A form with no boxed
+        // representation declines (`None`) — the call falls back to the erased typing.
+        let t = if (ret.nullable || arg.nullable) && !t.is_reference() {
             t.nullable_boxed()?
         } else {
             t

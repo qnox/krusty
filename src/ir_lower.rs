@@ -11502,6 +11502,23 @@ impl<'a> Lower<'a> {
             // A `Unit` value flowing into a reference target (`fun f(): Any? = unitExpr`, `Unit?`).
             Some(self.unit_value_after_effect(e))
         } else if self.has_scalar_value_repr(at) && target_ref {
+            // The value may be the compiler-inserted unbox of an ERASED call result (`fizz(1)`
+            // typed `Int` over a physical `Object` return). Flowing it straight back into a
+            // reference context of the SAME primitive (`val v: Int? = uncheckedCastNull<Int>()`,
+            // an `Any` parameter) must reuse the original reference, not box the just-unboxed
+            // value: the round-trip is not the identity when the erased result is `null`
+            // (`null as T` NPEs at the unbox where kotlinc keeps the reference). A numeric
+            // CONVERSION target (`Long?` from an `Int` result) still needs the unbox + re-box.
+            if target.nullable_primitive() == Some(at) || target.is_erased_top() {
+                let stripped = self.strip_discarded_unbox(e);
+                if stripped != e {
+                    return Some(if target.is_erased_top() {
+                        stripped
+                    } else {
+                        self.emit_type_op(IrTypeOp::Cast, stripped, *target)
+                    });
+                }
+            }
             Some(self.emit_type_op(IrTypeOp::ImplicitCoercion, e, target.clone()))
         } else if at.is_reference() && !target_ref && *target != Ty::Unit && *target != Ty::Error {
             Some(self.emit_type_op(IrTypeOp::ImplicitCoercion, e, target.clone()))
