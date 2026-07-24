@@ -1044,7 +1044,7 @@ pub struct IrFile {
     /// this side-table instead. Empty ⇒ treat every parameter as non-null (the prior behavior).
     pub fn_param_declared_nullable: std::collections::HashMap<u32, Vec<bool>>,
     /// Value-class internal name → the lowered default expression of its single primary-constructor
-    /// property, when it has one (`value class ServerId(val value: String = UuidGen.generate())`).
+    /// property, when it has one (`value class ItemId(val value: String = IdGen.next())`).
     /// Lowered in the STATIC `constructor-impl` frame (the sole param is value-index 0, no `this`); the
     /// value-class JVM pass registers it as `constructor-impl`'s param default so the backend emits the
     /// synthetic `constructor-impl$default(U, int, DefaultConstructorMarker)` kotlinc requires.
@@ -1096,7 +1096,7 @@ pub struct IrFile {
     /// `@Serializable` class's generated `$$serializer` object, which kotlinc deprecates HIDDEN.
     deprecated_classes: std::collections::HashSet<TypeName>,
     /// Internal names of classes whose primary constructor has a value-class-typed parameter (a
-    /// `data class Server(val id: ServerId, …)`). kotlinc makes such a primary `<init>` PRIVATE and adds a
+    /// `data class Rec(val id: ItemId, …)`). kotlinc makes such a primary `<init>` PRIVATE and adds a
     /// PUBLIC|SYNTHETIC accessor `<init>(…args, DefaultConstructorMarker)` that delegates to it — its ABI
     /// for a constructor mentioning an inline class. Recorded by the value-class pass BEFORE it erases the
     /// parameter types (which lose the value-class identity).
@@ -1120,7 +1120,7 @@ pub struct IrFile {
     pub suspend_declared_sigs: std::collections::HashMap<u32, (Vec<Ty>, Ty)>,
     /// Each function the value-class pass rewrote, keyed by `FunId` → its DECLARED `(name, params,
     /// ret)` before the pass mangled the name and erased the value classes to their underlying types.
-    /// `@Metadata` names the Kotlin function and its declared parameter types (`ApplicationId`, not
+    /// `@Metadata` names the Kotlin function and its declared parameter types (`ItemId`, not
     /// `String`); the mangled name and erased descriptor ride along as a `JvmMethodSignature`. Captured
     /// before the CPS rewrite, so a function that is both `suspend` and value-class-typed reports the
     /// fully declared signature here rather than the half-lowered one.

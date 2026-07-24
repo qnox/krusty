@@ -20431,7 +20431,7 @@ impl<'a> Lower<'a> {
                         // more specific (`List<Int>.get` → `Int`) gets the unbox/checkcast kotlinc emits.
                         self.coerce_to_static(call, ret, physical_ret)
                     } else if let Some((internal, m)) = {
-                        // A `@JvmStatic` member of a classpath `object` (`UuidGen.of(x)`) → a static
+                        // A `@JvmStatic` member of a classpath `object` (`IdGen.of(x)`) → a static
                         // method on the object class (`invokestatic`), found in the type's static list.
                         rt.obj_internal()
                             .zip(self.info.resolved_companion(e).cloned())

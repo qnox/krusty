@@ -15,12 +15,12 @@ fn compile(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
 fn extends_runtime_exception_with_message() {
     let classes = compile(
         "package demo\n\
-         class EntityNotFoundException(message: String) : RuntimeException(message)\n",
+         class MissingEntryException(message: String) : RuntimeException(message)\n",
     )
     .expect("krusty failed to compile an exception subclass");
     let (_, bytes) = classes
         .iter()
-        .find(|(n, _)| n == "demo/EntityNotFoundException")
+        .find(|(n, _)| n == "demo/MissingEntryException")
         .expect("class emitted");
     let has = |needle: &str| bytes.windows(needle.len()).any(|w| w == needle.as_bytes());
     // The `<init>` calls the classpath base's String constructor.

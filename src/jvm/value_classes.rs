@@ -325,7 +325,7 @@ pub fn lower_value_classes(
             .or_else(|| module_value_classes.get(&fq).copied())
         {
             // The underlying carries its own declared nullability — trust it: a NON-NULL reference
-            // underlying (`ChangeId(val value: String)`) means `ChangeId?` stays UNBOXED (null carried by
+            // underlying (`ItemId(val value: String)`) means `ItemId?` stays UNBOXED (null carried by
             // the reference), exactly like a same-file value class. Classpath VCs come from the resolver
             // (decoded from `@Metadata`); same-module source VCs from `module_value_classes`.
             let ir_under = u.scalar_value_repr().unwrap_or(u);
@@ -749,7 +749,7 @@ pub fn lower_value_classes(
         // parameters — match it by the `get` prefix AND an empty parameter list. It stays unmangled UNLESS
         // its owner is a supertype-free class (`getter_mangle_owners`), where a value-class-returning getter
         // safely mangles to kotlinc's `getId-<hash>` (no override to keep consistent). A user FUNCTION that
-        // starts with `get` but takes parameters (`suspend fun getById(id: ServerId)`) is a normal member
+        // starts with `get` but takes parameters (`suspend fun getById(id: ItemId)`) is a normal member
         // and always mangles.
         let is_vc_field_getter = f.name.starts_with("get")
             && orig_params[fid].is_empty()
@@ -2565,7 +2565,7 @@ pub fn lower_value_classes(
             if let Some(body) = ir.functions[fid].body {
                 // A nullable value-class return `X?` has the BOXED descriptor `LX;`, so a tail that is an
                 // UNBOXED `X` value must be boxed — not only the syntactic `constructor-impl`/`unbox-impl`
-                // forms `box_tail` handled, but also a value-class field read (`di.applicationId`) or a
+                // forms `box_tail` handled, but also a value-class field read (`h.itemId`) or a
                 // call returning the unboxed underlying (`byDep(): X`) flowing in via nullable widening.
                 // `box_nullable_vc_tail` boxes exactly the tails whose representation IS an unboxed `X`
                 // (leaving `null`, already-boxed, and unrelated values — e.g. a suspend continuation's
@@ -3912,7 +3912,7 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
         let body = ir.add_expr(IrExpr::Block { stmts, value: None });
         let cfid = add_static(ir, "constructor-impl", vec![u_ir], u_ir, body);
         ir.open_methods.insert(cfid); // kotlinc emits `constructor-impl` `public static` (non-final)
-                                      // A default on the single underlying property (`ServerId(val value: String = …)`) → register it as
+                                      // A default on the single underlying property (`ItemId(val value: String = …)`) → register it as
                                       // `constructor-impl`'s param default so the backend emits `constructor-impl$default(U, int, marker)`
                                       // (kotlinc's synthetic). The default was lowered in the static `constructor-impl` frame (param @0).
         if let Some(def) = ir.value_ctor_default(&internal) {
