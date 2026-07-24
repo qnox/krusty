@@ -87,9 +87,8 @@ src/ir.rs, ir_lower.rs            backend-neutral IR + AST→IR lowering
 src/jvm/                          IR→bytecode emit, class-file writer, .class reader, jar/dir
                                   classpath, bytecode inliner (inline.rs)
 src/metadata/                     @kotlin.Metadata protobuf + .kotlin_module emitters
-crates/krusty-analysis/           process-independent in-memory source-set analysis
 crates/krusty-cli/                kotlinc-compatible batch executable and command parsing
-crates/krusty-lsp/                JSON-RPC/LSP executable and compact editor query state
+crates/krusty-lsp/                compiler-backed analysis, JSON-RPC/LSP, compact query state
 tests/                            differential + round-trip harness vs real kotlinc
 docs/SPEC.md                      language subset + Kotlin-semantics decisions
 docs/IMPLEMENTATION_PLAN.md       phased plan (each phase ends green)
@@ -109,7 +108,8 @@ krusty src/ -d mylib.jar -module-name mylib  # ... or to a library .jar
 krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath
 krusty -version | -help
 
-# LSP server over JSON-RPC on stdin/stdout (full-document sync, diagnostics, hover):
+# LSP server over JSON-RPC on stdin/stdout
+# (full-document sync, diagnostics, hover, full/range semantic highlighting):
 cargo build -p krusty-lsp
 target/debug/krusty-lsp --stdio -cp deps.jar:classes/
 ```

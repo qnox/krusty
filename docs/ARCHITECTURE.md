@@ -36,11 +36,12 @@ boundary.
   node, keep the hook narrow, backend-owned, and record it as migration debt rather than adding JVM
   spelling or platform policy to core lowering.
 - **Process front ends** are separate workspace packages. The root `krusty` package is a compiler
-  library and exposes frontend and backend contracts. `crates/krusty-analysis` adapts that public
-  frontend to process-independent, in-memory source-set analysis. `crates/krusty-cli` owns
-  kotlinc-compatible batch argument parsing, filesystem output, and process exit behavior, while
-  `crates/krusty-lsp` owns JSON-RPC, document lifecycle, and compact editor query snapshots. These
-  packages depend toward the compiler library; the compiler never depends on any process adapter.
+  library and exposes frontend and backend contracts. `crates/krusty-cli` owns kotlinc-compatible
+  batch argument parsing, filesystem output, and process exit behavior, while `crates/krusty-lsp`
+  owns its in-memory source-set analysis, JSON-RPC, document lifecycle, and compact editor query
+  snapshots. These packages depend toward the compiler library; the compiler never depends on any
+  process adapter. LSP compiler analysis is an internal module—not a single-consumer workspace
+  package—and architecture guards keep it isolated from the long-lived protocol/session modules.
 - **Shared process-independent policy** stays in the compiler library when it is genuinely a compiler
   concern. For example, JVM classpath code resolves a JDK home to `lib/modules`; each executable
   independently decides how its own arguments select that home. There is no command-layer “common”
@@ -50,17 +51,24 @@ boundary.
 
 - `serde`, `serde_json`, JSON-RPC transport, and session state belong to the separate
   `crates/krusty-lsp` workspace package. The compiler's dependency graph has no server dependency
-  or server-specific feature; the LSP crate builds snapshots through `krusty-analysis`.
+  or server-specific feature. Within the LSP package, `compiler_analysis` is the only module allowed
+  to inspect checked frontend data; protocol/session modules consume compact snapshot contracts.
 - The LSP supervisor never runs the compiler in its own long-lived process. It sends source sets to
   a compiler worker that is restarted after 64 analyses. This bounds growth from the compiler's
   process-lifetime name/type interners while amortizing JVM classpath initialization across edits.
-- An open document retains its source text, diagnostics only long enough to publish them, and a
-  compact hover index. Each hover entry is a 12-byte `(Span, type-id)` record; rendered type names
-  are deduplicated per document.
+- An open document retains its source text, diagnostics only long enough to publish them, a compact
+  hover index, and semantic-highlighting tokens. Each hover entry is a 12-byte `(Span, type-id)`
+  record; rendered type names are deduplicated per document. Each semantic token is a 16-byte
+  `(UTF-16 line, start, length, type, modifiers)` record, positioned once in the compiler worker so
+  full/range requests neither rerun analysis nor rescan source. Worker JSON uses packed array entries
+  rather than repeating object keys, and range encoding binary-searches the sorted snapshot before
+  allocating its result.
 - Open documents are analyzed as one source set, so one parse/signature pass resolves declarations
-  across open files and refreshes every open file's diagnostics and hover snapshot atomically. AST,
-  symbol-table, and full type-analysis allocations are dropped after each analysis; closing a
-  document removes its source and hover index.
+  across open files and refreshes every open file's diagnostics, hover, and highlighting snapshots
+  atomically. A source-set highlight table temporarily carries source-only flags such as `data`,
+  `operator`, and `Deprecated` across files while the compact snapshots are built. AST,
+  symbol-table, full type-analysis, and that table are dropped after each analysis; closing a
+  document removes its source and compact query indexes.
 - Input frames are capped at 16 MiB, headers at 8 KiB, and the reader-to-dispatch queue at four
   parsed messages. Open text is capped at 32 MiB across at most 256 documents; worker JSON encoding
   is capped at 64 MiB in both directions. Document-state bursts are capped by count, retained bytes,

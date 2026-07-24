@@ -41,10 +41,10 @@ ci: lint test-lsp coverage-gate conformance-all-plain
 # findings are tolerated; any new one fails. Identical behaviour everywhere — it's plain cargo + sh.
 lint: fmt-check clippy-baseline-check
 
-# The coverage harness targets the compiler library's explicit test binaries, so run the independent
-# analysis and LSP packages directly in the PR gate.
+# The coverage harness targets the compiler library's explicit test binaries, so run the LSP
+# package—including its internal compiler-analysis module—directly in the PR gate.
 test-lsp:
-    cargo test --profile gate -p krusty-analysis -p krusty-lsp --all-targets
+    cargo test --profile gate -p krusty-lsp --all-targets
 
 # rustfmt must be clean (the repo is fully formatted; `just fmt` fixes any drift).
 fmt-check:

@@ -1,8 +1,0 @@
-[package]
-name = "krusty-analysis"
-version = "0.0.1"
-edition = "2021"
-description = "Process-independent source analysis built on the krusty compiler frontend"
-
-[dependencies]
-krusty = { path = "../.." }

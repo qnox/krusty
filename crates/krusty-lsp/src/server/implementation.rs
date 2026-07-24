@@ -13,7 +13,10 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::super::{DocumentAnalysis, HoverIndex};
+use super::super::{
+    DocumentAnalysis, HoverIndex, SemanticTokenIndex, SemanticTokenRange, SEMANTIC_TOKEN_MODIFIERS,
+    SEMANTIC_TOKEN_TYPES,
+};
 use crate::worker::{source_set_fits, MAX_SOURCE_SET_BYTES};
 use krusty::diag::{Diagnostic, Severity};
 
@@ -136,6 +139,7 @@ struct OpenDocument {
     text: String,
     version: i64,
     hover: HoverIndex,
+    semantic_tokens: SemanticTokenIndex,
     analysis_blocked: bool,
 }
 
@@ -215,6 +219,7 @@ where
             .map(|(uri, analysis)| {
                 let open = self.documents.get_mut(&uri).unwrap();
                 open.hover = analysis.hover;
+                open.semantic_tokens = analysis.semantic_tokens;
                 publish_diagnostics(&uri, Some(open.version), analysis.diagnostics, &open.text)
             })
             .collect()
@@ -299,6 +304,14 @@ where
                         "capabilities": {
                             "hoverProvider": true,
                             "positionEncoding": "utf-16",
+                            "semanticTokensProvider": {
+                                "legend": {
+                                    "tokenTypes": SEMANTIC_TOKEN_TYPES,
+                                    "tokenModifiers": SEMANTIC_TOKEN_MODIFIERS,
+                                },
+                                "full": true,
+                                "range": true,
+                            },
                             "textDocumentSync": 1
                         },
                         "serverInfo": {
@@ -313,6 +326,8 @@ where
             "textDocument/didChange" => self.did_change(id, params, defer_analysis),
             "textDocument/didClose" => self.did_close(id, params, defer_analysis),
             "textDocument/hover" => self.hover(id, params),
+            "textDocument/semanticTokens/full" => self.semantic_tokens(id, params, false),
+            "textDocument/semanticTokens/range" => self.semantic_tokens(id, params, true),
             "shutdown" => {
                 let Some(id) = id else {
                     return Dispatch::none();
@@ -345,6 +360,7 @@ where
                         text: String::new(),
                         version,
                         hover: HoverIndex::default(),
+                        semantic_tokens: SemanticTokenIndex::default(),
                         analysis_blocked: true,
                     },
                 );
@@ -366,6 +382,7 @@ where
                 text: params.text_document.text,
                 version,
                 hover: HoverIndex::default(),
+                semantic_tokens: SemanticTokenIndex::default(),
                 analysis_blocked: false,
             },
         );
@@ -398,6 +415,7 @@ where
             open.version = params.text_document.version;
             open.text.clear();
             open.hover = HoverIndex::default();
+            open.semantic_tokens = SemanticTokenIndex::default();
             open.analysis_blocked = true;
             self.analysis_dirty |= was_analyzed;
             let mut messages = vec![analysis_limit_diagnostic(
@@ -465,6 +483,35 @@ where
             }),
         )])
     }
+
+    fn semantic_tokens(&self, id: Option<Value>, params: Value, range: bool) -> Dispatch {
+        let Some(id) = id else {
+            return Dispatch::none();
+        };
+        let parsed = if range {
+            serde_json::from_value::<SemanticTokensRangeParams>(params)
+                .map(|params| (params.text_document, Some(params.range)))
+        } else {
+            serde_json::from_value::<SemanticTokensParams>(params)
+                .map(|params| (params.text_document, None))
+        };
+        let Ok((text_document, range)) = parsed else {
+            return invalid_params(Some(id));
+        };
+        let Some(open) = self.documents.get(&text_document.uri) else {
+            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+        };
+        let range = range.map(|range| SemanticTokenRange {
+            start_line: range.start.line,
+            start_character: range.start.character,
+            end_line: range.end.line,
+            end_character: range.end.character,
+        });
+        Dispatch::messages(vec![rpc_result(
+            id,
+            json!({"data": open.semantic_tokens.encode(range)}),
+        )])
+    }
 }
 
 #[derive(Deserialize)]
@@ -517,6 +564,25 @@ struct DidCloseParams {
 struct TextDocumentPositionParams {
     text_document: TextDocumentIdentifier,
     position: Position,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+struct Range {
+    start: Position,
+    end: Position,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SemanticTokensParams {
+    text_document: TextDocumentIdentifier,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SemanticTokensRangeParams {
+    text_document: TextDocumentIdentifier,
+    range: Range,
 }
 
 fn invalid_params(id: Option<Value>) -> Dispatch {

@@ -47,6 +47,53 @@ mod tests {
     }
 
     #[test]
+    fn initialize_and_requests_expose_full_and_range_semantic_highlighting() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        let initialized = server.handle(request(1, "initialize", json!({})));
+        let provider = &initialized.messages[0]["result"]["capabilities"]["semanticTokensProvider"];
+        assert_eq!(provider["full"], true);
+        assert_eq!(provider["range"], true);
+        assert_eq!(provider["legend"]["tokenTypes"][4], "struct");
+        assert_eq!(provider["legend"]["tokenModifiers"][9], "defaultLibrary");
+
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": "file:///main.kt",
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "data class User(val name: String)\nfun nameOf(user: User) = user.name"
+                }
+            }),
+        ));
+        let full = server.handle(request(
+            2,
+            "textDocument/semanticTokens/full",
+            json!({"textDocument": {"uri": "file:///main.kt"}}),
+        ));
+        let full_data = full.messages[0]["result"]["data"].as_array().unwrap();
+        assert!(!full_data.is_empty());
+        assert_eq!(full_data.len() % 5, 0);
+
+        let range = server.handle(request(
+            3,
+            "textDocument/semanticTokens/range",
+            json!({
+                "textDocument": {"uri": "file:///main.kt"},
+                "range": {
+                    "start": {"line": 1, "character": 0},
+                    "end": {"line": 2, "character": 0}
+                }
+            }),
+        ));
+        let range_data = range.messages[0]["result"]["data"].as_array().unwrap();
+        assert!(!range_data.is_empty());
+        assert!(range_data.len() < full_data.len());
+        assert_eq!(range_data[0], 1);
+    }
+
+    #[test]
     fn document_lifecycle_publishes_diagnostics_and_drops_closed_text() {
         let calls = Rc::new(Cell::new(0));
         let calls_for_analyzer = calls.clone();

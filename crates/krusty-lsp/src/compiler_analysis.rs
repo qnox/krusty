@@ -1,16 +1,14 @@
-//! Process-independent source-analysis helpers for compiler tools.
+//! Compiler-facing source analysis isolated from the long-lived LSP supervisor.
+
+mod semantic;
 
 use krusty::ast::File;
 use krusty::diag::{DiagSink, Diagnostic};
-use krusty::frontend::{self, FrontendSymbols, FrontendTypeInfo};
+use krusty::frontend;
 use krusty::libraries::SemanticPlatform;
 
-pub struct Analysis {
-    pub file: File,
-    pub symbols: Option<FrontendSymbols>,
-    pub types: Option<FrontendTypeInfo>,
-    pub diagnostics: Vec<Diagnostic>,
-}
+pub use krusty::frontend::{FrontendSymbols, FrontendTypeInfo};
+pub use semantic::{HighlightOccurrence, HighlightSymbols};
 
 pub struct FileAnalysis {
     pub file: File,
@@ -37,57 +35,6 @@ impl FileAnalysis {
             .iter()
             .copied()
             .zip(types.iter().copied())
-    }
-}
-
-impl Analysis {
-    pub fn has_errors(&self) -> bool {
-        self.diagnostics
-            .iter()
-            .any(|d| d.severity == krusty::diag::Severity::Error)
-    }
-
-    pub fn diagnostic_messages(&self) -> Vec<&str> {
-        self.diagnostics.iter().map(|d| d.msg.as_str()).collect()
-    }
-
-    pub fn typed_expressions(
-        &self,
-    ) -> impl Iterator<Item = (krusty::diag::Span, krusty::types::Ty)> + '_ {
-        let types = self
-            .types
-            .as_ref()
-            .map(|types| types.expr_types.as_slice())
-            .unwrap_or(&[]);
-        self.file
-            .expr_spans
-            .iter()
-            .copied()
-            .zip(types.iter().copied())
-    }
-}
-
-/// Analyze one in-memory source against a semantic library provider.
-pub fn analyze_source(source: &str, platform: Box<dyn SemanticPlatform>) -> Analysis {
-    let mut diags = DiagSink::new();
-    let (file, symbols, types) = frontend::analyze_source(source, platform, &mut diags);
-    Analysis {
-        file,
-        symbols,
-        types,
-        diagnostics: diags.diags,
-    }
-}
-
-/// Analyze one in-memory source without external libraries.
-pub fn analyze_standalone_source(source: &str) -> Analysis {
-    let mut diags = DiagSink::new();
-    let (file, symbols, types) = frontend::analyze_source_standalone(source, &mut diags);
-    Analysis {
-        file,
-        symbols,
-        types,
-        diagnostics: diags.diags,
     }
 }
 
@@ -164,28 +111,6 @@ pub fn analyze_standalone_source_set(sources: &[&str]) -> SourceSetAnalysis {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn source_analysis_accepts_in_memory_source() {
-        let analysis = analyze_standalone_source("fun box(): String = \"OK\"");
-        assert!(!analysis.has_errors(), "{:?}", analysis.diagnostics);
-        assert!(analysis.symbols.is_some());
-        assert!(analysis.types.is_some());
-    }
-
-    #[test]
-    fn source_analysis_reports_in_memory_diagnostics() {
-        let analysis = analyze_standalone_source("fun box(): Int = \"no\"");
-        assert!(analysis.has_errors());
-        assert!(
-            analysis
-                .diagnostic_messages()
-                .iter()
-                .any(|msg| msg.contains("return type mismatch")),
-            "{:?}",
-            analysis.diagnostic_messages()
-        );
-    }
 
     #[test]
     fn source_set_analysis_resolves_cross_file_declarations() {

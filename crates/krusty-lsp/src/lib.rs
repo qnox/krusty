@@ -1,4 +1,5 @@
 mod analysis;
+mod compiler_analysis;
 mod options;
 mod server;
 mod worker;

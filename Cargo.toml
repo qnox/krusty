@@ -6,7 +6,7 @@ description = "Memory-lean Kotlin->JVM compiler PoC (per-file streaming pipeline
 autotests = false
 
 [workspace]
-members = ["crates/krusty-analysis", "crates/krusty-cli", "crates/krusty-lsp"]
+members = ["crates/krusty-cli", "crates/krusty-lsp"]
 default-members = [".", "crates/krusty-cli"]
 resolver = "2"
 

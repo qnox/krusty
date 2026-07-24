@@ -17,7 +17,8 @@ use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use serde::{Deserialize, Serialize};
 
-use crate::{read_framed, write_framed, DocumentAnalysis, HoverIndex};
+use crate::compiler_analysis::{self, HighlightSymbols};
+use crate::{read_framed, write_framed, DocumentAnalysis, HoverIndex, SemanticTokenIndex};
 
 pub const DEFAULT_ANALYSES_PER_WORKER: usize = 64;
 const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
@@ -46,6 +47,7 @@ struct WireDiagnostic {
 struct AnalysisResponse {
     diagnostics: Vec<WireDiagnostic>,
     hover: HoverIndex,
+    semantic_tokens: SemanticTokenIndex,
 }
 
 impl From<DocumentAnalysis> for AnalysisResponse {
@@ -65,6 +67,7 @@ impl From<DocumentAnalysis> for AnalysisResponse {
                 })
                 .collect(),
             hover: analysis.hover,
+            semantic_tokens: analysis.semantic_tokens,
         }
     }
 }
@@ -87,6 +90,7 @@ impl AnalysisResponse {
                 })
                 .collect(),
             hover: self.hover,
+            semantic_tokens: self.semantic_tokens,
         }
     }
 }
@@ -300,10 +304,21 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
         drop(body);
         let sources: Vec<_> = request.sources.iter().map(String::as_str).collect();
         let platform = Box::new(JvmLibraries::new(classpath.clone()));
-        let analyses = krusty_analysis::analyze_source_set(&sources, platform)
+        let source_set = compiler_analysis::analyze_source_set(&sources, platform);
+        let highlight_symbols =
+            HighlightSymbols::from_source_set(&sources, &source_set.files, &source_set.symbols);
+        let analyses = source_set
             .files
             .into_iter()
-            .map(DocumentAnalysis::from_file_analysis)
+            .zip(&sources)
+            .map(|(file, source)| {
+                DocumentAnalysis::from_file_analysis(
+                    source,
+                    file,
+                    &source_set.symbols,
+                    &highlight_symbols,
+                )
+            })
             .map(AnalysisResponse::from)
             .collect::<Vec<_>>();
         let response = encode_response(&analyses)?;
@@ -357,5 +372,6 @@ mod tests {
             .into_document_analysis();
         assert!(analysis.diagnostics.is_empty());
         assert!(analysis.hover.entry_count() > 0);
+        assert!(analysis.semantic_tokens.entry_count() > 0);
     }
 }

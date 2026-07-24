@@ -39,9 +39,13 @@ mod tests {
     }
 
     #[test]
-    fn analysis_package_uses_only_frontend_dependencies() {
+    fn lsp_compiler_analysis_uses_only_frontend_dependencies() {
         assert_allowed_external_crate_modules_in_tree(
-            "crates/krusty-analysis/src",
+            "crates/krusty-lsp/src/compiler_analysis",
+            &["ast", "diag", "frontend", "libraries", "types"],
+        );
+        assert_allowed_external_crate_modules_in_file(
+            Path::new("crates/krusty-lsp/src/compiler_analysis.rs"),
             &["ast", "diag", "frontend", "libraries", "types"],
         );
     }
@@ -69,10 +73,19 @@ mod tests {
 
     #[test]
     fn lsp_server_crate_uses_only_public_compiler_layers() {
-        assert_allowed_external_crate_modules_in_tree(
-            "crates/krusty-lsp/src",
-            &["analysis", "diag", "jvm", "types"],
-        );
+        for path in rust_files_under("crates/krusty-lsp/src") {
+            if path.ends_with("compiler_analysis.rs")
+                || path
+                    .components()
+                    .any(|component| component.as_os_str() == "compiler_analysis")
+            {
+                continue;
+            }
+            assert_allowed_external_crate_modules_in_file(
+                &path,
+                &["analysis", "diag", "jvm", "types"],
+            );
+        }
     }
 
     #[test]
@@ -81,7 +94,7 @@ mod tests {
             fs::read_to_string("crates/krusty-lsp/src/main.rs").expect("read LSP executable");
         assert!(main.contains("AnalysisWorker::spawn"));
         assert!(
-            !main.contains("krusty_analysis::"),
+            !main.contains("compiler_analysis::"),
             "the long-lived LSP supervisor must not run compiler analysis directly"
         );
         let worker =
