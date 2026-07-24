@@ -1,20 +1,46 @@
-//! krusty's diagnostics should read like kotlinc's. For a set of erroneous snippets, compile with
-//! both and assert the first `error:` message text matches exactly.
+//! krusty's diagnostics should match kotlinc's message and source location. For a set of erroneous
+//! snippets, compile with both and assert the first error's file, line, column, and text match exactly.
 
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 use super::common;
 
-/// Extract the first `error: <msg>` text (without the `file:line:col:` prefix) from compiler output.
-fn first_error(output: &str) -> Option<String> {
-    output
-        .lines()
-        .find_map(|l| l.split_once("error:").map(|(_, m)| m.trim().to_string()))
+#[derive(Debug, PartialEq, Eq)]
+struct ObservedError {
+    file: String,
+    line: usize,
+    column: usize,
+    message: String,
+}
+
+/// Extract the first `path:line:column: error: message` record. Compare the basename because both
+/// compilers receive the same path, while their renderers may independently canonicalize its prefix.
+fn first_error(output: &str) -> Option<ObservedError> {
+    output.lines().find_map(|rendered| {
+        let (location, message) = rendered.split_once("error:")?;
+        let location = location.trim().trim_end_matches(':');
+        let mut fields = location.rsplitn(3, ':');
+        let column = fields.next()?.trim().parse().ok()?;
+        let line = fields.next()?.trim().parse().ok()?;
+        let path = fields.next()?.trim();
+        let file = Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(path)
+            .to_string();
+        Some(ObservedError {
+            file,
+            line,
+            column,
+            message: message.trim().to_string(),
+        })
+    })
 }
 
 #[test]
-fn error_messages_match_kotlinc() {
+fn errors_match_kotlinc_in_text_and_location() {
     let krusty = common::krusty_binary();
 
     // Snippets within krusty's subset that produce a diagnostic kotlinc also produces identically.
@@ -27,6 +53,8 @@ fn error_messages_match_kotlinc() {
         "val x: String = 1",
         "fun f() { var x: String = \"\"; x = 1 }",
         "fun f(x: Int): Int = x\nfun g(): Int = f()",
+        "fun <T> f(x: T): T = x\nfun g(): Int = f<Int>()",
+        "fun f(x: Int): Int = x\nfun g(): Int = f ()",
         "fun f(x: Int): Int = x\nfun g(): Int = f(1, 2)",
         "fun f(x: Int): Int = x\nfun g(): Int = f(\"no\")",
         "fun <T> f(x: T): T = x\nfun g(): Int = f(1, 2)",
@@ -38,6 +66,7 @@ fn error_messages_match_kotlinc() {
         "fun f(x: Int): Int = x\nfun f(x: String): Int = 0\nfun g(): Int = f(1, 2)",
         "fun f(x: Int = 1): Int = x\nfun g(): Int = f(1, 2)",
         "fun f(a: Int = 0, b: String): String = b\nfun g(): String = f(a = 1)",
+        "fun f(`a`: Int = 0, b: String): String = b\nfun g(): String = f(`a` = 1)",
         "fun f(a: Int = 0, b: String, vararg x: Int): Int = 0\nfun g(): Int = f()",
         "fun g(): Int {\nfun f(x: Int): Int = x\nreturn f()\n}",
         "fun g(): Int {\nfun f(x: Int): Int = x\nreturn f(1, 2)\n}",
@@ -55,6 +84,8 @@ fn error_messages_match_kotlinc() {
         "fun f(vararg x: Int): Int = x.size\nfun g(): Int = f(\"no\")",
         "fun f(x: Int = \"no\"): Int = x",
         "fun f(x: String): Int = x.missing",
+        "fun f(x: String): Int = x.`missing name`",
+        "fun f(x: String?): Int? = x?.`missing name`",
         "fun f(x: String): Int = x.missing()",
         "fun f(x: String): String = x.substring(\"no\")",
         "fun f(x: Int): Int = x.substring(1)",
@@ -82,7 +113,7 @@ fn error_messages_match_kotlinc() {
             .arg(&kt)
             .output()
             .unwrap();
-        let kr_msg = first_error(String::from_utf8_lossy(&kr.stderr).as_ref())
+        let kr_error = first_error(String::from_utf8_lossy(&kr.stderr).as_ref())
             .or_else(|| first_error(&String::from_utf8_lossy(&kr.stdout)));
 
         // Reference compile via the persistent kotlinc server (one reused JVM, not a CLI spawn/case).
@@ -95,11 +126,11 @@ fn error_messages_match_kotlinc() {
             eprintln!("skipping diagnostics_match_kotlinc: kotlinc server unavailable");
             return;
         };
-        let kc_msg = first_error(&kc_err);
+        let kc_error = first_error(&kc_err);
 
-        if kr_msg != kc_msg {
+        if kr_error != kc_error {
             mismatches.push(format!(
-                "diagnostic mismatch for {src:?}\n krusty: {kr_msg:?}\n kotlinc: {kc_msg:?}"
+                "diagnostic mismatch for {src:?}\n krusty: {kr_error:?}\n kotlinc: {kc_error:?}"
             ));
         }
     }
@@ -124,7 +155,7 @@ fn cross_file_generic_diagnostic_matches_kotlinc() {
         .arg(&use_site)
         .output()
         .unwrap();
-    let krusty_message = first_error(String::from_utf8_lossy(&krusty_output.stderr).as_ref())
+    let krusty_error = first_error(String::from_utf8_lossy(&krusty_output.stderr).as_ref())
         .or_else(|| first_error(&String::from_utf8_lossy(&krusty_output.stdout)));
 
     let kotlinc_args = vec![
@@ -137,8 +168,8 @@ fn cross_file_generic_diagnostic_matches_kotlinc() {
         eprintln!("skipping cross-file diagnostics parity: kotlinc server unavailable");
         return;
     };
-    let kotlinc_message = first_error(&kotlinc_stderr);
+    let kotlinc_error = first_error(&kotlinc_stderr);
     let _ = fs::remove_dir_all(&root);
 
-    assert_eq!(krusty_message, kotlinc_message);
+    assert_eq!(krusty_error, kotlinc_error);
 }

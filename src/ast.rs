@@ -839,9 +839,25 @@ pub struct File {
     pub stmt_arena: Vec<Stmt>,
     pub expr_spans: Vec<Span>,
     pub stmt_spans: Vec<Span>,
+    /// Sparse source locations for the value-introducing `=` associated with an expression: property
+    /// and local initializers, parameter defaults, and assignment RHS expressions. Diagnostics point
+    /// at Kotlin's operator location without retaining source text or adding a span field to every AST
+    /// node. Keyed by the value expression's `ExprId`; absent for expression bodies and synthetic values.
+    pub value_operator_spans: std::collections::HashMap<u32, Span>,
     /// Per-`Expr::Call` argument names: keyed by the call's `ExprId`, parallel to its `args`
     /// (`None` = positional, `Some(name)` = `name = expr`). Absent ⇒ all positional.
     pub call_arg_names: std::collections::HashMap<u32, Vec<Option<String>>>,
+    /// Source span of each named argument's label, parallel to `call_arg_names`. Stored only for calls
+    /// that have named arguments, so diagnostics can match Kotlin's label location without retaining
+    /// source text or adding metadata to positional calls.
+    pub call_arg_name_spans: std::collections::HashMap<u32, Vec<Option<Span>>>,
+    /// Exact `(` locations for syntactically empty calls. For non-empty calls, diagnostics can point at
+    /// the first argument; keeping this map sparse avoids adding location fields to every call node.
+    pub empty_call_open_paren_spans: std::collections::HashMap<u32, Span>,
+    /// Exact raw name locations when a member name cannot be recovered from the expression end:
+    /// backticked members and safe calls with argument lists. Kept sparse rather than widening every
+    /// expression node.
+    pub exact_member_name_spans: std::collections::HashMap<u32, Span>,
     /// `ExprId`s of `Expr::Call`s whose LAST argument is a SYNTACTIC trailing lambda (`f(a) { … }` /
     /// `f { … }`). A trailing lambda always binds to the callee's LAST parameter — preceding parameters
     /// without a positional argument take their defaults — so default-omission lowering must place it in

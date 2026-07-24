@@ -1093,6 +1093,26 @@ impl<'a> Parser<'a> {
             false
         }
     }
+    fn eat_span(&mut self, k: TokenKind) -> Option<Span> {
+        self.at(k).then(|| self.bump().span)
+    }
+    /// The lexer exposes an identifier's decoded-content span. Extend it to the raw syntactic token for
+    /// backticked identifiers while the parser still has source access; no source string is retained.
+    fn syntactic_ident_span(&self, token: Token) -> Span {
+        let bytes = self.src.as_bytes();
+        let lo = token.span.lo as usize;
+        let hi = token.span.hi as usize;
+        if token.kind == TokenKind::Ident
+            && lo > 0
+            && hi < bytes.len()
+            && bytes[lo - 1] == b'`'
+            && bytes[hi] == b'`'
+        {
+            Span::new(token.span.lo - 1, token.span.hi + 1)
+        } else {
+            token.span
+        }
+    }
     fn expect(&mut self, k: TokenKind, what: &str) -> bool {
         if self.eat(k) {
             true
@@ -1807,12 +1827,16 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        let init = if self.eat(TokenKind::Eq) {
+        let init_operator = self.eat_span(TokenKind::Eq);
+        let init = if init_operator.is_some() {
             self.skip_newlines();
             Some(self.parse_expr())
         } else {
             None
         };
+        if let (Some(operator), Some(init)) = (init_operator, init) {
+            self.file.value_operator_spans.insert(init.0, operator);
+        }
         // `val x: T by <expr>` — a delegated property (in place of `= init`). Reads/writes route through
         // the delegate's `getValue`/`setValue` operators.
         let delegate = if init.is_none() && self.at(TokenKind::Ident) && self.text() == "by" {
@@ -2835,12 +2859,16 @@ impl<'a> Parser<'a> {
             };
             self.expect(TokenKind::Colon, "':'");
             let ty = self.parse_type();
-            let default = if self.eat(TokenKind::Eq) {
+            let default_operator = self.eat_span(TokenKind::Eq);
+            let default = if default_operator.is_some() {
                 self.skip_newlines();
                 Some(self.parse_expr())
             } else {
                 None
             };
+            if let (Some(operator), Some(default)) = (default_operator, default) {
+                self.file.value_operator_spans.insert(default.0, operator);
+            }
             params.push(Param {
                 name: pname,
                 ty,
@@ -4955,14 +4983,21 @@ impl<'a> Parser<'a> {
                 let deferred = ty.is_some()
                     && !self.at(TokenKind::Eq)
                     && (is_var || !ty.as_ref().unwrap().nullable);
+                let init_operator = (!deferred).then(|| {
+                    let operator = self.tok().span;
+                    self.expect(TokenKind::Eq, "'='");
+                    operator
+                });
                 let init = if deferred {
                     let sp = self.tok().span;
                     self.default_init_expr(ty.as_ref().unwrap(), sp)
                 } else {
-                    self.expect(TokenKind::Eq, "'='");
                     self.skip_newlines();
                     self.parse_expr()
                 };
+                if let Some(operator) = init_operator {
+                    self.file.value_operator_spans.insert(init.0, operator);
+                }
                 self.finish_stmt(
                     Stmt::Local {
                         is_var: is_var || deferred,
@@ -5113,15 +5148,17 @@ impl<'a> Parser<'a> {
                 if self.at(TokenKind::Eq) {
                     match self.file.expr(e).clone() {
                         Expr::Name(n) => {
-                            self.bump(); // '='
+                            let operator = self.bump().span; // '='
                             self.skip_newlines();
                             let value = self.parse_expr();
+                            self.file.value_operator_spans.insert(value.0, operator);
                             return self.finish_stmt(Stmt::Assign { name: n, value }, start);
                         }
                         Expr::Member { receiver, name } => {
-                            self.bump(); // '='
+                            let operator = self.bump().span; // '='
                             self.skip_newlines();
                             let value = self.parse_expr();
+                            self.file.value_operator_spans.insert(value.0, operator);
                             return self.finish_stmt(
                                 Stmt::AssignMember {
                                     receiver,
@@ -5132,9 +5169,10 @@ impl<'a> Parser<'a> {
                             );
                         }
                         Expr::Index { array, indices } => {
-                            self.bump(); // '='
+                            let operator = self.bump().span; // '='
                             self.skip_newlines();
                             let value = self.parse_expr();
+                            self.file.value_operator_spans.insert(value.0, operator);
                             return self.finish_stmt(
                                 Stmt::AssignIndex {
                                     array,
@@ -6202,6 +6240,8 @@ impl<'a> Parser<'a> {
                 {
                     self.bump(); // '?'
                     self.bump(); // '.'
+                    let name_token = self.tok();
+                    let name_span = self.syntactic_ident_span(name_token);
                     let name = self.ident_or_error("member name");
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let args = if self.at(TokenKind::LParen) {
@@ -6222,7 +6262,8 @@ impl<'a> Parser<'a> {
                         None
                     };
                     let end = self.t[self.i.saturating_sub(1)].span;
-                    lhs = self.file.add_expr(
+                    let needs_exact_name_span = name_span != name_token.span || args.is_some();
+                    let safe_call = self.file.add_expr(
                         Expr::SafeCall {
                             receiver: lhs,
                             name,
@@ -6230,6 +6271,12 @@ impl<'a> Parser<'a> {
                         },
                         Span::new(lspan.lo, end.hi),
                     );
+                    if needs_exact_name_span {
+                        self.file
+                            .exact_member_name_spans
+                            .insert(safe_call.0, name_span);
+                    }
+                    lhs = safe_call;
                 }
                 // `Recv?::name` / `Recv?::class` — a callable reference / class literal on a NULLABLE
                 // receiver type. The `?` only marks the receiver type nullable; the reference is the same
@@ -6267,16 +6314,24 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::Dot => {
                     self.bump();
+                    let name_token = self.tok();
+                    let name_span = self.syntactic_ident_span(name_token);
                     let name = self.ident_or_error("member name");
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let end = self.t[self.i.saturating_sub(1)].span;
-                    lhs = self.file.add_expr(
+                    let member = self.file.add_expr(
                         Expr::Member {
                             receiver: lhs,
                             name,
                         },
                         Span::new(lspan.lo, end.hi),
                     );
+                    if name_span != name_token.span {
+                        self.file
+                            .exact_member_name_spans
+                            .insert(member.0, name_span);
+                    }
+                    lhs = member;
                 }
                 // `expr::name` or `Expr::class` — bound callable reference / class literal.
                 TokenKind::ColonColon => {
@@ -6305,21 +6360,25 @@ impl<'a> Parser<'a> {
                     );
                 }
                 TokenKind::LParen => {
-                    self.bump();
+                    let open_paren = self.bump().span;
                     self.skip_newlines();
                     let mut args = Vec::new();
                     let mut names: Vec<Option<String>> = Vec::new();
+                    let mut name_spans: Vec<Option<Span>> = Vec::new();
                     while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
                         // Named argument `name = expr` — `name` is an identifier followed by a single
                         // `=` (not `==`, which begins an equality expression).
                         if self.at_named_arg() {
+                            let name_span = self.syntactic_ident_span(self.tok());
                             let n = self.text().to_string();
                             self.bump(); // name
                             self.bump(); // '='
                             self.skip_newlines();
                             names.push(Some(n));
+                            name_spans.push(Some(name_span));
                         } else {
                             names.push(None);
+                            name_spans.push(None);
                         }
                         // Spread operator `*expr` — the argument is an array spread into a `vararg`.
                         let spread = self.eat(TokenKind::Star);
@@ -6337,12 +6396,19 @@ impl<'a> Parser<'a> {
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let end = self.tok().span;
                     self.expect(TokenKind::RParen, "')'");
+                    let is_empty = args.is_empty();
                     let call = self.file.add_expr(
                         Expr::Call { callee: lhs, args },
                         Span::new(lspan.lo, end.hi),
                     );
+                    if is_empty {
+                        self.file
+                            .empty_call_open_paren_spans
+                            .insert(call.0, open_paren);
+                    }
                     if names.iter().any(|n| n.is_some()) {
                         self.file.call_arg_names.insert(call.0, names);
+                        self.file.call_arg_name_spans.insert(call.0, name_spans);
                     }
                     if !pending_targs.is_empty() {
                         self.file
@@ -6359,6 +6425,22 @@ impl<'a> Parser<'a> {
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let end = self.t[self.i.saturating_sub(1)].span;
                     let old = lhs;
+                    let rebuilt_safe_call_name_span =
+                        if let Expr::SafeCall { name, .. } = self.file.expr(old) {
+                            self.file
+                                .exact_member_name_spans
+                                .get(&old.0)
+                                .copied()
+                                .or_else(|| {
+                                    let span = self.file.expr_spans[old.0 as usize];
+                                    Some(Span::new(
+                                        span.hi.saturating_sub(name.len() as u32),
+                                        span.hi,
+                                    ))
+                                })
+                        } else {
+                            None
+                        };
                     lhs = match self.file.expr(lhs).clone() {
                         Expr::Call { callee, mut args } => {
                             args.push(lambda);
@@ -6396,6 +6478,19 @@ impl<'a> Parser<'a> {
                     if let Some(mut names) = self.file.call_arg_names.remove(&old.0) {
                         names.push(None);
                         self.file.call_arg_names.insert(lhs.0, names);
+                    }
+                    if let Some(mut spans) = self.file.call_arg_name_spans.remove(&old.0) {
+                        spans.push(None);
+                        self.file.call_arg_name_spans.insert(lhs.0, spans);
+                    }
+                    // The rebuilt call contains the trailing lambda, so it is no longer empty.
+                    self.file.empty_call_open_paren_spans.remove(&old.0);
+                    // A safe call is itself rebuilt to append the lambda; move its exact member-name
+                    // location to the live expression ID. For an ordinary member, `old` remains the
+                    // rebuilt `Call`'s callee and must keep its own metadata.
+                    if let Some(span) = rebuilt_safe_call_name_span {
+                        self.file.exact_member_name_spans.remove(&old.0);
+                        self.file.exact_member_name_spans.insert(lhs.0, span);
                     }
                     // Mark this call as having a SYNTACTIC trailing lambda so default-omission lowering
                     // binds it to the callee's LAST parameter (preceding gaps take defaults).
@@ -7585,6 +7680,54 @@ mod tests {
             d.render("test", src)
         );
         file.debug_tree()
+    }
+
+    #[test]
+    fn diagnostic_operator_and_named_argument_locations_are_sparse_spans() {
+        let mut diagnostics = DiagSink::new();
+        let source = "fun target(`a`: Int = 0, b: Int) = a + b\n\
+                      fun use(x: String) { var y: String = \"\"; y = 1; \
+                      target<Int> (); target(`a` = 1); x.`missing name`; \
+                      x?.`missing safe` { }; x?.missing { } }\n";
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected: {}",
+            diagnostics.render("test", source)
+        );
+
+        assert_eq!(file.value_operator_spans.len(), 3);
+        for span in file.value_operator_spans.values() {
+            assert_eq!(&source[span.lo as usize..span.hi as usize], "=");
+        }
+        let labels = file
+            .call_arg_name_spans
+            .values()
+            .flat_map(|spans| spans.iter().flatten())
+            .collect::<Vec<_>>();
+        assert_eq!(labels.len(), 1);
+        assert_eq!(&source[labels[0].lo as usize..labels[0].hi as usize], "`a`");
+        let open_parens = file
+            .empty_call_open_paren_spans
+            .values()
+            .collect::<Vec<_>>();
+        assert_eq!(open_parens.len(), 1);
+        assert_eq!(
+            &source[open_parens[0].lo as usize..open_parens[0].hi as usize],
+            "("
+        );
+        let mut exact_members = file
+            .exact_member_name_spans
+            .values()
+            .map(|span| &source[span.lo as usize..span.hi as usize])
+            .collect::<Vec<_>>();
+        exact_members.sort_unstable();
+        assert_eq!(
+            exact_members,
+            vec!["`missing name`", "`missing safe`", "missing"],
+            "rebuilt safe calls must each have one live exact-name entry"
+        );
     }
 
     #[test]
