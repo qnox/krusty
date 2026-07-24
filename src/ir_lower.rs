@@ -5558,6 +5558,63 @@ impl<'a> Lower<'a> {
         )
     }
 
+    /// Emit the RAW `java.lang.Class` for a class literal `X::class` (`ce` is the `CallableRef`).
+    /// UNBOUND `T::class` → a `Class` constant (reified `T` resolved to the call-site type first);
+    /// BOUND `expr::class` → `expr.getClass()` (evaluated once). A bare `X::class` wraps this in
+    /// `Reflection.getOrCreateKotlinClass` to yield a `KClass`; `X::class.java` uses this result directly
+    /// (kotlinc likewise emits the bare `Class` constant for `::class.java`).
+    fn emit_class_literal_raw(&mut self, ce: AstExprId) -> Option<u32> {
+        let Expr::CallableRef { receiver, .. } = self.afile.expr(ce).clone() else {
+            return None;
+        };
+        let Some(ExprLowering::ClassLiteral { unbound }) = self.info.expr_lowers.get(&ce).cloned()
+        else {
+            return None;
+        };
+        // `T::class` on a REIFIED type parameter: inside an expanded `<reified T>` inline body the
+        // receiver name resolves to the call-site type via `reified_subst`, so emit that concrete class
+        // constant (`Prov::class`) rather than the erased marker.
+        if let Some(recv) = receiver {
+            if let Expr::Name(n) = self.afile.expr(recv).clone() {
+                let sub = self
+                    .reified_subst
+                    .iter()
+                    .rev()
+                    .find_map(|frame| frame.get(&n).cloned());
+                if let Some(sub) = sub {
+                    let ty = self.ty_ref(&sub)?;
+                    let internal = self.class_literal_ldc_internal(ty)?;
+                    return Some(self.emit_class_const(internal));
+                }
+            }
+        }
+        match unbound {
+            Some(ty) => {
+                let internal = self.class_literal_ldc_internal(ty)?;
+                Some(self.emit_class_const(internal))
+            }
+            None => {
+                let recv = receiver?;
+                // A primitive receiver (`42::class`) is boxed first (an `Object` target makes `lower_arg`
+                // box to the primitive's wrapper), so `getClass` yields the wrapper class — matching an
+                // unbound `Int::class` (also the wrapper).
+                let r = if self.info.ty(recv).is_reference() {
+                    self.expr(recv)?
+                } else {
+                    self.lower_arg(recv, &ty_to_ir(Ty::obj("kotlin/Any")))?
+                };
+                Some(self.emit_virtual_call(
+                    "java/lang/Object".to_string(),
+                    "getClass".to_string(),
+                    "()Ljava/lang/Class;".to_string(),
+                    false,
+                    r,
+                    vec![],
+                ))
+            }
+        }
+    }
+
     fn compare_ordered(&mut self, ty: Ty, op: IrBinOp, lhs: u32, rhs: u32) -> Option<u32> {
         if ty.is_unsigned() {
             let call = self.runtime_call(RuntimeOp::UnsignedCompare, ty, vec![lhs, rhs])?;
@@ -16561,55 +16618,24 @@ impl<'a> Lower<'a> {
                         target_vararg,
                     );
                 }
-                // A class literal (the checker recorded bound-vs-unbound). UNBOUND `T::class` → a `Class`
-                // constant; BOUND `expr::class` → `expr.getClass()` (evaluated once).
-                if name == "class" {
-                    if let Some(ExprLowering::ClassLiteral { unbound }) =
-                        self.info.expr_lowers.get(&e).cloned()
-                    {
-                        // `T::class` on a REIFIED type parameter: inside an expanded `<reified T>` inline
-                        // body the receiver name resolves to the call-site type via `reified_subst`, so
-                        // emit that concrete class constant (`Prov::class`) rather than the erased marker.
-                        if let Some(recv) = receiver {
-                            if let Expr::Name(n) = self.afile.expr(recv).clone() {
-                                let sub = self
-                                    .reified_subst
-                                    .iter()
-                                    .rev()
-                                    .find_map(|frame| frame.get(&n).cloned());
-                                if let Some(sub) = sub {
-                                    let ty = self.ty_ref(&sub)?;
-                                    let internal = self.class_literal_ldc_internal(ty)?;
-                                    return Some(self.emit_class_const(internal));
-                                }
-                            }
-                        }
-                        return match unbound {
-                            Some(ty) => {
-                                let internal = self.class_literal_ldc_internal(ty)?;
-                                Some(self.emit_class_const(internal))
-                            }
-                            None => {
-                                let recv = receiver?;
-                                // A primitive receiver (`42::class`) is boxed first (an `Object` target
-                                // makes `lower_arg` box to the primitive's wrapper), so `getClass` yields
-                                // the wrapper class — matching an unbound `Int::class` (also the wrapper).
-                                let r = if self.info.ty(recv).is_reference() {
-                                    self.expr(recv)?
-                                } else {
-                                    self.lower_arg(recv, &ty_to_ir(Ty::obj("kotlin/Any")))?
-                                };
-                                Some(self.emit_virtual_call(
-                                    "java/lang/Object".to_string(),
-                                    "getClass".to_string(),
-                                    "()Ljava/lang/Class;".to_string(),
-                                    false,
-                                    r,
-                                    vec![],
-                                ))
-                            }
-                        };
-                    }
+                // A class literal `X::class` — its Kotlin type is `kotlin.reflect.KClass`, emitted as the
+                // raw `java.lang.Class` wrapped in `Reflection.getOrCreateKotlinClass` (kotlinc's shape).
+                // `X::class.java` unwraps back to the raw `Class` (handled at the `.java` site below, via
+                // `emit_class_literal_raw`, so no wrapper is emitted then).
+                if name == "class"
+                    && matches!(
+                        self.info.expr_lowers.get(&e),
+                        Some(ExprLowering::ClassLiteral { .. })
+                    )
+                {
+                    let raw = self.emit_class_literal_raw(e)?;
+                    return Some(self.emit_static_call(
+                        "kotlin/jvm/internal/Reflection",
+                        "getOrCreateKotlinClass".to_string(),
+                        "(Ljava/lang/Class;)Lkotlin/reflect/KClass;".to_string(),
+                        crate::libraries::InlineKind::None,
+                        vec![raw],
+                    ));
                 }
                 // A property reference is typed by its callable shape, but still lowers to the Kotlin
                 // property-reference runtime object on the JVM.
@@ -17185,13 +17211,6 @@ impl<'a> Lower<'a> {
                 {
                     let owner = owner.render();
                     return Some(self.emit_external_static_field(&owner, &name, &descriptor));
-                }
-                // `X::class.java`.
-                if matches!(
-                    self.info.expr_lowers.get(&e),
-                    Some(ExprLowering::ClassLiteralJava)
-                ) {
-                    return self.expr(receiver);
                 }
                 // A classpath nested singleton object recorded by the checker (`PrimitiveKind.STRING`) →
                 // `getstatic <Outer$Nested>.INSTANCE`.

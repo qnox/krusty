@@ -53,10 +53,16 @@ return \"OK\"\n\
 
 #[test]
 fn class_literal_type_is_provider_backed() {
+    // `C::class` is a `kotlin.reflect.KClass` (emitted via `Reflection.getOrCreateKotlinClass`), so it
+    // exposes the KClass API (`simpleName`) — NOT `java.lang.Class`'s `name`, which is only reachable
+    // through the `.java` bridge. (This asserted `c.name` while krusty modelled a class literal as a bare
+    // `java.lang.Class`; that shape does not compile under kotlinc.)
     const SRC: &str = "class C\n\
 fun box(): String {\n\
 val c = C::class\n\
-return if (c.name.endsWith(\"C\")) \"OK\" else c.name\n\
+val n = c.simpleName ?: return \"null\"\n\
+if (n != \"C\") return n\n\
+return if (c.java.name.endsWith(\"C\")) \"OK\" else c.java.name\n\
 }\n";
     common::expect_box_ok_with_stdlib(SRC, "ClassLiteralShape");
 }
