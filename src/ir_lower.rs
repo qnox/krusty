@@ -5513,13 +5513,21 @@ impl<'a> Lower<'a> {
                 return Some(self.emit_method_call(class, index, recv, vec![]));
             }
         }
-        // Top-level extension operator (`operator fun T?.inc()`). Only for a REFERENCE receiver — a
-        // nullable-primitive extension (`Int?.inc`) boxes wrong here and risks the recursion the
-        // checker guards, so leave those to skip.
+        // Top-level extension operator (`operator fun T?.inc()`) — a reference receiver, or a
+        // nullable PRIMITIVE (`Int?.inc`, keyed under its boxed wrapper, where the variable slot
+        // already holds the boxed form).
         if ty.erased_recv().is_reference() {
             if let Some(&fid) = self.ext_fun_ids.get(&(ty.erased_recv(), op.to_string())) {
                 let recv = self.emit_get_value(var_slot);
-                return Some(self.emit_local_call(fid, vec![recv]));
+                let call = self.emit_local_call(fid, vec![recv]);
+                // The extension may return the NON-null form (`operator fun Int?.inc(): Int`) while
+                // the variable keeps the nullable (boxed) representation — box the result back.
+                let ret = self.ir.functions[fid as usize].ret;
+                let slot = ty_to_ir(ty);
+                if ret != slot {
+                    return Some(self.emit_type_op(IrTypeOp::ImplicitCoercion, call, slot));
+                }
+                return Some(call);
             }
         }
         None
@@ -17520,6 +17528,27 @@ impl<'a> Lower<'a> {
                 }
                 // A class `compareTo(o): Int` drives relational operators.
                 if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+                    // A user `compareTo` EXTENSION on a nullable primitive (`Long?.compareTo`): the
+                    // checker typed the comparison Boolean through it (the builtin needs a non-null
+                    // receiver). Call it and compare its Int result with 0. The boxed-wrapper key can
+                    // never be produced by a non-null primitive operand, so this cannot shadow the
+                    // builtin comparison. Nullable-primitive ONLY, matching the checker's gate (a
+                    // nullable REFERENCE erases to the non-null form's key).
+                    if lty.nullable_primitive().is_some() {
+                        if let Some(&fid) = self
+                            .ext_fun_ids
+                            .get(&(lty.erased_recv(), "compareTo".to_string()))
+                        {
+                            let params = self.ir.functions[fid as usize].params.clone();
+                            if params.len() == 2 {
+                                let l = self.lower_arg(lhs, &params[0])?;
+                                let r = self.lower_arg(rhs, &params[1])?;
+                                let cmp = self.emit_local_call(fid, vec![l, r]);
+                                let zero = self.emit_const(IrConst::Int(0));
+                                return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
+                            }
+                        }
+                    }
                     if let Some(internal) = self.recv_ty(lhs).obj_internal().map(|s| s.to_string())
                     {
                         if let Some((class, index, mfid, _)) =
