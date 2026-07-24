@@ -2,6 +2,7 @@
 
 mod completion;
 mod navigation;
+mod rendering;
 mod semantic;
 
 use krusty::ast::File;
@@ -14,7 +15,8 @@ pub(crate) use completion::CompletionKind;
 pub(crate) use completion::CompletionSymbols;
 pub use krusty::frontend::{FrontendSymbols, FrontendTypeInfo};
 pub use navigation::{DefinitionOccurrence, DefinitionSymbols, DefinitionTarget};
-pub use semantic::{HighlightOccurrence, HighlightSymbols};
+pub(crate) use semantic::{hover_wire_cost, SemanticLimits};
+pub use semantic::{HighlightOccurrence, HighlightSymbols, HoverOccurrence};
 
 pub struct FileAnalysis {
     pub file: File,
