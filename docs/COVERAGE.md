@@ -17,8 +17,8 @@ nightly toolchain. `llvm-tools-preview` must be installed on nightly
 (`rustup component add llvm-tools-preview --toolchain nightly`) and `cargo-llvm-cov` on `PATH`
 (`cargo install cargo-llvm-cov`).
 
-Artifacts land in `target/coverage/`: `full.json` (per-file `llvm-cov export`) and `summary.json`
-(the four totals — the shape the gate compares).
+Artifacts land in `target/coverage/`: package-level per-file exports in `compiler-full.json` and
+`lsp-full.json`, plus `summary.json` with the combined totals the gate compares.
 
 ## Runner — why not `cargo llvm-cov test` / nextest
 
@@ -34,7 +34,7 @@ throw that away:
 
 So `scripts/coverage.sh` uses the `llvm-cov show-env` workflow instead: it sets the instrumentation
 environment, builds once, runs the (non-excluded) binaries in parallel itself — the same model as
-`run-tests.sh` — and aggregates the profraw counters with `llvm-cov report`.
+`run-tests.sh` — and aggregates the profraw counters with package-scoped `llvm-cov report` calls.
 
 ## What counts — scope of the metric
 
@@ -46,9 +46,9 @@ testdata rather than the quality of krusty-authored tests. The excluded set live
 - `conformance` — external corpus/reference-toolchain suites: Kotlin box/codegen, pinned box regressions, IR blockers, vendored box cases, serialization conformance, and KSP real-toolchain checks
 
 Everything else counts, including project-authored e2e suites (`feature_box_e2e`, the `metadata_*`
-e2e, …) whose *inputs live in-repo* even though they exercise the JVM runtime. The product `e2e` binary is kept by default, so new product tests count automatically. Adding a new external suite should go under the `conformance` binary or be paired with an explicit `EXCLUDE` entry, visible in review. Coverage is reported for the product library
-(`src/`); the test harness (`tests/`) and CLI/survey tooling (`crates/krusty-cli`, `src/bin/`) are
-ignored.
+e2e, ...) whose inputs live in-repo even though they exercise the JVM runtime. Compiler and
+`krusty-lsp` unit/integration test binaries are instrumented, so new code in either product library
+affects the gate. Test harnesses, CLI/survey tooling, and binary entry points are ignored.
 
 ## The regression gate
 

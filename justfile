@@ -32,17 +32,15 @@ default:
     @just --list
 
 # === PR gate: the one command CI runs ===
-# Own tests run once under coverage; external/reference conformance runs plain. This avoids running
-# the product e2e suite once in `test-all` and then again in `coverage-gate`.
-ci: lint test-lsp coverage-gate conformance-all-plain
+# Own tests run once under coverage; external/reference conformance runs plain.
+ci: lint coverage-gate conformance-all-plain
 
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
 # findings are tolerated; any new one fails. Identical behaviour everywhere — it's plain cargo + sh.
 lint: fmt-check clippy-baseline-check
 
-# The coverage harness targets the compiler library's explicit test binaries, so run the LSP
-# package—including its internal compiler-analysis module—directly in the PR gate.
+# Run the LSP package without coverage instrumentation.
 test-lsp:
     cargo test --profile gate -p krusty-lsp --all-targets
 
@@ -445,3 +443,21 @@ package TARGET PRODUCT="krusty":
         tar -C "$bindir" -czf "dist/${name}.tar.gz" "$product"
         echo "dist/${name}.tar.gz"
     fi
+
+# Package the Zed extension source into dist/.
+package-zed:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ver=$(just version)
+    src="editors/zed"
+    staging_root="$(mktemp -d)"
+    trap 'rm -rf "$staging_root"' EXIT
+    staging="$staging_root/krusty-zed"
+    mkdir -p "$staging"
+    cp -R "$src/." "$staging/"
+    rm -rf "$staging/target"
+    sed -i.bak -E "s/^version = \".*\"/version = \"$(just max-version)\"/" "$staging/extension.toml"
+    rm -f "$staging/extension.toml.bak"
+    mkdir -p dist
+    tar -C "$(dirname "$staging")" -czf "dist/krusty-zed-${ver}.tar.gz" "krusty-zed"
+    echo "dist/krusty-zed-${ver}.tar.gz"

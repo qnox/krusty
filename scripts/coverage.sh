@@ -32,7 +32,8 @@ cd "$(dirname "$0")/.."
 export RUST_MIN_STACK="${RUST_MIN_STACK:-134217728}" # 128 MiB
 
 summary_out="${1:-target/coverage/summary.json}"
-raw_out="target/coverage/full.json"
+compiler_raw_out="target/coverage/compiler-full.json"
+lsp_raw_out="target/coverage/lsp-full.json"
 jobs="${KRUSTY_TEST_JOBS:-1}"
 test_threads="${KRUSTY_TEST_THREADS:-3}"
 coverage_target="${KRUSTY_COVERAGE_TARGET_DIR:-target/coverage-build}"
@@ -66,18 +67,20 @@ mkdir -p target/coverage
 # so remove the raw/merged coverage files directly instead; profraw names carry a %p pid slot.
 rm -f "$coverage_target"/*.profraw target/coverage/*.profdata target/coverage/*.profraw
 
-# Compile exactly the coverage workload without running it, and read each test executable's path from
-# cargo's JSON build output. Keep library unit tests plus the product e2e integration target; do not
-# instrument/build zero-test bin harnesses or `conformance`, because conformance is excluded from the
-# metric and pre-push runs it separately without coverage instrumentation.
+# Compile the compiler and LSP coverage workloads without running them, then read each test
+# executable's path from Cargo's JSON build output.
 cargo +nightly build -p krusty-cli
 export KRUSTY_BIN="$coverage_target/debug/krusty"
 if [ ! -x "$KRUSTY_BIN" ]; then
   echo "coverage: compiler binary missing after workspace build: $KRUSTY_BIN" >&2
   exit 1
 fi
-mapfile -t bins < <(cargo +nightly test --no-run --lib --test e2e --message-format=json 2>/dev/null \
-  | jq -r 'select(.profile.test == true and .executable != null) | .executable')
+mapfile -t bins < <(
+  {
+    cargo +nightly test --no-run --lib --test e2e --message-format=json 2>/dev/null
+    cargo +nightly test --no-run -p krusty-lsp --all-targets --message-format=json 2>/dev/null
+  } | jq -r 'select(.profile.test == true and .executable != null) | .executable'
+)
 
 # Keep the lib/bin unit-test executables and every integration binary except the excluded suites.
 run=()
@@ -103,18 +106,28 @@ if compgen -G "$status_dir/*" >/dev/null; then
 fi
 rm -rf "$status_dir"
 
-# Coverage is of the product (src/ library), not of the test harness or the CLI/survey tooling.
+# Cargo package selection also controls which instrumented objects `llvm-cov report` discovers.
+# Export each product package separately, then combine their totals for the repository gate.
 IGNORE='(^|/)tests/|(^|/)src/main\.rs|(^|/)src/bin/'
 cargo +nightly llvm-cov report --branch --ignore-filename-regex "$IGNORE" \
-  --json --output-path "$raw_out"
+  --json --output-path "$compiler_raw_out"
+cargo +nightly llvm-cov report --branch -p krusty-lsp --ignore-filename-regex "$IGNORE" \
+  --json --output-path "$lsp_raw_out"
 
-# Reduce llvm-cov's export to the four totals the gate compares against. `percent` is already 0..100.
-jq '.data[0].totals
-    | { regions:   {covered: .regions.covered,   count: .regions.count,   percent: .regions.percent},
-        functions: {covered: .functions.covered, count: .functions.count, percent: .functions.percent},
-        lines:     {covered: .lines.covered,     count: .lines.count,     percent: .lines.percent},
-        branches:  {covered: .branches.covered,  count: .branches.count,  percent: .branches.percent} }' \
-  "$raw_out" > "$summary_out"
+# Reduce both exports to the combined totals the gate compares against.
+jq -s '
+  map(.data[0].totals) as $totals
+  | ["regions", "functions", "lines", "branches"]
+  | map(. as $metric
+      | ($totals | map(.[$metric].covered) | add) as $covered
+      | ($totals | map(.[$metric].count) | add) as $count
+      | {key: $metric, value: {
+          covered: $covered,
+          count: $count,
+          percent: (if $count == 0 then 0 else $covered * 100 / $count end)
+        }})
+  | from_entries' \
+  "$compiler_raw_out" "$lsp_raw_out" > "$summary_out"
 
 echo "coverage summary ($summary_out):" >&2
 jq -r 'to_entries[] | "  \(.key | (. + "         ")[0:10])  \(.value.percent*100|round/100)%  (\(.value.covered)/\(.value.count))"' "$summary_out" >&2
