@@ -1410,10 +1410,11 @@ impl Classpath {
         };
         let names = c.value_params.iter().map(|p| p.name.clone()).collect();
         let defaults = c.value_params.iter().map(|p| p.has_default).collect();
+        let vararg = c.last_param_vararg();
         MetadataCallFacts {
             kept_params: Some(end),
             call_sig: if extension {
-                CallSig::metadata_extension(end, names, defaults)
+                CallSig::metadata_extension(end, names, defaults, vararg)
             } else {
                 CallSig::metadata_top_level(
                     end,
@@ -1425,6 +1426,7 @@ impl Classpath {
                         .collect(),
                     c.value_params.iter().map(|p| p.recv_fun).collect(),
                     c.value_params.iter().map(|p| p.materialized).collect(),
+                    vararg,
                 )
             },
             ret: metadata_return_info(c.ret_class, c.ret_nullable),
