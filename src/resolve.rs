@@ -1824,10 +1824,31 @@ pub fn collect_signatures_with_cp(
                         let module_declared_recv = file.decls.iter().any(|&d| {
                             matches!(file.decl(d), crate::ast::Decl::Class(c) if c.name == recv_ref.name)
                         });
+                        // A nullable PRIMITIVE receiver (`Int?.inc`) is EXEMPT from the hazard for the
+                        // operators whose call sites dispatch by receiver nullability: its
+                        // [`Ty::erased_recv`] key is the boxed wrapper class, DISTINCT from the plain
+                        // primitive's key, so a non-null `Int + …` can never route to it. Other operator
+                        // names (`equals`, `get`, `invoke`, the bitwise/unary set, …) have call paths
+                        // that never consult this key on a nullable receiver (or hit still-unsupported
+                        // shapes there) — accepting them would silently keep the builtin (a miscompile),
+                        // so they stay rejected.
+                        let nullable_prim_dispatchable = matches!(recv_ty, Ty::Nullable(_))
+                            && matches!(
+                                f.name.as_str(),
+                                "plus"
+                                    | "minus"
+                                    | "times"
+                                    | "div"
+                                    | "rem"
+                                    | "compareTo"
+                                    | "inc"
+                                    | "dec"
+                            );
                         if recv_ref.nullable
                             && recv_ty.is_reference()
                             && is_operator
                             && !module_declared_recv
+                            && !nullable_prim_dispatchable
                         {
                             diags.error(f.span, "krusty: an operator extension on a nullable reference receiver is not supported".to_string());
                         } else {
@@ -8129,11 +8150,17 @@ impl<'a> Checker<'a> {
                         _ => None,
                     };
                     if let Some(n) = name {
-                        if let Some(l) = self.lookup(&n) {
-                            if !l.is_var {
-                                if let Some(p) = l.ty.nullable_primitive() {
-                                    return Some((n, p));
-                                }
+                        // `this != null` inside a nullable-prim-receiver extension (`fun Int?.f()`):
+                        // the receiver is immutable, so it narrows like a `val`. Its type lives in
+                        // `this_ty` — `this` has no scope entry until a narrowing declares one.
+                        let stable_ty = if n == "this" {
+                            self.this_ty
+                        } else {
+                            self.lookup(&n).filter(|l| !l.is_var).map(|l| l.ty)
+                        };
+                        if let Some(t) = stable_ty {
+                            if let Some(p) = t.nullable_primitive() {
+                                return Some((n, p));
                             }
                         }
                     }
@@ -9534,26 +9561,33 @@ impl<'a> Checker<'a> {
                 // `target++`/`++target` as a value: a simple mutable numeric/Char variable (the built-in
                 // `inc`/`dec`), or a variable whose type has a user `inc`/`dec` operator. The result type
                 // is the variable's type.
-                let tt = self.expr(target);
+                let mut tt = self.expr(target);
                 if let Expr::Name(name) = self.file.expr(target).clone() {
                     match self
                         .lookup(&name)
                         .map(|l| (l.ty, l.is_var))
                         .or_else(|| self.syms.props.get(&name).map(|&(t, v, _)| (t, v)))
                     {
-                        Some((_, is_var)) => {
+                        Some((vt, is_var)) => {
                             if !is_var {
                                 self.diags
                                     .error(self.span(e), "'val' cannot be reassigned.".to_string());
                             }
-                            if !tt.is_numeric_or_char()
-                                && self.inc_dec_operator_ret(tt, dec).is_none()
-                            {
-                                self.diags.error(
-                                    self.span(e),
-                                    "krusty: '++'/'--' is only supported on a numeric variable"
-                                        .to_string(),
-                                );
+                            // Dispatch on the variable's BINDING type, not a flow-narrowed use type:
+                            // the update writes back to the variable, and the lowerer keys the
+                            // builtin-vs-operator choice (and the slot representation) on the binding
+                            // (`var i: Int? = 10; i++` calls a user `Int?.inc` on the BOXED slot even
+                            // where a read of `i` is narrowed to `Int`). The expression's type is the
+                            // binding type for the same reason.
+                            if !vt.is_numeric_or_char() {
+                                if self.inc_dec_operator_ret(vt, dec).is_none() {
+                                    self.diags.error(
+                                        self.span(e),
+                                        "krusty: '++'/'--' is only supported on a numeric variable"
+                                            .to_string(),
+                                    );
+                                }
+                                tt = vt;
                             }
                         }
                         None => self
@@ -9858,16 +9892,25 @@ impl<'a> Checker<'a> {
                 }
                 result
             }
-            Expr::Name(n) if n == "this" => match self.this_ty {
-                Some(t) => t,
-                None => {
-                    self.diags.error(
-                        self.span(e),
-                        "'this' is not available outside a class member".to_string(),
-                    );
-                    Ty::Error
+            Expr::Name(n) if n == "this" => {
+                // A smart-cast narrowing (`this != null` in a nullable-prim-receiver extension)
+                // declares a `"this"` scope entry; it wins over the declared receiver type. `this`
+                // is otherwise never a scope local.
+                if let Some(l) = self.lookup("this") {
+                    l.ty
+                } else {
+                    match self.this_ty {
+                        Some(t) => t,
+                        None => {
+                            self.diags.error(
+                                self.span(e),
+                                "'this' is not available outside a class member".to_string(),
+                            );
+                            Ty::Error
+                        }
+                    }
                 }
-            },
+            }
             // `this@Label` — a labeled receiver. Resolve from the receiver-label stack (innermost last):
             // the matching entry's type is the result. The INNERMOST match (the current `this`) records
             // `LabeledThisInner` (lowered as a bare `this`); a match exactly ONE class level up, with
@@ -10075,7 +10118,16 @@ impl<'a> Checker<'a> {
                 // User-defined extension operator on a primitive receiver overrides built-in arithmetic.
                 // Only applies to primitive receivers (reference receivers can't distinguish nullable vs
                 // non-null at the krusty type level, risking infinite self-recursion in the body).
-                if lt != Ty::Error && rt != Ty::Error && !lt.is_reference() {
+                // A nullable PRIMITIVE (`Int?`) is included: it has no builtin arithmetic at all, and its
+                // erased key (the boxed wrapper) is distinct from the plain primitive's, so the lookup
+                // can only find an extension DECLARED on the nullable form. A nullable REFERENCE
+                // (`Nullable(String)` from a safe-call/classpath type) stays excluded — its erased key is
+                // the NON-null form's, so the lookup could route a nullable receiver to an extension
+                // declared on the non-null type.
+                if lt != Ty::Error
+                    && rt != Ty::Error
+                    && (!lt.is_reference() || lt.nullable_primitive().is_some())
+                {
                     let op_name = op.arith_operator_name();
                     if let Some(fname) = op_name {
                         if let Some(fi) = self
@@ -10181,6 +10233,25 @@ impl<'a> Checker<'a> {
                                 return self.set(e, ret);
                             }
                         }
+                    }
+                }
+                // A user `compareTo(o): Int` EXTENSION on a nullable primitive (`Long?.compareTo`)
+                // drives `<`/`<=`/`>`/`>=` — the builtin comparison needs a non-null receiver, so the
+                // extension is the only applicable operator. Keyed under the boxed wrapper, which a
+                // non-null primitive comparison never looks up.
+                if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+                    && lt.nullable_primitive().is_some()
+                    && rt != Ty::Error
+                {
+                    if let Some(param) = self
+                        .syms
+                        .ext_fun_overloads(lt, "compareTo")
+                        .iter()
+                        .find(|s| s.ret == Ty::Int)
+                        .and_then(|s| s.single_param())
+                    {
+                        self.expect_assignable(param, rt, self.span(rhs), "operator argument");
+                        return self.set(e, Ty::Boolean);
                     }
                 }
                 self.check_binary(op, lt, rt, self.span(e))

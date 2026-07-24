@@ -160,8 +160,22 @@ fn empty_array_of_without_type() {
 
 #[test]
 fn operator_extension_on_nullable_receiver() {
-    let d = diags("operator fun Int?.plus(o: Int): Int = 0\nfun box(): Int = 0");
-    assert_rejected(&d, "operator extension on a nullable receiver");
+    // A nullable REFERENCE receiver still collides with the non-null form's erased key (reference
+    // nullability isn't modeled at call sites). A nullable PRIMITIVE receiver (`Int?.plus`) is now
+    // supported for the dispatchable operator names — see `nullable_receiver_operator_ext_e2e`.
+    let d = diags("operator fun String?.plus(o: String): String = \"\"\nfun box(): Int = 0");
+    assert_rejected(&d, "operator extension on a nullable reference receiver");
+}
+
+#[test]
+fn non_dispatchable_operator_extension_on_nullable_primitive() {
+    // Operator names whose call paths never dispatch by receiver nullability (`get`, `equals`, …)
+    // stay rejected on a nullable primitive — accepting them would silently keep the builtin.
+    let d = diags("operator fun Int?.get(i: Int): Int = 0\nfun box(): Int = 0");
+    assert_rejected(
+        &d,
+        "non-dispatchable operator extension on a nullable primitive receiver",
+    );
 }
 
 #[test]
