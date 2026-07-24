@@ -886,7 +886,8 @@ fn kotlin_codegen_box_conformance() {
         for p in [
             stdlib_jar.clone(),
             common::kotlin_test_jar(),
-            common::find_jar("kotlin-reflect-", &[]),
+            common::dist_jar("kotlin-reflect.jar")
+                .or_else(|| common::find_jar("kotlin-reflect-", &["sources"])),
             common::find_jar("kotlin-stdlib-jdk8", &[]),
             common::find_jar("kotlinx-coroutines-core", &["jdk8"]),
             common::find_jar("annotations-", &[]),
