@@ -87,6 +87,9 @@ src/ir.rs, ir_lower.rs            backend-neutral IR + AST→IR lowering
 src/jvm/                          IR→bytecode emit, class-file writer, .class reader, jar/dir
                                   classpath, bytecode inliner (inline.rs)
 src/metadata/                     @kotlin.Metadata protobuf + .kotlin_module emitters
+crates/krusty-analysis/           process-independent in-memory source-set analysis
+crates/krusty-cli/                kotlinc-compatible batch executable and command parsing
+crates/krusty-lsp/                JSON-RPC/LSP executable and compact editor query state
 tests/                            differential + round-trip harness vs real kotlinc
 docs/SPEC.md                      language subset + Kotlin-semantics decisions
 docs/IMPLEMENTATION_PLAN.md       phased plan (each phase ends green)
@@ -105,7 +108,15 @@ krusty src/ -d out/                          # compile a source tree to a class 
 krusty src/ -d mylib.jar -module-name mylib  # ... or to a library .jar
 krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath
 krusty -version | -help
+
+# LSP server over JSON-RPC on stdin/stdout (full-document sync, diagnostics, hover):
+cargo build -p krusty-lsp
+target/debug/krusty-lsp --stdio -cp deps.jar:classes/
 ```
+
+Releases publish separate compiler and language-server archives for each platform.
+The LSP analyzes all open Kotlin documents as one source set and uses a restartable compiler worker
+to keep process-lifetime compiler interning bounded during long editor sessions.
 
 The test harness self-provisions the reference Kotlin compiler and box corpus through `just` when
 available, uses the fast `gate` profile, builds once, and runs test binaries in parallel. Pass

@@ -196,7 +196,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   lambdas; facade `@Metadata` already encodes class-typed top-level function params.
 
 ## Phase 9 — kotlinc drop-in CLI  ✅
-- ✅ `src/cli.rs`: kotlinc-compatible argument parsing — `-d`, `-classpath`/`-cp`/`-class-path`,
+- ✅ `crates/krusty-cli/src/cli.rs`: kotlinc-compatible argument parsing — `-d`,
+  `-classpath`/`-cp`/`-class-path`,
   `-module-name`, `-version`, `-help`, plus a table of accepted-but-ignored flags (with/without a
   value: `-include-runtime`, `-jvm-target`, `-no-stdlib`, `-language-version`, …). Unknown `-flags`
   are ignored with a note (never mistaken for sources). `@argfile`s expand inline.

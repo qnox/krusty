@@ -5,11 +5,11 @@
 use std::io::Write;
 use std::path::Path;
 
-use krusty::cli;
 use krusty::diag::DiagSink;
 use krusty::frontend::{collect_signatures_with_cp, parse_source};
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
+use krusty_cli::cli;
 
 fn main() {
     let opts = cli::parse(std::env::args().skip(1));

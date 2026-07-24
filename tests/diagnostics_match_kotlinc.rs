@@ -15,7 +15,7 @@ fn first_error(output: &str) -> Option<String> {
 
 #[test]
 fn error_messages_match_kotlinc() {
-    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let krusty = common::krusty_binary();
 
     // Snippets within krusty's subset that produce a diagnostic kotlinc also produces identically.
     let cases = [
@@ -36,7 +36,7 @@ fn error_messages_match_kotlinc() {
         let kt = root.join(format!("t{i}.kt"));
         fs::write(&kt, src).unwrap();
 
-        let kr = Command::new(krusty)
+        let kr = Command::new(&krusty)
             .args(["-d", root.join("o").to_str().unwrap()])
             .arg(&kt)
             .output()

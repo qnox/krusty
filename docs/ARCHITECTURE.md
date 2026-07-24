@@ -35,6 +35,40 @@ boundary.
   backend lowering passes. If a temporary common-lowering hook is needed while the IR lacks a neutral
   node, keep the hook narrow, backend-owned, and record it as migration debt rather than adding JVM
   spelling or platform policy to core lowering.
+- **Process front ends** are separate workspace packages. The root `krusty` package is a compiler
+  library and exposes frontend and backend contracts. `crates/krusty-analysis` adapts that public
+  frontend to process-independent, in-memory source-set analysis. `crates/krusty-cli` owns
+  kotlinc-compatible batch argument parsing, filesystem output, and process exit behavior, while
+  `crates/krusty-lsp` owns JSON-RPC, document lifecycle, and compact editor query snapshots. These
+  packages depend toward the compiler library; the compiler never depends on any process adapter.
+- **Shared process-independent policy** stays in the compiler library when it is genuinely a compiler
+  concern. For example, JVM classpath code resolves a JDK home to `lib/modules`; each executable
+  independently decides how its own arguments select that home. There is no command-layer “common”
+  crate until both executable packages share a stable command abstraction rather than a few flags.
+
+## Language-server memory model
+
+- `serde`, `serde_json`, JSON-RPC transport, and session state belong to the separate
+  `crates/krusty-lsp` workspace package. The compiler's dependency graph has no server dependency
+  or server-specific feature; the LSP crate builds snapshots through `krusty-analysis`.
+- The LSP supervisor never runs the compiler in its own long-lived process. It sends source sets to
+  a compiler worker that is restarted after 64 analyses. This bounds growth from the compiler's
+  process-lifetime name/type interners while amortizing JVM classpath initialization across edits.
+- An open document retains its source text, diagnostics only long enough to publish them, and a
+  compact hover index. Each hover entry is a 12-byte `(Span, type-id)` record; rendered type names
+  are deduplicated per document.
+- Open documents are analyzed as one source set, so one parse/signature pass resolves declarations
+  across open files and refreshes every open file's diagnostics and hover snapshot atomically. AST,
+  symbol-table, and full type-analysis allocations are dropped after each analysis; closing a
+  document removes its source and hover index.
+- Input frames are capped at 16 MiB, headers at 8 KiB, and the reader-to-dispatch queue at four
+  parsed messages. Open text is capped at 32 MiB across at most 256 documents; worker JSON encoding
+  is capped at 64 MiB in both directions. Document-state bursts are capped by count, retained bytes,
+  and elapsed time; their newest changes are applied in one analysis. A worker analysis is terminated
+  and restarted after 30 seconds.
+- The server advertises full-document synchronization. This avoids a second rope/piece-table
+  representation and makes each accepted version replace the prior text allocation; stale versions
+  do not trigger analysis.
 
 ## Invariants
 
@@ -65,7 +99,8 @@ The front end is not yet fully decoupled. The concrete blockers, in priority ord
    maps and `ir_lower.rs` often re-resolves what the checker selected. *Target:* one resolved-call /
    resolved-property table carries selected callable identity, argument mapping, metadata facts, and the
    backend handle forward.
-4. **The driver** (`main.rs`) calls `jvm::emit` directly. *Target:* a `Backend` trait
+4. **The batch driver** (`crates/krusty-cli/src/main.rs`) selects the JVM backend directly. *Target:*
+   backend selection remains executable policy while compilation is expressed through the `Backend` trait
    (`compile(checked program) → artifacts`); `-target jvm|wasm|js` selects the impl.
 
 Migration is incremental and gated by the conformance harness (never regress `0 FAIL`): introduce

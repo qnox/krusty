@@ -417,6 +417,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "krusty-analysis"
+version = "0.0.1"
+dependencies = [
+ "krusty",
+]
+
+[[package]]
+name = "krusty-cli"
+version = "0.0.1"
+dependencies = [
+ "krusty",
+ "zip",
+]
+
+[[package]]
+name = "krusty-lsp"
+version = "0.0.1"
+dependencies = [
+ "krusty",
+ "krusty-analysis",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
