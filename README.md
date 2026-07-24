@@ -109,14 +109,16 @@ krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath
 krusty -version | -help
 
 # LSP server over JSON-RPC on stdin/stdout
-# (full-document sync, diagnostics, hover, full/range semantic highlighting):
+# (full-document sync, diagnostics, completion + resolve, hover, semantic highlighting):
 cargo build -p krusty-lsp
 target/debug/krusty-lsp --stdio -cp deps.jar:classes/
 ```
 
 Releases publish separate compiler and language-server archives for each platform.
 The LSP analyzes all open Kotlin documents as one source set and uses a restartable compiler worker
-to keep process-lifetime compiler interning bounded during long editor sessions.
+to keep process-lifetime compiler interning bounded during long editor sessions. Completion is
+lexically scoped, includes declarations from other open files, and handles an incomplete `receiver.`
+or `receiver?.` for a simple named receiver without rerunning analysis for the request.
 
 The test harness self-provisions the reference Kotlin compiler and box corpus through `just` when
 available, uses the fast `gate` profile, builds once, and runs test binaries in parallel. Pass

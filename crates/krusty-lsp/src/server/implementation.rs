@@ -1,8 +1,9 @@
 //! JSON-RPC/LSP session state and bounded stdio dispatch.
 //!
 //! This module lives in the separate `krusty-lsp` package, so the batch compiler neither links JSON
-//! support nor retains server state. A session stores only the latest text and compact hover data
-//! for each open document; full compiler analysis is dropped after every open/change notification.
+//! support nor retains server state. A session stores only the latest text and compact hover,
+//! completion, and highlighting data for each open document; full compiler analysis is dropped after
+//! every open/change notification.
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -14,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::super::{
-    DocumentAnalysis, HoverIndex, SemanticTokenIndex, SemanticTokenRange, SEMANTIC_TOKEN_MODIFIERS,
-    SEMANTIC_TOKEN_TYPES,
+    CompletionIndex, DocumentAnalysis, HoverIndex, SemanticTokenIndex, SemanticTokenRange,
+    SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
 };
 use crate::worker::{source_set_fits, MAX_SOURCE_SET_BYTES};
 use krusty::diag::{Diagnostic, Severity};
@@ -138,7 +139,9 @@ impl Dispatch {
 struct OpenDocument {
     text: String,
     version: i64,
+    completion_generation: u64,
     hover: HoverIndex,
+    completion: CompletionIndex,
     semantic_tokens: SemanticTokenIndex,
     analysis_blocked: bool,
 }
@@ -148,6 +151,7 @@ pub struct LspService<A> {
     documents: HashMap<String, OpenDocument>,
     analyze: A,
     analysis_dirty: bool,
+    completion_generation: u64,
     initialized: bool,
     shutdown_requested: bool,
 }
@@ -161,6 +165,7 @@ where
             documents: HashMap::new(),
             analyze,
             analysis_dirty: false,
+            completion_generation: 0,
             initialized: false,
             shutdown_requested: false,
         }
@@ -213,12 +218,16 @@ where
                 })
                 .collect();
         }
+        self.completion_generation = self.completion_generation.wrapping_add(1);
+        let completion_generation = self.completion_generation;
 
         uris.into_iter()
             .zip(analyses)
             .map(|(uri, analysis)| {
                 let open = self.documents.get_mut(&uri).unwrap();
+                open.completion_generation = completion_generation;
                 open.hover = analysis.hover;
+                open.completion = analysis.completion;
                 open.semantic_tokens = analysis.semantic_tokens;
                 publish_diagnostics(&uri, Some(open.version), analysis.diagnostics, &open.text)
             })
@@ -303,6 +312,10 @@ where
                     json!({
                         "capabilities": {
                             "hoverProvider": true,
+                            "completionProvider": {
+                                "resolveProvider": true,
+                                "triggerCharacters": ["."],
+                            },
                             "positionEncoding": "utf-16",
                             "semanticTokensProvider": {
                                 "legend": {
@@ -326,6 +339,8 @@ where
             "textDocument/didChange" => self.did_change(id, params, defer_analysis),
             "textDocument/didClose" => self.did_close(id, params, defer_analysis),
             "textDocument/hover" => self.hover(id, params),
+            "textDocument/completion" => self.completion(id, params),
+            "completionItem/resolve" => self.resolve_completion(id, params),
             "textDocument/semanticTokens/full" => self.semantic_tokens(id, params, false),
             "textDocument/semanticTokens/range" => self.semantic_tokens(id, params, true),
             "shutdown" => {
@@ -359,7 +374,9 @@ where
                     OpenDocument {
                         text: String::new(),
                         version,
+                        completion_generation: 0,
                         hover: HoverIndex::default(),
+                        completion: CompletionIndex::default(),
                         semantic_tokens: SemanticTokenIndex::default(),
                         analysis_blocked: true,
                     },
@@ -381,7 +398,9 @@ where
             OpenDocument {
                 text: params.text_document.text,
                 version,
+                completion_generation: 0,
                 hover: HoverIndex::default(),
+                completion: CompletionIndex::default(),
                 semantic_tokens: SemanticTokenIndex::default(),
                 analysis_blocked: false,
             },
@@ -415,6 +434,7 @@ where
             open.version = params.text_document.version;
             open.text.clear();
             open.hover = HoverIndex::default();
+            open.completion = CompletionIndex::default();
             open.semantic_tokens = SemanticTokenIndex::default();
             open.analysis_blocked = true;
             self.analysis_dirty |= was_analyzed;
@@ -482,6 +502,92 @@ where
                 }
             }),
         )])
+    }
+
+    fn completion(&self, id: Option<Value>, params: Value) -> Dispatch {
+        let Some(id) = id else {
+            return Dispatch::none();
+        };
+        let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params) else {
+            return invalid_params(Some(id));
+        };
+        let Some(open) = self.documents.get(&params.text_document.uri) else {
+            return Dispatch::messages(vec![rpc_result(
+                id,
+                json!({"isIncomplete": false, "items": []}),
+            )]);
+        };
+        let Some(offset) = position_to_byte_offset(&open.text, params.position) else {
+            return invalid_params(Some(id));
+        };
+        let is_incomplete = open.completion.is_incomplete();
+        let items: Vec<_> = open
+            .completion
+            .complete(&open.text, offset)
+            .into_iter()
+            .map(|candidate| {
+                json!({
+                    "label": candidate.label,
+                    "kind": candidate.kind,
+                    "data": {
+                        "uri": params.text_document.uri,
+                        "version": open.version,
+                        "generation": open.completion_generation,
+                        "slot": candidate.slot,
+                    }
+                })
+            })
+            .collect();
+        Dispatch::messages(vec![rpc_result(
+            id,
+            json!({"isIncomplete": is_incomplete, "items": items}),
+        )])
+    }
+
+    fn resolve_completion(&self, id: Option<Value>, mut item: Value) -> Dispatch {
+        let Some(id) = id else {
+            return Dispatch::none();
+        };
+        let Some(object) = item.as_object_mut() else {
+            return invalid_params(Some(id));
+        };
+        let Some(label) = object
+            .get("label")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            return invalid_params(Some(id));
+        };
+        let Some(data) = object.get("data") else {
+            return Dispatch::messages(vec![rpc_result(id, item)]);
+        };
+        let Some(uri) = data.get("uri").and_then(Value::as_str) else {
+            return Dispatch::messages(vec![rpc_result(id, item)]);
+        };
+        let Some(version) = data.get("version").and_then(Value::as_i64) else {
+            return Dispatch::messages(vec![rpc_result(id, item)]);
+        };
+        let Some(generation) = data.get("generation").and_then(Value::as_u64) else {
+            return Dispatch::messages(vec![rpc_result(id, item)]);
+        };
+        let Some(slot) = data
+            .get("slot")
+            .and_then(Value::as_u64)
+            .and_then(|slot| u32::try_from(slot).ok())
+        else {
+            return Dispatch::messages(vec![rpc_result(id, item)]);
+        };
+        if let Some(detail) = self
+            .documents
+            .get(uri)
+            .filter(|document| {
+                document.version == version && document.completion_generation == generation
+            })
+            .and_then(|document| document.completion.resolve(slot, &label))
+        {
+            object.insert("detail".to_string(), Value::String(detail.to_string()));
+        }
+        Dispatch::messages(vec![rpc_result(id, item)])
     }
 
     fn semantic_tokens(&self, id: Option<Value>, params: Value, range: bool) -> Dispatch {
