@@ -94,6 +94,131 @@ mod tests {
     }
 
     #[test]
+    fn completion_is_scoped_compiler_backed_and_resolvable() {
+        let calls = Rc::new(Cell::new(0));
+        let calls_for_analyzer = calls.clone();
+        let mut server = LspService::new(move |sources: &[&str]| {
+            calls_for_analyzer.set(calls_for_analyzer.get() + 1);
+            super::super::analyze_for_lsp(sources)
+        });
+        let initialized = server.handle(request(1, "initialize", json!({})));
+        let provider = &initialized.messages[0]["result"]["capabilities"]["completionProvider"];
+        assert_eq!(provider["resolveProvider"], true);
+        assert_eq!(provider["triggerCharacters"], json!(["."]));
+
+        let source = concat!(
+            "data class User(val name: String) {\n",
+            "  fun greeting(): String = name\n",
+            "}\n",
+            "fun demo(user: User) {\n",
+            "  val local: User = user\n",
+            "  user.\n",
+            "  val later = 1\n",
+            "}\n",
+        );
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": "file:///main.kt",
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": source
+                }
+            }),
+        ));
+        assert_eq!(calls.get(), 1);
+
+        let completion = server.handle(request(
+            2,
+            "textDocument/completion",
+            json!({
+                "textDocument": {"uri": "file:///main.kt"},
+                "position": {"line": 5, "character": 7}
+            }),
+        ));
+        assert_eq!(calls.get(), 1, "completion must use the cached snapshot");
+        assert_eq!(completion.messages[0]["result"]["isIncomplete"], false);
+        let items = completion.messages[0]["result"]["items"]
+            .as_array()
+            .unwrap();
+        let name = items
+            .iter()
+            .find(|item| item["label"] == "name")
+            .expect("constructor property completion");
+        assert_eq!(name["kind"], 10);
+        let greeting = items
+            .iter()
+            .find(|item| item["label"] == "greeting")
+            .expect("method completion");
+        assert_eq!(greeting["kind"], 2);
+        assert!(items.iter().all(|item| item["label"] != "later"));
+
+        let resolved = server.handle(request(3, "completionItem/resolve", greeting.clone()));
+        assert_eq!(resolved.messages[0]["result"]["label"], "greeting");
+        assert_eq!(
+            resolved.messages[0]["result"]["detail"],
+            "fun greeting(): String"
+        );
+        assert_eq!(calls.get(), 1, "resolve must use the cached snapshot");
+
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": "file:///other.kt",
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "fun unrelated() = 1"
+                }
+            }),
+        ));
+        let stale = server.handle(request(4, "completionItem/resolve", greeting.clone()));
+        assert!(
+            stale.messages[0]["result"]["detail"].is_null(),
+            "a source-set refresh must invalidate old positional completion slots"
+        );
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn completion_includes_cross_file_top_level_declarations() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        for (uri, text) in [
+            ("file:///Answer.kt", "package demo\nfun answer(): Int = 42"),
+            ("file:///Use.kt", "package demo\nfun use(): Int = ans"),
+        ] {
+            server.handle(notification(
+                "textDocument/didOpen",
+                json!({
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": "kotlin",
+                        "version": 1,
+                        "text": text
+                    }
+                }),
+            ));
+        }
+
+        let completion = server.handle(request(
+            2,
+            "textDocument/completion",
+            json!({
+                "textDocument": {"uri": "file:///Use.kt"},
+                "position": {"line": 1, "character": 20}
+            }),
+        ));
+        let items = completion.messages[0]["result"]["items"]
+            .as_array()
+            .unwrap();
+        assert!(items
+            .iter()
+            .any(|item| item["label"] == "answer" && item["kind"] == 3));
+    }
+
+    #[test]
     fn document_lifecycle_publishes_diagnostics_and_drops_closed_text() {
         let calls = Rc::new(Cell::new(0));
         let calls_for_analyzer = calls.clone();

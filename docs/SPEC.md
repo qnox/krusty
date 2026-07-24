@@ -1516,6 +1516,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `semantic_tokens_preserve_source_set_metadata_across_files`,
   `initialize_and_requests_expose_full_and_range_semantic_highlighting`.)
 
+- **Completion uses compiler-derived source-set and lexical symbols.** The server returns an LSP
+  `CompletionList`, advertises item resolution, and maps Kotlin declarations to the official
+  completion kinds (`method`, `operator`, `function`, `property`, `constant`, `variable`, `struct`,
+  `interface`, `enum`, `enumMember`, and `typeParameter`). Unqualified completion selects only declarations whose
+  lexical scope and declaration position contain the cursor, with the narrowest same-name binding
+  winning. Source top-level declarations are shared across same-package open files (or files that
+  explicitly import them without an alias); unrelated unimported packages do not leak unusable
+  entries. A simple
+  source-defined receiver followed by `.` or `?.` completes its own and inherited accessible
+  properties and methods, companion members, or enum entries even when parser recovery prevents
+  type checking that edit. Completion and
+  `completionItem/resolve` read compact cached snapshots and never rerun compiler analysis.
+  This increment catalogs public/internal source declarations; private/protected completion remains
+  a later context-aware access-control increment and is not advertised by the current snapshot.
+  (`completion_survives_an_incomplete_safe_member_access`,
+  `completion_snapshot_interns_strings_into_compact_array_entries`,
+  `completion_includes_inherited_members`,
+  `completion_does_not_offer_unimported_cross_package_symbols`,
+  `completion_is_scoped_compiler_backed_and_resolvable`,
+  `completion_includes_cross_file_top_level_declarations`.)
+
 - **A property reference is a function value** (`C::n` as a `(C)->Int`). An unbound `Type::prop` has type
   `KProperty1<C, R>` and a bound `obj::prop` has `KProperty0<R>`; both are accepted where a `(C)->R` /
   `()->R` (`kotlin/jvm/functions/Function1`/`Function0`) of the matching arity is expected, because

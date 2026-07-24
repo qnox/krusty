@@ -17,8 +17,11 @@ use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use serde::{Deserialize, Serialize};
 
-use crate::compiler_analysis::{self, HighlightSymbols};
-use crate::{read_framed, write_framed, DocumentAnalysis, HoverIndex, SemanticTokenIndex};
+use crate::compiler_analysis::{self, CompletionSymbols, HighlightSymbols};
+use crate::{
+    read_framed, write_framed, CompletionBudget, CompletionIndex, DocumentAnalysis, HoverIndex,
+    SemanticTokenIndex,
+};
 
 pub const DEFAULT_ANALYSES_PER_WORKER: usize = 64;
 const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
@@ -47,6 +50,7 @@ struct WireDiagnostic {
 struct AnalysisResponse {
     diagnostics: Vec<WireDiagnostic>,
     hover: HoverIndex,
+    completion: CompletionIndex,
     semantic_tokens: SemanticTokenIndex,
 }
 
@@ -67,6 +71,7 @@ impl From<DocumentAnalysis> for AnalysisResponse {
                 })
                 .collect(),
             hover: analysis.hover,
+            completion: analysis.completion,
             semantic_tokens: analysis.semantic_tokens,
         }
     }
@@ -90,6 +95,7 @@ impl AnalysisResponse {
                 })
                 .collect(),
             hover: self.hover,
+            completion: self.completion,
             semantic_tokens: self.semantic_tokens,
         }
     }
@@ -307,6 +313,8 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
         let source_set = compiler_analysis::analyze_source_set(&sources, platform);
         let highlight_symbols =
             HighlightSymbols::from_source_set(&sources, &source_set.files, &source_set.symbols);
+        let completion_symbols = CompletionSymbols::from_source_set(&sources, &source_set.files);
+        let mut completion_budget = CompletionBudget::default();
         let analyses = source_set
             .files
             .into_iter()
@@ -317,6 +325,8 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
                     file,
                     &source_set.symbols,
                     &highlight_symbols,
+                    &completion_symbols,
+                    &mut completion_budget,
                 )
             })
             .map(AnalysisResponse::from)
@@ -372,6 +382,7 @@ mod tests {
             .into_document_analysis();
         assert!(analysis.diagnostics.is_empty());
         assert!(analysis.hover.entry_count() > 0);
+        assert!(analysis.completion.entry_count() > 0);
         assert!(analysis.semantic_tokens.entry_count() > 0);
     }
 }

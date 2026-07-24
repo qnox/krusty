@@ -23,11 +23,20 @@ fn stdio_server_uses_the_compiler_worker_and_exits_cleanly() {
                     "uri": "file:///main.kt",
                     "languageId": "kotlin",
                     "version": 1,
-                    "text": "fun box(): Int = \"no\""
+                    "text": "fun answer(): Int = 42\nfun box(): Int = \"no\"\nfun use(): Int = ans"
                 }
             }
         }),
-        json!({"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": null}),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": "file:///main.kt"},
+                "position": {"line": 2, "character": 20}
+            }
+        }),
+        json!({"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": null}),
         json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
     ];
     {
@@ -52,4 +61,10 @@ fn stdio_server_uses_the_compiler_worker_and_exits_cleanly() {
         .unwrap()
         .contains("return type mismatch"));
     assert_eq!(output[2]["id"], 2);
+    assert!(output[2]["result"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["label"] == "answer" && item["kind"] == 3));
+    assert_eq!(output[3]["id"], 3);
 }
