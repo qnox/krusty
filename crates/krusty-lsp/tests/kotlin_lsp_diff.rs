@@ -1,4 +1,5 @@
-//! Opt-in protocol differential against JetBrains' official Kotlin LSP.
+//! Opt-in diagnostics, highlighting, navigation, hover, and completion differential against
+//! JetBrains' official Kotlin LSP.
 //!
 //! Set `KRUSTY_KOTLIN_LSP` to the official launcher (`kotlin-lsp.sh` or
 //! `bin/intellij-server`). The official distribution is intentionally not downloaded by the normal
@@ -358,6 +359,52 @@ impl LspProcess {
         );
         response.get("result").cloned().unwrap_or(Value::Null)
     }
+
+    fn completions(&mut self, uri: &str, line: u32, character: u32, label_prefix: &str) -> Value {
+        let request_id = self.next_request_id();
+        let response = self.request(
+            request_id,
+            "textDocument/completion",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": line, "character": character}
+            }),
+        );
+        let result = response.get("result").cloned().unwrap_or(Value::Null);
+        let is_incomplete = result["isIncomplete"].as_bool().unwrap_or(false);
+        let items = result
+            .as_array()
+            .cloned()
+            .or_else(|| result["items"].as_array().cloned())
+            .unwrap_or_default();
+        let mut items = items
+            .into_iter()
+            .filter(|item| {
+                item["label"]
+                    .as_str()
+                    .is_some_and(|label| label.starts_with(label_prefix))
+            })
+            .map(|item| {
+                let request_id = self.next_request_id();
+                let response = self.request(request_id, "completionItem/resolve", item.clone());
+                let resolved = response
+                    .get("result")
+                    .filter(|result| result.is_object())
+                    .unwrap_or(&item);
+                json!({
+                    "label": resolved["label"],
+                    "kind": resolved["kind"],
+                    "labelDetails": resolved["labelDetails"],
+                    "sortText": resolved["sortText"],
+                })
+            })
+            .collect::<Vec<_>>();
+        items.sort_by_key(Value::to_string);
+        json!({
+            "isIncomplete": is_incomplete,
+            "items": items,
+        })
+    }
 }
 
 impl Drop for LspProcess {
@@ -417,7 +464,7 @@ fn diagnostic_comparison_preserves_the_exact_range_and_text() {
 }
 
 #[test]
-fn diagnostics_tokens_definitions_and_hovers_match_official_kotlin_lsp() {
+fn diagnostics_tokens_definitions_hovers_and_completions_match_official_kotlin_lsp() {
     let Ok(kotlin_lsp) = std::env::var("KRUSTY_KOTLIN_LSP") else {
         eprintln!("skipping Kotlin LSP differential: set KRUSTY_KOTLIN_LSP");
         return;
@@ -781,6 +828,23 @@ fn diagnostics_tokens_definitions_and_hovers_match_official_kotlin_lsp() {
             "PackageUse.kt",
             "package b\nfun useItem(item: Item): Int = item.right\n",
         ),
+        (
+            "CompletionParity.kt",
+            "package completionparity\n\
+             class KrustyParityBox(val krustyParityValue: Int) {\n\
+             \u{20}\u{20}var krustyParityMutable: String = \"\"\n\
+             \u{20}\u{20}fun krustyParityCall(arg: String): Int = arg.length\n\
+             }\n\
+             fun krustyParityTop(): Int = 1\n\
+             fun krustyParityInferred() = 3\n\
+             val krustyParityGlobal: Int = 2\n\
+             fun completionUse(box: KrustyParityBox): Int {\n\
+             \u{20}\u{20}val krustyParityLocal: Int = 1\n\
+             \u{20}\u{20}fun krustyParityNested(): Int = 2\n\
+             \u{20}\u{20}box.krustyParity\n\
+             \u{20}\u{20}return krustyParity\n\
+             }\n",
+        ),
     ];
     for (name, source) in diagnostic_cases
         .iter()
@@ -888,6 +952,10 @@ fn diagnostics_tokens_definitions_and_hovers_match_official_kotlin_lsp() {
     let declaration_uri = format!("file://{}", source_root.join("Declaration.kt").display());
     let import_terminal_uri = format!("file://{}", source_root.join("ImportTerminal.kt").display());
     let package_use_uri = format!("file://{}", source_root.join("PackageUse.kt").display());
+    let completion_parity_uri = format!(
+        "file://{}",
+        source_root.join("CompletionParity.kt").display()
+    );
     let definition_positions = [
         ("class reference", basic_tokens_uri.as_str(), 1, 17),
         ("parameter reference", basic_tokens_uri.as_str(), 1, 33),
@@ -1424,6 +1492,29 @@ fn diagnostics_tokens_definitions_and_hovers_match_official_kotlin_lsp() {
             })
         })
         .collect::<Vec<_>>();
+    let completion_positions = [
+        ("receiver members", completion_parity_uri.as_str(), 11, 18),
+        (
+            "unqualified lexical and top-level symbols",
+            completion_parity_uri.as_str(),
+            12,
+            21,
+        ),
+    ];
+    let expected_completions = completion_positions
+        .iter()
+        .map(|(name, uri, line, character)| {
+            json!({
+                "case": name,
+                "result": reference.completions(
+                    uri,
+                    *line,
+                    *character,
+                    "krustyParity"
+                )
+            })
+        })
+        .collect::<Vec<_>>();
     // The official server uses a multi-gigabyte IntelliJ process. Tear it down before starting
     // krusty so the opt-in differential does not retain both servers at peak memory.
     drop(reference);
@@ -1475,6 +1566,20 @@ fn diagnostics_tokens_definitions_and_hovers_match_official_kotlin_lsp() {
             })
         })
         .collect::<Vec<_>>();
+    let actual_completions = completion_positions
+        .iter()
+        .map(|(name, uri, line, character)| {
+            json!({
+                "case": name,
+                "result": krusty.completions(
+                    uri,
+                    *line,
+                    *character,
+                    "krustyParity"
+                )
+            })
+        })
+        .collect::<Vec<_>>();
 
     for ((name, _), (actual, expected)) in diagnostic_cases
         .iter()
@@ -1497,4 +1602,8 @@ fn diagnostics_tokens_definitions_and_hovers_match_official_kotlin_lsp() {
         "negative definition mismatches"
     );
     assert_eq!(actual_hovers, expected_hovers, "hover mismatches");
+    assert_eq!(
+        actual_completions, expected_completions,
+        "completion mismatches"
+    );
 }
