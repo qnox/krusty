@@ -288,6 +288,39 @@ fun box(): String {
 }
 
 #[test]
+fn tail_forward_with_early_returns_boxes_them() {
+    // A tail-call-forwarded suspend fn (no state machine) whose body ALSO has early returns: the CPS
+    // method returns `Object`, so the early primitive return must box (`Boolean.valueOf`) and a bare
+    // `return` in a `Unit` fn must yield `Unit.INSTANCE` — only the forwarded tail stays verbatim.
+    // Regression: the forward path skipped return boxing entirely (`iconst_1; areturn` VerifyError).
+    let body = r#"
+var log = ""
+suspend fun note(s: String) { log += s }
+suspend fun record(s: String?) {
+    s ?: return
+    note(s)
+}
+suspend fun classify(n: Int): String {
+    if (n < 0) return "neg"
+    return pick(n)
+}
+suspend fun pick(n: Int): String = if (n == 0) "zero" else "pos"
+fun box(): String {
+    runBlocking { record(null) }
+    runBlocking { record("x") }
+    if (log != "x") return "FAIL log: $log"
+    val a = runBlocking { classify(-1) }
+    val b = runBlocking { classify(0) }
+    val c = runBlocking { classify(5) }
+    return if (a == "neg" && b == "zero" && c == "pos") "OK" else "FAIL:$a,$b,$c"
+}
+"#;
+    if let Some(out) = run_box("SuspendTailForwardEarlyReturn", body) {
+        assert_eq!(out, "OK", "early returns in a tail-forwarded suspend fn");
+    }
+}
+
+#[test]
 fn suspend_extension_function_on_user_type() {
     // A suspend extension function on a user class; the receiver is threaded alongside the continuation,
     // and a suspend call inside the extension body suspends against it.

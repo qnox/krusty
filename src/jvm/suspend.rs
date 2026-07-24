@@ -239,6 +239,13 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
             let cont = ir.add_expr(IrExpr::GetValue(p_old));
             append_continuation(ir, call, cont);
             make_forward_body(ir, b, call);
+            // The body may hold EARLY returns besides the forwarded tail (`if (n == 0) return true;
+            // return odd(n - 1)`) — the CPS method returns `Object`, so a primitive early return must
+            // box exactly as in a leaf body (kotlinc boxes it and keeps the tail-call shape). The tail
+            // return's coercion is an identity on the callee's already-`Object` result.
+            if !box_returns(ir, b) {
+                return false;
+            }
         } else if !has_susp {
             // Leaf: box the returns (no state machine). The CPS method returns `Object`, so an expression
             // / statement body that falls through (no `return`) must get a terminal return — a value body
