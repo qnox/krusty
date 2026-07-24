@@ -198,6 +198,25 @@ impl DefinitionIndex {
         }
     }
 
+    /// Occurrences that resolve to one of the selected declarations.
+    pub fn occurrences_targeting<'a>(
+        &'a self,
+        targets: &'a HashSet<DefinitionTarget>,
+    ) -> impl Iterator<Item = (Span, DefinitionTarget)> + 'a {
+        self.entries
+            .iter()
+            .map(|entry| {
+                (
+                    Span::new(entry[0], entry[1]),
+                    DefinitionTarget {
+                        file: entry[2],
+                        span: Span::new(entry[3], entry[4]),
+                    },
+                )
+            })
+            .filter(move |(_, target)| targets.contains(target))
+    }
+
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
@@ -915,6 +934,73 @@ mod tests {
                 }]
             );
         }
+    }
+
+    #[test]
+    fn definition_snapshot_reverse_query_reuses_the_same_compact_entries() {
+        let source = "data class User(val name: String)\n\
+                      fun greet(user: User): String = user.name\n";
+        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let declaration = Span::new(20, 24);
+        let targets = HashSet::from([DefinitionTarget {
+            file: 0,
+            span: declaration,
+        }]);
+
+        assert_eq!(
+            analysis
+                .definitions
+                .occurrences_targeting(&targets)
+                .map(|(span, _)| span)
+                .collect::<Vec<_>>(),
+            vec![
+                declaration,
+                Span::new(
+                    source.rfind("name").unwrap() as u32,
+                    source.rfind("name").unwrap() as u32 + 4,
+                ),
+            ]
+        );
+        assert_eq!(std::mem::size_of::<DefinitionEntry>(), 20);
+    }
+
+    #[test]
+    fn definition_snapshot_reverse_query_scans_multiple_targets_together() {
+        let target_a = DefinitionTarget {
+            file: 0,
+            span: Span::new(10, 11),
+        };
+        let target_b = DefinitionTarget {
+            file: 1,
+            span: Span::new(20, 21),
+        };
+        let mut budget = DefinitionBudget::default();
+        let index = DefinitionIndex::from_occurrences(
+            vec![
+                DefinitionOccurrence {
+                    span: Span::new(0, 1),
+                    target: target_a,
+                },
+                DefinitionOccurrence {
+                    span: Span::new(2, 3),
+                    target: target_b,
+                },
+                DefinitionOccurrence {
+                    span: Span::new(4, 5),
+                    target: DefinitionTarget {
+                        file: 2,
+                        span: Span::new(30, 31),
+                    },
+                },
+            ],
+            &mut budget,
+        );
+        let targets = HashSet::from([target_a, target_b]);
+
+        assert_eq!(
+            index.occurrences_targeting(&targets).collect::<Vec<_>>(),
+            vec![(Span::new(0, 1), target_a), (Span::new(2, 3), target_b),]
+        );
     }
 
     #[test]

@@ -75,7 +75,9 @@ boundary.
   uses packed array entries rather than repeating object keys, and range encoding binary-searches
   the sorted snapshot before allocating its result. A definition entry is a 20-byte
   `(source lo, source hi, target file, target lo, target hi)` array with no retained strings; a shared
-  256K-entry budget bounds both construction and long-lived storage.
+  256K-entry budget bounds both construction and long-lived storage. Find-references deduplicates
+  cursor targets into a request-local set, reverse-scans each bounded entry once, and allocates only
+  the returned locations rather than retaining a duplicate reverse index.
 - Open documents are analyzed as one source set, so one parse/signature pass resolves declarations
   across open files and refreshes every open file's diagnostics, completion, hover, and highlighting
   snapshots atomically. Temporary source-set catalogs carry completion declarations and source-only

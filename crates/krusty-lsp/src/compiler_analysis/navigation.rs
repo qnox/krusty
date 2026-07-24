@@ -14,7 +14,7 @@ use super::{
     FileAnalysis,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DefinitionTarget {
     pub file: u32,
     pub span: Span,

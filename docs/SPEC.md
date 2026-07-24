@@ -1625,6 +1625,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `definition_keeps_same_named_classes_package_qualified`,
   `definition_snapshot_uses_compact_file_and_span_entries`.)
 
+- **Find-references reuses exact navigation identities.** The server advertises
+  `referencesProvider` and returns source `Location`s whose compact definition target matches the
+  symbol under the cursor. `includeDeclaration` includes or removes only the declaration's own
+  identifier range. Cross-file functions, lexical values, classes, overloads, and imports therefore
+  preserve the same symbol disambiguation as go-to-definition. The query deduplicates cursor targets
+  in request-local memory and performs one bounded scan of the existing globally capped 20-byte
+  definition entries, so it retains no reverse-index copy, compiler AST, source copy, or symbol
+  string and never reruns compiler analysis.
+  (`references_match_exact_cross_file_ranges_and_declaration_filtering`,
+  `definition_snapshot_reverse_query_reuses_the_same_compact_entries`.)
+
 - **Hover returns official Kotlin LSP signatures and locations.** The server returns fenced Kotlin
   markdown for source symbols and the exact UTF-16 identifier range, and returns `null` for literals
   where the official server does. Signatures include inferred and nullable types, receiver types,
