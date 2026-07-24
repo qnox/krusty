@@ -278,6 +278,26 @@ impl AnalysisWorker {
         Ok(())
     }
 
+    /// Point the worker at a new classpath and JDK, restarting it so the change takes effect.
+    ///
+    /// The worker interns compiler-global types for its whole lifetime, so this cannot be applied in
+    /// place — the process is replaced, which is exactly the bounded-restart path the supervisor
+    /// already relies on. The classpath and JDK launch arguments are rebuilt from the parameters;
+    /// unrelated arguments keep their order. When nothing would change, the worker is left running.
+    pub fn reconfigure(
+        &mut self,
+        classpath: &[PathBuf],
+        jdk_home: Option<&Path>,
+        no_jdk: bool,
+    ) -> io::Result<()> {
+        let arguments = replace_launch_arguments(&self.arguments, classpath, jdk_home, no_jdk);
+        if arguments == self.arguments {
+            return Ok(());
+        }
+        self.arguments = arguments;
+        self.restart()
+    }
+
     pub fn analyze(&mut self, sources: &[&str]) -> io::Result<Vec<DocumentAnalysis>> {
         if self.analyses >= self.max_analyses {
             self.restart()?;
@@ -352,6 +372,53 @@ fn json_io(error: serde_json::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
+/// Rebuild a worker argument vector with a fresh classpath and JDK: drop every existing
+/// `-cp`/`-classpath` pair, `-jdk-home` pair, and `-no-jdk` flag, then re-add them from the
+/// parameters. The worker resolves JDK modules from `-jdk-home` (or `JAVA_HOME`) itself, so the
+/// classpath here carries project entries only. Unrelated arguments keep their order.
+fn replace_launch_arguments(
+    arguments: &[String],
+    classpath: &[PathBuf],
+    jdk_home: Option<&Path>,
+    no_jdk: bool,
+) -> Vec<String> {
+    let mut rebuilt = Vec::with_capacity(arguments.len());
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "-cp" | "-classpath" | "-class-path" | "-jdk-home" => index += 2,
+            "-no-jdk" => index += 1,
+            other => {
+                rebuilt.push(other.to_string());
+                index += 1;
+            }
+        }
+    }
+    if no_jdk {
+        rebuilt.push("-no-jdk".to_string());
+    } else if let Some(jdk_home) = jdk_home {
+        rebuilt.push("-jdk-home".to_string());
+        rebuilt.push(jdk_home.to_string_lossy().into_owned());
+    }
+    if !classpath.is_empty() {
+        rebuilt.push("-cp".to_string());
+        rebuilt.push(join_classpath(classpath));
+    }
+    rebuilt
+}
+
+fn join_classpath(classpath: &[PathBuf]) -> String {
+    std::env::join_paths(classpath)
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| {
+            classpath
+                .iter()
+                .map(|path| path.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(if cfg!(windows) { ";" } else { ":" })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
@@ -368,6 +435,48 @@ mod tests {
         let error = output.write_all(b"5").unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(output.bytes, b"1234");
+    }
+
+    #[test]
+    fn reconfigure_replaces_classpath_and_jdk_while_keeping_other_arguments() {
+        let arguments = vec![
+            "--stdio".to_string(),
+            "-cp".to_string(),
+            "old.jar".to_string(),
+            "-jdk-home".to_string(),
+            "/old-jdk".to_string(),
+        ];
+        let rebuilt = replace_launch_arguments(
+            &arguments,
+            &[PathBuf::from("a.jar"), PathBuf::from("classes")],
+            Some(Path::new("/jdk21")),
+            false,
+        );
+        let expected_cp = join_classpath(&[PathBuf::from("a.jar"), PathBuf::from("classes")]);
+        assert_eq!(
+            rebuilt,
+            vec![
+                "--stdio".to_string(),
+                "-jdk-home".to_string(),
+                "/jdk21".to_string(),
+                "-cp".to_string(),
+                expected_cp,
+            ]
+        );
+    }
+
+    #[test]
+    fn reconfigure_honors_no_jdk_and_an_empty_classpath() {
+        let arguments = vec![
+            "-jdk-home".to_string(),
+            "/old-jdk".to_string(),
+            "-classpath".to_string(),
+            "old.jar".to_string(),
+        ];
+        assert_eq!(
+            replace_launch_arguments(&arguments, &[], None, true),
+            vec!["-no-jdk".to_string()]
+        );
     }
 
     #[test]
