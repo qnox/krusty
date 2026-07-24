@@ -732,6 +732,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   OUT OF SCOPE (documented residuals): inline-function SMAP line mapping, `LocalVariableTable` for
   top-level fns (next slice), the loop-head extra StackMapTable `same` frame.
   `tests/lnt_parity_e2e.rs` (6 full-byte + 3 javap-level pins).
+- **`LocalVariableTable` for regular function bodies**: block locals end at block exit; method
+  locals, `this`, and parameters span to method end. Parsed non-suspend functions record source
+  local names through `IrFile::value_names`; synthesized and suspend methods retain their existing
+  tables. Metadata string tables merge consecutive plain records, and method attribute names use
+  ASM's `StackMapTable`-before-debug-table order. Remaining byte-parity differences include dead
+  slot reuse, branch fall-through elimination, and inline-local name mangling.
 - **Receiver scope functions `run`/`apply`** (the receiver is `this`, not `it`): the lowerer inlines the
   body binding the receiver to a `this` slot with `cur_class` cleared, so the body's bare member reads
   (getter), writes (setter), and method calls (`invokevirtual`) all resolve against the receiver through

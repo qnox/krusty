@@ -96,13 +96,8 @@ impl StringTable {
         i
     }
 
-    /// Serialize the `StringTableTypes` message (record = field 1, repeated).
     fn serialize_types(&self) -> Pb {
-        let mut p = Pb::new();
-        for r in &self.records {
-            p.repeated_message(1, r);
-        }
-        p
+        crate::metadata::serialize_string_table_types(&self.records)
     }
 }
 
