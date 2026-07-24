@@ -1065,6 +1065,23 @@ impl SymbolTable {
         }
         self.prop_of_name(c.super_internal?, name)
     }
+
+    /// True when `internal`'s full bare-name member scope is visible to this module's own-class
+    /// queries — no superclass, no interfaces (whose default accessor `var`s `prop_of` cannot see),
+    /// no `inner` outer chain, and not itself nested inside another class (an outer member binds
+    /// before a top-level name). Per-NAME shadows the caller must still check itself: instance
+    /// props/accessors via `prop_of`/method lookup, and this class's own companion statics via
+    /// `static_props`/`static_methods`. Lets a bare `x++` inside a member safely fall through to a
+    /// same-named top-level property when nothing in the enclosing scope can shadow it.
+    pub fn class_scope_fully_visible(&self, internal: &str) -> bool {
+        let Some(c) = self.class_by_internal(internal) else {
+            return false;
+        };
+        c.super_internal.is_none()
+            && c.interfaces.is_empty()
+            && c.inner_of.is_none()
+            && !internal.contains('$')
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -17258,7 +17275,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Stmt::IncDec { name, dec } => {
+            Stmt::IncDec { name, dec, .. } => {
                 // `inc`/`dec` are overloadable operators: the built-in numeric ones, or a user
                 // `inc`/`dec` operator on the variable's type. Anything else is rejected (never
                 // miscompiled).

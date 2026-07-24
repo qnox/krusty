@@ -800,6 +800,8 @@ mod suspend_spill_slot_reuse_e2e;
 mod suspend_try_finally_body_e2e;
 #[path = "suspend_try_finally_e2e.rs"]
 mod suspend_try_finally_e2e;
+#[path = "suspend_unit_tail_conditional_e2e.rs"]
+mod suspend_unit_tail_conditional_e2e;
 #[path = "suspend_value_class_mangle_e2e.rs"]
 mod suspend_value_class_mangle_e2e;
 #[path = "suspend_value_invoke_e2e.rs"]
@@ -826,6 +828,8 @@ mod top_level_property_e2e;
 mod toplevel_array_inference_e2e;
 #[path = "toplevel_default_multimask_e2e.rs"]
 mod toplevel_default_multimask_e2e;
+#[path = "toplevel_prop_incdec_e2e.rs"]
+mod toplevel_prop_incdec_e2e;
 #[path = "toplevel_prop_with_companion_const_e2e.rs"]
 mod toplevel_prop_with_companion_const_e2e;
 #[path = "toplevel_property_inference_e2e.rs"]

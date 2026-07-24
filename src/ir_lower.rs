@@ -5533,6 +5533,140 @@ impl<'a> Lower<'a> {
         None
     }
 
+    /// `name++`/`name--` on a TOP-LEVEL `var`: read (computed `getX()` / `getstatic` / another
+    /// file's facade getter), add ±1 (kotlinc ADDS a −1 constant for a decrement, never subtracts),
+    /// write back (computed `setX(v)` / `putstatic` / facade setter). kotlinc's shapes: a POSTFIX
+    /// spills the original value to a temp (the expression value when `as_value`); a PREFIX stores
+    /// and then RE-READS (the statement position discards that re-read with a `pop` — kotlinc emits
+    /// the dead read too). Built-in numeric scalars only — a user `inc`/`dec` operator type bails
+    /// (the file skips).
+    fn lower_toplevel_incdec(
+        &mut self,
+        name: &str,
+        dec: bool,
+        prefix: bool,
+        as_value: bool,
+    ) -> Option<u32> {
+        let computed_get = self.computed_props.get(name).copied();
+        let computed_set = self.computed_setters.get(name).copied();
+        let static_slot = self.statics.get(name).copied();
+        let same_file = computed_get.is_some() || computed_set.is_some() || static_slot.is_some();
+        // A same-file property with NO writable storage — e.g. a top-level delegated `var`, which
+        // registers only its computed getter (the write must go through the delegate's `setValue`,
+        // unmodeled here) — bails rather than panic on the missing setter.
+        if same_file && computed_set.is_none() && static_slot.is_none() {
+            return None;
+        }
+        let facade = if same_file {
+            None
+        } else {
+            // A top-level `var` from ANOTHER file — its field is private, so both the read and the
+            // write go through the facade's accessors. (`is_var` false — or a `const` — can't be
+            // the target; the checker already rejected a `val`.)
+            let (facade, fty, is_var, _) = self.syms.prop_facades.get(name).cloned()?;
+            if !is_var {
+                return None;
+            }
+            Some((facade, fty))
+        };
+        let ty = match (&facade, static_slot, computed_get) {
+            (Some((_, fty)), _, _) => *fty,
+            (None, Some((_, sty)), _) => sty,
+            (None, None, Some((_, gty))) => gty,
+            (None, None, None) => return None,
+        };
+        let step = self.incdec_step_const(ty, dec)?;
+        let read = |me: &mut Self| {
+            if let Some((gfid, _)) = computed_get {
+                me.emit_local_call(gfid, vec![])
+            } else if let Some((idx, _)) = static_slot {
+                me.emit_get_static(idx)
+            } else {
+                let (f, fty) = facade.unwrap();
+                me.emit_cross_file_call(f, property_getter_name(name), vec![], fty, vec![])
+            }
+        };
+        let write = |me: &mut Self, nv: u32| {
+            if let Some(sfid) = computed_set {
+                me.emit_local_call(sfid, vec![nv])
+            } else if let Some((idx, _)) = static_slot {
+                me.emit_set_static(idx, nv)
+            } else {
+                let (f, fty) = facade.unwrap();
+                me.emit_cross_file_call(
+                    f,
+                    property_setter_name(name),
+                    vec![ty_to_ir(fty)],
+                    Ty::Unit,
+                    vec![nv],
+                )
+            }
+        };
+        let cur = read(self);
+        if prefix {
+            let nv = self.scalar_update_value(cur, ty, IrBinOp::Add, step);
+            let store = write(self, nv);
+            let back = read(self);
+            return Some(self.emit_block(vec![store], Some(back)));
+        }
+        let tmp = self.fresh_value();
+        let var = self.emit_variable(tmp, ty_to_ir(ty), Some(cur));
+        let old = self.emit_get_value(tmp);
+        let nv = self.scalar_update_value(old, ty, IrBinOp::Add, step);
+        let store = write(self, nv);
+        let value = as_value.then(|| self.emit_get_value(tmp));
+        Some(self.emit_block(vec![var, store], value))
+    }
+
+    /// A bare `name` inside a member body could bind to an ENCLOSING-SCOPE property shadowing a
+    /// same-named top-level one — and not every such member is visible to `prop_of` (interface
+    /// default accessors, outer members, accessor-only properties, companion statics). True only
+    /// when the enclosing scope provably has no such member: EVERY `this` binding in scope (an
+    /// inlined `run`/`apply` receiver REBINDS `this` over the enclosing class's — kotlinc walks all
+    /// implicit receivers before the file scope) is a class with a fully visible scope declaring
+    /// neither the property (instance or companion) nor `getX`/`setX` accessors.
+    fn toplevel_incdec_unshadowed(&self, name: &str) -> bool {
+        self.scope
+            .iter()
+            .filter(|(n, _, _)| n == "this")
+            .all(|(_, _, this_ty)| {
+                let Some(internal) = this_ty.obj_internal().map(|s| s.to_string()) else {
+                    return false;
+                };
+                let companion_free = self.syms.class_by_internal(&internal).is_some_and(|c| {
+                    !c.static_props.contains_key(name)
+                        && !c.static_methods.contains_key(&property_getter_name(name))
+                });
+                self.syms.class_scope_fully_visible(&internal)
+                    && companion_free
+                    && self.syms.prop_of(&internal, name).is_none()
+                    && self
+                        .resolve_method(&internal, &property_getter_name(name))
+                        .is_none()
+                    && self
+                        .resolve_method(&internal, &property_setter_name(name))
+                        .is_none()
+            })
+    }
+
+    /// The `inc`/`dec` step constant for `ty` — ±1 in the type's arithmetic width (kotlinc emits
+    /// `iconst_m1`/`ldc2_w -1` + an ADD for a decrement).
+    fn incdec_step_const(&self, ty: Ty, dec: bool) -> Option<IrConst> {
+        // An unsigned or value-class value is wrapped/mangled — its `inc`/`dec` is the type's own
+        // operator, and a raw primitive add on the stored form would miscompile; bail (skip).
+        if ty.is_unsigned() || self.value_class_underlying(ty).is_some() {
+            return None;
+        }
+        let s: i32 = if dec { -1 } else { 1 };
+        Some(match self.scalar_value_repr(ty)?.int_arithmetic_repr() {
+            Ty::Int => IrConst::Int(s),
+            Ty::Long => IrConst::Long(s.into()),
+            Ty::Double => IrConst::Double(s.into()),
+            Ty::Float => IrConst::Float(s as f32),
+            _ => return None,
+        })
+    }
+
     fn implicit_coercion(&mut self, arg: u32, ty: Ty) -> u32 {
         self.emit_type_op(IrTypeOp::ImplicitCoercion, arg, ty_to_ir(ty))
     }
@@ -14106,7 +14240,7 @@ impl<'a> Lower<'a> {
             // `name++` / `name--` on a local numeric variable → `name = name ± 1`. (In statement
             // position the pre/post distinction is irrelevant — the value isn't observed.) A built-in
             // numeric primitive only; a `var` field/property or a user `operator inc`/`dec` bails.
-            Stmt::IncDec { name, dec } => {
+            Stmt::IncDec { name, dec, prefix } => {
                 // A boxed mutable-capture local: `x++`/`x--` reads/writes through its `Ref` holder.
                 if let Some(elem) = self.boxed_elem.get(&name).cloned() {
                     let (holder, _) = self.lookup(&name)?;
@@ -14128,11 +14262,26 @@ impl<'a> Lower<'a> {
                 // A `var` field of the enclosing class (`this.x++` written bare) inside its own method —
                 // `this.x = this.x ± 1` via a direct field read/write. (`obj.x++`/`arr[i]++` were already
                 // desugared to a compound assignment by the parser; an external `this`, e.g. an inlined
-                // `apply`, isn't handled here.)
+                // `apply`, isn't handled here.) A member binds BEFORE a same-named top-level property
+                // (kotlinc scoping), so the member path commits when `this` has the property; otherwise
+                // the name is a top-level `var` (a static field, computed accessors, or another file's
+                // facade).
                 if self.lookup(&name).is_none() {
-                    let (this_v, this_ty) = self.lookup("this")?;
-                    let internal = this_ty.obj_internal()?.to_string();
-                    let (fty, is_var) = self.syms.prop_of(&internal, &name)?;
+                    let member = self.lookup("this").and_then(|(this_v, this_ty)| {
+                        let internal = this_ty.obj_internal()?.to_string();
+                        let (fty, is_var) = self.syms.prop_of(&internal, &name)?;
+                        Some((this_v, internal, fty, is_var))
+                    });
+                    let Some((this_v, internal, fty, is_var)) = member else {
+                        // `prop_of` can't see every member shape (interface default accessors,
+                        // outer/companion members, accessor-only properties) — fall through to the
+                        // top-level property only when the enclosing scope provably has no
+                        // same-named member; otherwise bail (skip) rather than risk mis-binding.
+                        if !self.toplevel_incdec_unshadowed(&name) {
+                            return None;
+                        }
+                        return self.lower_toplevel_incdec(&name, dec, prefix, false);
+                    };
                     if !is_var {
                         return None;
                     }
@@ -18113,6 +18262,15 @@ impl<'a> Lower<'a> {
                         self.scalar_update_value(read, elem, undo, one_c)
                     };
                     return Some(self.emit_block(vec![set], Some(value)));
+                }
+                // A top-level `var` as the target (`n++` as a value). The checker types the name
+                // through locals/top-level only, but a same-named ENCLOSING-CLASS member would bind
+                // first under kotlinc scoping — bail unless the scope provably has no such member.
+                if self.lookup(&name).is_none() {
+                    if !self.toplevel_incdec_unshadowed(&name) {
+                        return None;
+                    }
+                    return self.lower_toplevel_incdec(&name, dec, prefix, true);
                 }
                 let (v, ty) = self.lookup(&name)?;
                 // A user `inc`/`dec` operator on a non-numeric variable → `x = x.inc()` yielding the

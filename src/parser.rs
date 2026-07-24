@@ -4707,8 +4707,8 @@ impl<'a> Parser<'a> {
     }
 
     /// Desugar `name++`/`name--`/`++name`/`--name` (statement) to `name = name ± 1`.
-    fn parse_incdec(&mut self, name: String, dec: bool, start: Span) -> StmtId {
-        self.finish_stmt(Stmt::IncDec { name, dec }, start)
+    fn parse_incdec(&mut self, name: String, dec: bool, prefix: bool, start: Span) -> StmtId {
+        self.finish_stmt(Stmt::IncDec { name, dec, prefix }, start)
     }
 
     /// A full-form destructuring statement starts with `(` (name-based) or `[` (positional, only
@@ -5100,9 +5100,14 @@ impl<'a> Parser<'a> {
                 // `parse_postfix` built an `Expr::IncDec`; in statement position the value is
                 // discarded, so re-route to the statement helper (which desugars a `Name` to
                 // `Stmt::IncDec` and a member/index target to an assignment).
-                if let Expr::IncDec { target, dec, .. } = self.file.expr(e).clone() {
+                if let Expr::IncDec {
+                    target,
+                    dec,
+                    prefix,
+                } = self.file.expr(e).clone()
+                {
                     let op_span = self.file.expr_spans[e.0 as usize];
-                    return self.incdec_target(target, dec, op_span, start);
+                    return self.incdec_target(target, dec, prefix, op_span, start);
                 }
                 // assignment: `name = value` or `receiver.name = value`.
                 if self.at(TokenKind::Eq) {
@@ -6821,14 +6826,21 @@ impl<'a> Parser<'a> {
         )
     }
 
-    fn incdec_target(&mut self, e: ExprId, dec: bool, op_span: Span, start: Span) -> StmtId {
+    fn incdec_target(
+        &mut self,
+        e: ExprId,
+        dec: bool,
+        prefix: bool,
+        op_span: Span,
+        start: Span,
+    ) -> StmtId {
         // The desugar `target = target.inc()` re-evaluates `target`, so its receiver/index must be
         // side-effect-free (a pure access path). For a complex receiver (`f().x++`) kotlinc evaluates
         // it exactly once — not yet modeled — so bail (skip the file) rather than double-evaluate.
         // `.inc()`/`.dec()` covers both the built-in numeric operators and a user `inc`/`dec` operator.
         let op_name = if dec { "dec" } else { "inc" };
         match self.file.expr(e).clone() {
-            Expr::Name(n) => self.parse_incdec(n, dec, start),
+            Expr::Name(n) => self.parse_incdec(n, dec, prefix, start),
             Expr::Member { receiver, name } if self.is_pure_path(receiver) => {
                 let lhs = self.file.add_expr(
                     Expr::Member {
