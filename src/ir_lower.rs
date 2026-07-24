@@ -2111,6 +2111,12 @@ pub fn lower_file_at_reporting(
                     names.extend(f.params.iter().map(|p| p.name.clone()));
                     lo.ir.fn_params.insert(fid, FnParamInfo::names(names));
                 }
+                if f.decl_line != 0 {
+                    lo.ir.fn_decl_lines.insert(fid, f.decl_line);
+                }
+                if f.body_close_line != 0 {
+                    lo.ir.fn_close_lines.insert(fid, f.body_close_line);
+                }
                 let ret_ty = lo.ir.functions[fid as usize].ret.clone();
                 // A top-level `tailrec fun` (no extension receiver): rewrite its tail self-calls into a
                 // `while(true)` loop (param reassignment + `continue`) so deep recursion doesn't overflow.
@@ -2661,6 +2667,9 @@ pub fn lower_file_at_reporting(
                     // `LocalVariableTable` / `@Metadata`.
                     if m.decl_line != 0 {
                         lo.ir.fn_decl_lines.insert(fid, m.decl_line);
+                    }
+                    if m.body_close_line != 0 {
+                        lo.ir.fn_close_lines.insert(fid, m.body_close_line);
                     }
                     lo.ir.fn_params.entry(fid).or_insert_with(|| {
                         FnParamInfo::names(m.params.iter().map(|p| p.name.clone()).collect())
@@ -6795,13 +6804,26 @@ impl<'a> Lower<'a> {
                 }
                 if !diverged {
                     if let Some(t) = trailing {
-                        out.push(self.expr(t)?);
+                        let ve = self.expr(t)?;
+                        self.note_expr_line(ve, t);
+                        out.push(ve);
                     }
                 }
             }
             _ => out.push(self.expr(body)?),
         }
         Some(())
+    }
+
+    /// Record `t`'s source line on the lowered root `root` for the `LineNumberTable` — a block's
+    /// TRAILING expression is a statement in source terms (kotlinc marks it like one), but it
+    /// bypasses `append_stmt`.
+    fn note_expr_line(&mut self, root: u32, t: AstExprId) {
+        if let Some(&line) = self.afile.expr_lines.get(t.0 as usize) {
+            if line != 0 {
+                self.ir.expr_lines.insert(root, line);
+            }
+        }
     }
 
     /// Lower one statement into `out`. A destructuring declaration splices its bindings directly so the
@@ -6811,10 +6833,22 @@ impl<'a> Lower<'a> {
         if matches!(self.info.stmt_lowers.get(&s), Some(StmtLowering::Erased)) {
             return Some(());
         }
+        let start = out.len();
         if let Stmt::Destructure { entries, init } = self.afile.stmt(s).clone() {
-            return self.lower_destructure(s, &entries, init, out);
+            self.lower_destructure(s, &entries, init, out)?;
+        } else {
+            let e = self.stmt(s)?;
+            out.push(e);
         }
-        out.push(self.stmt(s)?);
+        // The statement's FIRST lowered root carries its source line — the emitter starts a
+        // `LineNumberTable` entry at that root's first instruction.
+        if let Some(&first) = out.get(start) {
+            if let Some(&line) = self.afile.stmt_lines.get(s.0 as usize) {
+                if line != 0 {
+                    self.ir.expr_lines.insert(first, line);
+                }
+            }
+        }
         Some(())
     }
 
@@ -13299,6 +13333,14 @@ impl<'a> Lower<'a> {
                     let ve = self.lower_arg(*e, ret_ty)?;
                     vec![self.emit_return(Some(ve))]
                 };
+                // An expression body's whole `LineNumberTable` is the expression's line.
+                if let Some(&line) = self.afile.expr_lines.get(e.0 as usize) {
+                    if line != 0 {
+                        for &root in &stmts {
+                            self.ir.expr_lines.insert(root, line);
+                        }
+                    }
+                }
                 self.emit_block(stmts, None)
             }
             FunBody::Block(blk) => self.block_as_body(*blk, ret_ty)?,
@@ -13347,15 +13389,19 @@ impl<'a> Lower<'a> {
             // the plain return path below.)
             if self.cur_tailrec.is_some() && *ret_ty != Ty::Unit {
                 let tail = self.lower_tail_expr(t, ret_ty)?;
+                self.note_expr_line(tail, t);
                 out.push(tail);
                 self.scope.truncate(depth);
                 return Some(self.emit_block(out, None));
             }
             let ve = self.expr(t)?;
             if *ret_ty == Ty::Unit || diverges {
+                self.note_expr_line(ve, t);
                 out.push(ve); // Unit trailing, or a diverging one (returns/throws itself — no wrap)
             } else {
-                out.push(self.emit_return(Some(ve)));
+                let ret = self.emit_return(Some(ve));
+                self.note_expr_line(ret, t);
+                out.push(ret);
             }
         }
         self.scope.truncate(depth);
@@ -16727,7 +16773,10 @@ impl<'a> Lower<'a> {
                 }
                 let value = match trailing {
                     Some(t) if !diverged => match self.expr(t) {
-                        Some(v) => Some(v),
+                        Some(v) => {
+                            self.note_expr_line(v, t);
+                            Some(v)
+                        }
                         None => {
                             self.scope.truncate(depth);
                             return None;

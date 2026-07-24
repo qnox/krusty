@@ -504,6 +504,8 @@ mod lateinit_local_e2e;
 mod list_fold_e2e;
 #[path = "literal_escapes_coverage_e2e.rs"]
 mod literal_escapes_coverage_e2e;
+#[path = "lnt_parity_e2e.rs"]
+mod lnt_parity_e2e;
 #[path = "local_capture_coverage_e2e.rs"]
 mod local_capture_coverage_e2e;
 #[path = "local_class_e2e.rs"]

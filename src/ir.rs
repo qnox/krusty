@@ -1027,6 +1027,10 @@ pub struct IrFile {
     /// Top-level properties — static fields on the facade, initialized in `<clinit>` in order.
     pub statics: Vec<IrStatic>,
     pub exprs: Vec<IrExpr>,
+    /// Sparse `ExprId` → 1-based source line for the `LineNumberTable`: statement roots, loop
+    /// updates, and the implicit `Unit` return (the block's closing-brace line, kotlinc's mapping).
+    /// Absent = no line mark starts at that expression.
+    pub expr_lines: std::collections::HashMap<u32, u32>,
     /// `ExprId` → the expression's LOGICAL (source) type as the checker inferred it, recorded verbatim by
     /// the lowerer — NOT erased. The value-class pass consults it to recover the representation of a value
     /// whose IR node alone is ambiguous: a library call returns a physical `Object` descriptor, but its
@@ -1154,6 +1158,9 @@ pub struct IrFile {
     /// FunId → 1-based source line of its `fun` declaration, for the method's `LineNumberTable`.
     /// A side map (not a field on `IrFunction`) so the 40-odd construction sites stay untouched.
     pub fn_decl_lines: std::collections::HashMap<u32, u32>,
+    /// FunId → 1-based source line of a BLOCK body's closing `}` — kotlinc maps a `Unit` fn's
+    /// implicit `return` there in the `LineNumberTable`. Same side-map rationale as `fn_decl_lines`.
+    pub fn_close_lines: std::collections::HashMap<u32, u32>,
     /// Class fq-internal-name → its generic-signature SHAPE (type parameters + bounds), for a generic
     /// class. The JVM backend formats it into the class `Signature` attribute.
     class_signatures: std::collections::HashMap<TypeName, IrGenericSig>,

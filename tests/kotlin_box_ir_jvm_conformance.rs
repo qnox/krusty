@@ -258,7 +258,24 @@ fn compile_source(
         T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
         return None;
     }
-    let outputs: Vec<(String, Vec<u8>)> = match ir_emit::emit_all(&ir, &facade_name, &*cp, None) {
+    // Emit with the CLI backend's full artifact shape (facade `@Metadata`, verified per-class
+    // `@Metadata` shapes, `SourceFile` = `<stem>.kt`) so the byte-diff mode measures what ships —
+    // and the box run exercises the shipping bytes too.
+    let metadata = krusty::jvm::backend::facade_package_metadata(file, 0, &syms);
+    let opts = ir_emit::EmitOptions {
+        emit_class_metadata: true,
+        source_file: Some(format!("{stem}.kt")),
+        ..Default::default()
+    };
+    let run = ir_emit::EmitRun::default();
+    let outputs: Vec<(String, Vec<u8>)> = match ir_emit::emit_all_with_opts(
+        &ir,
+        &facade_name,
+        &*cp,
+        metadata.as_ref(),
+        &opts,
+        &run,
+    ) {
         Some(o) => o,
         None => {
             T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -560,7 +577,21 @@ fn compile_blocks(
         // MODULE's compile reads this module's output from the classpath and needs it to resolve
         // cross-module extensions.
         let metadata = krusty::jvm::backend::facade_package_metadata(file, i as u32, &syms);
-        let out = ir_emit::emit_all(&ir, &facade, &*cp, metadata.as_ref())?;
+        let opts = ir_emit::EmitOptions {
+            // NO per-class `@Metadata` here: this path also compiles `// MODULE:` dependency
+            // chains, where a DOWNSTREAM module reads the emitted class metadata at compile time —
+            // the unverified value-class shapes mis-resolve there (VerifyError/CCE in the
+            // compileKotlinAgainstKotlin inline-class tests). Multi-file tests aren't byte-diffed
+            // yet, so only the `SourceFile` stamp is mirrored.
+            emit_class_metadata: false,
+            source_file: Some(format!(
+                "{}.kt",
+                blocks[i].0.rsplit('/').next().unwrap_or(&blocks[i].0)
+            )),
+            ..Default::default()
+        };
+        let run = ir_emit::EmitRun::default();
+        let out = ir_emit::emit_all_with_opts(&ir, &facade, &*cp, metadata.as_ref(), &opts, &run)?;
         all.extend(out);
     }
     if all.is_empty() {
