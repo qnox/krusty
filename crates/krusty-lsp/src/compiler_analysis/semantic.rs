@@ -1,10 +1,13 @@
 //! Semantic symbol classification over checked frontend data.
 
-use std::{cmp::Reverse, collections::HashMap};
+use std::{
+    cmp::Reverse,
+    collections::{HashMap, HashSet},
+};
 
 use krusty::ast::{
     ClassDecl, ClassKind, Decl, Expr, ExprId, File, FunBody, FunDecl, Param, PropDecl, PropParam,
-    Stmt, TypeRef,
+    Stmt, StmtId, TypeRef,
 };
 use krusty::diag::{DiagSink, Span};
 use krusty::frontend::{
@@ -13,7 +16,10 @@ use krusty::frontend::{
 use krusty::types::Ty;
 
 use super::{
-    navigation::{declaration_name_span, definition_name_span, MemberKind},
+    navigation::{
+        declaration_name_span, definition_name_span, render_function_hover, source_name, MemberKind,
+    },
+    rendering::{render_ty, render_type},
     DefinitionOccurrence, DefinitionSymbols, DefinitionTarget, FileAnalysis,
 };
 
@@ -73,6 +79,26 @@ pub struct HighlightOccurrence {
 pub struct SemanticOccurrences {
     pub highlights: Vec<HighlightOccurrence>,
     pub definitions: Vec<DefinitionOccurrence>,
+    pub hovers: Vec<HoverOccurrence>,
+}
+
+pub struct HoverOccurrence {
+    pub span: Span,
+    pub value: String,
+}
+
+pub(crate) fn hover_wire_cost(value: &str, new_value: bool) -> usize {
+    32usize.saturating_add(if new_value {
+        16usize.saturating_add(value.len().saturating_mul(6))
+    } else {
+        0
+    })
+}
+
+pub(crate) struct SemanticLimits {
+    pub definition_entries: usize,
+    pub hover_entries: usize,
+    pub hover_wire_bytes: usize,
 }
 
 struct SemanticClassifier<'a> {
@@ -84,7 +110,14 @@ struct SemanticClassifier<'a> {
     tokens: Vec<FrontendNameToken>,
     classified: Vec<Option<HighlightOccurrence>>,
     definitions: Vec<DefinitionOccurrence>,
+    hovers: Vec<HoverOccurrence>,
     definition_limit: usize,
+    hover_limit: usize,
+    hover_bytes: usize,
+    hover_byte_limit: usize,
+    hover_values: HashMap<String, u32>,
+    hover_entries: HashSet<[u32; 3]>,
+    lambda_hover_types: HashMap<ExprId, Vec<String>>,
     token_by_span: HashMap<(u32, u32), usize>,
     statement_scopes: HashMap<(u32, u32), Span>,
     callees: HashMap<ExprId, ExprId>,
@@ -102,6 +135,8 @@ struct SemanticContext<'a> {
     highlight_symbols: &'a HighlightSymbols,
     definition_symbols: &'a DefinitionSymbols,
     definition_limit: usize,
+    hover_limit: usize,
+    hover_byte_limit: usize,
 }
 
 struct Binding {
@@ -112,6 +147,7 @@ struct Binding {
     modifiers: u16,
     definition: Option<Span>,
     definition_owner: Option<String>,
+    hover: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -258,20 +294,22 @@ impl FileAnalysis {
                 highlight_symbols,
                 definition_symbols: &definition_symbols,
                 definition_limit: 0,
+                hover_limit: 0,
+                hover_byte_limit: 0,
             },
         );
         classifier.classify();
         classifier.finish().highlights
     }
 
-    pub fn semantic_occurrences(
+    pub(crate) fn semantic_occurrences(
         &self,
         source: &str,
         file_index: u32,
         symbols: &FrontendSymbols,
         highlight_symbols: &HighlightSymbols,
         definition_symbols: &DefinitionSymbols,
-        definition_limit: usize,
+        limits: SemanticLimits,
     ) -> SemanticOccurrences {
         let mut diagnostics = DiagSink::new();
         let tokens = lex_name_tokens(source, &mut diagnostics);
@@ -285,7 +323,9 @@ impl FileAnalysis {
                 type_info: self.types.as_ref(),
                 highlight_symbols,
                 definition_symbols,
-                definition_limit,
+                definition_limit: limits.definition_entries,
+                hover_limit: limits.hover_entries,
+                hover_byte_limit: limits.hover_wire_bytes,
             },
         );
         classifier.classify();
@@ -307,6 +347,8 @@ impl<'a> SemanticClassifier<'a> {
             highlight_symbols,
             definition_symbols,
             definition_limit,
+            hover_limit,
+            hover_byte_limit,
         } = context;
         let token_by_span = tokens
             .iter()
@@ -355,7 +397,14 @@ impl<'a> SemanticClassifier<'a> {
             tokens,
             classified,
             definitions: Vec::new(),
+            hovers: Vec::new(),
             definition_limit,
+            hover_limit,
+            hover_bytes: 0,
+            hover_byte_limit,
+            hover_values: HashMap::new(),
+            hover_entries: HashSet::new(),
+            lambda_hover_types: HashMap::new(),
             token_by_span,
             statement_scopes,
             callees,
@@ -397,7 +446,7 @@ impl<'a> SemanticClassifier<'a> {
             }
         }
         for (index, statement) in self.file.stmt_arena.iter().enumerate() {
-            self.mark_statement(statement, self.file.stmt_spans[index]);
+            self.mark_statement(StmtId(index as u32), statement, self.file.stmt_spans[index]);
         }
         for (index, expression) in self.file.expr_arena.iter().enumerate() {
             self.mark_expression(ExprId(index as u32), expression);
@@ -413,6 +462,7 @@ impl<'a> SemanticClassifier<'a> {
         SemanticOccurrences {
             highlights: self.classified.into_iter().flatten().collect(),
             definitions: self.definitions,
+            hovers: self.hovers,
         }
     }
 
@@ -681,6 +731,10 @@ impl<'a> SemanticClassifier<'a> {
             HighlightModifiers::READONLY,
             definition,
         );
+        let name = definition
+            .map(|span| source_name(self.source, span, &parameter.name))
+            .unwrap_or(&parameter.name);
+        self.set_last_binding_hover(format!("{}: {}", name, render_type(&parameter.ty)));
         self.set_last_binding_owner(&parameter.ty);
         self.mark_type(&parameter.ty);
     }
@@ -717,6 +771,12 @@ impl<'a> SemanticClassifier<'a> {
             value_modifiers,
             Some(definition_name_span(self.source, parameter.span)),
         );
+        let definition = definition_name_span(self.source, parameter.span);
+        self.set_last_binding_hover(format!(
+            "{}: {}",
+            source_name(self.source, definition, &parameter.name),
+            render_type(&parameter.ty)
+        ));
         self.set_last_binding_owner(&parameter.ty);
         self.mark_type(&parameter.ty);
     }
@@ -770,16 +830,68 @@ impl<'a> SemanticClassifier<'a> {
                 0,
                 definition,
             );
+            if let Some(definition) = definition {
+                let value = source_name(self.source, definition, name).to_string();
+                self.set_last_binding_hover_at(value, definition);
+            }
         }
     }
 
-    fn mark_statement(&mut self, statement: &Stmt, span: Span) {
+    fn mark_statement(&mut self, statement_id: StmtId, statement: &Stmt, span: Span) {
         match statement {
             Stmt::Local {
-                is_var, name, ty, ..
+                is_var,
+                name,
+                ty,
+                init,
+            } => {
+                if let (Some(ty), Expr::Lambda { .. }) = (ty.as_ref(), self.file.expr(*init)) {
+                    self.lambda_hover_types
+                        .insert(*init, ty.fun_params.iter().map(render_type).collect());
+                }
+                let value_modifiers = variable_modifier(*is_var);
+                let definition = self.mark_named_in_span(
+                    span,
+                    name,
+                    HighlightKind::Variable,
+                    HighlightModifiers::DECLARATION | value_modifiers,
+                    false,
+                );
+                let scope = self.enclosing_block_scope(span);
+                self.add_binding(
+                    name,
+                    scope,
+                    span.hi,
+                    HighlightKind::Variable,
+                    value_modifiers,
+                    definition,
+                );
+                let inferred = ty.as_ref().map(render_type).or_else(|| {
+                    self.type_info
+                        .and_then(|types| types.expr_types.get(init.0 as usize))
+                        .copied()
+                        .filter(|ty| *ty != Ty::Error)
+                        .map(render_ty)
+                });
+                if let Some(ty) = inferred {
+                    let name = definition
+                        .map(|span| source_name(self.source, span, name))
+                        .unwrap_or(name);
+                    self.set_last_binding_hover(format!(
+                        "{} {name}: {ty}",
+                        if *is_var { "var" } else { "val" }
+                    ));
+                }
+                if let Some(ty) = ty {
+                    self.set_last_binding_owner(ty);
+                    self.mark_type(ty);
+                }
             }
-            | Stmt::LocalDelegate {
-                is_var, name, ty, ..
+            Stmt::LocalDelegate {
+                is_var,
+                name,
+                ty,
+                delegate,
             } => {
                 let value_modifiers = variable_modifier(*is_var);
                 let definition = self.mark_named_in_span(
@@ -798,6 +910,20 @@ impl<'a> SemanticClassifier<'a> {
                     value_modifiers,
                     definition,
                 );
+                let inferred = ty.as_ref().map(render_type).or_else(|| {
+                    self.type_info
+                        .and_then(|types| types.delegate_getvalue(*delegate))
+                        .map(|target| render_ty(target.ret()))
+                });
+                if let Some(ty) = inferred {
+                    let name = definition
+                        .map(|span| source_name(self.source, span, name))
+                        .unwrap_or(name);
+                    self.set_last_binding_hover(format!(
+                        "{} {name}: {ty}",
+                        if *is_var { "var" } else { "val" }
+                    ));
+                }
                 if let Some(ty) = ty {
                     self.set_last_binding_owner(ty);
                     self.mark_type(ty);
@@ -819,12 +945,13 @@ impl<'a> SemanticClassifier<'a> {
                     HighlightModifiers::MODIFICATION,
                     definition,
                 );
+                self.set_last_binding_hover(format!("lateinit var {name}: {}", render_type(ty)));
                 self.set_last_binding_owner(ty);
                 self.mark_type(ty);
             }
             Stmt::Destructure { entries, .. } => {
                 let mut after = span.lo;
-                for (name, is_var) in entries {
+                for (entry_index, (name, is_var)) in entries.iter().enumerate() {
                     let value_modifiers = variable_modifier(*is_var);
                     let mut definition = None;
                     if let Some(index) = self.find_named(span, name, Some(after), None, false) {
@@ -845,6 +972,23 @@ impl<'a> SemanticClassifier<'a> {
                         value_modifiers,
                         definition,
                     );
+                    let ty = self
+                        .type_info
+                        .and_then(|types| {
+                            types.resolved_destructure_component(statement_id, entry_index)
+                        })
+                        .map(|target| target.ret())
+                        .filter(|ty| *ty != Ty::Error);
+                    if let Some(ty) = ty {
+                        let name = definition
+                            .map(|span| source_name(self.source, span, name))
+                            .unwrap_or(name);
+                        self.set_last_binding_hover(format!(
+                            "{} {name}: {}",
+                            if *is_var { "var" } else { "val" },
+                            render_ty(ty)
+                        ));
+                    }
                 }
             }
             Stmt::Assign { name, .. } | Stmt::IncDec { name, .. } => {
@@ -883,6 +1027,28 @@ impl<'a> SemanticClassifier<'a> {
                     HighlightModifiers::READONLY,
                     definition,
                 );
+                let ty = match statement {
+                    Stmt::For { .. } => Some(Ty::Int),
+                    Stmt::ForEach { iterable, .. } => self.type_info.and_then(|types| {
+                        types
+                            .iterator_protocol(*iterable)
+                            .map(|protocol| protocol.elem_ty)
+                            .or_else(|| {
+                                types
+                                    .expr_types
+                                    .get(iterable.0 as usize)
+                                    .copied()
+                                    .and_then(Ty::array_elem)
+                            })
+                    }),
+                    _ => None,
+                };
+                if let Some(ty) = ty {
+                    let name = definition
+                        .map(|span| source_name(self.source, span, name))
+                        .unwrap_or(name);
+                    self.set_last_binding_hover(format!("val {name}: {}", render_ty(ty)));
+                }
             }
             Stmt::LocalFun(function) => {
                 self.mark_function(function, false, false);
@@ -903,6 +1069,24 @@ impl<'a> SemanticClassifier<'a> {
                     function_modifiers(function),
                     definition,
                 );
+                let name = definition
+                    .map(|span| source_name(self.source, span, &function.name))
+                    .unwrap_or(&function.name);
+                let inferred_return = match function.body {
+                    FunBody::Expr(body) | FunBody::Block(body) => self
+                        .type_info
+                        .and_then(|types| types.expr_types.get(body.0 as usize))
+                        .copied()
+                        .filter(|ty| *ty != Ty::Error),
+                    FunBody::None => None,
+                };
+                self.set_last_binding_hover(render_function_hover(
+                    function,
+                    inferred_return,
+                    name,
+                    &self.tokens,
+                    self.source,
+                ));
             }
             Stmt::LocalClass(class) => self.mark_class(class),
             _ => {}
@@ -969,6 +1153,12 @@ impl<'a> SemanticClassifier<'a> {
                     for target in targets {
                         self.push_definition(span, target);
                     }
+                }
+                let binding_hover = self
+                    .binding_at_kind(name, span.lo, self.callees.contains_key(&id))
+                    .and_then(|binding| binding.hover.clone());
+                if let Some(value) = binding_hover {
+                    self.push_hover(span, value);
                 }
             }
             Expr::Member { receiver, name } => {
@@ -1064,7 +1254,8 @@ impl<'a> SemanticClassifier<'a> {
             }
             Expr::Is { ty, .. } | Expr::As { ty, .. } => self.mark_type(ty),
             Expr::Lambda { params, .. } => {
-                for name in params {
+                let declared_types = self.file.lambda_param_types.get(&id.0);
+                for (parameter_index, name) in params.iter().enumerate() {
                     let definition = self.mark_named_in_span(
                         span,
                         name,
@@ -1084,6 +1275,25 @@ impl<'a> SemanticClassifier<'a> {
                         HighlightModifiers::READONLY,
                         definition,
                     );
+                    if let Some(ty) = declared_types
+                        .and_then(|types| types.get(parameter_index))
+                        .and_then(Option::as_ref)
+                    {
+                        let name = definition
+                            .map(|span| source_name(self.source, span, name))
+                            .unwrap_or(name);
+                        self.set_last_binding_hover(format!("{name}: {}", render_type(ty)));
+                    } else if let Some(ty) = self
+                        .lambda_hover_types
+                        .get(&id)
+                        .and_then(|types| types.get(parameter_index))
+                        .cloned()
+                    {
+                        let name = definition
+                            .map(|span| source_name(self.source, span, name))
+                            .unwrap_or(name);
+                        self.set_last_binding_hover(format!("{name}: {ty}"));
+                    }
                 }
                 if let Some(types) = self.file.lambda_param_types.get(&id.0) {
                     for ty in types.iter().flatten() {
@@ -1109,6 +1319,10 @@ impl<'a> SemanticClassifier<'a> {
                         HighlightModifiers::READONLY,
                         definition,
                     );
+                    let name = definition
+                        .map(|span| source_name(self.source, span, &catch.name))
+                        .unwrap_or(&catch.name);
+                    self.set_last_binding_hover(format!("val {name}: {}", render_type(&catch.ty)));
                     self.mark_type(&catch.ty);
                 }
             }
@@ -1120,6 +1334,33 @@ impl<'a> SemanticClassifier<'a> {
         self.type_info
             .is_some_and(|types| types.resolved_constructors.contains_key(&call))
             || self.symbols.class_names.contains_key(name) && !self.symbols.funs.contains_key(name)
+    }
+
+    fn contextual_class_target(&self, name: &str, at: u32) -> Option<DefinitionTarget> {
+        self.contextual_class_owner(name, at)
+            .and_then(|owner| self.definition_symbols.class_target_for_owner(&owner))
+    }
+
+    fn contextual_class_owner(&self, name: &str, at: u32) -> Option<String> {
+        if !name.contains('.') {
+            let mut enclosing = self
+                .file
+                .decls
+                .iter()
+                .filter_map(|&declaration| match self.file.decl(declaration) {
+                    Decl::Class(class) if class.span.lo <= at && at <= class.span.hi => Some(class),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            enclosing.sort_unstable_by_key(|class| class.span.hi.saturating_sub(class.span.lo));
+            for class in enclosing {
+                let nested = format!("{}.{}", class.name, name);
+                if let Some(owner) = self.definition_symbols.class_owner(self.file, &nested) {
+                    return Some(owner);
+                }
+            }
+        }
+        self.definition_symbols.class_owner(self.file, name)
     }
 
     fn name_definition(&self, name: &str, at: u32, expression: ExprId) -> Option<DefinitionTarget> {
@@ -1175,11 +1416,11 @@ impl<'a> SemanticClassifier<'a> {
                 }
             }
             if self.is_constructor_call(call, name) {
-                return self.definition_symbols.class_target(self.file, name);
+                return self.contextual_class_target(name, at);
             }
         }
         if self.highlight_symbols.class_kinds.contains_key(name) {
-            return self.definition_symbols.class_target(self.file, name);
+            return self.contextual_class_target(name, at);
         }
         self.binding_at_kind(name, at, self.callees.contains_key(&expression))
             .and_then(|binding| binding.definition)
@@ -1190,12 +1431,43 @@ impl<'a> SemanticClassifier<'a> {
     }
 
     fn push_definition(&mut self, span: Span, target: DefinitionTarget) {
-        if self.definitions.len() < self.definition_limit {
-            self.definitions.push(DefinitionOccurrence {
-                span: definition_name_span(self.source, span),
-                target,
-            });
+        let span = self.push_definition_only(span, target);
+        if let Some(value) = self.definition_symbols.hover_value(target) {
+            self.push_hover(span, value.to_owned());
         }
+    }
+
+    fn push_definition_only(&mut self, span: Span, target: DefinitionTarget) -> Span {
+        let span = definition_name_span(self.source, span);
+        if self.definitions.len() < self.definition_limit {
+            self.definitions.push(DefinitionOccurrence { span, target });
+        }
+        span
+    }
+
+    fn push_hover(&mut self, span: Span, value: String) {
+        let span = definition_name_span(self.source, span);
+        let value_index = self
+            .hover_values
+            .get(&value)
+            .copied()
+            .unwrap_or(self.hover_values.len() as u32);
+        if !self.hover_entries.insert([span.lo, span.hi, value_index]) {
+            return;
+        }
+        let new_value = !self.hover_values.contains_key(&value);
+        let bytes = hover_wire_cost(&value, new_value);
+        if self.hovers.len() >= self.hover_limit
+            || bytes > self.hover_byte_limit.saturating_sub(self.hover_bytes)
+        {
+            self.hover_entries.remove(&[span.lo, span.hi, value_index]);
+            return;
+        }
+        self.hover_bytes += bytes;
+        if new_value {
+            self.hover_values.insert(value.clone(), value_index);
+        }
+        self.hovers.push(HoverOccurrence { span, value });
     }
 
     fn checked_member_target(
@@ -1280,7 +1552,33 @@ impl<'a> SemanticClassifier<'a> {
                         self.definition_symbols
                             .member_target(&owner.render(), name, kind, params)
                     {
-                        self.push_definition(source_span, target);
+                        let nested = matches!(self.file.expr(expression), Expr::Call { .. })
+                            .then(|| self.receiver_definition_owner(receiver))
+                            .flatten()
+                            .and_then(|owner| {
+                                self.definition_symbols.nested_class_target(&owner, name)
+                            })
+                            .and_then(|target| {
+                                self.definition_symbols
+                                    .hover_value(target)
+                                    .map(|value| (target, value.to_owned()))
+                            });
+                        let selected_hover = self
+                            .definition_symbols
+                            .hover_value(target)
+                            .map(str::to_owned);
+                        if let (Some((nested_target, nested)), Some(selected)) =
+                            (nested, selected_hover)
+                        {
+                            let span = self.push_definition_only(source_span, nested_target);
+                            self.push_definition_only(source_span, target);
+                            self.push_hover(
+                                span,
+                                format!("{nested}\n````\n\n---\n````kotlin\n{selected}"),
+                            );
+                        } else {
+                            self.push_definition(source_span, target);
+                        }
                     }
                     return;
                 }
@@ -1289,11 +1587,38 @@ impl<'a> SemanticClassifier<'a> {
         let Some(owner) = self.receiver_definition_owner(receiver) else {
             return;
         };
+        let nested_target = resolved_expression
+            .filter(|&expression| matches!(self.file.expr(expression), Expr::Call { .. }))
+            .and_then(|_| self.definition_symbols.nested_class_target(&owner, name));
         let targets = self.definition_symbols.member_targets(&owner, name, kind);
         if !targets.is_empty() {
-            for target in targets {
-                self.push_definition(source_span, target);
+            if let Some((nested_target, nested)) = nested_target.and_then(|target| {
+                self.definition_symbols
+                    .hover_value(target)
+                    .map(|value| (target, value.to_owned()))
+            }) {
+                let selected = targets
+                    .iter()
+                    .filter_map(|&target| self.definition_symbols.hover_value(target))
+                    .collect::<Vec<_>>()
+                    .join("\n````\n\n---\n````kotlin\n");
+                self.push_definition_only(source_span, nested_target);
+                for &target in &targets {
+                    self.push_definition_only(source_span, target);
+                }
+                self.push_hover(
+                    source_span,
+                    format!("{nested}\n````\n\n---\n````kotlin\n{selected}"),
+                );
+            } else {
+                for target in targets {
+                    self.push_definition(source_span, target);
+                }
             }
+            return;
+        }
+        if let Some(target) = nested_target {
+            self.push_definition(source_span, target);
             return;
         }
         if kind == MemberKind::InstanceValue {
@@ -1314,8 +1639,7 @@ impl<'a> SemanticClassifier<'a> {
     fn member_kind(&self, receiver: ExprId, function: bool) -> MemberKind {
         let static_receiver = match self.file.expr(receiver) {
             Expr::Name(name) => self
-                .definition_symbols
-                .class_owner(self.file, name)
+                .contextual_class_owner(name, self.file.expr_spans[receiver.0 as usize].lo)
                 .is_some_and(|owner| !self.definition_symbols.is_object_owner(&owner)),
             _ => false,
         };
@@ -1335,7 +1659,9 @@ impl<'a> SemanticClassifier<'a> {
             {
                 return Some(owner);
             }
-            if let Some(owner) = self.definition_symbols.class_owner(self.file, name) {
+            if let Some(owner) =
+                self.contextual_class_owner(name, self.file.expr_spans[receiver.0 as usize].lo)
+            {
                 return Some(owner);
             }
         }
@@ -1543,7 +1869,7 @@ impl<'a> SemanticClassifier<'a> {
                     file: self.file_index,
                     span,
                 })
-                .or_else(|| self.definition_symbols.class_target(self.file, &ty.name))
+                .or_else(|| self.contextual_class_target(&ty.name, source_span.lo))
             {
                 self.push_definition(source_span, target);
             }
@@ -1649,14 +1975,32 @@ impl<'a> SemanticClassifier<'a> {
             modifiers,
             definition,
             definition_owner: None,
+            hover: None,
         });
     }
 
     fn set_last_binding_owner(&mut self, ty: &TypeRef) {
-        let owner = self.definition_symbols.class_owner(self.file, &ty.name);
+        let owner = self.contextual_class_owner(&ty.name, ty.span.lo);
         if let Some(binding) = self.bindings.last_mut() {
             binding.definition_owner = owner;
         }
+    }
+
+    fn set_last_binding_hover(&mut self, value: String) {
+        let definition = self.bindings.last_mut().and_then(|binding| {
+            binding.hover = Some(value.clone());
+            binding.definition
+        });
+        if let Some(span) = definition {
+            self.push_hover(span, value);
+        }
+    }
+
+    fn set_last_binding_hover_at(&mut self, value: String, span: Span) {
+        if let Some(binding) = self.bindings.last_mut() {
+            binding.hover = Some(value.clone());
+        }
+        self.push_hover(span, value);
     }
 
     fn add_member_function_binding(

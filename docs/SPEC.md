@@ -1619,6 +1619,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `definition_keeps_same_named_classes_package_qualified`,
   `definition_snapshot_uses_compact_file_and_span_entries`.)
 
+- **Hover returns official Kotlin LSP signatures and locations.** The server returns fenced Kotlin
+  markdown for source symbols and the exact UTF-16 identifier range, and returns `null` for literals
+  where the official server does. Signatures include inferred and nullable types, receiver types,
+  generic bounds, modality, visibility, and selected overload parameters. Requests use a cached
+  12-byte `(source lo, source hi, interned signature id)` entry and never rerun analysis. Signature
+  strings are deduplicated and bounded; compiler ASTs and source-text copies are dropped after the
+  worker builds the snapshot. The opt-in official differential compares the entire hover result,
+  including markdown and both range endpoints.
+
 - **A property reference is a function value** (`C::n` as a `(C)->Int`). An unbound `Type::prop` has type
   `KProperty1<C, R>` and a bound `obj::prop` has `KProperty0<R>`; both are accepted where a `(C)->R` /
   `()->R` (`kotlin/jvm/functions/Function1`/`Function0`) of the matching arity is expected, because

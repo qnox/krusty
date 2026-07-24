@@ -121,6 +121,8 @@ to keep process-lifetime compiler interning bounded during long editor sessions.
 lexically scoped, includes declarations from other open files, and handles an incomplete `receiver.`
 or `receiver?.` for a simple named receiver without rerunning analysis for the request.
 Go-to-definition uses the same analyzed source set and compact cached file/span references.
+Hover returns official Kotlin LSP declaration signatures and identifier ranges from a bounded,
+interned snapshot; it does not retain compiler ASTs or duplicate source strings.
 
 The test harness self-provisions the reference Kotlin compiler and box corpus through `just` when
 available, uses the fast `gate` profile, builds once, and runs test binaries in parallel. Pass

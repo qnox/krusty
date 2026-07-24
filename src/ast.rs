@@ -495,6 +495,7 @@ pub struct FunDecl {
     /// `tailrec` modifier — a self-recursive function whose tail calls the lowerer rewrites into a loop
     /// (param reassignment + `continue`), so deep recursion doesn't overflow the stack.
     pub is_tailrec: bool,
+    pub is_operator: bool,
     /// Simple names of annotations applied to this function (`@Composable fun f()` → `["Composable"]`),
     /// mirroring `ClassDecl.annotations`. Used by the compiler-extension surface (`crate::plugins`) to
     /// find annotated functions.
@@ -781,6 +782,7 @@ pub struct PropDecl {
     /// `open` or `override` (without `final`) — the accessors are overridable, so the JVM backend
     /// must not emit `ACC_FINAL` on them (same rule as `FunDecl::is_open`).
     pub is_open: bool,
+    pub is_override: bool,
     /// `None` for a `lateinit var` (declared without an initializer; the backing field defaults to
     /// null and is assigned later).
     pub init: Option<ExprId>,
