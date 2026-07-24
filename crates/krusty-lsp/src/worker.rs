@@ -17,10 +17,10 @@ use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use serde::{Deserialize, Serialize};
 
-use crate::compiler_analysis::{self, CompletionSymbols, HighlightSymbols};
+use crate::compiler_analysis::{self, CompletionSymbols, DefinitionSymbols, HighlightSymbols};
 use crate::{
-    read_framed, write_framed, CompletionBudget, CompletionIndex, DocumentAnalysis, HoverIndex,
-    SemanticTokenIndex,
+    read_framed, write_framed, AnalysisBudgets, CompletionIndex, DefinitionIndex, DocumentAnalysis,
+    HoverIndex, SemanticTokenIndex, SourceSetIndexes,
 };
 
 pub const DEFAULT_ANALYSES_PER_WORKER: usize = 64;
@@ -52,6 +52,7 @@ struct AnalysisResponse {
     hover: HoverIndex,
     completion: CompletionIndex,
     semantic_tokens: SemanticTokenIndex,
+    definitions: DefinitionIndex,
 }
 
 impl From<DocumentAnalysis> for AnalysisResponse {
@@ -73,6 +74,7 @@ impl From<DocumentAnalysis> for AnalysisResponse {
             hover: analysis.hover,
             completion: analysis.completion,
             semantic_tokens: analysis.semantic_tokens,
+            definitions: analysis.definitions,
         }
     }
 }
@@ -97,6 +99,7 @@ impl AnalysisResponse {
             hover: self.hover,
             completion: self.completion,
             semantic_tokens: self.semantic_tokens,
+            definitions: self.definitions,
         }
     }
 }
@@ -313,20 +316,28 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
         let source_set = compiler_analysis::analyze_source_set(&sources, platform);
         let highlight_symbols =
             HighlightSymbols::from_source_set(&sources, &source_set.files, &source_set.symbols);
+        let definition_symbols =
+            DefinitionSymbols::from_source_set(&sources, &source_set.files, &source_set.symbols);
         let completion_symbols = CompletionSymbols::from_source_set(&sources, &source_set.files);
-        let mut completion_budget = CompletionBudget::default();
+        let indexes = SourceSetIndexes::new(
+            &source_set.symbols,
+            &highlight_symbols,
+            &definition_symbols,
+            &completion_symbols,
+        );
+        let mut budgets = AnalysisBudgets::new();
         let analyses = source_set
             .files
             .into_iter()
             .zip(&sources)
-            .map(|(file, source)| {
+            .enumerate()
+            .map(|(file_index, (file, source))| {
                 DocumentAnalysis::from_file_analysis(
                     source,
                     file,
-                    &source_set.symbols,
-                    &highlight_symbols,
-                    &completion_symbols,
-                    &mut completion_budget,
+                    file_index as u32,
+                    &indexes,
+                    &mut budgets,
                 )
             })
             .map(AnalysisResponse::from)
@@ -384,5 +395,6 @@ mod tests {
         assert!(analysis.hover.entry_count() > 0);
         assert!(analysis.completion.entry_count() > 0);
         assert!(analysis.semantic_tokens.entry_count() > 0);
+        assert!(analysis.definitions.entry_count() > 0);
     }
 }

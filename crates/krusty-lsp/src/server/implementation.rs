@@ -2,8 +2,8 @@
 //!
 //! This module lives in the separate `krusty-lsp` package, so the batch compiler neither links JSON
 //! support nor retains server state. A session stores only the latest text and compact hover,
-//! completion, and highlighting data for each open document; full compiler analysis is dropped after
-//! every open/change notification.
+//! completion, navigation, and highlighting data for each open document; full compiler analysis is
+//! dropped after every open/change notification.
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::super::{
-    CompletionIndex, DocumentAnalysis, HoverIndex, SemanticTokenIndex, SemanticTokenRange,
-    SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
+    CompletionIndex, DefinitionIndex, DocumentAnalysis, HoverIndex, SemanticTokenIndex,
+    SemanticTokenRange, SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
 };
 use crate::worker::{source_set_fits, MAX_SOURCE_SET_BYTES};
 use krusty::diag::{Diagnostic, Severity};
@@ -143,6 +143,7 @@ struct OpenDocument {
     hover: HoverIndex,
     completion: CompletionIndex,
     semantic_tokens: SemanticTokenIndex,
+    definitions: DefinitionIndex,
     analysis_blocked: bool,
 }
 
@@ -200,6 +201,13 @@ where
             (self.analyze)(&sources)
         };
         if analyses.len() != uris.len() {
+            for uri in &uris {
+                let open = self.documents.get_mut(uri).unwrap();
+                open.hover = HoverIndex::default();
+                open.completion = CompletionIndex::default();
+                open.semantic_tokens = SemanticTokenIndex::default();
+                open.definitions = DefinitionIndex::default();
+            }
             return uris
                 .into_iter()
                 .map(|uri| {
@@ -229,6 +237,7 @@ where
                 open.hover = analysis.hover;
                 open.completion = analysis.completion;
                 open.semantic_tokens = analysis.semantic_tokens;
+                open.definitions = analysis.definitions;
                 publish_diagnostics(&uri, Some(open.version), analysis.diagnostics, &open.text)
             })
             .collect()
@@ -312,6 +321,7 @@ where
                     json!({
                         "capabilities": {
                             "hoverProvider": true,
+                            "definitionProvider": true,
                             "completionProvider": {
                                 "resolveProvider": true,
                                 "triggerCharacters": ["."],
@@ -339,6 +349,7 @@ where
             "textDocument/didChange" => self.did_change(id, params, defer_analysis),
             "textDocument/didClose" => self.did_close(id, params, defer_analysis),
             "textDocument/hover" => self.hover(id, params),
+            "textDocument/definition" => self.definition(id, params),
             "textDocument/completion" => self.completion(id, params),
             "completionItem/resolve" => self.resolve_completion(id, params),
             "textDocument/semanticTokens/full" => self.semantic_tokens(id, params, false),
@@ -378,6 +389,7 @@ where
                         hover: HoverIndex::default(),
                         completion: CompletionIndex::default(),
                         semantic_tokens: SemanticTokenIndex::default(),
+                        definitions: DefinitionIndex::default(),
                         analysis_blocked: true,
                     },
                 );
@@ -402,6 +414,7 @@ where
                 hover: HoverIndex::default(),
                 completion: CompletionIndex::default(),
                 semantic_tokens: SemanticTokenIndex::default(),
+                definitions: DefinitionIndex::default(),
                 analysis_blocked: false,
             },
         );
@@ -436,6 +449,7 @@ where
             open.hover = HoverIndex::default();
             open.completion = CompletionIndex::default();
             open.semantic_tokens = SemanticTokenIndex::default();
+            open.definitions = DefinitionIndex::default();
             open.analysis_blocked = true;
             self.analysis_dirty |= was_analyzed;
             let mut messages = vec![analysis_limit_diagnostic(
@@ -542,6 +556,53 @@ where
             id,
             json!({"isIncomplete": is_incomplete, "items": items}),
         )])
+    }
+
+    fn definition(&self, id: Option<Value>, params: Value) -> Dispatch {
+        let Some(id) = id else {
+            return Dispatch::none();
+        };
+        let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params) else {
+            return invalid_params(Some(id));
+        };
+        let Some(open) = self.documents.get(&params.text_document.uri) else {
+            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+        };
+        let Some(offset) = position_to_byte_offset(&open.text, params.position) else {
+            return invalid_params(Some(id));
+        };
+        let targets = open.definitions.get(offset).collect::<Vec<_>>();
+        if targets.is_empty() {
+            return Dispatch::messages(vec![rpc_result(id, json!([]))]);
+        }
+        let mut uris = self
+            .documents
+            .iter()
+            .filter(|(_, document)| !document.analysis_blocked)
+            .map(|(uri, _)| uri)
+            .collect::<Vec<_>>();
+        uris.sort_unstable();
+        let locations = targets
+            .into_iter()
+            .filter_map(|target| {
+                let uri = uris.get(target.file as usize)?;
+                let target_document = self.documents.get(*uri)?;
+                Some(json!({
+                    "uri": uri,
+                    "range": {
+                        "start": byte_offset_to_position(
+                            &target_document.text,
+                            target.span.lo as usize
+                        ),
+                        "end": byte_offset_to_position(
+                            &target_document.text,
+                            target.span.hi as usize
+                        ),
+                    }
+                }))
+            })
+            .collect::<Vec<_>>();
+        Dispatch::messages(vec![rpc_result(id, Value::Array(locations))])
     }
 
     fn resolve_completion(&self, id: Option<Value>, mut item: Value) -> Dispatch {

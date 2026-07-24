@@ -57,11 +57,12 @@ boundary.
   a compiler worker that is restarted after 64 analyses. This bounds growth from the compiler's
   process-lifetime name/type interners while amortizing JVM classpath initialization across edits.
 - An open document retains its source text, diagnostics only long enough to publish them, a compact
-  hover index, completion catalog, and semantic-highlighting tokens. Each hover entry is a 12-byte
-  `(Span, type-id)` record; rendered type names are deduplicated per document. A scoped completion
-  entry is a 24-byte packed array of scope bounds, declaration position, interned label/detail IDs,
-  item kind, and optional receiver type; member entries are 16 bytes. Completion and item resolution
-  filter these cached records, including parser-recovered `receiver.`/`receiver?.` expressions,
+  hover index, completion catalog, definition index, and semantic-highlighting tokens. Each hover
+  entry is a 12-byte `(Span, type-id)` record; rendered type names are deduplicated per document. A
+  scoped completion entry is a 24-byte packed array of scope bounds, declaration position, interned
+  label/detail IDs, item kind, and optional receiver type; member entries are 16 bytes. Completion and
+  item resolution filter these cached records, including parser-recovered `receiver.`/`receiver?.`
+  expressions,
   without retaining the AST or invoking the worker. A document retains member catalogs only for
   receiver types referenced by its own lexical symbols/source, rather than duplicating every member
   in the open source set. A shared source-set budget caps completion at 32,768 records and a
@@ -69,13 +70,16 @@ boundary.
   semantic token is a 16-byte `(UTF-16 line, start, length, type, modifiers)` record, positioned once
   in the compiler worker so full/range requests neither rerun analysis nor rescan source. Worker JSON
   uses packed array entries rather than repeating object keys, and range encoding binary-searches
-  the sorted snapshot before allocating its result.
+  the sorted snapshot before allocating its result. A definition entry is a 20-byte
+  `(source lo, source hi, target file, target lo, target hi)` array with no retained strings; a shared
+  256K-entry budget bounds both construction and long-lived storage.
 - Open documents are analyzed as one source set, so one parse/signature pass resolves declarations
   across open files and refreshes every open file's diagnostics, completion, hover, and highlighting
   snapshots atomically. Temporary source-set catalogs carry completion declarations and source-only
   highlighting flags such as `data`, `operator`, and `Deprecated` across files while the compact
-  snapshots are built. AST, symbol-table, full type-analysis, and those catalogs are dropped after
-  each analysis; closing a document removes its source and compact query indexes.
+  snapshots are built. Navigation also consumes checker-selected source declaration ids for overloads
+  before reducing them to file/span pairs. AST, symbol-table, full type-analysis, and those catalogs
+  are dropped after each analysis; closing a document removes its source and compact query indexes.
 - Input frames are capped at 16 MiB, headers at 8 KiB, and the reader-to-dispatch queue at four
   parsed messages. Open text is capped at 32 MiB across at most 256 documents; worker JSON encoding
   is capped at 64 MiB in both directions. Document-state bursts are capped by count, retained bytes,
