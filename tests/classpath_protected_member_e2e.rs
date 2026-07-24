@@ -19,7 +19,7 @@ fn subclass_calls_protected_classpath_member() {
     if !std::path::Path::new(&javac).exists() {
         return;
     }
-    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let krusty = common::krusty_binary();
     let root = std::env::temp_dir().join(format!("krusty_prot_{}", std::process::id()));
     let cp = root.join("cp");
     let _ = fs::remove_dir_all(&root);
@@ -47,7 +47,7 @@ fn subclass_calls_protected_classpath_member() {
     )
     .unwrap();
     let kr = root.join("kr");
-    let out = Command::new(krusty)
+    let out = Command::new(&krusty)
         .args(["-cp", cp.to_str().unwrap(), "-d", kr.to_str().unwrap()])
         .arg(root.join("Use.kt"))
         .output()

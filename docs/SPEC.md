@@ -1497,6 +1497,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `diagnostics_match_kotlinc` test, which compiles each snippet with both compilers and asserts the first
   `error:` text matches exactly.
 
+- **Semantic highlighting follows the official Kotlin LSP symbol model.** Data classes highlight as
+  `struct`; ordinary classes, enums, interfaces, annotations, and objects use `class`, `enum`,
+  `interface`, `decorator`, and `type`. Kotlin properties remain `property` even at top level;
+  constructor value parameters are `parameter` unless declared `val`/`var`, in which case they are
+  properties. Top-level callables carry `static`; immutable values carry `readonly`; mutable values
+  carry `modification`; suspend functions carry `async`; abstract declarations carry `abstract`;
+  deprecated declarations carry `deprecated`; operator functions use `operator`; Kotlin builtins and
+  resolved `kotlin.*` library symbols carry `defaultLibrary`. Every declaration also carries
+  `declaration`. References select the narrowest enclosing lexical binding, and range responses
+  include tokens intersecting either boundary. Qualified references use the checked receiver class,
+  so same-named members on different classes retain distinct categories and mutability modifiers.
+  Source-only flags (`data`, `operator`, and source deprecation) are shared across every file in the
+  analyzed source set.
+  (`semantic_tokens_match_official_kotlin_symbol_classification`,
+  `semantic_tokens_respect_lexical_shadowing_between_functions`,
+  `semantic_tokens_resolve_qualified_members_and_deprecated_references`,
+  `semantic_tokens_preserve_source_set_metadata_across_files`,
+  `initialize_and_requests_expose_full_and_range_semantic_highlighting`.)
+
 - **A property reference is a function value** (`C::n` as a `(C)->Int`). An unbound `Type::prop` has type
   `KProperty1<C, R>` and a bound `obj::prop` has `KProperty0<R>`; both are accepted where a `(C)->R` /
   `()->R` (`kotlin/jvm/functions/Function1`/`Function0`) of the matching arity is expected, because

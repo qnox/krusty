@@ -47,12 +47,19 @@ trap cleanup EXIT
 # startup/warmup costs. Running binaries concurrently keeps each binary's in-process shared JVM runner
 # while avoiding the sequential binary bottleneck.
 build_log="$logdir/build.log"
-cargo test --color never --profile gate --no-run 2>&1 | tee "$build_log"
+cargo build --color never --profile gate -p krusty-cli
+target_root="${CARGO_TARGET_DIR:-$PWD/target}"
+[[ "$target_root" = /* ]] || target_root="$PWD/$target_root"
+cli_name="krusty"
+[[ "${OS:-}" = "Windows_NT" ]] && cli_name="krusty.exe"
+export KRUSTY_BIN="$target_root/gate/$cli_name"
+[[ -x "$KRUSTY_BIN" ]] || { echo "run-tests.sh: compiler binary missing: $KRUSTY_BIN" >&2; exit 1; }
+cargo test --workspace --color never --profile gate --no-run 2>&1 | tee "$build_log"
 
 bins=()
 while IFS=$'\t' read -r target path; do
   case "$target" in
-    "unittests src/main.rs"|"unittests src/bin/"*) continue ;;
+    *"src/main.rs"|"unittests src/bin/"*) continue ;;
   esac
   bins+=("$path")
 done < <(sed -nE 's/.*[Ee]xecutable ([^(]+) \(([^)]+)\)/\1\t\2/p' "$build_log" | sort -u)

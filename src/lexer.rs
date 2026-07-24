@@ -8,6 +8,39 @@ use crate::diag::{DiagSink, Span};
 use crate::token::{keyword, Token, TokenKind};
 
 pub fn lex(src: &str, diags: &mut DiagSink) -> Vec<Token> {
+    lexer(src, diags).run()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NameTokenKind {
+    Ident,
+    Package,
+    Import,
+    At,
+    Dot,
+    Newline,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct NameToken {
+    pub kind: NameTokenKind,
+    pub span: Span,
+}
+
+impl NameToken {
+    pub fn text<'a>(&self, source: &'a str) -> &'a str {
+        &source[self.span.lo as usize..self.span.hi as usize]
+    }
+}
+
+/// Lex only the tokens needed by name-based analysis (identifiers plus namespace/annotation
+/// separators). This follows the exact ordinary lexer path, including templates and backtick names,
+/// while avoiding a second full-token allocation for editor symbol indexing.
+pub fn lex_name_tokens(src: &str, diags: &mut DiagSink) -> Vec<NameToken> {
+    lexer(src, diags).run_names()
+}
+
+fn lexer<'a>(src: &'a str, diags: &'a mut DiagSink) -> Lexer<'a> {
     Lexer {
         b: src.as_bytes(),
         i: 0,
@@ -15,7 +48,6 @@ pub fn lex(src: &str, diags: &mut DiagSink) -> Vec<Token> {
         diags,
         pending: std::collections::VecDeque::new(),
     }
-    .run()
 }
 
 struct Lexer<'a> {
@@ -38,6 +70,32 @@ impl<'a> Lexer<'a> {
             }
         }
         self.out
+    }
+
+    fn run_names(mut self) -> Vec<NameToken> {
+        let mut names = Vec::new();
+        loop {
+            let token = self.next_token();
+            let kind = match token.kind {
+                TokenKind::Ident => Some(NameTokenKind::Ident),
+                TokenKind::KwPackage => Some(NameTokenKind::Package),
+                TokenKind::KwImport => Some(NameTokenKind::Import),
+                TokenKind::At => Some(NameTokenKind::At),
+                TokenKind::Dot => Some(NameTokenKind::Dot),
+                TokenKind::Newline => Some(NameTokenKind::Newline),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                names.push(NameToken {
+                    kind,
+                    span: token.span,
+                });
+            }
+            if token.kind == TokenKind::Eof {
+                break;
+            }
+        }
+        names
     }
 
     /// Return a queued token if any, else lex one fresh.
@@ -717,5 +775,22 @@ mod tests {
             kinds("a.toString()"),
             vec![Ident, Dot, Ident, LParen, RParen, Eof]
         );
+    }
+
+    #[test]
+    fn name_lexer_uses_the_same_identifiers_without_retaining_other_tokens() {
+        use NameTokenKind::*;
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex_name_tokens(
+            "package demo\n@Deprecated fun greet(name: String) = \"hi $name\"",
+            &mut diagnostics,
+        );
+        let kinds: Vec<_> = tokens.iter().map(|token| token.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![Package, Ident, Newline, At, Ident, Ident, Ident, Ident, Ident]
+        );
+        assert!(!diagnostics.has_errors());
+        assert!(tokens.len() < lex("fun greet(name: String) = 1", &mut diagnostics).len());
     }
 }

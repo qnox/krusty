@@ -70,6 +70,12 @@ rm -f "$coverage_target"/*.profraw target/coverage/*.profdata target/coverage/*.
 # cargo's JSON build output. Keep library unit tests plus the product e2e integration target; do not
 # instrument/build zero-test bin harnesses or `conformance`, because conformance is excluded from the
 # metric and pre-push runs it separately without coverage instrumentation.
+cargo +nightly build -p krusty-cli
+export KRUSTY_BIN="$coverage_target/debug/krusty"
+if [ ! -x "$KRUSTY_BIN" ]; then
+  echo "coverage: compiler binary missing after workspace build: $KRUSTY_BIN" >&2
+  exit 1
+fi
 mapfile -t bins < <(cargo +nightly test --no-run --lib --test e2e --message-format=json 2>/dev/null \
   | jq -r 'select(.profile.test == true and .executable != null) | .executable')
 

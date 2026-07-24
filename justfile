@@ -34,12 +34,17 @@ default:
 # === PR gate: the one command CI runs ===
 # Own tests run once under coverage; external/reference conformance runs plain. This avoids running
 # the product e2e suite once in `test-all` and then again in `coverage-gate`.
-ci: lint coverage-gate conformance-all-plain
+ci: lint test-lsp coverage-gate conformance-all-plain
 
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
 # findings are tolerated; any new one fails. Identical behaviour everywhere — it's plain cargo + sh.
 lint: fmt-check clippy-baseline-check
+
+# The coverage harness targets the compiler library's explicit test binaries, so run the LSP
+# package—including its internal compiler-analysis module—directly in the PR gate.
+test-lsp:
+    cargo test --profile gate -p krusty-lsp --all-targets
 
 # rustfmt must be clean (the repo is fully formatted; `just fmt` fixes any drift).
 fmt-check:
@@ -52,7 +57,7 @@ fmt:
 # Emit current clippy findings as a stable, line-number-independent fingerprint set:
 #   <count><TAB><file><TAB><message>   (one per file+message, so a new occurrence bumps the count)
 clippy-findings:
-    @cargo clippy --all-targets --all-features --message-format=short 2>&1 \
+    @cargo clippy --workspace --all-targets --all-features --message-format=short 2>&1 \
       | grep -E ':[0-9]+:[0-9]+: warning: ' \
       | sed -E 's/^([^:]+):[0-9]+:[0-9]+: warning: (.*)$/\1\t\2/' \
       | sort | uniq -c | sed -E 's/^ *([0-9]+) /\1\t/' | sort
@@ -398,37 +403,45 @@ version:
     v=$(just max-version)
     echo "${v}-build.$(just build-number "$v")"
 
-# Build an optimized krusty. Optional TARGET is a rust target triple.
+# Build optimized compiler and LSP executables from their independent workspace packages.
 build-release TARGET="":
     #!/usr/bin/env bash
     set -euo pipefail
     export KRUSTY_VERSION="$(just version)"
     export KRUSTY_KOTLIN_SUPPORT="$(just supported-kotlin)"
     if [ -n "{{TARGET}}" ]; then
-        cargo build --release --target {{TARGET}}
+        cargo build --release --target {{TARGET}} -p krusty-cli --bin krusty
+        cargo build --release --target {{TARGET}} -p krusty-lsp
     else
-        cargo build --release
+        cargo build --release -p krusty-cli --bin krusty
+        cargo build --release -p krusty-lsp
     fi
-    echo "built krusty $KRUSTY_VERSION (supported Kotlin: $KRUSTY_KOTLIN_SUPPORT) ${TARGET:+for {{TARGET}}}"
+    echo "built krusty and krusty-lsp $KRUSTY_VERSION (supported Kotlin: $KRUSTY_KOTLIN_SUPPORT) ${TARGET:+for {{TARGET}}}"
 
-# Package the built binary into dist/ (.tar.gz on unix, .zip on windows). Prints the archive path.
-package TARGET:
+# Package one executable into dist/ (.tar.gz on unix, .zip on windows). PRODUCT defaults to the
+# compiler for compatibility; release CI invokes this once for `krusty` and once for `krusty-lsp`.
+package TARGET PRODUCT="krusty":
     #!/usr/bin/env bash
     set -euo pipefail
     ver=$(just version)
+    product="{{PRODUCT}}"
+    case "$product" in
+        krusty|krusty-lsp) ;;
+        *) echo "unknown release product: $product" >&2; exit 2 ;;
+    esac
     bindir="target/{{TARGET}}/release"
-    name="krusty-${ver}-{{TARGET}}"
+    name="${product}-${ver}-{{TARGET}}"
     mkdir -p dist
     if [[ "{{TARGET}}" == *windows* ]]; then
         out="$PWD/dist/${name}.zip"
         rm -f "$out"
         if command -v 7z >/dev/null 2>&1; then
-            ( cd "$bindir" && 7z a -tzip "$out" krusty.exe >/dev/null )
+            ( cd "$bindir" && 7z a -tzip "$out" "${product}.exe" >/dev/null )
         else
-            ( cd "$bindir" && zip -q "$out" krusty.exe )
+            ( cd "$bindir" && zip -q "$out" "${product}.exe" )
         fi
         echo "dist/${name}.zip"
     else
-        tar -C "$bindir" -czf "dist/${name}.tar.gz" krusty
+        tar -C "$bindir" -czf "dist/${name}.tar.gz" "$product"
         echo "dist/${name}.tar.gz"
     fi

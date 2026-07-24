@@ -22,6 +22,18 @@ use crate::libraries::{CallSig, ReturnInfo};
 use crate::name_tree::{NameId, NameTree};
 use crate::types::{type_name, type_name_from, Ty, TypeName, TypeNameList};
 
+/// Resolve a JDK home to its `lib/modules` boot classpath.
+///
+/// An explicit home takes precedence over `JAVA_HOME`. Missing or invalid homes are a no-op so
+/// callers can combine this with an explicit classpath without making environment setup mandatory.
+pub fn platform_jdk_modules(jdk_home: Option<&Path>) -> Option<PathBuf> {
+    let base = jdk_home
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("JAVA_HOME").map(PathBuf::from))?;
+    let modules = base.join("lib").join("modules");
+    modules.is_file().then_some(modules)
+}
+
 /// Map a Kotlin internal type name (`kotlin/Int`, `kotlin/Char`, …) from builtins metadata to a `Ty`.
 pub(super) fn kotlin_name_to_ty(name: &str) -> Ty {
     match name {

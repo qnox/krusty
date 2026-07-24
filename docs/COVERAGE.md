@@ -47,7 +47,8 @@ testdata rather than the quality of krusty-authored tests. The excluded set live
 
 Everything else counts, including project-authored e2e suites (`feature_box_e2e`, the `metadata_*`
 e2e, …) whose *inputs live in-repo* even though they exercise the JVM runtime. The product `e2e` binary is kept by default, so new product tests count automatically. Adding a new external suite should go under the `conformance` binary or be paired with an explicit `EXCLUDE` entry, visible in review. Coverage is reported for the product library
-(`src/`); the test harness (`tests/`) and CLI/survey tooling (`src/main.rs`, `src/bin/`) are ignored.
+(`src/`); the test harness (`tests/`) and CLI/survey tooling (`crates/krusty-cli`, `src/bin/`) are
+ignored.
 
 ## The regression gate
 

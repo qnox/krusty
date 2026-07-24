@@ -5,6 +5,11 @@ edition = "2021"
 description = "Memory-lean Kotlin->JVM compiler PoC (per-file streaming pipeline)"
 autotests = false
 
+[workspace]
+members = ["crates/krusty-cli", "crates/krusty-lsp"]
+default-members = [".", "crates/krusty-cli"]
+resolver = "2"
+
 [dependencies]
 # Read `.class` entries from `.jar` classpath entries (Java/Kotlin library support).
 zip = { version = "8", default-features = false, features = ["deflate"] }
@@ -37,10 +42,6 @@ pprof = { version = "0.15", features = ["flamegraph"] }
 [lib]
 name = "krusty"
 path = "src/lib.rs"
-
-[[bin]]
-name = "krusty"
-path = "src/main.rs"
 
 [profile.release]
 opt-level = 3
