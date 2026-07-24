@@ -1,6 +1,6 @@
 //! Semantic symbol classification over checked frontend data.
 
-use std::collections::HashMap;
+use std::{cmp::Reverse, collections::HashMap};
 
 use krusty::ast::{
     ClassDecl, ClassKind, Decl, Expr, ExprId, File, FunBody, FunDecl, Param, PropDecl, PropParam,
@@ -12,7 +12,10 @@ use krusty::frontend::{
 };
 use krusty::types::Ty;
 
-use super::FileAnalysis;
+use super::{
+    navigation::{declaration_name_span, definition_name_span, MemberKind},
+    DefinitionOccurrence, DefinitionSymbols, DefinitionTarget, FileAnalysis,
+};
 
 /// Editor-neutral semantic categories. Discriminants intentionally follow the LSP 3.17 predefined
 /// legend, so an LSP adapter can serialize the compact value without a lookup table.
@@ -67,20 +70,38 @@ pub struct HighlightOccurrence {
     pub modifiers: HighlightModifiers,
 }
 
+pub struct SemanticOccurrences {
+    pub highlights: Vec<HighlightOccurrence>,
+    pub definitions: Vec<DefinitionOccurrence>,
+}
+
 struct SemanticClassifier<'a> {
     source: &'a str,
     file: &'a File,
+    file_index: u32,
     symbols: &'a FrontendSymbols,
     type_info: Option<&'a FrontendTypeInfo>,
     tokens: Vec<FrontendNameToken>,
     classified: Vec<Option<HighlightOccurrence>>,
+    definitions: Vec<DefinitionOccurrence>,
+    definition_limit: usize,
     token_by_span: HashMap<(u32, u32), usize>,
     statement_scopes: HashMap<(u32, u32), Span>,
     callees: HashMap<ExprId, ExprId>,
     highlight_symbols: &'a HighlightSymbols,
+    definition_symbols: &'a DefinitionSymbols,
     bindings: Vec<Binding>,
     properties: HashMap<String, u16>,
     functions: HashMap<String, u16>,
+}
+
+struct SemanticContext<'a> {
+    file_index: u32,
+    symbols: &'a FrontendSymbols,
+    type_info: Option<&'a FrontendTypeInfo>,
+    highlight_symbols: &'a HighlightSymbols,
+    definition_symbols: &'a DefinitionSymbols,
+    definition_limit: usize,
 }
 
 struct Binding {
@@ -89,6 +110,8 @@ struct Binding {
     declared_at: u32,
     kind: HighlightKind,
     modifiers: u16,
+    definition: Option<Span>,
+    definition_owner: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -223,13 +246,47 @@ impl FileAnalysis {
     ) -> Vec<HighlightOccurrence> {
         let mut diagnostics = DiagSink::new();
         let tokens = lex_name_tokens(source, &mut diagnostics);
+        let definition_symbols = DefinitionSymbols::default();
         let mut classifier = SemanticClassifier::new(
             source,
             &self.file,
-            symbols,
-            self.types.as_ref(),
-            highlight_symbols,
             tokens,
+            SemanticContext {
+                file_index: 0,
+                symbols,
+                type_info: self.types.as_ref(),
+                highlight_symbols,
+                definition_symbols: &definition_symbols,
+                definition_limit: 0,
+            },
+        );
+        classifier.classify();
+        classifier.finish().highlights
+    }
+
+    pub fn semantic_occurrences(
+        &self,
+        source: &str,
+        file_index: u32,
+        symbols: &FrontendSymbols,
+        highlight_symbols: &HighlightSymbols,
+        definition_symbols: &DefinitionSymbols,
+        definition_limit: usize,
+    ) -> SemanticOccurrences {
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex_name_tokens(source, &mut diagnostics);
+        let mut classifier = SemanticClassifier::new(
+            source,
+            &self.file,
+            tokens,
+            SemanticContext {
+                file_index,
+                symbols,
+                type_info: self.types.as_ref(),
+                highlight_symbols,
+                definition_symbols,
+                definition_limit,
+            },
         );
         classifier.classify();
         classifier.finish()
@@ -240,11 +297,17 @@ impl<'a> SemanticClassifier<'a> {
     fn new(
         source: &'a str,
         file: &'a File,
-        symbols: &'a FrontendSymbols,
-        type_info: Option<&'a FrontendTypeInfo>,
-        highlight_symbols: &'a HighlightSymbols,
         tokens: Vec<FrontendNameToken>,
+        context: SemanticContext<'a>,
     ) -> Self {
+        let SemanticContext {
+            file_index,
+            symbols,
+            type_info,
+            highlight_symbols,
+            definition_symbols,
+            definition_limit,
+        } = context;
         let token_by_span = tokens
             .iter()
             .enumerate()
@@ -286,14 +349,18 @@ impl<'a> SemanticClassifier<'a> {
         Self {
             source,
             file,
+            file_index,
             symbols,
             type_info,
             tokens,
             classified,
+            definitions: Vec::new(),
+            definition_limit,
             token_by_span,
             statement_scopes,
             callees,
             highlight_symbols,
+            definition_symbols,
             bindings: Vec::new(),
             properties: HashMap::new(),
             functions: HashMap::new(),
@@ -301,12 +368,32 @@ impl<'a> SemanticClassifier<'a> {
     }
 
     fn classify(&mut self) {
+        for target in self
+            .definition_symbols
+            .file_targets(self.file_index)
+            .to_vec()
+        {
+            self.push_definition(target.span, target);
+        }
         self.mark_namespaces_and_annotations();
         for &declaration in &self.file.decls {
             match self.file.decl(declaration) {
                 Decl::Fun(function) => self.mark_function(function, false, true),
                 Decl::Class(class) => self.mark_class(class),
-                Decl::Property(property) => self.mark_property(property, true),
+                Decl::Property(property) => {
+                    let definition = self.mark_property(property, true);
+                    self.add_binding(
+                        &property.name,
+                        self.file_span(),
+                        0,
+                        HighlightKind::Property,
+                        variable_modifier(property.is_var) | HighlightModifiers::STATIC,
+                        definition,
+                    );
+                    if let Some(ty) = &property.ty {
+                        self.set_last_binding_owner(ty);
+                    }
+                }
             }
         }
         for (index, statement) in self.file.stmt_arena.iter().enumerate() {
@@ -322,8 +409,11 @@ impl<'a> SemanticClassifier<'a> {
         }
     }
 
-    fn finish(self) -> Vec<HighlightOccurrence> {
-        self.classified.into_iter().flatten().collect()
+    fn finish(self) -> SemanticOccurrences {
+        SemanticOccurrences {
+            highlights: self.classified.into_iter().flatten().collect(),
+            definitions: self.definitions,
+        }
     }
 
     fn mark_namespaces_and_annotations(&mut self) {
@@ -430,6 +520,14 @@ impl<'a> SemanticClassifier<'a> {
             (HighlightKind::Namespace, 0)
         };
         self.mark_index(terminal, kind, modifiers);
+        let qualified = path
+            .iter()
+            .map(|&index| self.tokens[index].text(self.source))
+            .collect::<Vec<_>>()
+            .join(".");
+        if let Some(target) = self.definition_symbols.class_target(self.file, &qualified) {
+            self.push_definition(self.tokens[terminal].span, target);
+        }
         if let Some(alias) = alias_marker
             .and_then(|marker| names.get(marker + 1))
             .copied()
@@ -467,15 +565,43 @@ impl<'a> SemanticClassifier<'a> {
             self.mark_function(method, true, false);
             self.add_member_function_binding(class.span, method, false);
         }
+        let companion_scope = class
+            .companion_methods
+            .iter()
+            .map(|method| method.span)
+            .chain(class.companion_props.iter().map(|property| property.span))
+            .reduce(|left, right| Span::new(left.lo.min(right.lo), left.hi.max(right.hi)));
         for method in &class.companion_methods {
             self.mark_function(method, true, true);
-            self.add_member_function_binding(class.span, method, true);
+            self.add_member_function_binding(companion_scope.unwrap_or(class.span), method, true);
         }
         for property in &class.body_props {
-            self.mark_property(property, false);
+            let definition = self.mark_property(property, false);
+            self.add_binding(
+                &property.name,
+                class.span,
+                class.span.lo,
+                HighlightKind::Property,
+                variable_modifier(property.is_var),
+                definition,
+            );
+            if let Some(ty) = &property.ty {
+                self.set_last_binding_owner(ty);
+            }
         }
         for property in &class.companion_props {
-            self.mark_property(property, true);
+            let definition = self.mark_property(property, true);
+            self.add_binding(
+                &property.name,
+                companion_scope.unwrap_or(class.span),
+                companion_scope.unwrap_or(class.span).lo,
+                HighlightKind::Property,
+                variable_modifier(property.is_var) | HighlightModifiers::STATIC,
+                definition,
+            );
+            if let Some(ty) = &property.ty {
+                self.set_last_binding_owner(ty);
+            }
         }
         for entry in &class.enum_entries {
             self.mark_exact(
@@ -540,7 +666,7 @@ impl<'a> SemanticClassifier<'a> {
     }
 
     fn mark_parameter(&mut self, owner: Span, scope: Span, parameter: &Param) {
-        self.mark_named_before(
+        let definition = self.mark_named_before_span(
             owner,
             &parameter.name,
             parameter.ty.span.lo,
@@ -553,7 +679,9 @@ impl<'a> SemanticClassifier<'a> {
             scope.lo,
             HighlightKind::Parameter,
             HighlightModifiers::READONLY,
+            definition,
         );
+        self.set_last_binding_owner(&parameter.ty);
         self.mark_type(&parameter.ty);
     }
 
@@ -587,11 +715,13 @@ impl<'a> SemanticClassifier<'a> {
             scope.lo,
             reference_kind,
             value_modifiers,
+            Some(definition_name_span(self.source, parameter.span)),
         );
+        self.set_last_binding_owner(&parameter.ty);
         self.mark_type(&parameter.ty);
     }
 
-    fn mark_property(&mut self, property: &PropDecl, static_property: bool) {
+    fn mark_property(&mut self, property: &PropDecl, static_property: bool) -> Option<Span> {
         let value_modifiers = variable_modifier(property.is_var);
         let modifiers = HighlightModifiers::DECLARATION
             | value_modifiers
@@ -600,7 +730,7 @@ impl<'a> SemanticClassifier<'a> {
             } else {
                 0
             };
-        self.mark_named_in(
+        let definition = self.mark_named_in_span(
             property.span,
             &property.name,
             HighlightKind::Property,
@@ -620,18 +750,26 @@ impl<'a> SemanticClassifier<'a> {
         if let Some(ty) = &property.ty {
             self.mark_type(ty);
         }
+        definition
     }
 
     fn mark_type_parameters(&mut self, owner: Span, scope: Span, names: &[String]) {
         for name in names {
-            self.mark_named_in(
+            let definition = self.mark_named_in_span(
                 owner,
                 name,
                 HighlightKind::TypeParameter,
                 HighlightModifiers::DECLARATION,
                 false,
             );
-            self.add_binding(name, scope, scope.lo, HighlightKind::TypeParameter, 0);
+            self.add_binding(
+                name,
+                scope,
+                scope.lo,
+                HighlightKind::TypeParameter,
+                0,
+                definition,
+            );
         }
     }
 
@@ -644,7 +782,7 @@ impl<'a> SemanticClassifier<'a> {
                 is_var, name, ty, ..
             } => {
                 let value_modifiers = variable_modifier(*is_var);
-                self.mark_named_in(
+                let definition = self.mark_named_in_span(
                     span,
                     name,
                     HighlightKind::Variable,
@@ -658,13 +796,15 @@ impl<'a> SemanticClassifier<'a> {
                     span.hi,
                     HighlightKind::Variable,
                     value_modifiers,
+                    definition,
                 );
                 if let Some(ty) = ty {
+                    self.set_last_binding_owner(ty);
                     self.mark_type(ty);
                 }
             }
             Stmt::LocalLateinit { name, ty } => {
-                self.mark_named_in(
+                let definition = self.mark_named_in_span(
                     span,
                     name,
                     HighlightKind::Variable,
@@ -677,15 +817,20 @@ impl<'a> SemanticClassifier<'a> {
                     span.hi,
                     HighlightKind::Variable,
                     HighlightModifiers::MODIFICATION,
+                    definition,
                 );
+                self.set_last_binding_owner(ty);
                 self.mark_type(ty);
             }
             Stmt::Destructure { entries, .. } => {
                 let mut after = span.lo;
                 for (name, is_var) in entries {
                     let value_modifiers = variable_modifier(*is_var);
+                    let mut definition = None;
                     if let Some(index) = self.find_named(span, name, Some(after), None, false) {
                         after = self.tokens[index].span.hi;
+                        definition =
+                            Some(definition_name_span(self.source, self.tokens[index].span));
                         self.mark_index(
                             index,
                             HighlightKind::Variable,
@@ -698,6 +843,7 @@ impl<'a> SemanticClassifier<'a> {
                         span.hi,
                         HighlightKind::Variable,
                         value_modifiers,
+                        definition,
                     );
                 }
             }
@@ -716,7 +862,7 @@ impl<'a> SemanticClassifier<'a> {
                 );
             }
             Stmt::For { name, .. } | Stmt::ForEach { name, .. } => {
-                self.mark_named_in(
+                let definition = self.mark_named_in_span(
                     span,
                     name,
                     HighlightKind::Variable,
@@ -735,9 +881,29 @@ impl<'a> SemanticClassifier<'a> {
                     scope.lo,
                     HighlightKind::Variable,
                     HighlightModifiers::READONLY,
+                    definition,
                 );
             }
-            Stmt::LocalFun(function) => self.mark_function(function, false, false),
+            Stmt::LocalFun(function) => {
+                self.mark_function(function, false, false);
+                let definition = self
+                    .find_named(function.span, &function.name, None, None, false)
+                    .map(|index| definition_name_span(self.source, self.tokens[index].span));
+                let kind =
+                    if self.has_modifier_before_name(function.span, &function.name, "operator") {
+                        HighlightKind::Operator
+                    } else {
+                        HighlightKind::Function
+                    };
+                self.add_binding(
+                    &function.name,
+                    self.enclosing_block_scope(span),
+                    span.lo,
+                    kind,
+                    function_modifiers(function),
+                    definition,
+                );
+            }
             Stmt::LocalClass(class) => self.mark_class(class),
             _ => {}
         }
@@ -751,12 +917,7 @@ impl<'a> SemanticClassifier<'a> {
                     if self.is_constructor_call(call, name) {
                         self.type_token(name, span.lo)
                     } else {
-                        let scoped = self.binding_at(name, span.lo).filter(|binding| {
-                            matches!(
-                                binding.kind,
-                                HighlightKind::Method | HighlightKind::Operator
-                            )
-                        });
+                        let scoped = self.binding_at_kind(name, span.lo, true);
                         (
                             if let Some(binding) = scoped {
                                 binding.kind
@@ -782,7 +943,7 @@ impl<'a> SemanticClassifier<'a> {
                                 .copied()
                                 .unwrap_or(0),
                     )
-                } else if let Some(binding) = self.binding_at(name, span.lo) {
+                } else if let Some(binding) = self.binding_at_kind(name, span.lo, false) {
                     (binding.kind, binding.modifiers)
                 } else if self.symbols.props.contains_key(name) {
                     let is_var = self.symbols.props[name].1;
@@ -794,11 +955,36 @@ impl<'a> SemanticClassifier<'a> {
                     (HighlightKind::Variable, 0)
                 };
                 self.mark_exact(span, kind, modifiers);
+                if let Some(target) = self.name_definition(name, span.lo, id) {
+                    self.push_definition(span, target);
+                } else {
+                    let kind = if self.callees.contains_key(&id) {
+                        MemberKind::StaticFunction
+                    } else {
+                        MemberKind::StaticValue
+                    };
+                    let targets = self
+                        .definition_symbols
+                        .top_level_targets(self.file, name, kind);
+                    for target in targets {
+                        self.push_definition(span, target);
+                    }
+                }
             }
             Expr::Member { receiver, name } => {
                 let call = self.callees.get(&id).copied();
                 let highlight = self.member_highlight(*receiver, name, call);
-                self.mark_named_in(span, name, highlight.kind, highlight.modifiers, true);
+                if let Some(source_span) =
+                    self.mark_named_in_span(span, name, highlight.kind, highlight.modifiers, true)
+                {
+                    self.record_member_definitions(
+                        source_span,
+                        *receiver,
+                        name,
+                        Some(call.unwrap_or(id)),
+                        self.member_kind(*receiver, call.is_some()),
+                    );
+                }
             }
             Expr::SafeCall {
                 receiver,
@@ -807,7 +993,17 @@ impl<'a> SemanticClassifier<'a> {
             } => {
                 let call = args.as_ref().map(|_| id);
                 let highlight = self.member_highlight(*receiver, name, call);
-                self.mark_named_in(span, name, highlight.kind, highlight.modifiers, true);
+                if let Some(source_span) =
+                    self.mark_named_in_span(span, name, highlight.kind, highlight.modifiers, true)
+                {
+                    self.record_member_definitions(
+                        source_span,
+                        *receiver,
+                        name,
+                        Some(id),
+                        self.member_kind(*receiver, args.is_some()),
+                    );
+                }
             }
             Expr::CallableRef { receiver, name } if name != "class" => {
                 let highlight = if let Some(receiver) = receiver {
@@ -829,12 +1025,47 @@ impl<'a> SemanticClassifier<'a> {
                         },
                     }
                 };
-                self.mark_named_in(span, name, highlight.kind, highlight.modifiers, true);
+                if let Some(source_span) =
+                    self.mark_named_in_span(span, name, highlight.kind, highlight.modifiers, true)
+                {
+                    if let Some(receiver) = receiver {
+                        self.record_member_definitions(
+                            source_span,
+                            *receiver,
+                            name,
+                            None,
+                            self.member_kind(
+                                *receiver,
+                                matches!(
+                                    highlight.kind,
+                                    HighlightKind::Method | HighlightKind::Operator
+                                ),
+                            ),
+                        );
+                    } else {
+                        let kind = if matches!(
+                            highlight.kind,
+                            HighlightKind::Method
+                                | HighlightKind::Function
+                                | HighlightKind::Operator
+                        ) {
+                            MemberKind::StaticFunction
+                        } else {
+                            MemberKind::StaticValue
+                        };
+                        let targets = self
+                            .definition_symbols
+                            .top_level_targets(self.file, name, kind);
+                        for target in targets {
+                            self.push_definition(source_span, target);
+                        }
+                    }
+                }
             }
             Expr::Is { ty, .. } | Expr::As { ty, .. } => self.mark_type(ty),
             Expr::Lambda { params, .. } => {
                 for name in params {
-                    self.mark_named_in(
+                    let definition = self.mark_named_in_span(
                         span,
                         name,
                         HighlightKind::Parameter,
@@ -851,6 +1082,7 @@ impl<'a> SemanticClassifier<'a> {
                         scope.lo,
                         HighlightKind::Parameter,
                         HighlightModifiers::READONLY,
+                        definition,
                     );
                 }
                 if let Some(types) = self.file.lambda_param_types.get(&id.0) {
@@ -861,7 +1093,7 @@ impl<'a> SemanticClassifier<'a> {
             }
             Expr::Try { catches, .. } => {
                 for catch in catches {
-                    self.mark_named_before(
+                    let definition = self.mark_named_before_span(
                         span,
                         &catch.name,
                         catch.ty.span.lo,
@@ -875,6 +1107,7 @@ impl<'a> SemanticClassifier<'a> {
                         scope.lo,
                         HighlightKind::Variable,
                         HighlightModifiers::READONLY,
+                        definition,
                     );
                     self.mark_type(&catch.ty);
                 }
@@ -887,6 +1120,234 @@ impl<'a> SemanticClassifier<'a> {
         self.type_info
             .is_some_and(|types| types.resolved_constructors.contains_key(&call))
             || self.symbols.class_names.contains_key(name) && !self.symbols.funs.contains_key(name)
+    }
+
+    fn name_definition(&self, name: &str, at: u32, expression: ExprId) -> Option<DefinitionTarget> {
+        let resolved_expression = self.callees.get(&expression).copied().unwrap_or(expression);
+        let member_kind = if self.callees.contains_key(&expression) {
+            MemberKind::InstanceFunction
+        } else {
+            MemberKind::InstanceValue
+        };
+        if let Some(target) = self.checked_companion_target(
+            resolved_expression,
+            name,
+            if self.callees.contains_key(&expression) {
+                MemberKind::StaticFunction
+            } else {
+                MemberKind::StaticValue
+            },
+        ) {
+            return Some(target);
+        }
+        if let Some(target) = self.checked_member_target(resolved_expression, name, member_kind) {
+            return Some(target);
+        }
+        if let Some(&call) = self.callees.get(&expression) {
+            if let Some((file, declaration)) = self
+                .type_info
+                .and_then(|types| types.resolved_source_call(call))
+            {
+                if let Some(target) = self
+                    .definition_symbols
+                    .declaration_target(file, declaration)
+                {
+                    return Some(target);
+                }
+            }
+            if let Some(resolved) = self
+                .type_info
+                .and_then(|types| types.resolved_local_function(call))
+            {
+                if let Stmt::LocalFun(function) = self.file.stmt(resolved.stmt_id) {
+                    if let Some(span) = declaration_name_span(
+                        &self.tokens,
+                        self.source,
+                        function.span,
+                        &function.name,
+                        false,
+                    ) {
+                        return Some(DefinitionTarget {
+                            file: self.file_index,
+                            span,
+                        });
+                    }
+                }
+            }
+            if self.is_constructor_call(call, name) {
+                return self.definition_symbols.class_target(self.file, name);
+            }
+        }
+        if self.highlight_symbols.class_kinds.contains_key(name) {
+            return self.definition_symbols.class_target(self.file, name);
+        }
+        self.binding_at_kind(name, at, self.callees.contains_key(&expression))
+            .and_then(|binding| binding.definition)
+            .map(|span| DefinitionTarget {
+                file: self.file_index,
+                span,
+            })
+    }
+
+    fn push_definition(&mut self, span: Span, target: DefinitionTarget) {
+        if self.definitions.len() < self.definition_limit {
+            self.definitions.push(DefinitionOccurrence {
+                span: definition_name_span(self.source, span),
+                target,
+            });
+        }
+    }
+
+    fn checked_member_target(
+        &self,
+        expression: ExprId,
+        name: &str,
+        kind: MemberKind,
+    ) -> Option<DefinitionTarget> {
+        let (owner, resolved_name, params) = self
+            .type_info?
+            .resolved_module_member_signature(expression)?;
+        (resolved_name == name)
+            .then(|| {
+                self.definition_symbols
+                    .member_target(&owner.render(), name, kind, params)
+            })
+            .flatten()
+    }
+
+    fn checked_companion_target(
+        &self,
+        expression: ExprId,
+        name: &str,
+        kind: MemberKind,
+    ) -> Option<DefinitionTarget> {
+        let member = self.type_info?.resolved_companion(expression)?;
+        if member.name != name {
+            return None;
+        }
+        let owner = member.owner?.render();
+        let owner = owner.strip_suffix("$Companion").unwrap_or(&owner);
+        self.definition_symbols
+            .member_target(owner, name, kind, &member.params)
+    }
+
+    fn record_member_definitions(
+        &mut self,
+        source_span: Span,
+        receiver: ExprId,
+        name: &str,
+        resolved_expression: Option<ExprId>,
+        kind: MemberKind,
+    ) {
+        if let Some(expression) = resolved_expression {
+            if let Some(target) = self
+                .type_info
+                .and_then(|types| types.resolved_super_call(expression))
+                .and_then(|resolved| {
+                    self.definition_symbols.member_target(
+                        &resolved.owner.render(),
+                        name,
+                        MemberKind::InstanceFunction,
+                        &resolved.params,
+                    )
+                })
+            {
+                self.push_definition(source_span, target);
+                return;
+            }
+            if let Some(target) = self.checked_companion_target(expression, name, kind) {
+                self.push_definition(source_span, target);
+                return;
+            }
+            if let Some((file, declaration)) = self
+                .type_info
+                .and_then(|types| types.resolved_source_call(expression))
+            {
+                if let Some(target) = self
+                    .definition_symbols
+                    .declaration_target(file, declaration)
+                {
+                    self.push_definition(source_span, target);
+                }
+                return;
+            }
+            if let Some((owner, resolved_name, params)) = self
+                .type_info
+                .and_then(|types| types.resolved_module_member_signature(expression))
+            {
+                if resolved_name == name {
+                    if let Some(target) =
+                        self.definition_symbols
+                            .member_target(&owner.render(), name, kind, params)
+                    {
+                        self.push_definition(source_span, target);
+                    }
+                    return;
+                }
+            }
+        }
+        let Some(owner) = self.receiver_definition_owner(receiver) else {
+            return;
+        };
+        let targets = self.definition_symbols.member_targets(&owner, name, kind);
+        if !targets.is_empty() {
+            for target in targets {
+                self.push_definition(source_span, target);
+            }
+            return;
+        }
+        if kind == MemberKind::InstanceValue {
+            if let Some(receiver_ty) = self
+                .type_info
+                .and_then(|types| types.expr_types.get(receiver.0 as usize))
+            {
+                if let Some(target) =
+                    self.definition_symbols
+                        .extension_value_target(*receiver_ty, name, self.file)
+                {
+                    self.push_definition(source_span, target);
+                }
+            }
+        }
+    }
+
+    fn member_kind(&self, receiver: ExprId, function: bool) -> MemberKind {
+        let static_receiver = match self.file.expr(receiver) {
+            Expr::Name(name) => self
+                .definition_symbols
+                .class_owner(self.file, name)
+                .is_some_and(|owner| !self.definition_symbols.is_object_owner(&owner)),
+            _ => false,
+        };
+        match (static_receiver, function) {
+            (false, false) => MemberKind::InstanceValue,
+            (false, true) => MemberKind::InstanceFunction,
+            (true, false) => MemberKind::StaticValue,
+            (true, true) => MemberKind::StaticFunction,
+        }
+    }
+
+    fn receiver_definition_owner(&self, receiver: ExprId) -> Option<String> {
+        if let Expr::Name(name) = self.file.expr(receiver) {
+            if let Some(owner) = self
+                .binding_at(name, self.file.expr_spans[receiver.0 as usize].lo)
+                .and_then(|binding| binding.definition_owner.clone())
+            {
+                return Some(owner);
+            }
+            if let Some(owner) = self.definition_symbols.class_owner(self.file, name) {
+                return Some(owner);
+            }
+        }
+        let ty = self
+            .type_info?
+            .expr_types
+            .get(receiver.0 as usize)?
+            .non_null();
+        let Ty::Obj(owner, _) = ty else {
+            return None;
+        };
+        Some(owner.render())
     }
 
     fn member_highlight(
@@ -1072,6 +1533,20 @@ impl<'a> SemanticClassifier<'a> {
                 index += 2;
             }
             self.mark_index(index, kind, modifiers);
+            let source_span = self.tokens[index].span;
+            if let Some(target) = self
+                .binding_at_matching(leaf, source_span.lo, |binding| {
+                    binding.kind == HighlightKind::TypeParameter
+                })
+                .and_then(|binding| binding.definition)
+                .map(|span| DefinitionTarget {
+                    file: self.file_index,
+                    span,
+                })
+                .or_else(|| self.definition_symbols.class_target(self.file, &ty.name))
+            {
+                self.push_definition(source_span, target);
+            }
         }
         if let Some(argument) = &ty.arg {
             self.mark_type(argument);
@@ -1086,8 +1561,10 @@ impl<'a> SemanticClassifier<'a> {
 
     fn type_token(&self, name: &str, at: u32) -> (HighlightKind, u16) {
         if self
-            .binding_at(name, at)
-            .is_some_and(|binding| binding.kind == HighlightKind::TypeParameter)
+            .binding_at_matching(name, at, |binding| {
+                binding.kind == HighlightKind::TypeParameter
+            })
+            .is_some()
         {
             return (HighlightKind::TypeParameter, 0);
         }
@@ -1153,14 +1630,33 @@ impl<'a> SemanticClassifier<'a> {
         declared_at: u32,
         kind: HighlightKind,
         modifiers: u16,
+        definition: Option<Span>,
     ) {
+        if let Some(span) = definition {
+            let target = DefinitionTarget {
+                file: self.file_index,
+                span,
+            };
+            if !self.definition_symbols.is_file_target(target) {
+                self.push_definition(span, target);
+            }
+        }
         self.bindings.push(Binding {
             name: name.to_owned(),
             scope,
             declared_at,
             kind,
             modifiers,
+            definition,
+            definition_owner: None,
         });
+    }
+
+    fn set_last_binding_owner(&mut self, ty: &TypeRef) {
+        let owner = self.definition_symbols.class_owner(self.file, &ty.name);
+        if let Some(binding) = self.bindings.last_mut() {
+            binding.definition_owner = owner;
+        }
     }
 
     fn add_member_function_binding(
@@ -1188,10 +1684,32 @@ impl<'a> SemanticClassifier<'a> {
         if is_deprecated(&function.annotations) {
             modifiers |= HighlightModifiers::DEPRECATED;
         }
-        self.add_binding(&function.name, scope, scope.lo, kind, modifiers);
+        let definition = self
+            .find_named(function.span, &function.name, None, None, false)
+            .map(|index| definition_name_span(self.source, self.tokens[index].span));
+        self.add_binding(&function.name, scope, scope.lo, kind, modifiers, definition);
     }
 
     fn binding_at(&self, name: &str, at: u32) -> Option<&Binding> {
+        self.binding_at_matching(name, at, |_| true)
+    }
+
+    fn binding_at_kind(&self, name: &str, at: u32, function: bool) -> Option<&Binding> {
+        self.binding_at_matching(name, at, |binding| {
+            let is_function = matches!(
+                binding.kind,
+                HighlightKind::Function | HighlightKind::Method | HighlightKind::Operator
+            );
+            is_function == function
+        })
+    }
+
+    fn binding_at_matching(
+        &self,
+        name: &str,
+        at: u32,
+        predicate: impl Fn(&Binding) -> bool,
+    ) -> Option<&Binding> {
         self.bindings
             .iter()
             .filter(|binding| {
@@ -1199,8 +1717,14 @@ impl<'a> SemanticClassifier<'a> {
                     && binding.scope.lo <= at
                     && at <= binding.scope.hi
                     && binding.declared_at <= at
+                    && predicate(binding)
             })
-            .min_by_key(|binding| binding.scope.hi.saturating_sub(binding.scope.lo))
+            .min_by_key(|binding| {
+                (
+                    binding.scope.hi.saturating_sub(binding.scope.lo),
+                    Reverse(binding.declared_at),
+                )
+            })
     }
 
     fn mark_exact(&mut self, span: Span, kind: HighlightKind, modifiers: u16) {
@@ -1209,17 +1733,18 @@ impl<'a> SemanticClassifier<'a> {
         }
     }
 
-    fn mark_named_before(
+    fn mark_named_before_span(
         &mut self,
         owner: Span,
         name: &str,
         before: u32,
         kind: HighlightKind,
         modifiers: u16,
-    ) {
-        if let Some(index) = self.find_named(owner, name, None, Some(before), true) {
-            self.mark_index(index, kind, modifiers);
-        }
+    ) -> Option<Span> {
+        let index = self.find_named(owner, name, None, Some(before), true)?;
+        let span = self.tokens[index].span;
+        self.mark_index(index, kind, modifiers);
+        Some(definition_name_span(self.source, span))
     }
 
     fn mark_named_in(
@@ -1233,6 +1758,20 @@ impl<'a> SemanticClassifier<'a> {
         if let Some(index) = self.find_named(owner, name, None, None, last) {
             self.mark_index(index, kind, modifiers);
         }
+    }
+
+    fn mark_named_in_span(
+        &mut self,
+        owner: Span,
+        name: &str,
+        kind: HighlightKind,
+        modifiers: u16,
+        last: bool,
+    ) -> Option<Span> {
+        let index = self.find_named(owner, name, None, None, last)?;
+        let span = self.tokens[index].span;
+        self.mark_index(index, kind, modifiers);
+        Some(definition_name_span(self.source, span))
     }
 
     fn find_named(
