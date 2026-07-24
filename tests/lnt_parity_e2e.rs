@@ -13,51 +13,8 @@ use std::fs;
 
 use super::common;
 
-/// Compile `src` with both compilers and byte-compare the named facade class. Returns
-/// `None` (skip) when the reference toolchain is unavailable.
-fn byte_diff(name: &str, src: &str, class: &str) -> Option<Result<(), String>> {
-    let dir = std::env::temp_dir().join(format!("krusty_lntp_{name}_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    let kref = dir.join("ref");
-    fs::create_dir_all(&kref).ok()?;
-    let src_path = dir.join(format!("{name}.kt"));
-    fs::write(&src_path, src).ok()?;
-    let args = vec![
-        "-d".to_string(),
-        kref.to_string_lossy().into_owned(),
-        src_path.to_string_lossy().into_owned(),
-    ];
-    let (code, stderr) = common::kotlinc_compile(&args)?;
-    assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
-    let ref_bytes = fs::read(kref.join(format!("{class}.class"))).ok()?;
-
-    // The metadata_cp variant stamps `SourceFile` (`<stem>.kt`) exactly as the CLI backend does, so
-    // the emitted bytes equal a `krusty -d …` run — the byte-identity codepath.
-    let classes = common::compile_in_process_metadata_cp(src, name, &[])
-        .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
-    let (_, krusty_bytes) = classes
-        .iter()
-        .find(|(n, _)| n == class)
-        .unwrap_or_else(|| panic!("{name}: krusty did not emit {class}"));
-
-    let _ = fs::remove_dir_all(&dir);
-    if krusty_bytes == &ref_bytes {
-        return Some(Ok(()));
-    }
-    let off = krusty_bytes
-        .iter()
-        .zip(ref_bytes.iter())
-        .position(|(a, b)| a != b)
-        .unwrap_or_else(|| krusty_bytes.len().min(ref_bytes.len()));
-    Some(Err(format!(
-        "{name}/{class}: bytes differ at offset {off} (krusty {} B, kotlinc {} B)",
-        krusty_bytes.len(),
-        ref_bytes.len()
-    )))
-}
-
 fn assert_byte_identical(name: &str, src: &str, class: &str) {
-    match byte_diff(name, src, class) {
+    match common::byte_diff_against_kotlinc(name, src, class) {
         None => eprintln!("skip ({name}: reference toolchain unavailable)"),
         Some(Ok(())) => {}
         Some(Err(e)) => panic!("{e}"),

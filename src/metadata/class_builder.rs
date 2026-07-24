@@ -177,31 +177,7 @@ impl StringTable {
         self.intern(descriptor.to_string(), r)
     }
     fn serialize_types(&self) -> Pb {
-        // kotlinc's `JvmStringTable` COALESCES a run of consecutive verbatim strings (no operation /
-        // predefinedIndex) into ONE `Record` with `range` (field 1) = the run length; a single verbatim
-        // string is an empty record (range defaults to 1). Records that carry an operation or a
-        // predefined index (class-id, builtin) are never coalesced. Matching this is required for a
-        // byte-identical d1.
-        let mut p = Pb::new();
-        let mut i = 0;
-        while i < self.records.len() {
-            if self.records[i].is_empty() {
-                let mut run = 1;
-                while i + run < self.records.len() && self.records[i + run].is_empty() {
-                    run += 1;
-                }
-                let mut rec = Pb::new();
-                if run > 1 {
-                    rec.field_varint(1, run as u64); // Record.range = 1
-                }
-                p.repeated_message(1, &rec);
-                i += run;
-            } else {
-                p.repeated_message(1, &self.records[i]);
-                i += 1;
-            }
-        }
-        p
+        crate::metadata::serialize_string_table_types(&self.records)
     }
 }
 
