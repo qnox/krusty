@@ -274,6 +274,8 @@ mod duplicate_param_check_e2e;
 mod elvis_newline_continuation_e2e;
 #[path = "elvis_nullability_join_e2e.rs"]
 mod elvis_nullability_join_e2e;
+#[path = "elvis_return_smartcast_e2e.rs"]
+mod elvis_return_smartcast_e2e;
 #[path = "empty_loop_body_e2e.rs"]
 mod empty_loop_body_e2e;
 #[path = "enum_body_property_e2e.rs"]
@@ -456,6 +458,8 @@ mod ir_edge_coverage_e2e;
 mod ir_lower_bail_coverage_e2e;
 #[path = "ir_lower_deep_coverage_e2e.rs"]
 mod ir_lower_deep_coverage_e2e;
+#[path = "is_nullable_and_notnull_smartcast_e2e.rs"]
+mod is_nullable_and_notnull_smartcast_e2e;
 #[path = "is_nullable_primitive_e2e.rs"]
 mod is_nullable_primitive_e2e;
 #[path = "is_primitive_smartcast_e2e.rs"]
