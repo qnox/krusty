@@ -96,11 +96,33 @@ impl StringTable {
         i
     }
 
-    /// Serialize the `StringTableTypes` message (record = field 1, repeated).
+    /// Serialize the `StringTableTypes` message (record = field 1, repeated). kotlinc RANGE-MERGES
+    /// only consecutive PLAIN (empty) records — a run of `n > 1` plain-local strings serializes as
+    /// ONE record with `Record.range = n` (`\x0a\x02\x08\x02`), byte-matching kotlinc's d1. A
+    /// record carrying `predefined_index`/`operation` is NEVER coalesced, even when byte-identical
+    /// to its neighbor (kotlinc emits those one per string).
     fn serialize_types(&self) -> Pb {
         let mut p = Pb::new();
-        for r in &self.records {
-            p.repeated_message(1, r);
+        let mut i = 0;
+        while i < self.records.len() {
+            if !self.records[i].is_empty() {
+                p.repeated_message(1, &self.records[i]);
+                i += 1;
+                continue;
+            }
+            let mut j = i + 1;
+            while j < self.records.len() && self.records[j].is_empty() {
+                j += 1;
+            }
+            let run = (j - i) as u64;
+            if run > 1 {
+                let mut r = Pb::new();
+                r.field_varint(1, run); // Record.range
+                p.repeated_message(1, &r);
+            } else {
+                p.repeated_message(1, &self.records[i]);
+            }
+            i = j;
         }
         p
     }

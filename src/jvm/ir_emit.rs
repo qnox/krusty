@@ -2057,6 +2057,9 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env: &EmitEnv) 
         ret: Ty::Unit,
         loop_stack: Vec::new(),
         pending_stack: Vec::new(),
+        open_locals: Vec::new(),
+        block_depth: 0,
+        record_locals: false,
     };
     let mut code = CodeBuilder::new(0);
     let mut any_init = false;
@@ -2279,6 +2282,9 @@ fn emit_class(
                 ret: Ty::Unit,
                 loop_stack: Vec::new(),
                 pending_stack: Vec::new(),
+                open_locals: Vec::new(),
+                block_depth: 0,
+                record_locals: false,
             };
             e.slots.insert(0, (0, Ty::obj(&fq_name)));
             let mut s = 1u16;
@@ -2545,6 +2551,9 @@ fn emit_class(
                 ret: Ty::Unit,
                 loop_stack: Vec::new(),
                 pending_stack: Vec::new(),
+                open_locals: Vec::new(),
+                block_depth: 0,
+                record_locals: false,
             };
             e.slots.insert(0, (0, Ty::obj(&fq_name)));
             let mut s = 1u16;
@@ -2699,6 +2708,9 @@ fn emit_class(
                 ret: Ty::Unit,
                 loop_stack: Vec::new(),
                 pending_stack: Vec::new(),
+                open_locals: Vec::new(),
+                block_depth: 0,
+                record_locals: false,
             };
             let mut clinit = CodeBuilder::new(0);
             if let Some(comp_fq) = c.companion_class() {
@@ -2902,6 +2914,9 @@ fn emit_enum_entry_subclass(
             ret: Ty::Unit,
             loop_stack: Vec::new(),
             pending_stack: Vec::new(),
+            open_locals: Vec::new(),
+            block_depth: 0,
+            record_locals: false,
         };
         e.slots.insert(0, (0, Ty::obj(&fq_name))); // `this`
         e.emit(init_body, &mut ctor);
@@ -4319,6 +4334,9 @@ fn emit_interface_class(
             ret: Ty::Unit,
             loop_stack: Vec::new(),
             pending_stack: Vec::new(),
+            open_locals: Vec::new(),
+            block_depth: 0,
+            record_locals: false,
         };
         let mut clinit = CodeBuilder::new(0);
         if let Some(comp_fq) = c.companion_class() {
@@ -4552,6 +4570,9 @@ fn emit_enum_class(
             ret: Ty::Unit,
             loop_stack: Vec::new(),
             pending_stack: Vec::new(),
+            open_locals: Vec::new(),
+            block_depth: 0,
+            record_locals: false,
         };
         e.slots.insert(0, (0, Ty::obj(&fq)));
         let mut s = 3u16;
@@ -4617,6 +4638,9 @@ fn emit_enum_class(
             ret: Ty::Unit,
             loop_stack: Vec::new(),
             pending_stack: Vec::new(),
+            open_locals: Vec::new(),
+            block_depth: 0,
+            record_locals: false,
         };
         let mut clinit = CodeBuilder::new(0);
         // kotlinc gives each entry's construction its own `<clinit>` LineNumberTable entry, on that
@@ -4907,7 +4931,15 @@ fn emit_method_inner(
         ret,
         loop_stack: Vec::new(),
         pending_stack: Vec::new(),
+        open_locals: Vec::new(),
+        block_depth: 0,
+        record_locals: false,
     };
+    // Record LVT entries only when the finish path will flush a COMPLETE table: a parsed,
+    // non-suspend function. A suspend state machine's spilled/hoisted locals lose their
+    // `value_names` keys in the transform, and an unflushed method would ship a partial
+    // block-locals-only table — both worse shapes than none.
+    e.record_locals = ir.fn_decl_lines.contains_key(&fid) && !ir.suspend_funs.contains(&fid);
     if instance {
         e.slots.insert(0, (0, Ty::obj(owner)));
         e.next_slot = 1;
@@ -5003,6 +5035,34 @@ fn emit_method_inner(
             code.mark_line(close);
         }
         code.ret_void();
+    }
+    // `LocalVariableTable` for a PARSED function (a synthesized body has no `fn_decl_lines` entry
+    // and keeps its curated/fallback table): method-scope locals close here with length-to-end, in
+    // declaration order, then `this` (instance) and the parameters (start 0) — kotlinc's
+    // scope-close order with parameters last. Must mirror the `record_locals` gate exactly.
+    if e.record_locals {
+        for (_, slot, start, name, desc) in std::mem::take(&mut e.open_locals) {
+            code.add_local_entry(start, None, slot, &name, &desc);
+        }
+        if instance {
+            code.add_local_entry(0, None, 0, "this", &format!("L{owner};"));
+        }
+        let mut slot = u16::from(instance);
+        for (i, t) in param_tys.iter().enumerate() {
+            let pname = ir
+                .param_names(fid)
+                .and_then(|ns| ns.get(i).cloned())
+                .or_else(|| f.param_checks.get(i).and_then(|n| n.clone()))
+                .unwrap_or_else(|| format!("p{i}"));
+            code.add_local_entry(
+                0,
+                None,
+                slot,
+                &pname,
+                &crate::jvm::names::type_descriptor(*t),
+            );
+            slot += slot_words(*t);
+        }
     }
     code.ensure_locals(e.next_slot);
     code.link();
@@ -5378,6 +5438,9 @@ fn emit_default_stub(
         ret,
         loop_stack: Vec::new(),
         pending_stack: Vec::new(),
+        open_locals: Vec::new(),
+        block_depth: 0,
+        record_locals: false,
     };
     // value 0 = self; values 1..=n = the real params; then mask + marker (not value-indexed).
     e.slots.insert(0, (0, owner_ty));
@@ -5585,6 +5648,9 @@ fn emit_facade_default_stub(
         ret,
         loop_stack: Vec::new(),
         pending_stack: Vec::new(),
+        open_locals: Vec::new(),
+        block_depth: 0,
+        record_locals: false,
     };
     // No `self`: value-index `i` = the i-th real parameter (the static layout the defaults were lowered
     // with); then mask + marker (not value-indexed).
@@ -5677,6 +5743,9 @@ fn emit_ctor_default_stub(
         ret: Ty::Unit,
         loop_stack: Vec::new(),
         pending_stack: Vec::new(),
+        open_locals: Vec::new(),
+        block_depth: 0,
+        record_locals: false,
     };
     let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
     // `this` at slot 0 = value-index 0; real params at value-index 1..=n.
@@ -5834,6 +5903,18 @@ struct Emitter<'a> {
     /// so the pending operand is typed through the branch (matching kotlinc), avoiding the spill-to-temp
     /// krusty would otherwise need. Pushed/popped around the branchy RHS in `emit_binop`.
     pending_stack: Vec<VerifType>,
+    /// SOURCE locals currently in scope, awaiting their `LocalVariableTable` entry:
+    /// `(block_depth, slot, start_pc, name, descriptor)`. A local closes (entry emitted, scoped
+    /// length) when its enclosing Block exits; method-scope leftovers close at the method end with
+    /// length-to-end. See `close_scope_locals`.
+    open_locals: Vec<(usize, u16, u16, String, String)>,
+    /// Current Block nesting depth (the body root is depth 1 — its locals span to the method end).
+    block_depth: usize,
+    /// Whether this method records `LocalVariableTable` entries. Set ONLY for a parsed,
+    /// non-suspend function whose finish path will flush the method-scope locals + `this` +
+    /// params — otherwise a lambda impl / stub / state machine would ship a PARTIAL table of
+    /// block-scoped locals only (worse than none).
+    record_locals: bool,
 }
 
 /// Parse a method descriptor's parameter types (in order) to `Ty`s.
@@ -6618,6 +6699,7 @@ impl<'a> Emitter<'a> {
                 // (its slot must read as `Top` once out of scope — else a sibling branch that never
                 // initialized it fails verification).
                 let saved = self.slots.clone();
+                self.block_depth += 1;
                 let mut dead = false;
                 for s in stmts {
                     // A statement root carrying a source line starts a `LineNumberTable` entry at
@@ -6645,6 +6727,8 @@ impl<'a> Emitter<'a> {
                         self.emit_discarding(v, code);
                     }
                 }
+                self.close_scope_locals(code);
+                self.block_depth -= 1;
                 self.slots = saved;
             }
             IrExpr::Return(v) => match v {
@@ -6696,6 +6780,19 @@ impl<'a> Emitter<'a> {
                     });
                     self.slots.insert(index, (slot, jt));
                     store(jt, slot, code);
+                    // A SOURCE local opens its `LocalVariableTable` range right after the
+                    // initializing store (kotlinc's start pc); it closes when its Block exits.
+                    if let Some(name) = self.ir.value_names.get(&e).filter(|_| self.record_locals) {
+                        if code.bytes.len() <= u16::MAX as usize {
+                            self.open_locals.push((
+                                self.block_depth,
+                                slot,
+                                code.bytes.len() as u16,
+                                name.clone(),
+                                crate::jvm::names::type_descriptor(jt),
+                            ));
+                        }
+                    }
                 } else {
                     let slot = reuse.unwrap_or_else(|| {
                         let s = self.next_slot;
@@ -6846,6 +6943,27 @@ impl<'a> Emitter<'a> {
             }
             other => {
                 self.emit_discarding_node(e, &other, code);
+            }
+        }
+    }
+
+    /// Close every open SOURCE local belonging to the CURRENT block: emit its
+    /// `LocalVariableTable` entry with the scoped length ending here (kotlinc's shape — a
+    /// block-scoped local dies at its block's close). The body ROOT block (depth 1) leaves its
+    /// locals open; they run to the method end and flush in the method-finish path.
+    fn close_scope_locals(&mut self, code: &mut CodeBuilder) {
+        if self.block_depth <= 1 {
+            return;
+        }
+        let end = code.bytes.len().min(u16::MAX as usize) as u16;
+        let depth = self.block_depth;
+        let mut i = 0;
+        while i < self.open_locals.len() {
+            if self.open_locals[i].0 >= depth {
+                let (_, slot, start, name, desc) = self.open_locals.remove(i);
+                code.add_local_entry(start, Some(end.saturating_sub(start)), slot, &name, &desc);
+            } else {
+                i += 1;
             }
         }
     }
@@ -7766,6 +7884,7 @@ impl<'a> Emitter<'a> {
             // stack. Scope block-locals (restore the slot map) so they don't leak into outer frames.
             IrExpr::Block { stmts, value } => {
                 let saved = self.slots.clone();
+                self.block_depth += 1;
                 let mut dead = false;
                 for s in stmts {
                     // A statement root carrying a source line starts a `LineNumberTable` entry.
@@ -7793,6 +7912,8 @@ impl<'a> Emitter<'a> {
                         self.emit_value(*v, code);
                     }
                 }
+                self.close_scope_locals(code);
+                self.block_depth -= 1;
                 self.slots = saved;
             }
             IrExpr::Lambda {

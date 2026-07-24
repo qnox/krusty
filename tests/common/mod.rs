@@ -1835,3 +1835,47 @@ fn collect_class_files(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>
     }
     Some(())
 }
+
+/// Compile `src` with BOTH compilers — kotlinc via the persistent server, krusty via the
+/// byte-identity in-process path (`compile_in_process_metadata_cp`, CLI-equivalent bytes) — and
+/// byte-compare the named class. `None` = reference toolchain unavailable (caller skips);
+/// `Some(Err)` carries the first differing offset.
+#[allow(dead_code)]
+pub fn byte_diff_against_kotlinc(name: &str, src: &str, class: &str) -> Option<Result<(), String>> {
+    let dir = std::env::temp_dir().join(format!("krusty_bdiff_{name}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let kref = dir.join("ref");
+    std::fs::create_dir_all(&kref).ok()?;
+    let src_path = dir.join(format!("{name}.kt"));
+    std::fs::write(&src_path, src).ok()?;
+    let args = vec![
+        "-d".to_string(),
+        kref.to_string_lossy().into_owned(),
+        src_path.to_string_lossy().into_owned(),
+    ];
+    let (code, stderr) = kotlinc_compile(&args)?;
+    assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
+    let ref_bytes = std::fs::read(kref.join(format!("{class}.class"))).ok()?;
+
+    let classes = compile_in_process_metadata_cp(src, name, &[])
+        .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
+    let (_, krusty_bytes) = classes
+        .iter()
+        .find(|(n, _)| n == class)
+        .unwrap_or_else(|| panic!("{name}: krusty did not emit {class}"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+    if krusty_bytes == &ref_bytes {
+        return Some(Ok(()));
+    }
+    let off = krusty_bytes
+        .iter()
+        .zip(ref_bytes.iter())
+        .position(|(a, b)| a != b)
+        .unwrap_or_else(|| krusty_bytes.len().min(ref_bytes.len()));
+    Some(Err(format!(
+        "{name}/{class}: bytes differ at offset {off} (krusty {} B, kotlinc {} B)",
+        krusty_bytes.len(),
+        ref_bytes.len()
+    )))
+}

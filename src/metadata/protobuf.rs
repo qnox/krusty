@@ -24,6 +24,11 @@ impl Pb {
         self.buf.is_empty()
     }
 
+    /// Append another message's already-encoded fields verbatim (protobuf concatenation semantics).
+    pub fn append_raw(&mut self, bytes: &[u8]) {
+        self.buf.extend_from_slice(bytes);
+    }
+
     /// Append a base-128 varint (unsigned LEB128).
     pub fn varint(&mut self, mut v: u64) {
         loop {

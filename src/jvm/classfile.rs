@@ -348,6 +348,10 @@ impl ConstPool {
     }
 }
 
+/// One `LocalVariableTable` entry: `(name_idx, desc_idx, slot, start, length)`. `start: None` =
+/// whole method from 0; `length: None` = to the method end (the writer computes it).
+type LvtEntry = (u16, u16, u16, Option<u16>, Option<u16>);
+
 struct MethodInfo {
     access: u16,
     name: u16,
@@ -372,7 +376,8 @@ struct MethodInfo {
     /// params) — written as `start_pc=0, length=code_len`. `Some(pc)` is a local that becomes live
     /// mid-method (e.g. a `hashCode` `result` accumulator, live from its first store) — written as
     /// `start_pc=pc, length=code_len-pc`.
-    lvt: Vec<(u16, u16, u16, Option<u16>)>,
+    /// LocalVariableTable entries. See [`LvtEntry`].
+    lvt: Vec<LvtEntry>,
     /// Method-level `RuntimeInvisibleAnnotations` (each entry a pre-encoded annotation) — e.g. the
     /// `@org.jetbrains.annotations.NotNull` kotlinc puts on a non-null reference RETURN.
     invisible_anns: Vec<Vec<u8>>,
@@ -1418,7 +1423,22 @@ impl ClassWriter {
             } else {
                 code.line_marks().to_vec()
             },
-            lvt: Vec::new(),
+            lvt: if name == "<init>" || name == "<clinit>" {
+                Vec::new()
+            } else {
+                code.local_entries()
+                    .iter()
+                    .map(|(start, len, slot, nm, ds)| {
+                        (
+                            self.cp.utf8(nm),
+                            self.cp.utf8(ds),
+                            *slot,
+                            Some(*start),
+                            *len,
+                        )
+                    })
+                    .collect()
+            },
             invisible_anns: Vec::new(),
             param_anns: Vec::new(),
         });
@@ -1512,21 +1532,36 @@ impl ClassWriter {
         {
             return;
         }
-        let lvt: Vec<(u16, u16, u16, Option<u16>)> = locals
-            .iter()
-            .map(|(nm, ds, slot)| (self.cp.utf8(nm), self.cp.utf8(ds), *slot, None))
-            .collect();
+        // A body whose emission already built a debug table (per-statement line marks / scoped
+        // locals) keeps it — the declaration-level fallback fills only the parts still EMPTY (a
+        // suspend method has line marks but relies on this params-only LVT). Checked BEFORE
+        // interning so a fully-discarded fallback can't perturb the constant pool.
+        let (needs_lnt, needs_lvt) = match self.methods.iter().find(|m| m.name == n && m.desc == d)
+        {
+            Some(m) => (m.lnt.is_empty(), m.lvt.is_empty()),
+            None => return,
+        };
+        if !needs_lnt && !needs_lvt {
+            return;
+        }
+        let lvt: Vec<LvtEntry> = if needs_lvt {
+            locals
+                .iter()
+                .map(|(nm, ds, slot)| (self.cp.utf8(nm), self.cp.utf8(ds), *slot, None, None))
+                .collect()
+        } else {
+            Vec::new()
+        };
         if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
-            // A body emitted with per-statement `mark_line`s already carries kotlinc's REAL
-            // multi-entry LineNumberTable — the single declaration-line fallback must not clobber
-            // it (only mark-less bodies, e.g. synthesized accessors, take the fallback).
-            if m.lnt.is_empty() {
+            if needs_lnt {
                 m.lnt = lnt
                     .map(|(pc, line)| (pc, line as u16))
                     .into_iter()
                     .collect();
             }
-            m.lvt = lvt;
+            if needs_lvt {
+                m.lvt = lvt;
+            }
         }
     }
 
@@ -1581,8 +1616,8 @@ impl ClassWriter {
                 .unwrap_or(0) as u16;
             m.lnt = Vec::new();
             m.lvt = vec![
-                (result_n, result_d, 1, Some(start)),
-                (this_n, this_d, 0, None),
+                (result_n, result_d, 1, Some(start), None),
+                (this_n, this_d, 0, None, None),
             ];
         }
     }
@@ -1636,6 +1671,14 @@ impl ClassWriter {
         // First-use order of the per-method attribute names, in method emit order.
         let mut seq: Vec<An> = Vec::new();
         for m in &self.methods {
+            // kotlinc (ASM) interns `StackMapTable` when the first FRAME is visited — during code
+            // emission, so BEFORE both `LineNumberTable` and `LocalVariableTable` (empirically
+            // probed: every framed facade fn pools `StackMapTable` immediately before
+            // `LineNumberTable`). A class whose first debug-bearing method has no frames still
+            // interns Lnt/Lvt first — the shape the data-class byte-parity fixtures pinned.
+            if m.stackmap.is_some() && !seq.contains(&An::Smt) {
+                seq.push(An::Smt);
+            }
             if !m.lnt.is_empty() && !seq.contains(&An::Lnt) {
                 seq.push(An::Lnt);
             }
@@ -1649,9 +1692,6 @@ impl ClassWriter {
             }
             if !m.invisible_anns.is_empty() && !seq.contains(&An::Ria) {
                 seq.push(An::Ria);
-            }
-            if m.stackmap.is_some() && !seq.contains(&An::Smt) {
-                seq.push(An::Smt);
             }
             if !m.param_anns.is_empty() && !seq.contains(&An::Ripa) {
                 seq.push(An::Ripa);
@@ -1905,12 +1945,13 @@ impl ClassWriter {
                         u2(&mut out, lvt_attr_name.unwrap());
                         u4(&mut out, (2 + m.lvt.len() * 10) as u32);
                         u2(&mut out, m.lvt.len() as u16);
-                        for &(name_idx, desc_idx, slot, start) in &m.lvt {
+                        for &(name_idx, desc_idx, slot, start, length) in &m.lvt {
                             // A whole-method local (`None`) spans `[0, code_len)`; a mid-method one
-                            // (`Some(pc)`) spans `[pc, code_len)`.
+                            // (`Some(pc)`) spans to the method end unless a scoped LENGTH is given
+                            // (a block-scoped local dies at its block's close).
                             let start_pc = start.unwrap_or(0);
                             u2(&mut out, start_pc);
-                            u2(&mut out, code_len as u16 - start_pc); // length to method end
+                            u2(&mut out, length.unwrap_or(code_len as u16 - start_pc));
                             u2(&mut out, name_idx);
                             u2(&mut out, desc_idx);
                             u2(&mut out, slot);
@@ -2057,6 +2098,9 @@ pub struct CodeBuilder {
     frames: Vec<(u32, Vec<VerifType>, Vec<VerifType>)>,
     /// `LineNumberTable` marks recorded during emission: `(start_pc, line)`. See [`Self::mark_line`].
     line_marks: Vec<(u16, u16)>,
+    /// `LocalVariableTable` entries recorded during emission, in kotlinc's SCOPE-CLOSE order:
+    /// `(start_pc, length: None = to method end, slot, name, descriptor)`.
+    local_entries: Vec<(u16, Option<u16>, u16, String, String)>,
 }
 
 impl CodeBuilder {
@@ -2072,7 +2116,26 @@ impl CodeBuilder {
             needs_stackmap: false,
             frames: Vec::new(),
             line_marks: Vec::new(),
+            local_entries: Vec::new(),
         }
+    }
+
+    /// Record a `LocalVariableTable` entry. `length: None` = to the method end (computed at write).
+    pub fn add_local_entry(
+        &mut self,
+        start: u16,
+        length: Option<u16>,
+        slot: u16,
+        name: &str,
+        desc: &str,
+    ) {
+        self.local_entries
+            .push((start, length, slot, name.to_string(), desc.to_string()));
+    }
+
+    /// The recorded `LocalVariableTable` entries (empty for a body emitted without local info).
+    pub fn local_entries(&self) -> &[(u16, Option<u16>, u16, String, String)] {
+        &self.local_entries
     }
 
     /// Record a `LineNumberTable` entry for `line` starting at the CURRENT pc. Deduped: a re-mark
