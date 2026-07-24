@@ -216,6 +216,8 @@ mod context_parameters_e2e;
 mod contract_erasure_e2e;
 #[path = "coroutine_intrinsics_e2e.rs"]
 mod coroutine_intrinsics_e2e;
+#[path = "cross_file_companion_fun_e2e.rs"]
+mod cross_file_companion_fun_e2e;
 #[path = "cross_file_ctor_default_e2e.rs"]
 mod cross_file_ctor_default_e2e;
 #[path = "data_class_metadata_wiring_e2e.rs"]
@@ -672,6 +674,8 @@ mod reference_adaptation_e2e;
 mod reference_in_range_e2e;
 #[path = "reified_inline_check_e2e.rs"]
 mod reified_inline_check_e2e;
+#[path = "reified_inline_splice_ldc_wide_e2e.rs"]
+mod reified_inline_splice_ldc_wide_e2e;
 #[path = "require_check_smartcast_e2e.rs"]
 mod require_check_smartcast_e2e;
 #[path = "resolve_parse_deep_coverage_e2e.rs"]

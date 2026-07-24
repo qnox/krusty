@@ -676,15 +676,21 @@ fn reify_markers(insns: &mut [Insn], src_cp: &[C]) -> Option<Vec<(usize, String)
         if i < 2 {
             return None; // a marker with no room for its `iconst <mode>; ldc "<T>"` argument pushes
         }
-        let name = match &insns[i - 1] {
-            Insn::Plain { op: 0x12, operands } if operands.len() == 1 => match src_cp
-                .get(operands[0] as usize)
-            {
-                Some(C::String(u)) => utf8(src_cp, *u).map(|s| s.trim_end_matches('?').to_string()),
-                _ => None,
-            },
+        // The type-parameter name is pushed by the `ldc`/`ldc_w` before the marker. A large class (e.g.
+        // stdlib `CollectionsKt`) has a constant pool past 255, so the name String is loaded with `ldc_w`
+        // (0x13, 2-byte index), not `ldc` (0x12, 1-byte) — read BOTH, else the marker looks malformed and
+        // an otherwise-splicable reified inline (`filterIsInstance`) is wrongly skipped.
+        let name_idx = match &insns[i - 1] {
+            Insn::Plain { op: 0x12, operands } if operands.len() == 1 => Some(operands[0] as usize),
+            Insn::Plain { op: 0x13, operands } if operands.len() == 2 => {
+                Some(((operands[0] as usize) << 8) | operands[1] as usize)
+            }
             _ => None,
-        }?;
+        };
+        let name = name_idx.and_then(|idx| match src_cp.get(idx) {
+            Some(C::String(u)) => utf8(src_cp, *u).map(|s| s.trim_end_matches('?').to_string()),
+            _ => None,
+        })?;
         let j = (i + 1..insns.len()).find(|&j| is_reified_type_bearing(&insns[j], src_cp))?;
         plan.push((i, j, name));
     }

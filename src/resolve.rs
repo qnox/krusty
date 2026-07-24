@@ -199,6 +199,11 @@ pub struct ClassSig {
     pub inner_of: Option<TypeName>,
     /// `companion object` functions, emitted as `static` methods and called as `ClassName.fn(...)`.
     pub static_methods: HashMap<String, Signature>,
+    /// The names in [`Self::static_methods`] that are SOURCE `companion object` functions, as opposed
+    /// to signatures a compiler plugin synthesizes into `static_methods` (kotlinx.serialization's
+    /// `serializer()`). A `ClassName.fn(...)` call lowers to `getstatic Companion; invokevirtual` only
+    /// for a source companion function; a plugin-owned name is left to the plugin's own emit path.
+    pub companion_fun_names: std::collections::HashSet<String>,
     /// `companion object` properties, emitted as `static final` fields read as `ClassName.PROP`.
     pub static_props: HashMap<String, Ty>,
     /// Names of `lateinit` properties (instance and companion) — reads emit a null-check that throws.
@@ -2418,6 +2423,10 @@ pub fn collect_signatures_with_cp(
                         });
                         is_file_class.then(|| resolve_super(base))
                     });
+                    // SOURCE companion function names, captured before the plugin phase below injects
+                    // any synthetic signature (`serializer()`) into `static_methods`.
+                    let companion_fun_names: std::collections::HashSet<String> =
+                        c.companion_methods.iter().map(|m| m.name.clone()).collect();
                     // `companion object` members → static methods/props on this class.
                     let mut static_methods: HashMap<String, Signature> = c
                         .companion_methods
@@ -2620,6 +2629,7 @@ pub fn collect_signatures_with_cp(
                             is_sealed: c.is_sealed(),
                             inner_of: inner_of_ref,
                             static_methods,
+                            companion_fun_names,
                             static_props,
                             lateinit_props,
                             interfaces: interfaces_ref,
@@ -2669,6 +2679,7 @@ pub fn collect_signatures_with_cp(
                                 is_sealed: false,
                                 inner_of: None,
                                 static_methods: HashMap::new(),
+                                companion_fun_names: std::collections::HashSet::new(),
                                 static_props: HashMap::new(),
                                 lateinit_props: Default::default(),
                                 interfaces: companion_interfaces_ref,
