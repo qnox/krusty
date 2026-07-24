@@ -12559,6 +12559,40 @@ impl<'a> Lower<'a> {
                 }
             }
         }
+        // LAST RESORT for a MODULE member the paths above declined: honour the argument→parameter mapping
+        // the checker recorded in `resolved_call_arg_slots` (the very record the qualified `recv.m(args)`
+        // path consumes) and let the backend emit `<name>$default(…, mask, marker)` for the omitted slots.
+        // That is what the const-default fill above cannot do — a data class `copy`'s defaults are
+        // `this.<field>` reads, not constants, so `copy(field = v)` used to bail the whole file.
+        //
+        // It runs AFTER those paths, never before: routing a call they already handle through `$default`
+        // changes the emitted shape, and the suspend pass does not model that shape for a suspend member
+        // (it turned an omitted CONSTANT-default call in a suspend function into a whole-module failure).
+        if let Some(ResolvedCall::ModuleMember {
+            owner,
+            name: target,
+            params,
+            ..
+        }) = self.info.resolved_calls.get(&e).cloned()
+        {
+            if target == name {
+                if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
+                    let owner = owner.render();
+                    if let Some((class, index, _fid, mret)) =
+                        self.link_local_method(&owner, &target, &params)
+                    {
+                        let (provided, prelude) =
+                            self.lower_method_slot_args_source_order(args, &slots, &params)?;
+                        let recv = self.emit_get_value(this_v);
+                        let call = self.emit_method_call(class, index, recv, provided);
+                        // A generic higher-order member erases its `<R>` return to `Object`; the checker
+                        // records the concrete result, so insert the `checkcast`/unbox kotlinc emits.
+                        let call = self.coerce_generic_read(call, e, mret);
+                        return Some(self.wrap_arg_prelude(call, prelude));
+                    }
+                }
+            }
+        }
         if matches!(name, "toString" | "hashCode") && args.is_empty() {
             let recv = self.emit_get_value(this_v);
             return Some(self.emit_external_call(format!("kotlin/Any.{name}"), Some(recv), vec![]));

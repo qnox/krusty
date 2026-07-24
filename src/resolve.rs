@@ -8606,25 +8606,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn lookup_method_name(&self, internal: TypeName, name: &str) -> Option<Signature> {
-        let c = self.syms.class_by_type_name(internal)?;
-        if let Some(sigs) = c.methods.get(name) {
-            // Sole overload only: this lookup has no argument types to select with.
-            return match sigs.as_slice() {
-                [one] => Some(one.clone()),
-                _ => None,
-            };
-        }
-        // A class provides its implemented interfaces' methods — directly overridden, inherited, or (for
-        // `: I by d`) delegated. Resolving them here lets a delegating class's calls type-check.
-        for i in c.interfaces.iter_ids() {
-            if let Some(sig) = self.lookup_method_name(i, name) {
-                return Some(sig);
-            }
-        }
-        self.lookup_method_name(c.super_internal?, name)
-    }
-
     /// Resolve a property (own or inherited) on a class internal name.
     fn lookup_prop(&self, internal: &str, name: &str) -> Option<(Ty, bool)> {
         let internal = existing_type_name(internal)?;
@@ -12872,6 +12853,131 @@ impl<'a> Checker<'a> {
         self.syms.classes.contains_key(&qname).then_some(qname)
     }
 
+    /// Resolve and type-check a call to a MODULE (user) class's instance member on receiver type `rt`.
+    ///
+    /// An implicit receiver is only sugar for `this.`, so this is the ONE place a module-member call is
+    /// resolved — the qualified `recv.m(args)` arm and the bare `m(args)` (`this`-receiver) paths both
+    /// come here. Keeping them together is what makes NAMED and OMITTED arguments behave identically:
+    /// the bare path used to reduce the resolved member to `(params, ret)` and zip the arguments
+    /// positionally, so `copy(resources = x)` type-checked `x` against the FIRST parameter.
+    ///
+    /// `None` when no module member matches (the caller falls through to its classpath/other paths).
+    fn check_module_member_call(
+        &mut self,
+        call: ExprId,
+        rt: Ty,
+        name: &str,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+        span: Span,
+    ) -> Option<Ty> {
+        let Ty::Obj(internal_name, _) = rt else {
+            return None;
+        };
+        // The `name =` argument labels, in source order.
+        let arg_names = self.file.call_arg_names.get(&call.0).cloned();
+        let arg_names = arg_names.as_deref();
+        // The user member resolved through the current module as a `SymbolSource` (`ModuleSymbols`); its
+        // DFS member walk matches `lookup_method`, so the first Member overload is the same one hand-rolled
+        // lookup would pick. Collected owned so the borrow of `syms` ends before the mutating type-checks
+        // below. MODULE (user) class members only: a classpath receiver already resolved through
+        // `resolve_instance_member` at the call site (by argument fit); querying the federated members here
+        // would arity-bind a Java member (`Iterable.forEach(Consumer)`) and reject the Kotlin lambda,
+        // shadowing the extension the classpath selectors pick.
+        let members = pick_member_overloads(
+            crate::module_symbols::ModuleSymbols::new(self.syms).instance_members(rt, name),
+            arg_tys,
+            arg_names.is_some(),
+        );
+        // The first Member overload is the most-derived override (for dispatch/return). For an
+        // OMITTED-argument call, the default may be declared on a SUPERTYPE (an interface method's default
+        // isn't redeclared on the override) — prefer an overload that records defaults so the omitted args
+        // resolve, falling back to the override.
+        let short = arg_names.is_some()
+            || members
+                .first()
+                .is_some_and(|o| arg_tys.len() != o.params.len());
+        let module_member = if short {
+            members
+                .iter()
+                .find(|o| o.call_sig.can_map_omitted_args(o.params.len()))
+                .or_else(|| members.first())
+                .cloned()
+        } else {
+            members.first().cloned()
+        };
+        let fi = module_member?;
+        let params = fi.params.clone();
+        let cs = &fi.call_sig;
+        let mut mapped_slots: Option<Vec<Option<ExprId>>> = None;
+        // Named or omitted arguments: map each argument onto its parameter position via the parameter
+        // names (honouring `required`), then type-check against THAT parameter — a NAMED call may reorder
+        // (`z.test(b = …, a = …)`), so a positional check would pair each argument with the wrong
+        // parameter. Fires for any named call, and for an omitted-argument call to a method with defaults.
+        if cs.has_param_names()
+            && (arg_names.is_some()
+                || (arg_tys.len() != params.len() && cs.required < params.len()))
+        {
+            match map_call_sig_args(args, arg_names, cs) {
+                Ok(slots) => {
+                    for (i, slot) in slots.iter().enumerate() {
+                        if let Some(a) = slot {
+                            self.expect_assignable(
+                                params[i],
+                                self.expr_types[a.0 as usize],
+                                self.span(*a),
+                                "argument",
+                            );
+                        }
+                    }
+                    mapped_slots = Some(slots);
+                }
+                Err(msg) => self.diags.error(span, format!("call to '{name}': {msg}")),
+            }
+            // Fall through to the shared return-type logic below (generic `<R>` inference /
+            // `inferred_member_ret`) rather than returning the erased `fi.callable.ret`.
+        } else if params.len() != arg_tys.len() {
+            self.diags.error(
+                span,
+                format!(
+                    "method '{name}' expects {} args, got {}",
+                    params.len(),
+                    arg_tys.len()
+                ),
+            );
+        } else {
+            // A `vararg` member (`fun f(vararg s: T)`) accepts trailing `T` args packed into the array
+            // param — element-type them, don't match the array positionally.
+            let vararg = self
+                .syms
+                .method_of_name(internal_name, name)
+                .is_some_and(|s| s.vararg);
+            self.expect_call_args(&params, vararg, args, arg_tys);
+        }
+        // A generic higher-order member: the result is the method's `<R>` inferred from the lambda body
+        // (`box.map { it.length }` → `Int`), not the erased `Object`.
+        let ret = if let Some((gm, class_binds, _)) = &self.plan_generic_member(rt, name) {
+            self.generic_member_ret(gm, class_binds, arg_tys)
+        } else {
+            self.inferred_member_ret(rt, name, &params)
+                .unwrap_or(fi.ret)
+        };
+        self.resolved_calls.insert(
+            call,
+            ResolvedCall::ModuleMember {
+                owner: fi.owner.unwrap_or(internal_name),
+                name: name.to_string(),
+                params: params.clone(),
+                ret,
+                interface: fi.is_interface,
+            },
+        );
+        if let Some(slots) = mapped_slots {
+            self.resolved_call_arg_slots.insert(call, slots);
+        }
+        Some(ret)
+    }
+
     fn check_call(&mut self, call: ExprId, callee: ExprId, args: &[ExprId], span: Span) -> Ty {
         // The called function's name (`foo` / `recv.method`) — a `Recv.() -> R` lambda argument to it
         // binds `this@<name>`, so this is the label pushed when checking any receiver-lambda argument.
@@ -13967,103 +14073,9 @@ impl<'a> Checker<'a> {
                             self.reject_if_inaccessible(vis, &name, owner, span);
                         }
                     }
-                    // The user member resolved through the current module as a `SymbolSource`
-                    // (`ModuleSymbols`); its DFS member walk matches `lookup_method`, so the first Member
-                    // overload is the same one hand-rolled lookup would pick. Collected owned so the
-                    // borrow of `syms` ends before the mutating type-checks below.
-                    // MODULE (user) class members only: a classpath receiver already resolved through
-                    // `resolve_instance_member` above (by argument fit); querying the federated members here
-                    // would arity-bind a Java member (`Iterable.forEach(Consumer)`) and reject the Kotlin
-                    // lambda, shadowing the extension the classpath selectors pick.
-                    let members = pick_member_overloads(
-                        crate::module_symbols::ModuleSymbols::new(self.syms)
-                            .instance_members(rt, &name),
-                        &arg_tys,
-                        arg_names.is_some(),
-                    );
-                    // The first Member overload is the most-derived override (for dispatch/return). For an
-                    // OMITTED-argument call, the default may be declared on a SUPERTYPE (an interface
-                    // method's default isn't redeclared on the override) — prefer an overload that records
-                    // defaults so the omitted args resolve, falling back to the override.
-                    let short = arg_names.is_some()
-                        || members
-                            .first()
-                            .is_some_and(|o| arg_tys.len() != o.params.len());
-                    let module_member = if short {
-                        members
-                            .iter()
-                            .find(|o| o.call_sig.can_map_omitted_args(o.params.len()))
-                            .or_else(|| members.first())
-                            .cloned()
-                    } else {
-                        members.first().cloned()
-                    };
-                    if let Some(fi) = module_member {
-                        let params = fi.params.clone();
-                        let cs = &fi.call_sig;
-                        let mut mapped_slots: Option<Vec<Option<ExprId>>> = None;
-                        // Named or omitted arguments: map each argument onto its parameter position via the
-                        // parameter names (honouring `required`), then type-check against THAT parameter —
-                        // a NAMED call may reorder (`z.test(b = …, a = …)`), so a positional check would
-                        // pair each argument with the wrong parameter. Fires for any named call, and for an
-                        // omitted-argument call to a method with defaults.
-                        if cs.has_param_names()
-                            && (arg_names.is_some()
-                                || (arg_tys.len() != params.len() && cs.required < params.len()))
-                        {
-                            match map_call_sig_args(args, arg_names.as_deref(), cs) {
-                                Ok(slots) => {
-                                    for (i, slot) in slots.iter().enumerate() {
-                                        if let Some(a) = slot {
-                                            self.expect_assignable(
-                                                params[i],
-                                                self.expr_types[a.0 as usize],
-                                                self.span(*a),
-                                                "argument",
-                                            );
-                                        }
-                                    }
-                                    mapped_slots = Some(slots);
-                                }
-                                Err(msg) => {
-                                    self.diags.error(span, format!("call to '{name}': {msg}"))
-                                }
-                            }
-                            // Fall through to the shared return-type logic below (generic `<R>` inference /
-                            // `inferred_member_ret`) rather than returning the erased `fi.callable.ret`.
-                        } else if params.len() != arg_tys.len() {
-                            self.diags.error(
-                                span,
-                                format!(
-                                    "method '{name}' expects {} args, got {}",
-                                    params.len(),
-                                    arg_tys.len()
-                                ),
-                            );
-                        } else {
-                            self.expect_call_args(&params, false, args, &arg_tys);
-                        }
-                        // A generic higher-order member: the result is the method's `<R>` inferred from
-                        // the lambda body (`box.map { it.length }` → `Int`), not the erased `Object`.
-                        let ret = if let Some((gm, class_binds, _)) = &generic_member {
-                            self.generic_member_ret(gm, class_binds, &arg_tys)
-                        } else {
-                            self.inferred_member_ret(rt, &name, &params)
-                                .unwrap_or(fi.ret)
-                        };
-                        self.resolved_calls.insert(
-                            call,
-                            ResolvedCall::ModuleMember {
-                                owner: fi.owner.unwrap_or(internal_name),
-                                name: name.clone(),
-                                params: params.clone(),
-                                ret,
-                                interface: fi.is_interface,
-                            },
-                        );
-                        if let Some(slots) = mapped_slots {
-                            self.resolved_call_arg_slots.insert(call, slots);
-                        }
+                    if let Some(ret) =
+                        self.check_module_member_call(call, rt, &name, args, &arg_tys, span)
+                    {
                         return ret;
                     }
                     // A classpath Java object: resolve the instance method via the `.class` reader.
@@ -15290,41 +15302,34 @@ impl<'a> Checker<'a> {
                 if !self.module_declares(&fname) {
                     if let Some(Ty::Obj(internal, _)) = self.this_ty {
                         let internal_rendered = internal.render();
-                        // The sibling member through the module source; the enclosing-class fallback walks
-                        // `inner_of` (a LEXICAL scope, not the type hierarchy) so it stays on `lookup_method`.
-                        let resolved: Option<(Vec<Ty>, Ty)> =
-                            crate::module_symbols::ModuleSymbols::new(self.syms)
-                                .instance_members(Ty::obj_name(internal), &fname)
-                                .into_iter()
-                                .next()
-                                .map(|m| (m.params, m.ret))
-                                .or_else(|| {
-                                    self.syms
-                                        .class_by_type_name(internal)
-                                        .and_then(ClassSig::inner_of_name)
-                                        .and_then(|outer| self.lookup_method_name(outer, &fname))
-                                        .map(|s| (s.params, s.ret))
-                                });
                         crate::trace_compiler!(
                             "resolve",
-                            "unqualified sibling call {fname}() on this_ty={internal_rendered} -> {resolved:?}"
+                            "unqualified sibling call {fname}() on this_ty={internal_rendered}"
                         );
-                        if let Some((params, ret)) = resolved {
-                            // A `vararg` sibling method (`fun f(vararg s: T)`) accepts trailing `T` args
-                            // packed into the array param — element-type them, don't match the array
-                            // positionally.
-                            let vararg = self
-                                .syms
-                                .method_of_name(internal, &fname)
-                                .is_some_and(|s| s.vararg);
-                            self.expect_call_args(&params, vararg, args, &arg_tys);
-                            // An EXPRESSION-body sibling method whose declared return was the collection
-                            // default (`Unit`, not yet inferred) — refine from the inference recorded when
-                            // its body was checked (an anonymous object / local class whose `fun m() = f()`
-                            // return couldn't be inferred at collection). Matches the qualified-member path.
-                            return self
-                                .inferred_member_ret(Ty::obj_name(internal), &fname, &params)
-                                .unwrap_or(ret);
+                        // `foo()` is only sugar for `this.foo()`, so resolve it through the SAME
+                        // module-member path the qualified call uses — that is what maps NAMED/OMITTED
+                        // arguments onto their parameters and records `resolved_call_arg_slots`. Reducing
+                        // the member to `(params, ret)` and zipping positionally (as this did) bound
+                        // `copy(resources = x)`'s argument to the FIRST parameter.
+                        //
+                        // Inside an inner class an unqualified call may instead target an ENCLOSING class's
+                        // method (`this.this$0.foo()`) — a LEXICAL scope, not the type hierarchy — so retry
+                        // against `inner_of`.
+                        let outer = self
+                            .syms
+                            .class_by_type_name(internal)
+                            .and_then(ClassSig::inner_of_name);
+                        for recv in std::iter::once(internal).chain(outer) {
+                            if let Some(ret) = self.check_module_member_call(
+                                call,
+                                Ty::obj_name(recv),
+                                &fname,
+                                args,
+                                &arg_tys,
+                                span,
+                            ) {
+                                return ret;
+                            }
                         }
                     } else {
                         crate::trace_compiler!(
