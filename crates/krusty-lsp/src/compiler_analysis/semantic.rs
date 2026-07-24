@@ -202,7 +202,6 @@ impl HighlightSymbols {
                 MemberHighlight {
                     kind: HighlightKind::EnumMember,
                     modifiers: HighlightModifiers::READONLY
-                        | HighlightModifiers::STATIC
                         | if is_deprecated(&entry.annotations) {
                             HighlightModifiers::DEPRECATED
                         } else {
@@ -483,7 +482,6 @@ impl<'a> SemanticClassifier<'a> {
                 entry.span,
                 HighlightKind::EnumMember,
                 HighlightModifiers::DECLARATION
-                    | HighlightModifiers::STATIC
                     | HighlightModifiers::READONLY
                     | if is_deprecated(&entry.annotations) {
                         HighlightModifiers::DEPRECATED
@@ -560,7 +558,7 @@ impl<'a> SemanticClassifier<'a> {
     }
 
     fn mark_constructor_parameter(&mut self, scope: Span, parameter: &PropParam) {
-        let (kind, value_modifiers) = if parameter.is_property {
+        let (reference_kind, value_modifiers) = if parameter.is_property {
             (HighlightKind::Property, variable_modifier(parameter.is_var))
         } else {
             (HighlightKind::Parameter, HighlightModifiers::READONLY)
@@ -572,14 +570,24 @@ impl<'a> SemanticClassifier<'a> {
         };
         self.mark_exact(
             parameter.span,
-            kind,
-            HighlightModifiers::DECLARATION | value_modifiers | deprecated,
+            // The official Kotlin LSP highlights every primary-constructor declaration as a
+            // readonly parameter, including a mutable `var` property parameter. References still
+            // resolve as properties below, preserving member highlighting (`user.name`) and
+            // property mutability.
+            HighlightKind::Parameter,
+            HighlightModifiers::DECLARATION | HighlightModifiers::READONLY | deprecated,
         );
         if parameter.is_property {
             self.properties
                 .insert(parameter.name.clone(), value_modifiers);
         }
-        self.add_binding(&parameter.name, scope, scope.lo, kind, value_modifiers);
+        self.add_binding(
+            &parameter.name,
+            scope,
+            scope.lo,
+            reference_kind,
+            value_modifiers,
+        );
         self.mark_type(&parameter.ty);
     }
 

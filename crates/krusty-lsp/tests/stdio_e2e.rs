@@ -56,10 +56,10 @@ fn stdio_server_uses_the_compiler_worker_and_exits_cleanly() {
     assert!(child.wait().unwrap().success());
     assert_eq!(output[0]["id"], 1);
     assert_eq!(output[1]["method"], "textDocument/publishDiagnostics");
-    assert!(output[1]["params"]["diagnostics"][0]["message"]
-        .as_str()
-        .unwrap()
-        .contains("return type mismatch"));
+    assert_eq!(
+        output[1]["params"]["diagnostics"][0]["message"],
+        "Return type mismatch: expected 'Int', actual 'String'."
+    );
     assert_eq!(output[2]["id"], 2);
     assert!(output[2]["result"]["items"]
         .as_array()

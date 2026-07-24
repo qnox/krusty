@@ -5,6 +5,7 @@
 //! test suite: it is large, platform-specific, and released independently from krusty.
 
 use std::io::{BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
@@ -12,7 +13,64 @@ use std::time::{Duration, Instant};
 use krusty_lsp::{read_framed, write_framed, MAX_MESSAGE_BYTES};
 use serde_json::{json, Value};
 
-const TIMEOUT: Duration = Duration::from_secs(120);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn reference_version_key(version: &str) -> [u32; 3] {
+    let mut parts = version.split('.');
+    let key = [
+        parts.next().and_then(|part| part.parse().ok()),
+        parts.next().and_then(|part| part.parse().ok()),
+        parts.next().and_then(|part| part.parse().ok()),
+    ];
+    assert!(
+        parts.next().is_none() && key.iter().all(Option::is_some),
+        "invalid reference version {version:?} in kotlin-versions"
+    );
+    key.map(Option::unwrap)
+}
+
+fn reference_kotlin_version_from(manifest: &str) -> &str {
+    manifest
+        .lines()
+        .filter_map(|line| {
+            let line = line.split('#').next()?.trim();
+            if line.is_empty() {
+                None
+            } else {
+                line.split_whitespace().next()
+            }
+        })
+        .max_by_key(|version| reference_version_key(version))
+        .expect("kotlin-versions must contain a reference version")
+}
+
+fn reference_kotlin_version() -> &'static str {
+    reference_kotlin_version_from(include_str!("../../../kotlin-versions"))
+}
+
+struct TempProject {
+    root: PathBuf,
+}
+
+impl TempProject {
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!("krusty_lsp_diff_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        Self { root }
+    }
+
+    fn path(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl Drop for TempProject {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
 
 struct SemanticLegend {
     types: Vec<String>,
@@ -24,6 +82,7 @@ struct LspProcess {
     stdin: ChildStdin,
     messages: Receiver<Value>,
     pending: Vec<Value>,
+    next_request_id: i64,
 }
 
 impl LspProcess {
@@ -54,6 +113,7 @@ impl LspProcess {
             stdin,
             messages,
             pending: Vec::new(),
+            next_request_id: 2,
         }
     }
 
@@ -108,11 +168,19 @@ impl LspProcess {
             "method": method,
             "params": params,
         }));
-        self.receive_until(Instant::now() + TIMEOUT, |message| message["id"] == id)
+        self.receive_until(Instant::now() + REQUEST_TIMEOUT, |message| {
+            message["id"] == id
+        })
     }
 
     fn notify(&mut self, method: &str, params: Value) {
         self.send(json!({"jsonrpc": "2.0", "method": method, "params": params}));
+    }
+
+    fn next_request_id(&mut self) -> i64 {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        id
     }
 
     fn initialize(&mut self, root_uri: &str) -> SemanticLegend {
@@ -182,8 +250,8 @@ impl LspProcess {
             }),
         );
 
-        let deadline = Instant::now() + TIMEOUT;
-        let mut request_id = 10;
+        // The first opt-in run may need to download Gradle and import/index a cold project.
+        let deadline = Instant::now() + ANALYSIS_TIMEOUT;
         loop {
             if let Some(index) = self.pending.iter().position(|message| {
                 message["method"] == "textDocument/publishDiagnostics"
@@ -198,12 +266,12 @@ impl LspProcess {
                     .clone();
             }
 
+            let request_id = self.next_request_id();
             let response = self.request(
                 request_id,
                 "textDocument/diagnostic",
                 json!({"textDocument": {"uri": uri}}),
             );
-            request_id += 1;
             if let Some(items) = response["result"]["items"].as_array() {
                 if !items.is_empty() {
                     return items.clone();
@@ -229,8 +297,9 @@ impl LspProcess {
                 }
             }),
         );
+        let request_id = self.next_request_id();
         let response = self.request(
-            2,
+            request_id,
             "textDocument/semanticTokens/full",
             json!({"textDocument": {"uri": uri}}),
         );
@@ -295,39 +364,120 @@ fn normalized_diagnostics(diagnostics: Vec<Value>) -> Vec<Value> {
 }
 
 #[test]
+fn reference_version_selection_is_semantic_and_order_independent() {
+    let manifest = "2.10.0 newer\n# ignored\n2.9.9 older\n";
+    assert_eq!(reference_kotlin_version_from(manifest), "2.10.0");
+}
+
+#[test]
 fn diagnostics_and_semantic_tokens_match_official_kotlin_lsp() {
     let Ok(kotlin_lsp) = std::env::var("KRUSTY_KOTLIN_LSP") else {
         eprintln!("skipping Kotlin LSP differential: set KRUSTY_KOTLIN_LSP");
         return;
     };
 
-    let root = std::env::temp_dir().join(format!("krusty_lsp_diff_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
-    let diagnostic_path = root.join("Diagnostic.kt");
-    let diagnostic_source = "fun box(): String = 1\n";
-    std::fs::write(&diagnostic_path, diagnostic_source).unwrap();
-    let tokens_path = root.join("Tokens.kt");
-    let tokens_source =
-        "data class User(val name: String)\nfun greet(user: User): String = user.name\n";
-    std::fs::write(&tokens_path, tokens_source).unwrap();
+    let project = TempProject::new();
+    let root = project.path();
+    let source_root = root.join("src/main/kotlin");
+    std::fs::create_dir_all(&source_root).unwrap();
+    std::fs::write(
+        root.join("settings.gradle"),
+        "rootProject.name = 'krusty-lsp-diff'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("build.gradle"),
+        format!(
+            "plugins {{ id 'org.jetbrains.kotlin.jvm' version '{}' }}\n\
+             repositories {{ mavenCentral() }}\n",
+            reference_kotlin_version()
+        ),
+    )
+    .unwrap();
+    let diagnostic_cases = [
+        ("ReturnType.kt", "fun returnMismatch(): String = 1\n"),
+        (
+            "Unresolved.kt",
+            "fun unresolvedValue(): Int = missingValue\n",
+        ),
+        (
+            "ArgumentType.kt",
+            "fun needsInt(value: Int): Int = value\n\
+             fun argumentMismatch(): Int = needsInt(\"wrong\")\n",
+        ),
+        (
+            "ConditionType.kt",
+            "fun conditionMismatch(): Int { if (1) return 1; return 0 }\n",
+        ),
+    ];
+    let token_cases = [
+        (
+            "BasicTokens.kt",
+            "data class User(val name: String)\n\
+             fun greet(user: User): String = user.name\n",
+        ),
+        (
+            "MemberTokens.kt",
+            "enum class Shade { RED }\n\
+             class Holder(var mutable: Int, val fixed: Int)\n\
+             fun paint(holder: Holder): Shade {\n\
+                 holder.mutable = holder.fixed\n\
+                 return Shade.RED\n\
+             }\n",
+        ),
+    ];
+    for (name, source) in diagnostic_cases.iter().chain(&token_cases) {
+        std::fs::write(source_root.join(name), source).unwrap();
+    }
     let root_uri = format!("file://{}", root.display());
-    let diagnostic_uri = format!("file://{}", diagnostic_path.display());
-    let tokens_uri = format!("file://{}", tokens_path.display());
 
     let mut reference = LspProcess::spawn(&kotlin_lsp, &["--stdio"]);
     let reference_legend = reference.initialize(&root_uri);
-    let expected_diagnostics =
-        normalized_diagnostics(reference.diagnostics(&diagnostic_uri, diagnostic_source));
-    let expected_tokens = reference.semantic_tokens(&tokens_uri, tokens_source, &reference_legend);
+    let expected_diagnostics = diagnostic_cases
+        .iter()
+        .map(|(name, source)| {
+            let uri = format!("file://{}", source_root.join(name).display());
+            normalized_diagnostics(reference.diagnostics(&uri, source))
+        })
+        .collect::<Vec<_>>();
+    let expected_tokens = token_cases
+        .iter()
+        .map(|(name, source)| {
+            let uri = format!("file://{}", source_root.join(name).display());
+            reference.semantic_tokens(&uri, source, &reference_legend)
+        })
+        .collect::<Vec<_>>();
+    // The official server uses a multi-gigabyte IntelliJ process. Tear it down before starting
+    // krusty so the opt-in differential does not retain both servers at peak memory.
+    drop(reference);
 
     let mut krusty = LspProcess::spawn(env!("CARGO_BIN_EXE_krusty-lsp"), &["--stdio", "-no-jdk"]);
     let krusty_legend = krusty.initialize(&root_uri);
-    let actual_diagnostics =
-        normalized_diagnostics(krusty.diagnostics(&diagnostic_uri, diagnostic_source));
-    let actual_tokens = krusty.semantic_tokens(&tokens_uri, tokens_source, &krusty_legend);
+    let actual_diagnostics = diagnostic_cases
+        .iter()
+        .map(|(name, source)| {
+            let uri = format!("file://{}", source_root.join(name).display());
+            normalized_diagnostics(krusty.diagnostics(&uri, source))
+        })
+        .collect::<Vec<_>>();
+    let actual_tokens = token_cases
+        .iter()
+        .map(|(name, source)| {
+            let uri = format!("file://{}", source_root.join(name).display());
+            krusty.semantic_tokens(&uri, source, &krusty_legend)
+        })
+        .collect::<Vec<_>>();
 
-    let _ = std::fs::remove_dir_all(&root);
-    assert_eq!(actual_diagnostics, expected_diagnostics);
-    assert_eq!(actual_tokens, expected_tokens);
+    for ((name, _), (actual, expected)) in diagnostic_cases
+        .iter()
+        .zip(actual_diagnostics.iter().zip(&expected_diagnostics))
+    {
+        assert_eq!(actual, expected, "diagnostic mismatch for {name}");
+    }
+    for ((name, _), (actual, expected)) in token_cases
+        .iter()
+        .zip(actual_tokens.iter().zip(&expected_tokens))
+    {
+        assert_eq!(actual, expected, "semantic-token mismatch for {name}");
+    }
 }

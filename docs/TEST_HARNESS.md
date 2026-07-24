@@ -21,11 +21,13 @@ The LSP crate also has an opt-in protocol differential against JetBrains' offici
 compares normalized diagnostic ranges, severity, source, and messages, plus decoded semantic-token
 types and modifiers, rather than raw protocol token indexes whose legends can differ. Point the
 environment variable at an installed official launcher; the regular suite does not download the
-roughly 400 MB, platform-specific distribution:
+roughly 400 MB, platform-specific distribution. The differential creates a minimal Gradle project
+using the highest version in `kotlin-versions`, because current official servers do not analyze loose
+source files without a workspace model:
 
 ```sh
-KRUSTY_KOTLIN_LSP=/path/to/kotlin-lsp.sh \
-cargo test --profile gate -p krusty-lsp --test kotlin_lsp_diff -- --nocapture
+KRUSTY_KOTLIN_LSP=/path/to/bin/intellij-server \
+./run-tests.sh -p krusty-lsp --test kotlin_lsp_diff -- --nocapture
 ```
 
 The compiler diagnostic differential uses the provisioned kotlinc and compares each first error's

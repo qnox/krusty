@@ -656,10 +656,10 @@ mod tests {
         .unwrap();
         assert_eq!(initialize["id"], 1);
         assert_eq!(diagnostics["params"]["version"], 7);
-        assert!(diagnostics["params"]["diagnostics"][0]["message"]
-            .as_str()
-            .unwrap()
-            .contains("return type mismatch"));
+        assert_eq!(
+            diagnostics["params"]["diagnostics"][0]["message"],
+            "Return type mismatch: expected 'Int', actual 'String'."
+        );
         assert_eq!(shutdown["id"], 2);
         assert!(read_framed(&mut output, MAX_MESSAGE_BYTES)
             .unwrap()
