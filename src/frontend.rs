@@ -5,6 +5,7 @@
 use crate::ast::File;
 use crate::diag::DiagSink;
 use crate::features::LangFeatures;
+pub use crate::lexer::{NameToken as FrontendNameToken, NameTokenKind as FrontendNameTokenKind};
 use crate::libraries::{EmptySymbolSource, SemanticPlatform};
 pub(crate) use crate::resolve::ClassSig as FrontendClassSig;
 pub use crate::resolve::SymbolTable as FrontendSymbols;
@@ -294,6 +295,12 @@ impl CopyExpr {
 pub fn parse_source(src: &str, features: &LangFeatures, diags: &mut DiagSink) -> File {
     let tokens = crate::lexer::lex(src, diags);
     crate::parser::parse_with_features(src, &tokens, diags, features)
+}
+
+/// Tokenize only source names and the separators needed to interpret their declaration/reference
+/// context. Process adapters use this frontend entry point rather than depending on lexer internals.
+pub fn lex_name_tokens(src: &str, diags: &mut DiagSink) -> Vec<FrontendNameToken> {
+    crate::lexer::lex_name_tokens(src, diags)
 }
 
 /// Lex and parse one source string after reading language-feature directives from the source.

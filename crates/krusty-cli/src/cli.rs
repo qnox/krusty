@@ -3,9 +3,10 @@
 //! `-version`, `-help`, …), source files **or directories**, `@argfile`s, and graceful handling of
 //! options krusty doesn't implement (ignored with a note, rather than treated as source files).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use crate::features::LangFeatures;
+use krusty::features::LangFeatures;
+use krusty::jvm::classpath::platform_jdk_modules;
 
 pub struct Options {
     /// Output directory or `.jar` (kotlinc `-d`).
@@ -197,23 +198,12 @@ impl Options {
     pub fn effective_classpath(&self) -> Vec<PathBuf> {
         let mut cp = self.classpath.clone();
         if !self.no_jdk {
-            if let Some(modules) = default_jdk_modules(self.jdk_home.as_deref()) {
+            if let Some(modules) = platform_jdk_modules(self.jdk_home.as_deref()) {
                 cp.push(modules);
             }
         }
         cp
     }
-}
-
-/// The platform JDK's `lib/modules` jimage (the `java.base` bootclasspath), from `-jdk-home` or
-/// `$JAVA_HOME`. `None` when neither is set or the file is absent (so a bad env is a no-op, not a
-/// hard error). krusty has no embedded JVM, so it relies on these rather than its own `java.home`.
-fn default_jdk_modules(jdk_home: Option<&Path>) -> Option<PathBuf> {
-    let base = jdk_home
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("JAVA_HOME").map(PathBuf::from))?;
-    let modules = base.join("lib").join("modules");
-    modules.is_file().then_some(modules)
 }
 
 /// krusty's release version. Injected at build time via the `KRUSTY_VERSION` env var; the `just`

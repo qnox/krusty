@@ -760,7 +760,7 @@ fn diff_refs() -> Option<&'static std::collections::HashMap<String, (String, Str
                 return None;
             }
             // krusty — one invocation for every case.
-            let kc = Command::new(env!("CARGO_BIN_EXE_krusty"))
+            let kc = Command::new(common::krusty_binary())
                 .args(["-d", krout.to_str().unwrap()])
                 .args(&files)
                 .output()

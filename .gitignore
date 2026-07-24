@@ -1,4 +1,5 @@
 target/
+dist/
 krusty-out/
 docs/badges/
 # LLVM source-based coverage counter dumps (see scripts/coverage.sh); can land in the tree root if a

@@ -11,6 +11,50 @@ use std::time::{Duration, Instant};
 
 use krusty::jvm::classpath::Classpath;
 
+/// Locate the batch CLI built from the separate `krusty-cli` workspace package.
+///
+/// The canonical test runner builds it before starting the suite. A direct `cargo test -p krusty`
+/// may not, so build it once on demand in the test profile rather than coupling the compiler crate
+/// back to the executable package.
+#[allow(dead_code)]
+pub fn krusty_binary() -> PathBuf {
+    static BINARY: OnceLock<PathBuf> = OnceLock::new();
+    BINARY
+        .get_or_init(|| {
+            if let Some(path) = std::env::var_os("KRUSTY_BIN") {
+                return PathBuf::from(path);
+            }
+
+            let current = std::env::current_exe().expect("locate current test executable");
+            let profile_dir = current
+                .parent()
+                .and_then(Path::parent)
+                .expect("test executable must be under target/<profile>/deps");
+            let binary = profile_dir.join(format!("krusty{}", std::env::consts::EXE_SUFFIX));
+            let profile = profile_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("target profile directory must be UTF-8");
+            let mut build = Command::new(env!("CARGO"));
+            build.args(["build", "-p", "krusty-cli"]);
+            if profile != "debug" {
+                build.args(["--profile", profile]);
+            }
+            let status = build
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .status()
+                .expect("build krusty-cli");
+            assert!(status.success(), "failed to build krusty-cli");
+            assert!(
+                binary.is_file(),
+                "krusty-cli did not produce {}",
+                binary.display()
+            );
+            binary
+        })
+        .clone()
+}
+
 /// Make a spawned child receive `SIGKILL` when THIS test process dies, so a persistent JVM runner is
 /// killed at teardown (clean exit OR the gate SIGKILL-ing the binary) instead of orphaning ~1 GB.
 /// Linux `PR_SET_PDEATHSIG`; a no-op elsewhere. MUST be paired with [`spawn_owned`]: on Linux the

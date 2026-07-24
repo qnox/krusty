@@ -156,9 +156,7 @@ fn runtime_jars() -> Option<(PathBuf, PathBuf, PathBuf)> {
 }
 
 fn krusty_binary() -> PathBuf {
-    option_env!("CARGO_BIN_EXE_krusty")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/krusty"))
+    common::krusty_binary()
 }
 
 /// Compile `src` with the krusty binary against `cp`; returns (ok, stderr).

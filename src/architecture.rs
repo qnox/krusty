@@ -39,8 +39,70 @@ mod tests {
     }
 
     #[test]
-    fn lsp_facade_uses_only_frontend_analysis_dependencies() {
-        assert_allowed_crate_modules("src/lsp.rs", &["ast", "diag", "frontend", "libraries"]);
+    fn lsp_compiler_analysis_uses_only_frontend_dependencies() {
+        assert_allowed_external_crate_modules_in_tree(
+            "crates/krusty-lsp/src/compiler_analysis",
+            &["ast", "diag", "frontend", "libraries", "types"],
+        );
+        assert_allowed_external_crate_modules_in_file(
+            Path::new("crates/krusty-lsp/src/compiler_analysis.rs"),
+            &["ast", "diag", "frontend", "libraries", "types"],
+        );
+    }
+
+    #[test]
+    fn compiler_library_has_no_command_line_layer() {
+        assert!(
+            !Path::new("src/cli.rs").exists(),
+            "batch command-line parsing belongs to the krusty-cli package"
+        );
+        let library = fs::read_to_string("src/lib.rs").expect("read compiler library root");
+        assert!(
+            !library.lines().any(|line| line.trim() == "pub mod cli;"),
+            "the compiler library must not export batch CLI policy"
+        );
+    }
+
+    #[test]
+    fn compiler_cli_uses_only_public_compiler_layers() {
+        assert_allowed_external_crate_modules_in_tree(
+            "crates/krusty-cli/src",
+            &["compiler", "diag", "features", "frontend", "jvm"],
+        );
+    }
+
+    #[test]
+    fn lsp_server_crate_uses_only_public_compiler_layers() {
+        for path in rust_files_under("crates/krusty-lsp/src") {
+            if path.ends_with("compiler_analysis.rs")
+                || path
+                    .components()
+                    .any(|component| component.as_os_str() == "compiler_analysis")
+            {
+                continue;
+            }
+            assert_allowed_external_crate_modules_in_file(
+                &path,
+                &["analysis", "diag", "jvm", "types"],
+            );
+        }
+    }
+
+    #[test]
+    fn production_lsp_isolates_compiler_analysis_in_a_bounded_worker() {
+        let main =
+            fs::read_to_string("crates/krusty-lsp/src/main.rs").expect("read LSP executable");
+        assert!(main.contains("AnalysisWorker::spawn"));
+        assert!(
+            !main.contains("compiler_analysis::"),
+            "the long-lived LSP supervisor must not run compiler analysis directly"
+        );
+        let worker =
+            fs::read_to_string("crates/krusty-lsp/src/worker.rs").expect("read LSP worker");
+        assert!(worker.contains("DEFAULT_ANALYSES_PER_WORKER"));
+        assert!(worker.contains("self.analyses >= self.max_analyses"));
+        assert!(worker.contains("ANALYSIS_TIMEOUT"));
+        assert!(worker.contains("MAX_SOURCE_SET_BYTES"));
     }
 
     #[test]

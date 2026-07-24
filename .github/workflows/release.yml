@@ -20,7 +20,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Build + package one binary per OS/arch target.
+  # Build + package the compiler and LSP executables for each OS/arch target.
   build:
     strategy:
       fail-fast: false
@@ -28,8 +28,10 @@ jobs:
         target:
           - { triple: x86_64-unknown-linux-gnu,  os: ubuntu-latest }
           - { triple: aarch64-unknown-linux-gnu, os: ubuntu-latest, cross: true }
-          - { triple: aarch64-apple-darwin,      os: macos-14 }
-          - { triple: x86_64-pc-windows-msvc,    os: windows-latest }
+          - { triple: aarch64-apple-darwin,      os: macos-15 }
+          - { triple: x86_64-apple-darwin,       os: macos-15-intel }
+          - { triple: x86_64-pc-windows-msvc,   os: windows-latest }
+          - { triple: aarch64-pc-windows-msvc,  os: windows-11-arm }
     runs-on: ${{ matrix.target.os }}
     steps:
       - uses: actions/checkout@v7
@@ -51,14 +53,20 @@ jobs:
       - name: build
         shell: bash
         run: just build-release "${{ matrix.target.triple }}"
-      - name: package
-        id: pkg
+      - name: package compiler
+        id: compiler_pkg
         shell: bash
         run: echo "path=$(just package "${{ matrix.target.triple }}")" >> "$GITHUB_OUTPUT"
+      - name: package language server
+        id: lsp_pkg
+        shell: bash
+        run: echo "path=$(just package "${{ matrix.target.triple }}" krusty-lsp)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
         with:
           name: krusty-${{ matrix.target.triple }}
-          path: ${{ steps.pkg.outputs.path }}
+          path: |
+            ${{ steps.compiler_pkg.outputs.path }}
+            ${{ steps.lsp_pkg.outputs.path }}
           if-no-files-found: error
 
   # Publish a single GitHub release with every target's binary attached.

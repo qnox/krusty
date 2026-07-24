@@ -26,12 +26,12 @@ fn krusty_compile(name: &str, src: &str) -> Option<(std::path::PathBuf, String)>
     if !std::path::Path::new(&format!("{jh}/bin/javap")).exists() {
         return None;
     }
-    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_susp_{name}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("S.kt"), src).unwrap();
-    let out = Command::new(krusty)
+    let out = Command::new(&krusty)
         .args(["-d", dir.to_str().unwrap()])
         .arg(dir.join("S.kt"))
         .output()
@@ -114,14 +114,14 @@ fn krusty_compiled_suspend_dep_is_consumable() {
     let Some(stdlib) = stdlib_jar() else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_susp_rt_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     let lib = dir.join("lib");
     fs::create_dir_all(&lib).unwrap();
     // 1) krusty compiles the suspend lib (emits @Metadata).
     fs::write(dir.join("Lib.kt"), "suspend fun helper(): Int = 42\n").unwrap();
-    let kl = Command::new(krusty)
+    let kl = Command::new(&krusty)
         .args(["-cp", &stdlib, "-d", lib.to_str().unwrap()])
         .arg(dir.join("Lib.kt"))
         .output()
@@ -138,7 +138,7 @@ fn krusty_compiled_suspend_dep_is_consumable() {
     )
     .unwrap();
     let cp_compile = format!("{}:{}", lib.to_str().unwrap(), stdlib);
-    let ku = Command::new(krusty)
+    let ku = Command::new(&krusty)
         .args(["-cp", &cp_compile, "-d", dir.to_str().unwrap()])
         .arg(dir.join("Use.kt"))
         .output()
@@ -1287,13 +1287,13 @@ fn run_suspend_2(name: &str, lib: &str, user: &str, facade: &str, method: &str, 
     let Some(stdlib) = stdlib_jar() else {
         return;
     };
-    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_susp_{name}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("Lib.kt"), lib).unwrap();
     fs::write(dir.join("Use.kt"), user).unwrap();
-    let kc = Command::new(krusty)
+    let kc = Command::new(&krusty)
         .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
         .arg(dir.join("Lib.kt"))
         .arg(dir.join("Use.kt"))

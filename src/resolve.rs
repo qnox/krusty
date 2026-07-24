@@ -4791,6 +4791,21 @@ impl DelegateGetValueTarget {
 }
 
 impl TypeInfo {
+    /// Whether a checked call selected a class/object member rather than a top-level, extension, or
+    /// local function. Process adapters use this semantic distinction without depending on the
+    /// resolver's internal target representation.
+    pub fn resolved_call_is_member(&self, e: ExprId) -> bool {
+        matches!(
+            self.resolved_calls.get(&e),
+            Some(
+                ResolvedCall::Member(_)
+                    | ResolvedCall::Companion(_)
+                    | ResolvedCall::ModuleMember { .. }
+                    | ResolvedCall::LambdaReturnMember(_)
+            )
+        )
+    }
+
     /// The resolved classpath instance member at call `e`, if the checker recorded one.
     pub fn resolved_member(&self, e: ExprId) -> Option<&crate::symbol_resolver::ResolvedMember> {
         match self.resolved_calls.get(&e) {

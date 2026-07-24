@@ -1,0 +1,13 @@
+[package]
+name = "krusty-cli"
+version = "0.0.1"
+edition = "2021"
+description = "kotlinc-compatible batch command-line driver for the krusty compiler"
+
+[dependencies]
+krusty = { path = "../.." }
+zip = { version = "8", default-features = false, features = ["deflate"] }
+
+[[bin]]
+name = "krusty"
+path = "src/main.rs"

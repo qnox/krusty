@@ -196,7 +196,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   lambdas; facade `@Metadata` already encodes class-typed top-level function params.
 
 ## Phase 9 — kotlinc drop-in CLI  ✅
-- ✅ `src/cli.rs`: kotlinc-compatible argument parsing — `-d`, `-classpath`/`-cp`/`-class-path`,
+- ✅ `crates/krusty-cli/src/cli.rs`: kotlinc-compatible argument parsing — `-d`,
+  `-classpath`/`-cp`/`-class-path`,
   `-module-name`, `-version`, `-help`, plus a table of accepted-but-ignored flags (with/without a
   value: `-include-runtime`, `-jvm-target`, `-no-stdlib`, `-language-version`, …). Unknown `-flags`
   are ignored with a note (never mistaken for sources). `@argfile`s expand inline.
@@ -3994,3 +3995,30 @@ per-jar/multi-module setups are just more sources.
 - Keep the AST/IR **index-based** (no `Box`/`Rc` graphs) — that's the experiment.
 - Record every Kotlin-semantics decision (overflow, division, concat order) in SPEC §7 with a test.
 - The harness is the source of truth for "correct"; don't claim a feature works without a diff test.
+
+## Phase 477 — official-Kotlin-LSP semantic highlighting  ✅
+
+- Advertise the official LSP 3.17 semantic-token legend and serve both
+  `textDocument/semanticTokens/full` and `textDocument/semanticTokens/range`, matching the official
+  Kotlin LSP surface.
+- Classify Kotlin declarations and references from the checked frontend as namespaces, classes,
+  enums, interfaces, data-class structs, objects/types, type parameters, value parameters,
+  variables, properties, enum members, functions, methods, and decorators. Preserve the official
+  operator category and declaration/readonly/static/deprecated/abstract/async/modification/
+  default-library modifiers. Resolve terminal import symbols and type aliases to their semantic
+  category, select local/parameter/type-parameter references from lexical scopes, and classify
+  qualified properties, enum entries, methods, operators, and callable references from their
+  checked receiver type instead of from a file-global spelling. Build source-only class/member flags
+  once for the whole open source set so `data`, `operator`, and deprecation survive cross-file use.
+- Keep editor requests allocation- and analysis-light: the worker performs a reduced name-token lex
+  (identifiers and the few separators needed for classification), converts positions to UTF-16 in
+  one ascending pass, and serializes 16-byte compact entries. The supervisor caches only this
+  snapshot; its worker representation uses packed JSON arrays, while range requests binary-search,
+  intersection-filter, and delta-encode it without rescanning the document.
+- TDD covers official data-class/property/function classification, range rebasing, capability
+  negotiation, intersecting range rebasing, lexical shadowing, imports, aliases, operators,
+  deprecation, member resolution, compact worker serialization, the bounded worker wire round trip,
+  cross-file semantic metadata, and the reduced lexer.
+- Fixed the workspace-extraction coverage regression at the same gate: coverage now builds
+  `krusty-cli` once and injects `KRUSTY_BIN`, instead of each instrumented e2e process attempting a
+  nested Cargo build under coverage flags.

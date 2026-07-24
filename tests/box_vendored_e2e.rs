@@ -64,7 +64,7 @@ fn vendored_kotlin_box_cases_return_ok() {
             "kotlin-stdlib jar not found — box cases need it on the runtime classpath. \
              Provision the reference compiler with `just kotlinc`. Refusing to skip.",
         );
-    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let krusty = common::krusty_binary();
     let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/box_data");
     let work = std::env::temp_dir().join(format!("krusty_vbox_{}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
@@ -118,7 +118,7 @@ public class BoxRun {
     for (i, kt) in cases.iter().enumerate() {
         let out = work.join(format!("o{i}"));
         fs::create_dir_all(&out).unwrap();
-        let kc = Command::new(krusty)
+        let kc = Command::new(&krusty)
             .args(["-d", out.to_str().unwrap()])
             .arg(kt)
             .output()

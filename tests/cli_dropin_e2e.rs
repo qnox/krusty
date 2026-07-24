@@ -12,7 +12,7 @@ fn env(k: &str) -> Option<String> {
 
 #[test]
 fn compiles_directory_to_jar_consumable_by_kotlinc() {
-    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let krusty = common::krusty_binary();
 
     let root = std::env::temp_dir().join(format!("krusty_cli_{}", std::process::id()));
     let src = root.join("src/demo");
@@ -31,7 +31,7 @@ fn compiles_directory_to_jar_consumable_by_kotlinc() {
 
     let jar = root.join("mylib.jar");
     // kotlinc-style invocation: unsupported flags, a module name, a source *directory*, jar output.
-    let out = Command::new(krusty)
+    let out = Command::new(&krusty)
         .args([
             "-include-runtime",
             "-jvm-target",
@@ -131,7 +131,7 @@ fn cross_file_top_level_function_and_property() {
         return;
     };
     let stdlib = stdlib.to_str().unwrap().to_string();
-    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_xfile_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -145,7 +145,7 @@ fn cross_file_top_level_function_and_property() {
         "fun box(): String {\n  if (helper(21) != 42) return \"f1\"\n  if (tag(\"hi\") != \"hi!\") return \"f2\"\n  if (GREETING != \"hi\") return \"f3\"\n  counter = counter + 5\n  if (counter != 15) return \"f4: $counter\"\n  return \"OK\"\n}\n",
     )
     .unwrap();
-    let kc = Command::new(krusty)
+    let kc = Command::new(&krusty)
         .args(["-d", dir.to_str().unwrap()])
         .arg(dir.join("A.kt"))
         .arg(dir.join("B.kt"))
@@ -199,7 +199,7 @@ fn cross_file_class_construct_and_property_read() {
         return;
     };
     let stdlib = stdlib.to_str().unwrap().to_string();
-    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_xcls_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -213,7 +213,7 @@ fn cross_file_class_construct_and_property_read() {
         "fun box(): String {\n  val b = Box(21, \"hi\")\n  if (b.x != 21) return \"f1\"\n  if (b.tag != \"hi\") return \"f2\"\n  if (b.doubled() != 42) return \"f3\"\n  b.tag = \"bye\"\n  if (b.tag != \"bye\") return \"f4: ${b.tag}\"\n  return \"OK\"\n}\n",
     )
     .unwrap();
-    let kc = Command::new(krusty)
+    let kc = Command::new(&krusty)
         .args(["-d", dir.to_str().unwrap()])
         .arg(dir.join("A.kt"))
         .arg(dir.join("B.kt"))
@@ -267,7 +267,7 @@ fn cross_file_destructuring() {
         return;
     };
     let stdlib = stdlib.to_str().unwrap().to_string();
-    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_xdestr_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -281,7 +281,7 @@ fn cross_file_destructuring() {
         "fun box(): String {\n  val p = Pair2(\"O\", \"K\")\n  val (x, y) = p\n  return x + y\n}\n",
     )
     .unwrap();
-    let kc = Command::new(krusty)
+    let kc = Command::new(&krusty)
         .args(["-d", dir.to_str().unwrap()])
         .arg(dir.join("A.kt"))
         .arg(dir.join("B.kt"))
@@ -330,7 +330,7 @@ fn cross_file_destructuring() {
 /// compile — the guarantee here is that the return type is no longer erased.
 #[test]
 fn cross_file_object_inferred_return_element_resolves() {
-    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_xinfer_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -346,7 +346,7 @@ fn cross_file_object_inferred_return_element_resolves() {
     .unwrap();
     // Pass B.kt BEFORE A.kt so the caller is checked before the definer — the order that, without a
     // GLOBAL pre-inference, leaves `all()`'s inferred return erased when B reads it.
-    let out = Command::new(krusty)
+    let out = Command::new(&krusty)
         .args(["-d", dir.to_str().unwrap()])
         .arg(dir.join("B.kt"))
         .arg(dir.join("A.kt"))
@@ -379,7 +379,7 @@ fn cross_file_object_member_call_lowers() {
         return;
     };
     let stdlib = stdlib.to_str().unwrap().to_string();
-    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_xobj_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -393,7 +393,7 @@ fn cross_file_object_member_call_lowers() {
         "package demo\nfun box(): String = R.greet()\n",
     )
     .unwrap();
-    let kc = Command::new(krusty)
+    let kc = Command::new(&krusty)
         .args(["-d", dir.to_str().unwrap()])
         .arg(dir.join("B.kt"))
         .arg(dir.join("A.kt"))
@@ -448,7 +448,7 @@ fn cross_module_object_as_value() {
         return;
     };
     let stdlib = stdlib.to_str().unwrap().to_string();
-    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_objval_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -462,7 +462,7 @@ fn cross_module_object_as_value() {
         "package a.app\nimport d.svc.Helper\nclass C {\n  private val h = Helper\n  fun run(): String = h.tag()\n}\nfun box(): String = C().run()\n",
     )
     .unwrap();
-    let kc = Command::new(krusty)
+    let kc = Command::new(&krusty)
         .args(["-d", dir.to_str().unwrap()])
         .arg(dir.join("B.kt"))
         .arg(dir.join("A.kt"))
@@ -518,7 +518,7 @@ fn ctor_omitted_non_const_default_uses_init_default() {
         return;
     };
     let stdlib = stdlib.to_str().unwrap().to_string();
-    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_ctordef_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -532,7 +532,7 @@ fn ctor_omitted_non_const_default_uses_init_default() {
         "package demo\nfun box(): String {\n  val s = Server(name = \"n\")\n  return if (s.name == \"n\" && s.labels.isEmpty()) \"OK\" else \"FAIL\"\n}\n",
     )
     .unwrap();
-    let kc = Command::new(krusty)
+    let kc = Command::new(&krusty)
         .args(["-cp", &stdlib, "-d", dir.to_str().unwrap()])
         .arg(dir.join("B.kt"))
         .arg(dir.join("A.kt"))
@@ -585,7 +585,7 @@ fn cross_file_value_class_property_read_uses_mangled_getter() {
         return;
     };
     let stdlib = stdlib.to_str().unwrap().to_string();
-    let krusty = env!("CARGO_BIN_EXE_krusty");
+    let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_xfilevc_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -601,7 +601,7 @@ fn cross_file_value_class_property_read_uses_mangled_getter() {
         "package demo\nfun box(): String = make().id.value\n",
     )
     .unwrap();
-    let kc = Command::new(krusty)
+    let kc = Command::new(&krusty)
         .args(["-d", dir.to_str().unwrap()])
         .arg(dir.join("Read.kt"))
         .arg(dir.join("Domain.kt"))
