@@ -58,11 +58,12 @@ boundary.
   process-lifetime name/type interners while amortizing JVM classpath initialization across edits.
 - An open document retains its source text, diagnostics only long enough to publish them, a compact
   hover index, completion catalog, definition index, and semantic-highlighting tokens. Each hover
-  entry is a 12-byte `(Span, type-id)` record; rendered type names are deduplicated per document. A
-  scoped completion entry is a 24-byte packed array of scope bounds, declaration position, interned
-  label/detail IDs, item kind, and optional receiver type; member entries are 16 bytes. Completion and
-  item resolution filter these cached records, including parser-recovered `receiver.`/`receiver?.`
-  expressions,
+  entry is a 12-byte `(source lo, source hi, declaration-signature id)` record; official-format
+  signature strings are deduplicated per document and bounded across the source set. No AST node or
+  hover entry retains a source-text copy. A scoped completion
+  entry is a 24-byte packed array of scope bounds, declaration position, interned label/detail IDs,
+  item kind, and optional receiver type; member entries are 16 bytes. Completion and item resolution
+  filter these cached records, including parser-recovered `receiver.`/`receiver?.` expressions,
   without retaining the AST or invoking the worker. A document retains member catalogs only for
   receiver types referenced by its own lexical symbols/source, rather than duplicating every member
   in the open source set. A shared source-set budget caps completion at 32,768 records and a

@@ -8,7 +8,7 @@ use krusty::ast::{
 use krusty::diag::Span;
 use krusty::types::{Ty, Visibility};
 
-use super::FileAnalysis;
+use super::{rendering::render_type, FileAnalysis};
 
 /// LSP 3.17 completion-item-kind discriminants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,7 +101,7 @@ impl CompletionSymbols {
             }
         }
         let mut inheritance = Vec::new();
-        for (source, file) in sources.iter().copied().zip(files) {
+        for (_source, file) in sources.iter().copied().zip(files) {
             let package = file.file.package.clone().unwrap_or_default();
             let local_classes: std::collections::HashSet<_> = file
                 .file
@@ -117,7 +117,7 @@ impl CompletionSymbols {
             for &declaration in &file.file.decls {
                 match file.file.decl(declaration) {
                     Decl::Fun(function) => {
-                        let symbol = function_symbol(source, function, false);
+                        let symbol = function_symbol(function, false);
                         if function.receiver.is_none() {
                             result.globals.push(GlobalSymbol {
                                 package: package.clone(),
@@ -135,7 +135,7 @@ impl CompletionSymbols {
                             continue;
                         }
                         let owner = result.owner_for_name(&file.file, &class.name);
-                        result.add_class(source, &package, &owner, &file.file, class);
+                        result.add_class(&package, &owner, &file.file, class);
                         inheritance.extend(
                             class
                                 .base_class
@@ -215,14 +215,7 @@ impl CompletionSymbols {
         result
     }
 
-    fn add_class(
-        &mut self,
-        source: &str,
-        package: &str,
-        owner: &str,
-        file: &File,
-        class: &ClassDecl,
-    ) {
+    fn add_class(&mut self, package: &str, owner: &str, file: &File, class: &ClassDecl) {
         let kind = class_kind(class);
         self.globals.push(GlobalSymbol {
             package: package.to_string(),
@@ -271,7 +264,7 @@ impl CompletionSymbols {
                 function.visibility,
                 Visibility::Public | Visibility::Internal
             ) {
-                instance.push(function_symbol(source, function, true));
+                instance.push(function_symbol(function, true));
             }
         }
         self.members
@@ -296,7 +289,7 @@ impl CompletionSymbols {
                 function.visibility,
                 Visibility::Public | Visibility::Internal
             ) {
-                static_members.push(function_symbol(source, function, true));
+                static_members.push(function_symbol(function, true));
             }
         }
         for entry in &class.enum_entries {
@@ -530,7 +523,7 @@ impl FileAnalysis {
                 }
                 Stmt::LocalFun(function) => {
                     result.push(scoped(
-                        &function_symbol(source, function, false),
+                        &function_symbol(function, false),
                         enclosing_scope,
                         statement_span.lo,
                         3,
@@ -854,7 +847,7 @@ fn function_scope(function: &FunDecl, file: &File) -> Span {
     }
 }
 
-fn function_symbol(source: &str, function: &FunDecl, member: bool) -> Symbol {
+fn function_symbol(function: &FunDecl, member: bool) -> Symbol {
     let params = function
         .params
         .iter()
@@ -869,7 +862,7 @@ fn function_symbol(source: &str, function: &FunDecl, member: bool) -> Symbol {
     Symbol {
         label: function.name.clone(),
         detail: format!("fun {}({params}): {rendered_result}", function.name),
-        kind: if has_modifier(source, function.span, "operator") {
+        kind: if function.is_operator {
             CompletionKind::Operator
         } else if member {
             CompletionKind::Method
@@ -922,16 +915,6 @@ fn class_detail(class: &ClassDecl) -> String {
     format!("{prefix} {}", class.name)
 }
 
-fn has_modifier(source: &str, span: Span, modifier: &str) -> bool {
-    source
-        .get(span.lo as usize..span.hi as usize)
-        .is_some_and(|declaration| {
-            declaration
-                .split(|character: char| !character.is_alphanumeric() && character != '_')
-                .any(|word| word == modifier)
-        })
-}
-
 fn type_key(reference: &TypeRef) -> String {
     simple_name(&reference.name)
 }
@@ -957,41 +940,4 @@ fn ty_key(ty: &Ty) -> Option<String> {
         Ty::Error | Ty::Null | Ty::Nothing => None,
         primitive => Some(format!("{primitive:?}")),
     }
-}
-
-fn render_type(reference: &TypeRef) -> String {
-    if reference.name == "<fun>" {
-        let params = reference
-            .fun_params
-            .iter()
-            .map(render_type)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let result = reference
-            .arg
-            .as_deref()
-            .map_or_else(|| "Unit".to_string(), render_type);
-        return format!("({params}) -> {result}");
-    }
-    let mut result = reference.name.clone();
-    if !reference.targs.is_empty() {
-        result.push('<');
-        result.push_str(
-            &reference
-                .targs
-                .iter()
-                .map(render_type)
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        result.push('>');
-    } else if let Some(argument) = &reference.arg {
-        result.push('<');
-        result.push_str(&render_type(argument));
-        result.push('>');
-    }
-    if reference.nullable {
-        result.push('?');
-    }
-    result
 }

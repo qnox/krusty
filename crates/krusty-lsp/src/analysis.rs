@@ -3,30 +3,26 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::compiler_analysis::{
-    analyze_standalone_source_set, CompletionSymbols, DefinitionOccurrence, DefinitionSymbols,
-    DefinitionTarget, FileAnalysis, FrontendSymbols, HighlightOccurrence, HighlightSymbols,
+    analyze_standalone_source_set, hover_wire_cost, CompletionSymbols, DefinitionOccurrence,
+    DefinitionSymbols, DefinitionTarget, FileAnalysis, FrontendSymbols, HighlightOccurrence,
+    HighlightSymbols, HoverOccurrence, SemanticLimits,
 };
 use krusty::diag::{Diagnostic, Span};
-use krusty::types::Ty;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
-struct HoverEntry {
-    lo: u32,
-    hi: u32,
-    type_index: u32,
-}
+/// `(source lo, source hi, interned hover value id)`.
+type HoverEntry = [u32; 3];
 
 /// Compact semantic snapshot retained for hover queries after full compiler analysis is dropped.
 #[derive(Default, Deserialize, Serialize)]
 pub struct HoverIndex {
     entries: Vec<HoverEntry>,
-    type_names: Vec<String>,
+    values: Vec<String>,
 }
 
 pub struct Hover<'a> {
     pub span: Span,
-    pub type_name: &'a str,
+    pub value: &'a str,
 }
 
 const NO_COMPLETION_TYPE: u32 = 0x003f_ffff;
@@ -34,6 +30,34 @@ const MEMBER_COMPLETION_SLOT: u32 = 1 << 31;
 const MAX_SOURCE_SET_COMPLETION_ENTRIES: usize = 32 * 1024;
 const MAX_SOURCE_SET_COMPLETION_WIRE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SOURCE_SET_DEFINITION_ENTRIES: usize = 256 * 1024;
+const MAX_SOURCE_SET_HOVER_ENTRIES: usize = 256 * 1024;
+const MAX_SOURCE_SET_HOVER_WIRE_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Default)]
+pub(crate) struct HoverBudget {
+    entries: usize,
+    wire_bytes: usize,
+}
+
+impl HoverBudget {
+    fn remaining_entries(&self) -> usize {
+        MAX_SOURCE_SET_HOVER_ENTRIES.saturating_sub(self.entries)
+    }
+
+    fn remaining_wire_bytes(&self) -> usize {
+        MAX_SOURCE_SET_HOVER_WIRE_BYTES.saturating_sub(self.wire_bytes)
+    }
+
+    fn reserve(&mut self, value: &str, new_value: bool) -> bool {
+        let bytes = hover_wire_cost(value, new_value);
+        if self.entries >= MAX_SOURCE_SET_HOVER_ENTRIES || bytes > self.remaining_wire_bytes() {
+            return false;
+        }
+        self.entries += 1;
+        self.wire_bytes += bytes;
+        true
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct CompletionBudget {
@@ -601,53 +625,48 @@ fn advance_position(text: &str, line: &mut u32, character: &mut u32, previous_wa
 }
 
 impl HoverIndex {
-    pub fn from_file_analysis(analysis: &FileAnalysis) -> Self {
-        Self::from_typed_expressions(analysis.typed_expressions(), analysis.file.expr_spans.len())
-    }
-
-    fn from_typed_expressions(
-        typed_expressions: impl Iterator<Item = (Span, Ty)>,
-        capacity: usize,
-    ) -> Self {
-        let mut unique_types = Vec::new();
-        let mut type_indices = HashMap::new();
+    fn from_occurrences(rich_occurrences: Vec<HoverOccurrence>, budget: &mut HoverBudget) -> Self {
+        let capacity = rich_occurrences.len().min(budget.remaining_entries());
+        let mut values = Vec::new();
+        let mut value_indices = HashMap::<String, u32>::new();
         let mut entries = Vec::with_capacity(capacity);
-        for (span, ty) in typed_expressions {
-            if ty == Ty::Error {
+        let mut entry_keys = HashSet::with_capacity(capacity);
+
+        for occurrence in rich_occurrences {
+            if entries.len() >= capacity {
+                break;
+            }
+            let existing_value_index = value_indices.get(&occurrence.value).copied();
+            let value_index = existing_value_index.unwrap_or(values.len() as u32);
+            let entry = [occurrence.span.lo, occurrence.span.hi, value_index];
+            if !entry_keys.insert(entry) {
                 continue;
             }
-            let type_index = match type_indices.get(&ty) {
-                Some(&index) => index,
-                None => {
-                    let index = unique_types.len() as u32;
-                    unique_types.push(ty);
-                    type_indices.insert(ty, index);
-                    index
-                }
-            };
-            entries.push(HoverEntry {
-                lo: span.lo,
-                hi: span.hi,
-                type_index,
-            });
+            let new_value = existing_value_index.is_none();
+            if !budget.reserve(&occurrence.value, new_value) {
+                break;
+            }
+            if new_value {
+                value_indices.insert(occurrence.value.clone(), value_index);
+                values.push(occurrence.value);
+            }
+            entries.push(entry);
         }
-        Self {
-            entries,
-            type_names: unique_types.into_iter().map(source_type_name).collect(),
-        }
+        entries.sort_unstable();
+        Self { entries, values }
     }
 
     pub fn get(&self, byte_offset: u32) -> Option<Hover<'_>> {
         self.entries
             .iter()
             .filter(|entry| {
-                entry.lo <= byte_offset
-                    && (byte_offset < entry.hi || (entry.lo == entry.hi && byte_offset == entry.lo))
+                entry[0] <= byte_offset
+                    && (byte_offset < entry[1] || (entry[0] == entry[1] && byte_offset == entry[0]))
             })
-            .min_by_key(|entry| entry.hi.saturating_sub(entry.lo))
+            .min_by_key(|entry| entry[1].saturating_sub(entry[0]))
             .map(|entry| Hover {
-                span: Span::new(entry.lo, entry.hi),
-                type_name: &self.type_names[entry.type_index as usize],
+                span: Span::new(entry[0], entry[1]),
+                value: &self.values[entry[2] as usize],
             })
     }
 
@@ -655,8 +674,8 @@ impl HoverIndex {
         self.entries.len()
     }
 
-    pub fn type_count(&self) -> usize {
-        self.type_names.len()
+    pub fn value_count(&self) -> usize {
+        self.values.len()
     }
 }
 
@@ -692,6 +711,7 @@ impl<'a> SourceSetIndexes<'a> {
 }
 
 pub(crate) struct AnalysisBudgets {
+    hover: HoverBudget,
     completion: CompletionBudget,
     definition: DefinitionBudget,
 }
@@ -699,6 +719,7 @@ pub(crate) struct AnalysisBudgets {
 impl AnalysisBudgets {
     pub(crate) fn new() -> Self {
         Self {
+            hover: HoverBudget::default(),
             completion: CompletionBudget::default(),
             definition: DefinitionBudget::default(),
         }
@@ -713,7 +734,6 @@ impl DocumentAnalysis {
         indexes: &SourceSetIndexes<'_>,
         budgets: &mut AnalysisBudgets,
     ) -> Self {
-        let hover = HoverIndex::from_file_analysis(&analysis);
         let completion = CompletionIndex::from_file_analysis_with_budget(
             source,
             &analysis,
@@ -726,8 +746,13 @@ impl DocumentAnalysis {
             indexes.symbols,
             indexes.highlights,
             indexes.definitions,
-            budgets.definition.remaining(),
+            SemanticLimits {
+                definition_entries: budgets.definition.remaining(),
+                hover_entries: budgets.hover.remaining_entries(),
+                hover_wire_bytes: budgets.hover.remaining_wire_bytes(),
+            },
         );
+        let hover = HoverIndex::from_occurrences(semantic.hovers, &mut budgets.hover);
         let semantic_tokens = SemanticTokenIndex::from_occurrences(source, semantic.highlights);
         let definitions =
             DefinitionIndex::from_occurrences(semantic.definitions, &mut budgets.definition);
@@ -785,58 +810,6 @@ pub fn analyze_for_lsp(sources: &[&str]) -> Vec<DocumentAnalysis> {
             )
         })
         .collect()
-}
-
-fn source_type_name(ty: Ty) -> String {
-    match ty {
-        Ty::Int => "Int".to_string(),
-        Ty::Byte => "Byte".to_string(),
-        Ty::Short => "Short".to_string(),
-        Ty::Long => "Long".to_string(),
-        Ty::Float => "Float".to_string(),
-        Ty::Double => "Double".to_string(),
-        Ty::Boolean => "Boolean".to_string(),
-        Ty::Char => "Char".to_string(),
-        Ty::UInt => "UInt".to_string(),
-        Ty::ULong => "ULong".to_string(),
-        Ty::String => "String".to_string(),
-        Ty::Unit => "Unit".to_string(),
-        Ty::Obj(name, args) => {
-            let mut rendered = name.render().replace('/', ".");
-            if !args.is_empty() {
-                rendered.push('<');
-                for (index, arg) in args.iter().enumerate() {
-                    if index != 0 {
-                        rendered.push_str(", ");
-                    }
-                    rendered.push_str(&source_type_name(*arg));
-                }
-                rendered.push('>');
-            }
-            rendered
-        }
-        Ty::Null => "Nothing?".to_string(),
-        Ty::Nothing => "Nothing".to_string(),
-        Ty::Error => "<error>".to_string(),
-        Ty::Fun(signature) => {
-            let mut rendered = if signature.suspend {
-                "suspend (".to_string()
-            } else {
-                "(".to_string()
-            };
-            for (index, parameter) in signature.params.iter().enumerate() {
-                if index != 0 {
-                    rendered.push_str(", ");
-                }
-                rendered.push_str(&source_type_name(*parameter));
-            }
-            rendered.push_str(") -> ");
-            rendered.push_str(&source_type_name(signature.ret));
-            rendered
-        }
-        Ty::Nullable(inner) => format!("{}?", source_type_name(*inner)),
-        Ty::TyParam(name, _) => name.to_string(),
-    }
 }
 
 #[cfg(test)]
@@ -910,20 +883,12 @@ mod tests {
     }
 
     #[test]
-    fn hover_index_returns_smallest_typed_expression() {
+    fn hover_index_returns_symbol_hover_with_identifier_span() {
         let source = "fun box(): Int { val answer = 40 + 2; return answer }";
-        let mut analysis = analyze_standalone_source_set(&[source]).files;
-        let analysis = analysis.remove(0);
-        assert!(
-            analysis.diagnostics.is_empty(),
-            "{:?}",
-            analysis.diagnostics
-        );
-
-        let index = HoverIndex::from_file_analysis(&analysis);
+        let index = analyze_for_lsp(&[source]).remove(0).hover;
         let offset = source.rfind("answer").unwrap() as u32 + 1;
         let hover = index.get(offset).expect("hover over local read");
-        assert_eq!(hover.type_name, "Int");
+        assert_eq!(hover.value, "val answer: Int");
         assert_eq!(
             &source[hover.span.lo as usize..hover.span.hi as usize],
             "answer"
@@ -931,30 +896,150 @@ mod tests {
     }
 
     #[test]
-    fn hover_index_deduplicates_type_names_into_twelve_byte_entries() {
-        let analysis = analyze_standalone_source_set(&["fun box(): Int = (40 + 2) * 1"])
-            .files
-            .remove(0);
-        let index = HoverIndex::from_file_analysis(&analysis);
-        assert!(index.entry_count() >= 5);
-        assert_eq!(index.type_count(), 1);
+    fn hover_index_deduplicates_values_into_twelve_byte_array_entries() {
+        let index = analyze_for_lsp(&["fun box(answer: Int): Int = answer + answer"])
+            .remove(0)
+            .hover;
+        assert!(index.entry_count() >= 3);
+        assert!(index.value_count() <= 2);
         assert_eq!(std::mem::size_of::<HoverEntry>(), 12);
+        let json = serde_json::to_value(&index).unwrap();
+        assert_eq!(json["entries"][0].as_array().unwrap().len(), 3);
     }
 
     #[test]
-    fn hover_formats_null_as_nullable_nothing() {
-        let source = "fun box(): String? = null";
-        let analysis = analyze_standalone_source_set(&[source]).files.remove(0);
-        assert!(
-            analysis.diagnostics.is_empty(),
-            "{:?}",
-            analysis.diagnostics
+    fn hover_index_respects_source_set_entry_and_wire_budgets() {
+        let occurrences = vec![
+            HoverOccurrence {
+                span: Span::new(0, 1),
+                value: "val first: Int".to_string(),
+            },
+            HoverOccurrence {
+                span: Span::new(2, 3),
+                value: "val second: Int".to_string(),
+            },
+        ];
+        let mut entry_budget = HoverBudget {
+            entries: MAX_SOURCE_SET_HOVER_ENTRIES - 1,
+            wire_bytes: 0,
+        };
+        let index = HoverIndex::from_occurrences(occurrences, &mut entry_budget);
+        assert_eq!(index.entry_count(), 1);
+        assert_eq!(entry_budget.entries, MAX_SOURCE_SET_HOVER_ENTRIES);
+
+        let mut wire_budget = HoverBudget {
+            entries: 0,
+            wire_bytes: MAX_SOURCE_SET_HOVER_WIRE_BYTES - 1,
+        };
+        let index = HoverIndex::from_occurrences(
+            vec![HoverOccurrence {
+                span: Span::new(0, 1),
+                value: "val blocked: Int".to_string(),
+            }],
+            &mut wire_budget,
         );
-        let index = HoverIndex::from_file_analysis(&analysis);
+        assert_eq!(index.entry_count(), 0);
+        assert_eq!(wire_budget.entries, 0);
+    }
+
+    #[test]
+    fn duplicate_hover_occurrences_do_not_consume_the_shared_budget() {
+        let mut budget = HoverBudget::default();
+        let index = HoverIndex::from_occurrences(
+            vec![
+                HoverOccurrence {
+                    span: Span::new(0, 1),
+                    value: "val answer: Int".to_string(),
+                },
+                HoverOccurrence {
+                    span: Span::new(0, 1),
+                    value: "val answer: Int".to_string(),
+                },
+            ],
+            &mut budget,
+        );
+
+        assert_eq!(index.entry_count(), 1);
+        assert_eq!(budget.entries, 1);
+    }
+
+    #[test]
+    fn hover_omits_literal_expressions_like_the_official_server() {
+        let source = "fun box(): String? = null";
+        let index = analyze_for_lsp(&[source]).remove(0).hover;
+        assert!(index.get(source.rfind("null").unwrap() as u32).is_none());
+    }
+
+    #[test]
+    fn hover_covers_type_parameters_and_loop_variables() {
+        let source = "fun <T> identity(value: T): T = value\n\
+                      fun loop(): Int { for (item in 1..1) return item; return 0 }";
+        let index = analyze_for_lsp(&[source]).remove(0).hover;
+
+        let type_parameter = index
+            .get((source.find("<T>").unwrap() + 1) as u32)
+            .expect("type-parameter declaration hover");
+        assert_eq!(type_parameter.value, "T");
+        let loop_variable = index
+            .get((source.find("item in").unwrap() + 1) as u32)
+            .expect("loop-variable declaration hover");
+        assert_eq!(loop_variable.value, "val item: Int");
+    }
+
+    #[test]
+    fn hover_renders_inferred_nested_types_as_source_names() {
+        let source = "class Outer { class Inner }\n\
+                      fun use(): Int { val nested = Outer.Inner(); return nested.hashCode() }";
+        let index = analyze_for_lsp(&[source]).remove(0).hover;
         let hover = index
-            .get(source.rfind("null").unwrap() as u32 + 1)
-            .expect("hover over null expression");
-        assert_eq!(hover.type_name, "Nothing?");
+            .get((source.rfind("nested").unwrap() + 1) as u32)
+            .expect("inferred nested local hover");
+
+        assert_eq!(hover.value, "val nested: Outer.Inner");
+        assert!(!hover.value.contains('$'));
+        assert!(!hover.value.contains('/'));
+    }
+
+    #[test]
+    fn hover_uses_checked_destructuring_component_types() {
+        let source = "data class Parts(val number: Int, val text: String)\n\
+                      fun use(parts: Parts): Int { val (number, text) = parts; return number }";
+        let index = analyze_for_lsp(&[source]).remove(0).hover;
+
+        let number = index
+            .get((source.rfind("number").unwrap() + 1) as u32)
+            .expect("destructured number hover");
+        assert_eq!(number.value, "val number: Int");
+        let text = index
+            .get((source.find("text) =").unwrap() + 1) as u32)
+            .expect("destructured text hover");
+        assert_eq!(text.value, "val text: String");
+    }
+
+    #[test]
+    fn hover_detects_modifiers_across_declaration_lines() {
+        let source = "class Meter(val value: Int)\n\
+                      operator\nfun Meter.plus(other: Meter): Meter = this\n\
+                      open class Parent { open val item: Int = 1 }\n\
+                      class Child : Parent() {\noverride\nval item: Int = 2\n}";
+        let index = analyze_for_lsp(&[source]).remove(0).hover;
+
+        let function = index
+            .get((source.find("plus").unwrap() + 1) as u32)
+            .expect("operator function hover");
+        assert!(
+            function.value.starts_with("operator fun "),
+            "{}",
+            function.value
+        );
+        let property = index
+            .get((source.rfind("item").unwrap() + 1) as u32)
+            .expect("override property hover");
+        assert!(
+            property.value.starts_with("override val "),
+            "{}",
+            property.value
+        );
     }
 
     #[test]

@@ -1320,6 +1320,7 @@ impl<'a> Parser<'a> {
                         mods.iter().any(|m| m == "abstract"),
                     );
                     d.visibility = visibility_of(&mods);
+                    d.is_operator = mods.iter().any(|m| m == "operator");
                     let id = self.file.add_decl(Decl::Fun(d));
                     self.file.decls.push(id);
                 }
@@ -1343,6 +1344,7 @@ impl<'a> Parser<'a> {
                         false,
                     );
                     d.visibility = visibility_of(&mods);
+                    d.is_override = mods.iter().any(|m| m == "override");
                     let id = self.file.add_decl(Decl::Property(d));
                     self.file.decls.push(id);
                 }
@@ -2015,6 +2017,7 @@ impl<'a> Parser<'a> {
             receiver,
             ty,
             is_var,
+            is_override: false,
             init,
             is_lateinit,
             getter,
@@ -2136,6 +2139,7 @@ impl<'a> Parser<'a> {
                     d.visibility = visibility_of(&mods);
                     d.is_open = !d.is_final && mods.iter().any(|m| m == "open" || m == "override");
                     d.is_override = mods.iter().any(|m| m == "override");
+                    d.is_operator = mods.iter().any(|m| m == "operator");
                     methods.push(d);
                 }
                 TokenKind::KwVal | TokenKind::KwVar => {
@@ -2148,6 +2152,7 @@ impl<'a> Parser<'a> {
                     p.visibility = visibility_of(&mods);
                     p.is_open = !mods.iter().any(|x| x == "final")
                         && mods.iter().any(|x| x == "open" || x == "override");
+                    p.is_override = mods.iter().any(|m| m == "override");
                     props.push(p);
                 }
                 _ => {
@@ -2376,6 +2381,7 @@ impl<'a> Parser<'a> {
                         f.is_open =
                             !f.is_final && emods.iter().any(|m| m == "open" || m == "override");
                         f.is_override = emods.iter().any(|m| m == "override");
+                        f.is_operator = emods.iter().any(|m| m == "operator");
                         methods.push(f);
                     }
                     // A body member property (`enum class C { A; val x = … }`): a field + accessor on
@@ -2390,6 +2396,7 @@ impl<'a> Parser<'a> {
                         p.visibility = visibility_of(&emods);
                         p.is_open = !emods.iter().any(|x| x == "final")
                             && emods.iter().any(|x| x == "open" || x == "override");
+                        p.is_override = emods.iter().any(|m| m == "override");
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -2620,6 +2627,7 @@ impl<'a> Parser<'a> {
                 visibility: Visibility::Public,
                 is_suspend: false,
                 is_tailrec: false,
+                is_operator: false,
                 annotations,
                 decl_line: 0, // filled by the parser post-pass
                 body_close_line: 0,
@@ -2771,6 +2779,7 @@ impl<'a> Parser<'a> {
             visibility: Visibility::Public,
             is_suspend,
             is_tailrec,
+            is_operator: false,
             annotations,
             decl_line: 0, // filled by the parser post-pass
             body_close_line: 0,
@@ -3132,6 +3141,7 @@ impl<'a> Parser<'a> {
                         f.is_open =
                             !f.is_final && mods.iter().any(|m| m == "open" || m == "override");
                         f.is_override = mods.iter().any(|m| m == "override");
+                        f.is_operator = mods.iter().any(|m| m == "operator");
                         methods.push(f);
                     }
                     TokenKind::KwVal | TokenKind::KwVar => {
@@ -3146,6 +3156,7 @@ impl<'a> Parser<'a> {
                         p.visibility = visibility_of(&mods);
                         p.is_open = !mods.iter().any(|x| x == "final")
                             && mods.iter().any(|x| x == "open" || x == "override");
+                        p.is_override = mods.iter().any(|m| m == "override");
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -3615,12 +3626,15 @@ impl<'a> Parser<'a> {
                         // so it never saw `private` — a private interface method is non-virtual (called via
                         // `invokespecial`), so preserve the flag here.
                         f.visibility = visibility_of(&imods);
+                        f.is_override = imods.iter().any(|m| m == "override");
+                        f.is_operator = imods.iter().any(|m| m == "operator");
                         methods.push(f);
                     }
                     // Abstract interface property: `val`/`var x: T` (no initializer/getter).
                     TokenKind::KwVal | TokenKind::KwVar => {
                         let mut p = self.parse_top_property(false, true);
                         p.visibility = visibility_of(&imods);
+                        p.is_override = imods.iter().any(|m| m == "override");
                         if p.init.is_some() {
                             self.diags.error(p.span, "krusty: interface properties with an initializer/getter are not supported");
                         }
@@ -3747,6 +3761,7 @@ impl<'a> Parser<'a> {
                         f.is_open =
                             !f.is_final && mods.iter().any(|m| m == "open" || m == "override");
                         f.is_override = mods.iter().any(|m| m == "override");
+                        f.is_operator = mods.iter().any(|m| m == "operator");
                         methods.push(f);
                     }
                     TokenKind::KwVal | TokenKind::KwVar => {
@@ -3759,6 +3774,7 @@ impl<'a> Parser<'a> {
                         p.visibility = visibility_of(&mods);
                         p.is_open = !mods.iter().any(|x| x == "final")
                             && mods.iter().any(|x| x == "open" || x == "override");
+                        p.is_override = mods.iter().any(|m| m == "override");
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -3905,6 +3921,7 @@ impl<'a> Parser<'a> {
                         f.is_open =
                             !f.is_final && mods.iter().any(|m| m == "open" || m == "override");
                         f.is_override = mods.iter().any(|m| m == "override");
+                        f.is_operator = mods.iter().any(|m| m == "operator");
                         methods.push(f);
                     }
                     TokenKind::KwVal | TokenKind::KwVar => {
@@ -3917,6 +3934,7 @@ impl<'a> Parser<'a> {
                         p.visibility = visibility_of(&mods);
                         p.is_open = !mods.iter().any(|x| x == "final")
                             && mods.iter().any(|x| x == "open" || x == "override");
+                        p.is_override = mods.iter().any(|m| m == "override");
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }

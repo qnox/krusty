@@ -506,10 +506,14 @@ where
         let Some(hover) = open.hover.get(offset) else {
             return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
         };
+        let contents = json!({
+            "kind": "markdown",
+            "value": format!("````kotlin\n{}\n````\n", hover.value),
+        });
         Dispatch::messages(vec![rpc_result(
             id,
             json!({
-                "contents": {"kind": "plaintext", "value": hover.type_name},
+                "contents": contents,
                 "range": {
                     "start": byte_offset_to_position(&open.text, hover.span.lo as usize),
                     "end": byte_offset_to_position(&open.text, hover.span.hi as usize),
