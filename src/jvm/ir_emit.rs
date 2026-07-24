@@ -4996,6 +4996,12 @@ fn emit_method_inner(
     // (`fun foo() { throw … }`): an unreachable `return` after `athrow` has no stack-map frame and
     // the verifier rejects it. Skip it exactly when the body can't fall through.
     if ret == Ty::Unit && !e.diverges(body) {
+        // kotlinc maps the implicit `return` to the body's closing-`}` line. `fn_close_lines` has
+        // entries only for PARSED declarations, so a synthesized body (no entry) keeps its
+        // decl-line fallback table.
+        if let Some(&close) = ir.fn_close_lines.get(&fid) {
+            code.mark_line(close);
+        }
         code.ret_void();
     }
     code.ensure_locals(e.next_slot);
@@ -6614,6 +6620,11 @@ impl<'a> Emitter<'a> {
                 let saved = self.slots.clone();
                 let mut dead = false;
                 for s in stmts {
+                    // A statement root carrying a source line starts a `LineNumberTable` entry at
+                    // its first instruction (kotlinc's per-statement mapping).
+                    if let Some(&l) = self.ir.expr_lines.get(&s) {
+                        code.mark_line(l);
+                    }
                     // See the value-context `Block` arm: a statement nets zero, so reset the tracked
                     // height afterward to undo an approximate branchy-splice drift.
                     let base = code.stack_height();
@@ -6626,6 +6637,11 @@ impl<'a> Emitter<'a> {
                 }
                 if !dead {
                     if let Some(v) = value {
+                        // A trailing value is a statement in source terms — start its
+                        // `LineNumberTable` entry like one.
+                        if let Some(&l) = self.ir.expr_lines.get(&v) {
+                            code.mark_line(l);
+                        }
                         self.emit_discarding(v, code);
                     }
                 }
@@ -7752,6 +7768,10 @@ impl<'a> Emitter<'a> {
                 let saved = self.slots.clone();
                 let mut dead = false;
                 for s in stmts {
+                    // A statement root carrying a source line starts a `LineNumberTable` entry.
+                    if let Some(&l) = self.ir.expr_lines.get(s) {
+                        code.mark_line(l);
+                    }
                     // A statement nets zero on the operand stack (its value is stored/discarded). Reset
                     // the tracked height to that baseline afterward: a branchy lambda splice (`takeIf`)
                     // tracks its internal branches only approximately and can leave `cur_stack` drifted
@@ -7767,6 +7787,9 @@ impl<'a> Emitter<'a> {
                 }
                 if !dead {
                     if let Some(v) = value {
+                        if let Some(&l) = self.ir.expr_lines.get(v) {
+                            code.mark_line(l);
+                        }
                         self.emit_value(*v, code);
                     }
                 }

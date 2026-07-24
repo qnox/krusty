@@ -1409,7 +1409,15 @@ impl ClassWriter {
             exceptions: code.resolved_exceptions(),
             stackmap,
             signature: sig,
-            lnt: Vec::new(),
+            // `<init>`/`<clinit>` line tables are CURATED after the fact (`set_method_debug` /
+            // `set_method_lines` — the class-decl-line super-call entry, per-initializer entries,
+            // trailing return). Marks that leaked in through nested initializer blocks would
+            // deactivate those "only when empty" fallbacks and ship a partial table — drop them.
+            lnt: if name == "<init>" || name == "<clinit>" {
+                Vec::new()
+            } else {
+                code.line_marks().to_vec()
+            },
             lvt: Vec::new(),
             invisible_anns: Vec::new(),
             param_anns: Vec::new(),
@@ -1509,10 +1517,15 @@ impl ClassWriter {
             .map(|(nm, ds, slot)| (self.cp.utf8(nm), self.cp.utf8(ds), *slot, None))
             .collect();
         if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
-            m.lnt = lnt
-                .map(|(pc, line)| (pc, line as u16))
-                .into_iter()
-                .collect();
+            // A body emitted with per-statement `mark_line`s already carries kotlinc's REAL
+            // multi-entry LineNumberTable — the single declaration-line fallback must not clobber
+            // it (only mark-less bodies, e.g. synthesized accessors, take the fallback).
+            if m.lnt.is_empty() {
+                m.lnt = lnt
+                    .map(|(pc, line)| (pc, line as u16))
+                    .into_iter()
+                    .collect();
+            }
             m.lvt = lvt;
         }
     }
@@ -2042,6 +2055,8 @@ pub struct CodeBuilder {
     /// Frames to include in the StackMapTable: (label_id, locals, stack).
     /// Added via `add_frame_if_new`; first registration for a given label wins.
     frames: Vec<(u32, Vec<VerifType>, Vec<VerifType>)>,
+    /// `LineNumberTable` marks recorded during emission: `(start_pc, line)`. See [`Self::mark_line`].
+    line_marks: Vec<(u16, u16)>,
 }
 
 impl CodeBuilder {
@@ -2056,7 +2071,29 @@ impl CodeBuilder {
             exceptions: Vec::new(),
             needs_stackmap: false,
             frames: Vec::new(),
+            line_marks: Vec::new(),
         }
+    }
+
+    /// Record a `LineNumberTable` entry for `line` starting at the CURRENT pc. Deduped: a re-mark
+    /// of the line already in effect is dropped; a second mark at the same pc overwrites (the
+    /// statement that actually begins an instruction wins, matching kotlinc's per-statement entries).
+    pub fn mark_line(&mut self, line: u32) {
+        if self.bytes.len() > u16::MAX as usize {
+            return; // past the classfile pc range — an entry would silently wrap
+        }
+        let line = line.min(u16::MAX as u32) as u16;
+        let pc = self.bytes.len() as u16;
+        match self.line_marks.last_mut() {
+            Some((lpc, ll)) if *lpc == pc => *ll = line,
+            Some((_, ll)) if *ll == line => {}
+            _ => self.line_marks.push((pc, line)),
+        }
+    }
+
+    /// The recorded `LineNumberTable` marks (empty for a body emitted without line info).
+    pub fn line_marks(&self) -> &[(u16, u16)] {
+        &self.line_marks
     }
 
     /// Mark that this method creates a lambda object. Causes a StackMapTable to be emitted.

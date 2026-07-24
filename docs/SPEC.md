@@ -719,6 +719,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   file-level divergences are pre-existing and global (method emission order, local-slot reuse, `<clinit>`
   zero-init elision). Built-in numeric scalars only — a user/extension `inc`/`dec` operator on a top-level
   `var` still skips. `tests/toplevel_prop_incdec_e2e.rs`.
+- **`LineNumberTable` for regular function bodies** (kotlinc parity, byte-verified): one entry per
+  STATEMENT at its first pc (a block's TRAILING expression counts as a statement); an expression
+  body maps to the expression's line; a `Unit` fn's implicit `return` maps to the closing-`}` line
+  (`FunDecl::body_close_line` → `IrFile::fn_close_lines`); the first entry of a guarded function
+  starts where kotlinc's does relative to the `checkNotNullParameter` prologue. Plumbed as parser
+  line vecs (`File::{expr,stmt}_lines`) → sparse `IrFile::expr_lines` noted on each statement's
+  FIRST lowered root (`append_stmt`) and on trailing values (`note_expr_line`) → `CodeBuilder::
+  mark_line` in both emitter Block arms (same-pc overwrite, same-line dedupe). `<init>`/`<clinit>`
+  keep their CURATED tables (marks are dropped in `add_method_sig`; the class-decl-line/initializer
+  entries own those methods); a mark-less synthesized body keeps the single decl-line fallback.
+  OUT OF SCOPE (documented residuals): inline-function SMAP line mapping, `LocalVariableTable` for
+  top-level fns (next slice), the loop-head extra StackMapTable `same` frame.
+  `tests/lnt_parity_e2e.rs` (6 full-byte + 3 javap-level pins).
 - **Receiver scope functions `run`/`apply`** (the receiver is `this`, not `it`): the lowerer inlines the
   body binding the receiver to a `this` slot with `cur_class` cleared, so the body's bare member reads
   (getter), writes (setter), and method calls (`invokevirtual`) all resolve against the receiver through

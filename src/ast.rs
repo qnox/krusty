@@ -466,6 +466,10 @@ pub struct FunDecl {
     /// 1-based source line of the `fun` declaration (from `span.lo`), for its `LineNumberTable`.
     /// 0 = unknown (no debug table emitted). Filled by the same parser post-pass as `Class::decl_line`.
     pub decl_line: u32,
+    /// 1-based source line of a BLOCK body's closing `}` — kotlinc maps a `Unit` function's implicit
+    /// `return` to this line in the `LineNumberTable`. 0 = unknown / expression body. Filled by the
+    /// same parser post-pass as `decl_line`.
+    pub body_close_line: u32,
     pub is_inline: bool,
     /// `final` modifier — cannot be overridden. Data-class synthesis skips methods a parent marks
     /// `final` (overriding them would produce wrong behavior).
@@ -844,6 +848,11 @@ pub struct File {
     /// at Kotlin's operator location without retaining source text or adding a span field to every AST
     /// node. Keyed by the value expression's `ExprId`; absent for expression bodies and synthetic values.
     pub value_operator_spans: std::collections::HashMap<u32, Span>,
+    /// 1-based source line of each expression's start (parallel to `expr_spans`; 0 = unknown).
+    /// Filled by the parser post-pass for the `LineNumberTable`.
+    pub expr_lines: Vec<u32>,
+    /// 1-based source line of each statement's start (parallel to `stmt_spans`; 0 = unknown).
+    pub stmt_lines: Vec<u32>,
     /// Per-`Expr::Call` argument names: keyed by the call's `ExprId`, parallel to its `args`
     /// (`None` = positional, `Some(name)` = `name = expr`). Absent ⇒ all positional.
     pub call_arg_names: std::collections::HashMap<u32, Vec<Option<String>>>,
