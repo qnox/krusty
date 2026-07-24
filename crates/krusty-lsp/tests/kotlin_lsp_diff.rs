@@ -56,7 +56,8 @@ struct TempProject {
 
 impl TempProject {
     fn new() -> Self {
-        let root = std::env::temp_dir().join("krusty_lsp_diff_project");
+        let root =
+            std::env::temp_dir().join(format!("krusty_lsp_diff_project_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         Self { root }
@@ -347,6 +348,31 @@ impl LspProcess {
         response.get("result").cloned().unwrap_or(Value::Null)
     }
 
+    fn references(
+        &mut self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        include_declaration: bool,
+    ) -> Value {
+        let request_id = self.next_request_id();
+        let response = self.request(
+            request_id,
+            "textDocument/references",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": line, "character": character},
+                "context": {"includeDeclaration": include_declaration}
+            }),
+        );
+        let Some(locations) = response.get("result").and_then(Value::as_array) else {
+            return Value::Null;
+        };
+        let mut locations = locations.clone();
+        locations.sort_by_key(Value::to_string);
+        Value::Array(locations)
+    }
+
     fn hover(&mut self, uri: &str, line: u32, character: u32) -> Value {
         let request_id = self.next_request_id();
         let response = self.request(
@@ -464,7 +490,7 @@ fn diagnostic_comparison_preserves_the_exact_range_and_text() {
 }
 
 #[test]
-fn diagnostics_tokens_definitions_hovers_and_completions_match_official_kotlin_lsp() {
+fn diagnostics_tokens_navigation_hovers_and_completions_match_official_kotlin_lsp() {
     let Ok(kotlin_lsp) = std::env::var("KRUSTY_KOTLIN_LSP") else {
         eprintln!("skipping Kotlin LSP differential: set KRUSTY_KOTLIN_LSP");
         return;
@@ -1492,6 +1518,71 @@ fn diagnostics_tokens_definitions_hovers_and_completions_match_official_kotlin_l
             })
         })
         .collect::<Vec<_>>();
+    let reference_positions = [
+        (
+            "cross-file function including declaration",
+            definition_use_uri.as_str(),
+            1,
+            18,
+            true,
+        ),
+        (
+            "cross-file function excluding declaration",
+            definition_use_uri.as_str(),
+            1,
+            18,
+            false,
+        ),
+        (
+            "local value including declaration",
+            locals_uri.as_str(),
+            3,
+            12,
+            true,
+        ),
+        (
+            "class type references including declaration",
+            basic_tokens_uri.as_str(),
+            1,
+            17,
+            true,
+        ),
+        (
+            "selected overload only",
+            overloads_uri.as_str(),
+            2,
+            21,
+            true,
+        ),
+        (
+            "same-name local value only",
+            local_kinds_uri.as_str(),
+            3,
+            9,
+            true,
+        ),
+        (
+            "imported class through import terminal",
+            import_terminal_uri.as_str(),
+            1,
+            16,
+            true,
+        ),
+    ];
+    let expected_references = reference_positions
+        .iter()
+        .map(|(name, uri, line, character, include_declaration)| {
+            json!({
+                "case": name,
+                "result": reference.references(
+                    uri,
+                    *line,
+                    *character,
+                    *include_declaration
+                )
+            })
+        })
+        .collect::<Vec<_>>();
     let completion_positions = [
         ("receiver members", completion_parity_uri.as_str(), 11, 18),
         (
@@ -1566,6 +1657,20 @@ fn diagnostics_tokens_definitions_hovers_and_completions_match_official_kotlin_l
             })
         })
         .collect::<Vec<_>>();
+    let actual_references = reference_positions
+        .iter()
+        .map(|(name, uri, line, character, include_declaration)| {
+            json!({
+                "case": name,
+                "result": krusty.references(
+                    uri,
+                    *line,
+                    *character,
+                    *include_declaration
+                )
+            })
+        })
+        .collect::<Vec<_>>();
     let actual_completions = completion_positions
         .iter()
         .map(|(name, uri, line, character)| {
@@ -1602,6 +1707,10 @@ fn diagnostics_tokens_definitions_hovers_and_completions_match_official_kotlin_l
         "negative definition mismatches"
     );
     assert_eq!(actual_hovers, expected_hovers, "hover mismatches");
+    assert_eq!(
+        actual_references, expected_references,
+        "reference mismatches"
+    );
     assert_eq!(
         actual_completions, expected_completions,
         "completion mismatches"

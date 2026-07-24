@@ -254,6 +254,141 @@ mod tests {
     }
 
     #[test]
+    fn references_match_exact_cross_file_ranges_and_declaration_filtering() {
+        let calls = Rc::new(Cell::new(0));
+        let calls_for_analyzer = calls.clone();
+        let mut server = LspService::new(move |sources: &[&str]| {
+            calls_for_analyzer.set(calls_for_analyzer.get() + 1);
+            super::super::analyze_for_lsp(sources)
+        });
+        let initialized = server.handle(request(1, "initialize", json!({})));
+        assert_eq!(
+            initialized.messages[0]["result"]["capabilities"]["referencesProvider"],
+            true
+        );
+        for (uri, text) in [
+            (
+                "file:///DefinitionTarget.kt",
+                "package demo\nfun answer(): Int = 42\n",
+            ),
+            (
+                "file:///DefinitionUse.kt",
+                "package demo\nfun use(): Int = answer()\n",
+            ),
+        ] {
+            server.handle(notification(
+                "textDocument/didOpen",
+                json!({
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": "kotlin",
+                        "version": 1,
+                        "text": text
+                    }
+                }),
+            ));
+        }
+        assert_eq!(calls.get(), 2);
+
+        for (id, include_declaration, expected) in [
+            (
+                2,
+                true,
+                json!([
+                    {
+                        "uri": "file:///DefinitionTarget.kt",
+                        "range": {
+                            "start": {"line": 1, "character": 4},
+                            "end": {"line": 1, "character": 10}
+                        }
+                    },
+                    {
+                        "uri": "file:///DefinitionUse.kt",
+                        "range": {
+                            "start": {"line": 1, "character": 17},
+                            "end": {"line": 1, "character": 23}
+                        }
+                    }
+                ]),
+            ),
+            (
+                3,
+                false,
+                json!([
+                    {
+                        "uri": "file:///DefinitionUse.kt",
+                        "range": {
+                            "start": {"line": 1, "character": 17},
+                            "end": {"line": 1, "character": 23}
+                        }
+                    }
+                ]),
+            ),
+        ] {
+            let response = server.handle(request(
+                id,
+                "textDocument/references",
+                json!({
+                    "textDocument": {"uri": "file:///DefinitionUse.kt"},
+                    "position": {"line": 1, "character": 18},
+                    "context": {"includeDeclaration": include_declaration}
+                }),
+            ));
+            assert_eq!(response.messages[0]["result"], expected);
+        }
+        assert_eq!(calls.get(), 2, "references must use compact cached spans");
+    }
+
+    #[test]
+    fn references_keep_checker_selected_overloads_separate() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///Overloads.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "fun pick(value: Int): Int = value\n\
+                             fun pick(value: String): Int = value.length\n\
+                             fun use(): Int = pick(1)\n"
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/references",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 2, "character": 18},
+                "context": {"includeDeclaration": true}
+            }),
+        ));
+        assert_eq!(
+            response.messages[0]["result"],
+            json!([
+                {
+                    "uri": uri,
+                    "range": {
+                        "start": {"line": 0, "character": 4},
+                        "end": {"line": 0, "character": 8}
+                    }
+                },
+                {
+                    "uri": uri,
+                    "range": {
+                        "start": {"line": 2, "character": 17},
+                        "end": {"line": 2, "character": 21}
+                    }
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn definition_resolves_a_selected_source_extension_function() {
         let mut server = LspService::new(super::super::analyze_for_lsp);
         server.handle(request(1, "initialize", json!({})));

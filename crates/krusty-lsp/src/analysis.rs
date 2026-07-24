@@ -198,6 +198,26 @@ impl DefinitionIndex {
         }
     }
 
+    /// Reverse-query source ranges that resolve to any selected declaration identity.
+    ///
+    /// Every compact entry is visited exactly once even when a cursor maps to multiple targets.
+    /// The source-set budget bounds the scan, so references need no persistent reverse index or AST.
+    pub fn references_to_any<'a>(
+        &'a self,
+        targets: &'a HashSet<[u32; 3]>,
+    ) -> impl Iterator<Item = (Span, u32, Span)> + 'a {
+        self.entries
+            .iter()
+            .filter(|entry| targets.contains(&[entry[2], entry[3], entry[4]]))
+            .map(|entry| {
+                (
+                    Span::new(entry[0], entry[1]),
+                    entry[2],
+                    Span::new(entry[3], entry[4]),
+                )
+            })
+    }
+
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
@@ -915,6 +935,76 @@ mod tests {
                 }]
             );
         }
+    }
+
+    #[test]
+    fn definition_snapshot_reverse_query_reuses_the_same_compact_entries() {
+        let source = "data class User(val name: String)\n\
+                      fun greet(user: User): String = user.name\n";
+        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let declaration = Span::new(20, 24);
+        let targets = HashSet::from([[0, declaration.lo, declaration.hi]]);
+
+        assert_eq!(
+            analysis
+                .definitions
+                .references_to_any(&targets)
+                .map(|(span, _, _)| span)
+                .collect::<Vec<_>>(),
+            vec![
+                declaration,
+                Span::new(
+                    source.rfind("name").unwrap() as u32,
+                    source.rfind("name").unwrap() as u32 + 4,
+                ),
+            ]
+        );
+        assert_eq!(std::mem::size_of::<DefinitionEntry>(), 20);
+    }
+
+    #[test]
+    fn definition_snapshot_reverse_query_scans_multiple_targets_together() {
+        let target_a = DefinitionTarget {
+            file: 0,
+            span: Span::new(10, 11),
+        };
+        let target_b = DefinitionTarget {
+            file: 1,
+            span: Span::new(20, 21),
+        };
+        let mut budget = DefinitionBudget::default();
+        let index = DefinitionIndex::from_occurrences(
+            vec![
+                DefinitionOccurrence {
+                    span: Span::new(0, 1),
+                    target: target_a,
+                },
+                DefinitionOccurrence {
+                    span: Span::new(2, 3),
+                    target: target_b,
+                },
+                DefinitionOccurrence {
+                    span: Span::new(4, 5),
+                    target: DefinitionTarget {
+                        file: 2,
+                        span: Span::new(30, 31),
+                    },
+                },
+            ],
+            &mut budget,
+        );
+        let targets = HashSet::from([
+            [target_a.file, target_a.span.lo, target_a.span.hi],
+            [target_b.file, target_b.span.lo, target_b.span.hi],
+        ]);
+
+        assert_eq!(
+            index.references_to_any(&targets).collect::<Vec<_>>(),
+            vec![
+                (Span::new(0, 1), 0, Span::new(10, 11)),
+                (Span::new(2, 3), 1, Span::new(20, 21)),
+            ]
+        );
     }
 
     #[test]

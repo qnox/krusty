@@ -5,8 +5,7 @@
 //! completion, navigation, and highlighting data for each open document; full compiler analysis is
 //! dropped after every open/change notification.
 
-use std::collections::HashMap;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, BufRead, Read, Write};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -315,6 +314,7 @@ where
                         "capabilities": {
                             "hoverProvider": true,
                             "definitionProvider": true,
+                            "referencesProvider": true,
                             "completionProvider": {
                                 "resolveProvider": true,
                                 "triggerCharacters": ["."],
@@ -343,6 +343,7 @@ where
             "textDocument/didClose" => self.did_close(id, params, defer_analysis),
             "textDocument/hover" => self.hover(id, params),
             "textDocument/definition" => self.definition(id, params),
+            "textDocument/references" => self.references(id, params),
             "textDocument/completion" => self.completion(id, params),
             "completionItem/resolve" => self.resolve_completion(id, params),
             "textDocument/semanticTokens/full" => self.semantic_tokens(id, params, false),
@@ -611,6 +612,68 @@ where
         Dispatch::messages(vec![rpc_result(id, Value::Array(locations))])
     }
 
+    fn references(&self, id: Option<Value>, params: Value) -> Dispatch {
+        let Some(id) = id else {
+            return Dispatch::none();
+        };
+        let Ok(params) = serde_json::from_value::<ReferenceParams>(params) else {
+            return invalid_params(Some(id));
+        };
+        let Some(open) = self.documents.get(&params.text_document.uri) else {
+            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+        };
+        let Some(offset) = position_to_byte_offset(&open.text, params.position) else {
+            return invalid_params(Some(id));
+        };
+        let targets = open.definitions.get(offset).collect::<Vec<_>>();
+        if targets.is_empty() {
+            return Dispatch::messages(vec![rpc_result(id, json!([]))]);
+        }
+        let target_ids = targets
+            .into_iter()
+            .map(|target| [target.file, target.span.lo, target.span.hi])
+            .collect::<HashSet<_>>();
+        let mut uris = self
+            .documents
+            .iter()
+            .filter(|(_, document)| !document.analysis_blocked)
+            .map(|(uri, _)| uri)
+            .collect::<Vec<_>>();
+        uris.sort_unstable();
+
+        let mut occurrences = Vec::new();
+        for (source_file, uri) in uris.iter().enumerate() {
+            let document = &self.documents[*uri];
+            occurrences.extend(
+                document
+                    .definitions
+                    .references_to_any(&target_ids)
+                    .filter(|(span, target_file, target_span)| {
+                        params.context.include_declaration
+                            || source_file as u32 != *target_file
+                            || *span != *target_span
+                    })
+                    .map(|(span, _, _)| ((*uri).as_str(), span)),
+            );
+        }
+        occurrences.sort_unstable_by_key(|(uri, span)| (*uri, span.lo, span.hi));
+        occurrences.dedup();
+        let locations = occurrences
+            .into_iter()
+            .filter_map(|(uri, span)| {
+                let document = self.documents.get(uri)?;
+                Some(json!({
+                    "uri": uri,
+                    "range": {
+                        "start": byte_offset_to_position(&document.text, span.lo as usize),
+                        "end": byte_offset_to_position(&document.text, span.hi as usize),
+                    }
+                }))
+            })
+            .collect::<Vec<_>>();
+        Dispatch::messages(vec![rpc_result(id, Value::Array(locations))])
+    }
+
     fn resolve_completion(&self, id: Option<Value>, item: Value) -> Dispatch {
         let Some(id) = id else {
             return Dispatch::none();
@@ -701,6 +764,20 @@ struct DidCloseParams {
 struct TextDocumentPositionParams {
     text_document: TextDocumentIdentifier,
     position: Position,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReferenceParams {
+    text_document: TextDocumentIdentifier,
+    position: Position,
+    context: ReferenceContext,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReferenceContext {
+    include_declaration: bool,
 }
 
 #[derive(Clone, Copy, Deserialize)]
