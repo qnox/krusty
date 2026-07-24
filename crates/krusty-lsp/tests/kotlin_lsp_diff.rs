@@ -55,7 +55,7 @@ struct TempProject {
 
 impl TempProject {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("krusty_lsp_diff_{}", std::process::id()));
+        let root = std::env::temp_dir().join("krusty_lsp_diff_project");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         Self { root }
@@ -345,6 +345,19 @@ impl LspProcess {
         );
         response.get("result").cloned().unwrap_or(Value::Null)
     }
+
+    fn hover(&mut self, uri: &str, line: u32, character: u32) -> Value {
+        let request_id = self.next_request_id();
+        let response = self.request(
+            request_id,
+            "textDocument/hover",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": line, "character": character}
+            }),
+        );
+        response.get("result").cloned().unwrap_or(Value::Null)
+    }
 }
 
 impl Drop for LspProcess {
@@ -377,7 +390,34 @@ fn reference_version_selection_is_semantic_and_order_independent() {
 }
 
 #[test]
-fn diagnostics_semantic_tokens_and_definitions_match_official_kotlin_lsp() {
+fn diagnostic_comparison_preserves_the_exact_range_and_text() {
+    let diagnostics = normalized_diagnostics(vec![json!({
+        "range": {
+            "start": {"line": 3, "character": 5},
+            "end": {"line": 3, "character": 12}
+        },
+        "severity": 1,
+        "source": "Kotlin",
+        "message": "Argument type mismatch.",
+        "code": "ignored-by-parity-contract"
+    })]);
+
+    assert_eq!(
+        diagnostics,
+        vec![json!({
+            "range": {
+                "start": {"line": 3, "character": 5},
+                "end": {"line": 3, "character": 12}
+            },
+            "severity": 1,
+            "source": "Kotlin",
+            "message": "Argument type mismatch."
+        })]
+    );
+}
+
+#[test]
+fn diagnostics_tokens_definitions_and_hovers_match_official_kotlin_lsp() {
     let Ok(kotlin_lsp) = std::env::var("KRUSTY_KOTLIN_LSP") else {
         eprintln!("skipping Kotlin LSP differential: set KRUSTY_KOTLIN_LSP");
         return;
@@ -471,6 +511,125 @@ fn diagnostics_semantic_tokens_and_definitions_match_official_kotlin_lsp() {
             "fun String.ext(): Int = 1\nfun useReceiverless(): Int = ext()\n",
         ),
         (
+            "HoverAdvanced.kt",
+            "package hoveradvanced\n\
+             open class GenericBox<T>(val value: T) {\n\
+             \u{20}\u{20}open var mutable: String? = null\n\
+             \u{20}\u{20}protected open fun combine(vararg values: Int): String? = null\n\
+             }\n\
+             interface Named {\n\
+             \u{20}\u{20}fun label(prefix: String = \"x\"): String\n\
+             }\n\
+             suspend fun <T : Any> transform(value: T): T = value\n\
+             fun inferred() = 42\n\
+             fun use(box: GenericBox<Int>): String? = box.mutable\n",
+        ),
+        (
+            "HoverInference.kt",
+            "package hoverinference\n\
+             import kotlin.reflect.KProperty\n\
+             open class Base { open fun pick(): Int = 1 }\n\
+             class Child : Base() { override fun pick(): Int = 2 }\n\
+             val getterOnly get() = 42\n\
+             class Delegate { operator fun getValue(t: Any?, p: KProperty<*>): Int = 1 }\n\
+             fun locals(): Int {\n\
+             \u{20}\u{20}fun local() = 42\n\
+             \u{20}\u{20}val inferred by Delegate()\n\
+             \u{20}\u{20}return local() + inferred\n\
+             }\n\
+             fun loop(values: IntArray): Int {\n\
+             \u{20}\u{20}for (value in values) return value\n\
+             \u{20}\u{20}return 0\n\
+             }\n\
+             fun lambdaHover(): Int {\n\
+             \u{20}\u{20}val fn: (Int) -> Int = { value -> value + 1 }\n\
+             \u{20}\u{20}return fn(1)\n\
+             }\n\
+             fun catchHover(): Int = try { 1 } catch (error: Throwable) { 2 }\n\
+             val blockGetter get() { return 42 }\n\
+             val topDelegated by Delegate()\n\
+             class DelegatedHolder { val memberDelegated by Delegate() }\n",
+        ),
+        (
+            "HoverModifiers.kt",
+            "package hovermodifiers\n\
+             fun interface Action { fun run(): Int }\n\
+             @JvmInline value class Meter(val value: Int)\n\
+             class Outer { inner class Inner { fun answer(): Int = 1 } }\n\
+             enum class Code(val wire: Int) { OK(1) }\n\
+             annotation class Label(val text: String)\n\
+             const val ANSWER: Int = 42\n\
+             lateinit var text: String\n\
+             open class Parent { open val item: Int = 1; open fun pick(): Int = 1 }\n\
+             class Child : Parent() { override val item: Int = 2; override fun pick(): Int = 2 }\n\
+             inline fun inlined(): Int = 1\n\
+             tailrec fun tail(n: Int): Int = if (n == 0) 0 else tail(n - 1)\n\
+             operator fun Meter.plus(other: Meter): Meter = Meter(value + other.value)\n\
+             fun nestedUse(outer: Outer): Int = outer.Inner().answer()\n",
+        ),
+        (
+            "HoverReview.kt",
+            "package hoverreview\n\
+             data class Parts(val number: Int, val text: String)\n\
+             class Outer { class Inner }\n\
+             fun nestedLocal(): Int {\n\
+             \u{20}\u{20}val nested = Outer.Inner()\n\
+             \u{20}\u{20}return nested.hashCode()\n\
+             }\n\
+             fun destructure(parts: Parts): Int {\n\
+             \u{20}\u{20}val (number, text) = parts\n\
+             \u{20}\u{20}return number\n\
+             }\n\
+             class Meter(val value: Int)\n\
+             operator\n\
+             fun Meter.plus(other: Meter): Meter = this\n\
+             open class Parent { open val item: Int = 1 }\n\
+             class Child : Parent() {\n\
+             \u{20}\u{20}override\n\
+             \u{20}\u{20}val item: Int = 2\n\
+             }\n",
+        ),
+        (
+            "NestedDefinitions.kt",
+            "package nesteddefinitions\n\
+             class Outer { inner class Inner { fun answer(): Int = 1 } }\n",
+        ),
+        (
+            "NestedUse.kt",
+            "package nesteduse\n\
+             import nesteddefinitions.Outer\n\
+             import nesteddefinitions.Outer.Inner\n\
+             fun imported(value: Inner): Int = value.answer()\n\
+             fun constructed(outer: Outer): Int = outer.Inner().answer()\n\
+             fun qualified(value: nesteddefinitions.Outer.Inner): Int = value.answer()\n",
+        ),
+        (
+            "NestedOuterImportUse.kt",
+            "package nestedouterimport\n\
+             import nesteddefinitions.Outer\n\
+             fun importedOuter(value: Outer.Inner): Outer.Inner = value\n",
+        ),
+        (
+            "NestedOuterWildcardUse.kt",
+            "package nestedouterwildcard\n\
+             import nesteddefinitions.*\n\
+             fun wildcardOuter(value: Outer.Inner): Outer.Inner = value\n",
+        ),
+        (
+            "NestedEnclosingUse.kt",
+            "package nestedenclosing\n\
+             class Enclosing {\n\
+             \u{20}\u{20}inner class Nested\n\
+             \u{20}\u{20}fun echo(value: Nested): Nested = value\n\
+             }\n",
+        ),
+        (
+            "NestedCallableCollision.kt",
+            "package nestedcollision\n\
+             class Outer { inner class Item; fun Item(): Int = 1 }\n\
+             fun use(outer: Outer): Int = outer.Item()\n",
+        ),
+        (
             "Overloads.kt",
             "fun select(value: Int): Int = value\n\
              fun select(value: String): Int = value.length\n\
@@ -503,7 +662,8 @@ fn diagnostics_semantic_tokens_and_definitions_match_official_kotlin_lsp() {
         (
             "Backticked.kt",
             "fun `odd name`(): Int = 1\n\
-             fun useOdd(): Int = `odd name`()\n",
+             fun useOdd(): Int = `odd name`()\n\
+             fun parameterHover(`odd param`: Int): Int = `odd param`\n",
         ),
         (
             "MemberKinds.kt",
@@ -648,10 +808,15 @@ fn diagnostics_semantic_tokens_and_definitions_match_official_kotlin_lsp() {
         })
         .collect::<Vec<_>>();
     let basic_tokens_uri = format!("file://{}", source_root.join("BasicTokens.kt").display());
+    let member_tokens_uri = format!("file://{}", source_root.join("MemberTokens.kt").display());
     for (name, source) in definition_files {
         let uri = format!("file://{}", source_root.join(name).display());
         reference.open_document(&uri, source);
     }
+    let definition_target_uri = format!(
+        "file://{}",
+        source_root.join("DefinitionTarget.kt").display()
+    );
     let definition_use_uri = format!("file://{}", source_root.join("DefinitionUse.kt").display());
     let locals_uri = format!("file://{}", source_root.join("Locals.kt").display());
     let local_kinds_uri = format!("file://{}", source_root.join("LocalKinds.kt").display());
@@ -659,6 +824,27 @@ fn diagnostics_semantic_tokens_and_definitions_match_official_kotlin_lsp() {
     let receiverless_extension_uri = format!(
         "file://{}",
         source_root.join("ReceiverlessExtension.kt").display()
+    );
+    let hover_advanced_uri = format!("file://{}", source_root.join("HoverAdvanced.kt").display());
+    let hover_inference_uri = format!("file://{}", source_root.join("HoverInference.kt").display());
+    let hover_modifiers_uri = format!("file://{}", source_root.join("HoverModifiers.kt").display());
+    let hover_review_uri = format!("file://{}", source_root.join("HoverReview.kt").display());
+    let nested_use_uri = format!("file://{}", source_root.join("NestedUse.kt").display());
+    let nested_outer_import_use_uri = format!(
+        "file://{}",
+        source_root.join("NestedOuterImportUse.kt").display()
+    );
+    let nested_outer_wildcard_use_uri = format!(
+        "file://{}",
+        source_root.join("NestedOuterWildcardUse.kt").display()
+    );
+    let nested_enclosing_use_uri = format!(
+        "file://{}",
+        source_root.join("NestedEnclosingUse.kt").display()
+    );
+    let nested_callable_collision_uri = format!(
+        "file://{}",
+        source_root.join("NestedCallableCollision.kt").display()
     );
     let overloads_uri = format!("file://{}", source_root.join("Overloads.kt").display());
     let member_overloads_uri = format!(
@@ -860,6 +1046,30 @@ fn diagnostics_semantic_tokens_and_definitions_match_official_kotlin_lsp() {
             1,
             37,
         ),
+        (
+            "selected member over same-named inner class",
+            nested_callable_collision_uri.as_str(),
+            2,
+            36,
+        ),
+        (
+            "nested type through imported outer class",
+            nested_outer_import_use_uri.as_str(),
+            2,
+            32,
+        ),
+        (
+            "nested type through wildcard-imported outer class",
+            nested_outer_wildcard_use_uri.as_str(),
+            2,
+            32,
+        ),
+        (
+            "simple nested type inside outer class",
+            nested_enclosing_use_uri.as_str(),
+            3,
+            20,
+        ),
     ];
     let expected_definitions = definition_positions
         .iter()
@@ -892,6 +1102,325 @@ fn diagnostics_semantic_tokens_and_definitions_match_official_kotlin_lsp() {
             json!({
                 "case": name,
                 "result": result
+            })
+        })
+        .collect::<Vec<_>>();
+    let hover_positions = [
+        ("class declaration", basic_tokens_uri.as_str(), 0, 12),
+        ("class reference", basic_tokens_uri.as_str(), 1, 17),
+        (
+            "constructor property declaration",
+            basic_tokens_uri.as_str(),
+            0,
+            21,
+        ),
+        ("parameter reference", basic_tokens_uri.as_str(), 1, 33),
+        ("property reference", basic_tokens_uri.as_str(), 1, 38),
+        (
+            "top-level function declaration",
+            definition_target_uri.as_str(),
+            1,
+            5,
+        ),
+        ("literal expression", definition_target_uri.as_str(), 1, 20),
+        (
+            "cross-file function reference",
+            definition_use_uri.as_str(),
+            1,
+            18,
+        ),
+        (
+            "same-name top-level value",
+            top_kinds_use_uri.as_str(),
+            1,
+            26,
+        ),
+        ("local value reference", locals_uri.as_str(), 3, 12),
+        ("local function reference", locals_uri.as_str(), 3, 21),
+        ("selected overload reference", overloads_uri.as_str(), 2, 21),
+        (
+            "member overload reference",
+            member_overloads_uri.as_str(),
+            4,
+            39,
+        ),
+        (
+            "member property reference",
+            member_kinds_uri.as_str(),
+            4,
+            44,
+        ),
+        ("inherited member reference", inherited_uri.as_str(), 5, 37),
+        (
+            "extension function reference",
+            extension_uri.as_str(),
+            2,
+            33,
+        ),
+        (
+            "extension property reference",
+            extension_property_uri.as_str(),
+            3,
+            32,
+        ),
+        (
+            "generic extension reference",
+            generic_extension_uri.as_str(),
+            1,
+            28,
+        ),
+        (
+            "object member reference",
+            object_members_uri.as_str(),
+            4,
+            28,
+        ),
+        (
+            "companion member reference",
+            member_staticness_uri.as_str(),
+            6,
+            54,
+        ),
+        ("super member reference", super_call_uri.as_str(), 7, 29),
+        (
+            "imported class terminal",
+            import_terminal_uri.as_str(),
+            1,
+            16,
+        ),
+        (
+            "generic open class declaration",
+            hover_advanced_uri.as_str(),
+            1,
+            12,
+        ),
+        (
+            "open nullable property declaration",
+            hover_advanced_uri.as_str(),
+            2,
+            12,
+        ),
+        (
+            "defaulted interface method declaration",
+            hover_advanced_uri.as_str(),
+            6,
+            7,
+        ),
+        (
+            "bounded suspend function declaration",
+            hover_advanced_uri.as_str(),
+            8,
+            22,
+        ),
+        (
+            "inferred function declaration",
+            hover_advanced_uri.as_str(),
+            9,
+            5,
+        ),
+        (
+            "generic class reference",
+            hover_advanced_uri.as_str(),
+            10,
+            14,
+        ),
+        (
+            "protected vararg member declaration",
+            hover_advanced_uri.as_str(),
+            3,
+            22,
+        ),
+        (
+            "override member declaration",
+            hover_inference_uri.as_str(),
+            3,
+            37,
+        ),
+        (
+            "getter-only inferred property",
+            hover_inference_uri.as_str(),
+            4,
+            5,
+        ),
+        (
+            "inferred local function",
+            hover_inference_uri.as_str(),
+            7,
+            7,
+        ),
+        (
+            "inferred delegated local",
+            hover_inference_uri.as_str(),
+            8,
+            7,
+        ),
+        ("enum entry declaration", member_tokens_uri.as_str(), 0, 20),
+        ("bounded type parameter", hover_advanced_uri.as_str(), 8, 13),
+        ("for-loop variable", hover_inference_uri.as_str(), 12, 8),
+        ("lambda parameter", hover_inference_uri.as_str(), 16, 28),
+        ("backticked function", backticked_uri.as_str(), 0, 5),
+        (
+            "backticked function parameter signature",
+            backticked_uri.as_str(),
+            2,
+            5,
+        ),
+        (
+            "backticked function parameter declaration",
+            backticked_uri.as_str(),
+            2,
+            21,
+        ),
+        (
+            "backticked function parameter reference",
+            backticked_uri.as_str(),
+            2,
+            49,
+        ),
+        (
+            "backticked constructor property",
+            backticked_members_uri.as_str(),
+            0,
+            17,
+        ),
+        (
+            "backticked enum entry",
+            backticked_members_uri.as_str(),
+            2,
+            24,
+        ),
+        ("catch variable", hover_inference_uri.as_str(), 19, 42),
+        (
+            "block getter inferred property",
+            hover_inference_uri.as_str(),
+            20,
+            5,
+        ),
+        (
+            "top-level inferred delegated property",
+            hover_inference_uri.as_str(),
+            21,
+            5,
+        ),
+        (
+            "member inferred delegated property",
+            hover_inference_uri.as_str(),
+            22,
+            29,
+        ),
+        ("fun interface", hover_modifiers_uri.as_str(), 1, 15),
+        ("value class", hover_modifiers_uri.as_str(), 2, 24),
+        ("inner class", hover_modifiers_uri.as_str(), 3, 28),
+        (
+            "enum constructor signature",
+            hover_modifiers_uri.as_str(),
+            4,
+            12,
+        ),
+        (
+            "annotation constructor signature",
+            hover_modifiers_uri.as_str(),
+            5,
+            18,
+        ),
+        ("const property", hover_modifiers_uri.as_str(), 6, 11),
+        ("lateinit property", hover_modifiers_uri.as_str(), 7, 14),
+        ("override property", hover_modifiers_uri.as_str(), 9, 40),
+        ("inline function", hover_modifiers_uri.as_str(), 10, 12),
+        ("tailrec function", hover_modifiers_uri.as_str(), 11, 13),
+        ("operator function", hover_modifiers_uri.as_str(), 12, 20),
+        (
+            "qualified inner class reference",
+            hover_modifiers_uri.as_str(),
+            13,
+            42,
+        ),
+        (
+            "inner class member reference",
+            hover_modifiers_uri.as_str(),
+            13,
+            50,
+        ),
+        ("imported inner class type", nested_use_uri.as_str(), 3, 20),
+        (
+            "imported inner member reference",
+            nested_use_uri.as_str(),
+            3,
+            40,
+        ),
+        (
+            "imported outer inner constructor",
+            nested_use_uri.as_str(),
+            4,
+            44,
+        ),
+        (
+            "fully qualified inner class type",
+            nested_use_uri.as_str(),
+            5,
+            45,
+        ),
+        (
+            "fully qualified inner member reference",
+            nested_use_uri.as_str(),
+            5,
+            65,
+        ),
+        (
+            "member function wins over same-named inner class",
+            nested_callable_collision_uri.as_str(),
+            2,
+            36,
+        ),
+        (
+            "hover nested type through imported outer class",
+            nested_outer_import_use_uri.as_str(),
+            2,
+            32,
+        ),
+        (
+            "hover nested type through wildcard-imported outer class",
+            nested_outer_wildcard_use_uri.as_str(),
+            2,
+            32,
+        ),
+        (
+            "hover simple nested type inside outer class",
+            nested_enclosing_use_uri.as_str(),
+            3,
+            20,
+        ),
+        (
+            "inferred nested local type",
+            hover_review_uri.as_str(),
+            5,
+            10,
+        ),
+        (
+            "destructured component type",
+            hover_review_uri.as_str(),
+            9,
+            10,
+        ),
+        (
+            "multiline operator modifier",
+            hover_review_uri.as_str(),
+            13,
+            11,
+        ),
+        (
+            "multiline override modifier",
+            hover_review_uri.as_str(),
+            17,
+            7,
+        ),
+    ];
+    let expected_hovers = hover_positions
+        .iter()
+        .map(|(name, uri, line, character)| {
+            json!({
+                "case": name,
+                "result": reference.hover(uri, *line, *character)
             })
         })
         .collect::<Vec<_>>();
@@ -937,6 +1466,15 @@ fn diagnostics_semantic_tokens_and_definitions_match_official_kotlin_lsp() {
             })
         })
         .collect::<Vec<_>>();
+    let actual_hovers = hover_positions
+        .iter()
+        .map(|(name, uri, line, character)| {
+            json!({
+                "case": name,
+                "result": krusty.hover(uri, *line, *character)
+            })
+        })
+        .collect::<Vec<_>>();
 
     for ((name, _), (actual, expected)) in diagnostic_cases
         .iter()
@@ -958,4 +1496,5 @@ fn diagnostics_semantic_tokens_and_definitions_match_official_kotlin_lsp() {
         actual_negative_definitions, expected_negative_definitions,
         "negative definition mismatches"
     );
+    assert_eq!(actual_hovers, expected_hovers, "hover mismatches");
 }

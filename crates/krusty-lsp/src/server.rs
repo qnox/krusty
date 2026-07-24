@@ -1335,6 +1335,140 @@ mod tests {
     }
 
     #[test]
+    fn navigation_resolves_nested_types_through_outer_class_imports() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        for (uri, text) in [
+            (
+                "file:///Outer.kt",
+                "package p\nclass Outer { inner class Inner }\n",
+            ),
+            (
+                "file:///ExplicitUse.kt",
+                "package use\nimport p.Outer\nfun f(x: Outer.Inner): Outer.Inner = x\n",
+            ),
+            (
+                "file:///WildcardUse.kt",
+                "package use\nimport p.*\nfun f(x: Outer.Inner): Outer.Inner = x\n",
+            ),
+        ] {
+            server.handle(notification(
+                "textDocument/didOpen",
+                json!({
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": "kotlin",
+                        "version": 1,
+                        "text": text
+                    }
+                }),
+            ));
+        }
+
+        for (id, uri) in [(2, "file:///ExplicitUse.kt"), (4, "file:///WildcardUse.kt")] {
+            let definition = server.handle(request(
+                id,
+                "textDocument/definition",
+                json!({
+                    "textDocument": {"uri": uri},
+                    "position": {"line": 2, "character": 16}
+                }),
+            ));
+            assert_eq!(
+                definition.messages[0]["result"],
+                json!([{
+                    "uri": "file:///Outer.kt",
+                    "range": {
+                        "start": {"line": 1, "character": 26},
+                        "end": {"line": 1, "character": 31}
+                    }
+                }])
+            );
+
+            let hover = server.handle(request(
+                id + 1,
+                "textDocument/hover",
+                json!({
+                    "textDocument": {"uri": uri},
+                    "position": {"line": 2, "character": 16}
+                }),
+            ));
+            assert_eq!(
+                hover.messages[0]["result"],
+                json!({
+                    "contents": {
+                        "kind": "markdown",
+                        "value": "````kotlin\ninner class Inner\n````\n"
+                    },
+                    "range": {
+                        "start": {"line": 2, "character": 15},
+                        "end": {"line": 2, "character": 20}
+                    }
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn navigation_resolves_a_simple_nested_type_inside_its_outer_class() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///Outer.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "package p\nclass Outer { inner class Inner; fun f(x: Inner): Inner = x }\n"
+                }
+            }),
+        ));
+
+        let definition = server.handle(request(
+            2,
+            "textDocument/definition",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 1, "character": 50}
+            }),
+        ));
+        assert_eq!(
+            definition.messages[0]["result"],
+            json!([{
+                "uri": uri,
+                "range": {
+                    "start": {"line": 1, "character": 26},
+                    "end": {"line": 1, "character": 31}
+                }
+            }])
+        );
+
+        let hover = server.handle(request(
+            3,
+            "textDocument/hover",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 1, "character": 50}
+            }),
+        ));
+        assert_eq!(
+            hover.messages[0]["result"],
+            json!({
+                "contents": {
+                    "kind": "markdown",
+                    "value": "````kotlin\ninner class Inner\n````\n"
+                },
+                "range": {
+                    "start": {"line": 1, "character": 50},
+                    "end": {"line": 1, "character": 55}
+                }
+            })
+        );
+    }
+
+    #[test]
     fn definition_does_not_choose_between_ambiguous_wildcard_classes() {
         let mut server = LspService::new(super::super::analyze_for_lsp);
         server.handle(request(1, "initialize", json!({})));
@@ -2166,7 +2300,133 @@ mod tests {
         assert_eq!(hover.messages[0]["id"], 2);
         assert_eq!(
             hover.messages[0]["result"]["contents"],
-            json!({"kind": "plaintext", "value": "Int"})
+            json!({
+                "kind": "markdown",
+                "value": "````kotlin\nval answer: Int\n````\n"
+            })
+        );
+        assert_eq!(
+            hover.messages[0]["result"]["range"],
+            json!({
+                "start": {"line": 0, "character": 41},
+                "end": {"line": 0, "character": 47}
+            })
+        );
+        let literal = server.handle(request(
+            3,
+            "textDocument/hover",
+            json!({
+                "textDocument": {"uri": "file:///main.kt"},
+                "position": {"line": 0, "character": 30}
+            }),
+        ));
+        assert_eq!(calls.get(), 1, "hover must use the cached symbol index");
+        assert_eq!(literal.messages[0]["result"], Value::Null);
+    }
+
+    #[test]
+    fn hover_range_includes_backticks_for_parameter_references() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": "file:///main.kt",
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "fun f(`odd param`: Int): Int = `odd param`"
+                }
+            }),
+        ));
+
+        let hover = server.handle(request(
+            2,
+            "textDocument/hover",
+            json!({
+                "textDocument": {"uri": "file:///main.kt"},
+                "position": {"line": 0, "character": 36}
+            }),
+        ));
+        assert_eq!(
+            hover.messages[0]["result"],
+            json!({
+                "contents": {
+                    "kind": "markdown",
+                    "value": "````kotlin\n`odd param`: Int\n````\n"
+                },
+                "range": {
+                    "start": {"line": 0, "character": 31},
+                    "end": {"line": 0, "character": 42}
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn hover_prefers_a_selected_member_over_a_same_named_inner_class() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": "file:///main.kt",
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "class Outer { inner class Item; fun Item(): Int = 1 }\nfun use(outer: Outer): Int = outer.Item()"
+                }
+            }),
+        ));
+
+        let hover = server.handle(request(
+            2,
+            "textDocument/hover",
+            json!({
+                "textDocument": {"uri": "file:///main.kt"},
+                "position": {"line": 1, "character": 36}
+            }),
+        ));
+        assert_eq!(
+            hover.messages[0]["result"],
+            json!({
+                "contents": {
+                    "kind": "markdown",
+                    "value": "````kotlin\ninner class Item\n````\n\n---\n````kotlin\nfun Item(): Int\n````\n"
+                },
+                "range": {
+                    "start": {"line": 1, "character": 35},
+                    "end": {"line": 1, "character": 39}
+                }
+            })
+        );
+
+        let definition = server.handle(request(
+            3,
+            "textDocument/definition",
+            json!({
+                "textDocument": {"uri": "file:///main.kt"},
+                "position": {"line": 1, "character": 36}
+            }),
+        ));
+        assert_eq!(
+            definition.messages[0]["result"],
+            json!([
+                {
+                    "uri": "file:///main.kt",
+                    "range": {
+                        "start": {"line": 0, "character": 26},
+                        "end": {"line": 0, "character": 30}
+                    }
+                },
+                {
+                    "uri": "file:///main.kt",
+                    "range": {
+                        "start": {"line": 0, "character": 36},
+                        "end": {"line": 0, "character": 40}
+                    }
+                }
+            ])
         );
     }
 }
