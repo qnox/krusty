@@ -6361,7 +6361,7 @@ fn check_file_at_impl(
                             };
                             if let (Some(r), Some(init)) = (&bp.ty, bp.init) {
                                 let declared = c.resolve_ty(r);
-                                let it = c.expr(init);
+                                let it = c.expr_expected(init, declared);
                                 let sp = c.value_operator_span(init);
                                 c.expect_assignable(declared, it, sp, "property initializer");
                             }
@@ -6519,9 +6519,12 @@ fn check_file_at_impl(
                 }
                 for bp in &cl.body_props {
                     if let Some(init) = bp.init {
-                        let it = c.expr(init);
-                        if let Some(r) = &bp.ty {
-                            let declared = c.resolve_ty(r);
+                        let declared = bp.ty.as_ref().map(|r| c.resolve_ty(r));
+                        let it = match declared {
+                            Some(expected) => c.expr_expected(init, expected),
+                            None => c.expr(init),
+                        };
+                        if let Some(declared) = declared {
                             c.expect_assignable(
                                 declared,
                                 it,
@@ -6553,7 +6556,7 @@ fn check_file_at_impl(
                     if let Some(getter) = &bp.getter {
                         c.with_ret_field(prop_ty, Some(prop_ty), |c| match getter {
                             FunBody::Expr(g) => {
-                                let gt = c.expr(*g);
+                                let gt = c.expr_expected(*g, prop_ty);
                                 c.expect_assignable(prop_ty, gt, c.span(*g), "getter body");
                             }
                             FunBody::Block(g) => {
@@ -6658,9 +6661,12 @@ fn check_file_at_impl(
                     c.companion_of = Some(cl.name.clone());
                     for p in &cl.companion_props {
                         if let Some(init) = p.init {
-                            let it = c.expr(init);
-                            if let Some(r) = &p.ty {
-                                let declared = c.resolve_ty(r);
+                            let declared = p.ty.as_ref().map(|r| c.resolve_ty(r));
+                            let it = match declared {
+                                Some(expected) => c.expr_expected(init, expected),
+                                None => c.expr(init),
+                            };
+                            if let Some(declared) = declared {
                                 c.expect_assignable(
                                     declared,
                                     it,
@@ -6711,7 +6717,7 @@ fn check_file_at_impl(
                     let field_ty = has_backing_field.then_some(prop_ty);
                     c.with_ret_field(prop_ty, field_ty, |c| match g {
                         FunBody::Expr(e) => {
-                            let gt = c.expr(*e);
+                            let gt = c.expr_expected(*e, prop_ty);
                             c.expect_assignable(prop_ty, gt, c.span(*e), "getter body");
                         }
                         FunBody::Block(b) => {
@@ -6750,13 +6756,17 @@ fn check_file_at_impl(
                     c.record_delegate_getvalue(de, dt);
                 }
                 if let Some(init) = p.init {
-                    let it = c.expr(init);
-                    if let Some((declared, _, _)) = syms
+                    let declared = syms
                         .props
                         .get(&p.name)
                         .copied()
                         .filter(|(t, _, _)| *t != Ty::Error)
-                    {
+                        .map(|(ty, _, _)| ty);
+                    let it = match declared.filter(|_| p.ty.is_some()) {
+                        Some(expected) => c.expr_expected(init, expected),
+                        None => c.expr(init),
+                    };
+                    if let Some(declared) = declared {
                         if p.ty.is_some() {
                             c.expect_assignable(
                                 declared,
@@ -6914,11 +6924,8 @@ struct Checker<'a> {
     expr_types: Vec<Ty>,
     scopes: Vec<HashMap<String, Local>>,
     ret_ty: Ty,
-    /// The EXPECTED type of the expression about to be checked, propagated from an enclosing typed
-    /// context (a declared `val f: (Int) -> Int = …`) into RESULT positions (an `if`/`when` branch, a
-    /// block's trailing value) so a bare lambda literal there takes its parameter types from the
-    /// expectation instead of erasing to `Any`. Consumed (cleared) at each `expr()` entry, so it only
-    /// reaches the immediate expression; propagation sites re-arm it via [`Self::expr_expected`].
+    /// Expected type for the next expression. Consumed by [`Self::expr`]; result-position
+    /// propagation must re-arm it through [`Self::expr_expected`].
     expected: Option<Ty>,
     imports: HashMap<String, String>,
     /// Star/implicit import packages by kotlinc precedence level (same-package, explicit stars, Kotlin
@@ -9500,19 +9507,7 @@ impl<'a> Checker<'a> {
         }
         match &f.body {
             FunBody::Expr(e) => {
-                // An expression-body lambda whose declared return type is a function type takes its
-                // parameter types from that return type — `fun mk(): (Int) -> Int = { it + 1 }` types `it`
-                // as `Int`, not the erased `Object` (the same as a typed local/HOF-argument lambda).
-                let t = match (
-                    self.ret_ty,
-                    matches!(self.file.expr(*e), Expr::Lambda { .. }),
-                ) {
-                    (Ty::Fun(s), true) => {
-                        let params = s.params.clone();
-                        self.check_lambda_with_types(*e, &params)
-                    }
-                    _ => self.expr(*e),
-                };
+                let t = self.expr_expected(*e, self.ret_ty);
                 self.expect_assignable(self.ret_ty, t, self.span(*e), "function body");
             }
             FunBody::Block(e) => {
@@ -10218,7 +10213,7 @@ impl<'a> Checker<'a> {
             }
             Expr::Return { value, .. } => {
                 if let Some(v) = value {
-                    self.expr(v);
+                    self.expr_expected(v, self.ret_ty);
                 }
                 Ty::Nothing
             }
@@ -11510,7 +11505,9 @@ impl<'a> Checker<'a> {
                 let rt = self.expr(receiver);
                 self.check_member(rt, &name, self.span(e), Some(e))
             }
-            Expr::Call { callee, args } => self.check_call(e, callee, &args, self.span(e)),
+            Expr::Call { callee, args } => {
+                self.check_call(e, callee, &args, self.span(e), expected)
+            }
             Expr::If {
                 cond,
                 then_branch,
@@ -12277,7 +12274,7 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         arg_tys: &[Ty],
         span: Span,
-        explicit_elem: Option<Ty>,
+        element_hint: Option<Ty>,
     ) -> Option<Ty> {
         let primitive_of = |f: &str| match f {
             "intArrayOf" => Some(Ty::Int),
@@ -12309,10 +12306,9 @@ impl<'a> Checker<'a> {
             return Some(Ty::array(Ty::obj("kotlin/Any")));
         }
         if fname == "arrayOf" {
-            // An explicit type argument (`arrayOf<Byte>(1)`) fixes the element type — the array is
-            // `Array<Byte>` (`[Byte`), and the integer-literal args narrow to it. Otherwise infer the
-            // element as the common type of the arguments.
-            let mut elem: Option<Ty> = explicit_elem;
+            // An explicit type argument (`arrayOf<Byte>(1)`) or contextual `Array<T>` expectation fixes
+            // the element type; otherwise infer it as the common type of the arguments.
+            let mut elem: Option<Ty> = element_hint;
             if elem.is_none() {
                 for &t in arg_tys {
                     elem = Some(match elem {
@@ -14283,7 +14279,14 @@ impl<'a> Checker<'a> {
         Some(ret)
     }
 
-    fn check_call(&mut self, call: ExprId, callee: ExprId, args: &[ExprId], span: Span) -> Ty {
+    fn check_call(
+        &mut self,
+        call: ExprId,
+        callee: ExprId,
+        args: &[ExprId],
+        span: Span,
+        expected: Option<Ty>,
+    ) -> Ty {
         // The called function's name (`foo` / `recv.method`) — a `Recv.() -> R` lambda argument to it
         // binds `this@<name>`, so this is the label pushed when checking any receiver-lambda argument.
         // Uniform across every function: scope functions (`run`/`apply`/`with`) are not special here.
@@ -15852,8 +15855,8 @@ impl<'a> Checker<'a> {
             Expr::Name(fname) => {
                 // Calling a local of function type (`val f: () -> String = …; f()`) or one carrying a
                 // member `operator fun invoke` — both go through the one invoke convention.
-                if let Some(local) = self.lookup(&fname) {
-                    let receiver_ty = local.ty;
+                let local_value_ty = self.lookup(&fname).map(|local| local.ty);
+                if let Some(receiver_ty) = local_value_ty {
                     let arg_tys = self.arg_tys(args);
                     if let Some(ret) =
                         self.record_invoke(call, callee, receiver_ty, args, &arg_tys, span)
@@ -15861,54 +15864,63 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
+                let local_overloads = self
+                    .lookup_local_fun_overloads(&fname)
+                    .map(<[_]>::to_vec)
+                    .unwrap_or_default();
+                let property_fun_ty = if local_value_ty.is_none() {
+                    self.syms.props.get(&fname).map(|(ty, _, _)| *ty)
+                } else {
+                    None
+                }
+                .filter(|ty| matches!(ty, Ty::Fun(_)));
+                let candidate_arg_tys = (property_fun_ty.is_some() || local_overloads.len() > 1)
+                    .then(|| self.arg_tys(args));
+                let applicable_local = candidate_arg_tys
+                    .as_ref()
+                    .map(|arg_tys| {
+                        local_overloads
+                            .iter()
+                            .filter_map(|candidate| {
+                                let signature = &candidate.1;
+                                let score = local_function_candidate_score(
+                                    signature,
+                                    args,
+                                    arg_tys,
+                                    arg_names.as_deref(),
+                                )?;
+                                let context_count =
+                                    signature.context_count.min(signature.params.len());
+                                self.resolve_context_args(&signature.params[..context_count])
+                                    .map(|_| (score, candidate.clone()))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
                 // Calling a TOP-LEVEL property of function type: `val x: () -> Int = ...; x()` (e.g. a
                 // property bound to a function reference, `val x = ::foo`). Not a local (those are handled
                 // above) — read the property and `invoke` it; the backend reads the facade getter then
                 // calls `FunctionN.invoke`.
-                if !self.lexical_value_declares(&fname) {
-                    if let Some(&(rt @ Ty::Fun(_), _, _)) = self.syms.props.get(&fname) {
-                        let arg_tys = self.arg_tys(args);
-                        if let Some(ret) =
-                            self.record_invoke(call, callee, rt, args, &arg_tys, span)
+                if let (Some(rt), Some(arg_tys)) = (property_fun_ty, candidate_arg_tys.as_ref()) {
+                    if applicable_local.is_empty() {
+                        if let Some(ret) = self.record_invoke(call, callee, rt, args, arg_tys, span)
                         {
                             return ret;
                         }
                     }
                 }
                 // Local function call — resolved before top-level funs and constructors.
-                let local_overload_count = self
-                    .lookup_local_fun_overloads(&fname)
-                    .map_or(0, <[_]>::len);
-                let local_function = match local_overload_count {
+                let local_function = match local_overloads.len() {
                     0 => None,
-                    1 => self
-                        .lookup_local_fun_overloads(&fname)
-                        .and_then(|overloads| overloads.last())
-                        .cloned(),
+                    1 => local_overloads.last().cloned(),
                     _ => {
-                        let arg_tys = self.arg_tys(args);
-                        let arg_names = arg_names.as_deref();
-                        let applicable = self
-                            .lookup_local_fun_overloads(&fname)
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|candidate| {
-                                local_function_candidate_score(
-                                    &candidate.1,
-                                    args,
-                                    &arg_tys,
-                                    arg_names,
-                                )
-                                .map(|score| (score, candidate))
-                            })
-                            .collect::<Vec<_>>();
-                        let best = applicable.iter().map(|(score, _)| *score).max();
-                        let mut applicable = applicable
+                        let best = applicable_local.iter().map(|(score, _)| *score).max();
+                        let mut applicable = applicable_local
                             .into_iter()
                             .filter(|(score, _)| Some(*score) == best)
                             .map(|(_, candidate)| candidate);
                         match (applicable.next(), applicable.next()) {
-                            (Some(selected), None) => Some(selected.clone()),
+                            (Some(selected), None) => Some(selected),
                             _ => {
                                 self.diags.error(
                                     span,
@@ -16606,6 +16618,16 @@ impl<'a> Checker<'a> {
                                     }
                                 }
                             }
+                            if !self.file.is_spread_arg(a) {
+                                if let Some(&parameter) = sig.params.get(pi) {
+                                    let expected = if sig.vararg && pi + 1 == sig.params.len() {
+                                        parameter.array_elem().unwrap_or(Ty::Error)
+                                    } else {
+                                        parameter
+                                    };
+                                    return self.expr_expected(a, expected);
+                                }
+                            }
                         }
                         // A spread argument `*a` (`Array<E>`/`XArray`) contributes its ELEMENT type `E`
                         // to overload resolution and the vararg element check — it behaves like a list of
@@ -16651,14 +16673,15 @@ impl<'a> Checker<'a> {
                                 return Ty::obj_args("kotlin/Array", &[Ty::nullable(elem)]);
                             }
                         }
-                        let explicit_elem = self
+                        let element_hint = self
                             .file
                             .call_type_args
                             .get(&call.0)
                             .and_then(|ts| ts.first())
-                            .map(|r| self.resolve_ty(r));
+                            .map(|r| self.resolve_ty(r))
+                            .or_else(|| expected.and_then(Ty::array_elem));
                         if let Some(t) =
-                            self.check_array_builtin(&fname, args, &arg_tys, span, explicit_elem)
+                            self.check_array_builtin(&fname, args, &arg_tys, span, element_hint)
                         {
                             return t;
                         }
@@ -17789,12 +17812,8 @@ impl<'a> Checker<'a> {
                     self.diags
                         .error(r.span, format!("unresolved reference '{}'.", r.name));
                 }
-                // An initializer with a declared FUNCTION type takes its parameter types from the
-                // annotation, so `val f: (Int) -> Int = { it * 2 }` types `it`/`x` as `Int` (not the
-                // erased `Object`). Propagating the expectation also reaches a lambda that is the
-                // result of a nested `if`/`when`/block initializer. HOF *arguments* already do this.
                 let it = match declared {
-                    Some(d @ Ty::Fun(_)) => self.expr_expected(init, d),
+                    Some(d) => self.expr_expected(init, d),
                     _ => self.expr(init),
                 };
                 let bind = match declared {
@@ -17997,7 +18016,25 @@ impl<'a> Checker<'a> {
                 if self.try_user_plus_assign(s, value) {
                     return;
                 }
-                let vt = self.expr(value);
+                let assignment_expected =
+                    if name == "field" && self.lookup(&name).is_none() && self.field_ty.is_some() {
+                        self.field_ty
+                    } else {
+                        self.lookup(&name)
+                            .map(|local| local.ty)
+                            .or_else(|| {
+                                self.this_ty.and_then(|ty| {
+                                    ty.obj_internal()
+                                        .and_then(|internal| self.lookup_prop_name(internal, &name))
+                                        .map(|(ty, _)| ty)
+                                })
+                            })
+                            .or_else(|| self.syms.props.get(&name).map(|&(ty, _, _)| ty))
+                    };
+                let vt = match assignment_expected {
+                    Some(expected) => self.expr_expected(value, expected),
+                    None => self.expr(value),
+                };
                 // `field = …` inside a setter writes the backing field.
                 if name == "field" && self.lookup(&name).is_none() && self.field_ty.is_some() {
                     let fty = self.field_ty.unwrap();
@@ -18083,10 +18120,30 @@ impl<'a> Checker<'a> {
                     return;
                 }
                 let rt = self.expr(receiver);
-                let vt = self.expr(value);
+                let extension_property = self.syms.ext_prop(rt, &name);
+                let source_property = rt
+                    .obj_internal()
+                    .and_then(|internal| self.syms.prop_of_name(internal, &name));
+                let property_setter = if extension_property.is_none() && source_property.is_none() {
+                    self.resolve_property_setter(rt, &name)
+                } else {
+                    None
+                };
+                let assignment_expected = extension_property
+                    .map(|(ty, _)| ty)
+                    .or_else(|| source_property.map(|(ty, _)| ty))
+                    .or_else(|| {
+                        property_setter
+                            .as_ref()
+                            .and_then(|setter| setter.params.first().copied())
+                    });
+                let vt = match assignment_expected {
+                    Some(expected) => self.expr_expected(value, expected),
+                    None => self.expr(value),
+                };
                 let span = self.file.stmt_spans[s.0 as usize];
                 // Extension-property write: `recv.name = value` for a `var` extension property.
-                if let Some((lty, is_var)) = self.syms.ext_prop(rt, &name) {
+                if let Some((lty, is_var)) = extension_property {
                     if !is_var {
                         self.diags
                             .error(span, "'val' cannot be reassigned.".to_string());
@@ -18095,8 +18152,8 @@ impl<'a> Checker<'a> {
                 } else {
                     match rt {
                         Ty::Error => {}
-                        Ty::Obj(internal, _) => {
-                            if let Some((lty, is_var)) = self.syms.prop_of_name(internal, &name) {
+                        Ty::Obj(..) => {
+                            if let Some((lty, is_var)) = source_property {
                                 if !is_var {
                                     self.diags
                                         .error(span, "'val' cannot be reassigned.".to_string());
@@ -18107,7 +18164,7 @@ impl<'a> Checker<'a> {
                                     self.value_operator_span(value),
                                     "assignment",
                                 );
-                            } else if let Some(setter) = self.resolve_property_setter(rt, &name) {
+                            } else if let Some(setter) = property_setter {
                                 // A `var` member of a CLASSPATH type: its setter comes from `@Metadata`
                                 // (the `properties` query), not the user-declared `props` map. A setter
                                 // existing means the property is a `var`; the value is checked against
@@ -18141,7 +18198,10 @@ impl<'a> Checker<'a> {
                 // `a[i] = v` stores an array element; `recv[i, j, …] = v` calls `set` (or Map `put`).
                 let at = self.expr(array);
                 let its: Vec<Ty> = indices.iter().map(|&i| self.expr(i)).collect();
-                let vt = self.expr(value);
+                let vt = match at.array_elem() {
+                    Some(expected) => self.expr_expected(value, expected),
+                    None => self.expr(value),
+                };
                 let span = self.file.stmt_spans[s.0 as usize];
                 let single_index = matches!(indices.as_slice(), [_]);
                 if single_index {
@@ -18220,15 +18280,7 @@ impl<'a> Checker<'a> {
                 let rt = self.ret_ty;
                 match e {
                     Some(ex) => {
-                        // `return { it + 1 }` in a function returning a function type: the lambda's
-                        // parameter types come from the declared return type (as for an expression body).
-                        let t = match (rt, matches!(self.file.expr(ex), Expr::Lambda { .. })) {
-                            (Ty::Fun(s), true) => {
-                                let params = s.params.clone();
-                                self.check_lambda_with_types(ex, &params)
-                            }
-                            _ => self.expr(ex),
-                        };
+                        let t = self.expr_expected(ex, rt);
                         self.expect_assignable(rt, t, self.span(ex), "return");
                     }
                     None => {

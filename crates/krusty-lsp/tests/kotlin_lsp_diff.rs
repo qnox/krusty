@@ -303,20 +303,9 @@ impl LspProcess {
         // The first opt-in run may need to download Gradle and import/index a cold project.
         let deadline = Instant::now() + ANALYSIS_TIMEOUT;
         loop {
-            let request_id = self.next_request_id();
-            let response = self.request(
-                request_id,
-                "textDocument/diagnostic",
-                json!({"textDocument": {"uri": uri}}),
-            );
-            assert_eq!(
-                response["result"]["kind"], "full",
-                "LSP pull diagnostics must use the official full-report shape"
-            );
-            if let Some(items) = response["result"]["items"].as_array() {
-                if !items.is_empty() {
-                    return items.clone();
-                }
+            let items = self.pull_diagnostics(uri);
+            if !items.is_empty() {
+                return items;
             }
             assert!(
                 Instant::now() < deadline,
@@ -324,6 +313,28 @@ impl LspProcess {
             );
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    fn diagnostics_allow_empty(&mut self, uri: &str, text: &str) -> Vec<Value> {
+        self.open_document(uri, text);
+        self.pull_diagnostics(uri)
+    }
+
+    fn pull_diagnostics(&mut self, uri: &str) -> Vec<Value> {
+        let request_id = self.next_request_id();
+        let response = self.request(
+            request_id,
+            "textDocument/diagnostic",
+            json!({"textDocument": {"uri": uri}}),
+        );
+        assert_eq!(
+            response["result"]["kind"], "full",
+            "LSP pull diagnostics must use the official full-report shape"
+        );
+        response["result"]["items"]
+            .as_array()
+            .expect("LSP full diagnostic report items")
+            .clone()
     }
 
     fn semantic_tokens(&mut self, uri: &str, text: &str, legend: &SemanticLegend) -> Vec<Value> {
@@ -815,6 +826,10 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
             "fun conditionMismatch(): Int { if (1) return 1; return 0 }\n",
         ),
     ];
+    let clean_diagnostic_cases = [(
+        "ContextArray.kt",
+        "fun emptyStrings(): Array<String> = arrayOf()\n",
+    )];
     let token_cases = [
         (
             "BasicTokens.kt",
@@ -1415,6 +1430,7 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
     ];
     for (name, source) in diagnostic_cases
         .iter()
+        .chain(&clean_diagnostic_cases)
         .chain(&token_cases)
         .chain(&definition_files)
     {
@@ -1429,6 +1445,13 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
         .map(|(name, source)| {
             let uri = format!("file://{}", source_root.join(name).display());
             normalized_diagnostics(reference.diagnostics(&uri, source))
+        })
+        .collect::<Vec<_>>();
+    let expected_clean_diagnostics = clean_diagnostic_cases
+        .iter()
+        .map(|(name, source)| {
+            let uri = format!("file://{}", source_root.join(name).display());
+            normalized_diagnostics(reference.diagnostics_allow_empty(&uri, source))
         })
         .collect::<Vec<_>>();
     let expected_tokens = token_cases
@@ -2597,6 +2620,13 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
             normalized_diagnostics(krusty.diagnostics(&uri, source))
         })
         .collect::<Vec<_>>();
+    let actual_clean_diagnostics = clean_diagnostic_cases
+        .iter()
+        .map(|(name, source)| {
+            let uri = format!("file://{}", source_root.join(name).display());
+            normalized_diagnostics(krusty.diagnostics_allow_empty(&uri, source))
+        })
+        .collect::<Vec<_>>();
     let actual_tokens = token_cases
         .iter()
         .map(|(name, source)| {
@@ -2736,6 +2766,13 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
         .zip(actual_diagnostics.iter().zip(&expected_diagnostics))
     {
         assert_eq!(actual, expected, "diagnostic mismatch for {name}");
+    }
+    for ((name, _), (actual, expected)) in clean_diagnostic_cases.iter().zip(
+        actual_clean_diagnostics
+            .iter()
+            .zip(&expected_clean_diagnostics),
+    ) {
+        assert_eq!(actual, expected, "clean diagnostic mismatch for {name}");
     }
     for ((name, _), (actual, expected)) in token_cases
         .iter()

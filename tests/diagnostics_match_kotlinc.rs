@@ -57,6 +57,7 @@ fn errors_match_kotlinc_in_text_and_location() {
         "fun f(x: Int): Int = x\nfun g(): Int = f ()",
         "fun f(x: Int): Int = x\nfun g(): Int = f(1, 2)",
         "fun f(x: Int): Int = x\nfun g(): Int = f(\"no\")",
+        "fun f(): Array<String> = arrayOf()",
         "fun <T> f(x: T): T = x\nfun g(): Int = f(1, 2)",
         "suspend fun <T> f(x: T): T = x\nsuspend fun g(): Int = f(1, 2)",
         "inline fun <reified T> f(x: T): T = x\nfun g(): Int = f(1, 2)",

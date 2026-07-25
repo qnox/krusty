@@ -6152,12 +6152,36 @@ impl<'a> Emitter<'a> {
                 let impl_ret = ir_ty_to_jvm(&impl_f.ret);
                 // Each capture binds to the caller's actual slot (a mutable capture writes through).
                 let mut cap_slots: Vec<(u16, Ty)> = Vec::with_capacity(captures.len());
+                let mut converted_captures: Vec<(u32, u16, Ty)> = Vec::new();
                 for (k, &cap) in captures.iter().enumerate() {
-                    let IrExpr::GetValue(v) = self.ir.expr(cap) else {
-                        return false;
-                    };
-                    let Some(&(slot, _)) = self.slots.get(v) else {
-                        return false;
+                    let slot = if let IrExpr::GetValue(v) = self.ir.expr(cap) {
+                        let Some(&(slot, _)) = self.slots.get(v) else {
+                            return false;
+                        };
+                        slot
+                    } else {
+                        // Materialize the pure conversion inserted at a value-class capture boundary.
+                        let converted_get = match self.ir.expr(cap) {
+                            IrExpr::Call {
+                                callee: Callee::Virtual { name, .. },
+                                dispatch_receiver: Some(cast),
+                                args,
+                            } if name == "unbox-impl" && args.is_empty() => {
+                                matches!(
+                                    self.ir.expr(*cast),
+                                    IrExpr::TypeOp { arg, .. }
+                                        if matches!(self.ir.expr(*arg), IrExpr::GetValue(_))
+                                )
+                            }
+                            _ => false,
+                        };
+                        if !converted_get {
+                            return false;
+                        }
+                        let slot = self.next_slot;
+                        self.next_slot += slot_words(cap_tys[k]);
+                        converted_captures.push((cap, slot, cap_tys[k]));
+                        slot
                     };
                     cap_slots.push((slot, cap_tys[k]));
                 }
@@ -6167,6 +6191,10 @@ impl<'a> Emitter<'a> {
                 // type, then store it (top = last). Then run the body, then box the result to `Object`
                 // (matching the replaced `invoke`'s `Object` result).
                 scratch.set_stack(arity as u16);
+                for (capture, slot, ty) in converted_captures {
+                    self.emit_value(capture, &mut scratch);
+                    store(ty, slot, &mut scratch);
+                }
                 let mut param_slots: Vec<(u16, Ty)> = cap_slots;
                 param_slots.extend(std::iter::repeat_n((0u16, Ty::Error), arity));
                 for j in (0..arity).rev() {
@@ -8207,7 +8235,8 @@ impl<'a> Emitter<'a> {
                 if et.is_jvm_scalar() {
                     code.newarray(prim_newarray_atype(et));
                 } else {
-                    let ci = self.cw.class_ref(&ref_internal(et));
+                    // Nullability does not change the reference array class.
+                    let ci = self.cw.class_ref(&ref_internal(et.non_null()));
                     code.anewarray(ci);
                 }
                 let (op, w) = array_store_op(et);
