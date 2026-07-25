@@ -535,7 +535,7 @@ dependencies = [
  "libc",
  "pprof",
  "rayon",
- "syn 2.0.119",
+ "syn 3.0.3",
  "unicode-general-category",
  "zip",
 ]
