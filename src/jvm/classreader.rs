@@ -11,6 +11,7 @@ use crate::types::{TypeName, TypeNameList};
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PROTECTED: u16 = 0x0004;
 pub const ACC_STATIC: u16 = 0x0008;
+pub const ACC_BRIDGE: u16 = 0x0040;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MethodSig {
@@ -37,6 +38,15 @@ impl MethodSig {
     }
     pub fn is_abstract(&self) -> bool {
         self.access & 0x0400 != 0
+    }
+    pub fn is_bridge(&self) -> bool {
+        self.access & ACC_BRIDGE != 0
+    }
+    pub fn has_same_parameter_descriptor(&self, other: &Self) -> bool {
+        self.descriptor
+            .split_once(')')
+            .zip(other.descriptor.split_once(')'))
+            .is_some_and(|((params, _), (other_params, _))| params == other_params)
     }
 }
 
@@ -743,5 +753,21 @@ mod tests {
         assert_eq!(ci.methods.len(), 1);
         assert_eq!(ci.methods[0].name, "add");
         assert_eq!(ci.methods[0].descriptor, "(II)I");
+    }
+
+    #[test]
+    fn compares_method_parameters_independently_of_return_type() {
+        let method = |descriptor: &str| MethodSig {
+            access: super::ACC_PUBLIC,
+            name: "call".to_string(),
+            descriptor: descriptor.to_string(),
+            signature: None,
+        };
+        let concrete = method("(Ljava/lang/String;I)Ljava/lang/String;");
+        let return_bridge = method("(Ljava/lang/String;I)Ljava/lang/Object;");
+        let parameter_bridge = method("(Ljava/lang/Object;I)Ljava/lang/Object;");
+
+        assert!(concrete.has_same_parameter_descriptor(&return_bridge));
+        assert!(!concrete.has_same_parameter_descriptor(&parameter_bridge));
     }
 }

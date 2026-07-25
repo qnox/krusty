@@ -629,12 +629,9 @@ pub struct FunctionInfo {
     /// site" (an `@InlineOnly` is included only when it will SPLICE); the context-aware `accessible(...)`
     /// gate refines that for `protected`/`internal`. Read `public()` for the legacy public-only predicate.
     pub visibility: Visibility,
-    /// For an [`FnKind::Extension`] overload, the receiver-MRO RUNG it was found at (0 = the receiver's
-    /// own type, increasing up the supertype chain). An arg-binding selector groups candidates by this
-    /// rank and processes rungs most-specific-first, so a `List` extension wins over an `Iterable` one —
-    /// the same receiver precedence the classpath lookup gives, preserved through the consolidated query.
-    /// `0` for members/top-level (precedence there is by [`FnKind`], not rung); `u32::MAX` marks a
-    /// candidate that must never preempt a real rung (the `@OverloadResolutionByLambdaReturnType` family).
+    /// For a member or extension overload, the receiver-MRO rung it was found at (0 = the receiver's
+    /// own type, increasing up the supertype chain). Top-level overloads use 0; `u32::MAX` marks a
+    /// candidate that must never preempt a real rung.
     pub receiver_rank: u32,
     /// Provider-specific tie-break key within an otherwise applicable overload set. Lower is preferred.
     /// Consumers treat it as opaque selection data.
