@@ -2329,6 +2329,14 @@ pub fn lower_value_classes(
                     .zip(orig_params[*cfid as usize].iter())
                     .map(|(a, p)| (*a, p.clone()))
                     .collect(),
+                // Captures target the lifted implementation's leading parameters.
+                IrExpr::Lambda {
+                    impl_fn, captures, ..
+                } => captures
+                    .iter()
+                    .zip(orig_params[*impl_fn as usize].iter())
+                    .map(|(capture, parameter)| (*capture, *parameter))
+                    .collect(),
                 // A value-class instance-method call (`a.equals(b)`) boxes value-class arguments into
                 // the method's (reference) parameters, same as a plain call.
                 IrExpr::MethodCall {

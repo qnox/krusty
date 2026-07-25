@@ -563,8 +563,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stopping at the bare iterable and reporting `expected ')'`.
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
-  erased element; the checker rejects a *primitive* element — `arrayOf(1, 2)` — since `Array<Int>` is
-  `Integer[]` and would need per-element boxing krusty doesn't model yet). The array creators
+  erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is
+  `Array<Int>` backed by `Integer[]`, distinct from primitive `IntArray`). An empty `arrayOf()` obtains its
+  element type from an enclosing declared `Array<T>` context, including property and local initializers,
+  function/getter returns, assignments, and arguments; the backend therefore emits the specialized JVM
+  `T[]` instead of an erased `Object[]`. The array creators
   (`arrayOf`/`intArrayOf`/…/`IntArray(n)`/`emptyArray`) are **compiler intrinsics** — they have no
   callable body in `kotlin-stdlib` (kotlinc's backend lowers them to array bytecode by resolved symbol),
   so krusty recognizes them the same way kotlinc does: by the **resolved stdlib symbol**, gated on the
@@ -2141,6 +2144,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `lower_suspend_lambda` (boxed/null spill interplay unmodeled).
   (`suspend_lambda_with_value_class_params`; corpus
   `coroutines/inlineClasses/direct/createMangling.kt` box-OK, 2921 → 2922, FAIL 0.)
+
+- **A lifted closure capture is a value-class representation boundary too.** A value-class parameter
+  entering an outer `FunctionN.invoke` is boxed, while a nested lambda implementation's leading
+  capture parameter uses the value class's unboxed carrier. The JVM value-class pass inserts the
+  conversion at the `IrExpr::Lambda` capture edge; the inline splicer evaluates a resulting
+  `unbox-impl(GetValue(...))` into its lambda scratch frame before emitting the body. This keeps both
+  materialized and inline-spliced nested closures representation-correct (`Result<T>` included).
+  (`box_corpus_regression_e2e::result_value_class_corpus_cases_box_ok`; corpus
+  `inlineClasses/kt45991.kt`.)
 
 - **An argument's lambda pre-typing binds the parameter it actually fills, not its positional
   index.** A named lambda argument binds its named parameter; a syntactic trailing lambda binds the
