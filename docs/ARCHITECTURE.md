@@ -81,7 +81,15 @@ boundary.
   uses packed array entries rather than repeating object keys, and range encoding binary-searches
   the sorted snapshot before allocating its result. A definition entry is a 20-byte
   `(source lo, source hi, target file, target lo, target hi)` array with no retained strings; a shared
-  256K-entry budget bounds both construction and long-lived storage. Find-references deduplicates
+  256K-entry budget bounds definition, type-definition, and implementation construction and
+  long-lived storage.
+  The short-lived compiler catalog derives transitive source subclasses and exact member overrides,
+  using checked-signature and arity indexes instead of cross-scanning overload sets. A constant-factor
+  budget bounds hierarchy traversal, substitutions, and structural type comparisons. Compact source
+  declaration references and parser-owned generic-supertype `TypeRef`s carry substitutions across
+  non-declaring intermediates; only proven declaration edges are then closed transitively. Temporary
+  type patterns retain no source text, and the catalog is dropped before the supervisor receives the
+  packed entries. Find-references deduplicates
   cursor targets into a request-local set, reverse-scans each bounded entry once, and allocates only
   the returned locations rather than retaining a duplicate reverse index.
   Rename uses the same integer-only definition entries. During response encoding it reads identifier
@@ -89,9 +97,10 @@ boundary.
   and resolves every edit endpoint to UTF-16 in one forward source pass per affected document.
   Request-local spelling and replacement buffers are capped and dropped with the response; no AST,
   compiler snapshot, or document state retains another source string.
-  Type-definition uses the same 20-byte representation and consumes the remainder of that shared
-  256K-entry navigation budget after definition entries are built. Splitting a saturated budget
-  between the two indexes therefore cannot enlarge the prior worst-case navigation worker frame.
+  Type-definition and implementation use the same 20-byte representation and consume the remainder
+  of that shared 256K-entry navigation budget after definition entries are built. Splitting a
+  saturated budget among the three indexes cannot enlarge the prior worst-case navigation worker
+  frame.
   The compiler worker reduces checked explicit, inferred, nullable, constructor, ordinary-property
   declarations, and property-result types directly to source class spans, then drops type tables,
   ASTs, and its short-lived type-target map. The supervisor retains no class names or copied source
@@ -106,8 +115,8 @@ boundary.
   signature help, and highlighting snapshots atomically. Temporary source-set catalogs carry
   completion declarations and source-only highlighting flags such as `data`, `operator`, and
   `Deprecated` across files while the compact snapshots are built. Navigation also consumes
-  checker-selected source declaration ids for overloads before reducing them to file/span pairs. AST,
-  symbol-table, full type-analysis, and those catalogs
+  checker-selected source declaration ids for overloads before reducing definitions and transitive
+  implementations to file/span pairs. AST, symbol-table, full type-analysis, and those catalogs
   are dropped after each analysis; closing a document removes its source and compact query indexes.
 - Input frames are capped at 16 MiB, headers at 8 KiB, and the reader-to-dispatch queue at four
   parsed messages. Open text is capped at 32 MiB across at most 256 documents; worker JSON encoding

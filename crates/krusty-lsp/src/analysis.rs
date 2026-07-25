@@ -1396,6 +1396,7 @@ pub struct DocumentAnalysis {
     pub semantic_tokens: SemanticTokenIndex,
     pub definitions: DefinitionIndex,
     pub type_definitions: DefinitionIndex,
+    pub implementations: DefinitionIndex,
     pub document_symbols: DocumentSymbolIndex,
     pub folding_ranges: FoldingRangeIndex,
 }
@@ -1431,6 +1432,7 @@ pub(crate) struct AnalysisBudgets {
     completion: CompletionBudget,
     navigation: NavigationBudget,
     pending_type_definitions: usize,
+    pending_implementations: usize,
     document_symbol: DocumentSymbolBudget,
     folding_range: FoldingRangeBudget,
     signature_help: SignatureHelpBudget,
@@ -1443,10 +1445,32 @@ impl AnalysisBudgets {
             completion: CompletionBudget::default(),
             navigation: NavigationBudget::default(),
             pending_type_definitions: 0,
+            pending_implementations: 0,
             document_symbol: DocumentSymbolBudget::default(),
             folding_range: FoldingRangeBudget::default(),
             signature_help: SignatureHelpBudget::default(),
         }
+    }
+
+    fn remaining_pending_navigation(&self) -> usize {
+        self.navigation.remaining().min(
+            MAX_SOURCE_SET_NAVIGATION_ENTRIES.saturating_sub(
+                self.pending_type_definitions
+                    .saturating_add(self.pending_implementations),
+            ),
+        )
+    }
+
+    fn retain_pending_navigation(
+        &mut self,
+        type_definitions: &mut Vec<DefinitionOccurrence>,
+        implementations: &mut Vec<DefinitionOccurrence>,
+    ) {
+        let remaining = self.remaining_pending_navigation();
+        type_definitions.truncate(remaining);
+        implementations.truncate(remaining.saturating_sub(type_definitions.len()));
+        self.pending_type_definitions += type_definitions.len();
+        self.pending_implementations += implementations.len();
     }
 }
 
@@ -1457,7 +1481,7 @@ impl DocumentAnalysis {
         file_index: u32,
         indexes: &SourceSetIndexes<'_>,
         budgets: &mut AnalysisBudgets,
-    ) -> (Self, Vec<DefinitionOccurrence>) {
+    ) -> (Self, Vec<DefinitionOccurrence>, Vec<DefinitionOccurrence>) {
         let completion = CompletionIndex::from_file_analysis_with_budget(
             source,
             &analysis,
@@ -1471,7 +1495,8 @@ impl DocumentAnalysis {
             indexes.symbols,
             &mut budgets.signature_help,
         );
-        let semantic = analysis.semantic_occurrences(
+        let pending_navigation_entries = budgets.remaining_pending_navigation();
+        let mut semantic = analysis.semantic_occurrences(
             source,
             file_index,
             indexes.symbols,
@@ -1479,15 +1504,16 @@ impl DocumentAnalysis {
             indexes.definitions,
             SemanticLimits {
                 definition_entries: budgets.navigation.remaining(),
-                type_definition_entries: budgets.navigation.remaining().min(
-                    MAX_SOURCE_SET_NAVIGATION_ENTRIES
-                        .saturating_sub(budgets.pending_type_definitions),
-                ),
+                type_definition_entries: pending_navigation_entries,
+                implementation_entries: pending_navigation_entries,
                 hover_entries: budgets.hover.remaining_entries(),
                 hover_wire_bytes: budgets.hover.remaining_wire_bytes(),
             },
         );
-        budgets.pending_type_definitions += semantic.type_definitions.len();
+        budgets.retain_pending_navigation(
+            &mut semantic.type_definitions,
+            &mut semantic.implementations,
+        );
         let hover = HoverIndex::from_occurrences(semantic.hovers, &mut budgets.hover);
         let semantic_tokens = SemanticTokenIndex::from_occurrences(source, semantic.highlights);
         let definitions =
@@ -1515,10 +1541,12 @@ impl DocumentAnalysis {
                 semantic_tokens,
                 definitions,
                 type_definitions: DefinitionIndex::default(),
+                implementations: DefinitionIndex::default(),
                 document_symbols,
                 folding_ranges,
             },
             semantic.type_definitions,
+            semantic.implementations,
         )
     }
 
@@ -1531,6 +1559,7 @@ impl DocumentAnalysis {
             semantic_tokens: SemanticTokenIndex::default(),
             definitions: DefinitionIndex::default(),
             type_definitions: DefinitionIndex::default(),
+            implementations: DefinitionIndex::default(),
             document_symbols: DocumentSymbolIndex::default(),
             folding_ranges: FoldingRangeIndex::default(),
         }
@@ -1541,26 +1570,45 @@ impl DocumentAnalysis {
     }
 }
 
-pub(crate) fn finalize_type_definitions(
-    pending: Vec<(DocumentAnalysis, Vec<DefinitionOccurrence>)>,
+pub(crate) fn finalize_navigation(
+    mut pending: Vec<(
+        DocumentAnalysis,
+        Vec<DefinitionOccurrence>,
+        Vec<DefinitionOccurrence>,
+    )>,
     budgets: &mut AnalysisBudgets,
 ) -> Vec<DocumentAnalysis> {
+    for (analysis, occurrences, _) in &mut pending {
+        analysis.type_definitions =
+            DefinitionIndex::from_occurrences(std::mem::take(occurrences), &mut budgets.navigation);
+    }
+    for (analysis, _, occurrences) in &mut pending {
+        analysis.implementations =
+            DefinitionIndex::from_occurrences(std::mem::take(occurrences), &mut budgets.navigation);
+    }
     pending
         .into_iter()
-        .map(|(mut analysis, occurrences)| {
-            analysis.type_definitions =
-                DefinitionIndex::from_occurrences(occurrences, &mut budgets.navigation);
-            analysis
-        })
+        .map(|(analysis, _, _)| analysis)
         .collect()
 }
 
 /// Analyze one source in an open source set and retain only data needed by editor queries.
 pub fn analyze_for_lsp(sources: &[&str]) -> Vec<DocumentAnalysis> {
+    analyze_for_lsp_with_navigation_limit(sources, MAX_SOURCE_SET_NAVIGATION_ENTRIES)
+}
+
+fn analyze_for_lsp_with_navigation_limit(
+    sources: &[&str],
+    navigation_relation_limit: usize,
+) -> Vec<DocumentAnalysis> {
     let analysis = analyze_standalone_source_set(sources);
     let highlight_symbols = HighlightSymbols::from_source_set(&analysis.files, &analysis.symbols);
-    let definition_symbols =
-        DefinitionSymbols::from_source_set(sources, &analysis.files, &analysis.symbols);
+    let definition_symbols = DefinitionSymbols::from_source_set(
+        sources,
+        &analysis.files,
+        &analysis.symbols,
+        navigation_relation_limit,
+    );
     let completion_symbols = CompletionSymbols::from_source_set(&analysis.files);
     let signature_help_symbols =
         SignatureHelpSymbols::from_source_set(sources, &analysis.files, &analysis.symbols);
@@ -1587,7 +1635,7 @@ pub fn analyze_for_lsp(sources: &[&str]) -> Vec<DocumentAnalysis> {
             )
         })
         .collect();
-    finalize_type_definitions(pending, &mut budgets)
+    finalize_navigation(pending, &mut budgets)
 }
 
 #[cfg(test)]
@@ -2377,10 +2425,10 @@ mod tests {
         second.definitions =
             DefinitionIndex::from_occurrences(vec![occurrence(1, 2)], &mut budgets.navigation);
 
-        let analyses = finalize_type_definitions(
+        let analyses = finalize_navigation(
             vec![
-                (first, vec![occurrence(0, 4)]),
-                (second, vec![occurrence(1, 6)]),
+                (first, vec![occurrence(0, 4)], Vec::new()),
+                (second, vec![occurrence(1, 6)], Vec::new()),
             ],
             &mut budgets,
         );
@@ -2417,6 +2465,584 @@ mod tests {
             ]
         );
         assert_eq!(std::mem::size_of::<DefinitionEntry>(), 20);
+    }
+
+    #[test]
+    fn transient_implementation_relations_are_deterministically_capped() {
+        let source = "interface Root\n\
+                      class A : Root\n\
+                      class B : Root\n\
+                      class C : Root\n";
+        let analysis = analyze_for_lsp_with_navigation_limit(&[source], 1)
+            .pop()
+            .unwrap();
+        let root = source.find("Root").unwrap() as u32;
+        let a = source.find("A :").unwrap() as u32;
+
+        assert_eq!(
+            analysis.implementations.get(root).collect::<Vec<_>>(),
+            vec![DefinitionTarget {
+                file: 0,
+                span: Span::new(a, a + 1),
+            }]
+        );
+    }
+
+    #[test]
+    fn implementation_snapshot_is_compact_transitive_generic_and_overload_exact() {
+        assert_eq!(std::mem::size_of::<DefinitionEntry>(), 20);
+        let contract = "package impltest\n\
+                        interface Contract<T> {\n\
+                        \u{20}\u{20}fun convert(value: T): T\n\
+                        \u{20}\u{20}fun pick(value: Int): String\n\
+                        \u{20}\u{20}fun pick(value: String): String\n\
+                        }\n";
+        let implementations = "package impltest\n\
+                               class Middle : Contract<String> {\n\
+                               \u{20}\u{20}override fun convert(value: String): String = value\n\
+                               \u{20}\u{20}override fun pick(value: Int): String = value.toString()\n\
+                               \u{20}\u{20}override fun pick(value: String): String = value\n\
+                               }\n\
+                               class Leaf : Middle()\n";
+        let use_source = "package impltest\n\
+                          fun use(value: Contract<String>): String = value.convert(\"x\") + value.pick(1)\n";
+        let analyses = analyze_for_lsp(&[contract, implementations, use_source]);
+        let convert_target_lo = implementations.find("convert").unwrap() as u32;
+        let convert_target = DefinitionTarget {
+            file: 1,
+            span: Span::new(
+                convert_target_lo,
+                convert_target_lo + "convert".len() as u32,
+            ),
+        };
+        for (file, query) in [
+            (0, contract.find("convert").unwrap()),
+            (2, use_source.find("convert").unwrap()),
+        ] {
+            assert_eq!(
+                analyses[file]
+                    .implementations
+                    .get(query as u32)
+                    .collect::<Vec<_>>(),
+                vec![convert_target]
+            );
+        }
+
+        let int_pick_target_lo = implementations.find("pick").unwrap() as u32;
+        let int_pick_target = DefinitionTarget {
+            file: 1,
+            span: Span::new(int_pick_target_lo, int_pick_target_lo + "pick".len() as u32),
+        };
+        assert_eq!(
+            analyses[2]
+                .implementations
+                .get(use_source.rfind("pick").unwrap() as u32)
+                .collect::<Vec<_>>(),
+            vec![int_pick_target]
+        );
+
+        let contract_lo = contract.find("Contract").unwrap() as u32;
+        let middle_lo = implementations.find("Middle").unwrap() as u32;
+        let leaf_lo = implementations.find("Leaf").unwrap() as u32;
+        assert_eq!(
+            analyses[0]
+                .implementations
+                .get(contract_lo)
+                .collect::<Vec<_>>(),
+            vec![
+                DefinitionTarget {
+                    file: 1,
+                    span: Span::new(middle_lo, middle_lo + "Middle".len() as u32),
+                },
+                DefinitionTarget {
+                    file: 1,
+                    span: Span::new(leaf_lo, leaf_lo + "Leaf".len() as u32),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn generic_implementation_does_not_capture_an_unrelated_descendant_overload() {
+        let source = "interface Parent<T> {\n\
+                      \u{20}\u{20}fun route(value: T): String\n\
+                      }\n\
+                      open class Middle : Parent<String> {\n\
+                      \u{20}\u{20}override fun route(value: String): String = value\n\
+                      \u{20}\u{20}open fun route(value: Int): String = value.toString()\n\
+                      }\n\
+                      class Child : Middle() {\n\
+                      \u{20}\u{20}override fun route(value: Int): String = value.toString()\n\
+                      }\n";
+        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let parent_route = source.find("fun route").unwrap() as u32 + "fun ".len() as u32;
+        let middle_string_route =
+            source.find("override fun route").unwrap() as u32 + "override fun ".len() as u32;
+        let middle_int_route =
+            source.find("open fun route").unwrap() as u32 + "open fun ".len() as u32;
+        let child_int_route =
+            source.rfind("override fun route").unwrap() as u32 + "override fun ".len() as u32;
+
+        assert_eq!(
+            analysis
+                .implementations
+                .get(parent_route)
+                .collect::<Vec<_>>(),
+            vec![DefinitionTarget {
+                file: 0,
+                span: Span::new(
+                    middle_string_route,
+                    middle_string_route + "route".len() as u32,
+                ),
+            }]
+        );
+        assert_eq!(
+            analysis
+                .implementations
+                .get(middle_int_route)
+                .collect::<Vec<_>>(),
+            vec![DefinitionTarget {
+                file: 0,
+                span: Span::new(child_int_route, child_int_route + "route".len() as u32),
+            }]
+        );
+    }
+
+    #[test]
+    fn generic_base_class_override_uses_source_span_substitution() {
+        let source = "open class GenericBase<T> {\n\
+                      \u{20}\u{20}open fun route(value: T): String = value.toString()\n\
+                      }\n\
+                      class GenericChild : GenericBase<String>() {\n\
+                      \u{20}\u{20}override fun route(value: String): String = value\n\
+                      }\n";
+        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let parent_route = source.find("fun route").unwrap() as u32 + "fun ".len() as u32;
+        let child_route = source.rfind("fun route").unwrap() as u32 + "fun ".len() as u32;
+
+        assert_eq!(
+            analysis
+                .implementations
+                .get(parent_route)
+                .collect::<Vec<_>>(),
+            vec![DefinitionTarget {
+                file: 0,
+                span: Span::new(child_route, child_route + "route".len() as u32),
+            }]
+        );
+    }
+
+    #[test]
+    fn generic_base_arguments_ignore_same_named_constructor_defaults() {
+        let source = "open class Parent<T> {\n\
+                      \u{20}\u{20}open fun consume(value: T) {}\n\
+                      }\n\
+                      class Child(\n\
+                      \u{20}\u{20}val parent: Parent<Int> = Parent<Int>(),\n\
+                      ) : Parent<String>() {\n\
+                      \u{20}\u{20}override fun consume(value: String) {}\n\
+                      }\n";
+        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let parent_consume = source.find("fun consume").unwrap() as u32 + "fun ".len() as u32;
+        let child_consume = source.rfind("fun consume").unwrap() as u32 + "fun ".len() as u32;
+
+        assert_eq!(
+            analysis
+                .implementations
+                .get(parent_consume)
+                .collect::<Vec<_>>(),
+            vec![DefinitionTarget {
+                file: 0,
+                span: Span::new(child_consume, child_consume + "consume".len() as u32),
+            }]
+        );
+    }
+
+    #[test]
+    fn generic_base_arguments_ignore_nested_same_named_constructor_arguments() {
+        let source = "open class Parent<T>(ignored: Any? = null) {\n\
+                      \u{20}\u{20}open fun consume(value: T) {}\n\
+                      }\n\
+                      class Child : Parent<String>(Parent<Int>()) {\n\
+                      \u{20}\u{20}override fun consume(value: String) {}\n\
+                      }\n";
+        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let parent_consume = source.find("fun consume").unwrap() as u32 + "fun ".len() as u32;
+        let child_consume = source.rfind("fun consume").unwrap() as u32 + "fun ".len() as u32;
+
+        assert_eq!(
+            analysis
+                .implementations
+                .get(parent_consume)
+                .collect::<Vec<_>>(),
+            vec![DefinitionTarget {
+                file: 0,
+                span: Span::new(child_consume, child_consume + "consume".len() as u32),
+            }]
+        );
+    }
+
+    #[test]
+    fn method_type_parameter_shadows_the_class_type_parameter() {
+        let source = "open class Parent<T> {\n\
+                      \u{20}\u{20}open fun <T> route(value: T): T = value\n\
+                      }\n\
+                      class Child : Parent<String>() {\n\
+                      \u{20}\u{20}override fun <U> route(value: U): U = value\n\
+                      }\n";
+        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let parent_route = source.find("route").unwrap() as u32;
+        let child_route = source.rfind("route").unwrap() as u32;
+
+        assert_eq!(
+            analysis
+                .implementations
+                .get(parent_route)
+                .collect::<Vec<_>>(),
+            vec![DefinitionTarget {
+                file: 0,
+                span: Span::new(child_route, child_route + "route".len() as u32),
+            }]
+        );
+    }
+
+    #[test]
+    fn method_type_parameter_does_not_match_a_concrete_child_parameter() {
+        let source = "interface Parent {\n\
+                      \u{20}\u{20}fun <T> route(value: T): T\n\
+                      }\n\
+                      class Child : Parent {\n\
+                      \u{20}\u{20}override fun route(value: String): String = value\n\
+                      }\n";
+        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let parent_route = source.find("route").unwrap() as u32;
+
+        assert_eq!(
+            analysis
+                .implementations
+                .get(parent_route)
+                .collect::<Vec<_>>(),
+            Vec::<DefinitionTarget>::new()
+        );
+    }
+
+    #[test]
+    fn class_type_parameter_substitution_preserves_parameter_identity() {
+        let source = "interface Parent<T> {\n\
+                      \u{20}\u{20}fun route(value: T): String\n\
+                      }\n\
+                      class Child<A, B> : Parent<B> {\n\
+                      \u{20}\u{20}override fun route(value: A): String = value.toString()\n\
+                      }\n";
+        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let parent_route = source.find("route").unwrap() as u32;
+
+        assert_eq!(
+            analysis
+                .implementations
+                .get(parent_route)
+                .collect::<Vec<_>>(),
+            Vec::<DefinitionTarget>::new()
+        );
+    }
+
+    #[test]
+    fn nested_class_type_parameter_substitution_matches_structurally() {
+        let source = "open class Box<T>\n\
+                      interface Parent<T> {\n\
+                      \u{20}\u{20}fun route(value: T): String\n\
+                      }\n\
+                      class Child<A, B> : Parent<Box<B>> {\n\
+                      \u{20}\u{20}override fun route(value: Box<B>): String = value.toString()\n\
+                      }\n";
+        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let parent_route = source.find("route").unwrap() as u32;
+        let child_route = source.rfind("route").unwrap() as u32;
+
+        assert_eq!(
+            analysis
+                .implementations
+                .get(parent_route)
+                .collect::<Vec<_>>(),
+            vec![DefinitionTarget {
+                file: 0,
+                span: Span::new(child_route, child_route + "route".len() as u32),
+            }]
+        );
+    }
+
+    #[test]
+    fn erased_reference_nullability_does_not_define_an_override() {
+        let source = "open class Parent {\n\
+                      \u{20}\u{20}open fun route(value: String?): String = value.orEmpty()\n\
+                      }\n\
+                      class Child : Parent() {\n\
+                      \u{20}\u{20}override fun route(value: String): String = value\n\
+                      }\n";
+        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let parent_route = source.find("route").unwrap() as u32;
+
+        assert_eq!(
+            analysis
+                .implementations
+                .get(parent_route)
+                .collect::<Vec<_>>(),
+            Vec::<DefinitionTarget>::new()
+        );
+    }
+
+    #[test]
+    fn member_extension_receiver_is_part_of_the_override_signature() {
+        let source = "interface Parent {\n\
+                      \u{20}\u{20}fun String.route(): String\n\
+                      }\n\
+                      class Child : Parent {\n\
+                      \u{20}\u{20}override fun Int.route(): String = toString()\n\
+                      }\n";
+        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let parent_route = source.find("route").unwrap() as u32;
+
+        assert_eq!(
+            analysis
+                .implementations
+                .get(parent_route)
+                .collect::<Vec<_>>(),
+            Vec::<DefinitionTarget>::new()
+        );
+    }
+
+    #[test]
+    fn override_search_crosses_a_non_declaring_intermediate_class() {
+        let source = "interface Parent {\n\
+                      \u{20}\u{20}fun route(): String\n\
+                      }\n\
+                      abstract class Middle : Parent\n\
+                      class Child : Middle() {\n\
+                      \u{20}\u{20}override fun route(): String = \"child\"\n\
+                      }\n";
+        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let parent_route = source.find("fun route").unwrap() as u32 + "fun ".len() as u32;
+        let child_route = source.rfind("fun route").unwrap() as u32 + "fun ".len() as u32;
+
+        assert_eq!(
+            analysis
+                .implementations
+                .get(parent_route)
+                .collect::<Vec<_>>(),
+            vec![DefinitionTarget {
+                file: 0,
+                span: Span::new(child_route, child_route + "route".len() as u32),
+            }]
+        );
+    }
+
+    #[test]
+    fn generic_override_substitution_crosses_an_intermediate_class() {
+        let source = "interface Parent<T> {\n\
+                      \u{20}\u{20}fun route(value: T): String\n\
+                      }\n\
+                      abstract class Middle<U> : Parent<U>\n\
+                      class Child : Middle<String>() {\n\
+                      \u{20}\u{20}override fun route(value: String): String = value\n\
+                      }\n";
+        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let parent_route = source.find("fun route").unwrap() as u32 + "fun ".len() as u32;
+        let child_route = source.rfind("fun route").unwrap() as u32 + "fun ".len() as u32;
+
+        assert_eq!(
+            analysis
+                .implementations
+                .get(parent_route)
+                .collect::<Vec<_>>(),
+            vec![DefinitionTarget {
+                file: 0,
+                span: Span::new(child_route, child_route + "route".len() as u32),
+            }]
+        );
+    }
+
+    #[test]
+    fn constructor_property_override_uses_the_exact_declaration_span() {
+        let contract = "interface Named {\n  val title: String\n}\n";
+        let implementation = "class NamedImpl(override val title: String) : Named\n";
+        let use_source = "fun read(named: Named): String = named.title\n";
+        let analyses = analyze_for_lsp(&[contract, implementation, use_source]);
+        let target_lo = implementation.find("title").unwrap() as u32;
+        let target = DefinitionTarget {
+            file: 1,
+            span: Span::new(target_lo, target_lo + "title".len() as u32),
+        };
+
+        for (file, query) in [
+            (0, contract.find("title").unwrap()),
+            (2, use_source.find("title").unwrap()),
+        ] {
+            assert_eq!(
+                analyses[file]
+                    .implementations
+                    .get(query as u32)
+                    .collect::<Vec<_>>(),
+                vec![target]
+            );
+        }
+    }
+
+    #[test]
+    fn backtick_annotation_does_not_make_constructor_override_final() {
+        let source = "annotation class `final`\n\
+                      open class Base(open val title: String)\n\
+                      open class Child(@`final` override val title: String) : Base(title)\n\
+                      class Leaf(override val title: String) : Child(title)\n";
+        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let base_title = (source.find("open val title").unwrap() + "open val ".len()) as u32;
+        let child_title =
+            (source.find("override val title").unwrap() + "override val ".len()) as u32;
+        let leaf_title =
+            (source.rfind("override val title").unwrap() + "override val ".len()) as u32;
+
+        assert_eq!(
+            analysis
+                .implementations
+                .get(child_title)
+                .collect::<Vec<_>>(),
+            vec![DefinitionTarget {
+                file: 0,
+                span: Span::new(leaf_title, leaf_title + "title".len() as u32),
+            }]
+        );
+        assert_eq!(
+            analysis.implementations.get(base_title).collect::<Vec<_>>(),
+            vec![
+                DefinitionTarget {
+                    file: 0,
+                    span: Span::new(child_title, child_title + "title".len() as u32),
+                },
+                DefinitionTarget {
+                    file: 0,
+                    span: Span::new(leaf_title, leaf_title + "title".len() as u32),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn private_constructor_property_is_not_implemented_by_a_same_named_child_property() {
+        let source = "open class Base(private val title: String)\n\
+                      class Child(val title: String) : Base(\"base\")\n";
+        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let private_title = source.find("title").unwrap() as u32;
+
+        assert_eq!(
+            analysis
+                .implementations
+                .get(private_title)
+                .collect::<Vec<_>>(),
+            Vec::<DefinitionTarget>::new()
+        );
+    }
+
+    #[test]
+    fn pending_type_definitions_and_implementations_share_the_source_set_budget() {
+        let mut budgets = AnalysisBudgets::new();
+        budgets.pending_type_definitions = MAX_SOURCE_SET_NAVIGATION_ENTRIES - 4;
+        let occurrence = |offset| DefinitionOccurrence {
+            span: Span::new(offset, offset + 1),
+            target: DefinitionTarget {
+                file: 0,
+                span: Span::new(offset + 10, offset + 11),
+            },
+        };
+        let mut type_definitions = vec![occurrence(0), occurrence(1)];
+        let mut implementations = vec![occurrence(2), occurrence(3), occurrence(4), occurrence(5)];
+
+        budgets.retain_pending_navigation(&mut type_definitions, &mut implementations);
+
+        assert_eq!(type_definitions.len(), 2);
+        assert_eq!(implementations.len(), 2);
+        assert_eq!(
+            budgets.pending_type_definitions + budgets.pending_implementations,
+            MAX_SOURCE_SET_NAVIGATION_ENTRIES
+        );
+
+        let mut later_type_definitions = vec![occurrence(6)];
+        let mut later_implementations = vec![occurrence(7)];
+        budgets.retain_pending_navigation(&mut later_type_definitions, &mut later_implementations);
+
+        assert!(later_type_definitions.is_empty());
+        assert!(later_implementations.is_empty());
+    }
+
+    #[test]
+    fn definition_and_implementation_snapshots_share_the_navigation_budget() {
+        let mut budget = NavigationBudget {
+            entries: MAX_SOURCE_SET_NAVIGATION_ENTRIES - 2,
+        };
+        let definition = DefinitionIndex::from_occurrences(
+            vec![DefinitionOccurrence {
+                span: Span::new(0, 1),
+                target: DefinitionTarget {
+                    file: 0,
+                    span: Span::new(10, 11),
+                },
+            }],
+            &mut budget,
+        );
+        let implementation = DefinitionIndex::from_occurrences(
+            vec![
+                DefinitionOccurrence {
+                    span: Span::new(2, 3),
+                    target: DefinitionTarget {
+                        file: 1,
+                        span: Span::new(12, 13),
+                    },
+                },
+                DefinitionOccurrence {
+                    span: Span::new(4, 5),
+                    target: DefinitionTarget {
+                        file: 2,
+                        span: Span::new(14, 15),
+                    },
+                },
+            ],
+            &mut budget,
+        );
+
+        assert_eq!(definition.entry_count(), 1);
+        assert_eq!(implementation.entry_count(), 1);
+        assert_eq!(budget.entries, MAX_SOURCE_SET_NAVIGATION_ENTRIES);
+    }
+
+    #[test]
+    fn semantic_navigation_occurrences_share_the_construction_limit() {
+        let source = "interface Root\nclass A : Root\nclass B : Root\n";
+        let source_set = analyze_standalone_source_set(&[source]);
+        let highlights = HighlightSymbols::from_source_set(&source_set.files, &source_set.symbols);
+        let definitions = DefinitionSymbols::from_source_set(
+            &[source],
+            &source_set.files,
+            &source_set.symbols,
+            MAX_SOURCE_SET_NAVIGATION_ENTRIES,
+        );
+        let occurrences = source_set.files[0].semantic_occurrences(
+            source,
+            0,
+            &source_set.symbols,
+            &highlights,
+            &definitions,
+            SemanticLimits {
+                definition_entries: 2,
+                type_definition_entries: 0,
+                implementation_entries: 2,
+                hover_entries: 0,
+                hover_wire_bytes: 0,
+            },
+        );
+
+        assert_eq!(occurrences.definitions.len(), 2);
+        assert_eq!(
+            occurrences.definitions.len() + occurrences.implementations.len(),
+            2
+        );
     }
 
     #[test]

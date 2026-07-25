@@ -515,6 +515,9 @@ pub struct PropParam {
     /// `true` for a `val`/`var` parameter (a property → backing field + accessor); `false` for a
     /// plain constructor parameter (in scope for `init`/body-property initializers, but not a field).
     pub is_property: bool,
+    pub is_override: bool,
+    /// `open` or `override` without `final`.
+    pub is_open: bool,
     /// Declaration visibility (`public` by default), from the constructor-parameter modifier list.
     /// A `private` property's backing field gets NO accessor (kotlinc reads it directly in-class), so
     /// the accessor synthesis skips it; `internal`/`protected` currently accessor like `public`.
@@ -644,6 +647,7 @@ pub struct ClassDecl {
     pub delegation_exprs: Vec<(String, ExprId)>,
     /// A base-class supertype `: Base(args)` (name + constructor arguments), if any.
     pub base_class: Option<String>,
+    pub base_type_args: Vec<TypeRef>,
     pub base_args: Vec<ExprId>,
     /// Secondary constructors: `constructor(params) : this/super(args) { body }`.
     pub secondary_ctors: Vec<SecondaryCtor>,

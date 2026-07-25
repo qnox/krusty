@@ -602,6 +602,8 @@ fn rewrite_anon_captures(file: &mut File) {
                     is_vararg: false,
                     is_var: false,
                     is_property: true,
+                    is_override: false,
+                    is_open: false,
                     visibility: crate::types::Visibility::Public,
                     default: None,
                     annotations: Vec::new(),
@@ -855,7 +857,9 @@ fn fixup_parenless_base_classes(file: &mut File) {
                 .iter()
                 .position(|s| base_candidates.contains(&s.name))
             {
-                c.base_class = Some(c.supertypes.remove(pos).name);
+                let base = c.supertypes.remove(pos);
+                c.base_class = Some(base.name);
+                c.base_type_args = base.targs;
             }
         }
     }
@@ -2119,7 +2123,8 @@ impl<'a> Parser<'a> {
         // Capture the companion's supertype list (`companion object : Base(args), I`): the synthesized
         // `C$Companion` extends `Base` (ctor `super(args)`) and implements the interfaces, so the
         // companion can be used as a value of that supertype (e.g. `EmptyContinuation` as a `Continuation`).
-        let (ifaces, b, b_args, _delegations, _expr_delegations) = self.parse_supertypes();
+        let (ifaces, b, _b_targs, b_args, _delegations, _expr_delegations) =
+            self.parse_supertypes();
         *base = b;
         *base_args = b_args;
         // The companion's supertype list keeps bare names (it has no generic-signature needs yet).
@@ -2223,6 +2228,11 @@ impl<'a> Parser<'a> {
                     is_vararg,
                     is_var,
                     is_property,
+                    is_override: epmods.iter().any(|modifier| modifier == "override"),
+                    is_open: !epmods.iter().any(|modifier| modifier == "final")
+                        && epmods
+                            .iter()
+                            .any(|modifier| modifier == "open" || modifier == "override"),
                     visibility: visibility_of(&epmods),
                     default,
                     annotations: Vec::new(),
@@ -2240,7 +2250,7 @@ impl<'a> Parser<'a> {
         // abstract members are satisfied by the enum's own methods or per-entry overrides. (An enum can't
         // extend a class, so only the interface supertypes are kept.)
         let enum_supertypes = if self.at(TokenKind::Colon) {
-            let (supertypes, _base, _args, _del, _del_e) = self.parse_supertypes();
+            let (supertypes, _base, _base_targs, _args, _del, _del_e) = self.parse_supertypes();
             supertypes
         } else {
             Vec::new()
@@ -2495,6 +2505,7 @@ impl<'a> Parser<'a> {
             delegations: Vec::new(),
             delegation_exprs: Vec::new(),
             base_class: None,
+            base_type_args: Vec::new(),
             base_args: Vec::new(),
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
@@ -2612,7 +2623,7 @@ impl<'a> Parser<'a> {
                 self.bump();
             } // interface name
             self.parse_type_args();
-            let (supertypes, _, _, _, _) = self.parse_supertypes();
+            let (supertypes, _, _, _, _, _) = self.parse_supertypes();
             let _ = supertypes;
             if self.at(TokenKind::LBrace) {
                 let _ = self.parse_block_expr();
@@ -3089,6 +3100,11 @@ impl<'a> Parser<'a> {
                     is_vararg,
                     is_var,
                     is_property,
+                    is_override: cpmods.iter().any(|modifier| modifier == "override"),
+                    is_open: !cpmods.iter().any(|modifier| modifier == "final")
+                        && cpmods
+                            .iter()
+                            .any(|modifier| modifier == "open" || modifier == "override"),
                     visibility: visibility_of(&cpmods),
                     default,
                     annotations: pannos,
@@ -3104,7 +3120,7 @@ impl<'a> Parser<'a> {
         }
         // Optional supertype list: `: Iface1, Base(args), Iface2`. Supertypes with `()` are the
         // base class (v0: unsupported → flagged); the rest are implemented interfaces.
-        let (supertypes, base_class, base_args, delegations, delegation_exprs) =
+        let (supertypes, base_class, base_type_args, base_args, delegations, delegation_exprs) =
             self.parse_supertypes();
         // `class Derived<T> : Base<T>() where T : I1, T : I2` — generic constraints after the
         // supertype list, before the body.
@@ -3390,6 +3406,7 @@ impl<'a> Parser<'a> {
             delegations,
             delegation_exprs,
             base_class,
+            base_type_args,
             base_args,
             // A class has a primary constructor when it wrote one (parens / `constructor` keyword) OR
             // declares no secondary constructors at all (then an implicit no-arg primary exists). Only a
@@ -3409,12 +3426,14 @@ impl<'a> Parser<'a> {
     ) -> (
         Vec<TypeRef>,
         Option<String>,
+        Vec<TypeRef>,
         Vec<ExprId>,
         Vec<(String, String, bool)>,
         Vec<(String, ExprId)>,
     ) {
         let mut ifaces: Vec<TypeRef> = Vec::new();
         let mut base: Option<String> = None;
+        let mut base_type_args = Vec::new();
         let mut base_args = Vec::new();
         let mut delegations = Vec::new();
         let mut delegation_exprs = Vec::new();
@@ -3520,6 +3539,7 @@ impl<'a> Parser<'a> {
                     }
                     self.expect(TokenKind::RParen, "')'");
                     base = Some(effective.clone());
+                    base_type_args = targs;
                     if arg_names.iter().any(|n| n.is_some()) {
                         if let Some(first) = args.first() {
                             self.file.base_arg_names.insert(first.0, arg_names);
@@ -3577,7 +3597,14 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        (ifaces, base, base_args, delegations, delegation_exprs)
+        (
+            ifaces,
+            base,
+            base_type_args,
+            base_args,
+            delegations,
+            delegation_exprs,
+        )
     }
 
     /// `interface Name { fun sig(): T }` — abstract member functions only (v0).
@@ -3597,7 +3624,7 @@ impl<'a> Parser<'a> {
                 Vec::new(),
             )
         };
-        let (supertypes, _base, _base_args, _, _) = self.parse_supertypes();
+        let (supertypes, _base, _base_type_args, _base_args, _, _) = self.parse_supertypes();
         // `interface I<T> where T : Bound` — generic constraints after the supertype list, before the body.
         self.parse_where_clause();
         let mut methods = Vec::new();
@@ -3727,6 +3754,7 @@ impl<'a> Parser<'a> {
             delegations: Vec::new(),
             delegation_exprs: Vec::new(),
             base_class: None,
+            base_type_args: Vec::new(),
             base_args: Vec::new(),
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
@@ -3838,7 +3866,7 @@ impl<'a> Parser<'a> {
     /// not modelled — the checker/lowering reject a body that reads outer locals.
     fn parse_anon_object(&mut self, span: Span) -> ExprId {
         self.bump(); // 'object'
-        let (supertypes, base_class, base_args, delegations, delegation_exprs) =
+        let (supertypes, base_class, base_type_args, base_args, delegations, delegation_exprs) =
             self.parse_supertypes();
         let (methods, body_props, init_order) = self.parse_object_body();
         let end = self.t[self.i.saturating_sub(1)].span;
@@ -3870,6 +3898,7 @@ impl<'a> Parser<'a> {
             delegations,
             delegation_exprs,
             base_class,
+            base_type_args,
             base_args,
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
@@ -3896,7 +3925,7 @@ impl<'a> Parser<'a> {
         let name = self.ident_or_error("object name");
         // Capture the object's implemented INTERFACES (`object X : KSerializer<C>`) AND a base class
         // (`object A : Sealed()`): the general class lowering/emit handles the `extends` + `super(args)`.
-        let (supertypes, base_class, base_args, _delegations, _delegation_exprs) =
+        let (supertypes, base_class, base_type_args, base_args, _delegations, _delegation_exprs) =
             self.parse_supertypes();
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
@@ -4047,6 +4076,7 @@ impl<'a> Parser<'a> {
             delegations: Vec::new(),
             delegation_exprs: Vec::new(),
             base_class,
+            base_type_args,
             base_args,
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
@@ -8288,6 +8318,64 @@ mod tests {
             tree("class Box(val v: Int) {\n}"),
             "(class Box (val v Int))\n"
         );
+    }
+
+    #[test]
+    fn generic_base_arguments_are_preserved_in_the_class_ast() {
+        let source = "open class Base<T>\nclass Child : Base<Map<String, Int>>()";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(!diagnostics.has_errors());
+        let child = file
+            .decls
+            .iter()
+            .find_map(|&declaration| match file.decl(declaration) {
+                Decl::Class(class) if class.name == "Child" => Some(class),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(child.base_class.as_deref(), Some("Base"));
+        assert_eq!(child.base_type_args.len(), 1);
+        assert_eq!(child.base_type_args[0].name, "Map");
+        assert_eq!(
+            child.base_type_args[0]
+                .targs
+                .iter()
+                .map(|argument| argument.name.as_str())
+                .collect::<Vec<_>>(),
+            ["String", "Int"]
+        );
+    }
+
+    #[test]
+    fn constructor_property_modifiers_are_preserved_in_the_class_ast() {
+        let source = "annotation class `final`\n\
+                      open class Example(\n\
+                      \u{20}\u{20}@`final`(open = true) override val first: String,\n\
+                      \u{20}\u{20}final override val second: String,\n\
+                      \u{20}\u{20}val third: String,\n\
+                      )";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(!diagnostics.has_errors());
+        let class = file
+            .decls
+            .iter()
+            .find_map(|&declaration| match file.decl(declaration) {
+                Decl::Class(class) if class.name == "Example" => Some(class),
+                _ => None,
+            })
+            .unwrap();
+
+        assert!(class.props[0].is_override);
+        assert!(class.props[0].is_open);
+        assert!(class.props[1].is_override);
+        assert!(!class.props[1].is_open);
+        assert!(!class.props[2].is_override);
+        assert!(!class.props[2].is_open);
     }
 
     #[test]

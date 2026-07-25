@@ -81,6 +81,7 @@ pub struct SemanticOccurrences {
     pub highlights: Vec<HighlightOccurrence>,
     pub definitions: Vec<DefinitionOccurrence>,
     pub type_definitions: Vec<DefinitionOccurrence>,
+    pub implementations: Vec<DefinitionOccurrence>,
     pub hovers: Vec<HoverOccurrence>,
 }
 
@@ -100,6 +101,7 @@ pub(crate) fn hover_wire_cost(value: &str, new_value: bool) -> usize {
 pub(crate) struct SemanticLimits {
     pub definition_entries: usize,
     pub type_definition_entries: usize,
+    pub implementation_entries: usize,
     pub hover_entries: usize,
     pub hover_wire_bytes: usize,
 }
@@ -117,6 +119,8 @@ struct SemanticClassifier<'a> {
     hovers: Vec<HoverOccurrence>,
     definition_limit: usize,
     type_definition_limit: usize,
+    implementations: Vec<DefinitionOccurrence>,
+    implementation_limit: usize,
     hover_limit: usize,
     hover_bytes: usize,
     hover_byte_limit: usize,
@@ -141,6 +145,7 @@ struct SemanticContext<'a> {
     definition_symbols: &'a DefinitionSymbols,
     definition_limit: usize,
     type_definition_limit: usize,
+    implementation_limit: usize,
     hover_limit: usize,
     hover_byte_limit: usize,
 }
@@ -304,6 +309,7 @@ impl FileAnalysis {
                 definition_symbols: &definition_symbols,
                 definition_limit: 0,
                 type_definition_limit: 0,
+                implementation_limit: 0,
                 hover_limit: 0,
                 hover_byte_limit: 0,
             },
@@ -335,6 +341,7 @@ impl FileAnalysis {
                 definition_symbols,
                 definition_limit: limits.definition_entries,
                 type_definition_limit: limits.type_definition_entries,
+                implementation_limit: limits.implementation_entries,
                 hover_limit: limits.hover_entries,
                 hover_byte_limit: limits.hover_wire_bytes,
             },
@@ -359,6 +366,7 @@ impl<'a> SemanticClassifier<'a> {
             definition_symbols,
             definition_limit,
             type_definition_limit,
+            implementation_limit,
             hover_limit,
             hover_byte_limit,
         } = context;
@@ -413,6 +421,8 @@ impl<'a> SemanticClassifier<'a> {
             hovers: Vec::new(),
             definition_limit,
             type_definition_limit,
+            implementations: Vec::new(),
+            implementation_limit,
             hover_limit,
             hover_bytes: 0,
             hover_byte_limit,
@@ -478,6 +488,7 @@ impl<'a> SemanticClassifier<'a> {
             highlights: self.classified.into_iter().flatten().collect(),
             definitions: self.definitions,
             type_definitions: self.type_definitions,
+            implementations: self.implementations,
             hovers: self.hovers,
         }
     }
@@ -1652,6 +1663,23 @@ impl<'a> SemanticClassifier<'a> {
         if self.definitions.len() < self.definition_limit {
             self.definitions.push(DefinitionOccurrence { span, target });
         }
+        let implementation_limit = self
+            .implementation_limit
+            .saturating_sub(self.definitions.len());
+        self.implementations.truncate(implementation_limit);
+        let remaining = implementation_limit.saturating_sub(self.implementations.len());
+        self.implementations.extend(
+            self.definition_symbols
+                .implementation_targets(target)
+                .iter()
+                .copied()
+                .take(remaining)
+                .map(|target| DefinitionOccurrence { span, target }),
+        );
+        debug_assert!(
+            self.definitions.len() + self.implementations.len()
+                <= self.implementation_limit.max(self.definition_limit)
+        );
         span
     }
 
