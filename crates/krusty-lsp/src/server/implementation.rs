@@ -26,6 +26,10 @@ pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_HEADER_BYTES: usize = 8 * 1024;
 const INPUT_QUEUE_CAPACITY: usize = 4;
 const MAX_OPEN_DOCUMENTS: usize = 256;
+const MAX_CONTENT_CHANGES: usize = 256;
+const MAX_CONTENT_CHANGE_SCAN_BYTES: usize = MAX_SOURCE_SET_BYTES * 3;
+const MAX_CONTENT_CHANGE_EDIT_BYTES: usize = MAX_SOURCE_SET_BYTES * 3;
+const MAX_CONTENT_CHANGE_UNDO_BYTES: usize = MAX_SOURCE_SET_BYTES;
 const MAX_BATCH_MESSAGES: usize = 256;
 const MAX_BATCH_VALUE_BYTES: usize = 32 * 1024 * 1024;
 const CHANGE_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -105,6 +109,15 @@ pub struct Position {
 
 /// Translate an LSP UTF-16 position into a source byte offset.
 pub fn position_to_byte_offset(text: &str, target: Position) -> Option<u32> {
+    let mut scan_budget = usize::MAX;
+    position_to_byte_offset_with_budget(text, target, &mut scan_budget)
+}
+
+fn position_to_byte_offset_with_budget(
+    text: &str,
+    target: Position,
+    scan_budget: &mut usize,
+) -> Option<u32> {
     let mut line = 0u32;
     let mut character = 0u32;
     let mut previous_was_cr = false;
@@ -113,6 +126,7 @@ pub fn position_to_byte_offset(text: &str, target: Position) -> Option<u32> {
         {
             return u32::try_from(byte).ok();
         }
+        *scan_budget = scan_budget.checked_sub(ch.len_utf8())?;
         match ch {
             '\r' => {
                 line = line.checked_add(1)?;
@@ -411,7 +425,7 @@ where
                                 "full": true,
                                 "range": true,
                             },
-                            "textDocumentSync": 1
+                            "textDocumentSync": 2
                         },
                         "serverInfo": {
                             "name": "krusty-lsp",
@@ -535,7 +549,7 @@ where
         let Ok(mut params) = serde_json::from_value::<DidChangeParams>(params) else {
             return invalid_params(id);
         };
-        if params.content_changes.len() != 1 || params.content_changes[0].range.is_some() {
+        if params.content_changes.is_empty() || params.content_changes.len() > MAX_CONTENT_CHANGES {
             return invalid_params(id);
         }
         let uri = params.text_document.uri;
@@ -545,7 +559,24 @@ where
         if params.text_document.version <= open.version {
             return Dispatch::none();
         }
-        let text = params.content_changes.pop().unwrap().text;
+        if open.analysis_blocked {
+            let Some(full_change) = params
+                .content_changes
+                .iter()
+                .rposition(|change| change.range.is_none())
+            else {
+                return invalid_params(id);
+            };
+            params.content_changes.drain(..full_change);
+        }
+        let original = std::mem::take(&mut self.documents.get_mut(&uri).unwrap().text);
+        let text = match apply_content_changes(original, params.content_changes) {
+            Ok(text) => text,
+            Err(original) => {
+                self.documents.get_mut(&uri).unwrap().text = original;
+                return invalid_params(id);
+            }
+        };
         if !self.accepts_replacement(&uri, text.len()) {
             let open = self.documents.get_mut(&uri).unwrap();
             let was_analyzed = !open.analysis_blocked;
@@ -833,10 +864,13 @@ struct VersionedTextDocumentIdentifier {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ContentChange {
     text: String,
     #[serde(default)]
-    range: Option<Value>,
+    range: Option<Range>,
+    #[serde(default)]
+    range_length: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -882,6 +916,149 @@ struct ReferenceContext {
 struct Range {
     start: Position,
     end: Position,
+}
+
+enum ChangeUndo {
+    Range {
+        start: usize,
+        inserted_len: usize,
+        original: String,
+    },
+    Full(String),
+}
+
+struct ContentChangeBudget {
+    scan_bytes: usize,
+    edit_bytes: usize,
+    undo_bytes: usize,
+}
+
+impl ContentChangeBudget {
+    fn new() -> Self {
+        Self {
+            scan_bytes: MAX_CONTENT_CHANGE_SCAN_BYTES,
+            edit_bytes: MAX_CONTENT_CHANGE_EDIT_BYTES,
+            undo_bytes: MAX_CONTENT_CHANGE_UNDO_BYTES,
+        }
+    }
+
+    fn charge_edit(&mut self, bytes: usize) -> Option<()> {
+        self.edit_bytes = self.edit_bytes.checked_sub(bytes)?;
+        Some(())
+    }
+
+    fn charge_undo(&mut self, bytes: usize) -> Option<()> {
+        self.undo_bytes = self.undo_bytes.checked_sub(bytes)?;
+        Some(())
+    }
+
+    fn reset_undo(&mut self) {
+        self.undo_bytes = MAX_CONTENT_CHANGE_UNDO_BYTES;
+    }
+}
+
+fn apply_content_changes(text: String, changes: Vec<ContentChange>) -> Result<String, String> {
+    apply_content_changes_with_budget(text, changes, ContentChangeBudget::new())
+}
+
+fn apply_content_changes_with_budget(
+    mut text: String,
+    changes: Vec<ContentChange>,
+    mut budget: ContentChangeBudget,
+) -> Result<String, String> {
+    let mut undo = Vec::with_capacity(changes.len());
+    for change in changes {
+        if change.range.is_none() && !undo.is_empty() {
+            rollback_content_changes(&mut text, std::mem::take(&mut undo));
+            budget.reset_undo();
+        }
+        let Some(change) = apply_content_change(&mut text, change, &mut budget) else {
+            rollback_content_changes(&mut text, undo);
+            return Err(text);
+        };
+        undo.push(change);
+    }
+    Ok(text)
+}
+
+fn apply_content_change(
+    text: &mut String,
+    change: ContentChange,
+    budget: &mut ContentChangeBudget,
+) -> Option<ChangeUndo> {
+    if let Some(range) = change.range {
+        let (start, end) =
+            content_change_range(text, range, change.range_length, &mut budget.scan_bytes)?;
+        let removed_len = end - start;
+        let next_len = text
+            .len()
+            .checked_sub(removed_len)?
+            .checked_add(change.text.len())?;
+        if next_len > MAX_SOURCE_SET_BYTES {
+            return None;
+        }
+        let shifted_len = if removed_len == change.text.len() {
+            0
+        } else {
+            text.len() - end
+        };
+        let edit_bytes = removed_len
+            .checked_add(change.text.len())?
+            .checked_add(shifted_len)?;
+        budget.charge_edit(edit_bytes)?;
+        budget.charge_undo(removed_len)?;
+        let original = text[start..end].to_string();
+        let inserted_len = change.text.len();
+        text.replace_range(start..end, &change.text);
+        Some(ChangeUndo::Range {
+            start,
+            inserted_len,
+            original,
+        })
+    } else {
+        if change.text.len() > MAX_SOURCE_SET_BYTES {
+            return None;
+        }
+        budget.charge_undo(text.len())?;
+        Some(ChangeUndo::Full(std::mem::replace(text, change.text)))
+    }
+}
+
+fn content_change_range(
+    text: &str,
+    range: Range,
+    expected_utf16_len: Option<u32>,
+    scan_budget: &mut usize,
+) -> Option<(usize, usize)> {
+    let start = position_to_byte_offset_with_budget(text, range.start, scan_budget)? as usize;
+    let end = position_to_byte_offset_with_budget(text, range.end, scan_budget)? as usize;
+    if start > end {
+        return None;
+    }
+    if let Some(expected) = expected_utf16_len {
+        let mut actual = 0usize;
+        for ch in text[start..end].chars() {
+            *scan_budget = scan_budget.checked_sub(ch.len_utf8())?;
+            actual = actual.checked_add(ch.len_utf16())?;
+        }
+        if actual != expected as usize {
+            return None;
+        }
+    }
+    Some((start, end))
+}
+
+fn rollback_content_changes(text: &mut String, undo: Vec<ChangeUndo>) {
+    for change in undo.into_iter().rev() {
+        match change {
+            ChangeUndo::Range {
+                start,
+                inserted_len,
+                original,
+            } => text.replace_range(start..start + inserted_len, &original),
+            ChangeUndo::Full(previous) => *text = previous,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -1156,6 +1333,18 @@ fn change_identity(message: &Value) -> Option<(&str, i64)> {
     ))
 }
 
+fn is_single_full_document_change(message: &Value) -> bool {
+    let Some(changes) = message
+        .pointer("/params/contentChanges")
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    changes.len() == 1
+        && changes[0].get("text").and_then(Value::as_str).is_some()
+        && changes[0].get("range").is_none_or(Value::is_null)
+}
+
 fn document_notification_identity(message: &Value) -> Option<(&str, &str)> {
     let method = message.get("method")?.as_str()?;
     let uri = match method {
@@ -1212,16 +1401,19 @@ pub(crate) fn coalesce_document_notifications(
                 }
                 let next_change =
                     change_identity(&next).map(|(uri, version)| (uri.to_owned(), version));
-                let replace = next_change.as_ref().and_then(|(next_uri, next_version)| {
-                    changes
-                        .iter()
-                        .rposition(|change| {
-                            document_notification_identity(change)
-                                .is_some_and(|(_, uri)| uri == next_uri)
-                        })
-                        .filter(|&index| change_identity(&changes[index]).is_some())
-                        .map(|index| (index, *next_version))
-                });
+                let replace = is_single_full_document_change(&next)
+                    .then_some(next_change.as_ref())
+                    .flatten()
+                    .and_then(|(next_uri, next_version)| {
+                        changes
+                            .last()
+                            .filter(|change| {
+                                document_notification_identity(change)
+                                    .is_some_and(|(_, uri)| uri == next_uri)
+                            })
+                            .filter(|change| change_identity(change).is_some())
+                            .map(|_| (changes.len() - 1, *next_version))
+                    });
                 match replace {
                     Some((index, next_version)) => {
                         let (_, current_version) = change_identity(&changes[index]).unwrap();
@@ -1362,7 +1554,7 @@ fn json_io(error: serde_json::Error) -> io::Error {
 }
 
 #[cfg(test)]
-mod uri_tests {
+mod tests {
     use super::*;
 
     #[test]
@@ -1398,5 +1590,89 @@ mod uri_tests {
             Some(PathBuf::from("/c"))
         );
         assert_eq!(workspace_root(&json!({})), None);
+    }
+
+    #[test]
+    fn incremental_scan_budget_rolls_back_prior_edits() {
+        let changes = vec![
+            ContentChange {
+                text: "x".to_string(),
+                range: Some(Range {
+                    start: Position::new(0, 0),
+                    end: Position::new(0, 1),
+                }),
+                range_length: None,
+            },
+            ContentChange {
+                text: "y".to_string(),
+                range: Some(Range {
+                    start: Position::new(0, 4),
+                    end: Position::new(0, 4),
+                }),
+                range_length: None,
+            },
+        ];
+        let mut budget = ContentChangeBudget::new();
+        budget.scan_bytes = 3;
+
+        assert_eq!(
+            apply_content_changes_with_budget("abcd".to_string(), changes, budget),
+            Err("abcd".to_string())
+        );
+    }
+
+    #[test]
+    fn incremental_edit_budget_rolls_back_prior_edits() {
+        let changes = vec![
+            ContentChange {
+                text: "x".to_string(),
+                range: Some(Range {
+                    start: Position::new(0, 0),
+                    end: Position::new(0, 0),
+                }),
+                range_length: None,
+            },
+            ContentChange {
+                text: "y".to_string(),
+                range: Some(Range {
+                    start: Position::new(0, 0),
+                    end: Position::new(0, 0),
+                }),
+                range_length: None,
+            },
+        ];
+        let mut budget = ContentChangeBudget::new();
+        budget.edit_bytes = 8;
+
+        assert_eq!(
+            apply_content_changes_with_budget("abcd".to_string(), changes, budget),
+            Err("abcd".to_string())
+        );
+    }
+
+    #[test]
+    fn full_change_collapses_prior_undo_fragments() {
+        let changes = vec![
+            ContentChange {
+                text: String::new(),
+                range: Some(Range {
+                    start: Position::new(0, 0),
+                    end: Position::new(0, 4),
+                }),
+                range_length: None,
+            },
+            ContentChange {
+                text: "replacement".to_string(),
+                range: None,
+                range_length: None,
+            },
+        ];
+        let mut budget = ContentChangeBudget::new();
+        budget.undo_bytes = 4;
+
+        assert_eq!(
+            apply_content_changes_with_budget("abcd".to_string(), changes, budget),
+            Ok("replacement".to_string())
+        );
     }
 }

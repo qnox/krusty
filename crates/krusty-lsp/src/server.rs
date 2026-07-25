@@ -3,7 +3,7 @@ pub use implementation::*;
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::io::Cursor;
     use std::rc::Rc;
 
@@ -2163,7 +2163,7 @@ mod tests {
         assert_eq!(initialized.messages[0]["id"], 1);
         assert_eq!(
             initialized.messages[0]["result"]["capabilities"]["textDocumentSync"],
-            1
+            2
         );
 
         let opened = server.handle(notification(
@@ -2222,6 +2222,298 @@ mod tests {
         ));
         assert_eq!(closed.messages[0]["params"]["diagnostics"], json!([]));
         assert_eq!(server.open_document_count(), 0);
+    }
+
+    #[test]
+    fn incremental_utf16_changes_apply_in_order() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        let initialized = server.handle(request(1, "initialize", json!({})));
+        assert_eq!(
+            initialized.messages[0]["result"]["capabilities"]["textDocumentSync"],
+            2
+        );
+        let uri = "file:///Incremental.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "fun before(): Int = 1\nfun use(): Int = before()\n"
+                }
+            }),
+        ));
+
+        server.handle(notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [
+                    {
+                        "range": {
+                            "start": {"line": 0, "character": 4},
+                            "end": {"line": 0, "character": 10}
+                        },
+                        "rangeLength": 6,
+                        "text": "after"
+                    },
+                    {
+                        "range": {
+                            "start": {"line": 1, "character": 17},
+                            "end": {"line": 1, "character": 23}
+                        },
+                        "rangeLength": 6,
+                        "text": "after"
+                    }
+                ]
+            }),
+        ));
+
+        let definition = server.handle(request(
+            2,
+            "textDocument/definition",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 1, "character": 18}
+            }),
+        ));
+        assert_eq!(
+            definition.messages[0]["result"],
+            json!([{
+                "uri": uri,
+                "range": {
+                    "start": {"line": 0, "character": 4},
+                    "end": {"line": 0, "character": 9}
+                }
+            }])
+        );
+    }
+
+    #[test]
+    fn incremental_changes_use_utf16_and_roll_back_invalid_batches() {
+        let analyzed = Rc::new(RefCell::new(Vec::<String>::new()));
+        let analyzed_for_server = analyzed.clone();
+        let mut server = LspService::new(move |sources: &[&str]| {
+            analyzed_for_server
+                .borrow_mut()
+                .extend(sources.iter().map(|source| source.to_string()));
+            sources
+                .iter()
+                .map(|_| super::super::DocumentAnalysis::with_diagnostics(Vec::new()))
+                .collect()
+        });
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///UnicodeIncremental.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "val text = \"😀x\"\n"
+                }
+            }),
+        ));
+
+        server.handle(notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [{
+                    "range": {
+                        "start": {"line": 0, "character": 12},
+                        "end": {"line": 0, "character": 14}
+                    },
+                    "rangeLength": 2,
+                    "text": "z"
+                }]
+            }),
+        ));
+        assert_eq!(analyzed.borrow().last().unwrap(), "val text = \"zx\"\n");
+        let analysis_count = analyzed.borrow().len();
+
+        server.handle(notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": uri, "version": 3},
+                "contentChanges": [
+                    {
+                        "range": {
+                            "start": {"line": 0, "character": 12},
+                            "end": {"line": 0, "character": 13}
+                        },
+                        "rangeLength": 1,
+                        "text": "q"
+                    },
+                    {
+                        "range": {
+                            "start": {"line": 99, "character": 0},
+                            "end": {"line": 99, "character": 0}
+                        },
+                        "text": "invalid"
+                    }
+                ]
+            }),
+        ));
+        assert_eq!(analyzed.borrow().len(), analysis_count);
+
+        server.handle(notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": uri, "version": 3},
+                "contentChanges": [{
+                    "range": {
+                        "start": {"line": 0, "character": 12},
+                        "end": {"line": 0, "character": 13}
+                    },
+                    "rangeLength": 1,
+                    "text": "r"
+                }]
+            }),
+        ));
+        assert_eq!(analyzed.borrow().last().unwrap(), "val text = \"rx\"\n");
+    }
+
+    #[test]
+    fn incremental_change_count_is_bounded_before_source_scans() {
+        let analyzed = Rc::new(RefCell::new(Vec::<String>::new()));
+        let analyzed_for_server = analyzed.clone();
+        let mut server = LspService::new(move |sources: &[&str]| {
+            analyzed_for_server
+                .borrow_mut()
+                .extend(sources.iter().map(|source| source.to_string()));
+            sources
+                .iter()
+                .map(|_| super::super::DocumentAnalysis::empty())
+                .collect()
+        });
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///BoundedIncremental.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "x"
+                }
+            }),
+        ));
+        let analysis_count = analyzed.borrow().len();
+        let too_many = (0..257)
+            .map(|_| {
+                json!({
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 0}
+                    },
+                    "text": "a"
+                })
+            })
+            .collect::<Vec<_>>();
+
+        server.handle(notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": uri, "version": 2},
+                "contentChanges": too_many
+            }),
+        ));
+        assert_eq!(analyzed.borrow().len(), analysis_count);
+
+        server.handle(notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [{"text": "accepted"}]
+            }),
+        ));
+        assert_eq!(analyzed.borrow().last().unwrap(), "accepted");
+    }
+
+    #[test]
+    fn blocked_document_requires_a_full_change_before_incremental_recovery() {
+        let calls = Rc::new(Cell::new(0));
+        let calls_for_server = calls.clone();
+        let short_sources = Rc::new(RefCell::new(Vec::<String>::new()));
+        let short_sources_for_server = short_sources.clone();
+        let mut server = LspService::new(move |sources: &[&str]| {
+            calls_for_server.set(calls_for_server.get() + 1);
+            short_sources_for_server.borrow_mut().extend(
+                sources
+                    .iter()
+                    .filter(|source| source.len() < 64)
+                    .map(|source| source.to_string()),
+            );
+            sources
+                .iter()
+                .map(|_| super::super::DocumentAnalysis::empty())
+                .collect()
+        });
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///BlockedIncremental.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "original"
+                }
+            }),
+        ));
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": "file:///Filler.kt",
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "x".repeat(crate::worker::MAX_SOURCE_SET_BYTES - 16)
+                }
+            }),
+        ));
+
+        server.handle(notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [{"text": "this replacement exceeds the remaining budget"}]
+            }),
+        ));
+        let analysis_count = calls.get();
+
+        server.handle(notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": uri, "version": 3},
+                "contentChanges": [{
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 0}
+                    },
+                    "text": "corrupt"
+                }]
+            }),
+        ));
+        assert_eq!(calls.get(), analysis_count);
+        assert!(!short_sources
+            .borrow()
+            .iter()
+            .any(|source| source == "corrupt"));
+
+        server.handle(notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": uri, "version": 3},
+                "contentChanges": [{"text": "restored"}]
+            }),
+        ));
+        assert_eq!(short_sources.borrow().last().unwrap(), "restored");
     }
 
     #[test]
@@ -2405,6 +2697,79 @@ mod tests {
     }
 
     #[test]
+    fn queued_incremental_changes_apply_in_order_with_one_analysis() {
+        let analyzed = Rc::new(RefCell::new(Vec::<String>::new()));
+        let analyzed_for_server = analyzed.clone();
+        let mut server = LspService::new(move |sources: &[&str]| {
+            analyzed_for_server
+                .borrow_mut()
+                .extend(sources.iter().map(|source| source.to_string()));
+            sources
+                .iter()
+                .map(|_| super::super::DocumentAnalysis::empty())
+                .collect()
+        });
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///incremental.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "fun before() = 1\nfun use() = before()\n"
+                }
+            }),
+        ));
+        assert_eq!(analyzed.borrow().len(), 1);
+
+        let first = notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [{
+                    "range": {
+                        "start": {"line": 0, "character": 4},
+                        "end": {"line": 0, "character": 10}
+                    },
+                    "rangeLength": 6,
+                    "text": "after"
+                }]
+            }),
+        );
+        let second = notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": uri, "version": 3},
+                "contentChanges": [{
+                    "range": {
+                        "start": {"line": 1, "character": 12},
+                        "end": {"line": 1, "character": 18}
+                    },
+                    "rangeLength": 6,
+                    "text": "after"
+                }]
+            }),
+        );
+        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        sender.send(Incoming::Message(second)).unwrap();
+        drop(sender);
+        let mut pending = std::collections::VecDeque::new();
+
+        let changes = coalesce_document_notifications(first, &receiver, &mut pending);
+        assert_eq!(changes.len(), 2);
+        let mut output = Vec::new();
+        super::implementation::dispatch_document_batch(&mut output, &mut server, changes).unwrap();
+
+        assert_eq!(analyzed.borrow().len(), 2);
+        assert_eq!(
+            analyzed.borrow().last().unwrap(),
+            "fun after() = 1\nfun use() = after()\n"
+        );
+    }
+
+    #[test]
     fn queued_changes_for_multiple_documents_form_one_batch() {
         let first = notification(
             "textDocument/didChange",
@@ -2428,6 +2793,46 @@ mod tests {
         assert_eq!(changes.len(), 2);
         assert_eq!(changes[0]["params"]["textDocument"]["uri"], "file:///a.kt");
         assert_eq!(changes[1]["params"]["textDocument"]["uri"], "file:///b.kt");
+    }
+
+    #[test]
+    fn full_change_coalescing_does_not_cross_another_document_notification() {
+        let first = notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": "file:///a.kt", "version": 2},
+                "contentChanges": [{"text": "a2"}]
+            }),
+        );
+        let between = notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": "file:///b.kt",
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "b1"
+                }
+            }),
+        );
+        let latest = notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": "file:///a.kt", "version": 3},
+                "contentChanges": [{"text": "a3"}]
+            }),
+        );
+        let (sender, receiver) = std::sync::mpsc::sync_channel(3);
+        sender.send(Incoming::Message(between)).unwrap();
+        sender.send(Incoming::Message(latest)).unwrap();
+        drop(sender);
+        let mut pending = std::collections::VecDeque::new();
+
+        let changes = coalesce_document_notifications(first, &receiver, &mut pending);
+        assert_eq!(changes.len(), 3);
+        assert_eq!(changes[0]["params"]["textDocument"]["version"], 2);
+        assert_eq!(changes[1]["params"]["textDocument"]["uri"], "file:///b.kt");
+        assert_eq!(changes[2]["params"]["textDocument"]["version"], 3);
     }
 
     #[test]
