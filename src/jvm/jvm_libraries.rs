@@ -800,6 +800,15 @@ impl JvmLibraries {
                     .unwrap_or_default()
             };
             for m in &ci.methods {
+                if m.is_bridge()
+                    && ci.methods.iter().any(|target| {
+                        !target.is_bridge()
+                            && target.name == m.name
+                            && target.has_same_parameter_descriptor(m)
+                    })
+                {
+                    continue;
+                }
                 // Public members are callable from anywhere; a `protected` member is surfaced too so a
                 // subclass can reach it through the supertype walk (a compiling program only reaches it
                 // from a legal subclass, which kotlinc already checked). Private/package members stay
