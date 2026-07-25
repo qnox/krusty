@@ -1011,55 +1011,6 @@ impl LibraryType {
     }
 }
 
-/// The best overload named `name` among `candidates` for `args`: an exact-arity exact-`Ty` match,
-/// else an exact-arity match with autoboxing into erased `Any` parameters, else a prefix match (the
-/// loose fallback covering varargs/defaulted trailing parameters).
-pub(crate) fn best_overload<'a>(
-    candidates: impl Iterator<Item = &'a LibraryMember> + Clone,
-    name: &str,
-    args: &[Ty],
-) -> Option<&'a LibraryMember> {
-    let named = candidates.filter(|m| m.name == name);
-    named
-        .clone()
-        .find(|m| m.params == *args)
-        .or_else(|| {
-            named.clone().find(|m| {
-                m.params.len() == args.len()
-                    && m.params
-                        .iter()
-                        .zip(args)
-                        .all(|(p, a)| p == a || p.is_erased_top())
-            })
-        })
-        .or_else(|| {
-            named
-                .clone()
-                .find(|m| m.params.len() >= args.len() && m.params[..args.len()] == *args)
-        })
-        .or_else(|| {
-            named.clone().find(|m| {
-                let Some((last, fixed)) = m.params.split_last() else {
-                    return false;
-                };
-                let Some(elem) = last.array_elem() else {
-                    return false;
-                };
-                if args.len() == m.params.len() && args.last() == Some(last) {
-                    return false;
-                }
-                args.len() >= fixed.len()
-                    && fixed
-                        .iter()
-                        .zip(args)
-                        .all(|(p, a)| p == a || p.is_erased_top())
-                    && args[fixed.len()..]
-                        .iter()
-                        .all(|a| *a == elem || elem.is_erased_top() || a.is_erased_top())
-            })
-        })
-}
-
 impl LibraryType {
     /// A constructor callable with `args` — exact arity, then a widening pass that erases each
     /// reference argument to `Any` (a JDK type may only expose the `(Object)` overload).

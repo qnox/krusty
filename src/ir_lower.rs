@@ -12647,17 +12647,6 @@ impl<'a> Lower<'a> {
         Some(self.wrap_arg_prelude(call, arg_prelude))
     }
 
-    /// Lower a CALL `recv.name(args)` that resolves to a top-level EXTENSION function on `rt` — the
-    /// shared path behind a qualified `recv.name(args)` and a receiver-lambda / extension-fn body's
-    /// implicit `this.name(args)` (`"ab".run { uppercase() }`, `fun String.shout() = uppercase()`).
-    /// `recv_ir` is the already-lowered receiver value. Tries a public library extension first
-    /// (`invokestatic facade.name(recv, args)`), then a private `@InlineOnly` extension whose real body
-    /// the backend splices (`String.uppercase()` → `toUpperCase(Locale.ROOT)`). `None` when neither
-    /// resolves. No stdlib name is hardcoded — owner/descriptor come from the library reader.
-    /// Resolve a classpath extension `recv.name(args)`, retrying once with integer-LITERAL `Int`
-    /// arguments widened to `Long` — Kotlin adapts an integer literal to a wider expected type, so
-    /// `longRange step 3` resolves `LongProgression.step(Long)`. A non-literal `Int` is left as-is
-    /// (kotlinc rejects `longRange step intVar`). Mirrors the checker's classpath-extension adaptation.
     /// The reified-type substitution to record for a spliceable classpath extension call: pair the
     /// callee's generic type-parameter NAMES (from its `Signature`) with the call's explicit type
     /// ARGUMENTS (`getFor<Prov>` → `[("T", Prov)]`). Empty unless the callee is inline (its body is

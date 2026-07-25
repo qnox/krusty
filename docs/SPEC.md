@@ -103,6 +103,11 @@ Kotlin `Int.toString()` etc. map to these via a small intrinsics table. Phase 5 
 this with a real `.class` reader (`cafebabe`/hand-rolled) so any JDK/Java dependency works, and
 Phase 6 adds a minimal Java *source* front end for mixed compilation.
 
+Integer literals participate in overload applicability using the candidate parameter types. An
+exact `Int` parameter wins over adaptation to `Long`; non-literal `Int` values are not adapted.
+Public static fields are valid class-qualified property reads, including in inferred property
+initializers.
+
 ## 6. Correctness & compatibility: differential testing vs kotlinc
 
 **Compatibility IS a goal — specifically ABI + `@Metadata`, NOT byte-identity.** A krusty-compiled
