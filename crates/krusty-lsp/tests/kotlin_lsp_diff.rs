@@ -268,6 +268,10 @@ impl LspProcess {
             response["result"]["capabilities"]["renameProvider"], true,
             "LSP must advertise the official server's rename contract"
         );
+        assert_eq!(
+            response["result"]["capabilities"]["typeDefinitionProvider"], true,
+            "LSP must advertise the official server's type-definition contract"
+        );
         self.notify("initialized", json!({}));
         SemanticLegend {
             types: response["result"]["capabilities"]["semanticTokensProvider"]["legend"]
@@ -365,6 +369,19 @@ impl LspProcess {
         let response = self.request(
             request_id,
             "textDocument/definition",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": line, "character": character}
+            }),
+        );
+        response.get("result").cloned().unwrap_or(Value::Null)
+    }
+
+    fn type_definition(&mut self, uri: &str, line: u32, character: u32) -> Value {
+        let request_id = self.next_request_id();
+        let response = self.request(
+            request_id,
+            "textDocument/typeDefinition",
             json!({
                 "textDocument": {"uri": uri},
                 "position": {"line": line, "character": character}
@@ -692,6 +709,43 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
     let backticked_source = "fun `odd name`(): Int = 1\n\
          fun useOdd(): Int = `odd name`()\n\
          fun parameterHover(`odd param`: Int): Int = `odd param`\n";
+    let type_definition_target_source = "package typedefparity\n\
+         import kotlin.reflect.KProperty\n\
+         open class TypeParityBase\n\
+         class TypeParityDerived : TypeParityBase()\n\
+         data class TypeParityHolder(val item: TypeParityDerived)\n\
+         class TypeParityDelegate {\n\
+         \u{20}\u{20}operator fun getValue(thisRef: Any?, property: KProperty<*>): TypeParityDerived = TypeParityDerived()\n\
+         }\n\
+         class TypeParityFailure : Exception()\n\
+         val typeParityExplicitOrdinary: TypeParityDerived = TypeParityDerived()\n\
+         val typeParityInferredOrdinary = TypeParityDerived()\n\
+         class TypeParityProperties {\n\
+         \u{20}\u{20}val typeParityExplicitMember: TypeParityDerived = TypeParityDerived()\n\
+         \u{20}\u{20}val typeParityInferredMember = TypeParityDerived()\n\
+         }\n";
+    let type_definition_use_source = "package typedefparity\n\
+         fun typeParityUse(input: TypeParityDerived): TypeParityBase {\n\
+         \u{20}\u{20}val inferred = input\n\
+         \u{20}\u{20}val nullable: TypeParityDerived? = inferred\n\
+         \u{20}\u{20}val copied = nullable\n\
+         \u{20}\u{20}val holder = TypeParityHolder(inferred)\n\
+         \u{20}\u{20}lateinit var delayed: TypeParityDerived\n\
+         \u{20}\u{20}val delegated by TypeParityDelegate()\n\
+         \u{20}\u{20}val (destructured) = TypeParityHolder(inferred)\n\
+         \u{20}\u{20}for (element in arrayOf(inferred)) { element }\n\
+         \u{20}\u{20}val mapper = { lambdaInput: TypeParityDerived -> lambdaInput }\n\
+         \u{20}\u{20}try { inferred } catch (failure: TypeParityFailure) { inferred }\n\
+         \u{20}\u{20}val emoji = \"😀\"; return holder.item\n\
+         }\n\
+         fun <T : TypeParityBase> typeParityGeneric(input: T) {\n\
+         \u{20}\u{20}val explicitGeneric: T = input\n\
+         \u{20}\u{20}val copiedGeneric = input\n\
+         }\n\
+         fun typeParitySmart(value: TypeParityBase): TypeParityDerived? {\n\
+         \u{20}\u{20}if (value is TypeParityDerived) return value\n\
+         \u{20}\u{20}return null\n\
+         }\n";
     let definition_files = [
         (
             "DefinitionTarget.kt",
@@ -1172,6 +1226,8 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
              \u{20}\u{20}\"ok\",\n\
              ).first()\n",
         ),
+        ("TypeDefinitionTarget.kt", type_definition_target_source),
+        ("TypeDefinitionUse.kt", type_definition_use_source),
     ];
     for (name, source) in diagnostic_cases
         .iter()
@@ -1313,6 +1369,14 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
     let advanced_folding_ranges_uri = format!(
         "file://{}",
         source_root.join("FoldingRangesAdvanced.kt").display()
+    );
+    let type_definition_use_uri = format!(
+        "file://{}",
+        source_root.join("TypeDefinitionUse.kt").display()
+    );
+    let type_definition_target_uri = format!(
+        "file://{}",
+        source_root.join("TypeDefinitionTarget.kt").display()
     );
     let definition_positions = [
         ("class reference", basic_tokens_uri.as_str(), 1, 17),
@@ -1524,6 +1588,170 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
             assert!(
                 result.as_array().is_some_and(|locations| locations.is_empty()),
                 "official Kotlin LSP unexpectedly resolved negative definition case {name}: {result}"
+            );
+            json!({
+                "case": name,
+                "result": result
+            })
+        })
+        .collect::<Vec<_>>();
+    let type_definition_positions = [
+        (
+            "class declaration self",
+            type_definition_target_uri.as_str(),
+            position_after_marker(type_definition_target_source, "class TypeParityDer"),
+        ),
+        (
+            "constructor property declaration",
+            type_definition_target_uri.as_str(),
+            position_after_marker(type_definition_target_source, "val it"),
+        ),
+        (
+            "explicit top-level property declaration",
+            type_definition_target_uri.as_str(),
+            position_after_marker(type_definition_target_source, "val typeParityExp"),
+        ),
+        (
+            "inferred top-level property declaration",
+            type_definition_target_uri.as_str(),
+            position_after_marker(type_definition_target_source, "val typeParityInf"),
+        ),
+        (
+            "explicit member property declaration",
+            type_definition_target_uri.as_str(),
+            position_after_marker(type_definition_target_source, "val typeParityExplicitMem"),
+        ),
+        (
+            "inferred member property declaration",
+            type_definition_target_uri.as_str(),
+            position_after_marker(type_definition_target_source, "val typeParityInferredMem"),
+        ),
+        (
+            "parameter declaration",
+            type_definition_use_uri.as_str(),
+            position_after_marker(type_definition_use_source, "typeParityUse(inp"),
+        ),
+        (
+            "explicit parameter type",
+            type_definition_use_uri.as_str(),
+            position_after_marker(type_definition_use_source, "input: TypeParityDer"),
+        ),
+        (
+            "explicit return type",
+            type_definition_use_uri.as_str(),
+            position_after_marker(type_definition_use_source, "): TypeParityBa"),
+        ),
+        (
+            "inferred local declaration",
+            type_definition_use_uri.as_str(),
+            position_after_marker(type_definition_use_source, "val inf"),
+        ),
+        (
+            "inferred local value",
+            type_definition_use_uri.as_str(),
+            position_after_marker(type_definition_use_source, "val inferred = inp"),
+        ),
+        (
+            "nullable local declaration",
+            type_definition_use_uri.as_str(),
+            position_after_marker(type_definition_use_source, "val null"),
+        ),
+        (
+            "nullable local reference",
+            type_definition_use_uri.as_str(),
+            position_after_marker(type_definition_use_source, "val copied = null"),
+        ),
+        (
+            "nullable inferred declaration",
+            type_definition_use_uri.as_str(),
+            position_after_marker(type_definition_use_source, "val cop"),
+        ),
+        (
+            "constructor result",
+            type_definition_use_uri.as_str(),
+            position_after_marker(type_definition_use_source, "val holder = TypeParityHol"),
+        ),
+        (
+            "constructor inferred declaration",
+            type_definition_use_uri.as_str(),
+            position_after_marker(type_definition_use_source, "val hol"),
+        ),
+        (
+            "property result after emoji",
+            type_definition_use_uri.as_str(),
+            position_after_marker(type_definition_use_source, "return holder.it"),
+        ),
+        (
+            "lateinit local declaration",
+            type_definition_use_uri.as_str(),
+            position_after_marker(type_definition_use_source, "lateinit var dela"),
+        ),
+        (
+            "delegated local declaration",
+            type_definition_use_uri.as_str(),
+            position_after_marker(type_definition_use_source, "val deleg"),
+        ),
+        (
+            "destructured local declaration",
+            type_definition_use_uri.as_str(),
+            position_after_marker(type_definition_use_source, "val (destr"),
+        ),
+        (
+            "for-each local declaration",
+            type_definition_use_uri.as_str(),
+            position_after_marker(type_definition_use_source, "for (elem"),
+        ),
+        (
+            "explicit lambda parameter declaration",
+            type_definition_use_uri.as_str(),
+            position_after_marker(type_definition_use_source, "{ lambdaInp"),
+        ),
+        (
+            "catch parameter declaration",
+            type_definition_use_uri.as_str(),
+            position_after_marker(type_definition_use_source, "catch (fail"),
+        ),
+        (
+            "smart-cast value",
+            type_definition_use_uri.as_str(),
+            position_after_marker(type_definition_use_source, "return val"),
+        ),
+    ];
+    let expected_type_definitions = type_definition_positions
+        .iter()
+        .map(|(name, uri, (line, character))| {
+            let result = reference.type_definition(uri, *line, *character);
+            assert!(
+                result
+                    .as_array()
+                    .is_some_and(|locations| !locations.is_empty()),
+                "official Kotlin LSP returned no type definition for {name}: {result}"
+            );
+            json!({
+                "case": name,
+                "result": result
+            })
+        })
+        .collect::<Vec<_>>();
+    let negative_type_definition_positions = [
+        (
+            "generic explicit local declaration",
+            type_definition_use_uri.as_str(),
+            position_after_marker(type_definition_use_source, "val explicitGen"),
+        ),
+        (
+            "generic inferred local declaration",
+            type_definition_use_uri.as_str(),
+            position_after_marker(type_definition_use_source, "val copiedGen"),
+        ),
+    ];
+    let expected_negative_type_definitions = negative_type_definition_positions
+        .iter()
+        .map(|(name, uri, (line, character))| {
+            let result = reference.type_definition(uri, *line, *character);
+            assert!(
+                result.is_null(),
+                "official Kotlin LSP resolved negative type-definition case {name}: {result}"
             );
             json!({
                 "case": name,
@@ -2214,6 +2442,32 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
             })
         })
         .collect::<Vec<_>>();
+    let actual_type_definitions = type_definition_positions
+        .iter()
+        .map(|(name, uri, (line, character))| {
+            json!({
+                "case": name,
+                "result": krusty.type_definition(
+                    uri,
+                    *line,
+                    *character
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let actual_negative_type_definitions = negative_type_definition_positions
+        .iter()
+        .map(|(name, uri, (line, character))| {
+            json!({
+                "case": name,
+                "result": krusty.type_definition(
+                    uri,
+                    *line,
+                    *character
+                )
+            })
+        })
+        .collect::<Vec<_>>();
     let actual_hovers = hover_positions
         .iter()
         .map(|(name, uri, line, character)| {
@@ -2312,6 +2566,14 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
     assert_eq!(
         actual_negative_definitions, expected_negative_definitions,
         "negative definition mismatches"
+    );
+    assert_eq!(
+        actual_type_definitions, expected_type_definitions,
+        "type-definition mismatches"
+    );
+    assert_eq!(
+        actual_negative_type_definitions, expected_negative_type_definitions,
+        "negative type-definition mismatches"
     );
     assert_eq!(actual_hovers, expected_hovers, "hover mismatches");
     assert_eq!(

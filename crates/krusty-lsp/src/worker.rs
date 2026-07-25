@@ -21,9 +21,9 @@ use crate::compiler_analysis::{
     self, CompletionSymbols, DefinitionSymbols, HighlightSymbols, SignatureHelpSymbols,
 };
 use crate::{
-    read_framed, write_framed, AnalysisBudgets, CompletionIndex, DefinitionIndex, DocumentAnalysis,
-    DocumentSymbolIndex, FoldingRangeIndex, HoverIndex, SemanticTokenIndex, SignatureHelpIndex,
-    SourceSetIndexes,
+    finalize_type_definitions, read_framed, write_framed, AnalysisBudgets, CompletionIndex,
+    DefinitionIndex, DocumentAnalysis, DocumentSymbolIndex, FoldingRangeIndex, HoverIndex,
+    SemanticTokenIndex, SignatureHelpIndex, SourceSetIndexes,
 };
 
 pub const DEFAULT_ANALYSES_PER_WORKER: usize = 64;
@@ -57,6 +57,7 @@ struct AnalysisResponse {
     signature_help: SignatureHelpIndex,
     semantic_tokens: SemanticTokenIndex,
     definitions: DefinitionIndex,
+    type_definitions: DefinitionIndex,
     document_symbols: DocumentSymbolIndex,
     folding_ranges: FoldingRangeIndex,
 }
@@ -82,6 +83,7 @@ impl From<DocumentAnalysis> for AnalysisResponse {
             signature_help: analysis.signature_help,
             semantic_tokens: analysis.semantic_tokens,
             definitions: analysis.definitions,
+            type_definitions: analysis.type_definitions,
             document_symbols: analysis.document_symbols,
             folding_ranges: analysis.folding_ranges,
         }
@@ -110,6 +112,7 @@ impl AnalysisResponse {
             signature_help: self.signature_help,
             semantic_tokens: self.semantic_tokens,
             definitions: self.definitions,
+            type_definitions: self.type_definitions,
             document_symbols: self.document_symbols,
             folding_ranges: self.folding_ranges,
         }
@@ -361,7 +364,7 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             &signature_help_symbols,
         );
         let mut budgets = AnalysisBudgets::new();
-        let analyses = source_set
+        let pending = source_set
             .files
             .into_iter()
             .zip(&sources)
@@ -375,6 +378,9 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
                     &mut budgets,
                 )
             })
+            .collect();
+        let analyses = finalize_type_definitions(pending, &mut budgets)
+            .into_iter()
             .map(AnalysisResponse::from)
             .collect::<Vec<_>>();
         let response = encode_response(&analyses)?;
@@ -439,6 +445,24 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
+    use crate::analysis::MAX_SOURCE_SET_NAVIGATION_ENTRIES;
+
+    fn navigation_saturation_response(
+        definitions: usize,
+        type_definitions: usize,
+    ) -> AnalysisResponse {
+        AnalysisResponse {
+            diagnostics: Vec::new(),
+            hover: HoverIndex::default(),
+            completion: CompletionIndex::default(),
+            signature_help: SignatureHelpIndex::default(),
+            semantic_tokens: SemanticTokenIndex::default(),
+            definitions: DefinitionIndex::wire_saturation_fixture(definitions),
+            type_definitions: DefinitionIndex::wire_saturation_fixture(type_definitions),
+            document_symbols: DocumentSymbolIndex::default(),
+            folding_ranges: FoldingRangeIndex::default(),
+        }
+    }
 
     #[test]
     fn source_and_wire_buffers_are_bounded_before_worker_io() {
@@ -450,6 +474,32 @@ mod tests {
         let error = output.write_all(b"5").unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(output.bytes, b"1234");
+    }
+
+    #[test]
+    fn shared_navigation_budget_keeps_saturated_worker_response_below_frame_cap() {
+        let baseline = serde_json::to_vec(&vec![navigation_saturation_response(
+            MAX_SOURCE_SET_NAVIGATION_ENTRIES,
+            0,
+        )])
+        .unwrap();
+        assert!(baseline.len() < MAX_WORKER_MESSAGE_BYTES);
+
+        let definition_entries = MAX_SOURCE_SET_NAVIGATION_ENTRIES / 2;
+        let response = navigation_saturation_response(
+            definition_entries,
+            MAX_SOURCE_SET_NAVIGATION_ENTRIES - definition_entries,
+        );
+        assert_eq!(
+            response.definitions.entry_count() + response.type_definitions.entry_count(),
+            MAX_SOURCE_SET_NAVIGATION_ENTRIES
+        );
+        let encoded = serde_json::to_vec(&vec![response]).unwrap();
+        assert!(encoded.len() < MAX_WORKER_MESSAGE_BYTES);
+        assert!(
+            encoded.len() <= baseline.len(),
+            "type-definition entries must share, rather than enlarge, the prior navigation frame"
+        );
     }
 
     #[test]
@@ -497,8 +547,8 @@ mod tests {
     #[test]
     fn worker_protocol_analyzes_a_cross_file_source_set() {
         let sources = [
-            "package demo\nfun answer(): Int = 42",
-            "package demo\nfun use(): Int {\n  return answer()\n}",
+            "package demo\nclass WorkerResult\nfun answer(): WorkerResult = WorkerResult()",
+            "package demo\nfun use(): WorkerResult {\n  return answer()\n}",
         ];
         let request = serde_json::to_vec(&AnalysisRequest { sources: &sources }).unwrap();
         let mut input = Vec::new();
@@ -521,6 +571,7 @@ mod tests {
         assert!(analysis.signature_help.entry_count() > 0);
         assert!(analysis.semantic_tokens.entry_count() > 0);
         assert!(analysis.definitions.entry_count() > 0);
+        assert!(analysis.type_definitions.entry_count() > 0);
         assert!(analysis.document_symbols.entry_count() > 0);
         assert!(analysis.folding_ranges.entry_count() > 0);
     }

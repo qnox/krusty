@@ -33,7 +33,7 @@ pub struct Hover<'a> {
 const NO_COMPLETION_TYPE: u32 = 0x003f_ffff;
 const MAX_SOURCE_SET_COMPLETION_ENTRIES: usize = 32 * 1024;
 const MAX_SOURCE_SET_COMPLETION_WIRE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_SOURCE_SET_DEFINITION_ENTRIES: usize = 256 * 1024;
+pub(crate) const MAX_SOURCE_SET_NAVIGATION_ENTRIES: usize = 256 * 1024;
 const MAX_SOURCE_SET_HOVER_ENTRIES: usize = 256 * 1024;
 const MAX_SOURCE_SET_HOVER_WIRE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SOURCE_SET_DOCUMENT_SYMBOL_ENTRIES: usize = 32 * 1024;
@@ -77,7 +77,7 @@ pub(crate) struct CompletionBudget {
 }
 
 #[derive(Default)]
-pub(crate) struct DefinitionBudget {
+pub(crate) struct NavigationBudget {
     entries: usize,
 }
 
@@ -193,9 +193,9 @@ impl FoldingRangeBudget {
     }
 }
 
-impl DefinitionBudget {
+impl NavigationBudget {
     fn remaining(&self) -> usize {
-        MAX_SOURCE_SET_DEFINITION_ENTRIES.saturating_sub(self.entries)
+        MAX_SOURCE_SET_NAVIGATION_ENTRIES.saturating_sub(self.entries)
     }
 }
 
@@ -761,11 +761,14 @@ impl Iterator for DefinitionTargets<'_> {
 }
 
 impl DefinitionIndex {
-    fn from_occurrences(
-        occurrences: Vec<DefinitionOccurrence>,
-        budget: &mut DefinitionBudget,
-    ) -> Self {
-        let available = MAX_SOURCE_SET_DEFINITION_ENTRIES.saturating_sub(budget.entries);
+    #[cfg(test)]
+    pub(crate) fn wire_saturation_fixture(entry_count: usize) -> Self {
+        Self {
+            entries: vec![[u32::MAX; 5]; entry_count],
+        }
+    }
+
+    fn build(occurrences: Vec<DefinitionOccurrence>, available: usize) -> Self {
         let mut entries = occurrences
             .into_iter()
             .map(|occurrence| {
@@ -781,8 +784,17 @@ impl DefinitionIndex {
         entries.sort_unstable();
         entries.dedup();
         entries.truncate(available);
-        budget.entries += entries.len();
         Self { entries }
+    }
+
+    fn from_occurrences(
+        occurrences: Vec<DefinitionOccurrence>,
+        budget: &mut NavigationBudget,
+    ) -> Self {
+        let available = budget.remaining();
+        let index = Self::build(occurrences, available);
+        budget.entries += index.entries.len();
+        index
     }
 
     pub fn get(&self, byte_offset: u32) -> DefinitionTargets<'_> {
@@ -1383,6 +1395,7 @@ pub struct DocumentAnalysis {
     pub signature_help: SignatureHelpIndex,
     pub semantic_tokens: SemanticTokenIndex,
     pub definitions: DefinitionIndex,
+    pub type_definitions: DefinitionIndex,
     pub document_symbols: DocumentSymbolIndex,
     pub folding_ranges: FoldingRangeIndex,
 }
@@ -1416,7 +1429,8 @@ impl<'a> SourceSetIndexes<'a> {
 pub(crate) struct AnalysisBudgets {
     hover: HoverBudget,
     completion: CompletionBudget,
-    definition: DefinitionBudget,
+    navigation: NavigationBudget,
+    pending_type_definitions: usize,
     document_symbol: DocumentSymbolBudget,
     folding_range: FoldingRangeBudget,
     signature_help: SignatureHelpBudget,
@@ -1427,7 +1441,8 @@ impl AnalysisBudgets {
         Self {
             hover: HoverBudget::default(),
             completion: CompletionBudget::default(),
-            definition: DefinitionBudget::default(),
+            navigation: NavigationBudget::default(),
+            pending_type_definitions: 0,
             document_symbol: DocumentSymbolBudget::default(),
             folding_range: FoldingRangeBudget::default(),
             signature_help: SignatureHelpBudget::default(),
@@ -1442,7 +1457,7 @@ impl DocumentAnalysis {
         file_index: u32,
         indexes: &SourceSetIndexes<'_>,
         budgets: &mut AnalysisBudgets,
-    ) -> Self {
+    ) -> (Self, Vec<DefinitionOccurrence>) {
         let completion = CompletionIndex::from_file_analysis_with_budget(
             source,
             &analysis,
@@ -1463,15 +1478,20 @@ impl DocumentAnalysis {
             indexes.highlights,
             indexes.definitions,
             SemanticLimits {
-                definition_entries: budgets.definition.remaining(),
+                definition_entries: budgets.navigation.remaining(),
+                type_definition_entries: budgets.navigation.remaining().min(
+                    MAX_SOURCE_SET_NAVIGATION_ENTRIES
+                        .saturating_sub(budgets.pending_type_definitions),
+                ),
                 hover_entries: budgets.hover.remaining_entries(),
                 hover_wire_bytes: budgets.hover.remaining_wire_bytes(),
             },
         );
+        budgets.pending_type_definitions += semantic.type_definitions.len();
         let hover = HoverIndex::from_occurrences(semantic.hovers, &mut budgets.hover);
         let semantic_tokens = SemanticTokenIndex::from_occurrences(source, semantic.highlights);
         let definitions =
-            DefinitionIndex::from_occurrences(semantic.definitions, &mut budgets.definition);
+            DefinitionIndex::from_occurrences(semantic.definitions, &mut budgets.navigation);
         let document_symbols = DocumentSymbolIndex::from_occurrences(
             source,
             document_symbol_occurrences(
@@ -1486,16 +1506,20 @@ impl DocumentAnalysis {
             folding_range_occurrences(source, &analysis, budgets.folding_range.remaining_entries()),
             &mut budgets.folding_range,
         );
-        Self {
-            diagnostics: analysis.diagnostics,
-            hover,
-            completion,
-            signature_help,
-            semantic_tokens,
-            definitions,
-            document_symbols,
-            folding_ranges,
-        }
+        (
+            Self {
+                diagnostics: analysis.diagnostics,
+                hover,
+                completion,
+                signature_help,
+                semantic_tokens,
+                definitions,
+                type_definitions: DefinitionIndex::default(),
+                document_symbols,
+                folding_ranges,
+            },
+            semantic.type_definitions,
+        )
     }
 
     pub fn with_diagnostics(diagnostics: Vec<Diagnostic>) -> Self {
@@ -1506,6 +1530,7 @@ impl DocumentAnalysis {
             signature_help: SignatureHelpIndex::default(),
             semantic_tokens: SemanticTokenIndex::default(),
             definitions: DefinitionIndex::default(),
+            type_definitions: DefinitionIndex::default(),
             document_symbols: DocumentSymbolIndex::default(),
             folding_ranges: FoldingRangeIndex::default(),
         }
@@ -1514,6 +1539,20 @@ impl DocumentAnalysis {
     pub fn empty() -> Self {
         Self::with_diagnostics(Vec::new())
     }
+}
+
+pub(crate) fn finalize_type_definitions(
+    pending: Vec<(DocumentAnalysis, Vec<DefinitionOccurrence>)>,
+    budgets: &mut AnalysisBudgets,
+) -> Vec<DocumentAnalysis> {
+    pending
+        .into_iter()
+        .map(|(mut analysis, occurrences)| {
+            analysis.type_definitions =
+                DefinitionIndex::from_occurrences(occurrences, &mut budgets.navigation);
+            analysis
+        })
+        .collect()
 }
 
 /// Analyze one source in an open source set and retain only data needed by editor queries.
@@ -1533,7 +1572,7 @@ pub fn analyze_for_lsp(sources: &[&str]) -> Vec<DocumentAnalysis> {
         &signature_help_symbols,
     );
     let mut budgets = AnalysisBudgets::new();
-    analysis
+    let pending = analysis
         .files
         .into_iter()
         .zip(sources)
@@ -1547,7 +1586,8 @@ pub fn analyze_for_lsp(sources: &[&str]) -> Vec<DocumentAnalysis> {
                 &mut budgets,
             )
         })
-        .collect()
+        .collect();
+    finalize_type_definitions(pending, &mut budgets)
 }
 
 #[cfg(test)]
@@ -2144,6 +2184,214 @@ mod tests {
     }
 
     #[test]
+    fn type_definition_snapshot_is_compact_source_free_and_exact() {
+        assert_eq!(std::mem::size_of::<DefinitionEntry>(), 20);
+        let target = "package typedef\n\
+                      class TypeParityDerived\n\
+                      class TypeParityHolder(val item: TypeParityDerived)\n\
+                      val typeParityExplicitOrdinary: TypeParityDerived = TypeParityDerived()\n\
+                      val typeParityInferredOrdinary = TypeParityDerived()\n";
+        let use_source = "package typedef\n\
+             fun use(input: TypeParityDerived): TypeParityDerived {\n\
+             \u{20}\u{20}val inferred = input\n\
+             \u{20}\u{20}val nullable: TypeParityDerived? = inferred\n\
+             \u{20}\u{20}val copied = nullable\n\
+             \u{20}\u{20}val holder = TypeParityHolder(inferred)\n\
+             \u{20}\u{20}return holder.item\n\
+             }\n";
+        let analyses = analyze_for_lsp(&[target, use_source]);
+        let index = &analyses[1].type_definitions;
+        let derived_lo = target.find("TypeParityDerived").unwrap() as u32;
+        let derived = DefinitionTarget {
+            file: 0,
+            span: Span::new(derived_lo, derived_lo + "TypeParityDerived".len() as u32),
+        };
+        let holder_lo = target.find("TypeParityHolder").unwrap() as u32;
+        let holder = DefinitionTarget {
+            file: 0,
+            span: Span::new(holder_lo, holder_lo + "TypeParityHolder".len() as u32),
+        };
+        assert_eq!(
+            analyses[0]
+                .type_definitions
+                .get(derived_lo)
+                .collect::<Vec<_>>(),
+            vec![derived]
+        );
+        for query in [
+            target.find("typeParityExplicitOrdinary").unwrap(),
+            target.find("typeParityInferredOrdinary").unwrap(),
+        ] {
+            assert_eq!(
+                analyses[0]
+                    .type_definitions
+                    .get(query as u32)
+                    .collect::<Vec<_>>(),
+                vec![derived]
+            );
+        }
+
+        for query in [
+            use_source.find("input:").unwrap(),
+            use_source.find("inferred =").unwrap(),
+            use_source.find("= input").unwrap() + 2,
+            use_source.find("nullable:").unwrap(),
+            use_source.find("= nullable").unwrap() + 2,
+            use_source.rfind("item").unwrap(),
+        ] {
+            assert_eq!(index.get(query as u32).collect::<Vec<_>>(), vec![derived]);
+        }
+        let constructor = use_source.find("TypeParityHolder(").unwrap() as u32;
+        assert_eq!(index.get(constructor).collect::<Vec<_>>(), vec![holder]);
+    }
+
+    #[test]
+    fn type_definition_covers_value_declaration_forms() {
+        let source = "package typedforms\n\
+                      open class TypeTarget\n\
+                      data class TypeHolder(val value: TypeTarget)\n\
+                      class TypeDelegate {\n\
+                      \u{20}\u{20}operator fun getValue(thisRef: Any?, property: Any?): TypeTarget = TypeTarget()\n\
+                      }\n\
+                      fun declarations(input: TypeTarget) {\n\
+                      \u{20}\u{20}lateinit var late: TypeTarget\n\
+                      \u{20}\u{20}val delegated by TypeDelegate()\n\
+                      \u{20}\u{20}val (destructured) = TypeHolder(input)\n\
+                      \u{20}\u{20}for (element in arrayOf(input)) { element }\n\
+                      \u{20}\u{20}val lambda = { lambdaInput: TypeTarget -> lambdaInput }\n\
+                      }\n\
+                      fun <T : TypeTarget> generic(input: T) {\n\
+                      \u{20}\u{20}val explicitGeneric: T = input\n\
+                      \u{20}\u{20}val copied = input\n\
+                      }\n\
+                      class TypeNamespace { class QualifiedTarget }\n\
+                      fun <QualifiedTarget> qualified(input: TypeNamespace.QualifiedTarget) {\n\
+                      \u{20}\u{20}val copiedQualified = input\n\
+                      }\n\
+                      open class SmartBase\n\
+                      class SmartDerived : SmartBase()\n\
+                      fun smart(value: SmartBase) {\n\
+                      \u{20}\u{20}if (value is SmartDerived) { val narrowed = value }\n\
+                      }\n";
+        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        assert!(
+            analysis.diagnostics.is_empty(),
+            "{:?}",
+            analysis.diagnostics
+        );
+        let target_lo = source.find("TypeTarget").unwrap() as u32;
+        let target = DefinitionTarget {
+            file: 0,
+            span: Span::new(target_lo, target_lo + "TypeTarget".len() as u32),
+        };
+        for marker in [
+            "late:",
+            "delegated by",
+            "destructured)",
+            "element in",
+            "lambdaInput:",
+        ] {
+            let query = source.find(marker).unwrap() as u32;
+            assert_eq!(
+                analysis.type_definitions.get(query).collect::<Vec<_>>(),
+                vec![target],
+                "{marker}"
+            );
+        }
+
+        let explicit_generic = source.find("explicitGeneric:").unwrap() as u32;
+        assert_eq!(analysis.type_definitions.get(explicit_generic).count(), 0);
+        let copied = source.find("copied =").unwrap() as u32;
+        assert_eq!(analysis.type_definitions.get(copied).count(), 0);
+        let qualified_target_lo = source.find("class QualifiedTarget").unwrap() as u32 + 6;
+        let copied_qualified = source.find("copiedQualified =").unwrap() as u32;
+        assert_eq!(
+            analysis
+                .type_definitions
+                .get(copied_qualified)
+                .collect::<Vec<_>>(),
+            vec![DefinitionTarget {
+                file: 0,
+                span: Span::new(
+                    qualified_target_lo,
+                    qualified_target_lo + "QualifiedTarget".len() as u32,
+                ),
+            }]
+        );
+        let smart_target_lo = source.find("class SmartDerived").unwrap() as u32 + 6;
+        let narrowed = source.find("narrowed =").unwrap() as u32;
+        assert_eq!(
+            analysis.type_definitions.get(narrowed).collect::<Vec<_>>(),
+            vec![DefinitionTarget {
+                file: 0,
+                span: Span::new(
+                    smart_target_lo,
+                    smart_target_lo + "SmartDerived".len() as u32,
+                ),
+            }]
+        );
+    }
+
+    #[test]
+    fn type_definition_snapshot_respects_the_shared_navigation_entry_budget() {
+        let mut budget = NavigationBudget {
+            entries: MAX_SOURCE_SET_NAVIGATION_ENTRIES - 1,
+        };
+        let occurrences = vec![
+            DefinitionOccurrence {
+                span: Span::new(0, 1),
+                target: DefinitionTarget {
+                    file: 0,
+                    span: Span::new(10, 11),
+                },
+            },
+            DefinitionOccurrence {
+                span: Span::new(2, 3),
+                target: DefinitionTarget {
+                    file: 0,
+                    span: Span::new(12, 13),
+                },
+            },
+        ];
+        let index = DefinitionIndex::from_occurrences(occurrences, &mut budget);
+
+        assert_eq!(index.entry_count(), 1);
+        assert_eq!(budget.entries, MAX_SOURCE_SET_NAVIGATION_ENTRIES);
+    }
+
+    #[test]
+    fn definitions_in_later_files_take_priority_over_type_definitions() {
+        let mut budgets = AnalysisBudgets::new();
+        budgets.navigation.entries = MAX_SOURCE_SET_NAVIGATION_ENTRIES - 2;
+        let occurrence = |file, lo| DefinitionOccurrence {
+            span: Span::new(lo, lo + 1),
+            target: DefinitionTarget {
+                file,
+                span: Span::new(10, 11),
+            },
+        };
+        let mut first = DocumentAnalysis::empty();
+        first.definitions =
+            DefinitionIndex::from_occurrences(vec![occurrence(0, 0)], &mut budgets.navigation);
+        let mut second = DocumentAnalysis::empty();
+        second.definitions =
+            DefinitionIndex::from_occurrences(vec![occurrence(1, 2)], &mut budgets.navigation);
+
+        let analyses = finalize_type_definitions(
+            vec![
+                (first, vec![occurrence(0, 4)]),
+                (second, vec![occurrence(1, 6)]),
+            ],
+            &mut budgets,
+        );
+
+        assert_eq!(analyses[0].definitions.entry_count(), 1);
+        assert_eq!(analyses[1].definitions.entry_count(), 1);
+        assert_eq!(analyses[0].type_definitions.entry_count(), 0);
+        assert_eq!(analyses[1].type_definitions.entry_count(), 0);
+    }
+
+    #[test]
     fn definition_snapshot_reverse_query_reuses_the_same_compact_entries() {
         let source = "data class User(val name: String)\n\
                       fun greet(user: User): String = user.name\n";
@@ -2181,7 +2429,7 @@ mod tests {
             file: 1,
             span: Span::new(20, 21),
         };
-        let mut budget = DefinitionBudget::default();
+        let mut budget = NavigationBudget::default();
         let index = DefinitionIndex::from_occurrences(
             vec![
                 DefinitionOccurrence {
@@ -2212,8 +2460,8 @@ mod tests {
 
     #[test]
     fn definition_snapshot_respects_the_source_set_entry_budget() {
-        let mut budget = DefinitionBudget {
-            entries: MAX_SOURCE_SET_DEFINITION_ENTRIES - 1,
+        let mut budget = NavigationBudget {
+            entries: MAX_SOURCE_SET_NAVIGATION_ENTRIES - 1,
         };
         let occurrences = vec![
             DefinitionOccurrence {
@@ -2233,7 +2481,7 @@ mod tests {
         ];
         let index = DefinitionIndex::from_occurrences(occurrences, &mut budget);
         assert_eq!(index.entry_count(), 1);
-        assert_eq!(budget.entries, MAX_SOURCE_SET_DEFINITION_ENTRIES);
+        assert_eq!(budget.entries, MAX_SOURCE_SET_NAVIGATION_ENTRIES);
     }
 
     #[test]

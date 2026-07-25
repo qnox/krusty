@@ -1383,10 +1383,28 @@ mod tests {
                     "uri": uri,
                     "languageId": "kotlin",
                     "version": 1,
-                    "text": "fun target(): Int = 1\nfun use(): Int = target()\n"
+                    "text": "class StaleType\nfun target(): StaleType = StaleType()\nfun use(): StaleType = target()\n"
                 }
             }),
         ));
+        let fresh_type_definition = server.handle(request(
+            2,
+            "textDocument/typeDefinition",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 2, "character": 24}
+            }),
+        ));
+        assert_eq!(
+            fresh_type_definition.messages[0]["result"],
+            json!([{
+                "uri": uri,
+                "range": {
+                    "start": {"line": 0, "character": 6},
+                    "end": {"line": 0, "character": 15}
+                }
+            }])
+        );
         server.handle(notification(
             "textDocument/didChange",
             json!({
@@ -1397,7 +1415,7 @@ mod tests {
             }),
         ));
         let response = server.handle(request(
-            2,
+            3,
             "textDocument/definition",
             json!({
                 "textDocument": {"uri": uri},
@@ -1405,6 +1423,15 @@ mod tests {
             }),
         ));
         assert_eq!(response.messages[0]["result"], json!([]));
+        let type_definition = server.handle(request(
+            4,
+            "textDocument/typeDefinition",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 1, "character": 18}
+            }),
+        ));
+        assert_eq!(type_definition.messages[0]["result"], Value::Null);
     }
 
     #[test]
@@ -1459,6 +1486,68 @@ mod tests {
             }])
         );
         assert_eq!(calls.get(), 2, "definition must not rerun analysis");
+    }
+
+    #[test]
+    fn type_definition_resolves_exact_cross_file_utf16_location_without_reanalysis() {
+        let calls = Rc::new(Cell::new(0));
+        let calls_for_analyzer = calls.clone();
+        let mut server = LspService::new(move |sources: &[&str]| {
+            calls_for_analyzer.set(calls_for_analyzer.get() + 1);
+            super::super::analyze_for_lsp(sources)
+        });
+        let initialized = server.handle(request(1, "initialize", json!({})));
+        assert_eq!(
+            initialized.messages[0]["result"]["capabilities"]["typeDefinitionProvider"],
+            true
+        );
+        for (uri, text) in [
+            (
+                "file:///TypeDefinitionTarget.kt",
+                "package typedef\nclass TypeParityDerived\n",
+            ),
+            (
+                "file:///TypeDefinitionUse.kt",
+                "package typedef\nfun typeUse(value: TypeParityDerived): TypeParityDerived { val emoji = \"😀\"; return value }\n",
+            ),
+        ] {
+            server.handle(notification(
+                "textDocument/didOpen",
+                json!({
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": "kotlin",
+                        "version": 1,
+                        "text": text
+                    }
+                }),
+            ));
+        }
+        assert_eq!(calls.get(), 2);
+
+        let response = server.handle(request(
+            2,
+            "textDocument/typeDefinition",
+            json!({
+                "textDocument": {"uri": "file:///TypeDefinitionUse.kt"},
+                "position": {"line": 1, "character": 85}
+            }),
+        ));
+        assert_eq!(
+            response.messages[0]["result"],
+            json!([{
+                "uri": "file:///TypeDefinitionTarget.kt",
+                "range": {
+                    "start": {"line": 1, "character": 6},
+                    "end": {"line": 1, "character": 23}
+                }
+            }])
+        );
+        assert_eq!(
+            calls.get(),
+            2,
+            "type definition must use compact cached spans"
+        );
     }
 
     #[test]
@@ -3956,11 +4045,18 @@ mod tests {
             );
             sources
                 .iter()
-                .map(|_| super::super::DocumentAnalysis::empty())
+                .map(|source| {
+                    if source.len() < 64 {
+                        super::super::analyze_for_lsp(&[*source]).pop().unwrap()
+                    } else {
+                        super::super::DocumentAnalysis::empty()
+                    }
+                })
                 .collect()
         });
         server.handle(request(1, "initialize", json!({})));
         let uri = "file:///BlockedIncremental.kt";
+        let initial_source = "class BlockedType\nval blocked = BlockedType()\n";
         server.handle(notification(
             "textDocument/didOpen",
             json!({
@@ -3968,10 +4064,28 @@ mod tests {
                     "uri": uri,
                     "languageId": "kotlin",
                     "version": 1,
-                    "text": "original"
+                    "text": initial_source
                 }
             }),
         ));
+        let fresh_type_definition = server.handle(request(
+            2,
+            "textDocument/typeDefinition",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 1, "character": 5}
+            }),
+        ));
+        assert_eq!(
+            fresh_type_definition.messages[0]["result"],
+            json!([{
+                "uri": uri,
+                "range": {
+                    "start": {"line": 0, "character": 6},
+                    "end": {"line": 0, "character": 17}
+                }
+            }])
+        );
         server.handle(notification(
             "textDocument/didOpen",
             json!({
@@ -3979,7 +4093,7 @@ mod tests {
                     "uri": "file:///Filler.kt",
                     "languageId": "kotlin",
                     "version": 1,
-                    "text": "x".repeat(crate::worker::MAX_SOURCE_SET_BYTES - 16)
+                    "text": "x".repeat(crate::worker::MAX_SOURCE_SET_BYTES - initial_source.len())
                 }
             }),
         ));
@@ -3988,9 +4102,20 @@ mod tests {
             "textDocument/didChange",
             json!({
                 "textDocument": {"uri": uri, "version": 2},
-                "contentChanges": [{"text": "this replacement exceeds the remaining budget"}]
+                "contentChanges": [{
+                    "text": "this replacement exceeds the remaining budget because it is larger than the original"
+                }]
             }),
         ));
+        let blocked_type_definition = server.handle(request(
+            3,
+            "textDocument/typeDefinition",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 0, "character": 0}
+            }),
+        ));
+        assert_eq!(blocked_type_definition.messages[0]["result"], Value::Null);
         let analysis_count = calls.get();
 
         server.handle(notification(
