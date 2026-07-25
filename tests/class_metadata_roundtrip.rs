@@ -25,6 +25,7 @@ fn class_info(internal: &str, d1: Vec<u8>, d2: Vec<String>) -> ClassInfo {
         meta: decode_metadata(&d1_strings, &d2, None, internal, &[]),
         signature: None,
         retention: None,
+        inner_classes: Vec::new(),
     }
 }
 

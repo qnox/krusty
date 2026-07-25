@@ -118,8 +118,8 @@ fn suspend_try_finally_rejected() {
 }
 
 #[test]
-fn suspend_try_catch_rejected() {
-    assert!(rejects(
+fn suspend_try_catch_accepted() {
+    assert!(!rejects(
         "suspend fun d(): Int = 1\n\
          suspend fun f(): Int { try { return d() } catch (e: Exception) { return d() } }\n"
     ));

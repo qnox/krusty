@@ -2427,6 +2427,20 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         Some(Ty::obj("kotlin/reflect/KClass"))
     }
 
+    fn intrinsic_property(&self, receiver: Ty, name: &str) -> Option<LibraryMember> {
+        if name != "javaClass" || !receiver.non_null().is_reference() {
+            return None;
+        }
+        let mut member = LibraryMember::new(
+            "getClass".to_string(),
+            vec![],
+            Ty::obj("java/lang/Class"),
+            "()Ljava/lang/Class;".to_string(),
+        );
+        member.owner = Some(type_name("java/lang/Object"));
+        Some(member)
+    }
+
     fn platform_default_import_packages(&self) -> &'static [&'static str] {
         PLATFORM_DEFAULT_IMPORT_PACKAGES
     }

@@ -118,12 +118,18 @@ fn emit_checked_ir(
     // module's output from the classpath and needs it to resolve cross-module extensions.
     let metadata = krusty::jvm::backend::facade_package_metadata(file, file_index, syms);
     let run = krusty::jvm::ir_emit::EmitRun::default();
+    let opts = krusty::jvm::ir_emit::EmitOptions {
+        inner_class_resolver: Some(krusty::jvm::backend::classpath_inner_class_resolver(
+            cp.clone(),
+        )),
+        ..Default::default()
+    };
     match krusty::jvm::ir_emit::emit_all_with_opts(
         ir,
         facade,
         &**cp,
         metadata.as_ref(),
-        &krusty::jvm::ir_emit::EmitOptions::default(),
+        &opts,
         &run,
     ) {
         Some(o) if !o.is_empty() => Ok(o),

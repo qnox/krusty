@@ -145,6 +145,11 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         None
     }
 
+    /// A platform property implemented by compiler lowering rather than an ordinary getter.
+    fn intrinsic_property(&self, _receiver: Ty, _name: &str) -> Option<LibraryMember> {
+        None
+    }
+
     /// Platform constraints not represented in the ordinary semantic hierarchy.
     fn implicit_common_supertypes(&self, _types: &[Ty]) -> Vec<SemanticSupertype> {
         Vec::new()

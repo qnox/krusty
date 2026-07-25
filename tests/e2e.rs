@@ -132,6 +132,8 @@ mod classpath_default_args_e2e;
 mod classpath_enum_regex_vc_e2e;
 #[path = "classpath_function_reference_e2e.rs"]
 mod classpath_function_reference_e2e;
+#[path = "classpath_inner_classes_e2e.rs"]
+mod classpath_inner_classes_e2e;
 #[path = "classpath_is_smartcast_e2e.rs"]
 mod classpath_is_smartcast_e2e;
 #[path = "classpath_nested_ctor_reordered_named_valueclass_e2e.rs"]
@@ -472,6 +474,8 @@ mod is_nullable_and_notnull_smartcast_e2e;
 mod is_nullable_primitive_e2e;
 #[path = "is_primitive_smartcast_e2e.rs"]
 mod is_primitive_smartcast_e2e;
+#[path = "java_class_intrinsic_e2e.rs"]
+mod java_class_intrinsic_e2e;
 #[path = "java_instance_e2e.rs"]
 mod java_instance_e2e;
 #[path = "java_source_interop_e2e.rs"]
@@ -598,6 +602,8 @@ mod nested_type_scope_e2e;
 mod nested_type_shadowing_e2e;
 #[path = "newline_method_chain_e2e.rs"]
 mod newline_method_chain_e2e;
+#[path = "non_field_ctor_metadata_e2e.rs"]
+mod non_field_ctor_metadata_e2e;
 #[path = "not_null_assert_e2e.rs"]
 mod not_null_assert_e2e;
 #[path = "nothing_call_branch_e2e.rs"]
@@ -684,6 +690,8 @@ mod raw_string_interpolation_e2e;
 mod receiver_fn_value_invoke_e2e;
 #[path = "receiver_lambda_e2e.rs"]
 mod receiver_lambda_e2e;
+#[path = "receiver_lambda_in_method_e2e.rs"]
+mod receiver_lambda_in_method_e2e;
 #[path = "reference_adaptation_e2e.rs"]
 mod reference_adaptation_e2e;
 #[path = "reference_in_range_e2e.rs"]
@@ -728,6 +736,8 @@ mod same_package_classpath_e2e;
 mod samefile_nested_object_value_e2e;
 #[path = "scope_function_value_arg_e2e.rs"]
 mod scope_function_value_arg_e2e;
+#[path = "sealed_cross_file_metadata_e2e.rs"]
+mod sealed_cross_file_metadata_e2e;
 #[path = "sealed_interface_nested_e2e.rs"]
 mod sealed_interface_nested_e2e;
 #[path = "sealed_object_value_match_e2e.rs"]
@@ -780,10 +790,14 @@ mod suspend_collection_hof_suspend_lambda_e2e;
 mod suspend_continuation_owner_e2e;
 #[path = "suspend_conversion_e2e.rs"]
 mod suspend_conversion_e2e;
+#[path = "suspend_default_call_chained_receiver_e2e.rs"]
+mod suspend_default_call_chained_receiver_e2e;
 #[path = "suspend_default_param_e2e.rs"]
 mod suspend_default_param_e2e;
 #[path = "suspend_e2e.rs"]
 mod suspend_e2e;
+#[path = "suspend_in_try_body_hoist_e2e.rs"]
+mod suspend_in_try_body_hoist_e2e;
 #[path = "suspend_inline_hof_suspending_lambda_reject_e2e.rs"]
 mod suspend_inline_hof_suspending_lambda_reject_e2e;
 #[path = "suspend_inline_statementless_block_e2e.rs"]
@@ -870,6 +884,8 @@ mod unit_as_any_e2e;
 mod unit_cast_e2e;
 #[path = "unit_value_e2e.rs"]
 mod unit_value_e2e;
+#[path = "unit_vararg_e2e.rs"]
+mod unit_vararg_e2e;
 #[path = "unsigned_array_e2e.rs"]
 mod unsigned_array_e2e;
 #[path = "unsigned_ext_e2e.rs"]
