@@ -46,7 +46,7 @@ mod tests {
         );
         assert_allowed_external_crate_modules_in_file(
             Path::new("crates/krusty-lsp/src/compiler_analysis.rs"),
-            &["ast", "diag", "frontend", "libraries", "types"],
+            &["ast", "diag", "features", "frontend", "libraries", "types"],
         );
     }
 
@@ -81,10 +81,14 @@ mod tests {
             {
                 continue;
             }
-            assert_allowed_external_crate_modules_in_file(
-                &path,
-                &["analysis", "diag", "jvm", "types"],
-            );
+            let mut allowed = vec!["analysis", "diag", "jvm", "types"];
+            if path.ends_with("options.rs")
+                || path.ends_with("project/sync.rs")
+                || path.ends_with("worker.rs")
+            {
+                allowed.push("features");
+            }
+            assert_allowed_external_crate_modules_in_file(&path, &allowed);
         }
     }
 

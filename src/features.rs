@@ -31,6 +31,15 @@ impl LangFeatures {
         self.enabled.remove(name);
     }
 
+    /// Enable every feature enabled in `other`.
+    pub fn extend(&mut self, other: &Self) {
+        self.enabled.extend(other.enabled.iter().cloned());
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.enabled.iter().map(String::as_str)
+    }
+
     /// Apply the payload of a `// LANGUAGE:` directive / `-XXLanguage:` flag: whitespace- or
     /// comma-separated `+Feature` / `-Feature` tokens (`+` enables, `-` disables).
     pub fn apply_directive(&mut self, payload: &str) {
@@ -45,23 +54,28 @@ impl LangFeatures {
 
     /// Collect every `// LANGUAGE:` directive in a source file. This is how the kotlinc test
     /// infrastructure (and thus our conformance harness) specifies the flags a test compiles under.
-    pub fn from_source(src: &str) -> Self {
-        let mut f = Self::default();
+    pub fn apply_source_directives(&mut self, src: &str) {
         for line in src.lines() {
             let l = line.trim_start();
             if let Some(rest) = l.strip_prefix("// LANGUAGE:") {
-                f.apply_directive(rest);
+                self.apply_directive(rest);
             }
             // `// ASSERTIONS_MODE: always-enable|always-disable` — kotlinc's `-Xassertions` mode for the
             // `assert(...)` intrinsic (modeled as pseudo-features so it flows like any other directive).
             if let Some(rest) = l.strip_prefix("// ASSERTIONS_MODE:") {
                 match rest.trim() {
-                    "always-enable" => f.enable("AssertionsAlwaysEnable"),
-                    "always-disable" => f.enable("AssertionsAlwaysDisable"),
+                    "always-enable" => self.enable("AssertionsAlwaysEnable"),
+                    "always-disable" => self.enable("AssertionsAlwaysDisable"),
                     _ => {}
                 }
             }
         }
+    }
+
+    /// Collect every `// LANGUAGE:` directive in a source file.
+    pub fn from_source(src: &str) -> Self {
+        let mut f = Self::default();
+        f.apply_source_directives(src);
         f
     }
 
@@ -75,8 +89,19 @@ impl LangFeatures {
         }
         if let Some(rest) = arg.strip_prefix("-Xname-based-destructuring") {
             // `-Xname-based-destructuring[=only-syntax|name-mismatch|complete|disable]`.
-            if rest != "=disable" {
-                self.enable("NameBasedDestructuring");
+            match rest {
+                "=disable" => {
+                    self.disable("NameBasedDestructuring");
+                    self.disable("EnableNameBasedDestructuringShortForm");
+                }
+                "=complete" => {
+                    self.enable("NameBasedDestructuring");
+                    self.enable("EnableNameBasedDestructuringShortForm");
+                }
+                _ => {
+                    self.enable("NameBasedDestructuring");
+                    self.disable("EnableNameBasedDestructuringShortForm");
+                }
             }
             return true;
         }
@@ -106,6 +131,17 @@ mod tests {
     }
 
     #[test]
+    fn source_directives_are_applied_over_project_features() {
+        let mut features = LangFeatures::new();
+        features.enable("ProjectFeature");
+        features.apply_source_directives(
+            "// LANGUAGE: -ProjectFeature +SourceFeature\nfun box() = \"OK\"\n",
+        );
+        assert!(!features.has("ProjectFeature"));
+        assert!(features.has("SourceFeature"));
+    }
+
+    #[test]
     fn cli_xxlanguage_and_alias() {
         let mut f = LangFeatures::new();
         assert!(f.apply_cli_arg("-XXLanguage:+NameBasedDestructuring"));
@@ -113,6 +149,10 @@ mod tests {
         let mut g = LangFeatures::new();
         assert!(g.apply_cli_arg("-Xname-based-destructuring=complete"));
         assert!(g.has("NameBasedDestructuring"));
+        assert!(g.has("EnableNameBasedDestructuringShortForm"));
+        assert!(g.apply_cli_arg("-Xname-based-destructuring=disable"));
+        assert!(!g.has("NameBasedDestructuring"));
+        assert!(!g.has("EnableNameBasedDestructuringShortForm"));
         assert!(!g.apply_cli_arg("foo.kt"));
     }
 }

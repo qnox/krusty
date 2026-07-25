@@ -834,8 +834,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   drop-in honors kotlinc's feature toggles: `krusty::features::LangFeatures` holds the enabled
   `LanguageFeature` names, sourced from `-XXLanguage:+Foo`/`-Xname-based-destructuring` CLI flags and (in
   the test harness/gate/survey) from `// LANGUAGE:` directives. Default = no experimental features, so
-  default-flags behavior matches kotlinc. First gated feature, `NameBasedDestructuring`: `for ([a, b] in
-  e)` and `val/var [a, b] = e` are accepted ONLY when enabled, parsing identically to the `(a, b)` forms
+  default-flags behavior matches kotlinc. LSP project sync also reads recognized task-level Gradle
+  arguments, unions module feature sets for project-wide analysis, applies explicit server flags in
+  order, and applies source directives last in the compiler worker. First gated feature,
+  `NameBasedDestructuring`: `for ([a, b] in e)` and `val/var [a, b] = e` are accepted ONLY when
+  enabled, parsing identically to the `(a, b)` forms
   — both desugar to positional `component1()/component2()` calls, byte-identical to kotlinc (verified vs
   `-Xname-based-destructuring=complete`). Without the flag, `[a, b]` is rejected (kotlinc errors that the
   feature is experimental). A `var` destructured component captured and written by a closure is boxed

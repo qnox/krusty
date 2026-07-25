@@ -64,7 +64,8 @@ struct WorkerHost {
 }
 
 impl WorkerHost {
-    fn new(worker: AnalysisWorker, options: LspOptions) -> Self {
+    fn new(mut worker: AnalysisWorker, options: LspOptions) -> Self {
+        worker.set_language_features(options.language_features());
         Self {
             worker,
             options,
@@ -89,6 +90,8 @@ impl WorkerHost {
             RefreshOutcome::Unchanged => ProjectFeedback::default(),
             RefreshOutcome::Updated => {
                 let (classpath, jdk_home) = Self::launch_from(sync, &self.options, &self.runner);
+                let mut language_features = sync.project_language_features();
+                self.options.apply_language_features(&mut language_features);
                 let logs = Self::describe_model(
                     sync.kind(),
                     sync.model().map_or(0, |model| model.modules.len()),
@@ -109,6 +112,7 @@ impl WorkerHost {
                         logs,
                     };
                 }
+                self.worker.set_language_features(language_features);
                 ProjectFeedback {
                     reanalyze: true,
                     message: self.jdk_warning(jdk_home.is_some()),

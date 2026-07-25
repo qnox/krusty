@@ -11,6 +11,7 @@ mod source_scan;
 
 use krusty::ast::{File, FunBody, PropDecl};
 use krusty::diag::{DiagSink, Diagnostic};
+use krusty::features::LangFeatures;
 use krusty::frontend;
 use krusty::libraries::SemanticPlatform;
 use krusty::types::Ty;
@@ -92,13 +93,21 @@ pub fn analyze_source_set(
     sources: &[&str],
     platform: Box<dyn SemanticPlatform>,
 ) -> SourceSetAnalysis {
+    analyze_source_set_with_features(sources, platform, &LangFeatures::new())
+}
+
+pub fn analyze_source_set_with_features(
+    sources: &[&str],
+    platform: Box<dyn SemanticPlatform>,
+    project_features: &LangFeatures,
+) -> SourceSetAnalysis {
     let mut diags = DiagSink::new();
     let mut files = Vec::with_capacity(sources.len());
     for (index, source) in sources.iter().enumerate() {
         diags.set_file(index as u32);
-        files.push(frontend::parse_source_with_detected_features(
-            source, &mut diags,
-        ));
+        let mut features = project_features.clone();
+        features.apply_source_directives(source);
+        files.push(frontend::parse_source(source, &features, &mut diags));
     }
 
     let parse_errors: Vec<_> = (0..sources.len())
