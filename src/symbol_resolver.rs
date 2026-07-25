@@ -332,6 +332,7 @@ fn arg_fits_source(
     arg: &Ty,
 ) -> bool {
     arg_fits_platform(lib, param, arg)
+        || platform_arg_assignable(lib, param, arg)
         || crate::assignable::is_assignable(
             &crate::assignable::TyCtx::new(),
             &SourceOracle(src),
@@ -420,6 +421,62 @@ fn unique_most_specific<T>(
     CandidateSelection::Selected(applicable.swap_remove(selected).1)
 }
 
+fn fixed_parameter_shape(
+    params: &[Ty],
+    args: &[Ty],
+    fits: impl Fn(usize, &Ty, &Ty) -> bool,
+) -> Option<Vec<Ty>> {
+    (params.len() == args.len()
+        && params
+            .iter()
+            .zip(args)
+            .enumerate()
+            .all(|(i, (param, arg))| fits(i, param, arg)))
+    .then(|| params.to_vec())
+}
+
+fn omitted_parameter_shape(
+    params: &[Ty],
+    args: &[Ty],
+    fits: impl Fn(usize, &Ty, &Ty) -> bool,
+) -> Option<Vec<Ty>> {
+    (params.len() > args.len()
+        && params[..args.len()]
+            .iter()
+            .zip(args)
+            .enumerate()
+            .all(|(i, (param, arg))| fits(i, param, arg)))
+    .then(|| params.to_vec())
+}
+
+fn vararg_parameter_shape(
+    params: &[Ty],
+    args: &[Ty],
+    fits: impl Fn(usize, &Ty, &Ty) -> bool,
+) -> Option<Vec<Ty>> {
+    let (last, fixed) = params.split_last()?;
+    let element = last.array_elem()?;
+    if args.len() == params.len() && args.last() == Some(last) {
+        return None;
+    }
+    if args.len() < fixed.len()
+        || !fixed
+            .iter()
+            .zip(args)
+            .enumerate()
+            .all(|(i, (param, arg))| fits(i, param, arg))
+        || !args[fixed.len()..]
+            .iter()
+            .enumerate()
+            .all(|(i, arg)| fits(fixed.len() + i, &element, arg))
+    {
+        return None;
+    }
+    let mut expanded = fixed.to_vec();
+    expanded.resize(args.len(), element);
+    Some(expanded)
+}
+
 fn integer_literal_call_applies(
     params: &[Ty],
     args: &[Ty],
@@ -462,11 +519,11 @@ fn parameter_at_least_as_specific(
 }
 
 fn integer_literal_overload<T>(
-    lib: &dyn SemanticPlatform,
     candidates: impl Iterator<Item = (Vec<Ty>, T)>,
     args: &[Ty],
     integer_literals: &[bool],
     mut fits: impl FnMut(usize, &Ty, &Ty) -> bool,
+    at_least_as_specific: impl Fn(usize, Ty, Ty) -> bool,
 ) -> CandidateSelection<T> {
     if !integer_literals.iter().any(|literal| *literal) {
         return CandidateSelection::None;
@@ -491,14 +548,7 @@ fn integer_literal_overload<T>(
     if !has_adaptation {
         return CandidateSelection::None;
     }
-    unique_most_specific(applicable, |position, left, right| {
-        parameter_at_least_as_specific(
-            lib,
-            left,
-            right,
-            integer_literals.get(position).copied().unwrap_or(false),
-        )
-    })
+    unique_most_specific(applicable, at_least_as_specific)
 }
 
 fn best_companion_overload<'a>(
@@ -519,11 +569,18 @@ fn best_companion_overload<'a>(
         return Some(exact);
     }
     match integer_literal_overload(
-        lib,
         named.clone().map(|member| (member.params.clone(), member)),
         args,
         integer_literals,
         |_, param, arg| fits(param, arg),
+        |position, left, right| {
+            parameter_at_least_as_specific(
+                lib,
+                left,
+                right,
+                integer_literals.get(position).copied().unwrap_or(false),
+            ) || resolution_subtype(lib, src, left, right)
+        },
     ) {
         CandidateSelection::Selected(member) => return Some(member),
         CandidateSelection::Ambiguous => return None,
@@ -531,13 +588,8 @@ fn best_companion_overload<'a>(
     }
     match unique_most_specific(
         named.clone().filter_map(|member| {
-            (member.params.len() == args.len()
-                && member
-                    .params
-                    .iter()
-                    .zip(args)
-                    .all(|(param, arg)| fits(param, arg)))
-            .then_some((member.params.clone(), member))
+            fixed_parameter_shape(&member.params, args, |_, param, arg| fits(param, arg))
+                .map(|shape| (shape, member))
         }),
         |_, left, right| resolution_subtype(lib, src, left, right),
     ) {
@@ -547,13 +599,10 @@ fn best_companion_overload<'a>(
     }
     match unique_most_specific(
         named.clone().filter_map(|member| {
-            (member.params.len() > args.len()
-                && member.params[..args.len()]
-                    .iter()
-                    .zip(args)
-                    .enumerate()
-                    .all(|(i, (param, arg))| fits(param, arg) || adapts(param, arg, i)))
-            .then_some((member.params.clone(), member))
+            omitted_parameter_shape(&member.params, args, |i, param, arg| {
+                fits(param, arg) || adapts(param, arg, i)
+            })
+            .map(|shape| (shape, member))
         }),
         |_, left, right| resolution_subtype(lib, src, left, right),
     ) {
@@ -563,26 +612,10 @@ fn best_companion_overload<'a>(
     }
     match unique_most_specific(
         named.filter_map(|member| {
-            let (last, fixed) = member.params.split_last()?;
-            let element = last.array_elem()?;
-            if args.len() == member.params.len() && args.last() == Some(last) {
-                return None;
-            }
-            let applies = args.len() >= fixed.len()
-                && fixed
-                    .iter()
-                    .zip(args)
-                    .enumerate()
-                    .all(|(i, (param, arg))| fits(param, arg) || adapts(param, arg, i))
-                && args[fixed.len()..]
-                    .iter()
-                    .enumerate()
-                    .all(|(i, arg)| fits(&element, arg) || adapts(&element, arg, fixed.len() + i));
-            applies.then(|| {
-                let mut expanded = fixed.to_vec();
-                expanded.resize(args.len(), element);
-                (expanded, member)
+            vararg_parameter_shape(&member.params, args, |i, param, arg| {
+                fits(param, arg) || adapts(param, arg, i)
             })
+            .map(|shape| (shape, member))
         }),
         |_, left, right| resolution_subtype(lib, src, left, right),
     ) {
@@ -1157,54 +1190,60 @@ impl<'a> SymbolResolver<'a> {
             .filter(|o| o.public())
             .map(|o| (o, o.callable.params.clone(), o.callable.ret))
             .collect();
-        let fits = |p: &Ty, a: &Ty| arg_fits_platform(self.lib, p, a);
+        let fits = |p: &Ty, a: &Ty| self.arg_fits_or_subtype(p, a);
         let adapts = |p: &Ty, a: &Ty, i: usize| {
             integer_literal_adapts(*p, *a, integer_literals.get(i).copied().unwrap_or(false))
         };
 
-        let exact = parsed.iter().find(|(_, params, _)| params == args);
-        let pick = if exact.is_some() {
-            exact
+        let pick = if let Some(exact) = parsed.iter().find(|(_, params, _)| params == args) {
+            Some(exact)
         } else {
-            match integer_literal_overload(
-                self.lib,
+            let literal_pick = match integer_literal_overload(
                 parsed
                     .iter()
                     .map(|entry @ (_, params, _)| (params.clone(), entry)),
                 args,
                 integer_literals,
                 |_, param, arg| fits(param, arg),
+                |position, left, right| {
+                    parameter_at_least_as_specific(
+                        self.lib,
+                        left,
+                        right,
+                        integer_literals.get(position).copied().unwrap_or(false),
+                    ) || resolution_subtype(self.lib, &self.src, left, right)
+                },
             ) {
                 CandidateSelection::Selected(entry) => Some(entry),
                 CandidateSelection::Ambiguous => return None,
                 CandidateSelection::None => None,
+            };
+            match literal_pick {
+                Some(entry) => Some(entry),
+                None => match unique_most_specific(
+                    parsed.iter().filter_map(|entry @ (_, params, _)| {
+                        fixed_parameter_shape(params, args, |_, param, arg| fits(param, arg))
+                            .map(|shape| (shape, entry))
+                    }),
+                    |_, left, right| resolution_subtype(self.lib, &self.src, left, right),
+                ) {
+                    CandidateSelection::Selected(entry) => Some(entry),
+                    CandidateSelection::Ambiguous => return None,
+                    CandidateSelection::None => match unique_most_specific(
+                        parsed.iter().filter_map(|entry @ (_, params, _)| {
+                            vararg_parameter_shape(params, args, |i, param, arg| {
+                                fits(param, arg) || adapts(param, arg, i)
+                            })
+                            .map(|shape| (shape, entry))
+                        }),
+                        |_, left, right| resolution_subtype(self.lib, &self.src, left, right),
+                    ) {
+                        CandidateSelection::Selected(entry) => Some(entry),
+                        CandidateSelection::Ambiguous => return None,
+                        CandidateSelection::None => None,
+                    },
+                },
             }
-            .or_else(|| {
-                parsed.iter().find(|(_, params, _)| {
-                    params.len() == args.len() && params.iter().zip(args).all(|(p, a)| fits(p, a))
-                })
-            })
-            .or_else(|| {
-                parsed.iter().find(|(_, params, _)| {
-                    if params.is_empty() {
-                        return args.is_empty();
-                    }
-                    let fixed = params.len() - 1;
-                    let Some(elem) = params[fixed].array_elem() else {
-                        return false;
-                    };
-                    args.len() >= fixed
-                        && params[..fixed]
-                            .iter()
-                            .zip(args)
-                            .enumerate()
-                            .all(|(i, (p, a))| fits(p, a) || adapts(p, a, i))
-                        && args[fixed..]
-                            .iter()
-                            .enumerate()
-                            .all(|(i, a)| fits(&elem, a) || adapts(&elem, a, fixed + i))
-                })
-            })
         };
 
         if pick.is_none() {
@@ -2746,13 +2785,20 @@ fn best_by_args<'a>(
         return CandidateSelection::Selected(exact);
     }
     match integer_literal_overload(
-        lib,
         cands
             .iter()
             .map(|(candidate, params)| (params.clone(), *candidate)),
         args,
         integer_literals,
         |_, param, arg| fits(param, arg),
+        |position, left, right| {
+            parameter_at_least_as_specific(
+                lib,
+                left,
+                right,
+                integer_literals.get(position).copied().unwrap_or(false),
+            )
+        },
     ) {
         CandidateSelection::Selected(candidate) => {
             return CandidateSelection::Selected(candidate);
@@ -3065,7 +3111,6 @@ mod tests {
         let args = [Ty::Int, Ty::Int];
         let literals = [true, true];
         let selected = integer_literal_overload(
-            &source,
             [
                 (vec![Ty::Int, Ty::Long], "narrow"),
                 (vec![Ty::Long, Ty::Long], "wide"),
@@ -3074,11 +3119,18 @@ mod tests {
             &args,
             &literals,
             |_, param, arg| arg_fits(param, arg),
+            |position, left, right| {
+                parameter_at_least_as_specific(
+                    &source,
+                    left,
+                    right,
+                    literals.get(position).copied().unwrap_or(false),
+                )
+            },
         );
         assert!(matches!(selected, CandidateSelection::Selected("narrow")));
 
         let ambiguous = integer_literal_overload(
-            &source,
             [
                 (vec![Ty::Int, Ty::Long], "left"),
                 (vec![Ty::Long, Ty::Int], "right"),
@@ -3087,6 +3139,14 @@ mod tests {
             &args,
             &literals,
             |_, param, arg| arg_fits(param, arg),
+            |position, left, right| {
+                parameter_at_least_as_specific(
+                    &source,
+                    left,
+                    right,
+                    literals.get(position).copied().unwrap_or(false),
+                )
+            },
         );
         assert!(matches!(ambiguous, CandidateSelection::Ambiguous));
     }
@@ -3308,6 +3368,186 @@ mod tests {
             .expect("nullable callable should resolve");
         assert_eq!(call.ret, Ty::nullable(Ty::String));
         assert_eq!(call.physical_ret, Ty::String);
+    }
+
+    #[test]
+    fn top_level_callable_uses_source_subtypes_for_fixed_and_vararg_shapes() {
+        let broad = LibraryCallable::library(
+            "demo/FunctionsKt",
+            "accept",
+            vec![Ty::obj("demo/Base")],
+            Ty::Unit,
+            Ty::Unit,
+            "(Ldemo/Base;)V",
+        );
+        let specific = LibraryCallable::library(
+            "demo/FunctionsKt",
+            "accept",
+            vec![Ty::obj("demo/Mid")],
+            Ty::Unit,
+            Ty::Unit,
+            "(Ldemo/Mid;)V",
+        );
+        let source = FakeSource {
+            name: "accept",
+            receiver: None,
+            info: FunctionInfo::plain(FnKind::TopLevel, None, broad.clone()),
+        };
+        let scope = vec![type_name("")];
+        let resolver = SymbolResolver::new_scoped(&source, &scope);
+        let call = resolver
+            .pick_top_level(
+                "accept",
+                &FunctionSet {
+                    overloads: vec![
+                        FunctionInfo::plain(FnKind::TopLevel, None, broad),
+                        FunctionInfo::plain(FnKind::TopLevel, None, specific),
+                    ],
+                },
+                &[Ty::obj("demo/Leaf")],
+                &[],
+                &[],
+            )
+            .expect("source subtype should fit top-level parameter");
+        assert_eq!(call.params, vec![Ty::obj("demo/Mid")]);
+
+        let alias = |param, descriptor| {
+            FunctionInfo::plain(
+                FnKind::TopLevel,
+                None,
+                LibraryCallable::library(
+                    "demo/FunctionsKt",
+                    "accept",
+                    vec![param],
+                    Ty::Unit,
+                    Ty::Unit,
+                    descriptor,
+                ),
+            )
+        };
+        let call = resolver
+            .pick_top_level(
+                "accept",
+                &FunctionSet {
+                    overloads: vec![
+                        alias(Ty::obj("kotlin/Any"), "(Ljava/lang/Object;)V"),
+                        alias(Ty::String, "(Ljava/lang/String;)V"),
+                    ],
+                },
+                &[Ty::obj("java/lang/String")],
+                &[],
+                &[],
+            )
+            .expect("platform aliases should remain applicable");
+        assert_eq!(call.params, vec![Ty::String]);
+
+        let vararg = |element, descriptor| {
+            FunctionInfo::plain(
+                FnKind::TopLevel,
+                None,
+                LibraryCallable::library(
+                    "demo/FunctionsKt",
+                    "accept",
+                    vec![Ty::array(element)],
+                    Ty::Unit,
+                    Ty::Unit,
+                    descriptor,
+                ),
+            )
+        };
+        let call = resolver
+            .pick_top_level(
+                "accept",
+                &FunctionSet {
+                    overloads: vec![
+                        vararg(Ty::obj("demo/Base"), "([Ldemo/Base;)V"),
+                        vararg(Ty::obj("demo/Mid"), "([Ldemo/Mid;)V"),
+                    ],
+                },
+                &[Ty::obj("demo/Leaf"), Ty::obj("demo/Leaf")],
+                &[],
+                &[],
+            )
+            .expect("source subtypes should fit top-level varargs");
+        assert_eq!(call.params, vec![Ty::array(Ty::obj("demo/Mid"))]);
+
+        let literal = |second, descriptor| {
+            FunctionInfo::plain(
+                FnKind::TopLevel,
+                None,
+                LibraryCallable::library(
+                    "demo/FunctionsKt",
+                    "accept",
+                    vec![Ty::Long, second],
+                    Ty::Unit,
+                    Ty::Unit,
+                    descriptor,
+                ),
+            )
+        };
+        let call = resolver
+            .pick_top_level(
+                "accept",
+                &FunctionSet {
+                    overloads: vec![
+                        literal(Ty::obj("demo/Base"), "(JLdemo/Base;)V"),
+                        literal(Ty::obj("demo/Mid"), "(JLdemo/Mid;)V"),
+                    ],
+                },
+                &[Ty::Int, Ty::obj("demo/Leaf")],
+                &[true, false],
+                &[],
+            )
+            .expect("integer adaptation should retain source-type specificity");
+        assert_eq!(call.params, vec![Ty::Long, Ty::obj("demo/Mid")]);
+    }
+
+    #[test]
+    fn ambiguous_source_subtype_overloads_do_not_fall_back_to_vararg() {
+        let info = |params, descriptor| {
+            FunctionInfo::plain(
+                FnKind::TopLevel,
+                None,
+                LibraryCallable::library(
+                    "demo/FunctionsKt",
+                    "accept",
+                    params,
+                    Ty::Unit,
+                    Ty::Unit,
+                    descriptor,
+                ),
+            )
+        };
+        let source = FakeSource {
+            name: "accept",
+            receiver: None,
+            info: top_level_nullable_string_info(),
+        };
+        let scope = vec![type_name("")];
+        let resolver = SymbolResolver::new_scoped(&source, &scope);
+        let selected = resolver.pick_top_level(
+            "accept",
+            &FunctionSet {
+                overloads: vec![
+                    info(
+                        vec![Ty::obj("demo/Mid"), Ty::obj("demo/Base")],
+                        "(Ldemo/Mid;Ldemo/Base;)V",
+                    ),
+                    info(
+                        vec![Ty::obj("demo/Base"), Ty::obj("demo/Mid")],
+                        "(Ldemo/Base;Ldemo/Mid;)V",
+                    ),
+                    info(
+                        vec![Ty::array(Ty::obj("kotlin/Any"))],
+                        "([Ljava/lang/Object;)V",
+                    ),
+                ],
+            },
+            &[Ty::obj("demo/Leaf"), Ty::obj("demo/Leaf")],
+            &[],
+            &[],
+        );
+        assert!(selected.is_none());
     }
 
     #[test]
