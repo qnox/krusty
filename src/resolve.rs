@@ -658,6 +658,10 @@ impl ClassNames {
             .copied()
             .or_else(|| self.base.get(k).copied())
     }
+    pub fn get_class(&self, k: &str) -> Option<TypeName> {
+        self.get(k)
+            .filter(|internal| !internal.starts_with("__ty/"))
+    }
     pub fn contains_key(&self, k: &str) -> bool {
         self.user.contains_key(k) || self.base.contains_key(k)
     }
@@ -5195,11 +5199,13 @@ pub enum ResolvedCall {
     /// A same-module member operator selected by the checker for a source expression. Lowering links
     /// this exact owner/signature to the current file's IR method id; it must not re-select by name.
     ModuleMember {
+        receiver: Ty,
         owner: TypeName,
         name: String,
         params: Vec<Ty>,
         ret: Ty,
         interface: bool,
+        vararg: bool,
     },
     /// A same-module extension operator selected by the checker for a source expression.
     ModuleExtension {
@@ -5651,6 +5657,8 @@ pub enum ExprLowering {
     /// A `this@Outer` denoting the IMMEDIATE enclosing class of an `inner class` — one class level up —
     /// so it lowers as the inner class's captured outer instance (`this.this$0`).
     LabeledThisOuter,
+    /// A platform property implemented by an intrinsic getter.
+    IntrinsicProperty(Box<crate::libraries::LibraryMember>),
     /// A property-read `recv.name` resolved to a classpath extension property getter.
     ExtensionPropertyGet {
         getter: Box<crate::libraries::LibraryCallable>,
@@ -7508,6 +7516,19 @@ impl<'a> Checker<'a> {
     fn module_declares(&self, name: &str) -> bool {
         crate::module_symbols::ModuleSymbols::new(self.syms).declares_top_level(name)
     }
+
+    fn implicit_receiver_types(&self) -> Vec<Ty> {
+        let mut receivers = Vec::new();
+        if let Some(receiver) = self.this_ty {
+            receivers.push(receiver);
+        }
+        for (_, receiver, _) in self.this_labels.iter().rev() {
+            if !receivers.contains(receiver) {
+                receivers.push(*receiver);
+            }
+        }
+        receivers
+    }
     /// True when `e` is a call to the `kotlin.contracts.contract { … }` intrinsic — the erased
     /// contract-declaration block. The callee name `contract` is confirmed to resolve to a
     /// top-level function in `kotlin/contracts` through the symbol resolver, so a user function that
@@ -7575,11 +7596,13 @@ impl<'a> Checker<'a> {
                     return Some((
                         sig.ret,
                         ResolvedCall::ModuleMember {
+                            receiver,
                             owner,
                             name: name.to_string(),
                             params: sig.params.clone(),
                             ret: sig.ret,
                             interface,
+                            vararg: sig.vararg,
                         },
                     ));
                 }
@@ -10177,11 +10200,13 @@ impl<'a> Checker<'a> {
                             self.resolved_calls.insert(
                                 e,
                                 ResolvedCall::ModuleMember {
+                                    receiver: at,
                                     owner,
                                     name: "get".to_string(),
                                     params: sig.params.clone(),
                                     ret: sig.ret,
                                     interface,
+                                    vararg: sig.vararg,
                                 },
                             );
                             return self.set(e, sig.ret);
@@ -11005,6 +11030,14 @@ impl<'a> Checker<'a> {
                         self.expr_lowers
                             .insert(e, ExprLowering::ObjectValue { internal });
                         Ty::obj_name(internal)
+                    } else if let Some(member) = self
+                        .this_ty
+                        .and_then(|receiver| self.syms.libraries.intrinsic_property(receiver, &n))
+                    {
+                        let ret = member.ret;
+                        self.expr_lowers
+                            .insert(e, ExprLowering::IntrinsicProperty(Box::new(member)));
+                        ret
                     } else {
                         self.diags
                             .error(self.span(e), format!("unresolved reference '{n}'."));
@@ -13649,6 +13682,14 @@ impl<'a> Checker<'a> {
                 return ty;
             }
         }
+        if let Some(member) = self.syms.libraries.intrinsic_property(rt, name) {
+            let ret = member.ret;
+            if let Some(me) = mexpr {
+                self.expr_lowers
+                    .insert(me, ExprLowering::IntrinsicProperty(Box::new(member)));
+            }
+            return ret;
+        }
         let diagnostic_span = mexpr.map_or(span, |member| self.member_name_span(member, name));
         self.diags
             .error(diagnostic_span, format!("unresolved reference '{name}'."));
@@ -13741,11 +13782,13 @@ impl<'a> Checker<'a> {
             self.resolved_calls.insert(
                 call,
                 ResolvedCall::ModuleMember {
+                    receiver: rt,
                     owner: fi.callable.owner,
                     name: fi.callable.name.clone(),
                     params: params.clone(),
                     ret,
                     interface,
+                    vararg: fi.call_sig.vararg,
                 },
             );
         } else {
@@ -13959,7 +14002,7 @@ impl<'a> Checker<'a> {
         // parameter. Fires for any named call, and for an omitted-argument call to a method with defaults.
         } else if cs.has_param_names()
             && (arg_names.is_some()
-                || (arg_tys.len() != params.len() && cs.required < params.len()))
+                || (!cs.vararg && arg_tys.len() != params.len() && cs.required < params.len()))
         {
             match map_call_sig_args(args, arg_names, cs) {
                 Ok(slots) => {
@@ -13981,7 +14024,7 @@ impl<'a> Checker<'a> {
             }
             // Fall through to the shared return-type logic below (generic `<R>` inference /
             // `inferred_member_ret`) rather than returning the erased `fi.callable.ret`.
-        } else if params.len() != arg_tys.len() {
+        } else if !cs.vararg && params.len() != arg_tys.len() {
             self.report_function_arity(
                 call,
                 DiagnosticFunction {
@@ -14017,11 +14060,13 @@ impl<'a> Checker<'a> {
         self.resolved_calls.insert(
             call,
             ResolvedCall::ModuleMember {
+                receiver: rt,
                 owner: fi.owner.unwrap_or(internal_name),
                 name: name.to_string(),
                 params: params.clone(),
                 ret,
                 interface: fi.is_interface,
+                vararg: cs.vararg,
             },
         );
         if let Some(slots) = mapped_slots {
@@ -14062,7 +14107,7 @@ impl<'a> Checker<'a> {
                             .resolver().resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, n, &[], &[]).map(crate::symbol_resolver::Symbol::overloads).unwrap_or_default() }
                             .top_level()
                             .any(|o| o.call_sig.has_param_names())
-                        || self.this_ty.is_some_and(|rt| {
+                        || self.implicit_receiver_types().into_iter().any(|rt| {
                             self.resolver()
                                 .resolve_symbol(
                                     crate::symbol_resolver::SymRecv::Value(rt),
@@ -14078,8 +14123,7 @@ impl<'a> Checker<'a> {
                                         o.kind,
                                         crate::libraries::FnKind::Member
                                             | crate::libraries::FnKind::Extension
-                                    )
-                                        && o.call_sig.has_param_names()
+                                    ) && o.call_sig.has_param_names()
                                 })
                         })
                         // A CLASSPATH CONSTRUCTOR whose `@Metadata` records parameter names
@@ -16676,6 +16720,13 @@ impl<'a> Checker<'a> {
                             self.this_ty,
                             self.module_declares(&fname)
                         );
+                    }
+                    for recv in self.implicit_receiver_types().into_iter().skip(1) {
+                        if let Some(ret) =
+                            self.check_module_member_call(call, recv, &fname, args, &arg_tys)
+                        {
+                            return ret;
+                        }
                     }
                     // The declared receiver has no such member — try the flow-narrowed receiver from an
                     // enclosing `if (this is B)` (`fun A.test() = if (this is B) foo()`, where `foo` is a
@@ -19393,7 +19444,14 @@ fun box(): String {
         assert!(
             matches!(
                 info.resolved_calls.get(&call),
-                Some(ResolvedCall::ModuleMember { owner, name, params, ret, interface })
+                Some(ResolvedCall::ModuleMember {
+                    owner,
+                    name,
+                    params,
+                    ret,
+                    interface,
+                    ..
+                })
                     if owner.matches("Base")
                         && name == "ok"
                         && params.is_empty()

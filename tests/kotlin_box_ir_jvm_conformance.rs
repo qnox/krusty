@@ -265,6 +265,9 @@ fn compile_source(
     let opts = ir_emit::EmitOptions {
         emit_class_metadata: true,
         source_file: Some(format!("{stem}.kt")),
+        inner_class_resolver: Some(krusty::jvm::backend::classpath_inner_class_resolver(
+            cp.clone(),
+        )),
         ..Default::default()
     };
     let run = ir_emit::EmitRun::default();
@@ -587,6 +590,9 @@ fn compile_blocks(
             source_file: Some(format!(
                 "{}.kt",
                 blocks[i].0.rsplit('/').next().unwrap_or(&blocks[i].0)
+            )),
+            inner_class_resolver: Some(krusty::jvm::backend::classpath_inner_class_resolver(
+                cp.clone(),
             )),
             ..Default::default()
         };

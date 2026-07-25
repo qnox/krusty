@@ -108,6 +108,23 @@ impl JvmBackend {
     }
 }
 
+pub fn classpath_inner_class_resolver(
+    cp: std::rc::Rc<crate::jvm::classpath::Classpath>,
+) -> crate::jvm::classfile::InnerClassResolver {
+    std::rc::Rc::new(move |internal: &str| {
+        let class = cp.find(internal)?;
+        let entry = class
+            .inner_classes
+            .iter()
+            .find(|entry| entry.inner == internal)?;
+        Some(crate::jvm::classfile::InnerClassDetails {
+            outer: entry.outer.clone(),
+            name: entry.name.clone(),
+            access: entry.access,
+        })
+    })
+}
+
 pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut FrontendSymbols) {
     if files.len() <= 1 {
         return;
@@ -176,6 +193,7 @@ impl Backend for JvmBackend {
             // Opt-in (WIP): compute + emit `@Metadata` for supported shapes. Off unless requested, so
             // the default emit is unchanged (an unverified payload breaks kotlin-reflect).
             emit_class_metadata: std::env::var_os("KRUSTY_EMIT_CLASS_METADATA").is_some(),
+            inner_class_resolver: Some(classpath_inner_class_resolver(self.cp.clone())),
         };
 
         // Lower the checked file to the backend-agnostic IR, then emit JVM bytecode from it.

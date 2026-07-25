@@ -1344,8 +1344,11 @@ impl IrPlugin for SerializationPlugin {
             // <init> to fields `1..=N`; field 0 is the descriptor, built in <init>.
             ser.ctor_args = vec![
                 IrCtorArg {
+                    name: None,
                     ty: kserializer_of(class_ty("kotlin/Any")),
                     is_field: false,
+                    has_default: false,
+                    type_param: None,
                     check: None,
                 };
                 n_tp

@@ -798,7 +798,11 @@ pub fn lower_file_at_reporting(
                             let targs: Vec<Ty> =
                                 p.ty.targs
                                     .iter()
-                                    .map(|a| field_ty_with_args(file, a, &*syms.libraries))
+                                    .map(|a| {
+                                        field_ty_with_args(file, a, &*syms.libraries, &|n| {
+                                            syms.class_names.get_class(n)
+                                        })
+                                    })
                                     .collect();
                             let base = Ty::obj_args_name(fq_name, &targs);
                             if ir.is_nullable() {
@@ -853,8 +857,11 @@ pub fn lower_file_at_reporting(
                 ctor_args: inner_outer
                     .iter()
                     .map(|o| IrCtorArg {
+                        name: None,
                         ty: ty_to_ir(Ty::obj(o)),
                         is_field: true,
+                        has_default: false,
+                        type_param: None,
                         check: None,
                     })
                     .chain(c.props.iter().enumerate().map(|(i, p)| {
@@ -874,8 +881,15 @@ pub fn lower_file_at_reporting(
                             None
                         };
                         IrCtorArg {
+                            name: Some(p.name.clone()),
                             ty: t,
                             is_field: p.is_property,
+                            has_default: p.default.is_some(),
+                            type_param: c
+                                .type_params
+                                .iter()
+                                .position(|name| name == &p.ty.name)
+                                .map(|index| index as u32),
                             check,
                         }
                     }))
@@ -887,6 +901,7 @@ pub fn lower_file_at_reporting(
                 is_annotation: c.is_annotation(),
                 annotation_impl_of: None,
                 is_sealed: c.is_sealed(),
+                sealed_subclasses: syms.subclass_names_of(type_name(&internal)).into(),
                 is_abstract: c.is_abstract(),
                 is_open: c.is_open(),
                 superclass,
@@ -1563,6 +1578,7 @@ pub fn lower_file_at_reporting(
                     annotation_impl_of: None,
 
                     is_sealed: false,
+                    sealed_subclasses: Default::default(),
                     is_abstract: false,
                     is_open: false,
                     superclass: type_name(&comp_super),
@@ -3821,6 +3837,7 @@ pub fn lower_file_at_reporting(
                             annotation_impl_of: None,
 
                             is_sealed: false,
+                            sealed_subclasses: Default::default(),
                             is_abstract: false,
                             is_open: false,
                             superclass: type_name(&internal),
@@ -7162,12 +7179,6 @@ impl<'a> Lower<'a> {
         } else {
             arity
         };
-        // A RECEIVER lambda inside a class method would need two `this`es — its own receiver AND the
-        // enclosing instance — which the single-`this`-slot closure shape can't carry. Bail (skip). A
-        // PLAIN lambda instead captures the enclosing `this` like any other free variable (added below).
-        if self.cur_class.is_some() && recv_ty.is_some() {
-            return None;
-        }
         // A `Nothing`-returning lambda whose body is an unconditional NON-LOCAL `return` (`f { return … }`)
         // is handled by the diverging path below: it only ever splices (the impl method is marked
         // inline-only and not emitted), so its `return` becomes the enclosing fn's return, and the splicer
@@ -7197,6 +7208,9 @@ impl<'a> Lower<'a> {
         let deep = true;
         let mut captures: Vec<(String, u32, Ty)> = Vec::new();
         for (name, v, ty) in self.scope.iter().rev() {
+            if recv_ty.is_some() && name == "this" {
+                continue;
+            }
             let used = if deep {
                 self.afile.expr_uses_name_deep(body, name)
             } else {
@@ -7234,6 +7248,23 @@ impl<'a> Lower<'a> {
         } else if captures_outer_this {
             let (v, tty) = self.lookup("this$0")?;
             captures.insert(0, ("this".to_string(), v, tty));
+        }
+        let recv_lambda_captures_outer = self.cur_class.is_some()
+            && recv_ty.is_some()
+            && self.lambda_uses_enclosing_this(body, &bind_names, deep);
+        if recv_lambda_captures_outer
+            && self.cur_class.is_some_and(|cc| {
+                self.ir
+                    .classes
+                    .iter()
+                    .any(|c| c.fq_name == cc && c.is_value)
+            })
+        {
+            return None;
+        }
+        if recv_lambda_captures_outer {
+            let tty = Ty::obj_name(self.cur_class.unwrap());
+            captures.push(("this".to_string(), 0, tty));
         }
         // The capture values are read in the *enclosing* scope before it's swapped out.
         let capture_vals: Vec<u32> = captures
@@ -7432,7 +7463,9 @@ impl<'a> Lower<'a> {
                 // implicit-`this` member access.
                 if !bound.contains(n)
                     && (lo.resolve_field_name(cur, n).is_some()
-                        || lo.resolve_method_name(cur, n).is_some())
+                        || !crate::module_symbols::ModuleSymbols::new(lo.syms)
+                            .instance_members(Ty::obj_name(cur), n)
+                            .is_empty())
                 {
                     return true;
                 }
@@ -7704,13 +7737,19 @@ impl<'a> Lower<'a> {
         let ctor_args: Vec<IrCtorArg> = captures
             .iter()
             .map(|(_, _, ty)| IrCtorArg {
+                name: None,
                 ty: ty_to_ir(*ty),
                 is_field: false,
+                has_default: false,
+                type_param: None,
                 check: None,
             })
             .chain(std::iter::once(IrCtorArg {
+                name: None,
                 ty: cont_ir.clone(),
                 is_field: false,
+                has_default: false,
+                type_param: None,
                 check: None,
             }))
             .collect();
@@ -7755,6 +7794,7 @@ impl<'a> Lower<'a> {
             annotation_impl_of: None,
 
             is_sealed: false,
+            sealed_subclasses: Default::default(),
             is_abstract: false,
             is_open: false,
             superclass: type_name("kotlin/coroutines/jvm/internal/SuspendLambda"),
@@ -9919,6 +9959,7 @@ impl<'a> Lower<'a> {
             annotation_impl_of: None,
 
             is_sealed: false,
+            sealed_subclasses: Default::default(),
             is_abstract: false,
             is_open: false,
             superclass: type_name(&superclass),
@@ -10006,6 +10047,7 @@ impl<'a> Lower<'a> {
             is_annotation: false,
             annotation_impl_of: None,
             is_sealed: false,
+            sealed_subclasses: Default::default(),
             is_abstract: false,
             is_open: false,
             superclass: type_name(&superclass),
@@ -10255,6 +10297,7 @@ impl<'a> Lower<'a> {
             is_annotation: false,
             annotation_impl_of: None,
             is_sealed: false,
+            sealed_subclasses: Default::default(),
             is_abstract: false,
             is_open: false,
             superclass: type_name(&superclass),
@@ -10852,6 +10895,7 @@ impl<'a> Lower<'a> {
             annotation_impl_of: None,
 
             is_sealed: false,
+            sealed_subclasses: Default::default(),
             is_abstract: false,
             is_open: false,
             superclass,
@@ -10979,6 +11023,7 @@ impl<'a> Lower<'a> {
                 params: selected_params,
                 ret: selected_ret,
                 interface,
+                ..
             } => {
                 if target != name || selected_params.len() != args.len() {
                     return None;
@@ -12193,6 +12238,51 @@ impl<'a> Lower<'a> {
         self.lower_member_read_on(this_v, Ty::obj_name(internal), name, e)
     }
 
+    fn implicit_receivers(&self) -> Vec<(u32, Ty)> {
+        self.scope
+            .iter()
+            .rev()
+            .filter(|(name, _, _)| name == "this")
+            .map(|(_, value, ty)| (*value, *ty))
+            .collect()
+    }
+
+    fn lower_implicit_receiver_call(
+        &mut self,
+        name: &str,
+        args: &[AstExprId],
+        call: AstExprId,
+    ) -> Option<u32> {
+        let receivers = self.implicit_receivers();
+        for (value, ty) in receivers {
+            if let Some(result) = self.lower_this_member_call(value, ty, name, args, call) {
+                return Some(result);
+            }
+        }
+        None
+    }
+
+    fn lower_outer_implicit_member_read(&mut self, name: &str, e: AstExprId) -> Option<u32> {
+        for (value, ty) in self.implicit_receivers().into_iter().skip(1) {
+            let recv = self.emit_get_value(value);
+            if let Some(internal) = ty.obj_internal() {
+                if let Some((class, index, field_ty)) = self.resolve_field_name(internal, name) {
+                    let read = self.emit_get_field(recv, class, index);
+                    return Some(self.coerce_generic_read(read, e, field_ty));
+                }
+                if let Some((class, index, _, _)) =
+                    self.resolve_method_name(internal, &property_getter_name(name))
+                {
+                    return Some(self.emit_method_call(class, index, recv, vec![]));
+                }
+            }
+            if let Some(read) = self.lower_member_read_on(recv, ty, name, e) {
+                return Some(read);
+            }
+        }
+        None
+    }
+
     fn lower_member_read_on(&mut self, recv: u32, rt: Ty, name: &str, e: AstExprId) -> Option<u32> {
         // Resolve against the NON-NULL type. A receiver whose static type keeps its `?` (a smart-cast /
         // `!!` value bound to a call-result local, whose narrowing krusty doesn't propagate to the read
@@ -12679,12 +12769,6 @@ impl<'a> Lower<'a> {
         Some(self.coerce_erased_call_result(e, call, &physical_ret, true))
     }
 
-    /// Lower an unqualified CALL `name(args)` against the implicit `this` receiver — the body of a
-    /// receiver lambda (`"ab".run { uppercase() }`) or an extension function (`fun String.f() =
-    /// uppercase()`), where `cur_class` is cleared and the `this` slot holds the external receiver. The
-    /// implicit receiver takes priority over a receiver-less top-level function (Kotlin scoping), so
-    /// this runs first. Tries, in order: a user instance method, a builtin/library member, then a stdlib
-    /// extension. `None` when none match (the call falls through to top-level resolution).
     /// Lower call arguments, packing a trailing `vararg` parameter (`fun f(vararg s: T)` called
     /// `f(a, b)`): the fixed args lower against their params, the remaining become the elements of a
     /// fresh array of the vararg param's type — unless a lone argument already OF that array type is
@@ -12716,6 +12800,25 @@ impl<'a> Lower<'a> {
             out.push(self.emit_vararg(array_param, elements));
         }
         Some(out)
+    }
+
+    fn lower_selected_module_member_args(
+        &mut self,
+        call: AstExprId,
+        args: &[AstExprId],
+        params: &[Ty],
+        vararg: bool,
+    ) -> Option<(Vec<Option<u32>>, Vec<u32>)> {
+        if let Some(slots) = self.info.resolved_call_arg_slots.get(&call).cloned() {
+            return self.lower_method_slot_args_source_order(args, &slots, params);
+        }
+        let fixed = vararg_arity(vararg, params.len(), args.len())?;
+        let provided = self
+            .lower_call_args_vararg(args, params, vararg, fixed)?
+            .into_iter()
+            .map(Some)
+            .collect();
+        Some((provided, Vec::new()))
     }
 
     /// Lower an implicit-receiver user instance-method call that OMITS one or more CONSTANT-default
@@ -12815,27 +12918,28 @@ impl<'a> Lower<'a> {
         // the whole file. An omitted slot stays `None` and the backend emits `<name>$default(…, mask,
         // marker)`, exactly as it does for the qualified call.
         if let Some(ResolvedCall::ModuleMember {
+            receiver,
             owner,
             name: target,
             params,
+            vararg,
             ..
         }) = self.info.resolved_calls.get(&e).cloned()
         {
+            if receiver != this_ty {
+                return None;
+            }
             if target == name {
-                if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
-                    let owner = owner.render();
-                    if let Some((class, index, _fid, mret)) =
-                        self.link_local_method(&owner, &target, &params)
-                    {
-                        let (provided, prelude) =
-                            self.lower_method_slot_args_source_order(args, &slots, &params)?;
-                        let recv = self.emit_get_value(this_v);
-                        let call = self.emit_method_call(class, index, recv, provided);
-                        // A generic higher-order member erases its `<R>` return to `Object`; the checker
-                        // records the concrete result, so insert the `checkcast`/unbox kotlinc emits.
-                        let call = self.coerce_generic_read(call, e, mret);
-                        return Some(self.wrap_arg_prelude(call, prelude));
-                    }
+                let owner = owner.render();
+                if let Some((class, index, _fid, mret)) =
+                    self.link_local_method(&owner, &target, &params)
+                {
+                    let (provided, prelude) =
+                        self.lower_selected_module_member_args(e, args, &params, vararg)?;
+                    let recv = self.emit_get_value(this_v);
+                    let call = self.emit_method_call(class, index, recv, provided);
+                    let call = self.coerce_generic_read(call, e, mret);
+                    return Some(self.wrap_arg_prelude(call, prelude));
                 }
             }
         }
@@ -17069,6 +17173,22 @@ impl<'a> Lower<'a> {
                 );
             }
             Expr::Name(n) => {
+                if let Some(ExprLowering::IntrinsicProperty(member)) =
+                    self.info.expr_lowers.get(&e).cloned()
+                {
+                    let (this_v, this_ty) = self.lookup("this")?;
+                    let recv = self.emit_get_value(this_v);
+                    let fallback = this_ty.obj_internal().unwrap_or_else(crate::types::wk::any);
+                    let ret = member.ret;
+                    return Some(self.emit_library_member_call(
+                        recv,
+                        fallback,
+                        *member,
+                        ret,
+                        false,
+                        vec![],
+                    ));
+                }
                 // `this@Label` the checker resolved: `LabeledThisInner` (the current receiver) reads as a
                 // bare `this`; `LabeledThisOuter` (the immediate enclosing class of an `inner class`) reads
                 // the captured outer instance `this.this$0` (field index 0). Any other (unmarked) label
@@ -17304,6 +17424,8 @@ impl<'a> Lower<'a> {
                         })
                 } {
                     self.ir.external_static_instance(&owner, &cty, field)
+                } else if let Some(read) = self.lower_outer_implicit_member_read(&n, e) {
+                    read
                 } else {
                     // Unqualified member of the enclosing class: a backing field (`this.<field>`), or a
                     // computed property (`this.getX()`).
@@ -17451,6 +17573,26 @@ impl<'a> Lower<'a> {
                 return None;
             }
             Expr::Member { receiver, name } => {
+                if let Some(ExprLowering::IntrinsicProperty(member)) =
+                    self.info.expr_lowers.get(&e).cloned()
+                {
+                    let recv = self.expr(receiver)?;
+                    let fallback = self
+                        .info
+                        .ty(receiver)
+                        .non_null()
+                        .obj_internal()
+                        .unwrap_or_else(crate::types::wk::any);
+                    let ret = member.ret;
+                    return Some(self.emit_library_member_call(
+                        recv,
+                        fallback,
+                        *member,
+                        ret,
+                        false,
+                        vec![],
+                    ));
+                }
                 if let Some(ExprLowering::ExternalStaticFieldRead {
                     owner,
                     name,
@@ -19079,12 +19221,8 @@ impl<'a> Lower<'a> {
                     // not a local; `lower_this_member_call` returns `None` when no member matches, so a
                     // genuine top-level call still falls through to the module-function path below.
                     if self.cur_class.is_none() && self.lookup(&fname).is_none() {
-                        if let Some((this_v, this_ty)) = self.lookup("this") {
-                            if let Some(r) =
-                                self.lower_this_member_call(this_v, this_ty, &fname, &args, e)
-                            {
-                                return Some(r);
-                            }
+                        if let Some(r) = self.lower_implicit_receiver_call(&fname, &args, e) {
+                            return Some(r);
                         }
                     }
                     if let Some((target, fid)) = self
@@ -19241,9 +19379,7 @@ impl<'a> Lower<'a> {
                             && self.lookup(&fname).is_none()
                             && !self.module_declares(&fname)
                         {
-                            self.lookup("this").and_then(|(this_v, this_ty)| {
-                                self.lower_this_member_call(this_v, this_ty, &fname, &args, e)
-                            })
+                            self.lower_implicit_receiver_call(&fname, &args, e)
                         } else {
                             None
                         }
@@ -20587,6 +20723,8 @@ impl<'a> Lower<'a> {
                         params,
                         ret,
                         interface,
+                        vararg,
+                        ..
                     }) = self.info.resolved_calls.get(&e).cloned()
                     {
                         if target != name {
@@ -20597,22 +20735,8 @@ impl<'a> Lower<'a> {
                         if let Some((class, index, _fid, mret)) =
                             self.link_local_method(&owner, &target, &params)
                         {
-                            let (provided, prelude) = if let Some(slots) =
-                                self.info.resolved_call_arg_slots.get(&e).cloned()
-                            {
-                                self.lower_method_slot_args_source_order(&args, &slots, &params)?
-                            } else {
-                                if args.len() != params.len() {
-                                    return None;
-                                }
-                                (
-                                    self.lower_args(&args, &params)?
-                                        .into_iter()
-                                        .map(Some)
-                                        .collect(),
-                                    Vec::new(),
-                                )
-                            };
+                            let (provided, prelude) =
+                                self.lower_selected_module_member_args(e, &args, &params, vararg)?;
                             let call = self.emit_method_call(class, index, recv, provided);
                             // A generic higher-order member erases its `<R>` return to `Object`; the
                             // checker records the concrete result (`box.map { it.length }` → `Int`), so
@@ -20665,11 +20789,10 @@ impl<'a> Lower<'a> {
                                     }
                                 }
                             }
-                            if args.len() != params.len() {
-                                return None;
-                            }
-                            let a = self.lower_args(&args, &params)?;
-                            self.emit_call(
+                            let (provided, prelude) =
+                                self.lower_selected_module_member_args(e, &args, &params, vararg)?;
+                            let a: Vec<u32> = provided.into_iter().collect::<Option<_>>()?;
+                            let call = self.emit_call(
                                 Callee::Virtual {
                                     owner: type_name(&owner),
                                     name: target,
@@ -20679,7 +20802,8 @@ impl<'a> Lower<'a> {
                                 },
                                 Some(recv),
                                 a,
-                            )
+                            );
+                            self.wrap_arg_prelude(call, prelude)
                         }
                     } else if matches!(name.as_str(), "toString" | "hashCode") && args.is_empty() {
                         // `x.toString()`/`x.hashCode()` → the `kotlin/Any` virtual (dispatches to any
@@ -22345,7 +22469,12 @@ fn ref_uses_tparam(r: &ast::TypeRef, tps: &[String]) -> bool {
 /// the outer and inner element types). `ty_of`/`ty_to_ir` erase a general `Obj`'s args; this rebuilds them
 /// recursively from the source `TypeRef` so the serialization extension can derive a nested element
 /// serializer (`ListSerializer(ListSerializer(StringSerializer))`). Additive metadata on the type only.
-fn field_ty_with_args(file: &ast::File, tr: &ast::TypeRef, plat: &dyn SemanticPlatform) -> Ty {
+fn field_ty_with_args(
+    file: &ast::File,
+    tr: &ast::TypeRef,
+    plat: &dyn SemanticPlatform,
+    resolve_class: &dyn Fn(&str) -> Option<TypeName>,
+) -> Ty {
     let base = ty_to_ir(ty_of(file, tr, plat));
     // Rebuild the non-null type with recursively-preserved type arguments, then re-apply the source `?`
     // from the `TypeRef` (`ty_of` strips it from a reference type) — so a nullable element `String?` keeps
@@ -22355,11 +22484,24 @@ fn field_ty_with_args(file: &ast::File, tr: &ast::TypeRef, plat: &dyn SemanticPl
             let targs: Vec<Ty> = tr
                 .targs
                 .iter()
-                .map(|a| field_ty_with_args(file, a, plat))
+                .map(|a| field_ty_with_args(file, a, plat, resolve_class))
                 .collect();
             Ty::obj_args_name(fq, &targs)
         }
-        _ => base.non_null(),
+        _ => {
+            // Recover cross-file leaf types erased by the file-local `ty_of`.
+            let nn = base.non_null();
+            if nn.is_erased_top() && tr.targs.is_empty() && tr.arg.is_none() {
+                if let Some(internal) = resolve_class(&tr.name) {
+                    return if tr.nullable {
+                        Ty::nullable(Ty::obj_name(internal))
+                    } else {
+                        Ty::obj_name(internal)
+                    };
+                }
+            }
+            nn
+        }
     };
     if tr.nullable {
         Ty::nullable(resolved)
