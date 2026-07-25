@@ -199,6 +199,16 @@ impl LspProcess {
         id
     }
 
+    fn change_document(&mut self, uri: &str, version: i64, content_changes: Value) {
+        self.notify(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": uri, "version": version},
+                "contentChanges": content_changes
+            }),
+        );
+    }
+
     fn initialize(&mut self, root_uri: &str) -> SemanticLegend {
         let response = self.request(
             1,
@@ -233,6 +243,10 @@ impl LspProcess {
         assert!(
             response.get("result").is_some(),
             "initialize failed: {response}"
+        );
+        assert_eq!(
+            response["result"]["capabilities"]["textDocumentSync"], 2,
+            "LSP must advertise the official server's incremental synchronization mode"
         );
         self.notify("initialized", json!({}));
         SemanticLegend {
@@ -871,6 +885,10 @@ fn diagnostics_tokens_navigation_hovers_and_completions_match_official_kotlin_ls
              \u{20}\u{20}return krustyParity\n\
              }\n",
         ),
+        (
+            "IncrementalParity.kt",
+            "fun before(): Int = 1\nfun use(): Int = before()\n",
+        ),
     ];
     for (name, source) in diagnostic_cases
         .iter()
@@ -981,6 +999,10 @@ fn diagnostics_tokens_navigation_hovers_and_completions_match_official_kotlin_ls
     let completion_parity_uri = format!(
         "file://{}",
         source_root.join("CompletionParity.kt").display()
+    );
+    let incremental_parity_uri = format!(
+        "file://{}",
+        source_root.join("IncrementalParity.kt").display()
     );
     let definition_positions = [
         ("class reference", basic_tokens_uri.as_str(), 1, 17),
@@ -1606,6 +1628,32 @@ fn diagnostics_tokens_navigation_hovers_and_completions_match_official_kotlin_ls
             })
         })
         .collect::<Vec<_>>();
+    let incremental_changes = json!([
+        {
+            "range": {
+                "start": {"line": 0, "character": 4},
+                "end": {"line": 0, "character": 10}
+            },
+            "rangeLength": 6,
+            "text": "after"
+        },
+        {
+            "range": {
+                "start": {"line": 1, "character": 17},
+                "end": {"line": 1, "character": 23}
+            },
+            "rangeLength": 6,
+            "text": "after"
+        }
+    ]);
+    reference.change_document(&incremental_parity_uri, 2, incremental_changes.clone());
+    let expected_incremental_definition = reference.definition(&incremental_parity_uri, 1, 18);
+    assert!(
+        expected_incremental_definition
+            .as_array()
+            .is_some_and(|locations| !locations.is_empty()),
+        "official Kotlin LSP returned no definition after incremental edits"
+    );
     // The official server uses a multi-gigabyte IntelliJ process. Tear it down before starting
     // krusty so the opt-in differential does not retain both servers at peak memory.
     drop(reference);
@@ -1685,6 +1733,8 @@ fn diagnostics_tokens_navigation_hovers_and_completions_match_official_kotlin_ls
             })
         })
         .collect::<Vec<_>>();
+    krusty.change_document(&incremental_parity_uri, 2, incremental_changes);
+    let actual_incremental_definition = krusty.definition(&incremental_parity_uri, 1, 18);
 
     for ((name, _), (actual, expected)) in diagnostic_cases
         .iter()
@@ -1714,5 +1764,9 @@ fn diagnostics_tokens_navigation_hovers_and_completions_match_official_kotlin_ls
     assert_eq!(
         actual_completions, expected_completions,
         "completion mismatches"
+    );
+    assert_eq!(
+        actual_incremental_definition, expected_incremental_definition,
+        "incremental synchronization definition/range mismatch"
     );
 }

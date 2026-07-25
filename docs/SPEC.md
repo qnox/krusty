@@ -1636,6 +1636,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`references_match_exact_cross_file_ranges_and_declaration_filtering`,
   `definition_snapshot_reverse_query_reuses_the_same_compact_entries`.)
 
+- **Incremental document synchronization preserves compiler isolation and exact locations.** The
+  server advertises LSP incremental sync, applies every notification's UTF-16 ranged edits in order
+  to its single retained open-document `String`, and defers a burst to one compiler analysis.
+  Invalid multi-edit notifications roll back with request-local replaced fragments and do not advance
+  the document version; edit count, cumulative UTF-16 scanning, text mutation, and retained rollback
+  fragments are bounded per notification. A source-limit-blocked document rejects ranged edits until
+  a full replacement restores synchronization. No AST or compiler-front-end node retains LSP source
+  text. The official LSP differential applies the same edits to both servers and compares the
+  resulting definition URI and both UTF-16 range endpoints.
+
 - **Hover returns official Kotlin LSP signatures and locations.** The server returns fenced Kotlin
   markdown for source symbols and the exact UTF-16 identifier range, and returns `null` for literals
   where the official server does. Signatures include inferred and nullable types, receiver types,

@@ -109,7 +109,7 @@ krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath
 krusty -version | -help
 
 # LSP server over JSON-RPC on stdin/stdout
-# (full-document sync, diagnostics, completion + resolve, hover, go-to-definition, references,
+# (incremental UTF-16 sync, diagnostics, completion + resolve, hover, go-to-definition, references,
 #  semantic highlighting):
 cargo build -p krusty-lsp
 target/debug/krusty-lsp --stdio -cp deps.jar:classes/
