@@ -13569,7 +13569,7 @@ impl<'a> Lower<'a> {
                 then_branch,
                 else_branch: Some(eb),
             } => {
-                let c = self.expr(cond)?;
+                let c = self.lower_arg(cond, &ty_to_ir(Ty::Boolean))?;
                 let t = self.lower_tail_expr(then_branch, ret_ty)?;
                 let el = self.lower_tail_expr(eb, ret_ty)?;
                 Some(self.emit_when(vec![(Some(c), t), (None, el)]))
@@ -13690,7 +13690,7 @@ impl<'a> Lower<'a> {
                 then_branch,
                 else_branch,
             } => {
-                let c = self.expr(cond)?;
+                let c = self.lower_arg(cond, &ty_to_ir(Ty::Boolean))?;
                 let (t, td) = self.lower_tail_unit_expr(then_branch)?;
                 match else_branch {
                     Some(eb) => {
@@ -14535,7 +14535,7 @@ impl<'a> Lower<'a> {
                 }
             }
             Stmt::While { cond, body, label } => {
-                let c = self.expr(cond)?;
+                let c = self.lower_arg(cond, &ty_to_ir(Ty::Boolean))?;
                 let depth = self.scope.len();
                 let mut out = Vec::new();
                 self.append_body_stmts(body, &mut out)?;
@@ -14550,7 +14550,7 @@ impl<'a> Lower<'a> {
                 self.scope.truncate(depth);
                 // The condition is lowered after the body's scope is dropped — a `do…while` condition
                 // can't see body-local declarations (Kotlin scopes them to the body).
-                let c = self.expr(cond)?;
+                let c = self.lower_arg(cond, &ty_to_ir(Ty::Boolean))?;
                 let b = self.emit_block(out, None);
                 Some(self.emit_while(c, b, None, true, label))
             }
@@ -16814,7 +16814,10 @@ impl<'a> Lower<'a> {
                     // Unbox to the wrapper's OWN primitive (`Integer`→`Int`), then numeric-convert to the
                     // result if it differs (`Int? ?: 0.0` → unbox to `Int`, then `i2d` to `Double`) —
                     // unboxing `Integer` straight to `Double` would be an invalid checkcast.
-                    if let Some(lp) = lty.nullable_primitive() {
+                    if let Some(lp) = lty
+                        .nullable_primitive()
+                        .or_else(|| self.syms.libraries.boxed_primitive(lty))
+                    {
                         get2 = self.emit_type_op(IrTypeOp::ImplicitCoercion, get2, ty_to_ir(lp));
                         if lp != result_ty {
                             get2 = self.emit_type_op(
@@ -17515,7 +17518,7 @@ impl<'a> Lower<'a> {
                 if let [index] = indices.as_slice() {
                     if at.array_elem().is_some() {
                         let a = self.expr(array)?;
-                        let i = self.expr(*index)?;
+                        let i = self.lower_arg(*index, &ty_to_ir(Ty::Int))?;
                         return Some(self.emit_external_call("kotlin/Array.get", Some(a), vec![i]));
                     }
                 }
@@ -18144,7 +18147,7 @@ impl<'a> Lower<'a> {
                     }
                     _ => {}
                 }
-                let c = self.expr(cond)?;
+                let c = self.lower_arg(cond, &ty_to_ir(Ty::Boolean))?;
                 // When the `if`'s result type is a reference but a branch is a primitive (`if (c) true else
                 // null` → `Boolean?`), the primitive branch must be boxed at the merge so both branches
                 // agree on the (reference) stack type — `lower_arg` to the result type inserts the box.
@@ -18813,25 +18816,18 @@ impl<'a> Lower<'a> {
                     } else {
                         let mut cond: Option<u32> = None;
                         for &c in &arm.conditions {
-                            // An `is`/`!is` or `in`/`!in` condition is already a complete boolean test
-                            // involving the subject (the parser embeds it) — use it directly rather than
-                            // comparing the subject against it with `==`.
-                            let test = if is_when_test(self.afile, c) {
+                            let test = if subject.is_none() {
+                                self.lower_arg(c, &ty_to_ir(Ty::Boolean))?
+                            } else if is_when_test(self.afile, c) {
+                                // Subject tests already include their comparison.
                                 self.expr(c)?
                             } else {
-                                match (subj_tmp, subject) {
-                                    (Some((v, _)), _) => {
-                                        let s = self.emit_get_value(v);
-                                        let cv = self.expr(c)?;
-                                        self.emit_primitive_bin_op(IrBinOp::Eq, s, cv)
-                                    }
-                                    (None, Some(subj)) => {
-                                        let s = self.expr(subj)?;
-                                        let cv = self.expr(c)?;
-                                        self.emit_primitive_bin_op(IrBinOp::Eq, s, cv)
-                                    }
-                                    (None, None) => self.expr(c)?,
-                                }
+                                let s = match subj_tmp {
+                                    Some((v, _)) => self.emit_get_value(v),
+                                    None => self.expr(subject?)?,
+                                };
+                                let cv = self.expr(c)?;
+                                self.emit_primitive_bin_op(IrBinOp::Eq, s, cv)
                             };
                             cond = Some(match cond {
                                 Some(prev) => self.emit_primitive_bin_op(IrBinOp::Or, prev, test),
