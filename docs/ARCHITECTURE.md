@@ -56,8 +56,14 @@ boundary.
 - The LSP supervisor never runs the compiler in its own long-lived process. It sends source sets to
   a compiler worker that is restarted after 64 analyses. This bounds growth from the compiler's
   process-lifetime name/type interners while amortizing JVM classpath initialization across edits.
-- An open document retains its source text, diagnostics only long enough to publish them, a compact
-  hover index, completion catalog, definition index, and semantic-highlighting tokens. Each hover
+- An open document retains its source text, a bounded compact diagnostic cache for published and
+  pull diagnostics, and compact indexes for hover, completion, definitions, document symbols,
+  signature help, folding ranges, and semantic highlighting. The compiler's full diagnostic vector
+  is short-lived; only packed locations/severity and interned messages cross into session state.
+  Folding ranges are 28-byte packed records containing precomputed UTF-16 locations, kind/style
+  tags, and an optional summary byte span into the authoritative open document. Collapsed labels
+  are reconstructed only while encoding the bounded response; neither the snapshot nor an AST node
+  retains copied source text. Each hover
   entry is a 12-byte `(source lo, source hi, declaration-signature id)` record; official-format
   signature strings are deduplicated per document and bounded across the source set. No AST node or
   hover entry retains a source-text copy. A scoped completion
@@ -78,12 +84,18 @@ boundary.
   256K-entry budget bounds both construction and long-lived storage. Find-references deduplicates
   cursor targets into a request-local set, reverse-scans each bounded entry once, and allocates only
   the returned locations rather than retaining a duplicate reverse index.
+  A document-symbol entry is a 40-byte packed array containing an interned name id, precomputed
+  UTF-16 full/selection endpoints, kind/deprecation bits, and a parent index. The worker flattens
+  compiler declarations into this hierarchy, caps the source set at 32,768 entries and a conservative
+  8 MiB response estimate, then drops the AST and source-derived temporary spans. Requests rebuild
+  JSON from the packed hierarchy without retaining or recreating a second source string.
 - Open documents are analyzed as one source set, so one parse/signature pass resolves declarations
-  across open files and refreshes every open file's diagnostics, completion, hover, and highlighting
-  snapshots atomically. Temporary source-set catalogs carry completion declarations and source-only
-  highlighting flags such as `data`, `operator`, and `Deprecated` across files while the compact
-  snapshots are built. Navigation also consumes checker-selected source declaration ids for overloads
-  before reducing them to file/span pairs. AST, symbol-table, full type-analysis, and those catalogs
+  across open files and refreshes every open file's diagnostics, completion, hover, document symbols,
+  signature help, and highlighting snapshots atomically. Temporary source-set catalogs carry
+  completion declarations and source-only highlighting flags such as `data`, `operator`, and
+  `Deprecated` across files while the compact snapshots are built. Navigation also consumes
+  checker-selected source declaration ids for overloads before reducing them to file/span pairs. AST,
+  symbol-table, full type-analysis, and those catalogs
   are dropped after each analysis; closing a document removes its source and compact query indexes.
 - Input frames are capped at 16 MiB, headers at 8 KiB, and the reader-to-dispatch queue at four
   parsed messages. Open text is capped at 32 MiB across at most 256 documents; worker JSON encoding

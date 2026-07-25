@@ -1646,6 +1646,36 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   text. The official LSP differential applies the same edits to both servers and compares the
   resulting definition URI and both UTF-16 range endpoints.
 
+- **Document symbols match the official hierarchical Kotlin model and exact locations.** The server
+  advertises `documentSymbolProvider` and returns ordered nested declarations for top-level
+  functions/properties/classes/type aliases, primary and secondary constructors, constructor
+  properties, members, nested classes, enum entries, and companion objects. Official kinds include
+  `Struct` for data classes and `Object` for companions; deprecated declarations carry both the
+  legacy flag and `Deprecated` tag. Local declarations are omitted, matching the official server.
+  Every full and selection range is converted to UTF-16 once in the compiler worker. Long-lived state
+  is a bounded 40-byte packed record plus interned names—never an AST, source slice, or second source
+  string—and requests only encode that cached hierarchy. The opt-in official differential compares
+  the complete response, including hierarchy, kinds, tags, and every range endpoint.
+
+- **Signature help matches official source-call labels, overload selection, and parameter ranges.**
+  The server advertises the official trigger/retrigger characters and handles top-level overloads,
+  constructors, members, local functions, generic call-site substitutions, default and vararg
+  parameters, named-argument reordering, Unicode names, and nested calls. Each parameter label range
+  is an exact UTF-16 pair, including the official named-argument cursor behavior. Long-lived state is
+  bounded to 32-byte call records, 12-byte signature/parameter records, 8-byte argument records, and
+  interned strings; it retains neither compiler AST nodes nor another source string. Containment links
+  plus sorted argument endpoints make the cached-index lookup
+  `O(log calls + nesting depth + log arguments)` after the request position's linear UTF-16-to-byte
+  conversion, and requests never rerun compiler analysis. Named/generic overload customization is materialized for one
+  call at a time, charged to the source-set wire budget immediately, serialized, and dropped; the
+  bounded declaration catalog is never cloned across all call sites. Discovery sorts only bounded
+  12-byte `(ExprId, span)` call sites; argument shapes and names are then derived one call at a time,
+  with name bytes included in the same wire budget. Generic substitution recurses
+  through nullable and nested class arguments. The opt-in
+  differential compares the complete response for source declarations against Kotlin LSP 262.8190.0.
+  Classpath signature documentation remains dependent on a future source-attachment/KDoc metadata
+  provider; it is not fabricated from callable names.
+
 - **Hover returns official Kotlin LSP signatures and locations.** The server returns fenced Kotlin
   markdown for source symbols and the exact UTF-16 identifier range, and returns `null` for literals
   where the official server does. Signatures include inferred and nullable types, receiver types,

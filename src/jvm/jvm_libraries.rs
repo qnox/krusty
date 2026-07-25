@@ -2256,6 +2256,27 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         Some(Ty::obj(&format!("kotlin/jvm/functions/Function{arity}")))
     }
 
+    fn implicit_common_supertypes(&self, types: &[Ty]) -> Vec<crate::libraries::SemanticSupertype> {
+        let boxed_builtin = |ty: Ty| {
+            let ty = ty.non_null();
+            ty.jvm_boxed_ref().is_some() || ty == Ty::String
+        };
+        if types.len() > 1 && types.iter().copied().all(boxed_builtin) {
+            vec![
+                crate::libraries::SemanticSupertype {
+                    name: crate::types::type_name("kotlin/Comparable"),
+                    type_parameters: 1,
+                },
+                crate::libraries::SemanticSupertype {
+                    name: crate::types::type_name("java/io/Serializable"),
+                    type_parameters: 0,
+                },
+            ]
+        } else {
+            Vec::new()
+        }
+    }
+
     fn static_field(&self, internal: &str, name: &str) -> Option<crate::libraries::StaticFieldRef> {
         let internal = crate::types::existing_type_name(internal)?;
         self.static_field_name(internal, name)

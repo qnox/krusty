@@ -145,6 +145,11 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         None
     }
 
+    /// Platform constraints not represented in the ordinary semantic hierarchy.
+    fn implicit_common_supertypes(&self, _types: &[Ty]) -> Vec<SemanticSupertype> {
+        Vec::new()
+    }
+
     /// Additional default wildcard-import packages contributed by this platform, in dotted Kotlin
     /// package syntax. Common Kotlin defaults live in the resolver; this hook is only for documented
     /// target additions such as JVM's `java.lang` and `kotlin.jvm`.
@@ -199,6 +204,12 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     fn iterable_element_type_name(&self, _internal: TypeName) -> Option<Ty> {
         None
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SemanticSupertype {
+    pub name: TypeName,
+    pub type_parameters: usize,
 }
 
 impl LibraryMember {

@@ -3,12 +3,17 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::compiler_analysis::{
-    analyze_standalone_source_set, hover_wire_cost, CompletionDetails, CompletionKind,
-    CompletionSymbols, DefinitionOccurrence, DefinitionSymbols, DefinitionTarget, FileAnalysis,
-    FrontendSymbols, HighlightOccurrence, HighlightSymbols, HoverOccurrence, SemanticLimits,
+    analyze_standalone_source_set, document_symbol_occurrences, folding_range_occurrences,
+    hover_wire_cost, CompletionDetails, CompletionKind, CompletionSymbols, DefinitionOccurrence,
+    DefinitionSymbols, DefinitionTarget, DocumentSymbolOccurrence, FileAnalysis,
+    FoldingRangeOccurrence, FrontendSymbols, HighlightOccurrence, HighlightSymbols,
+    HoverOccurrence, SemanticLimits, SignatureCandidate, SignatureHelpCall, SignatureHelpSymbols,
+    FOLDING_KIND_COMMENT, FOLDING_KIND_IMPORTS, FOLDING_KIND_REGION, TEXT_BLOCK_COMMENT,
+    TEXT_BRACES, TEXT_IMPORTS, TEXT_KDOC, TEXT_PARENTHESES, TEXT_RAW_STRING, TEXT_REGION_LABEL,
 };
 use krusty::diag::{Diagnostic, Span};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 /// `(source lo, source hi, interned hover value id)`.
 type HoverEntry = [u32; 3];
@@ -31,6 +36,13 @@ const MAX_SOURCE_SET_COMPLETION_WIRE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SOURCE_SET_DEFINITION_ENTRIES: usize = 256 * 1024;
 const MAX_SOURCE_SET_HOVER_ENTRIES: usize = 256 * 1024;
 const MAX_SOURCE_SET_HOVER_WIRE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SOURCE_SET_DOCUMENT_SYMBOL_ENTRIES: usize = 32 * 1024;
+const MAX_SOURCE_SET_DOCUMENT_SYMBOL_WIRE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_SOURCE_SET_FOLDING_RANGE_ENTRIES: usize = 32 * 1024;
+const MAX_SOURCE_SET_FOLDING_RANGE_WIRE_BYTES: usize = 8 * 1024 * 1024;
+const FOLDING_RANGE_WIRE_FIXED_BYTES: usize = 192;
+const MAX_SOURCE_SET_SIGNATURE_HELP_CALLS: usize = 32 * 1024;
+const MAX_SOURCE_SET_SIGNATURE_HELP_WIRE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Default)]
 pub(crate) struct HoverBudget {
@@ -67,6 +79,118 @@ pub(crate) struct CompletionBudget {
 #[derive(Default)]
 pub(crate) struct DefinitionBudget {
     entries: usize,
+}
+
+#[derive(Default)]
+pub(crate) struct DocumentSymbolBudget {
+    entries: usize,
+    wire_bytes: usize,
+}
+
+#[derive(Default)]
+pub(crate) struct FoldingRangeBudget {
+    entries: usize,
+    wire_bytes: usize,
+}
+
+#[derive(Default)]
+pub(crate) struct SignatureHelpBudget {
+    calls: usize,
+    wire_bytes: usize,
+}
+
+impl SignatureHelpBudget {
+    fn remaining_calls(&self) -> usize {
+        MAX_SOURCE_SET_SIGNATURE_HELP_CALLS.saturating_sub(self.calls)
+    }
+
+    fn can_attempt(&self) -> bool {
+        self.calls < MAX_SOURCE_SET_SIGNATURE_HELP_CALLS
+            && self.wire_bytes < MAX_SOURCE_SET_SIGNATURE_HELP_WIRE_BYTES
+    }
+
+    fn remaining_argument_wire_bytes(&self) -> Option<usize> {
+        MAX_SOURCE_SET_SIGNATURE_HELP_WIRE_BYTES
+            .saturating_sub(self.wire_bytes)
+            .checked_sub(96)
+    }
+
+    fn reserve(
+        &mut self,
+        call: &SignatureHelpCall,
+        candidates: &[SignatureCandidate],
+        new_group: bool,
+    ) -> bool {
+        let argument_bytes = call.arguments.iter().fold(0usize, |bytes, argument| {
+            bytes.saturating_add(argument.wire_bytes())
+        });
+        let signature_bytes = if new_group {
+            candidates.iter().fold(0usize, |bytes, candidate| {
+                bytes
+                    .saturating_add(32)
+                    .saturating_add(candidate.label.len().saturating_mul(6))
+                    .saturating_add(candidate.parameters.iter().fold(
+                        0usize,
+                        |parameter_bytes, parameter| {
+                            parameter_bytes
+                                .saturating_add(24)
+                                .saturating_add(parameter.name.len().saturating_mul(6))
+                        },
+                    ))
+            })
+        } else {
+            0
+        };
+        let wire_bytes = 96usize
+            .saturating_add(argument_bytes)
+            .saturating_add(signature_bytes);
+        if self.calls >= MAX_SOURCE_SET_SIGNATURE_HELP_CALLS
+            || wire_bytes > MAX_SOURCE_SET_SIGNATURE_HELP_WIRE_BYTES.saturating_sub(self.wire_bytes)
+        {
+            return false;
+        }
+        self.calls += 1;
+        self.wire_bytes += wire_bytes;
+        true
+    }
+}
+
+impl DocumentSymbolBudget {
+    fn remaining_entries(&self) -> usize {
+        MAX_SOURCE_SET_DOCUMENT_SYMBOL_ENTRIES.saturating_sub(self.entries)
+    }
+
+    fn reserve(&mut self, name: &str) -> bool {
+        let wire_bytes = 192usize.saturating_add(name.len().saturating_mul(6));
+        if self.entries >= MAX_SOURCE_SET_DOCUMENT_SYMBOL_ENTRIES
+            || wire_bytes
+                > MAX_SOURCE_SET_DOCUMENT_SYMBOL_WIRE_BYTES.saturating_sub(self.wire_bytes)
+        {
+            return false;
+        }
+        self.entries += 1;
+        self.wire_bytes += wire_bytes;
+        true
+    }
+}
+
+impl FoldingRangeBudget {
+    fn remaining_entries(&self) -> usize {
+        MAX_SOURCE_SET_FOLDING_RANGE_ENTRIES.saturating_sub(self.entries)
+    }
+
+    fn reserve(&mut self, collapsed_text_bytes: usize) -> bool {
+        let wire_bytes =
+            FOLDING_RANGE_WIRE_FIXED_BYTES.saturating_add(collapsed_text_bytes.saturating_mul(6));
+        if self.entries >= MAX_SOURCE_SET_FOLDING_RANGE_ENTRIES
+            || wire_bytes > MAX_SOURCE_SET_FOLDING_RANGE_WIRE_BYTES.saturating_sub(self.wire_bytes)
+        {
+            return false;
+        }
+        self.entries += 1;
+        self.wire_bytes += wire_bytes;
+        true
+    }
 }
 
 impl DefinitionBudget {
@@ -126,6 +250,498 @@ type DefinitionEntry = [u32; 5];
 #[derive(Default, Deserialize, Serialize)]
 pub struct DefinitionIndex {
     entries: Vec<DefinitionEntry>,
+}
+
+/// `(start line, start UTF-16 column, end line, end UTF-16 column,
+/// kind + collapsed-text style, summary source byte lo, summary source byte hi)`.
+type FoldingRangeEntry = [u32; 7];
+
+#[derive(Default, Deserialize, Serialize)]
+pub struct FoldingRangeIndex {
+    entries: Vec<FoldingRangeEntry>,
+}
+
+/// `(name id, range start line/character, range end line/character,
+/// selection start line/character, selection end line/character, kind/deprecated/parent)`.
+type DocumentSymbolEntry = [u32; 10];
+
+/// Compact pre-positioned hierarchy retained after compiler analysis is dropped.
+#[derive(Default, Deserialize, Serialize)]
+pub struct DocumentSymbolIndex {
+    entries: Vec<DocumentSymbolEntry>,
+    names: Vec<String>,
+}
+
+/// `(argument-list lo, hi, signature start/count, selected signature, argument start/count,
+/// optional containing-call index + 1)`.
+type SignatureHelpCallEntry = [u32; 8];
+/// `(label string id, parameter start, parameter count)`.
+type SignatureHelpSignatureEntry = [u32; 3];
+/// `(name string id, label UTF-16 start, label UTF-16 end)`.
+type SignatureHelpParameterEntry = [u32; 3];
+/// `(argument end byte, optional name string id + 1)`.
+type SignatureHelpArgumentEntry = [u32; 2];
+const SIGNATURE_HELP_VARARG_BIT: u32 = 1 << 31;
+
+/// Compact call ranges and signature labels retained after compiler analysis is dropped.
+#[derive(Default, Deserialize, Serialize)]
+pub struct SignatureHelpIndex {
+    calls: Vec<SignatureHelpCallEntry>,
+    signatures: Vec<SignatureHelpSignatureEntry>,
+    parameters: Vec<SignatureHelpParameterEntry>,
+    arguments: Vec<SignatureHelpArgumentEntry>,
+    strings: Vec<String>,
+}
+
+impl SignatureHelpIndex {
+    fn from_file_analysis(
+        source: &str,
+        analysis: &FileAnalysis,
+        symbols: &SignatureHelpSymbols,
+        frontend_symbols: &FrontendSymbols,
+        budget: &mut SignatureHelpBudget,
+    ) -> Self {
+        let mut result = Self::default();
+        if !budget.can_attempt() || budget.remaining_argument_wire_bytes().is_none() {
+            return result;
+        }
+        let call_sites = symbols.call_sites(source, analysis, budget.remaining_calls());
+        let mut strings = HashMap::<String, u32>::new();
+        let mut groups = HashMap::<usize, (u32, u32)>::new();
+        let mut containing_calls = Vec::<usize>::new();
+
+        for site in call_sites {
+            if !budget.can_attempt() {
+                break;
+            }
+            let Some(argument_wire_bytes) = budget.remaining_argument_wire_bytes() else {
+                break;
+            };
+            let call = match symbols.call(
+                source,
+                analysis,
+                frontend_symbols,
+                site,
+                argument_wire_bytes,
+            ) {
+                Ok(Some(call)) => call,
+                Ok(None) => continue,
+                Err(()) => break,
+            };
+            let candidates = symbols.candidates_for_call(source, analysis, frontend_symbols, &call);
+            let candidates = candidates.as_ref();
+            let share_group = SignatureHelpSymbols::call_shares_group(&call);
+            let new_group = !share_group || !groups.contains_key(&call.group);
+            if !budget.reserve(&call, candidates, new_group) {
+                break;
+            }
+            let shared_group = share_group
+                .then(|| groups.get(&call.group).copied())
+                .flatten();
+            let (signature_start, signature_count) = if let Some(group) = shared_group {
+                group
+            } else {
+                let signature_start = result.signatures.len() as u32;
+                for candidate in candidates {
+                    let label = intern_signature_string(
+                        &candidate.label,
+                        &mut result.strings,
+                        &mut strings,
+                    );
+                    let parameter_start = result.parameters.len() as u32;
+                    for parameter in &candidate.parameters {
+                        let name = intern_signature_string(
+                            &parameter.name,
+                            &mut result.strings,
+                            &mut strings,
+                        );
+                        result
+                            .parameters
+                            .push([name, parameter.label_start, parameter.label_end]);
+                    }
+                    result.signatures.push([
+                        label,
+                        parameter_start,
+                        candidate.parameters.len() as u32
+                            | if candidate.is_vararg() {
+                                SIGNATURE_HELP_VARARG_BIT
+                            } else {
+                                0
+                            },
+                    ]);
+                }
+                let group = (signature_start, candidates.len() as u32);
+                if share_group {
+                    groups.insert(call.group, group);
+                }
+                group
+            };
+            let argument_start = result.arguments.len() as u32;
+            for argument in &call.arguments {
+                let name = argument.name.as_ref().map_or(0, |name| {
+                    intern_signature_string(name, &mut result.strings, &mut strings)
+                        .saturating_add(1)
+                });
+                result.arguments.push([argument.end, name]);
+            }
+            while containing_calls.last().is_some_and(|parent| {
+                let parent = result.calls[*parent];
+                parent[0] > call.span.lo || parent[1] < call.span.hi
+            }) {
+                containing_calls.pop();
+            }
+            let parent = containing_calls
+                .last()
+                .map_or(0, |parent| (*parent as u32).saturating_add(1));
+            let call_index = result.calls.len();
+            result.calls.push([
+                call.span.lo,
+                call.span.hi,
+                signature_start,
+                signature_count,
+                call.selected as u32,
+                argument_start,
+                call.arguments.len() as u32,
+                parent,
+            ]);
+            containing_calls.push(call_index);
+        }
+        result
+    }
+
+    pub fn encode(&self, offset: u32) -> Option<Value> {
+        let mut call_index = self.calls.partition_point(|call| call[0] <= offset);
+        let call = loop {
+            call_index = call_index.checked_sub(1)?;
+            let call = &self.calls[call_index];
+            if offset <= call[1] {
+                break call;
+            }
+            call_index = call[7] as usize;
+        };
+        let arguments = &self.arguments[call[5] as usize..call[5].saturating_add(call[6]) as usize];
+        let active_argument = arguments
+            .partition_point(|argument| argument[0] < offset)
+            .min(arguments.len().saturating_sub(1));
+        let active_name = arguments
+            .get(active_argument)
+            .and_then(|argument| argument[1].checked_sub(1));
+        let signatures =
+            &self.signatures[call[2] as usize..call[2].saturating_add(call[3]) as usize];
+        let signatures = signatures
+            .iter()
+            .map(|signature| {
+                let parameter_count = signature[2] & !SIGNATURE_HELP_VARARG_BIT;
+                let is_vararg = signature[2] & SIGNATURE_HELP_VARARG_BIT != 0;
+                let parameters = &self.parameters
+                    [signature[1] as usize..signature[1].saturating_add(parameter_count) as usize];
+                let matching_parameter = active_name
+                    .and_then(|name| parameters.iter().position(|parameter| parameter[0] == name));
+                let missing_named_parameter =
+                    active_name.is_some() && matching_parameter.is_none() && !parameters.is_empty();
+                let active_parameter = if parameters.is_empty()
+                    || (active_argument >= parameters.len() && !is_vararg)
+                {
+                    None
+                } else if missing_named_parameter {
+                    Some((active_argument + 1).min(parameters.len()))
+                } else {
+                    Some(matching_parameter.unwrap_or(active_argument.min(parameters.len() - 1)))
+                };
+                let mut encoded_parameters = parameters
+                    .iter()
+                    .map(|parameter| json!({"label": [parameter[1], parameter[2]]}))
+                    .collect::<Vec<_>>();
+                if missing_named_parameter {
+                    let insertion = active_parameter.unwrap();
+                    let offset = if insertion == 0 {
+                        parameters[0][1].saturating_sub(1)
+                    } else {
+                        parameters[insertion - 1][2].saturating_add(1)
+                    };
+                    encoded_parameters.insert(insertion, json!({"label": [offset, offset]}));
+                }
+                let mut encoded = json!({
+                    "label": self.strings[signature[0] as usize],
+                    "parameters": encoded_parameters,
+                });
+                if let Some(active_parameter) = active_parameter {
+                    encoded
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("activeParameter".to_string(), json!(active_parameter));
+                }
+                encoded
+            })
+            .collect::<Vec<_>>();
+        Some(json!({
+            "signatures": signatures,
+            "activeSignature": (call[4] as usize).min(signatures.len().saturating_sub(1)),
+        }))
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.calls.len()
+    }
+}
+
+fn intern_signature_string(
+    value: &str,
+    strings: &mut Vec<String>,
+    ids: &mut HashMap<String, u32>,
+) -> u32 {
+    if let Some(&id) = ids.get(value) {
+        return id;
+    }
+    let id = strings.len() as u32;
+    let value = value.to_string();
+    ids.insert(value.clone(), id);
+    strings.push(value);
+    id
+}
+
+impl DocumentSymbolIndex {
+    fn from_occurrences(
+        source: &str,
+        occurrences: Vec<DocumentSymbolOccurrence>,
+        budget: &mut DocumentSymbolBudget,
+    ) -> Self {
+        let mut retained = Vec::with_capacity(
+            occurrences
+                .len()
+                .min(MAX_SOURCE_SET_DOCUMENT_SYMBOL_ENTRIES.saturating_sub(budget.entries)),
+        );
+        for occurrence in occurrences {
+            if !budget.reserve(&occurrence.name) {
+                break;
+            }
+            retained.push(occurrence);
+        }
+
+        let positions = selected_positions(
+            source,
+            retained.iter().flat_map(|occurrence| {
+                [
+                    occurrence.range.lo,
+                    occurrence.range.hi,
+                    occurrence.selection.lo,
+                    occurrence.selection.hi,
+                ]
+            }),
+        );
+        let position = |offset| {
+            let index = positions
+                .binary_search_by_key(&offset, |(offset, _)| *offset)
+                .expect("document-symbol offset must be positioned");
+            positions[index].1
+        };
+
+        let mut names = Vec::new();
+        let mut name_ids = HashMap::<String, u32>::new();
+        let mut entries = Vec::with_capacity(retained.len());
+        for occurrence in retained {
+            let name_id = if let Some(&name_id) = name_ids.get(&occurrence.name) {
+                name_id
+            } else {
+                let name_id = names.len() as u32;
+                name_ids.insert(occurrence.name.clone(), name_id);
+                names.push(occurrence.name);
+                name_id
+            };
+            let range_start = position(occurrence.range.lo);
+            let range_end = position(occurrence.range.hi);
+            let selection_start = position(occurrence.selection.lo);
+            let selection_end = position(occurrence.selection.hi);
+            let parent = occurrence
+                .parent
+                .and_then(|parent| u32::try_from(parent).ok())
+                .and_then(|parent| parent.checked_add(1))
+                .unwrap_or(0);
+            let packed =
+                u32::from(occurrence.kind) | u32::from(occurrence.deprecated) << 8 | parent << 9;
+            entries.push([
+                name_id,
+                range_start[0],
+                range_start[1],
+                range_end[0],
+                range_end[1],
+                selection_start[0],
+                selection_start[1],
+                selection_end[0],
+                selection_end[1],
+                packed,
+            ]);
+        }
+        Self { entries, names }
+    }
+
+    pub fn encode(&self) -> Vec<Value> {
+        let mut children = (0..self.entries.len())
+            .map(|_| Vec::new())
+            .collect::<Vec<Vec<Value>>>();
+        let mut roots = Vec::new();
+        for index in (0..self.entries.len()).rev() {
+            let entry = self.entries[index];
+            let packed = entry[9];
+            let mut symbol = json!({
+                "name": self.names[entry[0] as usize],
+                "kind": packed & u8::MAX as u32,
+                "deprecated": packed & (1 << 8) != 0,
+                "range": {
+                    "start": {"line": entry[1], "character": entry[2]},
+                    "end": {"line": entry[3], "character": entry[4]},
+                },
+                "selectionRange": {
+                    "start": {"line": entry[5], "character": entry[6]},
+                    "end": {"line": entry[7], "character": entry[8]},
+                }
+            });
+            if packed & (1 << 8) != 0 {
+                symbol
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("tags".to_string(), json!([1]));
+            }
+            let symbol_children = &mut children[index];
+            if !symbol_children.is_empty() {
+                symbol_children.reverse();
+                symbol.as_object_mut().unwrap().insert(
+                    "children".to_string(),
+                    Value::Array(std::mem::take(symbol_children)),
+                );
+            }
+            let parent = packed >> 9;
+            if parent == 0 {
+                roots.push(symbol);
+            } else {
+                children[parent as usize - 1].push(symbol);
+            }
+        }
+        roots.reverse();
+        roots
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn name_count(&self) -> usize {
+        self.names.len()
+    }
+}
+
+fn selected_positions(
+    source: &str,
+    offsets: impl IntoIterator<Item = u32>,
+) -> Vec<(u32, [u32; 2])> {
+    let mut offsets = offsets.into_iter().collect::<Vec<_>>();
+    offsets.sort_unstable();
+    offsets.dedup();
+    let mut positions = Vec::with_capacity(offsets.len());
+    let mut byte = 0usize;
+    let mut line = 0u32;
+    let mut character = 0u32;
+    let mut previous_was_cr = false;
+    for offset in offsets {
+        let offset = offset as usize;
+        advance_position(
+            &source[byte..offset],
+            &mut line,
+            &mut character,
+            &mut previous_was_cr,
+        );
+        positions.push((offset as u32, [line, character]));
+        byte = offset;
+    }
+    positions
+}
+
+impl FoldingRangeIndex {
+    fn from_occurrences(
+        source: &str,
+        occurrences: Vec<FoldingRangeOccurrence>,
+        budget: &mut FoldingRangeBudget,
+    ) -> Self {
+        let positions = selected_positions(
+            source,
+            occurrences
+                .iter()
+                .flat_map(|occurrence| [occurrence.span.lo, occurrence.span.hi]),
+        );
+        let position = |offset| {
+            let index = positions
+                .binary_search_by_key(&offset, |(offset, _)| *offset)
+                .expect("folding-range offset must be positioned");
+            positions[index].1
+        };
+
+        let mut entries = Vec::with_capacity(
+            occurrences
+                .len()
+                .min(MAX_SOURCE_SET_FOLDING_RANGE_ENTRIES.saturating_sub(budget.entries)),
+        );
+        for occurrence in occurrences {
+            let start = position(occurrence.span.lo);
+            let end = position(occurrence.span.hi);
+            if start[0] >= end[0] {
+                continue;
+            }
+            if !budget.reserve(occurrence.text.collapsed_text_bytes()) {
+                break;
+            }
+            let summary = occurrence.text.summary();
+            entries.push([
+                start[0],
+                start[1],
+                end[0],
+                end[1],
+                u32::from(occurrence.kind) << 8 | u32::from(occurrence.text.style()),
+                summary.lo,
+                summary.hi,
+            ]);
+        }
+        Self { entries }
+    }
+
+    pub fn encode(&self, source: &str) -> Vec<Value> {
+        self.entries
+            .iter()
+            .map(|entry| {
+                let packed = entry[4];
+                let kind = match (packed >> 8) as u8 {
+                    FOLDING_KIND_COMMENT => "comment",
+                    FOLDING_KIND_IMPORTS => "imports",
+                    FOLDING_KIND_REGION => "region",
+                    _ => "region",
+                };
+                let summary = source
+                    .get(entry[5] as usize..entry[6] as usize)
+                    .unwrap_or("");
+                let collapsed_text = match packed as u8 {
+                    TEXT_IMPORTS => "...".to_string(),
+                    TEXT_PARENTHESES => "(...)".to_string(),
+                    TEXT_BRACES => "{...}".to_string(),
+                    TEXT_KDOC => format!("/** {summary} ...*/"),
+                    TEXT_BLOCK_COMMENT => format!("/ {summary} .../"),
+                    TEXT_RAW_STRING => format!("\"\"\"{summary} ...\"\"\""),
+                    TEXT_REGION_LABEL => summary.to_string(),
+                    _ => String::new(),
+                };
+                json!({
+                    "startLine": entry[0],
+                    "startCharacter": entry[1],
+                    "endLine": entry[2],
+                    "endCharacter": entry[3],
+                    "kind": kind,
+                    "collapsedText": collapsed_text,
+                })
+            })
+            .collect()
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 pub struct DefinitionTargets<'a> {
@@ -764,8 +1380,11 @@ pub struct DocumentAnalysis {
     pub diagnostics: Vec<Diagnostic>,
     pub hover: HoverIndex,
     pub completion: CompletionIndex,
+    pub signature_help: SignatureHelpIndex,
     pub semantic_tokens: SemanticTokenIndex,
     pub definitions: DefinitionIndex,
+    pub document_symbols: DocumentSymbolIndex,
+    pub folding_ranges: FoldingRangeIndex,
 }
 
 pub(crate) struct SourceSetIndexes<'a> {
@@ -773,6 +1392,7 @@ pub(crate) struct SourceSetIndexes<'a> {
     highlights: &'a HighlightSymbols,
     definitions: &'a DefinitionSymbols,
     completions: &'a CompletionSymbols,
+    signatures: &'a SignatureHelpSymbols,
 }
 
 impl<'a> SourceSetIndexes<'a> {
@@ -781,12 +1401,14 @@ impl<'a> SourceSetIndexes<'a> {
         highlights: &'a HighlightSymbols,
         definitions: &'a DefinitionSymbols,
         completions: &'a CompletionSymbols,
+        signatures: &'a SignatureHelpSymbols,
     ) -> Self {
         Self {
             symbols,
             highlights,
             definitions,
             completions,
+            signatures,
         }
     }
 }
@@ -795,6 +1417,9 @@ pub(crate) struct AnalysisBudgets {
     hover: HoverBudget,
     completion: CompletionBudget,
     definition: DefinitionBudget,
+    document_symbol: DocumentSymbolBudget,
+    folding_range: FoldingRangeBudget,
+    signature_help: SignatureHelpBudget,
 }
 
 impl AnalysisBudgets {
@@ -803,6 +1428,9 @@ impl AnalysisBudgets {
             hover: HoverBudget::default(),
             completion: CompletionBudget::default(),
             definition: DefinitionBudget::default(),
+            document_symbol: DocumentSymbolBudget::default(),
+            folding_range: FoldingRangeBudget::default(),
+            signature_help: SignatureHelpBudget::default(),
         }
     }
 }
@@ -821,6 +1449,13 @@ impl DocumentAnalysis {
             indexes.completions,
             &mut budgets.completion,
         );
+        let signature_help = SignatureHelpIndex::from_file_analysis(
+            source,
+            &analysis,
+            indexes.signatures,
+            indexes.symbols,
+            &mut budgets.signature_help,
+        );
         let semantic = analysis.semantic_occurrences(
             source,
             file_index,
@@ -837,12 +1472,29 @@ impl DocumentAnalysis {
         let semantic_tokens = SemanticTokenIndex::from_occurrences(source, semantic.highlights);
         let definitions =
             DefinitionIndex::from_occurrences(semantic.definitions, &mut budgets.definition);
+        let document_symbols = DocumentSymbolIndex::from_occurrences(
+            source,
+            document_symbol_occurrences(
+                source,
+                &analysis,
+                budgets.document_symbol.remaining_entries(),
+            ),
+            &mut budgets.document_symbol,
+        );
+        let folding_ranges = FoldingRangeIndex::from_occurrences(
+            source,
+            folding_range_occurrences(source, &analysis, budgets.folding_range.remaining_entries()),
+            &mut budgets.folding_range,
+        );
         Self {
             diagnostics: analysis.diagnostics,
             hover,
             completion,
+            signature_help,
             semantic_tokens,
             definitions,
+            document_symbols,
+            folding_ranges,
         }
     }
 
@@ -851,8 +1503,11 @@ impl DocumentAnalysis {
             diagnostics,
             hover: HoverIndex::default(),
             completion: CompletionIndex::default(),
+            signature_help: SignatureHelpIndex::default(),
             semantic_tokens: SemanticTokenIndex::default(),
             definitions: DefinitionIndex::default(),
+            document_symbols: DocumentSymbolIndex::default(),
+            folding_ranges: FoldingRangeIndex::default(),
         }
     }
 
@@ -868,11 +1523,14 @@ pub fn analyze_for_lsp(sources: &[&str]) -> Vec<DocumentAnalysis> {
     let definition_symbols =
         DefinitionSymbols::from_source_set(sources, &analysis.files, &analysis.symbols);
     let completion_symbols = CompletionSymbols::from_source_set(&analysis.files);
+    let signature_help_symbols =
+        SignatureHelpSymbols::from_source_set(sources, &analysis.files, &analysis.symbols);
     let indexes = SourceSetIndexes::new(
         &analysis.symbols,
         &highlight_symbols,
         &definition_symbols,
         &completion_symbols,
+        &signature_help_symbols,
     );
     let mut budgets = AnalysisBudgets::new();
     analysis
@@ -913,6 +1571,555 @@ mod tests {
                 (line, start, token[2], token[3], token[4])
             })
             .collect()
+    }
+
+    #[test]
+    fn document_symbol_snapshot_is_compact_interned_hierarchical_and_utf16_positioned() {
+        assert_eq!(std::mem::size_of::<DocumentSymbolEntry>(), 40);
+        let source = "😀\r\nx";
+        let occurrences = vec![
+            DocumentSymbolOccurrence {
+                name: "same".to_string(),
+                kind: 5,
+                deprecated: false,
+                range: Span::new(0, source.len() as u32),
+                selection: Span::new(6, 7),
+                parent: None,
+            },
+            DocumentSymbolOccurrence {
+                name: "same".to_string(),
+                kind: 7,
+                deprecated: true,
+                range: Span::new(6, 7),
+                selection: Span::new(6, 7),
+                parent: Some(0),
+            },
+        ];
+        let index = DocumentSymbolIndex::from_occurrences(
+            source,
+            occurrences,
+            &mut DocumentSymbolBudget::default(),
+        );
+
+        assert_eq!(index.entry_count(), 2);
+        assert_eq!(index.name_count(), 1);
+        assert_eq!(
+            index.encode(),
+            vec![json!({
+                "name": "same",
+                "kind": 5,
+                "deprecated": false,
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 1, "character": 1}
+                },
+                "selectionRange": {
+                    "start": {"line": 1, "character": 0},
+                    "end": {"line": 1, "character": 1}
+                },
+                "children": [{
+                    "name": "same",
+                    "kind": 7,
+                    "deprecated": true,
+                    "tags": [1],
+                    "range": {
+                        "start": {"line": 1, "character": 0},
+                        "end": {"line": 1, "character": 1}
+                    },
+                    "selectionRange": {
+                        "start": {"line": 1, "character": 0},
+                        "end": {"line": 1, "character": 1}
+                    }
+                }]
+            })]
+        );
+    }
+
+    #[test]
+    fn document_symbol_snapshot_respects_the_source_set_entry_budget() {
+        let source = "x";
+        let occurrences = (0..=MAX_SOURCE_SET_DOCUMENT_SYMBOL_ENTRIES)
+            .map(|_| DocumentSymbolOccurrence {
+                name: "x".to_string(),
+                kind: 13,
+                deprecated: false,
+                range: Span::new(0, 1),
+                selection: Span::new(0, 1),
+                parent: None,
+            })
+            .collect();
+        let index = DocumentSymbolIndex::from_occurrences(
+            source,
+            occurrences,
+            &mut DocumentSymbolBudget::default(),
+        );
+
+        assert_eq!(index.entry_count(), MAX_SOURCE_SET_DOCUMENT_SYMBOL_ENTRIES);
+        assert_eq!(index.name_count(), 1);
+    }
+
+    #[test]
+    fn folding_range_snapshot_is_compact_source_referenced_and_utf16_positioned() {
+        use crate::compiler_analysis::{FoldingRangeOccurrence, FoldingRangeText};
+
+        assert_eq!(std::mem::size_of::<FoldingRangeEntry>(), 28);
+        let source = "same\n😀(\r\nx\r\n)";
+        let range = Span::new(source.find('(').unwrap() as u32, source.len() as u32);
+        let index = FoldingRangeIndex::from_occurrences(
+            source,
+            vec![
+                FoldingRangeOccurrence {
+                    span: range,
+                    kind: FOLDING_KIND_REGION,
+                    text: FoldingRangeText::RegionLabel(Span::new(0, 4)),
+                },
+                FoldingRangeOccurrence {
+                    span: range,
+                    kind: FOLDING_KIND_COMMENT,
+                    text: FoldingRangeText::RegionLabel(Span::new(0, 4)),
+                },
+            ],
+            &mut FoldingRangeBudget::default(),
+        );
+
+        assert_eq!(index.entry_count(), 2);
+        assert_eq!(
+            serde_json::to_value(&index).unwrap(),
+            json!({"entries": [
+                [1, 2, 3, 1, 518, 0, 4],
+                [1, 2, 3, 1, 6, 0, 4]
+            ]})
+        );
+        assert_eq!(
+            index.encode(source),
+            vec![
+                json!({
+                    "startLine": 1,
+                    "startCharacter": 2,
+                    "endLine": 3,
+                    "endCharacter": 1,
+                    "kind": "region",
+                    "collapsedText": "same"
+                }),
+                json!({
+                    "startLine": 1,
+                    "startCharacter": 2,
+                    "endLine": 3,
+                    "endCharacter": 1,
+                    "kind": "comment",
+                    "collapsedText": "same"
+                })
+            ]
+        );
+    }
+
+    #[test]
+    fn folding_range_snapshot_is_source_set_and_expanded_wire_bounded() {
+        use crate::compiler_analysis::{FoldingRangeOccurrence, FoldingRangeText};
+
+        let source = "(\n)";
+        let same_line = FoldingRangeIndex::from_occurrences(
+            source,
+            vec![FoldingRangeOccurrence {
+                span: Span::new(0, 1),
+                kind: FOLDING_KIND_REGION,
+                text: FoldingRangeText::Braces,
+            }],
+            &mut FoldingRangeBudget::default(),
+        );
+        assert_eq!(same_line.entry_count(), 0);
+
+        let large = "m".repeat(4 * 1024);
+        let source = format!("{large}\n(\n)");
+        let fold_start = source.find('(').unwrap() as u32;
+        let occurrences = (0..3000)
+            .map(|_| FoldingRangeOccurrence {
+                span: Span::new(fold_start, source.len() as u32),
+                kind: FOLDING_KIND_COMMENT,
+                text: FoldingRangeText::RegionLabel(Span::new(0, large.len() as u32)),
+            })
+            .collect();
+        let mut budget = FoldingRangeBudget::default();
+        let bounded = FoldingRangeIndex::from_occurrences(&source, occurrences, &mut budget);
+        assert!(!bounded.entries.is_empty());
+        assert!(bounded.entries.len() < 3000);
+        assert!(budget.wire_bytes <= MAX_SOURCE_SET_FOLDING_RANGE_WIRE_BYTES);
+        assert!(
+            serde_json::to_vec(&Value::Array(bounded.encode(&source)))
+                .unwrap()
+                .len()
+                <= MAX_SOURCE_SET_FOLDING_RANGE_WIRE_BYTES
+        );
+
+        for mut exhausted in [
+            FoldingRangeBudget {
+                entries: MAX_SOURCE_SET_FOLDING_RANGE_ENTRIES,
+                wire_bytes: 0,
+            },
+            FoldingRangeBudget {
+                entries: 0,
+                wire_bytes: MAX_SOURCE_SET_FOLDING_RANGE_WIRE_BYTES,
+            },
+        ] {
+            let index = FoldingRangeIndex::from_occurrences(
+                &source,
+                vec![FoldingRangeOccurrence {
+                    span: Span::new(fold_start, source.len() as u32),
+                    kind: FOLDING_KIND_REGION,
+                    text: FoldingRangeText::RegionLabel(Span::new(0, 4)),
+                }],
+                &mut exhausted,
+            );
+            assert!(index.entries.is_empty());
+        }
+    }
+
+    #[test]
+    fn folding_range_extraction_uses_utf16_columns_and_crlf_once() {
+        let source = "fun choose(label: String = \"😀\") {\r\n\
+                      \u{20}\u{20}if (true) {\r\n\
+                      \u{20}\u{20}}\r\n\
+                      }\r\n";
+        let ranges = analyze_for_lsp(&[source])
+            .remove(0)
+            .folding_ranges
+            .encode(source);
+
+        assert_eq!(
+            ranges,
+            vec![
+                json!({
+                    "startLine": 0,
+                    "startCharacter": 33,
+                    "endLine": 3,
+                    "endCharacter": 1,
+                    "kind": "region",
+                    "collapsedText": "{...}"
+                }),
+                json!({
+                    "startLine": 1,
+                    "startCharacter": 12,
+                    "endLine": 2,
+                    "endCharacter": 3,
+                    "kind": "region",
+                    "collapsedText": "{...}"
+                })
+            ]
+        );
+    }
+
+    #[test]
+    fn folding_range_extraction_matches_advanced_official_shapes() {
+        let source = "package foldingadvanced\n\
+                      \n\
+                      //region Utilities\n\
+                      // First line comment.\n\
+                      // Second line comment.\n\
+                      fun grouped(\n\
+                      \u{20}\u{20}first: Int,\n\
+                      \u{20}\u{20}second: Int,\n\
+                      ): Int = listOf(\n\
+                      \u{20}\u{20}first,\n\
+                      \u{20}\u{20}second,\n\
+                      ).map {\n\
+                      \u{20}\u{20}it + 1\n\
+                      }.sum()\n\
+                      //endregion\n\
+                      \n\
+                      val raw = \"\"\"\n\
+                      \u{20}\u{20}first\n\
+                      \u{20}\u{20}second\n\
+                      \"\"\".trimIndent()\n\
+                      \n\
+                      fun choose(value: Int): Int = when (value) {\n\
+                      \u{20}\u{20}0 -> {\n\
+                      \u{20}\u{20}\u{20}\u{20}1\n\
+                      \u{20}\u{20}}\n\
+                      \u{20}\u{20}else -> value\n\
+                      }\n";
+        let ranges = analyze_for_lsp(&[source])
+            .remove(0)
+            .folding_ranges
+            .encode(source);
+
+        assert_eq!(
+            ranges,
+            vec![
+                json!({
+                    "collapsedText": "Utilities",
+                    "endCharacter": 11,
+                    "endLine": 14,
+                    "kind": "comment",
+                    "startCharacter": 0,
+                    "startLine": 2
+                }),
+                json!({
+                    "collapsedText": "{...}",
+                    "endCharacter": 7,
+                    "endLine": 13,
+                    "kind": "region",
+                    "startCharacter": 11,
+                    "startLine": 5
+                }),
+                json!({
+                    "collapsedText": "(...)",
+                    "endCharacter": 1,
+                    "endLine": 11,
+                    "kind": "region",
+                    "startCharacter": 15,
+                    "startLine": 8
+                }),
+                json!({
+                    "collapsedText": "{...}",
+                    "endCharacter": 1,
+                    "endLine": 13,
+                    "kind": "region",
+                    "startCharacter": 6,
+                    "startLine": 11
+                }),
+                json!({
+                    "collapsedText": "\"\"\"first ...\"\"\"",
+                    "endCharacter": 3,
+                    "endLine": 19,
+                    "kind": "region",
+                    "startCharacter": 10,
+                    "startLine": 16
+                }),
+                json!({
+                    "collapsedText": "{...}",
+                    "endCharacter": 1,
+                    "endLine": 26,
+                    "kind": "region",
+                    "startCharacter": 30,
+                    "startLine": 21
+                }),
+                json!({
+                    "collapsedText": "{...}",
+                    "endCharacter": 1,
+                    "endLine": 26,
+                    "kind": "region",
+                    "startCharacter": 43,
+                    "startLine": 21
+                }),
+                json!({
+                    "collapsedText": "{...}",
+                    "endCharacter": 3,
+                    "endLine": 24,
+                    "kind": "region",
+                    "startCharacter": 7,
+                    "startLine": 22
+                })
+            ]
+        );
+    }
+
+    #[test]
+    fn folding_range_extraction_matches_official_backticked_identifier_locations() {
+        let source = "fun escaped(\n\
+                      \u{20}\u{20}`)`: Int,\n\
+                      ): Int = listOf(\n\
+                      \u{20}\u{20}`)`,\n\
+                      \u{20}\u{20}1,\n\
+                      ).first()\n";
+        let ranges = analyze_for_lsp(&[source])
+            .remove(0)
+            .folding_ranges
+            .encode(source);
+
+        assert_eq!(
+            ranges,
+            vec![
+                json!({
+                    "collapsedText": "{...}",
+                    "endCharacter": 9,
+                    "endLine": 5,
+                    "kind": "region",
+                    "startCharacter": 11,
+                    "startLine": 0
+                }),
+                json!({
+                    "collapsedText": "(...)",
+                    "endCharacter": 1,
+                    "endLine": 5,
+                    "kind": "region",
+                    "startCharacter": 15,
+                    "startLine": 2
+                })
+            ]
+        );
+    }
+
+    #[test]
+    fn folding_range_extraction_matches_official_header_trivia_locations() {
+        let source = "/* commented() */\n\
+                      fun commented(/* ) commented() */\n\
+                      \u{20}\u{20}value: String,\n\
+                      ): String = listOf(\n\
+                      \u{20}\u{20}value,\n\
+                      \u{20}\u{20}\"ok\",\n\
+                      ).first()\n\
+                      \n\
+                      fun rawHeader(value: String = \"\"\") rawHeader()\n\
+                      \"\"\",\n\
+                      ): String = listOf(\n\
+                      \u{20}\u{20}value,\n\
+                      \u{20}\u{20}\"ok\",\n\
+                      ).first()\n";
+        let ranges = analyze_for_lsp(&[source])
+            .remove(0)
+            .folding_ranges
+            .encode(source);
+
+        assert_eq!(
+            ranges,
+            vec![
+                json!({
+                    "collapsedText": "{...}",
+                    "endCharacter": 9,
+                    "endLine": 6,
+                    "kind": "region",
+                    "startCharacter": 13,
+                    "startLine": 1
+                }),
+                json!({
+                    "collapsedText": "(...)",
+                    "endCharacter": 1,
+                    "endLine": 6,
+                    "kind": "region",
+                    "startCharacter": 18,
+                    "startLine": 3
+                }),
+                json!({
+                    "collapsedText": "{...}",
+                    "endCharacter": 9,
+                    "endLine": 13,
+                    "kind": "region",
+                    "startCharacter": 13,
+                    "startLine": 8
+                }),
+                json!({
+                    "collapsedText": "\"\"\") rawHeader() ...\"\"\"",
+                    "endCharacter": 3,
+                    "endLine": 9,
+                    "kind": "region",
+                    "startCharacter": 30,
+                    "startLine": 8
+                }),
+                json!({
+                    "collapsedText": "(...)",
+                    "endCharacter": 1,
+                    "endLine": 13,
+                    "kind": "region",
+                    "startCharacter": 18,
+                    "startLine": 10
+                })
+            ]
+        );
+    }
+
+    #[test]
+    fn signature_help_snapshot_is_compact_interned_and_queries_nested_calls() {
+        assert_eq!(std::mem::size_of::<SignatureHelpCallEntry>(), 32);
+        assert_eq!(std::mem::size_of::<SignatureHelpSignatureEntry>(), 12);
+        assert_eq!(std::mem::size_of::<SignatureHelpParameterEntry>(), 12);
+        assert_eq!(std::mem::size_of::<SignatureHelpArgumentEntry>(), 8);
+
+        let source = "fun outer(value: Int, other: Int): Int = value + other\n\
+                      fun inner(value: Int): Int = value\n\
+                      fun use(): Int = outer(inner(1), 2) + outer(3, 4)\n";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let symbols =
+            SignatureHelpSymbols::from_source_set(&[source], &analysis.files, &analysis.symbols);
+        let index = SignatureHelpIndex::from_file_analysis(
+            source,
+            &analysis.files[0],
+            &symbols,
+            &analysis.symbols,
+            &mut SignatureHelpBudget::default(),
+        );
+
+        assert_eq!(index.entry_count(), 3);
+        assert_eq!(
+            index
+                .strings
+                .iter()
+                .filter(|value| value.as_str() == "outer(value: Int, other: Int): Int")
+                .count(),
+            1
+        );
+        assert!(!index.strings.iter().any(|value| value == source));
+
+        let inner = source.find("inner(1").unwrap() as u32 + "inner(".len() as u32;
+        assert_eq!(
+            index.encode(inner).unwrap()["signatures"][0]["label"],
+            "inner(value: Int): Int"
+        );
+        let outer_second = source.find("inner(1), ").unwrap() as u32 + "inner(1), ".len() as u32;
+        let outer = index.encode(outer_second).unwrap();
+        assert_eq!(
+            outer["signatures"][0]["label"],
+            "outer(value: Int, other: Int): Int"
+        );
+        assert_eq!(outer["signatures"][0]["activeParameter"], 1);
+    }
+
+    #[test]
+    fn signature_help_snapshot_respects_shared_call_and_wire_budgets() {
+        let source = "fun answer(value: Int): Int = value\nfun use(): Int = answer(1)\n";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let symbols =
+            SignatureHelpSymbols::from_source_set(&[source], &analysis.files, &analysis.symbols);
+
+        let mut call_budget = SignatureHelpBudget {
+            calls: MAX_SOURCE_SET_SIGNATURE_HELP_CALLS,
+            wire_bytes: 0,
+        };
+        let index = SignatureHelpIndex::from_file_analysis(
+            source,
+            &analysis.files[0],
+            &symbols,
+            &analysis.symbols,
+            &mut call_budget,
+        );
+        assert_eq!(index.entry_count(), 0);
+
+        let mut wire_budget = SignatureHelpBudget {
+            calls: 0,
+            wire_bytes: MAX_SOURCE_SET_SIGNATURE_HELP_WIRE_BYTES - 1,
+        };
+        let index = SignatureHelpIndex::from_file_analysis(
+            source,
+            &analysis.files[0],
+            &symbols,
+            &analysis.symbols,
+            &mut wire_budget,
+        );
+        assert_eq!(index.entry_count(), 0);
+        assert_eq!(wire_budget.calls, 0);
+
+        let named_source = "fun answer(veryLongParameterName: Int): Int = veryLongParameterName\n\
+             fun use(): Int = answer(veryLongParameterName = 1)\n";
+        let named_analysis = analyze_standalone_source_set(&[named_source]);
+        let named_symbols = SignatureHelpSymbols::from_source_set(
+            &[named_source],
+            &named_analysis.files,
+            &named_analysis.symbols,
+        );
+        let mut name_budget = SignatureHelpBudget {
+            calls: 0,
+            // Enough for the 96-byte call and 16-byte argument record, but
+            // deliberately not the retained name string.
+            wire_bytes: MAX_SOURCE_SET_SIGNATURE_HELP_WIRE_BYTES - 112,
+        };
+        let index = SignatureHelpIndex::from_file_analysis(
+            named_source,
+            &named_analysis.files[0],
+            &named_symbols,
+            &named_analysis.symbols,
+            &mut name_budget,
+        );
+        assert_eq!(index.entry_count(), 0);
+        assert_eq!(name_budget.calls, 0);
     }
 
     #[test]
