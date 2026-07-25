@@ -49,11 +49,19 @@ mod tests {
         init_message: Option<(ProjectMessageKind, String)>,
         feedback_reanalyze: bool,
         feedback_message: Option<(ProjectMessageKind, String)>,
+        analysis_blocked: bool,
+        ready_after_refresh: bool,
+        analysis_calls: Rc<Cell<u32>>,
     }
 
     impl Analysis for RecordingHost {
         fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+            self.analysis_calls.set(self.analysis_calls.get() + 1);
             sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+        }
+
+        fn analysis_ready(&self) -> bool {
+            !self.analysis_blocked
         }
 
         fn set_workspace_root(&mut self, root: Option<std::path::PathBuf>) -> ProjectFeedback {
@@ -80,6 +88,9 @@ mod tests {
         fn refresh_project(&mut self) -> ProjectFeedback {
             self.pending = false;
             self.refreshes += 1;
+            if self.ready_after_refresh {
+                self.analysis_blocked = false;
+            }
             ProjectFeedback {
                 reanalyze: self.feedback_reanalyze,
                 message: self.feedback_message.take(),
@@ -204,6 +215,67 @@ mod tests {
             json!({ "changes": [{ "uri": "file:///p/build.gradle.kts", "type": 2 }] }),
         ));
         let messages = server.run_due_project_refresh();
+        assert!(messages.iter().any(|message| {
+            message["method"] == "textDocument/publishDiagnostics"
+                && message["params"]["uri"] == "file:///p/A.kt"
+        }));
+    }
+
+    #[test]
+    fn documents_are_not_analyzed_before_the_project_model_is_ready() {
+        let analysis_calls = Rc::new(Cell::new(0));
+        let host = RecordingHost {
+            analysis_blocked: true,
+            analysis_calls: analysis_calls.clone(),
+            ..RecordingHost::default()
+        };
+        let mut server = LspService::new(host);
+        server.handle(request(1, "initialize", json!({})));
+        let dispatch = server.handle(notification(
+            "textDocument/didOpen",
+            json!({ "textDocument": {
+                "uri": "file:///p/A.kt", "languageId": "kotlin", "version": 1,
+                "text": "val value = MissingType()"
+            }}),
+        ));
+
+        assert_eq!(analysis_calls.get(), 0);
+        assert!(dispatch.messages.iter().all(|message| {
+            message["method"] != "textDocument/publishDiagnostics"
+                || message["params"]["diagnostics"]
+                    .as_array()
+                    .is_some_and(Vec::is_empty)
+        }));
+    }
+
+    #[test]
+    fn documents_are_analyzed_when_project_refresh_becomes_ready() {
+        let analysis_calls = Rc::new(Cell::new(0));
+        let host = RecordingHost {
+            feedback_reanalyze: true,
+            analysis_blocked: true,
+            ready_after_refresh: true,
+            analysis_calls: analysis_calls.clone(),
+            ..RecordingHost::default()
+        };
+        let mut server = LspService::new(host);
+        server.handle(request(1, "initialize", json!({})));
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({ "textDocument": {
+                "uri": "file:///p/A.kt", "languageId": "kotlin", "version": 1,
+                "text": "fun ready() = true"
+            }}),
+        ));
+        assert_eq!(analysis_calls.get(), 0);
+
+        server.handle(notification(
+            "workspace/didChangeWatchedFiles",
+            json!({ "changes": [{ "uri": "file:///p/build.gradle.kts", "type": 2 }] }),
+        ));
+        let messages = server.run_due_project_refresh();
+
+        assert_eq!(analysis_calls.get(), 1);
         assert!(messages.iter().any(|message| {
             message["method"] == "textDocument/publishDiagnostics"
                 && message["params"]["uri"] == "file:///p/A.kt"

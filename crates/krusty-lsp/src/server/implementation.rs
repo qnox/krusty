@@ -95,6 +95,10 @@ impl ProjectFeedback {
 pub trait Analysis {
     fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis>;
 
+    fn analysis_ready(&self) -> bool {
+        true
+    }
+
     /// Adopt the workspace root and report the initial project state.
     fn set_workspace_root(&mut self, _root: Option<PathBuf>) -> ProjectFeedback {
         ProjectFeedback::default()
@@ -492,13 +496,15 @@ where
             .into_iter()
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        let analyses = {
+        let analyses = if self.analyze.analysis_ready() {
             let documents = &self.documents;
             let sources: Vec<_> = uris
                 .iter()
                 .map(|uri| documents[uri].text.as_str())
                 .collect();
             self.analyze.analyze(&sources)
+        } else {
+            uris.iter().map(|_| DocumentAnalysis::empty()).collect()
         };
         if analyses.len() != uris.len() {
             for uri in &uris {

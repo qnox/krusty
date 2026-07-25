@@ -44,6 +44,11 @@ impl ProjectSync {
         self.model.as_ref()
     }
 
+    pub fn rollback_model(&mut self, model: Option<ProjectModel>) {
+        self.model = model;
+        self.fingerprint = None;
+    }
+
     pub fn watch_paths(&self) -> Vec<PathBuf> {
         self.provider.watch_paths()
     }
@@ -80,6 +85,18 @@ impl ProjectSync {
         if self.model.is_some() && self.fingerprint == Some(fingerprint) {
             return RefreshOutcome::Unchanged;
         }
+        let _lock = match super::lock::WorkspaceProbeLock::acquire(self.provider.root()) {
+            Ok(lock) => lock,
+            Err(error) => {
+                return RefreshOutcome::Failed {
+                    error: ProbeError::Io(format!(
+                        "could not lock {}: {error}",
+                        self.provider.root().display()
+                    )),
+                    model_retained: self.model.is_some(),
+                };
+            }
+        };
         match self.provider.probe(runner) {
             Ok(model) => {
                 self.fingerprint = Some(fingerprint);
@@ -255,6 +272,39 @@ mod tests {
             }
         );
         assert_eq!(sync.project_classpath(), vec![PathBuf::from("/m2/a.jar")]);
+    }
+
+    #[test]
+    fn rolling_back_a_model_restores_the_last_good_classpath_and_retries() {
+        let tree = TempTree::new("sync-rollback");
+        tree.write("build.gradle.kts", "dependencies {}");
+        let mut sync = ProjectSync::new(Box::new(ScriptedProvider::new(
+            vec![tree.path("build.gradle.kts")],
+            vec![
+                Ok(model_with("/m2/a.jar")),
+                Ok(model_with("/m2/b.jar")),
+                Ok(model_with("/m2/c.jar")),
+            ],
+        )));
+
+        assert_eq!(
+            sync.refresh(&FakeRunner::default()),
+            RefreshOutcome::Updated
+        );
+        let previous = sync.model().cloned();
+        tree.write("build.gradle.kts", "dependencies { implementation(b) }");
+        assert_eq!(
+            sync.refresh(&FakeRunner::default()),
+            RefreshOutcome::Updated
+        );
+
+        sync.rollback_model(previous);
+        assert_eq!(sync.project_classpath(), vec![PathBuf::from("/m2/a.jar")]);
+        assert_eq!(
+            sync.refresh(&FakeRunner::default()),
+            RefreshOutcome::Updated
+        );
+        assert_eq!(sync.project_classpath(), vec![PathBuf::from("/m2/c.jar")]);
     }
 
     #[test]
