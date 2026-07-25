@@ -427,6 +427,7 @@ struct OpenDocument {
     signature_help: SignatureHelpIndex,
     semantic_tokens: SemanticTokenIndex,
     definitions: DefinitionIndex,
+    type_definitions: DefinitionIndex,
     document_symbols: DocumentSymbolIndex,
     folding_ranges: FoldingRangeIndex,
     analysis_blocked: bool,
@@ -507,6 +508,7 @@ where
                 open.signature_help = SignatureHelpIndex::default();
                 open.semantic_tokens = SemanticTokenIndex::default();
                 open.definitions = DefinitionIndex::default();
+                open.type_definitions = DefinitionIndex::default();
                 open.document_symbols = DocumentSymbolIndex::default();
                 open.folding_ranges = FoldingRangeIndex::default();
                 open.diagnostics = DiagnosticIndex::from_diagnostics(
@@ -537,6 +539,7 @@ where
                 open.signature_help = analysis.signature_help;
                 open.semantic_tokens = analysis.semantic_tokens;
                 open.definitions = analysis.definitions;
+                open.type_definitions = analysis.type_definitions;
                 open.document_symbols = analysis.document_symbols;
                 open.folding_ranges = analysis.folding_ranges;
                 open.diagnostics = DiagnosticIndex::from_diagnostics(
@@ -635,6 +638,7 @@ where
                         "capabilities": {
                             "hoverProvider": true,
                             "definitionProvider": true,
+                            "typeDefinitionProvider": true,
                             "referencesProvider": true,
                             "renameProvider": true,
                             "documentSymbolProvider": true,
@@ -688,6 +692,7 @@ where
             "textDocument/didClose" => self.did_close(id, params, defer_analysis),
             "textDocument/hover" => self.hover(id, params),
             "textDocument/definition" => self.definition(id, params),
+            "textDocument/typeDefinition" => self.type_definition(id, params),
             "textDocument/references" => self.references(id, params),
             "textDocument/rename" => self.rename(id, params),
             "textDocument/documentSymbol" => self.document_symbols(id, params),
@@ -755,6 +760,7 @@ where
                         signature_help: SignatureHelpIndex::default(),
                         semantic_tokens: SemanticTokenIndex::default(),
                         definitions: DefinitionIndex::default(),
+                        type_definitions: DefinitionIndex::default(),
                         document_symbols: DocumentSymbolIndex::default(),
                         folding_ranges: FoldingRangeIndex::default(),
                         analysis_blocked: true,
@@ -786,6 +792,7 @@ where
                 signature_help: SignatureHelpIndex::default(),
                 semantic_tokens: SemanticTokenIndex::default(),
                 definitions: DefinitionIndex::default(),
+                type_definitions: DefinitionIndex::default(),
                 document_symbols: DocumentSymbolIndex::default(),
                 folding_ranges: FoldingRangeIndex::default(),
                 analysis_blocked: false,
@@ -841,6 +848,7 @@ where
             open.signature_help = SignatureHelpIndex::default();
             open.semantic_tokens = SemanticTokenIndex::default();
             open.definitions = DefinitionIndex::default();
+            open.type_definitions = DefinitionIndex::default();
             open.document_symbols = DocumentSymbolIndex::default();
             open.folding_ranges = FoldingRangeIndex::default();
             open.diagnostics = analysis_limit_diagnostics();
@@ -1031,9 +1039,40 @@ where
         let Some(offset) = position_to_byte_offset(&open.text, params.position) else {
             return invalid_params(Some(id));
         };
-        let targets = open.definitions.get(offset).collect::<Vec<_>>();
+        Dispatch::messages(vec![rpc_result(
+            id,
+            Value::Array(self.navigation_locations(&open.definitions, offset)),
+        )])
+    }
+
+    fn type_definition(&self, id: Option<Value>, params: Value) -> Dispatch {
+        let Some(id) = id else {
+            return Dispatch::none();
+        };
+        let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params) else {
+            return invalid_params(Some(id));
+        };
+        let Some(open) = self.documents.get(&params.text_document.uri) else {
+            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+        };
+        let Some(offset) = position_to_byte_offset(&open.text, params.position) else {
+            return invalid_params(Some(id));
+        };
+        let locations = self.navigation_locations(&open.type_definitions, offset);
+        Dispatch::messages(vec![rpc_result(
+            id,
+            if locations.is_empty() {
+                Value::Null
+            } else {
+                Value::Array(locations)
+            },
+        )])
+    }
+
+    fn navigation_locations(&self, index: &DefinitionIndex, offset: u32) -> Vec<Value> {
+        let targets = index.get(offset).collect::<Vec<_>>();
         if targets.is_empty() {
-            return Dispatch::messages(vec![rpc_result(id, json!([]))]);
+            return Vec::new();
         }
         let uris = self.analyzed_uris();
         let locations = targets
@@ -1056,7 +1095,7 @@ where
                 }))
             })
             .collect::<Vec<_>>();
-        Dispatch::messages(vec![rpc_result(id, Value::Array(locations))])
+        locations
     }
 
     fn references(&self, id: Option<Value>, params: Value) -> Dispatch {

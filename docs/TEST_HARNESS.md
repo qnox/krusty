@@ -20,9 +20,10 @@ parameters.
 The LSP crate also has an opt-in protocol differential against JetBrains' official Kotlin LSP. It
 compares normalized diagnostic ranges, severity, source, and messages, decoded semantic-token types
 and modifiers, exact go-to-definition target URIs/ranges, find-reference declaration filtering and
-location sets, complete hover markdown/ranges, and stable completion labels, kinds, label details,
-ranking, and incomplete status. Diagnostic, navigation, reference, and hover locations compare both
-UTF-16 start and end positions; matching text at the wrong location fails.
+location sets, exact source type-definition URIs/ranges, complete hover markdown/ranges, and stable
+completion labels, kinds, label details, ranking, and incomplete status. Diagnostic, definition,
+type-definition, reference, and hover locations compare both UTF-16 start and end positions; matching
+text at the wrong location fails.
 Rename compares the complete `WorkspaceEdit`, including document URI/version, edit ordering,
 replacement text, and both UTF-16 range endpoints for cross-file, lexical, overload-selected,
 Unicode-offset, and backticked identifiers.
