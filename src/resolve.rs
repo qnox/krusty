@@ -4260,6 +4260,31 @@ fn infer_lit_ty_p(
         }
         ret
     }
+    fn type_receiver(
+        file: &File,
+        receiver: ExprId,
+        class_names: &ClassNames,
+        props: &[(String, Ty, bool)],
+        src: &dyn SemanticPlatform,
+    ) -> Option<TypeName> {
+        match file.expr(receiver) {
+            Expr::Name(name) => {
+                if props.iter().any(|(prop, _, _)| prop == name) {
+                    return None;
+                }
+                class_names.get(name)
+            }
+            Expr::Member { .. } => qualified_path(file, receiver).and_then(|path| {
+                let root = path.split('/').next()?;
+                if props.iter().any(|(name, _, _)| name == root) {
+                    return None;
+                }
+                let internal = type_name(&path);
+                src.resolve_type_name(internal).map(|_| internal)
+            }),
+            _ => None,
+        }
+    }
     let scope = function_scope_packages_with(file, src.platform_default_import_packages());
     let resolver = crate::symbol_resolver::SymbolResolver::new_scoped(src, &scope);
     match file.expr(e) {
@@ -4297,20 +4322,8 @@ fn infer_lit_ty_p(
                     return c.ty;
                 }
             }
-            let static_owner = match file.expr(*receiver) {
-                Expr::Name(type_name) => class_names.get(type_name),
-                Expr::Member { .. } => qualified_path(file, *receiver).and_then(|path| {
-                    let root = path.split('/').next()?;
-                    if props.iter().any(|(name, _, _)| name == root) {
-                        return None;
-                    }
-                    let internal = type_name(&path);
-                    src.resolve_type_name(internal).map(|_| internal)
-                }),
-                _ => None,
-            };
-            if let Some(field) =
-                static_owner.and_then(|internal| resolver.static_field(internal, name))
+            if let Some(field) = type_receiver(file, *receiver, class_names, props, src)
+                .and_then(|internal| resolver.static_field(internal, name))
             {
                 return field.ty;
             }
@@ -4493,6 +4506,32 @@ fn infer_lit_ty_p(
                             }
                         }
                     }
+                    let arg_tys: Vec<Ty> = args
+                        .iter()
+                        .map(|a| infer_lit_ty_p(file, *a, class_names, fun_rets, props, src, env))
+                        .collect();
+                    if !arg_tys.contains(&Ty::Error) {
+                        if let Some(ret) = type_receiver(file, *receiver, class_names, props, src)
+                            .and_then(|internal| {
+                                match resolver.resolve_symbol(
+                                    crate::symbol_resolver::SymRecv::TypeName(internal),
+                                    name,
+                                    &arg_tys,
+                                    &[],
+                                ) {
+                                    Some(crate::symbol_resolver::Symbol::Companion(member))
+                                    | Some(crate::symbol_resolver::Symbol::Instance(member)) => {
+                                        Some(member.ret)
+                                    }
+                                    _ => None,
+                                }
+                            })
+                        {
+                            if ret != Ty::Error {
+                                return ret;
+                            }
+                        }
+                    }
                     let recv_ty =
                         infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src, env);
                     if recv_ty != Ty::Error {
@@ -4505,12 +4544,6 @@ fn infer_lit_ty_p(
                         // same overload resolution the checker uses (so a numeric conversion — a real member
                         // on `kotlin/Int`/`Number` — is typed without any hardcoded method name). The `Any`
                         // fallback covers a USER receiver calling an inherited `toString`/`hashCode`/`equals`.
-                        let arg_tys: Vec<Ty> = args
-                            .iter()
-                            .map(|a| {
-                                infer_lit_ty_p(file, *a, class_names, fun_rets, props, src, env)
-                            })
-                            .collect();
                         // Only select an overload when every argument's type is known — an `Error` arg is
                         // assignable to any parameter, so it could spuriously match the wrong overload and
                         // infer a type the checker won't agree with. With an unknown arg, skip to the
