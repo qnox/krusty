@@ -42,3 +42,54 @@ fun box(): String = if (use(::helper) == 11) \"OK\" else \"no\"\n";
         "OK"
     );
 }
+
+#[test]
+fn applicable_callable_wins_between_local_function_and_property() {
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+fun a(a: String): String = \"top-level fun\"\n\
+fun invokeA(): String {\n\
+    val a: context(String) () -> String = { \"property a\" }\n\
+    return a(\"1\")\n\
+}\n\
+val b: context(String) () -> String = { \"property b\" }\n\
+fun invokeB(): String {\n\
+    fun b(a: String): String = \"local fun\"\n\
+    return b(\"1\")\n\
+}\n\
+val c: context(String) () -> String = { \"property c\" }\n\
+fun invokeC(): String {\n\
+    context(a: String)\n\
+    fun c(): String = \"local context fun\"\n\
+    return c(\"1\")\n\
+}\n\
+val d: () -> String = { \"property d\" }\n\
+fun invokeD(): String {\n\
+    context(s: String)\n\
+    fun d(): String = \"local context fun\"\n\
+    return d()\n\
+}\n\
+fun box(): String = if (invokeA() == \"property a\" && invokeB() == \"local fun\" && invokeC() == \"property c\" && invokeD() == \"property d\") \"OK\" else \"no\"\n";
+    assert_eq!(
+        run(SRC).expect("local function/property applicability"),
+        "OK"
+    );
+}
+
+#[test]
+fn local_overload_requires_available_context() {
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+class A\n\
+class B\n\
+fun box(): String {\n\
+    val b = B()\n\
+    context(a: A)\n\
+    fun pick(value: String): String = \"wrong\"\n\
+    context(b: B)\n\
+    fun pick(value: Any): String = \"OK\"\n\
+    return pick(\"value\")\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("local overload context applicability"),
+        "OK"
+    );
+}

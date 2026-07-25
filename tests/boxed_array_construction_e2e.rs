@@ -69,3 +69,47 @@ fn explicit_type_argument_byte() {
 }\n";
     assert_eq!(run(SRC).expect("arrayOf<Byte>"), "OK");
 }
+
+#[test]
+fn context_typed_empty_arrayof_compiles_and_runs() {
+    const SRC: &str = "val top: Array<String> = arrayOf()\n\
+class Holder {\n\
+    val member: Array<String> = arrayOf()\n\
+    val getter: Array<String> get() = arrayOf()\n\
+    fun block(): Array<String> { return arrayOf() }\n\
+}\n\
+fun accept(values: Array<String>): Array<String> = values\n\
+fun emptyStrings(): Array<String> = arrayOf()\n\
+fun box(): String {\n\
+    val ints: Array<Int> = arrayOf()\n\
+    val nullableInts: Array<Int?> = arrayOf(42)\n\
+    val strings = emptyStrings()\n\
+    var assigned: Array<String> = arrayOf(\"x\")\n\
+    assigned = arrayOf()\n\
+    val argument = accept(arrayOf())\n\
+    val holder = Holder()\n\
+    if (!ints.isEmpty() || !strings.isEmpty() || !top.isEmpty()) return \"size\"\n\
+    if (!assigned.isEmpty() || !argument.isEmpty()) return \"context\"\n\
+    if (!holder.member.isEmpty() || !holder.getter.isEmpty() || !holder.block().isEmpty()) return \"member\"\n\
+    if (ints.javaClass.componentType.name != \"java.lang.Integer\") return \"ints\"\n\
+    if (nullableInts.javaClass.componentType.name != \"java.lang.Integer\") return \"nullable ints\"\n\
+    if (strings.javaClass.componentType.name != \"java.lang.String\") return \"strings\"\n\
+    if (top.javaClass.componentType.name != \"java.lang.String\") return \"top\"\n\
+    if (assigned.javaClass.componentType.name != \"java.lang.String\") return \"assigned\"\n\
+    if (argument.javaClass.componentType.name != \"java.lang.String\") return \"argument\"\n\
+    if (holder.member.javaClass.componentType.name != \"java.lang.String\") return \"member type\"\n\
+    if (holder.getter.javaClass.componentType.name != \"java.lang.String\") return \"getter type\"\n\
+    if (holder.block().javaClass.componentType.name != \"java.lang.String\") return \"block type\"\n\
+    return \"OK\"\n\
+}\n";
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let jdk = common::jdk_modules();
+    let diagnostics = common::front_end_diagnostics(SRC, &[stdlib], jdk.as_deref());
+    assert!(
+        diagnostics.is_empty(),
+        "context-typed empty arrayOf should be frontend-valid: {diagnostics:?}"
+    );
+    assert_eq!(run(SRC).expect("context-typed empty arrayOf"), "OK");
+}

@@ -215,6 +215,7 @@ const RESULT_VALUE_CLASS_CASES: &[&str] = &[
     "inlineClasses/result/directCall2.kt",
     "inlineClasses/result/inlineMethodOnResult.kt",
     "inlineClasses/unboxGenericParameter/objectLiteral/resultAny.kt",
+    "inlineClasses/kt45991.kt",
 ];
 
 #[test]
