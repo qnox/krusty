@@ -5659,9 +5659,6 @@ pub enum ExprLowering {
     LabeledThisOuter,
     /// A platform property implemented by an intrinsic getter.
     IntrinsicProperty(Box<crate::libraries::LibraryMember>),
-    /// `X::class.java` — the `KClass<T>.java` unwrap. The lowerer emits the raw `java.lang.Class`
-    /// constant for a class-literal receiver (kotlinc's shape), else the runtime `getJavaClass`.
-    ClassLiteralJava,
     /// A property-read `recv.name` resolved to a classpath extension property getter.
     ExtensionPropertyGet {
         getter: Box<crate::libraries::LibraryCallable>,
@@ -13635,6 +13632,24 @@ impl<'a> Checker<'a> {
             }
             return Some(ret);
         }
+        if let Some((_, getter)) = self
+            .syms
+            .libraries
+            .extension_properties(rt)
+            .into_iter()
+            .find(|(property, _)| property == name)
+        {
+            let ret = getter.ret;
+            if let Some(e) = mexpr {
+                self.expr_lowers.insert(
+                    e,
+                    ExprLowering::ExtensionPropertyGet {
+                        getter: Box::new(getter),
+                    },
+                );
+            }
+            return Some(ret);
+        }
         None
     }
 
@@ -13684,21 +13699,6 @@ impl<'a> Checker<'a> {
                 }
                 return ty;
             }
-        }
-        // `X::class.java` — the stdlib `KClass<T>.java` extension unwraps to `java.lang.Class`.
-        // krusty types `::class` as `KClass`; `.java` yields the raw `Class`, which the lowerer emits
-        // as the class constant directly for a class-literal receiver (kotlinc's shape).
-        if name == "java"
-            && self
-                .syms
-                .libraries
-                .class_literal_type()
-                .is_some_and(|kclass| rt.non_null() == kclass)
-        {
-            if let Some(me) = mexpr {
-                self.expr_lowers.insert(me, ExprLowering::ClassLiteralJava);
-            }
-            return Ty::obj("java/lang/Class");
         }
         if let Some(member) = self.syms.libraries.intrinsic_property(rt, name) {
             let ret = member.ret;
