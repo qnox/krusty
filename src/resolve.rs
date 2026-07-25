@@ -4278,6 +4278,23 @@ fn infer_lit_ty_p(
                     return c.ty;
                 }
             }
+            let static_owner = match file.expr(*receiver) {
+                Expr::Name(type_name) => class_names.get(type_name),
+                Expr::Member { .. } => qualified_path(file, *receiver).and_then(|path| {
+                    let root = path.split('/').next()?;
+                    if props.iter().any(|(name, _, _)| name == root) {
+                        return None;
+                    }
+                    let internal = type_name(&path);
+                    src.resolve_type_name(internal).map(|_| internal)
+                }),
+                _ => None,
+            };
+            if let Some(field) =
+                static_owner.and_then(|internal| resolver.static_field(internal, name))
+            {
+                return field.ty;
+            }
             // Property read (`s.length`, `list.size`, `vc.value`). Use the scoped resolver so an
             // imported extension property such as `Char.code` can resolve through its getter.
             let rt = infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src, env);
@@ -7413,9 +7430,24 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &[Ty],
     ) -> Option<crate::symbol_resolver::ResolvedMember> {
+        self.resolve_instance_member_with_literal_args(recv, name, args, &[])
+    }
+    fn resolve_instance_member_with_literal_args(
+        &self,
+        recv: Ty,
+        name: &str,
+        args: &[Ty],
+        integer_literals: &[bool],
+    ) -> Option<crate::symbol_resolver::ResolvedMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::Value(recv), name, args, &[])
+            .resolve_symbol_with_literal_args(
+                SymRecv::Value(recv),
+                name,
+                args,
+                integer_literals,
+                &[],
+            )
             .and_then(Symbol::call)
     }
     fn resolve_property_member(
@@ -7478,6 +7510,24 @@ impl<'a> Checker<'a> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
             .resolve_symbol(SymRecv::Type(internal), name, args, &[])
+            .and_then(Symbol::companion)
+    }
+    fn resolve_companion_with_literal_args(
+        &self,
+        internal: &str,
+        name: &str,
+        args: &[Ty],
+        integer_literals: &[bool],
+    ) -> Option<crate::libraries::LibraryMember> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol_with_literal_args(
+                SymRecv::Type(internal),
+                name,
+                args,
+                integer_literals,
+                &[],
+            )
             .and_then(Symbol::companion)
     }
     fn resolve_companion_name(
@@ -9924,6 +9974,33 @@ impl<'a> Checker<'a> {
         args.iter().map(|&a| self.expr(a)).collect()
     }
 
+    fn is_integer_literal_arg(&self, expr: ExprId) -> bool {
+        match self.file.expr(expr) {
+            Expr::IntLit(_) => true,
+            Expr::Unary {
+                op: UnOp::Neg | UnOp::Plus,
+                operand,
+            } => self.is_integer_literal_arg(*operand),
+            _ => false,
+        }
+    }
+
+    fn integer_literal_args(&self, args: &[ExprId]) -> Vec<bool> {
+        args.iter()
+            .map(|&arg| self.is_integer_literal_arg(arg))
+            .collect()
+    }
+
+    fn integer_literal_adapts_to(&self, expected: Ty, actual: Ty, expr: ExprId) -> bool {
+        expected == Ty::Long && actual == Ty::Int && self.is_integer_literal_arg(expr)
+    }
+
+    fn expect_library_call_arg(&mut self, expected: Ty, actual: Ty, expr: ExprId, context: &str) {
+        if !self.integer_literal_adapts_to(expected, actual, expr) {
+            self.expect_assignable(expected, actual, self.span(expr), context);
+        }
+    }
+
     /// Like [`Self::arg_tys`], but type each LAMBDA argument against the extension `name`'s block
     /// parameter (bound by `receiver`), so `it` gets the real element/receiver type instead of the erased
     /// `Any` — the same binding the plain member-call path applies. A non-lambda argument types normally
@@ -11244,6 +11321,13 @@ impl<'a> Checker<'a> {
                             return self.set(e, c.ty);
                         }
                     }
+                }
+                if let Some(field) = self
+                    .classpath_type_receiver_internal(receiver)
+                    .and_then(|internal| self.resolver().static_field(internal, &name))
+                {
+                    let ty = self.record_external_static_field(Some(e), field);
+                    return self.set(e, ty);
                 }
                 // `Outer.NestedEnum.ENTRY` — a nested enum accessed through its enclosing type name.
                 // The receiver `Outer.NestedEnum` is a `Member` chain (not a bare `Name`); flatten it
@@ -12761,11 +12845,39 @@ impl<'a> Checker<'a> {
         arg_tys: &[Ty],
         type_args: &[Ty],
     ) -> Option<Ty> {
+        self.record_library_extension_call_with_literal_args(
+            call,
+            name,
+            receiver,
+            arg_tys,
+            &[],
+            type_args,
+        )
+    }
+
+    fn record_library_extension_call_with_literal_args(
+        &mut self,
+        call: Option<ExprId>,
+        name: &str,
+        receiver: Ty,
+        arg_tys: &[Ty],
+        integer_literals: &[bool],
+        type_args: &[Ty],
+    ) -> Option<Ty> {
         crate::trace_compiler!(
             "resolve",
             "record_library_extension_call {name} recv={receiver:?} args={arg_tys:?} targs={type_args:?}"
         );
-        let c = self.library_extension_callable(name, receiver, arg_tys, type_args)?;
+        let c = self
+            .resolver()
+            .resolve_symbol_with_literal_args(
+                crate::symbol_resolver::SymRecv::Value(receiver),
+                name,
+                arg_tys,
+                integer_literals,
+                type_args,
+            )
+            .and_then(crate::symbol_resolver::Symbol::extension_call)?;
         crate::trace_compiler!(
             "resolve",
             "record_library_extension_call {name} -> ret={:?} owner={} jvm={} desc={}",
@@ -13667,19 +13779,8 @@ impl<'a> Checker<'a> {
             }
         }
         if let Some(internal) = rt.non_null().obj_internal() {
-            if let Some(sf) = self.syms.libraries.static_field_name(internal, name) {
-                let ty = sf.ty;
-                if let Some(me) = mexpr {
-                    self.expr_lowers.insert(
-                        me,
-                        ExprLowering::ExternalStaticFieldRead {
-                            owner: sf.owner,
-                            name: sf.name,
-                            descriptor: sf.descriptor,
-                        },
-                    );
-                }
-                return ty;
+            if let Some(sf) = self.resolver().static_field(internal, name) {
+                return self.record_external_static_field(mexpr, sf);
             }
         }
         if let Some(member) = self.syms.libraries.intrinsic_property(rt, name) {
@@ -13694,6 +13795,24 @@ impl<'a> Checker<'a> {
         self.diags
             .error(diagnostic_span, format!("unresolved reference '{name}'."));
         Ty::Error
+    }
+
+    fn record_external_static_field(
+        &mut self,
+        expr: Option<ExprId>,
+        field: crate::libraries::StaticFieldRef,
+    ) -> Ty {
+        if let Some(expr) = expr {
+            self.expr_lowers.insert(
+                expr,
+                ExprLowering::ExternalStaticFieldRead {
+                    owner: field.owner,
+                    name: field.name,
+                    descriptor: field.descriptor,
+                },
+            );
+        }
+        field.ty
     }
 
     /// Probe a member read without emitting a diagnostic: returns `Some(ty)` if `recv.name` resolves,
@@ -13841,6 +13960,24 @@ impl<'a> Checker<'a> {
                     .and_then(|i| self.nested_internal_name(i))
             })
             .or_else(|| self.syms.class_names.get(name))
+    }
+
+    fn classpath_type_receiver_internal(&self, receiver: ExprId) -> Option<TypeName> {
+        match self.file.expr(receiver) {
+            Expr::Name(name) if !self.value_root_shadows_classifier(name) => {
+                self.classpath_class_internal_name(name)
+            }
+            Expr::Member { .. } => {
+                let path = qualified_path(self.file, receiver)?;
+                let root = path.split('/').next()?;
+                if self.value_root_shadows_classifier(root) {
+                    return None;
+                }
+                let internal = type_name(&path);
+                self.resolved_type_name(internal).map(|_| internal)
+            }
+            _ => None,
+        }
     }
 
     /// If `name` is imported from a classpath `object` (`import a.b.Obj.member` → `imports[member] =
@@ -14624,7 +14761,13 @@ impl<'a> Checker<'a> {
                         let leftmost = fq.split('/').next().unwrap_or("");
                         if self.lookup(leftmost).is_none() && self.resolved_type(&fq).is_some() {
                             let arg_tys = self.arg_tys(args);
-                            if let Some(m) = self.resolve_companion(&fq, &name, &arg_tys) {
+                            let integer_literals = self.integer_literal_args(args);
+                            if let Some(m) = self.resolve_companion_with_literal_args(
+                                &fq,
+                                &name,
+                                &arg_tys,
+                                &integer_literals,
+                            ) {
                                 self.set(receiver, Ty::obj(&fq));
                                 let ret = m.ret;
                                 self.resolved_calls.insert(call, ResolvedCall::Companion(m));
@@ -14742,7 +14885,14 @@ impl<'a> Checker<'a> {
                             .or_else(|| self.imported_type_internal(&cls));
                         if let Some(internal) = receiver_class {
                             let arg_tys = self.arg_tys(args);
-                            return match self.resolve_companion(&internal, &name, &arg_tys) {
+                            let integer_literals = self.integer_literal_args(args);
+                            let companion = self.resolve_companion_with_literal_args(
+                                &internal,
+                                &name,
+                                &arg_tys,
+                                &integer_literals,
+                            );
+                            return match companion {
                                 Some(m) => {
                                     // Type the class-name receiver as its own type so the LOWERING emits
                                     // the static call (`invokestatic <internal>.name`) via the classpath
@@ -14761,10 +14911,11 @@ impl<'a> Checker<'a> {
                                         .resolved_type(&internal)
                                         .and_then(|lt| lt.companion_object)
                                         .and_then(|(_, cty)| {
-                                            self.resolve_instance_member(
+                                            self.resolve_instance_member_with_literal_args(
                                                 Ty::obj_name(cty),
                                                 &name,
                                                 &arg_tys,
+                                                &integer_literals,
                                             )
                                             .map(|m| (cty, m))
                                         });
@@ -14802,11 +14953,14 @@ impl<'a> Checker<'a> {
                                                 .resolved_type(&internal)
                                                 .is_some_and(|t| t.is_object());
                                             if is_object {
-                                                if let Some(m) = self.resolve_instance_member(
-                                                    Ty::obj(&internal),
-                                                    &name,
-                                                    &arg_tys,
-                                                ) {
+                                                if let Some(m) = self
+                                                    .resolve_instance_member_with_literal_args(
+                                                        Ty::obj(&internal),
+                                                        &name,
+                                                        &arg_tys,
+                                                        &integer_literals,
+                                                    )
+                                                {
                                                     crate::trace_compiler!(
                                                         "resolve",
                                                         "classpath object instance member {cls}.{name} on {internal}"
@@ -15049,6 +15203,7 @@ impl<'a> Checker<'a> {
                         })
                         .collect()
                 });
+                let integer_literals = self.integer_literal_args(args);
                 if rt == Ty::Error {
                     return Ty::Error;
                 }
@@ -15070,7 +15225,12 @@ impl<'a> Checker<'a> {
                     ClasspathMemberSlotCall::NoMatch => {}
                 }
                 if rt == Ty::String {
-                    if let Some(m) = self.resolve_instance_member(rt, &name, &arg_tys) {
+                    if let Some(m) = self.resolve_instance_member_with_literal_args(
+                        rt,
+                        &name,
+                        &arg_tys,
+                        &integer_literals,
+                    ) {
                         let ret = m.ret;
                         self.resolved_calls.insert(call, ResolvedCall::Member(m));
                         return ret;
@@ -15095,7 +15255,12 @@ impl<'a> Checker<'a> {
                 ) {
                     return Ty::Int;
                 }
-                if let Some(m) = self.resolve_instance_member(rt, &name, &arg_tys) {
+                if let Some(m) = self.resolve_instance_member_with_literal_args(
+                    rt,
+                    &name,
+                    &arg_tys,
+                    &integer_literals,
+                ) {
                     crate::trace_compiler!(
                         "resolve",
                         "RIM-9451 name={name} rt={rt:?} -> ret={:?}",
@@ -15180,7 +15345,12 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                     // A classpath Java object: resolve the instance method via the `.class` reader.
-                    if let Some(m) = self.resolve_instance_member(rt, &name, &arg_tys) {
+                    if let Some(m) = self.resolve_instance_member_with_literal_args(
+                        rt,
+                        &name,
+                        &arg_tys,
+                        &integer_literals,
+                    ) {
                         let ret = m.ret;
                         self.resolved_calls.insert(call, ResolvedCall::Member(m));
                         return ret;
@@ -15307,41 +15477,15 @@ impl<'a> Checker<'a> {
                 ) {
                     return ret;
                 }
-                if let Some(ret) =
-                    self.record_library_extension_call(Some(call), &name, rt, &arg_tys, &call_targs)
-                {
+                if let Some(ret) = self.record_library_extension_call_with_literal_args(
+                    Some(call),
+                    &name,
+                    rt,
+                    &arg_tys,
+                    &integer_literals,
+                    &call_targs,
+                ) {
                     return ret;
-                }
-                // kotlinc adapts an integer LITERAL argument to a wider expected integer type
-                // (`longRange step 3` resolves `LongProgression.step(Long)`, with `3` as `3L`). When the
-                // exact-typed resolution failed, retry with integer-literal `Int` args widened to `Long`.
-                // A non-literal `Int` is NOT widened (kotlinc rejects `longRange step intVar`); and this is
-                // a fallback, so a call that already matched an `Int` overload is unaffected.
-                let has_int_literal = arg_tys
-                    .iter()
-                    .zip(args.iter())
-                    .any(|(t, a)| *t == Ty::Int && matches!(self.file.expr(*a), Expr::IntLit(_)));
-                if has_int_literal {
-                    let widened: Vec<Ty> = arg_tys
-                        .iter()
-                        .zip(args.iter())
-                        .map(|(t, a)| {
-                            if *t == Ty::Int && matches!(self.file.expr(*a), Expr::IntLit(_)) {
-                                Ty::Long
-                            } else {
-                                *t
-                            }
-                        })
-                        .collect();
-                    if let Some(ret) = self.record_library_extension_call(
-                        Some(call),
-                        &name,
-                        rt,
-                        &widened,
-                        &call_targs,
-                    ) {
-                        return ret;
-                    }
                 }
                 // A call selected by lambda RETURN type (`recv.sumOf { it * 2 }: Int`): the `@JvmName`
                 // overload matching the lambda's return is resolved from `@Metadata`. Record the resolved
@@ -17109,12 +17253,14 @@ impl<'a> Checker<'a> {
                         }
                         None => (args.to_vec(), arg_tys.clone(), None),
                     };
+                    let integer_literals = self.integer_literal_args(&sel_args);
                     if let Some(c) = self
                         .resolver()
-                        .resolve_symbol(
+                        .resolve_symbol_with_literal_args(
                             crate::symbol_resolver::SymRecv::TopLevel,
                             &fname,
                             &arg_tys,
+                            &integer_literals,
                             &call_targs,
                         )
                         .and_then(crate::symbol_resolver::Symbol::top_level_call)
@@ -17135,18 +17281,18 @@ impl<'a> Checker<'a> {
                             let fixed = c.params.len() - 1;
                             let elem = c.params[fixed].array_elem().unwrap_or(Ty::Error);
                             for i in 0..fixed.min(arg_tys.len()) {
-                                self.expect_assignable(
+                                self.expect_library_call_arg(
                                     c.params[i],
                                     arg_tys[i],
-                                    self.span(sel_args[i]),
+                                    sel_args[i],
                                     "argument",
                                 );
                             }
                             for i in fixed..arg_tys.len() {
-                                self.expect_assignable(
+                                self.expect_library_call_arg(
                                     elem,
                                     arg_tys[i],
-                                    self.span(sel_args[i]),
+                                    sel_args[i],
                                     "vararg argument",
                                 );
                             }
@@ -17158,19 +17304,19 @@ impl<'a> Checker<'a> {
                             let prefix_len = arg_tys.len() - 1;
                             let last = c.params.len() - 1;
                             for i in 0..prefix_len {
-                                self.expect_assignable(
+                                self.expect_library_call_arg(
                                     c.params[i],
                                     arg_tys[i],
-                                    self.span(sel_args[i]),
+                                    sel_args[i],
                                     "argument",
                                 );
                             }
                             let lambda_arg = sel_args[prefix_len];
                             if !matches!(self.file.expr(lambda_arg), Expr::Lambda { .. }) {
-                                self.expect_assignable(
+                                self.expect_library_call_arg(
                                     c.params[last],
                                     arg_tys[prefix_len],
-                                    self.span(lambda_arg),
+                                    lambda_arg,
                                     "argument",
                                 );
                             }
@@ -17179,10 +17325,10 @@ impl<'a> Checker<'a> {
                                 if matches!(self.file.expr(sel_args[i]), Expr::Lambda { .. }) {
                                     continue;
                                 }
-                                self.expect_assignable(
+                                self.expect_library_call_arg(
                                     c.params[i],
                                     *a,
-                                    self.span(sel_args[i]),
+                                    sel_args[i],
                                     "argument",
                                 );
                             }

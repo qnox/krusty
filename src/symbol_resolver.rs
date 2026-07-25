@@ -10,8 +10,8 @@
 //! ABI are not part of resolution.
 
 use crate::libraries::{
-    best_overload, FnKind, FunctionInfo, FunctionSet, GenericSig, InlineKind, LibraryCallable,
-    LibraryMember, Origin, PropKind, SemanticPlatform,
+    FnKind, FunctionInfo, FunctionSet, GenericSig, InlineKind, LibraryCallable, LibraryMember,
+    Origin, PropKind, SemanticPlatform,
 };
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
@@ -323,6 +323,233 @@ fn arg_fits_platform(lib: &dyn SemanticPlatform, param: &Ty, arg: &Ty) -> bool {
             .fun_arity()
             .zip(lib.function_like_arity(*arg))
             .is_some_and(|(p, a)| usize::from(p) == a)
+}
+
+fn integer_literal_adapts(param: Ty, arg: Ty, is_literal: bool) -> bool {
+    is_literal && arg == Ty::Int && param == Ty::Long
+}
+
+enum CandidateSelection<T> {
+    None,
+    Selected(T),
+    Ambiguous,
+}
+
+fn integer_literal_call_applies(
+    params: &[Ty],
+    args: &[Ty],
+    integer_literals: &[bool],
+    mut fits: impl FnMut(usize, &Ty, &Ty) -> bool,
+) -> Option<bool> {
+    if params.len() != args.len() {
+        return None;
+    }
+    params
+        .iter()
+        .zip(args)
+        .enumerate()
+        .try_fold(false, |adapted, (i, (&param, &arg))| {
+            if param == arg {
+                Some(adapted)
+            } else if integer_literal_adapts(
+                param,
+                arg,
+                integer_literals.get(i).copied().unwrap_or(false),
+            ) {
+                Some(true)
+            } else if fits(i, &param, &arg) {
+                Some(adapted)
+            } else {
+                None
+            }
+        })
+}
+
+fn parameter_at_least_as_specific(
+    lib: &dyn SemanticPlatform,
+    left: Ty,
+    right: Ty,
+    integer_literal: bool,
+) -> bool {
+    left == right
+        || (integer_literal && left == Ty::Int && right == Ty::Long)
+        || platform_arg_assignable(lib, &right, &left)
+}
+
+fn integer_literal_overload<T>(
+    lib: &dyn SemanticPlatform,
+    candidates: impl Iterator<Item = (Vec<Ty>, T)>,
+    args: &[Ty],
+    integer_literals: &[bool],
+    mut fits: impl FnMut(usize, &Ty, &Ty) -> bool,
+) -> CandidateSelection<T> {
+    if !integer_literals.iter().any(|literal| *literal) {
+        return CandidateSelection::None;
+    }
+    let mut applicable = Vec::new();
+    let mut has_adaptation = false;
+    for (params, candidate) in candidates {
+        let Some(adapted) =
+            integer_literal_call_applies(&params, args, integer_literals, &mut fits)
+        else {
+            continue;
+        };
+        has_adaptation |= adapted;
+        if applicable
+            .iter()
+            .any(|(existing, _): &(Vec<Ty>, T)| existing == &params)
+        {
+            continue;
+        }
+        applicable.push((params, candidate));
+    }
+    if !has_adaptation {
+        return CandidateSelection::None;
+    }
+    let maximal: Vec<usize> = applicable
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (params, _))| {
+            let dominated =
+                applicable.iter().enumerate().any(|(j, (other, _))| {
+                    i != j
+                        && other.iter().zip(params).enumerate().all(
+                            |(position, (&left, &right))| {
+                                parameter_at_least_as_specific(
+                                    lib,
+                                    left,
+                                    right,
+                                    integer_literals.get(position).copied().unwrap_or(false),
+                                )
+                            },
+                        )
+                        && other != params
+                });
+            (!dominated).then_some(i)
+        })
+        .collect();
+    if maximal.len() != 1 {
+        return CandidateSelection::Ambiguous;
+    }
+    let selected = maximal[0];
+    CandidateSelection::Selected(
+        applicable
+            .into_iter()
+            .nth(selected)
+            .expect("selected candidate exists")
+            .1,
+    )
+}
+
+fn unique_best_score<K: PartialEq, T>(
+    candidates: impl Iterator<Item = (usize, K, T)>,
+) -> Option<T> {
+    let mut best = None;
+    let mut ambiguous = false;
+    for (score, key, candidate) in candidates {
+        match best
+            .as_ref()
+            .map(|(best_score, _, _)| score.cmp(best_score))
+        {
+            None | Some(std::cmp::Ordering::Greater) => {
+                best = Some((score, key, candidate));
+                ambiguous = false;
+            }
+            Some(std::cmp::Ordering::Equal) => {
+                ambiguous |= best
+                    .as_ref()
+                    .is_some_and(|(_, best_key, _)| &key != best_key);
+            }
+            Some(std::cmp::Ordering::Less) => {}
+        }
+    }
+    if ambiguous {
+        None
+    } else {
+        best.map(|(_, _, candidate)| candidate)
+    }
+}
+
+fn best_companion_overload<'a>(
+    lib: &dyn SemanticPlatform,
+    candidates: impl Iterator<Item = &'a LibraryMember> + Clone,
+    name: &str,
+    args: &[Ty],
+    integer_literals: &[bool],
+) -> Option<&'a LibraryMember> {
+    debug_assert!(integer_literals.is_empty() || integer_literals.len() == args.len());
+    let adapts = |p: &Ty, a: &Ty, i: usize| {
+        integer_literal_adapts(*p, *a, integer_literals.get(i).copied().unwrap_or(false))
+    };
+    let named = candidates.filter(|member| member.name == name);
+    if let Some(exact) = named.clone().find(|member| member.params == args) {
+        return Some(exact);
+    }
+    match integer_literal_overload(
+        lib,
+        named.clone().map(|member| (member.params.clone(), member)),
+        args,
+        integer_literals,
+        |_, param, arg| param.is_erased_top() || abi_arg_subtype_of_param(lib, *arg, *param),
+    ) {
+        CandidateSelection::Selected(member) => return Some(member),
+        CandidateSelection::Ambiguous => return None,
+        CandidateSelection::None => {}
+    }
+    named
+        .clone()
+        .find(|member| {
+            member.params.len() == args.len()
+                && member
+                    .params
+                    .iter()
+                    .zip(args)
+                    .all(|(param, arg)| param == arg || param.is_erased_top())
+        })
+        .or_else(|| {
+            unique_best_score(named.clone().filter_map(|member| {
+                (member.params.len() == args.len()
+                    && member
+                        .params
+                        .iter()
+                        .zip(args)
+                        .all(|(param, arg)| abi_arg_subtype_of_param(lib, *arg, *param)))
+                .then_some((0, member.params.as_slice(), member))
+            }))
+        })
+        .or_else(|| {
+            named.clone().find(|member| {
+                member.params.len() > args.len()
+                    && member.params[..args.len()]
+                        .iter()
+                        .zip(args)
+                        .enumerate()
+                        .all(|(i, (param, arg))| param == arg || adapts(param, arg, i))
+            })
+        })
+        .or_else(|| {
+            named.clone().find(|member| {
+                let Some((last, fixed)) = member.params.split_last() else {
+                    return false;
+                };
+                let Some(element) = last.array_elem() else {
+                    return false;
+                };
+                if args.len() == member.params.len() && args.last() == Some(last) {
+                    return false;
+                }
+                args.len() >= fixed.len()
+                    && fixed.iter().zip(args).enumerate().all(|(i, (param, arg))| {
+                        param == arg || param.is_erased_top() || adapts(param, arg, i)
+                    })
+                    && args[fixed.len()..].iter().enumerate().all(|(i, arg)| {
+                        *arg == element
+                            || element.is_erased_top()
+                            || arg.is_erased_top()
+                            || adapts(&element, arg, fixed.len() + i)
+                    })
+            })
+        })
 }
 
 /// Extension overloads of a receiver-filtered set, ordered most-specific-first by the SOURCE receiver rank
@@ -681,6 +908,14 @@ impl<'a> SymbolResolver<'a> {
         self.src.resolve_type_name(internal)
     }
 
+    pub fn static_field(
+        &self,
+        internal: TypeName,
+        name: &str,
+    ) -> Option<crate::libraries::StaticFieldRef> {
+        self.lib.static_field_name(internal, name)
+    }
+
     /// Resolve a name on a receiver to the thing it DENOTES — a member, a property, a companion/instance
     /// member, or a constructor — WITHOUT being told how the site uses it. The resolver does not care
     /// whether the caller is going to call it, read it, write it, or take a reference; it just says what
@@ -696,12 +931,24 @@ impl<'a> SymbolResolver<'a> {
         args: &[Ty],
         type_args: &[Ty],
     ) -> Option<Symbol> {
+        self.resolve_symbol_with_literal_args(recv, name, args, &[], type_args)
+    }
+
+    pub fn resolve_symbol_with_literal_args(
+        &self,
+        recv: SymRecv,
+        name: &str,
+        args: &[Ty],
+        integer_literals: &[bool],
+        type_args: &[Ty],
+    ) -> Option<Symbol> {
+        debug_assert!(integer_literals.is_empty() || integer_literals.len() == args.len());
         match recv {
             SymRecv::Value(ty) => {
                 // Resolve every facet the name supports on this receiver; a name can support several (a
                 // Java zero-arg method is a property read AND a callable). Each facet is exactly the
                 // former per-use resolution, so the caller's chosen facet behaves as before.
-                let call = resolve_instance_member(self.lib, ty, name, args);
+                let call = resolve_instance_member(self.lib, ty, name, args, integer_literals);
                 let read = resolve_property_member(self.lib, ty, name);
                 let write = resolve_property_setter(self.lib, ty, name);
                 let method_ref = resolve_instance_ref(self.lib, ty, name);
@@ -714,7 +961,7 @@ impl<'a> SymbolResolver<'a> {
                     self.lib,
                     ty,
                     name,
-                    args,
+                    CallArgs::new(args, integer_literals),
                     type_args,
                     FnKind::Extension,
                     ExtCtx {
@@ -794,7 +1041,8 @@ impl<'a> SymbolResolver<'a> {
                 // reads `overloads` to inspect the family, or `top_level_call` for the arg/type-arg selected
                 // callable (default/vararg-aware) ready to emit.
                 let fs = function_set_from_symbols(self.symbols_in_scope(name));
-                let top_level_call = self.pick_top_level(name, &fs, args, type_args);
+                let top_level_call =
+                    self.pick_top_level(name, &fs, args, integer_literals, type_args);
                 let overloads = fs.overloads;
                 if overloads.is_empty() && top_level_call.is_none() {
                     return None;
@@ -811,10 +1059,11 @@ impl<'a> SymbolResolver<'a> {
                     extension_property_getter: None,
                 })))
             }
-            SymRecv::Type(internal) => self.resolve_symbol(
+            SymRecv::Type(internal) => self.resolve_symbol_with_literal_args(
                 SymRecv::TypeName(crate::types::type_name(internal)),
                 name,
                 args,
+                integer_literals,
                 type_args,
             ),
             SymRecv::TypeName(internal) => {
@@ -829,10 +1078,10 @@ impl<'a> SymbolResolver<'a> {
                 } else {
                     // `Type.name(args)` — an object/companion instance member, else a static/companion
                     // member. The resolver discovers which.
-                    resolve_instance_name(self.lib, internal, name, args)
+                    resolve_instance_name(self.lib, internal, name, args, integer_literals)
                         .map(Symbol::Instance)
                         .or_else(|| {
-                            resolve_companion_name(self.lib, internal, name, args)
+                            resolve_companion_name(self.lib, internal, name, args, integer_literals)
                                 .map(Symbol::Companion)
                         })
                 }
@@ -847,6 +1096,7 @@ impl<'a> SymbolResolver<'a> {
         name: &str,
         fs: &FunctionSet,
         args: &[Ty],
+        integer_literals: &[bool],
         type_args: &[Ty],
     ) -> Option<LibraryCallable> {
         let parsed: Vec<(&FunctionInfo, Vec<Ty>, Ty)> = fs
@@ -855,11 +1105,31 @@ impl<'a> SymbolResolver<'a> {
             .map(|o| (o, o.callable.params.clone(), o.callable.ret))
             .collect();
         let fits = |p: &Ty, a: &Ty| arg_fits_platform(self.lib, p, a);
+        let adapts = |p: &Ty, a: &Ty, i: usize| {
+            integer_literal_adapts(*p, *a, integer_literals.get(i).copied().unwrap_or(false))
+        };
 
-        let pick = parsed
-            .iter()
-            .find(|(_, params, _)| {
-                params.len() == args.len() && params.iter().zip(args).all(|(p, a)| fits(p, a))
+        let exact = parsed.iter().find(|(_, params, _)| params == args);
+        let pick = if exact.is_some() {
+            exact
+        } else {
+            match integer_literal_overload(
+                self.lib,
+                parsed
+                    .iter()
+                    .map(|entry @ (_, params, _)| (params.clone(), entry)),
+                args,
+                integer_literals,
+                |_, param, arg| fits(param, arg),
+            ) {
+                CandidateSelection::Selected(entry) => Some(entry),
+                CandidateSelection::Ambiguous => return None,
+                CandidateSelection::None => None,
+            }
+            .or_else(|| {
+                parsed.iter().find(|(_, params, _)| {
+                    params.len() == args.len() && params.iter().zip(args).all(|(p, a)| fits(p, a))
+                })
             })
             .or_else(|| {
                 parsed.iter().find(|(_, params, _)| {
@@ -871,10 +1141,18 @@ impl<'a> SymbolResolver<'a> {
                         return false;
                     };
                     args.len() >= fixed
-                        && params[..fixed].iter().zip(args).all(|(p, a)| fits(p, a))
-                        && args[fixed..].iter().all(|a| fits(&elem, a))
+                        && params[..fixed]
+                            .iter()
+                            .zip(args)
+                            .enumerate()
+                            .all(|(i, (p, a))| fits(p, a) || adapts(p, a, i))
+                        && args[fixed..]
+                            .iter()
+                            .enumerate()
+                            .all(|(i, a)| fits(&elem, a) || adapts(&elem, a, fixed + i))
                 })
-            });
+            })
+        };
 
         if pick.is_none() {
             if let Some(c) = self.resolve_top_level_default_callable(name, args, type_args) {
@@ -1672,28 +1950,13 @@ fn resolve_companion_name(
     internal: TypeName,
     name: &str,
     args: &[Ty],
+    integer_literals: &[bool],
 ) -> Option<LibraryMember> {
     let t = lib.resolve_type_name(internal)?;
     if !t.is_public {
         return None;
     }
-    if let Some(m) = best_overload(t.companion.iter(), name, args) {
-        return Some(m.clone());
-    }
-    // Widen each argument to the static parameter type, but only when the match is unique.
-    let mut widened = t.companion.iter().filter(|m| {
-        m.name == name
-            && m.params.len() == args.len()
-            && m.params
-                .iter()
-                .zip(args)
-                .all(|(p, a)| abi_arg_subtype_of_param(lib, *a, *p))
-    });
-    let first = widened.next()?;
-    if widened.next().is_some() {
-        return None;
-    }
-    Some(first.clone())
+    best_companion_overload(lib, t.companion.iter(), name, args, integer_literals).cloned()
 }
 
 /// Resolve an instance member `recv.name(args)` — the receiver's static type must be public, but the
@@ -1705,8 +1968,9 @@ fn resolve_instance_name(
     internal: TypeName,
     name: &str,
     args: &[Ty],
+    integer_literals: &[bool],
 ) -> Option<LibraryMember> {
-    select_instance_info(lib, Ty::obj_name(internal), name, args).map(|o| {
+    select_instance_info(lib, Ty::obj_name(internal), name, args, integer_literals).map(|o| {
         let ret = o.ret.apply(o.callable.ret);
         o.member_with_return(ret)
     })
@@ -1807,8 +2071,9 @@ fn resolve_instance_member(
     recv: Ty,
     name: &str,
     args: &[Ty],
+    integer_literals: &[bool],
 ) -> Option<ResolvedMember> {
-    let o = select_instance_info(lib, recv, name, args)?;
+    let o = select_instance_info(lib, recv, name, args, integer_literals)?;
     let ret = if o.callable.physical_ret == Ty::obj("kotlin/Any") {
         o.generic_sig
             .as_ref()
@@ -1857,7 +2122,7 @@ fn property_getter_via_query(
         .min_by_key(|p| p.receiver_rank)
         .map(|p| p.getter.name)
         .filter(|getter| !getter.contains('-'))?;
-    resolve_instance_member(lib, recv, &getter, &[]).filter(|m| m.ret.is_read_value_result())
+    resolve_instance_member(lib, recv, &getter, &[], &[]).filter(|m| m.ret.is_read_value_result())
 }
 
 /// Resolve a zero-arg property read on `recv`. The `@Metadata` `properties` query supplies the real
@@ -1869,11 +2134,11 @@ fn resolve_property_member(
     property: &str,
 ) -> Option<ResolvedMember> {
     property_getter_via_query(lib, recv, property)
-        .or_else(|| resolve_instance_member(lib, recv, property, &[]))
+        .or_else(|| resolve_instance_member(lib, recv, property, &[], &[]))
         .filter(|m| m.ret.is_read_value_result())
         .or_else(|| {
             let getter = lib.physical_property_getter_name(property)?;
-            resolve_instance_member(lib, recv, &getter, &[])
+            resolve_instance_member(lib, recv, &getter, &[], &[])
                 .filter(|m| m.ret.is_read_value_result())
         })
         .or_else(|| {
@@ -1928,12 +2193,13 @@ fn select_instance_info(
     recv: Ty,
     name: &str,
     args: &[Ty],
+    integer_literals: &[bool],
 ) -> Option<FunctionInfo> {
     select_overload(
         lib,
         recv,
         name,
-        args,
+        CallArgs::new(args, integer_literals),
         &[],
         FnKind::Member,
         ExtCtx {
@@ -2115,6 +2381,22 @@ struct ExtCtx<'a> {
     fn_scope: Option<&'a [TypeName]>,
 }
 
+#[derive(Clone, Copy)]
+struct CallArgs<'a> {
+    types: &'a [Ty],
+    integer_literals: &'a [bool],
+}
+
+impl<'a> CallArgs<'a> {
+    fn new(types: &'a [Ty], integer_literals: &'a [bool]) -> Self {
+        debug_assert!(integer_literals.is_empty() || integer_literals.len() == types.len());
+        Self {
+            types,
+            integer_literals,
+        }
+    }
+}
+
 /// The single call-overload selector for a receiver call `recv.name(args)`. It is parameterized by
 /// [`FnKind`] — MEMBER and EXTENSION resolution differ only in the *calling convention* the backend emits
 /// (invokevirtual with `this` vs invokestatic with the receiver as the leading arg), NOT in how the best
@@ -2169,11 +2451,15 @@ fn select_overload(
     lib: &dyn SemanticPlatform,
     recv: Ty,
     name: &str,
-    args: &[Ty],
+    args: CallArgs<'_>,
     type_args: &[Ty],
     kind: FnKind,
     ext: ExtCtx,
 ) -> Option<FunctionInfo> {
+    let CallArgs {
+        types: args,
+        integer_literals,
+    } = args;
     // A MEMBER call needs a public class receiver; an EXTENSION resolves on any receiver (primitives,
     // type variables, nullable types) that may have no `resolve_type` entry, so gate only members.
     if kind == FnKind::Member {
@@ -2299,8 +2585,10 @@ fn select_overload(
         by_rank.entry(rank).or_default().push((o, lp));
     }
     for cands in by_rank.values() {
-        if let Some(o) = best_by_args(lib, cands, args) {
-            return Some(o.clone());
+        match best_by_args(lib, cands, args, integer_literals) {
+            CandidateSelection::Selected(overload) => return Some(overload.clone()),
+            CandidateSelection::Ambiguous => return None,
+            CandidateSelection::None => {}
         }
     }
     // Platform assignability pass: subtype closure, erased `Any`, and value-class underlying matching.
@@ -2388,7 +2676,11 @@ fn best_by_args<'a>(
     lib: &dyn SemanticPlatform,
     cands: &[(&'a FunctionInfo, Vec<Ty>)],
     args: &[Ty],
-) -> Option<&'a FunctionInfo> {
+    integer_literals: &[bool],
+) -> CandidateSelection<&'a FunctionInfo> {
+    let adapts = |p: &Ty, a: &Ty, i: usize| {
+        integer_literal_adapts(*p, *a, integer_literals.get(i).copied().unwrap_or(false))
+    };
     // The DEFAULT-omitting passes accept a reference SUBTYPE / value-class-underlying argument (a
     // `joinToString(separator: CharSequence = …)` call with a `String`), matching the assignability the
     // exact-arity subtype pass in `select_overload` applies — the exact/`Any`-widened passes above stay
@@ -2402,24 +2694,46 @@ fn best_by_args<'a>(
                 .zip(lib.function_like_arity(*a))
                 .is_some_and(|(pn, an)| usize::from(pn) == an)
     };
+    if let Some((exact, _)) = cands.iter().find(|(_, params)| *params == args) {
+        return CandidateSelection::Selected(exact);
+    }
+    match integer_literal_overload(
+        lib,
+        cands
+            .iter()
+            .map(|(candidate, params)| (params.clone(), *candidate)),
+        args,
+        integer_literals,
+        |_, param, arg| fits(param, arg),
+    ) {
+        CandidateSelection::Selected(candidate) => {
+            return CandidateSelection::Selected(candidate);
+        }
+        CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
+        CandidateSelection::None => {}
+    }
     cands
         .iter()
-        .find(|(_, lp)| *lp == args)
-        .or_else(|| {
-            cands.iter().find(|(_, lp)| {
-                lp.len() == args.len()
-                    && lp.iter().zip(args).all(|(p, a)| {
-                        p == a || *p == Ty::obj("kotlin/Any") || fun_arg_matches(lib, p, a)
-                    })
-            })
+        .find(|(_, lp)| {
+            lp.len() == args.len()
+                && lp.iter().zip(args).all(|(p, a)| {
+                    p == a
+                        || *p == Ty::obj("kotlin/Any")
+                        || fun_arg_matches(lib, p, a)
+                        || p.fun_arity()
+                            .zip(lib.function_like_arity(*a))
+                            .is_some_and(|(param, arg)| usize::from(param) == arg)
+                })
         })
         .or_else(|| {
             cands.iter().find(|(o, lp)| {
-                lp.len() >= args.len()
-                    && (lp.len() == args.len()
-                        || o.call_sig.required == 0
-                        || o.call_sig.required <= args.len())
-                    && lp[..args.len()].iter().zip(args).all(|(p, a)| fits(p, a))
+                lp.len() > args.len()
+                    && (o.call_sig.required == 0 || o.call_sig.required <= args.len())
+                    && lp[..args.len()]
+                        .iter()
+                        .zip(args)
+                        .enumerate()
+                        .all(|(i, (p, a))| fits(p, a) || adapts(p, a, i))
             })
         })
         .or_else(|| {
@@ -2440,7 +2754,8 @@ fn best_by_args<'a>(
                     && lp[..prefix.min(lp.len())]
                         .iter()
                         .zip(&args[..prefix])
-                        .all(|(p, a)| fits(p, a))
+                        .enumerate()
+                        .all(|(i, (p, a))| fits(p, a) || adapts(p, a, i))
             })
         })
         .or_else(|| {
@@ -2461,11 +2776,19 @@ fn best_by_args<'a>(
                     return false;
                 };
                 args.len() >= fixed
-                    && lp[..fixed].iter().zip(args).all(|(p, a)| fits(p, a))
-                    && args[fixed..].iter().all(|a| fits(&elem, a))
+                    && lp[..fixed]
+                        .iter()
+                        .zip(args)
+                        .enumerate()
+                        .all(|(i, (p, a))| fits(p, a) || adapts(p, a, i))
+                    && args[fixed..]
+                        .iter()
+                        .enumerate()
+                        .all(|(i, a)| fits(&elem, a) || adapts(&elem, a, fixed + i))
             })
         })
         .map(|(o, _)| *o)
+        .map_or(CandidateSelection::None, CandidateSelection::Selected)
 }
 
 /// A lambda argument (`Ty::Fun`) matches a function-typed parameter of the same arity. The parameter may
@@ -2685,6 +3008,42 @@ mod tests {
     }
 
     #[test]
+    fn integer_literal_overloads_require_a_unique_most_specific_parameter_list() {
+        let source = FakeSource {
+            name: "unused",
+            receiver: None,
+            info: top_level_nullable_string_info(),
+        };
+        let args = [Ty::Int, Ty::Int];
+        let literals = [true, true];
+        let selected = integer_literal_overload(
+            &source,
+            [
+                (vec![Ty::Int, Ty::Long], "narrow"),
+                (vec![Ty::Long, Ty::Long], "wide"),
+            ]
+            .into_iter(),
+            &args,
+            &literals,
+            |_, param, arg| arg_fits(param, arg),
+        );
+        assert!(matches!(selected, CandidateSelection::Selected("narrow")));
+
+        let ambiguous = integer_literal_overload(
+            &source,
+            [
+                (vec![Ty::Int, Ty::Long], "left"),
+                (vec![Ty::Long, Ty::Int], "right"),
+            ]
+            .into_iter(),
+            &args,
+            &literals,
+            |_, param, arg| arg_fits(param, arg),
+        );
+        assert!(matches!(ambiguous, CandidateSelection::Ambiguous));
+    }
+
+    #[test]
     fn platform_class_identity_uses_borrowed_table_entries() {
         assert_eq!(
             platform_class_identity("kotlin/collections/Map$Entry"),
@@ -2843,7 +3202,7 @@ mod tests {
             receiver: Some(Ty::obj("demo/Box")),
             info: member_nullable_string_info(),
         };
-        let resolved = resolve_instance_member(&source, Ty::obj("demo/Box"), "maybe", &[])
+        let resolved = resolve_instance_member(&source, Ty::obj("demo/Box"), "maybe", &[], &[])
             .expect("nullable member should resolve");
         assert_eq!(resolved.ret, Ty::nullable(Ty::String));
         assert_eq!(resolved.member.physical_ret, Ty::String);
@@ -2856,7 +3215,7 @@ mod tests {
             receiver: Some(Ty::obj("demo/Box")),
             info: member_metadata_class_info(),
         };
-        let resolved = resolve_instance_member(&source, Ty::obj("demo/Box"), "names", &[])
+        let resolved = resolve_instance_member(&source, Ty::obj("demo/Box"), "names", &[], &[])
             .expect("member with metadata return class should resolve");
         assert_eq!(
             resolved.ret,
