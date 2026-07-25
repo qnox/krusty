@@ -81,6 +81,7 @@ impl WorkerHost {
     }
 
     fn configure(&mut self) -> ProjectFeedback {
+        let previous_model = self.sync.as_ref().and_then(ProjectSync::model).cloned();
         let Some(sync) = self.sync.as_mut() else {
             return ProjectFeedback::default();
         };
@@ -98,6 +99,7 @@ impl WorkerHost {
                     self.worker
                         .reconfigure(&classpath, jdk_home.as_deref(), self.options.no_jdk())
                 {
+                    sync.rollback_model(previous_model);
                     return ProjectFeedback {
                         reanalyze: false,
                         message: Some((
@@ -200,6 +202,10 @@ impl WorkerHost {
 }
 
 impl krusty_lsp::Analysis for WorkerHost {
+    fn analysis_ready(&self) -> bool {
+        self.sync.as_ref().and_then(ProjectSync::model).is_some()
+    }
+
     fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
         self.worker.analyze(sources).unwrap_or_else(|error| {
             sources

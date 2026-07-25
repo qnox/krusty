@@ -5,6 +5,7 @@ pub mod detect;
 pub mod fingerprint;
 pub mod gradle;
 pub mod jdk;
+mod lock;
 pub mod maven;
 pub mod model;
 pub mod provider;

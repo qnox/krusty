@@ -309,8 +309,13 @@ impl AnalysisWorker {
         if arguments == self.arguments {
             return Ok(());
         }
+        let replacement = WorkerProcess::spawn(&self.executable, &arguments)?;
+        let _ = self.process.child.kill();
+        let _ = self.process.child.wait();
+        self.process = replacement;
         self.arguments = arguments;
-        self.restart()
+        self.analyses = 0;
+        Ok(())
     }
 
     pub fn analyze(&mut self, sources: &[&str]) -> io::Result<Vec<DocumentAnalysis>> {
