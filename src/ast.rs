@@ -706,6 +706,9 @@ impl Modality {
     pub fn is_sealed(self) -> bool {
         matches!(self, Modality::Sealed)
     }
+    pub fn is_final(self) -> bool {
+        matches!(self, Modality::Final)
+    }
 }
 
 impl ClassDecl {
@@ -720,6 +723,9 @@ impl ClassDecl {
     /// Specifically `sealed`.
     pub fn is_sealed(&self) -> bool {
         self.modality.is_sealed()
+    }
+    pub fn is_final(&self) -> bool {
+        self.modality.is_final() && !self.is_interface()
     }
     pub fn is_interface(&self) -> bool {
         self.kind == ClassKind::Interface

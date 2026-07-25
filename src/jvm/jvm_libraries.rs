@@ -20,7 +20,7 @@ use crate::runtime::{
     RangeConstruction, RuntimeCtor, RuntimeOp,
 };
 use crate::symbol_resolver::{arg_fits, ty_subst, ty_subst_all};
-use crate::symbol_source::SymbolSource;
+use crate::symbol_source::{InheritanceShape, SymbolSource};
 use crate::types::{intern, type_name, Ty, TypeName, TypeNameList};
 
 /// The `kotlin/…Array` classifier name for an array `Ty` — a primitive specialized array
@@ -1752,20 +1752,39 @@ impl SymbolSource for JvmLibraries {
         false
     }
 
-    fn class_is_extensible(&self, internal: &str) -> bool {
-        // Only a real, concrete (non-final, non-abstract) non-interface `.class` is a safe superclass to
-        // emit a `super(…)` to. A mapped/builtin type (no own `.class`) or a final/abstract/interface
-        // base is rejected — extending it would either fail JVM verification or need bridge/abstract
-        // synthesis the backend does not do.
-        self.cp
-            .find(internal)
-            .is_some_and(|ci| !ci.is_final() && !ci.is_abstract() && !ci.is_interface())
-    }
-
-    fn class_is_extensible_name(&self, internal: TypeName) -> bool {
-        self.cp
-            .find_name(internal)
-            .is_some_and(|ci| !ci.is_final() && !ci.is_abstract() && !ci.is_interface())
+    fn inheritance_shape_name(&self, internal: TypeName) -> Option<InheritanceShape> {
+        let class = self.cp.find_name(internal)?;
+        let mut pending = vec![internal];
+        let mut seen = std::collections::HashSet::new();
+        let mut has_abstract_obligations = false;
+        while let Some(current) = pending.pop() {
+            if !seen.insert(current) {
+                continue;
+            }
+            let Some(current_class) = self.cp.find_name(current) else {
+                continue;
+            };
+            if current_class
+                .methods
+                .iter()
+                .any(|method| !method.is_static() && method.is_abstract())
+            {
+                has_abstract_obligations = true;
+                break;
+            }
+            pending.extend(current_class.interfaces.iter_ids());
+            pending.extend(current_class.super_class);
+        }
+        let ty = self.resolve_type_name(internal)?;
+        Some(InheritanceShape {
+            is_interface: class.is_interface(),
+            is_extensible: !class.is_final() && !class.is_interface(),
+            has_no_arg_constructor: ty
+                .constructors
+                .iter()
+                .any(|constructor| constructor.params.is_empty()),
+            supports_external_subclassing: !class.is_abstract() || !has_abstract_obligations,
+        })
     }
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
