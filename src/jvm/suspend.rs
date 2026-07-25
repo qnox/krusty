@@ -751,6 +751,23 @@ fn hoist_stmt(
             out.push(stmt);
             return;
         }
+        // Hoist inside each protected region; moving calls outside would change exception handling.
+        IrExpr::Try {
+            body,
+            catches,
+            finally,
+            ..
+        } => {
+            let blocks: Vec<ExprId> = std::iter::once(*body)
+                .chain(catches.iter().map(|c| c.body))
+                .chain(*finally)
+                .collect();
+            for b in blocks {
+                hoist_suspensions(ir, b, suspend_set, orig_rets);
+            }
+            out.push(stmt);
+            return;
+        }
         IrExpr::Variable { init: Some(i), .. } if is_suspend_call(ir, *i, suspend_set) => {
             out.push(stmt);
             return;
@@ -1014,6 +1031,18 @@ fn hoist_expr(
             stmts,
             value: Some(v),
         } if stmts.is_empty() => hoist_expr(ir, v, suspend_set, orig_rets, prelude),
+        // A non-suspending block prelude can move with its suspending value without reordering effects.
+        IrExpr::Block {
+            stmts,
+            value: Some(v),
+        } if !stmts
+            .iter()
+            .any(|&s| expr_calls_suspend(ir, s, suspend_set))
+            && expr_calls_suspend(ir, v, suspend_set) =>
+        {
+            prelude.extend(stmts);
+            hoist_expr(ir, v, suspend_set, orig_rets, prelude)
+        }
         // A leaf or a conditional/unhandled node: leave it (any suspension inside surfaces to the
         // flattener, which restructures it or skips the file).
         _ => e,
@@ -4066,15 +4095,21 @@ fn build_continuation_class(
             value: recv_v,
         }));
         ctor_args.push(IrCtorArg {
+            name: None,
             ty: recv_ty,
             is_field: false,
+            has_default: false,
+            type_param: None,
             check: None,
         });
         arg_idx += 1;
     }
     ctor_args.push(IrCtorArg {
+        name: None,
         ty: continuation_ty(),
         is_field: false,
+        has_default: false,
+        type_param: None,
         check: None,
     });
     let super_completion_idx = arg_idx;
@@ -4104,6 +4139,7 @@ fn build_continuation_class(
         is_annotation: false,
         annotation_impl_of: None,
         is_sealed: false,
+        sealed_subclasses: Default::default(),
         is_abstract: false,
         is_open: false,
         superclass: crate::types::type_name(CONTINUATION_IMPL),

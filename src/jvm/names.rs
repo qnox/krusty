@@ -43,6 +43,15 @@ pub fn collection_property_stub_name(prop: &str) -> Option<&'static str> {
 
 pub use crate::names::property_setter_name;
 
+pub(crate) fn reference_array_element(ty: Ty) -> Ty {
+    match ty {
+        Ty::Nullable(inner) => Ty::nullable(reference_array_element(*inner)),
+        Ty::Unit => Ty::obj("kotlin/Unit"),
+        Ty::Nothing => Ty::obj("kotlin/Nothing"),
+        other => other.boxed_ref().unwrap_or(other),
+    }
+}
+
 /// A JVM method descriptor `(params)ret` from krusty `Ty`s.
 pub fn method_descriptor(params: &[Ty], ret: Ty) -> String {
     let mut s = String::from("(");
@@ -109,7 +118,7 @@ pub fn type_descriptor(ty: Ty) -> String {
                 .first()
                 .copied()
                 .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-            format!("[{}", type_descriptor(e.boxed_ref().unwrap_or(e)))
+            format!("[{}", type_descriptor(reference_array_element(e)))
         }
         Ty::Obj(n, _) if primitive_array_descriptor(n).is_some() => {
             primitive_array_descriptor(n).unwrap().into()
@@ -147,6 +156,12 @@ mod tests {
             type_descriptor(unbounded),
             type_descriptor(Ty::obj("kotlin/Any"))
         );
+    }
+
+    #[test]
+    fn unit_array_uses_the_unit_reference_descriptor() {
+        let array = Ty::obj_args("kotlin/Array", &[Ty::Unit]);
+        assert_eq!(type_descriptor(array), "[Lkotlin/Unit;");
     }
 
     #[test]

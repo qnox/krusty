@@ -240,7 +240,20 @@ pub fn compile_in_process(
     // The facade `@Metadata` the CLI backend writes (top-level fn/extension records) — without it a
     // SEPARATE compilation reading this output from the classpath cannot resolve extensions.
     let metadata = krusty::jvm::backend::facade_package_metadata(file, 0, &syms);
-    let outputs = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, metadata.as_ref())?;
+    let opts = krusty::jvm::ir_emit::EmitOptions {
+        inner_class_resolver: Some(krusty::jvm::backend::classpath_inner_class_resolver(
+            cp.clone(),
+        )),
+        ..Default::default()
+    };
+    let outputs = krusty::jvm::ir_emit::emit_all_with_opts(
+        &ir,
+        &facade,
+        &*cp,
+        metadata.as_ref(),
+        &opts,
+        &krusty::jvm::ir_emit::EmitRun::default(),
+    )?;
     if outputs.is_empty() {
         None
     } else {
@@ -296,6 +309,9 @@ pub fn compile_in_process_metadata_cp(
         emit_class_metadata: true,
         // Match the CLI backend (`{stem}.kt`) so the bytes equal a `krusty -d …` run.
         source_file: Some(format!("{stem}.kt")),
+        inner_class_resolver: Some(krusty::jvm::backend::classpath_inner_class_resolver(
+            cp.clone(),
+        )),
         ..Default::default()
     };
     let run = EmitRun::default();

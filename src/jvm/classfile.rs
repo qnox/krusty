@@ -3,6 +3,7 @@
 //! StackMapTable attribute so the type-checking verifier on Java 25+ accepts them.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PRIVATE: u16 = 0x0002;
@@ -227,6 +228,20 @@ impl ConstPool {
             .get(&Const::Utf8(mapped.to_string()))
             .is_some_and(|&u| self.dedup.contains_key(&Const::Class(u)))
     }
+    fn class_names(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                let Const::Class(name_index) = entry else {
+                    return None;
+                };
+                match self.entry_at(*name_index) {
+                    Some(Const::Utf8(name)) => Some(name.clone()),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
     fn integer(&mut self, v: i32) -> u16 {
         self.intern(Const::Integer(v))
     }
@@ -427,6 +442,9 @@ pub struct ClassWriter {
     /// Candidate `InnerClasses` entries (the file's nested classes). `finish` emits only those whose
     /// `inner` is actually referenced as a class constant — kotlinc's rule.
     inner_class_candidates: Vec<InnerClassSpec>,
+    inner_class_resolver: Option<InnerClassResolver>,
+    /// Entries for the `PermittedSubclasses` attribute.
+    permitted_subclasses: Vec<String>,
     /// Class-file major version to emit (default v52; set via [`ClassWriter::set_major`]).
     major: u16,
     /// Source-file simple name for the `SourceFile` attribute (set via [`ClassWriter::set_source_file`]).
@@ -436,13 +454,22 @@ pub struct ClassWriter {
 
 /// One candidate `InnerClasses` entry: the nested class, its enclosing class (`None` for an anonymous
 /// local), its simple name (`None` when anonymous), and the entry's access flags.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InnerClassSpec {
     pub inner: String,
     pub outer: Option<String>,
     pub name: Option<String>,
     pub access: u16,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InnerClassDetails {
+    pub outer: Option<String>,
+    pub name: Option<String>,
+    pub access: u16,
+}
+
+pub type InnerClassResolver = Rc<dyn Fn(&str) -> Option<InnerClassDetails>>;
 
 impl ClassWriter {
     pub fn new(internal_name: &str, super_internal: &str) -> ClassWriter {
@@ -478,6 +505,8 @@ impl ClassWriter {
             class_deprecated: false,
             deprecated_methods: std::collections::HashSet::new(),
             inner_class_candidates: Vec::new(),
+            inner_class_resolver: None,
+            permitted_subclasses: Vec::new(),
             major: MAJOR_JAVA8,
             source_file: None,
             internal_name: internal_name.to_string(),
@@ -504,7 +533,34 @@ impl ClassWriter {
     /// if `inner` is referenced as a class constant. Register the whole file's nest on every writer —
     /// the per-class filter then yields exactly the entries kotlinc emits for that class.
     pub fn add_inner_class(&mut self, spec: InnerClassSpec) {
+        // Preserve the first registration because its order affects byte identity.
+        if self
+            .inner_class_candidates
+            .iter()
+            .any(|s| s.inner == spec.inner)
+        {
+            return;
+        }
         self.inner_class_candidates.push(spec);
+    }
+
+    pub fn set_inner_class_resolver(&mut self, resolver: Option<InnerClassResolver>) {
+        self.inner_class_resolver = resolver;
+    }
+
+    /// Set the `PermittedSubclasses` entries in emission order.
+    pub fn set_permitted_subclasses(&mut self, subclasses: Vec<String>) {
+        self.permitted_subclasses = subclasses;
+    }
+
+    /// Intern a class constant before natural first use.
+    pub fn seed_class(&mut self, internal: &str) {
+        self.cp.class(internal);
+    }
+
+    /// Intern a UTF-8 constant before natural first use.
+    pub fn seed_utf8(&mut self, s: &str) {
+        self.cp.utf8(s);
     }
 
     /// Mark the class itself as carrying a `Deprecated` attribute (kotlinc emits this for a `@Deprecated`
@@ -819,7 +875,7 @@ impl ClassWriter {
         &mut self,
         this_internal: &str,
         super_internal: &str,
-        ctor_desc: &str,
+        ctor_descs: (&str, &str),
         fields: &[SeedField],
         // (name, descriptor, setter_kind): 0 = getter, 1 = primitive/other setter, 2 = non-null
         // reference setter (its `checkNotNullParameter` guard also interns a `<set-?>` String constant).
@@ -827,6 +883,7 @@ impl ClassWriter {
         // Per-member generic `Signature`s (parameterized-type ctor/accessor/field members).
         sigs: &MemberSignatures,
     ) {
+        let (ctor_desc, super_ctor_desc) = ctor_descs;
         // Primary constructor: name + descriptor are interned at method entry, before its body.
         self.cp.utf8("<init>");
         self.cp.utf8(ctor_desc);
@@ -867,8 +924,7 @@ impl ClassWriter {
                 }
             }
         }
-        // `super()` call: `()V`, its NameAndType, the Methodref.
-        self.cp.methodref(super_internal, "<init>", "()V");
+        self.cp.methodref(super_internal, "<init>", super_ctor_desc);
         // One `putfield` per property-backed parameter: field name, descriptor, NameAndType, Fieldref.
         for f in fields.iter().filter(|f| f.stores_in_ctor) {
             // A body property's `String` initializer is pushed by `ldc` before its `putfield`.
@@ -1617,7 +1673,39 @@ impl ClassWriter {
         }
     }
 
+    fn resolve_inner_classes(&mut self) {
+        let Some(resolve) = self.inner_class_resolver.clone() else {
+            return;
+        };
+        let referenced = self.cp.class_names();
+        for inner in referenced {
+            if self
+                .inner_class_candidates
+                .iter()
+                .any(|candidate| candidate.inner == inner)
+            {
+                continue;
+            }
+            let Some(details) = resolve(&inner) else {
+                continue;
+            };
+            if let Some(outer) = &details.outer {
+                self.cp.class(outer);
+            }
+            if let Some(name) = &details.name {
+                self.cp.utf8(name);
+            }
+            self.add_inner_class(InnerClassSpec {
+                inner,
+                outer: details.outer,
+                name: details.name,
+                access: details.access,
+            });
+        }
+    }
+
     pub fn finish(mut self) -> Vec<u8> {
+        self.resolve_inner_classes();
         // kotlinc interns the `SourceFile` VALUE (the `.kt` name) right after the class annotations and
         // before the Code-attribute names, then the `SourceFile` attribute NAME later, and
         // `RuntimeVisibleAnnotations` last. Intern the value up front to match.
@@ -1739,12 +1827,30 @@ impl ClassWriter {
         } else {
             None
         };
-        // Each optional class attribute is BUILT here (interning its name/values before the pool is
-        // serialized) but held in a local, then written in kotlinc's fixed class-attribute order below:
-        //   InnerClasses, Signature, SourceFile, Deprecated, RuntimeVisibleAnnotations, BootstrapMethods.
-        // (krusty does not yet emit InnerClasses / class-level Signature.) kotlinc interns the
-        // `BootstrapMethods` NAME after `SourceFile`/`RuntimeVisibleAnnotations`, so it is built below
-        // them even though its handle/argument indices were interned when `add_bootstrap` ran.
+        // Attribute construction must finish before serializing the constant pool.
+        let inner_classes_attr = {
+            let referenced: Vec<InnerClassSpec> = self
+                .inner_class_candidates
+                .iter()
+                .filter(|s| self.cp.has_class(&s.inner))
+                .cloned()
+                .collect();
+            (!referenced.is_empty()).then(|| {
+                let name = self.cp.utf8("InnerClasses");
+                let mut body = Vec::new();
+                u2(&mut body, referenced.len() as u16);
+                for s in &referenced {
+                    let inner_idx = self.cp.class(&s.inner);
+                    let outer_idx = s.outer.as_deref().map_or(0, |o| self.cp.class(o));
+                    let name_idx = s.name.as_deref().map_or(0, |n| self.cp.utf8(n));
+                    u2(&mut body, inner_idx);
+                    u2(&mut body, outer_idx);
+                    u2(&mut body, name_idx);
+                    u2(&mut body, s.access);
+                }
+                (name, body)
+            })
+        };
         // `SourceFile`: name_index + a 2-byte body = the CP index of the source-file UTF8 (its VALUE was
         // interned at the top of `finish`). kotlinc interns the `SourceFile` name BEFORE the
         // `RuntimeVisibleAnnotations` name, so build this attribute first.
@@ -1792,29 +1898,16 @@ impl ClassWriter {
         // this class actually references as a class constant (the `has_class` filter), in registration
         // order. `inner` is already interned (that is why it passed the filter); `outer`/`name` intern
         // here — before the pool is serialized.
-        let inner_classes_attr = {
-            let referenced: Vec<InnerClassSpec> = self
-                .inner_class_candidates
-                .iter()
-                .filter(|s| self.cp.has_class(&s.inner))
-                .cloned()
-                .collect();
-            (!referenced.is_empty()).then(|| {
-                let name = self.cp.utf8("InnerClasses");
-                let mut body = Vec::new();
-                u2(&mut body, referenced.len() as u16);
-                for s in &referenced {
-                    let inner_idx = self.cp.class(&s.inner);
-                    let outer_idx = s.outer.as_deref().map_or(0, |o| self.cp.class(o));
-                    let name_idx = s.name.as_deref().map_or(0, |n| self.cp.utf8(n));
-                    u2(&mut body, inner_idx);
-                    u2(&mut body, outer_idx);
-                    u2(&mut body, name_idx);
-                    u2(&mut body, s.access);
-                }
-                (name, body)
-            })
-        };
+        let permitted_attr = (!self.permitted_subclasses.is_empty()).then(|| {
+            let name = self.cp.utf8("PermittedSubclasses");
+            let mut body = Vec::new();
+            u2(&mut body, self.permitted_subclasses.len() as u16);
+            for sub in &self.permitted_subclasses {
+                let idx = self.cp.class(sub);
+                u2(&mut body, idx);
+            }
+            (name, body)
+        });
         let mut out = Vec::new();
         u4(&mut out, 0xCAFEBABE);
         u2(&mut out, 0); // minor
@@ -1996,6 +2089,7 @@ impl ClassWriter {
                 sourcefile_attr,
                 deprecated_attr,
                 rva_attr,
+                permitted_attr,
                 bootstrap_attr,
             ]
             .into_iter()
@@ -2938,6 +3032,36 @@ mod tests {
         assert!(has(b"InnerClasses"));
         assert!(has(b"C$Companion"));
         assert!(has(b"Companion"));
+    }
+
+    #[test]
+    fn referenced_inner_classes_are_resolved_from_metadata() {
+        let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen_by_resolver = seen.clone();
+        let resolver: InnerClassResolver = Rc::new(move |internal| {
+            seen_by_resolver.borrow_mut().push(internal.to_string());
+            (internal == "dep/Nested").then(|| InnerClassDetails {
+                outer: Some("dep/Outer".to_string()),
+                name: Some("Nested".to_string()),
+                access: ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+            })
+        });
+
+        let mut writer = ClassWriter::new("Use", "java/lang/Object");
+        writer.set_inner_class_resolver(Some(resolver));
+        writer.class_ref("dep/Nested");
+        let info = crate::jvm::classreader::parse_class(&writer.finish()).expect("parse class");
+
+        assert_eq!(
+            info.inner_classes,
+            vec![crate::jvm::classreader::InnerClassRef {
+                inner: "dep/Nested".to_string(),
+                outer: Some("dep/Outer".to_string()),
+                name: Some("Nested".to_string()),
+                access: ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+            }]
+        );
+        assert!(!seen.borrow().iter().any(|name| name == "dep/Outer"));
     }
 
     #[test]

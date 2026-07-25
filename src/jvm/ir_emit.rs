@@ -5,11 +5,14 @@
 use std::collections::HashMap;
 
 use crate::ir::{Callee, IrBinOp, IrClass, IrConst, IrCtorArg, IrExpr, IrField, IrFile, IrTypeOp};
-use crate::jvm::classfile::{ClassWriter, CodeBuilder, Label, VerifType};
+use crate::jvm::classfile::{
+    ClassWriter, CodeBuilder, InnerClassResolver, Label, VerifType, MAJOR_JAVA8,
+};
 use crate::jvm::classreader::{MethodCode, C};
 use crate::jvm::inline::MethodBodies;
 use crate::jvm::names::{
-    method_descriptor, property_getter_name, property_setter_name, type_descriptor,
+    method_descriptor, property_getter_name, property_setter_name, reference_array_element,
+    type_descriptor,
 };
 use crate::types::{Ty, TypeName};
 
@@ -90,6 +93,7 @@ pub struct EmitOptions {
     /// out and emit no metadata. OFF by default: an unverified payload breaks kotlin-reflect (a
     /// box-corpus case caught this), so the default emit stays unchanged until a shape is verified.
     pub emit_class_metadata: bool,
+    pub inner_class_resolver: Option<InnerClassResolver>,
 }
 
 /// `Class.flags` (proto field 1) for any Kotlin class kind — ONE bitfield, not a per-kind constant.
@@ -323,20 +327,6 @@ fn build_class_metadata(
         .collect();
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
     let const_fields = init_body_constant_fields(ir, c);
-    // Per-ctor-parameter type-parameter index — the leading `ctor_param_count` fields, in order.
-    let ctor_param_tparams: Vec<Option<u32>> = c
-        .fields
-        .iter()
-        .take(c.ctor_param_count as usize)
-        .map(|f| {
-            ir.field_signatures(&c.fq_name()).and_then(|fs| {
-                fs.iter()
-                    .find(|(fname, _)| fname == &f.name)
-                    .and_then(|(_, tp)| c.type_params.iter().position(|t| t == tp))
-                    .map(|i| i as u32)
-            })
-        })
-        .collect();
     let props: Vec<PropMeta> = c
         .fields
         .iter()
@@ -365,19 +355,48 @@ fn build_class_metadata(
                 .then(|| (format!("set{}", cap(&f.name)), format!("({})V", desc(f.ty)))),
         })
         .collect();
-    // Only the LEADING `ctor_param_count` fields are constructor parameters; any remainder are BODY
-    // properties (an `object`'s `val x = 1`, a class's non-ctor `val`) — they are properties, not params.
-    let ctor_params: Vec<(String, Ty)> = c
-        .fields
+    let named_ctor_args: Vec<(String, Ty, bool, Option<u32>)> = c
+        .ctor_args
         .iter()
-        .take(c.ctor_param_count as usize)
-        .map(|f| (f.name.clone(), f.ty))
+        .filter_map(|arg| {
+            arg.name
+                .as_ref()
+                .map(|name| (name.clone(), arg.ty, arg.has_default, arg.type_param))
+        })
         .collect();
-    let ctor_param_defaults: Vec<bool> = c
-        .fields
+    let ctor_params_with_defaults = if named_ctor_args.is_empty() {
+        c.fields
+            .iter()
+            .take(c.ctor_param_count as usize)
+            .map(|field| {
+                let type_param = ir.field_signatures(&c.fq_name()).and_then(|signatures| {
+                    signatures
+                        .iter()
+                        .find(|(name, _)| name == &field.name)
+                        .and_then(|(_, type_param)| {
+                            c.type_params
+                                .iter()
+                                .position(|candidate| candidate == type_param)
+                        })
+                        .map(|index| index as u32)
+                });
+                (field.name.clone(), field.ty, field.has_default, type_param)
+            })
+            .collect()
+    } else {
+        named_ctor_args
+    };
+    let ctor_params: Vec<(String, Ty)> = ctor_params_with_defaults
         .iter()
-        .take(c.ctor_param_count as usize)
-        .map(|f| f.has_default)
+        .map(|(name, ty, _, _)| (name.clone(), *ty))
+        .collect();
+    let ctor_param_defaults: Vec<bool> = ctor_params_with_defaults
+        .iter()
+        .map(|(_, _, has_default, _)| *has_default)
+        .collect();
+    let ctor_param_tparams: Vec<Option<u32>> = ctor_params_with_defaults
+        .iter()
+        .map(|(_, _, _, type_param)| *type_param)
         .collect();
     // An `enum class`'s JVM constructor takes the two synthetic `Enum` parameters first, so its
     // recorded `JvmMethodSignature` is `(Ljava/lang/String;I…)V` — the metadata names the REAL
@@ -557,6 +576,37 @@ fn build_class_metadata(
         .then(|| format!("({0}){0}", desc(c.fields[0].ty)));
     // `Class.enumEntry` (f13) — the builder has always accepted these; only the caller withheld them.
     let enum_entry_names: Vec<String> = c.enum_entries.iter().map(|e| e.name.clone()).collect();
+    // Metadata keeps nested declarations ordered and sealed subclasses sorted.
+    let self_fq = c.fq_name();
+    let nested_names: Vec<String> = ir
+        .classes
+        .iter()
+        .filter(|candidate| {
+            c.sealed_subclasses
+                .iter_ids()
+                .any(|subtype| subtype == candidate.fq_name_id())
+        })
+        .filter_map(|candidate| {
+            candidate
+                .fq_name()
+                .strip_prefix(&format!("{self_fq}$"))
+                .map(str::to_string)
+        })
+        .collect();
+    let sealed_sorted = sorted_sealed_subclasses(c);
+    let sealed_descs: Vec<String> = sealed_sorted.iter().map(|s| format!("L{s};")).collect();
+    let nested_refs: Vec<&str> = nested_names.iter().map(String::as_str).collect();
+    let sealed_refs: Vec<&str> = sealed_descs.iter().map(String::as_str).collect();
+    // Metadata lists the declared superclass before interfaces.
+    let super_internal = c.superclass.render();
+    let mut supertype_descs: Vec<String> = Vec::new();
+    if super_internal != "kotlin/Any" {
+        supertype_descs.push(format!("L{super_internal};"));
+    }
+    for itf in c.interfaces.iter_rendered() {
+        supertype_descs.push(format!("L{itf};"));
+    }
+    let supertype_refs: Vec<&str> = supertype_descs.iter().map(String::as_str).collect();
     let (d1_bytes, d2) = build_class(
         &c.fq_name(),
         &ctor_params,
@@ -585,6 +635,9 @@ fn build_class_metadata(
             // An interface has no constructor at all, whatever the IR records.
             emit_primary_ctor: !c.is_interface,
             jvm_class_flags: c.is_interface.then_some(3),
+            nested: &nested_refs,
+            sealed_subclasses: &sealed_refs,
+            supertype_descs: &supertype_refs,
             ..Default::default()
         },
     );
@@ -704,10 +757,18 @@ fn seed_plain_class_pool(
     // A `data class` interns its parameterized-field `Signature`s LATE (in `seed_data_class_pool`, before
     // `@Metadata`), not with the field/accessors — so hand the plain seeder an EMPTY field-sig list and
     // pass the real ones to the data seeder below.
+    let (super_param_tys, _) = super_ctor_jvm_tys(ir, c, superclass, |a| {
+        ir.logical_types
+            .get(&a)
+            .cloned()
+            .map(|ty| ir_ty_to_jvm(&ty))
+            .unwrap_or(Ty::obj("kotlin/Any"))
+    });
+    let super_ctor_desc = crate::jvm::names::method_descriptor(&super_param_tys, Ty::Unit);
     cw.seed_plain_class_pool(
         fq_name,
         superclass,
-        &ctor_desc,
+        (&ctor_desc, &super_ctor_desc),
         &fields,
         &accessors,
         &crate::jvm::classfile::MemberSignatures {
@@ -1105,10 +1166,12 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
             "Lorg/jetbrains/annotations/NotNull;"
         })
     };
-    // Backing field of a reference property: kotlinc annotates it (`@NotNull` for non-null).
-    for f in &c.fields {
-        if let Some(a) = ann(&f.name, f.ty) {
-            cw.set_field_nullability(&f.name, a);
+    // Interfaces have accessors but no backing fields.
+    if !c.is_interface {
+        for f in &c.fields {
+            if let Some(a) = ann(&f.name, f.ty) {
+                cw.set_field_nullability(&f.name, a);
+            }
         }
     }
     // Primary constructor: one parameter annotation slot per property-backed parameter.
@@ -1190,9 +1253,33 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
 /// shape — a class's `$$serializer` (inner name `$serializer`) and its `Companion`, both `public static
 /// final` — emitted in kotlinc's order ($serializer before Companion). Anonymous nested classes (the
 /// suspend continuations) are not yet registered (they also need an `EnclosingMethod` attribute).
+fn inner_class_access(c: &IrClass) -> u16 {
+    const PUBLIC: u16 = 0x0001;
+    const STATIC: u16 = 0x0008;
+    const FINAL: u16 = 0x0010;
+    const INTERFACE: u16 = 0x0200;
+    const ABSTRACT: u16 = 0x0400;
+    const ANNOTATION: u16 = 0x2000;
+    const ENUM: u16 = 0x4000;
+
+    let is_inner = c.fields.first().is_some_and(|field| field.name == "this$0");
+    let mut access = PUBLIC | if is_inner { 0 } else { STATIC };
+    if c.is_annotation {
+        access |= INTERFACE | ABSTRACT | ANNOTATION;
+    } else if c.is_interface {
+        access |= INTERFACE | ABSTRACT;
+    } else if !c.enum_entries.is_empty() {
+        access |= FINAL | ENUM;
+    } else if c.is_sealed || c.is_abstract {
+        access |= ABSTRACT;
+    } else if !c.is_open {
+        access |= FINAL;
+    }
+    access
+}
+
 fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
     use crate::jvm::classfile::InnerClassSpec;
-    const ACC_PSF: u16 = 0x0019; // ACC_PUBLIC | ACC_STATIC | ACC_FINAL
     for c in &ir.classes {
         let fq = c.fq_name();
         if let Some(outer) = fq.strip_suffix("$$serializer") {
@@ -1200,7 +1287,7 @@ fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
                 inner: fq.clone(),
                 outer: Some(outer.to_string()),
                 name: Some("$serializer".to_string()),
-                access: ACC_PSF,
+                access: inner_class_access(c),
             });
         }
     }
@@ -1210,9 +1297,76 @@ fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
                 inner: comp,
                 outer: Some(c.fq_name()),
                 name: Some("Companion".to_string()),
-                access: ACC_PSF,
+                access: c
+                    .companion_class
+                    .and_then(|name| {
+                        ir.classes
+                            .iter()
+                            .find(|candidate| candidate.fq_name_id() == name)
+                    })
+                    .map_or(0x0019, inner_class_access),
             });
         }
+    }
+    // `finish` retains only nested classes referenced by this classfile.
+    for c in &ir.classes {
+        let fq = c.fq_name();
+        if fq.ends_with("$$serializer") {
+            continue; // handled above (special inner name `$serializer`)
+        }
+        let Some(pos) = fq.rfind('$') else {
+            continue; // top-level class — not nested
+        };
+        let name = &fq[pos + 1..];
+        if name == "Companion" {
+            continue; // handled above
+        }
+        cw.add_inner_class(InnerClassSpec {
+            inner: fq.clone(),
+            outer: Some(fq[..pos].to_string()),
+            name: Some(name.to_string()),
+            access: inner_class_access(c),
+        });
+    }
+}
+
+fn sorted_sealed_subclasses(c: &IrClass) -> Vec<String> {
+    let mut subclasses: Vec<String> = c.sealed_subclasses.iter_rendered().collect();
+    subclasses.sort_by(|a, b| {
+        let a_simple = a.rsplit(['$', '/']).next().unwrap_or(a);
+        let b_simple = b.rsplit(['$', '/']).next().unwrap_or(b);
+        a_simple.cmp(b_simple).then_with(|| a.cmp(b))
+    });
+    subclasses
+}
+
+fn register_sealed_subtypes(cw: &mut ClassWriter, ir: &IrFile, c: &IrClass, emit_permitted: bool) {
+    use crate::jvm::classfile::InnerClassSpec;
+    let self_fq = c.fq_name();
+    let subs = sorted_sealed_subclasses(c);
+    if subs.is_empty() {
+        return;
+    }
+    for sub in &subs {
+        if let Some(name) = sub.strip_prefix(&format!("{self_fq}$")) {
+            cw.seed_class(sub);
+            cw.add_inner_class(InnerClassSpec {
+                inner: sub.clone(),
+                outer: Some(self_fq.clone()),
+                name: Some(name.to_string()),
+                access: ir
+                    .classes
+                    .iter()
+                    .find(|candidate| candidate.fq_name_matches(sub))
+                    .map_or(0x0019, inner_class_access),
+            });
+        }
+    }
+    if emit_permitted {
+        for sub in &subs {
+            cw.seed_class(sub);
+        }
+        cw.set_permitted_subclasses(subs);
     }
 }
 
@@ -1235,6 +1389,7 @@ fn new_writer_generic(
         cw.set_major(major);
     }
     cw.set_source_file(opts.source_file.clone());
+    cw.set_inner_class_resolver(opts.inner_class_resolver.clone());
     cw
 }
 
@@ -2122,6 +2277,12 @@ fn emit_class(
     let raw_class_sig = ir.class_signature(&fq_name);
     let jvm_sig = raw_class_sig.and_then(jvm_class_signature);
     let mut cw = new_writer_generic(&fq_name, jvm_sig.as_deref(), &superclass, opts);
+    register_sealed_subtypes(
+        &mut cw,
+        ir,
+        c,
+        opts.class_major.unwrap_or(MAJOR_JAVA8) >= 61,
+    );
     register_inner_classes(&mut cw, ir);
     // Seed the constant pool in kotlinc's interning order for a plain property class that will carry a
     // computed `@Metadata` + debug tables — so the emitted class is byte-identical, not just
@@ -2256,16 +2417,6 @@ fn emit_class(
         let mut ctor = CodeBuilder::new(1 + params_words);
         // The superclass constructor's parameter types (empty for the erased top type — the front end
         // names it `kotlin/Any`, which this backend maps to `java/lang/Object`).
-        let mut super_param_tys: Vec<Ty> =
-            if crate::jvm::jvm_class_map::to_jvm_internal(&superclass) == "java/lang/Object" {
-                Vec::new()
-            } else {
-                ir.classes
-                    .iter()
-                    .find(|sc| sc.fq_name_matches(&superclass))
-                    .map(class_ctor_jvm_tys)
-                    .unwrap_or_default()
-            };
         let max_slot;
         let mut init_diverges = false;
         {
@@ -2291,12 +2442,6 @@ fn emit_class(
             for (vi, t) in param_tys.iter().enumerate() {
                 e.slots.insert(vi as u32 + 1, (s, *t));
                 s += slot_words(*t);
-            }
-            // A classpath superclass (not an IR class) with `super(args)`: the IR-class lookup above
-            // found no parameter types, so derive the super constructor's descriptor from the argument
-            // expressions themselves (e.g. a synthesized coroutine continuation's `super(completion)`).
-            if super_param_tys.is_empty() && !c.super_args.is_empty() {
-                super_param_tys = c.super_args.iter().map(|&a| e.value_ty(a)).collect();
             }
             // kotlinc guards each non-null reference constructor parameter with checkNotNullParameter at
             // the very start of `<init>` — before the super() call.
@@ -2347,15 +2492,10 @@ fn emit_class(
             // primary; a subclass `super(…)` must reach it through the PUBLIC|SYNTHETIC
             // `(…args, DefaultConstructorMarker)` accessor (a trailing `null` marker), never the
             // inaccessible private primary.
-            let super_accessor = e.ir.has_value_param_ctor(&superclass)
-                || e.ir
-                    .classes
-                    .iter()
-                    .any(|o| o.fq_name_matches(&superclass) && o.is_sealed);
-            let mut super_param_tys = super_param_tys.clone();
+            let (super_param_tys, super_accessor) =
+                super_ctor_jvm_tys(e.ir, c, &superclass, |arg| e.value_ty(arg));
             if super_accessor {
                 ctor.aconst_null();
-                super_param_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
             }
             let aw: i32 = super_param_tys.iter().map(|t| slot_words(*t) as i32).sum();
             let super_init = e.cw.methodref(
@@ -2849,6 +2989,10 @@ fn emit_class(
     }
     if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
+    }
+    // Seed the nested simple name at kotlinc's post-metadata pool position.
+    if let Some(pos) = fq_name.rfind('$') {
+        cw.seed_utf8(&fq_name[pos + 1..]);
     }
     cw.finish()
 }
@@ -4229,6 +4373,13 @@ fn emit_interface_class(
     for itf in c.interfaces.iter_rendered() {
         cw.add_interface(&itf);
     }
+    register_sealed_subtypes(
+        &mut cw,
+        ir,
+        c,
+        opts.class_major.unwrap_or(MAJOR_JAVA8) >= 61,
+    );
+    register_inner_classes(&mut cw, ir);
     let mut default_impls: Option<ClassWriter> = None;
     for &fid in &c.methods {
         let f = &ir.functions[fid as usize];
@@ -4644,9 +4795,10 @@ fn emit_enum_class(
         };
         let mut clinit = CodeBuilder::new(0);
         // kotlinc gives each entry's construction its own `<clinit>` LineNumberTable entry, on that
-        // entry's declaration line — recorded here, where the real pc is known.
+        // Consecutive enum entries on one source line share one LNT entry.
         for (i, entry) in c.enum_entries.iter().enumerate() {
-            if entry.decl_line != 0 {
+            if entry.decl_line != 0 && clinit_lines.last().map(|&(_, l)| l) != Some(entry.decl_line)
+            {
                 clinit_lines.push((clinit.bytes.len() as u16, entry.decl_line));
             }
             let args = &entry.args;
@@ -10277,7 +10429,7 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
                     .first()
                     .map(|e| {
                         let et = ir_ty_to_jvm(e);
-                        let boxed = et.boxed_ref().unwrap_or(et);
+                        let boxed = reference_array_element(et);
                         // Keep a NULLABLE element's `?`: `Array<Int?>` = `Integer[]` whose `get` yields the
                         // BOXED element (it can be `null`), UNLIKE `Array<Int>` whose `get` unboxes.
                         // `boxed_prim_of` returns `None` for a `Nullable(..)`, so the emitter's `Array.get`
@@ -10357,6 +10509,38 @@ fn class_ctor_jvm_tys(c: &IrClass) -> Vec<Ty> {
     } else {
         ctor_arg_jvm_tys(&c.ctor_args)
     }
+}
+
+fn super_ctor_jvm_tys(
+    ir: &IrFile,
+    c: &IrClass,
+    superclass: &str,
+    mut value_ty: impl FnMut(u32) -> Ty,
+) -> (Vec<Ty>, bool) {
+    let mut params = if crate::jvm::jvm_class_map::to_jvm_internal(superclass) == "java/lang/Object"
+    {
+        Vec::new()
+    } else if let Some(sc) = ir
+        .classes
+        .iter()
+        .find(|candidate| candidate.fq_name_matches(superclass))
+    {
+        class_ctor_jvm_tys(sc)
+    } else {
+        c.super_args.iter().map(|&arg| value_ty(arg)).collect()
+    };
+    if params.is_empty() && !c.super_args.is_empty() {
+        params = c.super_args.iter().map(|&arg| value_ty(arg)).collect();
+    }
+    let uses_accessor = ir.has_value_param_ctor(superclass)
+        || ir
+            .classes
+            .iter()
+            .any(|candidate| candidate.fq_name_matches(superclass) && candidate.is_sealed);
+    if uses_accessor {
+        params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
+    }
+    (params, uses_accessor)
 }
 
 /// The JVM element type of an array given its whole array type. `ir_ty_to_jvm` already maps

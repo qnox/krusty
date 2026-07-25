@@ -84,6 +84,15 @@ pub struct ClassInfo {
     /// use of this annotation is emitted `RuntimeVisibleAnnotations` for RUNTIME, `RuntimeInvisible…` for
     /// CLASS, and dropped for SOURCE.
     pub retention: Option<String>,
+    pub inner_classes: Vec<InnerClassRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InnerClassRef {
+    pub inner: String,
+    pub outer: Option<String>,
+    pub name: Option<String>,
+    pub access: u16,
 }
 
 impl ClassInfo {
@@ -425,6 +434,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         meta,
         signature: attrs.signature,
         retention: attrs.retention,
+        inner_classes: attrs.inner_classes,
     })
 }
 
@@ -438,6 +448,7 @@ struct ClassAttrs {
     k: Option<i32>,
     signature: Option<String>,
     retention: Option<String>,
+    inner_classes: Vec<InnerClassRef>,
 }
 
 /// Parse class-level attributes: `RuntimeVisibleAnnotations` → @kotlin.Metadata `d1`/`d2` and (for an
@@ -459,41 +470,61 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
         let name = utf8(ni).to_string();
         let Ok(len) = r.u4() else { break };
         let len = len as usize;
+        let Ok(body) = r.take(len) else { break };
+        let mut attr = Reader { b: body, i: 0 };
         if name == "Signature" {
-            if let Ok(si) = r.u2() {
+            if let Ok(si) = attr.u2() {
                 if let Some(C::Utf8(s)) = cp.get(si as usize) {
                     out.signature = Some(s.clone());
                 }
             }
-            if len > 2 {
-                let _ = r.take(len - 2);
+            continue;
+        }
+        if name == "InnerClasses" {
+            let class_name = |index: u16| match cp.get(index as usize) {
+                Some(C::Class(name_index)) => Some(utf8(*name_index).to_string()),
+                _ => None,
+            };
+            let Ok(count) = attr.u2() else { continue };
+            for _ in 0..count {
+                let (Ok(inner), Ok(outer), Ok(simple_name), Ok(access)) =
+                    (attr.u2(), attr.u2(), attr.u2(), attr.u2())
+                else {
+                    break;
+                };
+                let Some(inner) = class_name(inner) else {
+                    continue;
+                };
+                out.inner_classes.push(InnerClassRef {
+                    inner,
+                    outer: class_name(outer),
+                    name: (simple_name != 0).then(|| utf8(simple_name).to_string()),
+                    access,
+                });
             }
             continue;
         }
         if name != "RuntimeVisibleAnnotations" {
-            if r.take(len).is_err() {
-                break;
-            }
             continue;
         }
         // Parse annotations: @kotlin.Metadata (d1/d2) and @java.lang.annotation.Retention (policy).
-        let Ok(n_ann) = r.u2() else { break };
+        let Ok(n_ann) = attr.u2() else { continue };
         for _ in 0..n_ann {
-            let Ok(ati) = r.u2() else { break };
+            let Ok(ati) = attr.u2() else { break };
             let atype = utf8(ati);
             let is_kotlin_meta = atype == "Lkotlin/Metadata;";
             let is_retention = atype == "Ljava/lang/annotation/Retention;";
-            let Ok(n_pairs) = r.u2() else { break };
+            let Ok(n_pairs) = attr.u2() else { break };
             for _ in 0..n_pairs {
-                let Ok(eni) = r.u2() else { break };
+                let Ok(eni) = attr.u2() else { break };
                 let ename = utf8(eni);
                 // `@Retention`'s `value` is an enum-constant element (`e` type_index const_index) — capture
                 // the `RetentionPolicy` constant name; a valid classfile always uses the `e` tag here.
                 if is_retention && ename == "value" {
-                    let Ok(tag) = r.u1() else { break };
+                    let Ok(tag) = attr.u1() else { break };
                     if tag == b'e' {
-                        let _ = r.u2(); // enum type descriptor index
-                        if let Ok(ci) = r.u2() {
+                        let _ = attr.u2(); // enum type descriptor index
+                        if let Ok(ci) = attr.u2() {
                             out.retention = Some(utf8(ci).to_string());
                         }
                     } else {
@@ -505,9 +536,9 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
                 // `@Metadata`'s `k` (kind) is an Int element (`I` tag, Integer constant) — it decides
                 // how `d1` is read (protobuf vs a multi-file facade's part-name list).
                 if is_kotlin_meta && ename == "k" {
-                    let Ok(tag) = r.u1() else { break };
+                    let Ok(tag) = attr.u1() else { break };
                     if tag == b'I' {
-                        if let Ok(vi) = r.u2() {
+                        if let Ok(vi) = attr.u2() {
                             if let Some(C::Integer(v)) = cp.get(vi as usize) {
                                 out.k = Some(*v);
                             }
@@ -520,7 +551,7 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
                 }
                 let field = if is_kotlin_meta { ename } else { "" };
                 let want = field == "d1" || field == "d2";
-                match skip_element_value_extract_string_array(r, cp, want) {
+                match skip_element_value_extract_string_array(&mut attr, cp, want) {
                     Ok(Some(strings)) if field == "d1" => out.d1 = Some(strings),
                     Ok(Some(strings)) => out.d2 = Some(strings),
                     Ok(None) => {}

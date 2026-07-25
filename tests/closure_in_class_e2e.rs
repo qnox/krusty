@@ -71,3 +71,12 @@ fn vararg_member_call_in_closure() {
     fun box(): String = if (C().make()(\"x\") == 1) \"OK\" else \"fail\"\n";
     assert_eq!(run(SRC).expect("vararg member call inside a closure"), "OK");
 }
+
+#[test]
+fn qualified_vararg_member_call_uses_selected_signature() {
+    const SRC: &str = "class C {\n\
+        fun base(vararg s: String): Int = s.size\n\
+    }\n\
+    fun box(): String = if (C().base(\"x\", \"y\") == 2) \"OK\" else \"fail\"\n";
+    assert_eq!(run(SRC).expect("qualified vararg member call"), "OK");
+}

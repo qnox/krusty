@@ -358,6 +358,10 @@ pub struct ClassTail<'a> {
     /// Declared type-parameter names in order (`class C<T>` → `["T"]`), recorded as
     /// `Class.typeParameter` so the metadata describes the class as generic.
     pub type_params: &'a [String],
+    /// Direct sealed subtypes as JVM descriptors.
+    pub sealed_subclasses: &'a [&'a str],
+    /// Declared supertypes as JVM descriptors.
+    pub supertype_descs: &'a [&'a str],
 }
 
 impl Default for ClassTail<'_> {
@@ -376,6 +380,8 @@ impl Default for ClassTail<'_> {
             emit_primary_ctor: true,
             primary_ctor_flags: 0,
             type_params: &[],
+            sealed_subclasses: &[],
+            supertype_descs: &[],
         }
     }
 }
@@ -416,18 +422,27 @@ pub fn build_class(
         })
         .collect();
 
-    // f6 = supertype. An `enum class E` extends `kotlin/Enum<E>` — a PARAMETERIZED supertype whose
-    // single argument is the enum itself; everything else extends `kotlin/Any`.
-    let mut supertype = Pb::new();
-    if enum_entries.is_empty() {
-        supertype.field_varint(6, st.builtin(ANY_PREDEFINED) as u64);
-    } else {
+    // Enums use `Enum<E>`; classes without declarations use `Any`.
+    let mut supertype_msgs: Vec<Pb> = Vec::new();
+    if !enum_entries.is_empty() {
         let mut arg_ty = Pb::new();
         arg_ty.field_varint(6, fq as u64);
         let mut arg = Pb::new();
         arg.field_message(2, &arg_ty); // Type.Argument.type = 2
-        supertype.field_message(2, &arg); // Type.argument = 2
-        supertype.field_varint(6, st.builtin(ENUM_PREDEFINED) as u64);
+        let mut st_msg = Pb::new();
+        st_msg.field_message(2, &arg); // Type.argument = 2
+        st_msg.field_varint(6, st.builtin(ENUM_PREDEFINED) as u64);
+        supertype_msgs.push(st_msg);
+    } else if tail.supertype_descs.is_empty() {
+        let mut st_msg = Pb::new();
+        st_msg.field_varint(6, st.builtin(ANY_PREDEFINED) as u64);
+        supertype_msgs.push(st_msg);
+    } else {
+        for desc in tail.supertype_descs {
+            let mut st_msg = Pb::new();
+            st_msg.field_varint(6, st.class_id_from_desc(desc) as u64); // Type.className via DESC_TO_CLASS_ID
+            supertype_msgs.push(st_msg);
+        }
     }
 
     // f8 = constructors: the primary (flags 0), then any secondary constructors — each interning in
@@ -597,6 +612,12 @@ pub fn build_class(
     // Companion + nested class names intern LAST (kotlinc's d2 places them after all members).
     let companion_idx = companion_name.map(|c| st.local(c));
     let nested_idxs: Vec<u32> = nested_class_names.iter().map(|n| st.local(n)).collect();
+    // Sealed subclass IDs precede the module name in kotlinc's string table.
+    let sealed_idxs: Vec<u32> = tail
+        .sealed_subclasses
+        .iter()
+        .map(|d| st.class_id_from_desc(d))
+        .collect();
     // The module name (f101) interns LAST — kotlinc places it at the end of d2.
     let module_idx = tail.module_name.map(|m| st.local(m));
 
@@ -615,7 +636,9 @@ pub fn build_class(
     if let Some(ci) = companion_idx {
         class.field_varint(4, ci as u64); // Class.companion_object_name = 4
     }
-    class.field_message(6, &supertype);
+    for st_msg in &supertype_msgs {
+        class.repeated_message(6, st_msg); // Class.supertype = 6 (repeated)
+    }
     if !nested_idxs.is_empty() {
         let mut packed = Pb::new();
         for &n in &nested_idxs {
@@ -634,6 +657,13 @@ pub fn build_class(
     }
     for ee in &enum_msgs {
         class.repeated_message(13, ee); // Class.enum_entry = 13
+    }
+    if !sealed_idxs.is_empty() {
+        let mut packed = Pb::new();
+        for &idx in &sealed_idxs {
+            packed.varint(idx as u64);
+        }
+        class.field_bytes(16, packed.as_bytes());
     }
     if let Some((name_id, ty_pb)) = &inline_underlying {
         class.field_varint(17, *name_id as u64); // Class.inlineClassUnderlyingPropertyName = 17

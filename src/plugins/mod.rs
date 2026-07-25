@@ -504,6 +504,7 @@ pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass 
         is_annotation: false,
         annotation_impl_of: None,
         is_sealed: false,
+        sealed_subclasses: Default::default(),
         is_abstract: false,
         is_open: false,
         superclass: "java/lang/Object".into(),

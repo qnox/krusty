@@ -557,6 +557,8 @@ impl IrField {
 /// flag / null-check name can't desync.
 #[derive(Clone, Debug)]
 pub struct IrCtorArg {
+    /// Source parameter name. Synthetic constructor parameters have no name.
+    pub name: Option<String>,
     /// The parameter type (carries declared nullability — a nullable value-class param erases like its
     /// field).
     pub ty: Ty,
@@ -564,6 +566,8 @@ pub struct IrCtorArg {
     /// `fields[0..]` in the same relative order); `false` ⇒ a plain parameter, an argument only,
     /// available as a local in `<init>` for property initializers / `init` blocks.
     pub is_field: bool,
+    pub has_default: bool,
+    pub type_param: Option<u32>,
     /// `Some(name)` when the backend should guard this parameter with a non-null assertion
     /// (`Intrinsics.checkNotNullParameter`) at `<init>` entry — a non-null reference param. `None` for a
     /// primitive, nullable, or class-type-parameter param, and for the synthetic inner `this$0`.
@@ -629,6 +633,8 @@ pub struct IrClass {
     pub annotation_impl_of: Option<TypeName>,
     /// `true` for a `sealed class`/`sealed interface`.
     pub is_sealed: bool,
+    /// Direct subclasses known from the whole source module.
+    pub sealed_subclasses: TypeNameList,
     /// `true` for an `abstract class` (not `sealed`).
     pub is_abstract: bool,
     /// `true` for a source `open`/`sealed` class. Needed by backends because a subclass may be emitted
@@ -1888,6 +1894,7 @@ mod tests {
             is_annotation: false,
             annotation_impl_of: None,
             is_sealed: false,
+            sealed_subclasses: Default::default(),
             is_abstract: false,
             is_open: false,
             superclass: "kotlin/Any".into(),
