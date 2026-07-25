@@ -9,6 +9,7 @@ use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use krusty_lsp::{read_framed, write_framed, MAX_MESSAGE_BYTES};
@@ -16,6 +17,7 @@ use serde_json::{json, Value};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(300);
+static OFFICIAL_DIFFERENTIAL: Mutex<()> = Mutex::new(());
 
 fn reference_version_key(version: &str) -> [u32; 3] {
     let mut parts = version.split('.');
@@ -272,6 +274,10 @@ impl LspProcess {
             response["result"]["capabilities"]["typeDefinitionProvider"], true,
             "LSP must advertise the official server's type-definition contract"
         );
+        assert_eq!(
+            response["result"]["capabilities"]["implementationProvider"], true,
+            "LSP must advertise the official server's implementation contract"
+        );
         self.notify("initialized", json!({}));
         SemanticLegend {
             types: response["result"]["capabilities"]["semanticTokensProvider"]["legend"]
@@ -388,6 +394,24 @@ impl LspProcess {
             }),
         );
         response.get("result").cloned().unwrap_or(Value::Null)
+    }
+
+    fn implementation(&mut self, uri: &str, line: u32, character: u32) -> Value {
+        let request_id = self.next_request_id();
+        let response = self.request(
+            request_id,
+            "textDocument/implementation",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": line, "character": character}
+            }),
+        );
+        let Some(locations) = response.get("result").and_then(Value::as_array) else {
+            return Value::Null;
+        };
+        let mut locations = locations.clone();
+        locations.sort_by_key(Value::to_string);
+        Value::Array(locations)
     }
 
     fn document_symbols(&mut self, uri: &str) -> Value {
@@ -591,11 +615,171 @@ fn diagnostic_comparison_preserves_the_exact_range_and_text() {
 }
 
 #[test]
+fn implementation_locations_match_official_kotlin_lsp_exactly() {
+    let Ok(kotlin_lsp) = std::env::var("KRUSTY_KOTLIN_LSP") else {
+        eprintln!("skipping Kotlin LSP implementation differential: set KRUSTY_KOTLIN_LSP");
+        return;
+    };
+    let _official_guard = OFFICIAL_DIFFERENTIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let project = TempProject::new();
+    let root = project.path();
+    let source_root = root.join("src/main/kotlin");
+    std::fs::create_dir_all(&source_root).unwrap();
+    std::fs::write(
+        root.join("settings.gradle"),
+        "rootProject.name = 'krusty-lsp-implementation-diff'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("build.gradle"),
+        format!(
+            "plugins {{ id 'org.jetbrains.kotlin.jvm' version '{}' }}\n\
+             repositories {{ mavenCentral() }}\n",
+            reference_kotlin_version()
+        ),
+    )
+    .unwrap();
+
+    let contract = "package implementationparity\n\
+        interface ImplementationContract<T> {\n\
+        \u{20}\u{20}fun route(value: T): String\n\
+        \u{20}\u{20}fun pick(value: Int): String\n\
+        \u{20}\u{20}fun pick(value: String): String\n\
+        }\n\
+        open class ImplementationBase<T>(ignored: Any? = null) : ImplementationContract<T> {\n\
+        \u{20}\u{20}override fun route(value: T): String = value.toString()\n\
+        \u{20}\u{20}override fun pick(value: Int): String = value.toString()\n\
+        \u{20}\u{20}override fun pick(value: String): String = value\n\
+        }\n";
+    let leaf = "package implementationparity\n\
+        class ImplementationLeaf : ImplementationBase<String>(ImplementationBase<Int>()) {\n\
+        \u{20}\u{20}override fun route(value: String): String = value\n\
+        \u{20}\u{20}override fun pick(value: Int): String = value.toString()\n\
+        }\n";
+    let usage = "package implementationparity\n\
+        fun use(value: ImplementationContract<String>): String {\n\
+        \u{20}\u{20}val emoji = \"😀\"; return value.route(\"x\") + value.pick(1)\n\
+        }\n";
+    let files = [
+        ("ImplementationContract.kt", contract),
+        ("ImplementationLeaf.kt", leaf),
+        ("ImplementationUse.kt", usage),
+    ];
+    let warmup = "package implementationparity\nfun warmup(): String = 1\n";
+    std::fs::write(source_root.join("Warmup.kt"), warmup).unwrap();
+    for (name, source) in files {
+        std::fs::write(source_root.join(name), source).unwrap();
+    }
+    let root_uri = format!("file://{}", root.display());
+    let contract_uri = format!(
+        "file://{}",
+        source_root.join("ImplementationContract.kt").display()
+    );
+    let leaf_uri = format!(
+        "file://{}",
+        source_root.join("ImplementationLeaf.kt").display()
+    );
+    let use_uri = format!(
+        "file://{}",
+        source_root.join("ImplementationUse.kt").display()
+    );
+    let positions = [
+        (
+            "interface generic method",
+            contract_uri.as_str(),
+            position_after_marker(contract, "fun rou"),
+        ),
+        (
+            "base generic method",
+            contract_uri.as_str(),
+            position_after_marker(contract, "override fun rou"),
+        ),
+        (
+            "selected integer overload",
+            contract_uri.as_str(),
+            position_after_marker(contract, "fun pi"),
+        ),
+        (
+            "generic call after emoji",
+            use_uri.as_str(),
+            position_after_marker(usage, "value.rou"),
+        ),
+        (
+            "selected overload call after emoji",
+            use_uri.as_str(),
+            position_after_marker(usage, "value.pi"),
+        ),
+    ];
+
+    let mut reference = LspProcess::spawn(&kotlin_lsp, &["--stdio"]);
+    reference.initialize(&root_uri);
+    let warmup_uri = format!("file://{}", source_root.join("Warmup.kt").display());
+    assert!(!reference.diagnostics(&warmup_uri, warmup).is_empty());
+    for (name, source) in files {
+        let uri = format!("file://{}", source_root.join(name).display());
+        reference.open_document(&uri, source);
+    }
+    let expected = positions
+        .iter()
+        .map(|(name, uri, (line, character))| {
+            let result = reference.implementation(uri, *line, *character);
+            assert!(
+                result
+                    .as_array()
+                    .is_some_and(|locations| !locations.is_empty()),
+                "official Kotlin LSP returned no implementations for {name}: {result}"
+            );
+            json!({"case": name, "result": result})
+        })
+        .collect::<Vec<_>>();
+    let expected_leaf = reference.implementation(
+        &leaf_uri,
+        position_after_marker(leaf, "class ImplementationLe").0,
+        position_after_marker(leaf, "class ImplementationLe").1,
+    );
+    assert!(
+        expected_leaf.is_null(),
+        "official Kotlin LSP unexpectedly returned an implementation for the leaf: {expected_leaf}"
+    );
+    drop(reference);
+
+    let mut krusty = LspProcess::spawn(env!("CARGO_BIN_EXE_krusty-lsp"), &["--stdio", "-no-jdk"]);
+    krusty.initialize(&root_uri);
+    for (name, source) in files {
+        let uri = format!("file://{}", source_root.join(name).display());
+        krusty.open_document(&uri, source);
+    }
+    let actual = positions
+        .iter()
+        .map(|(name, uri, (line, character))| {
+            json!({
+                "case": name,
+                "result": krusty.implementation(uri, *line, *character)
+            })
+        })
+        .collect::<Vec<_>>();
+    let leaf_position = position_after_marker(leaf, "class ImplementationLe");
+    let actual_leaf = krusty.implementation(&leaf_uri, leaf_position.0, leaf_position.1);
+
+    assert_eq!(actual, expected, "implementation location mismatches");
+    assert_eq!(
+        actual_leaf, expected_leaf,
+        "negative implementation mismatch"
+    );
+}
+
+#[test]
 fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_kotlin_lsp() {
     let Ok(kotlin_lsp) = std::env::var("KRUSTY_KOTLIN_LSP") else {
         eprintln!("skipping Kotlin LSP differential: set KRUSTY_KOTLIN_LSP");
         return;
     };
+    let _official_guard = OFFICIAL_DIFFERENTIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let project = TempProject::new();
     let root = project.path();

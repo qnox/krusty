@@ -432,6 +432,7 @@ struct OpenDocument {
     semantic_tokens: SemanticTokenIndex,
     definitions: DefinitionIndex,
     type_definitions: DefinitionIndex,
+    implementations: DefinitionIndex,
     document_symbols: DocumentSymbolIndex,
     folding_ranges: FoldingRangeIndex,
     analysis_blocked: bool,
@@ -515,6 +516,7 @@ where
                 open.semantic_tokens = SemanticTokenIndex::default();
                 open.definitions = DefinitionIndex::default();
                 open.type_definitions = DefinitionIndex::default();
+                open.implementations = DefinitionIndex::default();
                 open.document_symbols = DocumentSymbolIndex::default();
                 open.folding_ranges = FoldingRangeIndex::default();
                 open.diagnostics = DiagnosticIndex::from_diagnostics(
@@ -546,6 +548,7 @@ where
                 open.semantic_tokens = analysis.semantic_tokens;
                 open.definitions = analysis.definitions;
                 open.type_definitions = analysis.type_definitions;
+                open.implementations = analysis.implementations;
                 open.document_symbols = analysis.document_symbols;
                 open.folding_ranges = analysis.folding_ranges;
                 open.diagnostics = DiagnosticIndex::from_diagnostics(
@@ -645,6 +648,7 @@ where
                             "hoverProvider": true,
                             "definitionProvider": true,
                             "typeDefinitionProvider": true,
+                            "implementationProvider": true,
                             "referencesProvider": true,
                             "renameProvider": true,
                             "documentSymbolProvider": true,
@@ -699,6 +703,7 @@ where
             "textDocument/hover" => self.hover(id, params),
             "textDocument/definition" => self.definition(id, params),
             "textDocument/typeDefinition" => self.type_definition(id, params),
+            "textDocument/implementation" => self.implementation(id, params),
             "textDocument/references" => self.references(id, params),
             "textDocument/rename" => self.rename(id, params),
             "textDocument/documentSymbol" => self.document_symbols(id, params),
@@ -767,6 +772,7 @@ where
                         semantic_tokens: SemanticTokenIndex::default(),
                         definitions: DefinitionIndex::default(),
                         type_definitions: DefinitionIndex::default(),
+                        implementations: DefinitionIndex::default(),
                         document_symbols: DocumentSymbolIndex::default(),
                         folding_ranges: FoldingRangeIndex::default(),
                         analysis_blocked: true,
@@ -799,6 +805,7 @@ where
                 semantic_tokens: SemanticTokenIndex::default(),
                 definitions: DefinitionIndex::default(),
                 type_definitions: DefinitionIndex::default(),
+                implementations: DefinitionIndex::default(),
                 document_symbols: DocumentSymbolIndex::default(),
                 folding_ranges: FoldingRangeIndex::default(),
                 analysis_blocked: false,
@@ -855,6 +862,7 @@ where
             open.semantic_tokens = SemanticTokenIndex::default();
             open.definitions = DefinitionIndex::default();
             open.type_definitions = DefinitionIndex::default();
+            open.implementations = DefinitionIndex::default();
             open.document_symbols = DocumentSymbolIndex::default();
             open.folding_ranges = FoldingRangeIndex::default();
             open.diagnostics = analysis_limit_diagnostics();
@@ -1075,13 +1083,37 @@ where
         )])
     }
 
+    fn implementation(&self, id: Option<Value>, params: Value) -> Dispatch {
+        let Some(id) = id else {
+            return Dispatch::none();
+        };
+        let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params) else {
+            return invalid_params(Some(id));
+        };
+        let Some(open) = self.documents.get(&params.text_document.uri) else {
+            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+        };
+        let Some(offset) = position_to_byte_offset(&open.text, params.position) else {
+            return invalid_params(Some(id));
+        };
+        let locations = self.navigation_locations(&open.implementations, offset);
+        Dispatch::messages(vec![rpc_result(
+            id,
+            if locations.is_empty() {
+                Value::Null
+            } else {
+                Value::Array(locations)
+            },
+        )])
+    }
+
     fn navigation_locations(&self, index: &DefinitionIndex, offset: u32) -> Vec<Value> {
         let targets = index.get(offset).collect::<Vec<_>>();
         if targets.is_empty() {
             return Vec::new();
         }
         let uris = self.analyzed_uris();
-        let locations = targets
+        targets
             .into_iter()
             .filter_map(|target| {
                 let uri = uris.get(target.file as usize)?;
@@ -1100,8 +1132,7 @@ where
                     }
                 }))
             })
-            .collect::<Vec<_>>();
-        locations
+            .collect()
     }
 
     fn references(&self, id: Option<Value>, params: Value) -> Dispatch {

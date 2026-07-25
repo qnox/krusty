@@ -110,7 +110,8 @@ krusty -version | -help
 
 # LSP server over JSON-RPC on stdin/stdout
 # (incremental UTF-16 sync, diagnostics, completion + resolve, signature help, hover,
-#  go-to-definition, go-to-type-definition, references, rename, hierarchical document symbols,
+#  go-to-definition, go-to-type-definition, go-to-implementation, references, rename,
+#  hierarchical document symbols,
 #  semantic highlighting):
 cargo build -p krusty-lsp
 target/debug/krusty-lsp --stdio -cp deps.jar:classes/
@@ -128,6 +129,8 @@ minimal edits, including exact UTF-16 ranges. It retains no source copy in AST o
 Go-to-type-definition uses checked expression and declaration types to return exact source-class
 locations from an integer-only span index sharing the bounded navigation budget; it retains no type
 names or source text.
+Go-to-implementation returns exact transitive source class and member overrides, including generic
+substitution and overload selection, from the same bounded integer-only navigation representation.
 Hover returns official Kotlin LSP declaration signatures and identifier ranges from a bounded,
 interned snapshot; it does not retain compiler ASTs or duplicate source strings.
 Document symbols likewise come from a bounded, compact hierarchy whose UTF-16 full and selection
