@@ -18887,7 +18887,12 @@ fun box(): String {
         fn resolve_symbols(&self, fqn: &str) -> crate::libraries::ResolvedSymbols {
             if matches!(
                 fqn,
-                "BoxedComparable" | "BoxedIndex" | "BoxedIterable" | "BoxedIterator" | "TestMutex"
+                "BoxedComparable"
+                    | "BoxedIndex"
+                    | "BoxedIterable"
+                    | "BoxedIterator"
+                    | "TestMutex"
+                    | "test/Factory"
             ) {
                 return crate::libraries::ResolvedSymbols {
                     classifier: self.resolve_type(fqn).map(std::rc::Rc::new),
@@ -19012,27 +19017,58 @@ fun box(): String {
                     | "BoxedIterable"
                     | "BoxedIterator"
                     | "TestMutex"
+                    | "test/Factory"
             )
-            .then(|| crate::libraries::LibraryType {
-                is_public: true,
-                kind: crate::libraries::TypeKind::Class,
-                supertypes: crate::types::TypeNameList::new(),
-                constructors: vec![],
-                members: vec![],
-                companion: vec![],
-                companion_consts: HashMap::new(),
-                sam_method: None,
-                companion_object: None,
-                value_companion_fns: vec![],
-                value_underlying: None,
-                alias_target: None,
-                type_params: vec![],
-                sealed_subclasses: crate::types::TypeNameList::new(),
-                enum_entries: vec![],
-                value_ctor_has_default: false,
-                ctor_named_params: vec![],
-                value_class_properties: vec![],
-                retention: None,
+            .then(|| {
+                let companion = if internal == "test/Factory" {
+                    let member = |second, descriptor: &str| crate::libraries::LibraryMember {
+                        name: "make".to_string(),
+                        owner: Some(crate::types::type_name("test/Factory")),
+                        physical_name: None,
+                        params: vec![Ty::obj("Config"), second],
+                        ret: Ty::String,
+                        ret_nullable: false,
+                        physical_ret: Ty::String,
+                        descriptor: descriptor.to_string(),
+                        signature: None,
+                        generic_sig: None,
+                        is_interface: false,
+                        inline: crate::libraries::InlineKind::None,
+                        suspend: false,
+                        visibility: crate::types::Visibility::Public,
+                        call_sig: CallSig::default(),
+                    };
+                    vec![
+                        member(
+                            Ty::obj("kotlin/Any"),
+                            "(LConfig;Ljava/lang/Object;)Ljava/lang/String;",
+                        ),
+                        member(Ty::obj("Handler"), "(LConfig;LHandler;)Ljava/lang/String;"),
+                    ]
+                } else {
+                    Vec::new()
+                };
+                crate::libraries::LibraryType {
+                    is_public: true,
+                    kind: crate::libraries::TypeKind::Class,
+                    supertypes: crate::types::TypeNameList::new(),
+                    constructors: vec![],
+                    members: vec![],
+                    companion,
+                    companion_consts: HashMap::new(),
+                    sam_method: None,
+                    companion_object: None,
+                    value_companion_fns: vec![],
+                    value_underlying: None,
+                    alias_target: None,
+                    type_params: vec![],
+                    sealed_subclasses: crate::types::TypeNameList::new(),
+                    enum_entries: vec![],
+                    value_ctor_has_default: false,
+                    ctor_named_params: vec![],
+                    value_class_properties: vec![],
+                    retention: None,
+                }
             })
         }
 
@@ -19311,6 +19347,41 @@ fun box(): String {
             Some(ResolvedCall::ModuleMember { receiver, .. })
                 if *receiver == Ty::obj("Receiver")
         ));
+    }
+
+    #[test]
+    fn java_static_accepts_anonymous_source_subclass_argument() {
+        let mut d = DiagSink::new();
+        let file = parse_file(
+            "import test.Factory\n\
+             open class Handler\n\
+             class Config\n\
+             fun create(config: Config): String =\n\
+                 Factory.make(config, object : Handler() {})",
+            &mut d,
+        );
+        let files = vec![file];
+        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert_no_diags(&d);
+
+        let call = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(idx, expr)| match expr {
+                Expr::Call { callee, .. } => match files[0].expr(*callee) {
+                    Expr::Member { name, .. } if name == "make" => Some(ExprId(idx as u32)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("source should contain the static factory call");
+        let Some(ResolvedCall::Companion(selected)) = info.resolved_calls.get(&call) else {
+            panic!("checker must record the selected Java static overload");
+        };
+        assert_eq!(selected.params, vec![Ty::obj("Config"), Ty::obj("Handler")]);
+        assert_eq!(selected.descriptor, "(LConfig;LHandler;)Ljava/lang/String;");
     }
 
     #[test]
