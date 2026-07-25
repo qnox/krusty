@@ -108,6 +108,8 @@ mod checker_operator_methods_e2e;
 mod class_body_e2e;
 #[path = "class_literal_e2e.rs"]
 mod class_literal_e2e;
+#[path = "class_literal_java_e2e.rs"]
+mod class_literal_java_e2e;
 #[path = "class_metadata_roundtrip.rs"]
 mod class_metadata_roundtrip;
 #[path = "class_tparam_cast_e2e.rs"]

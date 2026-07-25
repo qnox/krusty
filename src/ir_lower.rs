@@ -17573,6 +17573,25 @@ impl<'a> Lower<'a> {
                 return None;
             }
             Expr::Member { receiver, name } => {
+                // `X::class.java` — emit the raw `java.lang.Class` constant directly for a class-literal
+                // receiver (kotlinc's shape, no `KClass` wrapper); for any other `KClass` value, unwrap
+                // at runtime via `JvmClassMappingKt.getJavaClass`.
+                if matches!(
+                    self.info.expr_lowers.get(&e),
+                    Some(ExprLowering::ClassLiteralJava)
+                ) {
+                    if let Some(raw) = self.emit_class_literal_raw(receiver) {
+                        return Some(raw);
+                    }
+                    let recv = self.expr(receiver)?;
+                    return Some(self.emit_static_call(
+                        "kotlin/jvm/JvmClassMappingKt",
+                        "getJavaClass".to_string(),
+                        "(Lkotlin/reflect/KClass;)Ljava/lang/Class;".to_string(),
+                        crate::libraries::InlineKind::None,
+                        vec![recv],
+                    ));
+                }
                 if let Some(ExprLowering::IntrinsicProperty(member)) =
                     self.info.expr_lowers.get(&e).cloned()
                 {
