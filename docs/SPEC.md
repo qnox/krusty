@@ -1630,6 +1630,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `definition_keeps_same_named_classes_package_qualified`,
   `definition_snapshot_uses_compact_file_and_span_entries`.)
 
+- **Go-to-type-definition returns checked source-class locations.** The server advertises
+  `typeDefinitionProvider` and reduces explicit type references, parameter/local declarations,
+  inferred and nullable values, ordinary explicit/inferred property declarations, constructor
+  results, property reads, and source class declarations to exact source class-name ranges. The
+  query reads a 20-byte integer-only index and never reruns analysis. Definition and type-definition
+  share a 256K-entry source-set navigation cap: definitions are built first and type-definition
+  consumes the remainder, so this feature cannot enlarge the prior worst-case navigation worker
+  frame. The worker drops ASTs, checked type tables, and its temporary `TypeName` target map after
+  emitting the snapshot. No type name or source string is retained in the index. The official
+  differential compares complete location values and exact UTF-16 endpoints, including ordinary
+  properties and a query after a supplementary-plane character.
+  (`type_definition_snapshot_is_compact_source_free_and_exact`,
+  `type_definition_resolves_exact_cross_file_utf16_location_without_reanalysis`,
+  `shared_navigation_budget_keeps_saturated_worker_response_below_frame_cap`.)
+
 - **Find-references reuses exact navigation identities.** The server advertises
   `referencesProvider` and returns source `Location`s whose compact definition target matches the
   symbol under the cursor. `includeDeclaration` includes or removes only the declaration's own

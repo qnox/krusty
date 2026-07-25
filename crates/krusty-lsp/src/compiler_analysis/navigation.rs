@@ -7,9 +7,10 @@ use krusty::diag::{DiagSink, Span};
 use krusty::frontend::{
     lex_name_tokens, FrontendNameToken, FrontendNameTokenKind, FrontendSymbols,
 };
-use krusty::types::{Ty, Visibility};
+use krusty::types::{Ty, TypeName, Visibility};
 
 use super::{
+    checked_property_type,
     rendering::{render_ty, render_type},
     FileAnalysis,
 };
@@ -48,6 +49,7 @@ struct ExtensionDefinition {
 #[derive(Default)]
 pub struct DefinitionSymbols {
     classes: HashMap<String, DefinitionTarget>,
+    class_types: HashMap<TypeName, DefinitionTarget>,
     declarations: HashMap<(u32, u32), DefinitionTarget>,
     members: HashMap<(String, String), Vec<MemberDefinition>>,
     member_parents: HashMap<String, Vec<String>>,
@@ -142,9 +144,9 @@ impl DefinitionSymbols {
                                     target,
                                     render_property_hover(
                                         property,
-                                        property_type(
+                                        checked_property_type(
                                             property,
-                                            analysis,
+                                            analysis.types.as_ref(),
                                             class_symbols
                                                 .and_then(|symbols| symbols.prop(&property.name))
                                                 .map(|(ty, _)| ty),
@@ -164,6 +166,9 @@ impl DefinitionSymbols {
                             }
                         }
                         if let Some(class_symbols) = class_symbols {
+                            definitions
+                                .class_types
+                                .insert(class_symbols.internal_name(), target);
                             if class_symbols.is_object {
                                 definitions.object_owners.insert(owner.clone());
                             }
@@ -271,9 +276,9 @@ impl DefinitionSymbols {
                                     target,
                                     render_property_hover(
                                         property,
-                                        property_type(
+                                        checked_property_type(
                                             property,
-                                            analysis,
+                                            analysis.types.as_ref(),
                                             class_symbols.and_then(|symbols| {
                                                 symbols.static_props.get(&property.name).copied()
                                             }),
@@ -373,9 +378,9 @@ impl DefinitionSymbols {
                                 target,
                                 render_property_hover(
                                     property,
-                                    property_type(
+                                    checked_property_type(
                                         property,
-                                        analysis,
+                                        analysis.types.as_ref(),
                                         if property.receiver.is_some() {
                                             symbols.ext_props.values().find_map(|signature| {
                                                 (signature.source
@@ -475,6 +480,10 @@ impl DefinitionSymbols {
 
     pub(crate) fn class_target_for_owner(&self, owner: &str) -> Option<DefinitionTarget> {
         self.classes.get(owner).copied()
+    }
+
+    pub(crate) fn class_target_for_type(&self, owner: TypeName) -> Option<DefinitionTarget> {
+        self.class_types.get(&owner).copied()
     }
 
     pub(crate) fn declaration_target(
@@ -902,41 +911,6 @@ fn render_type_parameters(
         .collect::<Vec<_>>()
         .join(", ");
     format!("<{parameters}>{suffix}")
-}
-
-fn property_type(
-    property: &PropDecl,
-    analysis: &FileAnalysis,
-    resolved_type: Option<Ty>,
-) -> Option<Ty> {
-    resolved_type.or_else(|| {
-        property
-            .init
-            .or_else(|| {
-                property.getter.as_ref().and_then(|getter| match getter {
-                    krusty::ast::FunBody::Expr(body) | krusty::ast::FunBody::Block(body) => {
-                        Some(*body)
-                    }
-                    krusty::ast::FunBody::None => None,
-                })
-            })
-            .or(property.delegate)
-            .and_then(|init| {
-                analysis
-                    .types
-                    .as_ref()?
-                    .delegate_getvalue(init)
-                    .map(|target| target.ret())
-                    .or_else(|| {
-                        analysis
-                            .types
-                            .as_ref()?
-                            .expr_types
-                            .get(init.0 as usize)
-                            .copied()
-                    })
-            })
-    })
 }
 
 pub(crate) fn source_name<'a>(source: &'a str, span: Span, fallback: &'a str) -> &'a str {

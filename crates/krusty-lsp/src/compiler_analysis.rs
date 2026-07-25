@@ -9,10 +9,11 @@ mod semantic;
 mod signature_help;
 mod source_scan;
 
-use krusty::ast::File;
+use krusty::ast::{File, FunBody, PropDecl};
 use krusty::diag::{DiagSink, Diagnostic};
 use krusty::frontend;
 use krusty::libraries::SemanticPlatform;
+use krusty::types::Ty;
 
 pub(crate) use completion::{CompletionDetails, CompletionKind, CompletionSymbols};
 pub(crate) use document_symbols::{document_symbol_occurrences, DocumentSymbolOccurrence};
@@ -38,6 +39,31 @@ pub struct FileAnalysis {
 pub struct SourceSetAnalysis {
     pub files: Vec<FileAnalysis>,
     pub symbols: FrontendSymbols,
+}
+
+fn checked_property_type(
+    property: &PropDecl,
+    types: Option<&FrontendTypeInfo>,
+    resolved_type: Option<Ty>,
+) -> Option<Ty> {
+    resolved_type.or_else(|| {
+        property
+            .init
+            .or_else(|| {
+                property.getter.as_ref().and_then(|getter| match getter {
+                    FunBody::Expr(body) | FunBody::Block(body) => Some(*body),
+                    FunBody::None => None,
+                })
+            })
+            .or(property.delegate)
+            .and_then(|expression| {
+                let types = types?;
+                types
+                    .delegate_getvalue(expression)
+                    .map(|target| target.ret())
+                    .or_else(|| types.expr_types.get(expression.0 as usize).copied())
+            })
+    })
 }
 
 impl FileAnalysis {

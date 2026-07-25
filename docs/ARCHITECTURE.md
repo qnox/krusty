@@ -89,6 +89,13 @@ boundary.
   and resolves every edit endpoint to UTF-16 in one forward source pass per affected document.
   Request-local spelling and replacement buffers are capped and dropped with the response; no AST,
   compiler snapshot, or document state retains another source string.
+  Type-definition uses the same 20-byte representation and consumes the remainder of that shared
+  256K-entry navigation budget after definition entries are built. Splitting a saturated budget
+  between the two indexes therefore cannot enlarge the prior worst-case navigation worker frame.
+  The compiler worker reduces checked explicit, inferred, nullable, constructor, ordinary-property
+  declarations, and property-result types directly to source class spans, then drops type tables,
+  ASTs, and its short-lived type-target map. The supervisor retains no class names or copied source
+  for these queries.
   A document-symbol entry is a 40-byte packed array containing an interned name id, precomputed
   UTF-16 full/selection endpoints, kind/deprecation bits, and a parent index. The worker flattens
   compiler declarations into this hierarchy, caps the source set at 32,768 entries and a conservative
