@@ -9385,11 +9385,15 @@ impl<'a> Checker<'a> {
             .filter(|t| self.reified_tparams.insert((*t).clone()))
             .cloned()
             .collect();
-        let object_contract_ret = match (f.name.as_str(), f.params.len()) {
-            ("compareTo", 1) => Some(Ty::Int),
-            ("equals", 1) => Some(Ty::Boolean),
-            ("hashCode", 0) => Some(Ty::Int),
-            ("toString", 0) => Some(Ty::String),
+        let dispatch_this = self.this_ty;
+        if let Some(recv_ref) = &f.receiver {
+            self.this_ty = Some(self.resolve_ty(recv_ref));
+        }
+        let object_contract_ret = match (f.receiver.is_none(), f.name.as_str(), f.params.len()) {
+            (true, "compareTo", 1) => Some(Ty::Int),
+            (true, "equals", 1) => Some(Ty::Boolean),
+            (true, "hashCode", 0) => Some(Ty::Int),
+            (true, "toString", 0) => Some(Ty::String),
             _ => None,
         };
         self.ret_ty = f
@@ -9404,7 +9408,7 @@ impl<'a> Checker<'a> {
                 // use the return type that collect_signatures already inferred from the method body, or —
                 // for an `override` of an inherited member (a base class OR an implemented interface, e.g.
                 // an enum entry overriding an interface method) — that member's declared return type.
-                if let Some(Ty::Obj(internal, _)) = self.this_ty {
+                if let Some(Ty::Obj(internal, _)) = dispatch_this {
                     if let Some(sig) = self
                         .syms
                         .class_by_type_name(internal)
@@ -9425,8 +9429,10 @@ impl<'a> Checker<'a> {
             });
         self.push_local_funs();
         self.push_scope(); // implicit-this scope (properties)
-        for (n, t, is_var) in props {
-            self.declare(n, *t, *is_var);
+        if f.receiver.is_none() {
+            for (n, t, is_var) in props {
+                self.declare(n, *t, *is_var);
+            }
         }
         self.push_scope(); // parameter scope
         for p in &f.params {
@@ -9452,7 +9458,7 @@ impl<'a> Checker<'a> {
                 let inferred = self.expr(*e);
                 if inferred != Ty::Unit && inferred != Ty::Error {
                     self.ret_ty = inferred;
-                    if let Some(Ty::Obj(internal, _)) = self.this_ty {
+                    if let Some(Ty::Obj(internal, _)) = dispatch_this {
                         let params: Vec<Ty> = f
                             .params
                             .iter()
@@ -9482,6 +9488,7 @@ impl<'a> Checker<'a> {
         for t in reified_added {
             self.reified_tparams.remove(&t);
         }
+        self.this_ty = dispatch_this;
     }
 
     fn check_fun_body(&mut self, f: &FunDecl) {
@@ -11075,11 +11082,14 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
+                    let implicit_receivers = self.implicit_receiver_types();
                     // Unqualified property of the implicit/extension receiver: `fun Box.f() = v`
                     // means `this.v` (sibling method calls already resolve via `this_ty`).
-                    if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                        if let Some((ty, _)) = self.lookup_prop_name(internal, &n) {
-                            return self.set(e, ty);
+                    for receiver in implicit_receivers.iter().copied() {
+                        if let Ty::Obj(internal, _) = receiver {
+                            if let Some((ty, _)) = self.lookup_prop_name(internal, &n) {
+                                return self.set(e, ty);
+                            }
                         }
                     }
                     // An unqualified COMPANION property inside a REGULAR member (`HEX_RADIX` where
@@ -11088,19 +11098,21 @@ impl<'a> Checker<'a> {
                     // The `companion_of` branch above only fires when checking a companion member; this
                     // covers the bare form from a plain method (the qualified `C.HEX_RADIX` path already
                     // resolves it via `static_props`).
-                    if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                        if let Some(&ty) = self
-                            .syms
-                            .class_by_type_name(internal)
-                            .and_then(|c| c.static_props.get(&n))
-                        {
-                            return self.set(e, ty);
+                    for receiver in implicit_receivers.iter().copied() {
+                        if let Ty::Obj(internal, _) = receiver {
+                            if let Some(&ty) = self
+                                .syms
+                                .class_by_type_name(internal)
+                                .and_then(|c| c.static_props.get(&n))
+                            {
+                                return self.set(e, ty);
+                            }
                         }
                     }
                     // A bare name resolved against the implicit receiver (`this`) of arbitrary type —
                     // e.g. `length` inside `"ab".run { length }` (`this` is `String`). Goes through the
                     // general member read so builtin/library members (`String.length`) resolve too.
-                    if let Some(rt) = self.this_ty {
+                    for rt in implicit_receivers.iter().copied() {
                         if let Some(ty) = self.try_member_read(rt, &n, self.span(e), Some(e)) {
                             return self.set(e, ty);
                         }
@@ -11164,9 +11176,10 @@ impl<'a> Checker<'a> {
                         self.expr_lowers
                             .insert(e, ExprLowering::ObjectValue { internal });
                         Ty::obj_name(internal)
-                    } else if let Some(member) = self
-                        .this_ty
-                        .and_then(|receiver| self.syms.libraries.intrinsic_property(receiver, &n))
+                    } else if let Some(member) = implicit_receivers
+                        .iter()
+                        .copied()
+                        .find_map(|receiver| self.syms.libraries.intrinsic_property(receiver, &n))
                     {
                         let ret = member.ret;
                         self.expr_lowers
@@ -16969,7 +16982,7 @@ impl<'a> Checker<'a> {
                 // the same name: the receiver is a closer scope, so kotlinc binds the member. Attempt it
                 // FIRST — `this_member_call_ret` returns `None` when no member matches the arguments, so a
                 // genuine top-level call (no such member) still falls through to `module_top` below.
-                if let Some(rt) = self.this_ty {
+                for rt in self.implicit_receiver_types() {
                     if let Some(ret) = self.this_member_call_ret(call, rt, &fname, &arg_tys, args) {
                         return ret;
                     }
@@ -18926,6 +18939,24 @@ fun box(): String {
                     Ty::String,
                     "(LDelegate;Ljava/lang/Object;Lkotlin/reflect/KProperty;)Ljava/lang/String;",
                 ),
+                "test/decorate" => (
+                    crate::libraries::FnKind::Extension,
+                    Some(Ty::String),
+                    "test/TextKt",
+                    "decorate",
+                    vec![Ty::String],
+                    Ty::String,
+                    "(Ljava/lang/String;)Ljava/lang/String;",
+                ),
+                "test/containerTag" => (
+                    crate::libraries::FnKind::Extension,
+                    Some(Ty::obj("Container")),
+                    "test/ContainerKt",
+                    "containerTag",
+                    vec![Ty::obj("Container")],
+                    Ty::String,
+                    "(LContainer;)Ljava/lang/String;",
+                ),
                 _ => return crate::libraries::ResolvedSymbols::default(),
             };
             let callable = crate::libraries::LibraryCallable::library(
@@ -19203,6 +19234,84 @@ fun box(): String {
     }
 
     impl SemanticPlatform for FakeMemberPlatform {}
+
+    #[test]
+    fn member_extension_preserves_both_implicit_receivers() {
+        let mut d = DiagSink::new();
+        let file = parse_file(
+            "import test.containerTag\n\
+             import test.decorate\n\
+             object Container {\n\
+                 private fun String.render() = decorate() + containerTag()\n\
+             }",
+            &mut d,
+        );
+        let extension_receiver_call = named_call(&file, "decorate");
+        let dispatch_receiver_call = named_call(&file, "containerTag");
+        let files = vec![file];
+        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert_no_diags(&d);
+
+        let extension = info
+            .resolved_extension(extension_receiver_call)
+            .expect("imported extension must resolve on the member extension receiver");
+        assert_eq!(extension.owner, "test/TextKt");
+        assert_eq!(extension.name, "decorate");
+
+        let dispatch_extension = info
+            .resolved_extension(dispatch_receiver_call)
+            .expect("containing object must remain an implicit dispatch receiver");
+        assert_eq!(dispatch_extension.owner, "test/ContainerKt");
+        assert_eq!(dispatch_extension.name, "containerTag");
+    }
+
+    #[test]
+    fn member_extension_prefers_extension_receiver_members() {
+        let mut d = DiagSink::new();
+        let file = parse_file(
+            "class Receiver(val marker: Int) {\n\
+                 fun choose(): Int = marker\n\
+             }\n\
+             class Container(val marker: String, val dispatchOnly: String) {\n\
+                 fun choose(): String = marker\n\
+                 private fun Receiver.render(): Int = marker + choose()\n\
+                 private fun Receiver.dispatchRead(): String = dispatchOnly\n\
+             }",
+            &mut d,
+        );
+        let marker = file
+            .expr_arena
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, expr)| {
+                matches!(expr, Expr::Name(name) if name == "marker").then_some(ExprId(idx as u32))
+            })
+            .expect("source should contain the member-extension property read");
+        let dispatch_only = file
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(idx, expr)| {
+                matches!(expr, Expr::Name(name) if name == "dispatchOnly")
+                    .then_some(ExprId(idx as u32))
+            })
+            .expect("source should contain the dispatch-receiver property read");
+        let choose = named_call(&file, "choose");
+        let files = vec![file];
+        let mut syms = collect_signatures(&files, &mut d);
+        let info = check_file(&files[0], &mut syms, &mut d);
+        assert_no_diags(&d);
+
+        assert_eq!(info.ty(marker), Ty::Int);
+        assert_eq!(info.ty(dispatch_only), Ty::String);
+        assert!(matches!(
+            info.resolved_calls.get(&choose),
+            Some(ResolvedCall::ModuleMember { receiver, .. })
+                if *receiver == Ty::obj("Receiver")
+        ));
+    }
 
     #[test]
     fn suspend_inline_expansion_records_synthetic_member_targets_for_lowering() {
