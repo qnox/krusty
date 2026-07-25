@@ -234,6 +234,15 @@ fn modality_of(is_open: bool, is_abstract: bool, is_sealed: bool) -> crate::ast:
     }
 }
 
+fn modality_from_modifiers(modifiers: &[String]) -> crate::ast::Modality {
+    let sealed = modifiers.iter().any(|modifier| modifier == "sealed");
+    modality_of(
+        sealed || modifiers.iter().any(|modifier| modifier == "open"),
+        sealed || modifiers.iter().any(|modifier| modifier == "abstract"),
+        sealed,
+    )
+}
+
 /// A non-nullable, non-generic type reference to a simple type name (for a literal-inferred local).
 fn simple_type_ref(name: &str, span: crate::diag::Span) -> TypeRef {
     TypeRef {
@@ -1264,8 +1273,6 @@ impl<'a> Parser<'a> {
             mods.extend(self.maybe_parse_context_receivers());
             // A `sealed` class is implicitly abstract and open (subclasses live in the same module).
             let is_sealed = mods.iter().any(|m| m == "sealed");
-            let is_open = is_sealed || mods.iter().any(|m| m == "open");
-            let is_abstract = is_sealed || mods.iter().any(|m| m == "abstract");
             // `expect` (multiplatform header): whatever declaration the arm below pushes is
             // recorded so expect/actual matching can drop it once an `actual` provides the body.
             let is_expect = mods.iter().any(|m| m == "expect");
@@ -1327,7 +1334,7 @@ impl<'a> Parser<'a> {
                 TokenKind::KwClass => {
                     let is_value = mods.iter().any(|m| m == "inline" || m == "value");
                     let mut d = self.parse_class();
-                    d.modality = modality_of(is_open, is_abstract, is_sealed);
+                    d.modality = modality_from_modifiers(&mods);
                     d.is_value = is_value;
                     d.visibility = visibility_of(&mods);
                     let id = self.file.add_decl(Decl::Class(d));
@@ -3200,6 +3207,7 @@ impl<'a> Parser<'a> {
                         let start = self.file.decls.len();
                         let mut nested = self.parse_class();
                         self.reprefix_hoisted(&name, start);
+                        nested.modality = modality_from_modifiers(&mods);
                         nested.name = format!("{}.{}", name, nested.name);
                         if is_inner {
                             nested.inner_of = Some(name.clone());
@@ -3956,6 +3964,7 @@ impl<'a> Parser<'a> {
                     // is a singleton), so keep dropping those (unsupported → skip, not miscompile).
                     TokenKind::KwClass if !mods.iter().any(|m| m == "inner") => {
                         let mut nested = self.parse_class();
+                        nested.modality = modality_from_modifiers(&mods);
                         nested.name = format!("{}.{}", name, nested.name);
                         let id = self.file.add_decl(Decl::Class(nested));
                         self.file.decls.push(id);

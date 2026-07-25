@@ -12,7 +12,7 @@ use crate::libraries::{
     FnFlags, FnKind, FunctionInfo, FunctionSet, InlineKind, LibraryCallable, LibraryMember,
     LibraryType, Origin,
 };
-use crate::symbol_source::SymbolSource;
+use crate::symbol_source::{InheritanceShape, SymbolSource};
 use crate::types::{type_name, Ty, TypeName};
 use std::collections::HashMap;
 
@@ -64,12 +64,15 @@ impl<'a> ModuleSymbols<'a> {
             .map(|(n, s)| lib_member(n, s, c.internal_name(), c.is_interface))
             .collect();
         // The primary constructor (+ secondaries) as `<init>` members returning Unit.
-        let mut constructors = vec![LibraryMember::new(
-            "<init>".to_string(),
-            c.ctor_params.clone(),
-            Ty::Unit,
-            String::new(),
-        )];
+        let mut constructors = Vec::new();
+        if c.has_primary_ctor {
+            constructors.push(LibraryMember::new(
+                "<init>".to_string(),
+                c.ctor_params.clone(),
+                Ty::Unit,
+                String::new(),
+            ));
+        }
         for params in &c.secondary_ctors {
             constructors.push(LibraryMember::new(
                 "<init>".to_string(),
@@ -435,11 +438,24 @@ impl SymbolSource for ModuleSymbols<'_> {
             .class_by_type_name(internal)
             .map(|c| std::rc::Rc::new(self.type_shape_for(c)))
     }
+
+    fn inheritance_shape_name(&self, internal: TypeName) -> Option<InheritanceShape> {
+        let class = self.class_by_type_name(internal)?;
+        Some(InheritanceShape {
+            is_interface: class.is_interface,
+            is_extensible: !class.is_interface && !class.is_final,
+            has_no_arg_constructor: !class.is_sealed && class.has_no_arg_constructor(),
+            supports_external_subclassing: !class.is_sealed
+                && (!class.is_abstract
+                    || (!class.has_abstract_members && class.interfaces.is_empty())),
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resolve::CtorDefaultValue;
     use std::collections::{HashMap, HashSet};
 
     fn sig(params: Vec<Ty>, ret: Ty) -> Signature {
@@ -467,6 +483,7 @@ mod tests {
         FrontendClassSig {
             internal: internal.into(),
             props: vec![],
+            has_primary_ctor: true,
             ctor_params: vec![],
             ctor_param_names: vec![],
             methods: HashMap::new(),
@@ -475,6 +492,8 @@ mod tests {
             is_abstract: false,
             is_fun_interface: false,
             is_sealed: false,
+            is_final: false,
+            has_abstract_members: false,
             inner_of: None,
             static_methods: HashMap::new(),
             companion_fun_names: HashSet::new(),
@@ -626,5 +645,70 @@ mod tests {
         assert_eq!(t.members[0].ret, Ty::Int);
         assert_eq!(t.supertypes.to_vec(), vec!["demo/Shape".to_string()]);
         assert!(m.resolve_type("demo/Nope").is_none());
+    }
+
+    #[test]
+    fn inheritance_shape_tracks_modality_and_callable_no_arg_constructors() {
+        let mut st = FrontendSymbols::default();
+
+        let mut defaulted = class("demo/Defaulted");
+        defaulted.ctor_params = vec![Ty::Int];
+        defaulted.ctor_defaults = vec![Some(CtorDefaultValue::Int(1))];
+        st.insert_class("Defaulted".into(), defaulted);
+
+        let mut secondary = class("demo/Secondary");
+        secondary.has_primary_ctor = false;
+        secondary.ctor_params = vec![Ty::Int];
+        secondary.ctor_defaults = vec![None];
+        secondary.secondary_ctors = vec![vec![]];
+        st.insert_class("Secondary".into(), secondary);
+
+        let mut final_required = class("demo/FinalRequired");
+        final_required.has_primary_ctor = false;
+        final_required.ctor_params = vec![Ty::Int];
+        final_required.ctor_defaults = vec![None];
+        final_required.secondary_ctors = vec![vec![Ty::Int]];
+        final_required.is_final = true;
+        st.insert_class("FinalRequired".into(), final_required);
+
+        let mut abstract_with_interface = class("demo/AbstractWithInterface");
+        abstract_with_interface.is_abstract = true;
+        abstract_with_interface.interfaces = vec![type_name("demo/RequiredInterface")].into();
+        st.insert_class("AbstractWithInterface".into(), abstract_with_interface);
+
+        let mut sealed = class("demo/Sealed");
+        sealed.is_abstract = true;
+        sealed.is_sealed = true;
+        st.insert_class("Sealed".into(), sealed);
+
+        let source = ModuleSymbols::new(&st);
+        let defaulted = source
+            .inheritance_shape_name(type_name("demo/Defaulted"))
+            .expect("defaulted class shape");
+        assert!(defaulted.is_extensible);
+        assert!(defaulted.has_no_arg_constructor);
+
+        let secondary = source
+            .inheritance_shape_name(type_name("demo/Secondary"))
+            .expect("secondary-constructor class shape");
+        assert!(secondary.is_extensible);
+        assert!(secondary.has_no_arg_constructor);
+
+        let final_required = source
+            .inheritance_shape_name(type_name("demo/FinalRequired"))
+            .expect("final class shape");
+        assert!(!final_required.is_extensible);
+        assert!(!final_required.has_no_arg_constructor);
+
+        let abstract_with_interface = source
+            .inheritance_shape_name(type_name("demo/AbstractWithInterface"))
+            .expect("abstract class shape");
+        assert!(!abstract_with_interface.supports_external_subclassing);
+
+        let sealed = source
+            .inheritance_shape_name(type_name("demo/Sealed"))
+            .expect("sealed class shape");
+        assert!(!sealed.supports_external_subclassing);
+        assert!(!sealed.has_no_arg_constructor);
     }
 }

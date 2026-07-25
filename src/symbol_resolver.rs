@@ -908,6 +908,13 @@ impl<'a> SymbolResolver<'a> {
         self.src.resolve_type_name(internal)
     }
 
+    pub fn inheritance_shape_name(
+        &self,
+        internal: TypeName,
+    ) -> Option<crate::symbol_source::InheritanceShape> {
+        self.src.inheritance_shape_name(internal)
+    }
+
     pub fn static_field(
         &self,
         internal: TypeName,

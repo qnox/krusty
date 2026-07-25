@@ -26,6 +26,7 @@ use crate::runtime::{
     CountedLoopInfo, PlatformAccessor, PlatformCtor, PlatformField, RuntimeCtor, RuntimeOp,
     TargetRuntime,
 };
+use crate::symbol_resolver::SymbolResolver;
 use crate::types::{existing_type_name, type_name, Ty, TypeName};
 
 // --- Lower-bail diagnostics ----------------------------------------------------------------------
@@ -677,80 +678,45 @@ pub fn lower_file_at_reporting(
                         Decl::Class(bc) if bc.is_interface() == want_iface && class_internal(file, &bc.name) == *cand))
                 })
             };
-            // Resolve a base class (`: A(args)`): a non-interface class declared in this file, OR a
-            // CLASSPATH (Java/library) class — the subclass's `super(…)` becomes `invokespecial` on the
-            // base's `<init>`. A base type that resolves to neither (or to an interface) → bail.
+            let module = crate::module_symbols::ModuleSymbols::new(lo.syms);
+            let symbols = SymbolResolver::new_scoped_with_module(&*lo.syms.libraries, &module, &[]);
             let super_internal: Option<TypeName> = match &c.base_class {
                 Some(base) => {
-                    if let Some(base_internal) = resolve_file_supertype(base, false) {
-                        Some(type_name(&base_internal))
-                    } else {
-                        // A classpath base class: map the source name to its internal (via imports). Only a
-                        // CONCRETE (non-final, non-abstract) non-interface class is a safe superclass to
-                        // emit — a final base fails verification, an abstract base needs abstract-method /
-                        // bridge synthesis the backend doesn't do, an interface isn't a superclass. Anything
-                        // else → bail (the construct stays unsupported, as before).
-                        let resolved = lo
-                            .syms
+                    let file_base = resolve_file_supertype(base, false);
+                    let resolved = file_base.as_deref().map(type_name).unwrap_or_else(|| {
+                        lo.syms
                             .class_names
                             .get(base)
-                            .unwrap_or_else(|| type_name(base));
-                        if let Some(module_base) = lo.syms.class_by_type_name(resolved) {
-                            if module_base.is_interface || module_base.is_abstract {
-                                return None;
-                            }
-                            if c.base_args.is_empty() && !module_base.ctor_params.is_empty() {
-                                return None;
-                            }
-                            Some(resolved)
-                        } else {
-                            if !lo.syms.libraries.class_is_extensible_name(resolved) {
-                                return None;
-                            }
-                            // Only a NO-ARG `super()` to a classpath base is emitted (the ctor lowering has no
-                            // lowered `ClassSig` for a library base to shape a parameterized `super(args)`).
-                            // When no explicit base args are written, the base MUST have a no-arg constructor,
-                            // else the emitted `invokespecial <base>.<init>()V` would target a method that
-                            // doesn't exist — bail rather than miscompile. (An arg-taking `: Base(x)` already
-                            // bails at the `super_field_tys` arity check, since a classpath base contributes no
-                            // field types.)
-                            let has_no_arg_ctor = lo
-                                .syms
-                                .libraries
-                                .resolve_type_name(resolved)
-                                .is_some_and(|t| {
-                                    t.constructors.is_empty()
-                                        || t.constructors.iter().any(|ctor| ctor.params.is_empty())
-                                });
-                            if c.base_args.is_empty() && !has_no_arg_ctor {
-                                return None;
-                            }
+                            .unwrap_or_else(|| type_name(base))
+                    });
+                    match symbols.inheritance_shape_name(resolved) {
+                        Some(shape)
+                            if shape.is_extensible
+                                && (file_base.is_some() || shape.supports_external_subclassing)
+                                && (file_base.is_some()
+                                    || !c.has_primary_ctor
+                                    || !c.base_args.is_empty()
+                                    || shape.has_no_arg_constructor) =>
+                        {
                             Some(resolved)
                         }
+                        _ => return None,
                     }
                 }
                 None => None,
             };
             let superclass = super_internal.unwrap_or_else(crate::types::wk::any);
-            // Implemented interfaces (`: I, J`): a file interface, or a classpath interface
-            // (`Runnable`, `Comparator`) resolved through the library set; else bail.
             let mut iface_internals = Vec::new();
             for st_ref in &c.supertypes {
                 let st = &st_ref.name;
-                if let Some(internal) = resolve_file_supertype(st, true) {
-                    iface_internals.push(type_name(&internal));
-                    continue;
-                }
-                let resolved = lo.syms.class_names.get(st).unwrap_or_else(|| type_name(st));
-                if lo
-                    .syms
-                    .class_by_type_name(resolved)
-                    .is_some_and(|c| c.is_interface)
-                    || lo
-                        .syms
-                        .libraries
-                        .resolve_type_name(resolved)
-                        .is_some_and(|t| t.is_interface())
+                let resolved = if let Some(internal) = resolve_file_supertype(st, true) {
+                    type_name(&internal)
+                } else {
+                    lo.syms.class_names.get(st).unwrap_or_else(|| type_name(st))
+                };
+                if symbols
+                    .inheritance_shape_name(resolved)
+                    .is_some_and(|shape| shape.is_interface)
                 {
                     iface_internals.push(resolved);
                 } else {

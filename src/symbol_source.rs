@@ -14,6 +14,33 @@
 use crate::libraries::{FunctionSet, LibraryType, PropertySet, ResolvedSymbols};
 use crate::types::{Ty, TypeName};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InheritanceShape {
+    pub is_interface: bool,
+    pub is_extensible: bool,
+    pub has_no_arg_constructor: bool,
+    pub supports_external_subclassing: bool,
+}
+
+impl InheritanceShape {
+    pub fn from_type(
+        ty: &LibraryType,
+        is_extensible: bool,
+        supports_external_subclassing: bool,
+    ) -> Self {
+        InheritanceShape {
+            is_interface: ty.is_interface(),
+            is_extensible,
+            has_no_arg_constructor: ty.constructors.is_empty()
+                || ty
+                    .constructors
+                    .iter()
+                    .any(|constructor| constructor.params.is_empty()),
+            supports_external_subclassing,
+        }
+    }
+}
+
 /// A provider of declarations — a module's AST or a compiled library. The arg-independent metadata
 /// surface that federates across sources; arg-dependent selection/binding lives above (the resolver).
 pub trait SymbolSource {
@@ -87,17 +114,9 @@ pub trait SymbolSource {
         false
     }
 
-    /// Whether `internal` names a plain class this source can be used as a SUPERCLASS of an emitted
-    /// user class: a concrete (non-`final`, non-`abstract`) non-interface class that actually exists.
-    /// A `final` base can't be inherited, an `abstract` base needs abstract-method/bridge synthesis the
-    /// backend doesn't do, and an interface isn't a superclass — all must be rejected before emitting a
-    /// `super(…)` to it. `false` by default (a source with no such class).
-    fn class_is_extensible(&self, _internal: &str) -> bool {
-        false
-    }
-
-    fn class_is_extensible_name(&self, internal: TypeName) -> bool {
-        self.class_is_extensible(&internal.render())
+    fn inheritance_shape_name(&self, internal: TypeName) -> Option<InheritanceShape> {
+        let ty = self.resolve_type_name(internal)?;
+        Some(InheritanceShape::from_type(&ty, false, false))
     }
 }
 
@@ -193,16 +212,10 @@ impl SymbolSource for CompositeSource<'_> {
         }
     }
 
-    fn class_is_extensible(&self, internal: &str) -> bool {
+    fn inheritance_shape_name(&self, internal: TypeName) -> Option<InheritanceShape> {
         self.children
             .iter()
-            .any(|c| c.class_is_extensible(internal))
-    }
-
-    fn class_is_extensible_name(&self, internal: TypeName) -> bool {
-        self.children
-            .iter()
-            .any(|c| c.class_is_extensible_name(internal))
+            .find_map(|source| source.inheritance_shape_name(internal))
     }
 
     fn property_members(&self, recv: Ty, name: &str) -> PropertySet {
@@ -308,6 +321,14 @@ mod tests {
                 None
             }
         }
+        fn inheritance_shape_name(&self, internal: TypeName) -> Option<InheritanceShape> {
+            let ty = self.resolve_type_name(internal)?;
+            Some(InheritanceShape::from_type(
+                &ty,
+                self.owner == "library",
+                false,
+            ))
+        }
         fn resolve_symbols(&self, fqn: &str) -> ResolvedSymbols {
             // The record at `fqn`: this fake's type (when `typed` matches) and its one top-level
             // overload (when `fn_name` matches).
@@ -406,6 +427,16 @@ mod tests {
         // Both define `shared`; the module (first) wins.
         let t = c.resolve_type("shared").expect("a shape");
         assert_eq!(t.supertypes.to_vec(), vec!["module".to_string()]);
+        assert!(
+            !c.inheritance_shape_name(crate::types::type_name("shared"))
+                .expect("an inheritance shape")
+                .is_extensible
+        );
+        assert!(
+            l.inheritance_shape_name(crate::types::type_name("shared"))
+                .expect("a library inheritance shape")
+                .is_extensible
+        );
     }
 
     #[test]

@@ -175,6 +175,7 @@ fn extract_ctor_default(
 pub struct ClassSig {
     pub internal: TypeName,
     pub props: Vec<(String, Ty, bool)>, // backing-field properties (name, type, is_var)
+    pub has_primary_ctor: bool,
     /// Full primary-constructor parameter types in order (includes non-property params).
     pub ctor_params: Vec<Ty>,
     /// Primary-constructor parameter NAMES, in order, and whether each declares a default. Needed to
@@ -194,6 +195,9 @@ pub struct ClassSig {
     /// True if declared `sealed` — all subclasses are known in this module, enabling exhaustive
     /// `when` without an `else`.
     pub is_sealed: bool,
+    /// True when the declaration cannot be subclassed.
+    pub is_final: bool,
+    pub has_abstract_members: bool,
     /// `Some(outer_internal)` for an `inner class` — it captures the enclosing instance (a `this$0`
     /// field of the outer type); constructed as `outerInstance.Inner(...)`.
     pub inner_of: Option<TypeName>,
@@ -278,6 +282,14 @@ pub struct GenericMethod {
 type GenericMemberPlan = (GenericMethod, HashMap<String, Ty>, Vec<Vec<Ty>>);
 
 impl ClassSig {
+    pub(crate) fn has_no_arg_constructor(&self) -> bool {
+        (self.has_primary_ctor
+            && (self.ctor_params.is_empty()
+                || (self.ctor_defaults.len() == self.ctor_params.len()
+                    && self.ctor_defaults.iter().all(Option::is_some))))
+            || self.secondary_ctors.iter().any(Vec::is_empty)
+    }
+
     pub fn internal_name(&self) -> TypeName {
         self.internal
     }
@@ -3077,6 +3089,7 @@ pub fn collect_signatures_with_cp(
                         ClassSig {
                             internal: internal_ref,
                             props,
+                            has_primary_ctor: c.has_primary_ctor,
                             ctor_params,
                             methods,
                             is_interface: c.is_interface(),
@@ -3084,6 +3097,9 @@ pub fn collect_signatures_with_cp(
                             is_abstract: c.is_abstract(),
                             is_fun_interface: c.is_fun_interface,
                             is_sealed: c.is_sealed(),
+                            is_final: c.is_final(),
+                            has_abstract_members: c.methods.iter().any(|method| method.is_abstract)
+                                || c.body_props.iter().any(|property| property.is_abstract),
                             inner_of: inner_of_ref,
                             static_methods,
                             companion_fun_names,
@@ -3124,6 +3140,7 @@ pub fn collect_signatures_with_cp(
                             ClassSig {
                                 internal: comp_internal_ref,
                                 props: Vec::new(),
+                                has_primary_ctor: true,
                                 ctor_params: Vec::new(),
                                 methods: companion_methods_sigs
                                     .into_iter()
@@ -3134,6 +3151,8 @@ pub fn collect_signatures_with_cp(
                                 is_abstract: false,
                                 is_fun_interface: false,
                                 is_sealed: false,
+                                is_final: true,
+                                has_abstract_members: false,
                                 inner_of: None,
                                 static_methods: HashMap::new(),
                                 companion_fun_names: std::collections::HashSet::new(),
