@@ -1,8 +1,6 @@
-//! `X::class.java` — the stdlib `KClass<T>.java` extension, unwrapping a class literal to
-//! `java.lang.Class`. krusty types `::class` as `KClass` and previously left `.java` unresolved
-//! ("unresolved reference 'java'"). It now types as `java.lang.Class` and the lowerer emits the raw
-//! class constant directly for a class-literal receiver (kotlinc's shape). Round-tripped on a real
-//! JVM: the resulting `Class` reports the right name.
+//! Regression coverage for the stdlib `KClass<T>.java` extension. Both a class-literal receiver and
+//! a stored `KClass` value resolve through classpath extension-property metadata and round-trip on a
+//! real JVM as the corresponding `java.lang.Class`.
 use super::common;
 
 #[test]
