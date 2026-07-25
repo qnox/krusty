@@ -1636,6 +1636,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`references_match_exact_cross_file_ranges_and_declaration_filtering`,
   `definition_snapshot_reverse_query_reuses_the_same_compact_entries`.)
 
+- **Rename reconstructs exact official edits from compact navigation spans.** The server advertises
+  `renameProvider` and uses the same checker-selected definition identities as definition and
+  references, preserving lexical, overload, and cross-file disambiguation. It reads each occurrence
+  spelling from the authoritative open-document string only while handling the request and emits
+  the official server's minimal, ordered `documentChanges`, with exact document versions and UTF-16
+  start/end positions. Identifier diff work, distinct transient spellings, and estimated expanded
+  response bytes are capped. The compiler AST and long-lived LSP snapshots retain only file/span
+  identities—never copied source text or rename strings. The official differential compares the
+  complete response for cross-file, local, selected-overload, Unicode-offset, and backticked cases.
+  (`rename_matches_official_minimal_edits_exactly_without_reanalysis`,
+  `rename_bounds_identifier_diff_work_and_expanded_output`.)
+
 - **Incremental document synchronization preserves compiler isolation and exact locations.** The
   server advertises LSP incremental sync, applies every notification's UTF-16 ranged edits in order
   to its single retained open-document `String`, and defers a burst to one compiler analysis.

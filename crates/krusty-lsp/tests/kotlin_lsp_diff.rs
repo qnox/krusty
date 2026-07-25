@@ -264,6 +264,10 @@ impl LspProcess {
             response["result"]["capabilities"]["foldingRangeProvider"], true,
             "LSP must advertise the official server's folding-range contract"
         );
+        assert_eq!(
+            response["result"]["capabilities"]["renameProvider"], true,
+            "LSP must advertise the official server's rename contract"
+        );
         self.notify("initialized", json!({}));
         SemanticLegend {
             types: response["result"]["capabilities"]["semanticTokensProvider"]["legend"]
@@ -425,6 +429,20 @@ impl LspProcess {
         let mut locations = locations.clone();
         locations.sort_by_key(Value::to_string);
         Value::Array(locations)
+    }
+
+    fn rename(&mut self, uri: &str, line: u32, character: u32, new_name: &str) -> Value {
+        let request_id = self.next_request_id();
+        let response = self.request(
+            request_id,
+            "textDocument/rename",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": line, "character": character},
+                "newName": new_name
+            }),
+        );
+        response.get("result").cloned().unwrap_or(Value::Null)
     }
 
     fn hover(&mut self, uri: &str, line: u32, character: u32) -> Value {
@@ -669,6 +687,11 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
          fun use(): String {\n\
          \u{20}\u{20}return combine(\"x\", \n\
          }\n";
+    let rename_unicode_source =
+        "fun unicodeRename(): Int { val target = \"😀\"; return target.length }\n";
+    let backticked_source = "fun `odd name`(): Int = 1\n\
+         fun useOdd(): Int = `odd name`()\n\
+         fun parameterHover(`odd param`: Int): Int = `odd param`\n";
     let definition_files = [
         (
             "DefinitionTarget.kt",
@@ -855,12 +878,8 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
              \u{20}\u{20}fun get(): Int = value\n\
              }\n",
         ),
-        (
-            "Backticked.kt",
-            "fun `odd name`(): Int = 1\n\
-             fun useOdd(): Int = `odd name`()\n\
-             fun parameterHover(`odd param`: Int): Int = `odd param`\n",
-        ),
+        ("Backticked.kt", backticked_source),
+        ("RenameUnicode.kt", rename_unicode_source),
         (
             "MemberKinds.kt",
             "class Sized {\n\
@@ -1226,6 +1245,7 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
     let inherited_uri = format!("file://{}", source_root.join("Inherited.kt").display());
     let body_property_uri = format!("file://{}", source_root.join("BodyProperty.kt").display());
     let backticked_uri = format!("file://{}", source_root.join("Backticked.kt").display());
+    let rename_unicode_uri = format!("file://{}", source_root.join("RenameUnicode.kt").display());
     let member_kinds_uri = format!("file://{}", source_root.join("MemberKinds.kt").display());
     let member_staticness_uri = format!(
         "file://{}",
@@ -1895,6 +1915,55 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
             })
         })
         .collect::<Vec<_>>();
+    let rename_unicode_position = position_after_marker(rename_unicode_source, "return ");
+    let backticked_rename_position =
+        position_after_marker(backticked_source, "fun useOdd(): Int = `");
+    let rename_positions = [
+        (
+            "cross-file function",
+            definition_use_uri.as_str(),
+            1,
+            18,
+            "renamedAnswer",
+        ),
+        ("local value", locals_uri.as_str(), 3, 12, "renamedLocal"),
+        (
+            "selected overload",
+            overloads_uri.as_str(),
+            2,
+            21,
+            "renamedSelect",
+        ),
+        (
+            "UTF-16 location after supplementary character",
+            rename_unicode_uri.as_str(),
+            rename_unicode_position.0,
+            rename_unicode_position.1,
+            "renamedTarget",
+        ),
+        (
+            "backticked function to plain identifier",
+            backticked_uri.as_str(),
+            backticked_rename_position.0,
+            backticked_rename_position.1,
+            "plainName",
+        ),
+    ];
+    let expected_renames = rename_positions
+        .iter()
+        .map(|(name, uri, line, character, new_name)| {
+            json!({
+                "case": name,
+                "result": reference.rename(uri, *line, *character, new_name)
+            })
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        expected_renames
+            .iter()
+            .all(|case| case["result"].is_object()),
+        "official Kotlin LSP returned no rename edits: {expected_renames:?}"
+    );
     let completion_positions = [
         ("receiver members", completion_parity_uri.as_str(), 11, 18),
         (
@@ -2168,6 +2237,15 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
             })
         })
         .collect::<Vec<_>>();
+    let actual_renames = rename_positions
+        .iter()
+        .map(|(name, uri, line, character, new_name)| {
+            json!({
+                "case": name,
+                "result": krusty.rename(uri, *line, *character, new_name)
+            })
+        })
+        .collect::<Vec<_>>();
     let actual_completions = completion_positions
         .iter()
         .map(|(name, uri, line, character)| {
@@ -2240,6 +2318,7 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
         actual_references, expected_references,
         "reference mismatches"
     );
+    assert_eq!(actual_renames, expected_renames, "rename mismatches");
     assert_eq!(
         actual_completions, expected_completions,
         "completion mismatches"

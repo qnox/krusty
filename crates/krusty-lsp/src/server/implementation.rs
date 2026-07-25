@@ -37,6 +37,11 @@ const MAX_SOURCE_SET_DIAGNOSTIC_ENTRIES: usize = 32 * 1024;
 const MAX_SOURCE_SET_DIAGNOSTIC_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SOURCE_SET_DIAGNOSTIC_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const DIAGNOSTIC_WIRE_FIXED_BYTES: usize = 256;
+const MAX_RENAME_IDENTIFIER_BYTES: usize = 1024;
+const MAX_RENAME_SPELLINGS: usize = 8;
+pub(super) const MAX_RENAME_WIRE_BYTES: usize = 8 * 1024 * 1024;
+const RENAME_DOCUMENT_WIRE_FIXED_BYTES: usize = 128;
+const RENAME_EDIT_WIRE_FIXED_BYTES: usize = 192;
 const DIAGNOSTIC_WARNING_BIT: u32 = 1 << 31;
 const DIAGNOSTIC_MESSAGE_MASK: u32 = !DIAGNOSTIC_WARNING_BIT;
 const CHANGE_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -351,24 +356,36 @@ fn resolve_diagnostic_positions(
     text: &str,
     pending: &[PendingDiagnosticEntry],
 ) -> Vec<DiagnosticEntry> {
-    let mut entries = vec![[0u32; 5]; pending.len()];
-    let mut endpoints = Vec::<[u32; 2]>::with_capacity(pending.len().saturating_mul(2));
-    for (index, entry) in pending.iter().enumerate() {
-        let Ok(slot) = u32::try_from(index.saturating_mul(2)) else {
-            break;
-        };
-        entries[index][4] = entry[2];
-        endpoints.push([entry[0], slot]);
-        endpoints.push([entry[1], slot + 1]);
-    }
-    endpoints.sort_unstable_by_key(|endpoint| endpoint[0]);
+    pending
+        .iter()
+        .zip(resolve_span_positions(
+            text,
+            pending.iter().map(|entry| (entry[0], entry[1])),
+        ))
+        .map(|(entry, position)| [position[0], position[1], position[2], position[3], entry[2]])
+        .collect()
+}
 
+fn resolve_span_positions(
+    text: &str,
+    spans: impl ExactSizeIterator<Item = (u32, u32)>,
+) -> Vec<[u32; 4]> {
+    let mut positions = vec![[0u32; 4]; spans.len()];
+    let mut endpoints = Vec::with_capacity(spans.len().saturating_mul(2));
+    for (index, (lo, hi)) in spans.enumerate() {
+        let slot = index.saturating_mul(2);
+        endpoints.push((lo, slot));
+        endpoints.push((hi, slot + 1));
+    }
+    endpoints.sort_unstable_by_key(|endpoint| endpoint.0);
     let mut characters = text.char_indices().peekable();
     let mut line = 0u32;
     let mut character = 0u32;
     let mut previous_was_cr = false;
-    for endpoint in endpoints {
-        let limit = (endpoint[0] as usize).min(text.len());
+    for (offset, slot) in endpoints {
+        let limit = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(text.len());
         while let Some(&(byte, ch)) = characters.peek() {
             if byte >= limit || byte.saturating_add(ch.len_utf8()) > limit {
                 break;
@@ -393,13 +410,12 @@ fn resolve_diagnostic_positions(
                 }
             }
         }
-        let slot = endpoint[1] as usize;
-        let entry = &mut entries[slot / 2];
+        let position = &mut positions[slot / 2];
         let coordinate = (slot % 2) * 2;
-        entry[coordinate] = line;
-        entry[coordinate + 1] = character;
+        position[coordinate] = line;
+        position[coordinate + 1] = character;
     }
-    entries
+    positions
 }
 
 struct OpenDocument {
@@ -620,6 +636,7 @@ where
                             "hoverProvider": true,
                             "definitionProvider": true,
                             "referencesProvider": true,
+                            "renameProvider": true,
                             "documentSymbolProvider": true,
                             "foldingRangeProvider": true,
                             "diagnosticProvider": {
@@ -672,6 +689,7 @@ where
             "textDocument/hover" => self.hover(id, params),
             "textDocument/definition" => self.definition(id, params),
             "textDocument/references" => self.references(id, params),
+            "textDocument/rename" => self.rename(id, params),
             "textDocument/documentSymbol" => self.document_symbols(id, params),
             "textDocument/foldingRange" => self.folding_ranges(id, params),
             "textDocument/diagnostic" => self.pull_diagnostics(id, params),
@@ -1094,6 +1112,119 @@ where
         Dispatch::messages(vec![rpc_result(id, Value::Array(locations))])
     }
 
+    fn rename(&self, id: Option<Value>, params: Value) -> Dispatch {
+        let Some(id) = id else {
+            return Dispatch::none();
+        };
+        let Ok(params) = serde_json::from_value::<RenameParams>(params) else {
+            return invalid_params(Some(id));
+        };
+        if params.new_name.is_empty() || params.new_name.len() > MAX_RENAME_IDENTIFIER_BYTES {
+            return invalid_params(Some(id));
+        }
+        let Some(open) = self.documents.get(&params.text_document.uri) else {
+            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+        };
+        let Some(offset) = position_to_byte_offset(&open.text, params.position) else {
+            return invalid_params(Some(id));
+        };
+        let targets = open.definitions.get(offset).collect::<HashSet<_>>();
+        if targets.len() != 1 {
+            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+        }
+
+        let analyzed_uris = self.analyzed_uris();
+        let mut response_uris = Vec::with_capacity(analyzed_uris.len());
+        response_uris.push(params.text_document.uri.as_str());
+        response_uris.extend(
+            analyzed_uris
+                .iter()
+                .copied()
+                .filter(|uri| *uri != params.text_document.uri),
+        );
+
+        let mut spellings = HashMap::<String, Vec<RenameTextChange>>::new();
+        let mut wire_bytes = 64usize;
+        let mut document_changes = Vec::new();
+        for uri in response_uris {
+            let Some(document) = self.documents.get(uri) else {
+                continue;
+            };
+            let mut spans = document
+                .definitions
+                .occurrences_targeting(&targets)
+                .map(|(span, _)| span)
+                .collect::<Vec<_>>();
+            spans.sort_unstable_by_key(|span| (span.lo, span.hi));
+            spans.dedup();
+            if spans.is_empty() {
+                continue;
+            }
+
+            wire_bytes = wire_bytes
+                .saturating_add(RENAME_DOCUMENT_WIRE_FIXED_BYTES)
+                .saturating_add(json_string_wire_bytes(uri));
+            if wire_bytes > MAX_RENAME_WIRE_BYTES {
+                return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+            }
+            let mut pending_edits = Vec::new();
+            for span in spans {
+                let Some(old_name) = document.text.get(span.lo as usize..span.hi as usize) else {
+                    return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+                };
+                if old_name.len() > MAX_RENAME_IDENTIFIER_BYTES {
+                    return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+                }
+                if !spellings.contains_key(old_name) {
+                    if spellings.len() >= MAX_RENAME_SPELLINGS {
+                        return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+                    }
+                    let Some(changes) = rename_text_changes(old_name, &params.new_name) else {
+                        return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+                    };
+                    spellings.insert(old_name.to_string(), changes);
+                }
+                for change in &spellings[old_name] {
+                    wire_bytes = wire_bytes
+                        .saturating_add(RENAME_EDIT_WIRE_FIXED_BYTES)
+                        .saturating_add(json_string_wire_bytes(&change.new_text));
+                    if wire_bytes > MAX_RENAME_WIRE_BYTES {
+                        return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+                    }
+                    let (Ok(old_lo), Ok(old_hi)) =
+                        (u32::try_from(change.old_lo), u32::try_from(change.old_hi))
+                    else {
+                        return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+                    };
+                    let (Some(lo), Some(hi)) =
+                        (span.lo.checked_add(old_lo), span.lo.checked_add(old_hi))
+                    else {
+                        return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+                    };
+                    pending_edits.push(PendingRenameEdit {
+                        lo,
+                        hi,
+                        new_text: change.new_text.clone(),
+                    });
+                }
+            }
+            let Some(edits) = encode_rename_edits(&document.text, pending_edits) else {
+                return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+            };
+            document_changes.push(json!({
+                "textDocument": {
+                    "uri": uri,
+                    "version": document.version,
+                },
+                "edits": edits,
+            }));
+        }
+        Dispatch::messages(vec![rpc_result(
+            id,
+            json!({"documentChanges": document_changes}),
+        )])
+    }
+
     fn resolve_completion(&self, id: Option<Value>, item: Value) -> Dispatch {
         let Some(id) = id else {
             return Dispatch::none();
@@ -1228,8 +1359,128 @@ struct ReferenceParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RenameParams {
+    text_document: TextDocumentIdentifier,
+    position: Position,
+    new_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ReferenceContext {
     include_declaration: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RenameTextChange {
+    old_lo: usize,
+    old_hi: usize,
+    new_text: String,
+}
+
+struct PendingRenameEdit {
+    lo: u32,
+    hi: u32,
+    new_text: String,
+}
+
+fn rename_text_changes(old: &str, new: &str) -> Option<Vec<RenameTextChange>> {
+    let old_chars = old.chars().collect::<Vec<_>>();
+    let new_chars = new.chars().collect::<Vec<_>>();
+    if old_chars.len() > MAX_RENAME_IDENTIFIER_BYTES
+        || new_chars.len() > MAX_RENAME_IDENTIFIER_BYTES
+    {
+        return None;
+    }
+    let columns = new_chars.len().checked_add(1)?;
+    let cells = old_chars.len().checked_add(1)?.checked_mul(columns)?;
+    let mut lcs = vec![0u16; cells];
+    let cell = |old_index: usize, new_index: usize| old_index * columns + new_index;
+    for old_index in (0..old_chars.len()).rev() {
+        for new_index in (0..new_chars.len()).rev() {
+            lcs[cell(old_index, new_index)] = if old_chars[old_index] == new_chars[new_index] {
+                lcs[cell(old_index + 1, new_index + 1)].saturating_add(1)
+            } else {
+                lcs[cell(old_index + 1, new_index)].max(lcs[cell(old_index, new_index + 1)])
+            };
+        }
+    }
+
+    let old_offsets = char_offsets(old);
+    let new_offsets = char_offsets(new);
+    let mut changes = Vec::new();
+    let mut old_index = 0usize;
+    let mut new_index = 0usize;
+    let mut pending = None::<(usize, usize)>;
+    while old_index < old_chars.len() || new_index < new_chars.len() {
+        if old_index < old_chars.len()
+            && new_index < new_chars.len()
+            && old_chars[old_index] == new_chars[new_index]
+        {
+            if let Some((old_start, new_start)) = pending.take() {
+                changes.push(RenameTextChange {
+                    old_lo: old_offsets[old_start],
+                    old_hi: old_offsets[old_index],
+                    new_text: new[new_offsets[new_start]..new_offsets[new_index]].to_string(),
+                });
+            }
+            old_index += 1;
+            new_index += 1;
+        } else if new_index < new_chars.len()
+            && (old_index == old_chars.len()
+                || lcs[cell(old_index, new_index + 1)] > lcs[cell(old_index + 1, new_index)])
+        {
+            pending.get_or_insert((old_index, new_index));
+            new_index += 1;
+        } else {
+            pending.get_or_insert((old_index, new_index));
+            old_index += 1;
+        }
+    }
+    if let Some((old_start, new_start)) = pending {
+        changes.push(RenameTextChange {
+            old_lo: old_offsets[old_start],
+            old_hi: old_offsets[old_index],
+            new_text: new[new_offsets[new_start]..new_offsets[new_index]].to_string(),
+        });
+    }
+    Some(changes)
+}
+
+fn char_offsets(value: &str) -> Vec<usize> {
+    value
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .chain(std::iter::once(value.len()))
+        .collect()
+}
+
+fn encode_rename_edits(text: &str, pending: Vec<PendingRenameEdit>) -> Option<Vec<Value>> {
+    for edit in &pending {
+        let (Ok(lo), Ok(hi)) = (usize::try_from(edit.lo), usize::try_from(edit.hi)) else {
+            return None;
+        };
+        if hi < lo || hi > text.len() || !text.is_char_boundary(lo) || !text.is_char_boundary(hi) {
+            return None;
+        }
+    }
+    let positions = resolve_span_positions(text, pending.iter().map(|edit| (edit.lo, edit.hi)));
+
+    Some(
+        pending
+            .into_iter()
+            .zip(positions)
+            .map(|(edit, position)| {
+                json!({
+                    "range": {
+                        "start": {"line": position[0], "character": position[1]},
+                        "end": {"line": position[2], "character": position[3]},
+                    },
+                    "newText": edit.new_text,
+                })
+            })
+            .collect(),
+    )
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -1871,6 +2122,42 @@ fn json_io(error: serde_json::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rename_diff_matches_the_official_delete_on_tie_edits_and_bounds_work() {
+        let changes = |old, new| {
+            rename_text_changes(old, new)
+                .unwrap()
+                .into_iter()
+                .map(|change| (change.old_lo, change.old_hi, change.new_text))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            changes("answer", "renamedAnswer"),
+            [(0, 0, "ren".to_string()), (1, 1, "medA".to_string())]
+        );
+        assert_eq!(
+            changes("answer", "renamedLocal"),
+            [
+                (0, 1, "re".to_string()),
+                (2, 4, "am".to_string()),
+                (5, 6, "dLocal".to_string()),
+            ]
+        );
+        assert_eq!(
+            changes("`odd name`", "plainName"),
+            [
+                (0, 5, "plai".to_string()),
+                (6, 6, "N".to_string()),
+                (9, 10, String::new()),
+            ]
+        );
+        assert_eq!(
+            changes("😀target", "renamedTarget"),
+            [(0, 5, "ren".to_string()), (6, 6, "medTa".to_string()),]
+        );
+        assert!(rename_text_changes("x", &"n".repeat(MAX_RENAME_IDENTIFIER_BYTES + 1)).is_none());
+    }
 
     #[test]
     fn owned_rpc_envelopes_move_array_storage_without_cloning() {
