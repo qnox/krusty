@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::compiler_analysis::{self, CompletionSymbols, DefinitionSymbols, HighlightSymbols};
 use crate::{
     read_framed, write_framed, AnalysisBudgets, CompletionIndex, DefinitionIndex, DocumentAnalysis,
-    HoverIndex, SemanticTokenIndex, SourceSetIndexes,
+    DocumentSymbolIndex, HoverIndex, SemanticTokenIndex, SourceSetIndexes,
 };
 
 pub const DEFAULT_ANALYSES_PER_WORKER: usize = 64;
@@ -53,6 +53,7 @@ struct AnalysisResponse {
     completion: CompletionIndex,
     semantic_tokens: SemanticTokenIndex,
     definitions: DefinitionIndex,
+    document_symbols: DocumentSymbolIndex,
 }
 
 impl From<DocumentAnalysis> for AnalysisResponse {
@@ -75,6 +76,7 @@ impl From<DocumentAnalysis> for AnalysisResponse {
             completion: analysis.completion,
             semantic_tokens: analysis.semantic_tokens,
             definitions: analysis.definitions,
+            document_symbols: analysis.document_symbols,
         }
     }
 }
@@ -100,6 +102,7 @@ impl AnalysisResponse {
             completion: self.completion,
             semantic_tokens: self.semantic_tokens,
             definitions: self.definitions,
+            document_symbols: self.document_symbols,
         }
     }
 }
@@ -505,5 +508,6 @@ mod tests {
         assert!(analysis.completion.entry_count() > 0);
         assert!(analysis.semantic_tokens.entry_count() > 0);
         assert!(analysis.definitions.entry_count() > 0);
+        assert!(analysis.document_symbols.entry_count() > 0);
     }
 }

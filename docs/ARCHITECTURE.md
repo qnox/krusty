@@ -57,7 +57,8 @@ boundary.
   a compiler worker that is restarted after 64 analyses. This bounds growth from the compiler's
   process-lifetime name/type interners while amortizing JVM classpath initialization across edits.
 - An open document retains its source text, diagnostics only long enough to publish them, a compact
-  hover index, completion catalog, definition index, and semantic-highlighting tokens. Each hover
+  hover index, completion catalog, definition index, document-symbol hierarchy, and
+  semantic-highlighting tokens. Each hover
   entry is a 12-byte `(source lo, source hi, declaration-signature id)` record; official-format
   signature strings are deduplicated per document and bounded across the source set. No AST node or
   hover entry retains a source-text copy. A scoped completion
@@ -78,9 +79,14 @@ boundary.
   256K-entry budget bounds both construction and long-lived storage. Find-references deduplicates
   cursor targets into a request-local set, reverse-scans each bounded entry once, and allocates only
   the returned locations rather than retaining a duplicate reverse index.
+  A document-symbol entry is a 40-byte packed array containing an interned name id, precomputed
+  UTF-16 full/selection endpoints, kind/deprecation bits, and a parent index. The worker flattens
+  compiler declarations into this hierarchy, caps the source set at 32,768 entries and a conservative
+  8 MiB response estimate, then drops the AST and source-derived temporary spans. Requests rebuild
+  JSON from the packed hierarchy without retaining or recreating a second source string.
 - Open documents are analyzed as one source set, so one parse/signature pass resolves declarations
-  across open files and refreshes every open file's diagnostics, completion, hover, and highlighting
-  snapshots atomically. Temporary source-set catalogs carry completion declarations and source-only
+  across open files and refreshes every open file's diagnostics, completion, hover, document symbols,
+  and highlighting snapshots atomically. Temporary source-set catalogs carry completion declarations and source-only
   highlighting flags such as `data`, `operator`, and `Deprecated` across files while the compact
   snapshots are built. Navigation also consumes checker-selected source declaration ids for overloads
   before reducing them to file/span pairs. AST, symbol-table, full type-analysis, and those catalogs

@@ -1822,6 +1822,11 @@ impl<'a> Parser<'a> {
         is_const: bool,
         is_abstract: bool,
     ) -> PropDecl {
+        // Property annotations are not yet part of PropDecl, but they still belong to THIS
+        // declaration. Consume their sparse pending buffers so an annotation on a property cannot
+        // leak onto the following class/function declaration.
+        let _ = self.take_pending_annotations();
+        let _ = self.take_pending_annotation_args();
         let start = self.tok().span;
         let is_var = self.at(TokenKind::KwVar);
         self.bump(); // val/var
@@ -3015,13 +3020,13 @@ impl<'a> Parser<'a> {
             self.push_lexical_type_params(&type_params, &type_param_bounds);
         // An explicit primary-constructor `constructor` keyword (`class A private constructor(...)`,
         // possibly preceded by modifiers/annotations) marks a primary ctor even before the params.
-        if (self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())))
-            && self
-                .t
-                .get(self.i + 1)
-                .is_some_and(|t| t.kind == TokenKind::Ident && t.text(self.src) == "constructor")
-        {
+        if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
             self.skip_decl_prefix();
+            // These annotations belong to the primary constructor, not the class. Constructor
+            // metadata is not represented in ClassDecl yet, so discard it here instead of leaking
+            // it into a parameter or the following declaration.
+            let _ = self.take_pending_annotations();
+            let _ = self.take_pending_annotation_args();
         }
         let header_ctor_kw = self.at(TokenKind::Ident) && self.text() == "constructor";
         if header_ctor_kw {
@@ -8048,6 +8053,61 @@ mod tests {
             anns("B").is_empty(),
             "annotation must not leak to the next function"
         );
+    }
+
+    #[test]
+    fn property_annotation_does_not_leak_to_the_next_declaration() {
+        let mut diagnostics = DiagSink::new();
+        let source = "@Deprecated(\"old\")\nval oldProperty = 1\nclass Fresh\n";
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected: {}",
+            diagnostics.render("test.kt", source)
+        );
+        let class = file
+            .decls
+            .iter()
+            .find_map(|&declaration| match file.decl(declaration) {
+                Decl::Class(class) if class.name == "Fresh" => Some(class),
+                _ => None,
+            })
+            .expect("Fresh class");
+        assert!(
+            class.annotations.is_empty(),
+            "property annotation leaked onto the following class"
+        );
+    }
+
+    #[test]
+    fn parses_annotated_explicit_primary_constructor_without_splitting_the_class() {
+        let mut diagnostics = DiagSink::new();
+        let source =
+            "class Injected @Deprecated(\"old\") constructor(val value: Int)\nclass Fresh\n";
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected: {}",
+            diagnostics.render("test.kt", source)
+        );
+        assert_eq!(file.decls.len(), 2);
+        let find_class = |name: &str| {
+            file.decls
+                .iter()
+                .find_map(|&declaration| match file.decl(declaration) {
+                    Decl::Class(class) if class.name == name => Some(class),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{name} class"))
+        };
+        let class = find_class("Injected");
+        assert_eq!(class.name, "Injected");
+        assert_eq!(class.props.len(), 1);
+        assert_eq!(class.props[0].name, "value");
+        assert!(class.annotations.is_empty());
+        assert!(find_class("Fresh").annotations.is_empty());
     }
 
     #[test]

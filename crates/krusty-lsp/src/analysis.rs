@@ -3,12 +3,14 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::compiler_analysis::{
-    analyze_standalone_source_set, hover_wire_cost, CompletionDetails, CompletionKind,
-    CompletionSymbols, DefinitionOccurrence, DefinitionSymbols, DefinitionTarget, FileAnalysis,
-    FrontendSymbols, HighlightOccurrence, HighlightSymbols, HoverOccurrence, SemanticLimits,
+    analyze_standalone_source_set, document_symbol_occurrences, hover_wire_cost, CompletionDetails,
+    CompletionKind, CompletionSymbols, DefinitionOccurrence, DefinitionSymbols, DefinitionTarget,
+    DocumentSymbolOccurrence, FileAnalysis, FrontendSymbols, HighlightOccurrence, HighlightSymbols,
+    HoverOccurrence, SemanticLimits,
 };
 use krusty::diag::{Diagnostic, Span};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 /// `(source lo, source hi, interned hover value id)`.
 type HoverEntry = [u32; 3];
@@ -31,6 +33,8 @@ const MAX_SOURCE_SET_COMPLETION_WIRE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SOURCE_SET_DEFINITION_ENTRIES: usize = 256 * 1024;
 const MAX_SOURCE_SET_HOVER_ENTRIES: usize = 256 * 1024;
 const MAX_SOURCE_SET_HOVER_WIRE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SOURCE_SET_DOCUMENT_SYMBOL_ENTRIES: usize = 32 * 1024;
+const MAX_SOURCE_SET_DOCUMENT_SYMBOL_WIRE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Default)]
 pub(crate) struct HoverBudget {
@@ -67,6 +71,31 @@ pub(crate) struct CompletionBudget {
 #[derive(Default)]
 pub(crate) struct DefinitionBudget {
     entries: usize,
+}
+
+#[derive(Default)]
+pub(crate) struct DocumentSymbolBudget {
+    entries: usize,
+    wire_bytes: usize,
+}
+
+impl DocumentSymbolBudget {
+    fn remaining_entries(&self) -> usize {
+        MAX_SOURCE_SET_DOCUMENT_SYMBOL_ENTRIES.saturating_sub(self.entries)
+    }
+
+    fn reserve(&mut self, name: &str) -> bool {
+        let wire_bytes = 192usize.saturating_add(name.len().saturating_mul(6));
+        if self.entries >= MAX_SOURCE_SET_DOCUMENT_SYMBOL_ENTRIES
+            || wire_bytes
+                > MAX_SOURCE_SET_DOCUMENT_SYMBOL_WIRE_BYTES.saturating_sub(self.wire_bytes)
+        {
+            return false;
+        }
+        self.entries += 1;
+        self.wire_bytes += wire_bytes;
+        true
+    }
 }
 
 impl DefinitionBudget {
@@ -126,6 +155,173 @@ type DefinitionEntry = [u32; 5];
 #[derive(Default, Deserialize, Serialize)]
 pub struct DefinitionIndex {
     entries: Vec<DefinitionEntry>,
+}
+
+/// `(name id, range start line/character, range end line/character,
+/// selection start line/character, selection end line/character, kind/deprecated/parent)`.
+type DocumentSymbolEntry = [u32; 10];
+
+/// Compact pre-positioned hierarchy retained after compiler analysis is dropped.
+#[derive(Default, Deserialize, Serialize)]
+pub struct DocumentSymbolIndex {
+    entries: Vec<DocumentSymbolEntry>,
+    names: Vec<String>,
+}
+
+impl DocumentSymbolIndex {
+    fn from_occurrences(
+        source: &str,
+        occurrences: Vec<DocumentSymbolOccurrence>,
+        budget: &mut DocumentSymbolBudget,
+    ) -> Self {
+        let mut retained = Vec::with_capacity(
+            occurrences
+                .len()
+                .min(MAX_SOURCE_SET_DOCUMENT_SYMBOL_ENTRIES.saturating_sub(budget.entries)),
+        );
+        for occurrence in occurrences {
+            if !budget.reserve(&occurrence.name) {
+                break;
+            }
+            retained.push(occurrence);
+        }
+
+        let positions = selected_positions(
+            source,
+            retained.iter().flat_map(|occurrence| {
+                [
+                    occurrence.range.lo,
+                    occurrence.range.hi,
+                    occurrence.selection.lo,
+                    occurrence.selection.hi,
+                ]
+            }),
+        );
+        let position = |offset| {
+            let index = positions
+                .binary_search_by_key(&offset, |(offset, _)| *offset)
+                .expect("document-symbol offset must be positioned");
+            positions[index].1
+        };
+
+        let mut names = Vec::new();
+        let mut name_ids = HashMap::<String, u32>::new();
+        let mut entries = Vec::with_capacity(retained.len());
+        for occurrence in retained {
+            let name_id = if let Some(&name_id) = name_ids.get(&occurrence.name) {
+                name_id
+            } else {
+                let name_id = names.len() as u32;
+                name_ids.insert(occurrence.name.clone(), name_id);
+                names.push(occurrence.name);
+                name_id
+            };
+            let range_start = position(occurrence.range.lo);
+            let range_end = position(occurrence.range.hi);
+            let selection_start = position(occurrence.selection.lo);
+            let selection_end = position(occurrence.selection.hi);
+            let parent = occurrence
+                .parent
+                .and_then(|parent| u32::try_from(parent).ok())
+                .and_then(|parent| parent.checked_add(1))
+                .unwrap_or(0);
+            let packed =
+                u32::from(occurrence.kind) | u32::from(occurrence.deprecated) << 8 | parent << 9;
+            entries.push([
+                name_id,
+                range_start[0],
+                range_start[1],
+                range_end[0],
+                range_end[1],
+                selection_start[0],
+                selection_start[1],
+                selection_end[0],
+                selection_end[1],
+                packed,
+            ]);
+        }
+        Self { entries, names }
+    }
+
+    pub fn encode(&self) -> Vec<Value> {
+        let mut children = (0..self.entries.len())
+            .map(|_| Vec::new())
+            .collect::<Vec<Vec<Value>>>();
+        let mut roots = Vec::new();
+        for index in (0..self.entries.len()).rev() {
+            let entry = self.entries[index];
+            let packed = entry[9];
+            let mut symbol = json!({
+                "name": self.names[entry[0] as usize],
+                "kind": packed & u8::MAX as u32,
+                "deprecated": packed & (1 << 8) != 0,
+                "range": {
+                    "start": {"line": entry[1], "character": entry[2]},
+                    "end": {"line": entry[3], "character": entry[4]},
+                },
+                "selectionRange": {
+                    "start": {"line": entry[5], "character": entry[6]},
+                    "end": {"line": entry[7], "character": entry[8]},
+                }
+            });
+            if packed & (1 << 8) != 0 {
+                symbol
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("tags".to_string(), json!([1]));
+            }
+            let symbol_children = &mut children[index];
+            if !symbol_children.is_empty() {
+                symbol_children.reverse();
+                symbol.as_object_mut().unwrap().insert(
+                    "children".to_string(),
+                    Value::Array(std::mem::take(symbol_children)),
+                );
+            }
+            let parent = packed >> 9;
+            if parent == 0 {
+                roots.push(symbol);
+            } else {
+                children[parent as usize - 1].push(symbol);
+            }
+        }
+        roots.reverse();
+        roots
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn name_count(&self) -> usize {
+        self.names.len()
+    }
+}
+
+fn selected_positions(
+    source: &str,
+    offsets: impl IntoIterator<Item = u32>,
+) -> Vec<(u32, [u32; 2])> {
+    let mut offsets = offsets.into_iter().collect::<Vec<_>>();
+    offsets.sort_unstable();
+    offsets.dedup();
+    let mut positions = Vec::with_capacity(offsets.len());
+    let mut byte = 0usize;
+    let mut line = 0u32;
+    let mut character = 0u32;
+    let mut previous_was_cr = false;
+    for offset in offsets {
+        let offset = offset as usize;
+        advance_position(
+            &source[byte..offset],
+            &mut line,
+            &mut character,
+            &mut previous_was_cr,
+        );
+        positions.push((offset as u32, [line, character]));
+        byte = offset;
+    }
+    positions
 }
 
 pub struct DefinitionTargets<'a> {
@@ -766,6 +962,7 @@ pub struct DocumentAnalysis {
     pub completion: CompletionIndex,
     pub semantic_tokens: SemanticTokenIndex,
     pub definitions: DefinitionIndex,
+    pub document_symbols: DocumentSymbolIndex,
 }
 
 pub(crate) struct SourceSetIndexes<'a> {
@@ -795,6 +992,7 @@ pub(crate) struct AnalysisBudgets {
     hover: HoverBudget,
     completion: CompletionBudget,
     definition: DefinitionBudget,
+    document_symbol: DocumentSymbolBudget,
 }
 
 impl AnalysisBudgets {
@@ -803,6 +1001,7 @@ impl AnalysisBudgets {
             hover: HoverBudget::default(),
             completion: CompletionBudget::default(),
             definition: DefinitionBudget::default(),
+            document_symbol: DocumentSymbolBudget::default(),
         }
     }
 }
@@ -837,12 +1036,22 @@ impl DocumentAnalysis {
         let semantic_tokens = SemanticTokenIndex::from_occurrences(source, semantic.highlights);
         let definitions =
             DefinitionIndex::from_occurrences(semantic.definitions, &mut budgets.definition);
+        let document_symbols = DocumentSymbolIndex::from_occurrences(
+            source,
+            document_symbol_occurrences(
+                source,
+                &analysis,
+                budgets.document_symbol.remaining_entries(),
+            ),
+            &mut budgets.document_symbol,
+        );
         Self {
             diagnostics: analysis.diagnostics,
             hover,
             completion,
             semantic_tokens,
             definitions,
+            document_symbols,
         }
     }
 
@@ -853,6 +1062,7 @@ impl DocumentAnalysis {
             completion: CompletionIndex::default(),
             semantic_tokens: SemanticTokenIndex::default(),
             definitions: DefinitionIndex::default(),
+            document_symbols: DocumentSymbolIndex::default(),
         }
     }
 
@@ -913,6 +1123,91 @@ mod tests {
                 (line, start, token[2], token[3], token[4])
             })
             .collect()
+    }
+
+    #[test]
+    fn document_symbol_snapshot_is_compact_interned_hierarchical_and_utf16_positioned() {
+        assert_eq!(std::mem::size_of::<DocumentSymbolEntry>(), 40);
+        let source = "😀\r\nx";
+        let occurrences = vec![
+            DocumentSymbolOccurrence {
+                name: "same".to_string(),
+                kind: 5,
+                deprecated: false,
+                range: Span::new(0, source.len() as u32),
+                selection: Span::new(6, 7),
+                parent: None,
+            },
+            DocumentSymbolOccurrence {
+                name: "same".to_string(),
+                kind: 7,
+                deprecated: true,
+                range: Span::new(6, 7),
+                selection: Span::new(6, 7),
+                parent: Some(0),
+            },
+        ];
+        let index = DocumentSymbolIndex::from_occurrences(
+            source,
+            occurrences,
+            &mut DocumentSymbolBudget::default(),
+        );
+
+        assert_eq!(index.entry_count(), 2);
+        assert_eq!(index.name_count(), 1);
+        assert_eq!(
+            index.encode(),
+            vec![json!({
+                "name": "same",
+                "kind": 5,
+                "deprecated": false,
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 1, "character": 1}
+                },
+                "selectionRange": {
+                    "start": {"line": 1, "character": 0},
+                    "end": {"line": 1, "character": 1}
+                },
+                "children": [{
+                    "name": "same",
+                    "kind": 7,
+                    "deprecated": true,
+                    "tags": [1],
+                    "range": {
+                        "start": {"line": 1, "character": 0},
+                        "end": {"line": 1, "character": 1}
+                    },
+                    "selectionRange": {
+                        "start": {"line": 1, "character": 0},
+                        "end": {"line": 1, "character": 1}
+                    }
+                }]
+            })]
+        );
+    }
+
+    #[test]
+    fn document_symbol_snapshot_respects_the_source_set_entry_budget() {
+        let source = "x";
+        let occurrences = (0..=MAX_SOURCE_SET_DOCUMENT_SYMBOL_ENTRIES)
+            .map(|_| DocumentSymbolOccurrence {
+                name: "x".to_string(),
+                kind: 13,
+                deprecated: false,
+                range: Span::new(0, 1),
+                selection: Span::new(0, 1),
+                parent: None,
+            })
+            .collect();
+        let index = DocumentSymbolIndex::from_occurrences(
+            source,
+            occurrences,
+            &mut DocumentSymbolBudget::default(),
+        );
+
+        assert_eq!(index.entry_count(), MAX_SOURCE_SET_DOCUMENT_SYMBOL_ENTRIES);
+        assert_eq!(index.name_count(), 1);
     }
 
     #[test]

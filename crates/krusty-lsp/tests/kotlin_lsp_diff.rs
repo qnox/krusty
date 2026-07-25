@@ -219,6 +219,9 @@ impl LspProcess {
                 "capabilities": {
                     "textDocument": {
                         "diagnostic": {},
+                        "documentSymbol": {
+                            "hierarchicalDocumentSymbolSupport": true
+                        },
                         "publishDiagnostics": {"versionSupport": true},
                         "semanticTokens": {
                             "requests": {"full": true},
@@ -358,6 +361,16 @@ impl LspProcess {
                 "textDocument": {"uri": uri},
                 "position": {"line": line, "character": character}
             }),
+        );
+        response.get("result").cloned().unwrap_or(Value::Null)
+    }
+
+    fn document_symbols(&mut self, uri: &str) -> Value {
+        let request_id = self.next_request_id();
+        let response = self.request(
+            request_id,
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri}}),
         );
         response.get("result").cloned().unwrap_or(Value::Null)
     }
@@ -504,7 +517,7 @@ fn diagnostic_comparison_preserves_the_exact_range_and_text() {
 }
 
 #[test]
-fn diagnostics_tokens_navigation_hovers_and_completions_match_official_kotlin_lsp() {
+fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_kotlin_lsp() {
     let Ok(kotlin_lsp) = std::env::var("KRUSTY_KOTLIN_LSP") else {
         eprintln!("skipping Kotlin LSP differential: set KRUSTY_KOTLIN_LSP");
         return;
@@ -889,6 +902,81 @@ fn diagnostics_tokens_navigation_hovers_and_completions_match_official_kotlin_ls
             "IncrementalParity.kt",
             "fun before(): Int = 1\nfun use(): Int = before()\n",
         ),
+        (
+            "DocumentSymbols.kt",
+            "package documentparity\n\
+             val topValue: Int = 1\n\
+             fun topFunction(arg: Int): Int = arg\n\
+             class Box(val item: Int) {\n\
+             \u{20}\u{20}var mutable: String = \"\"\n\
+             \u{20}\u{20}fun member(value: Int): Int = value\n\
+             }\n\
+             enum class Shade { RED, BLUE }\n\
+             interface Named { fun label(): String }\n\
+             object Registry { val size: Int = 1; fun clear() {} }\n",
+        ),
+        (
+            "DocumentSymbolsAdvanced.kt",
+            "package documentsymboladvanced\n\
+             @Deprecated(\"old\")\n\
+             fun oldFunction(): Int = 1\n\
+             @Deprecated(\n\
+             \u{20}\u{20}\"old property\"\n\
+             )\n\
+             val oldProperty: Int = 1\n\
+             class Advanced(seed: Int, val first: String = \"a,b\", var second: Int = 2)\n\
+             class Outer {\n\
+             \u{20}\u{20}class Inner(val nestedValue: Int) {\n\
+             \u{20}\u{20}\u{20}\u{20}fun nestedMethod(): Int = nestedValue\n\
+             \u{20}\u{20}}\n\
+             }\n\
+             fun `odd name`(): Int = 1\n",
+        ),
+        (
+            "DocumentSymbolsScopes.kt",
+            "package documentsymbolscopes\n\
+             class Container {\n\
+             \u{20}\u{20}companion object Factory {\n\
+             \u{20}\u{20}\u{20}\u{20}val answer: Int = 42\n\
+             \u{20}\u{20}\u{20}\u{20}fun create(): Container = Container()\n\
+             \u{20}\u{20}}\n\
+             \u{20}\u{20}fun outer(): Int {\n\
+             \u{20}\u{20}\u{20}\u{20}val localValue: Int = 1\n\
+             \u{20}\u{20}\u{20}\u{20}fun localFunction(): Int = localValue\n\
+             \u{20}\u{20}\u{20}\u{20}class LocalClass(val localProperty: Int)\n\
+             \u{20}\u{20}\u{20}\u{20}return localFunction()\n\
+             \u{20}\u{20}}\n\
+             }\n",
+        ),
+        (
+            "DocumentSymbolsKinds.kt",
+            "package documentsymbolkinds\n\
+             annotation class Marker\n\
+             data class Record(val value: Int)\n\
+             @JvmInline\n\
+             value class Token(val raw: Int)\n\
+             fun interface Action { fun run(): Unit }\n\
+             sealed class Base\n\
+             typealias Alias = Record\n\
+             @Deprecated(\n\
+             \u{20}\u{20}\"old alias\"\n\
+             )\n\
+             typealias OldAlias = Record\n\
+             class Injected @Deprecated(\"old constructor\") constructor(val injected: Int)\n\
+             enum class Pair(val left: Int, val right: Int) { BOTH(1, 2) }\n\
+             class Secondary {\n\
+             \u{20}\u{20}constructor(value: Int) { println(value) }\n\
+             }\n\
+             class AnnotatedMembers {\n\
+             \u{20}\u{20}@Deprecated(\"old secondary\")\n\
+             \u{20}\u{20}constructor(value: Int) { println(value) }\n\
+             \u{20}\u{20}@Deprecated(\"old companion\")\n\
+             \u{20}\u{20}companion object {}\n\
+             }\n\
+             class DefaultCompanion {\n\
+             \u{20}\u{20}companion object { val only: Int = 1 }\n\
+             }\n",
+        ),
     ];
     for (name, source) in diagnostic_cases
         .iter()
@@ -1003,6 +1091,22 @@ fn diagnostics_tokens_navigation_hovers_and_completions_match_official_kotlin_ls
     let incremental_parity_uri = format!(
         "file://{}",
         source_root.join("IncrementalParity.kt").display()
+    );
+    let document_symbols_uri = format!(
+        "file://{}",
+        source_root.join("DocumentSymbols.kt").display()
+    );
+    let advanced_document_symbols_uri = format!(
+        "file://{}",
+        source_root.join("DocumentSymbolsAdvanced.kt").display()
+    );
+    let scoped_document_symbols_uri = format!(
+        "file://{}",
+        source_root.join("DocumentSymbolsScopes.kt").display()
+    );
+    let kind_document_symbols_uri = format!(
+        "file://{}",
+        source_root.join("DocumentSymbolsKinds.kt").display()
     );
     let definition_positions = [
         ("class reference", basic_tokens_uri.as_str(), 1, 17),
@@ -1654,6 +1758,19 @@ fn diagnostics_tokens_navigation_hovers_and_completions_match_official_kotlin_ls
             .is_some_and(|locations| !locations.is_empty()),
         "official Kotlin LSP returned no definition after incremental edits"
     );
+    let expected_document_symbols = [
+        &document_symbols_uri,
+        &advanced_document_symbols_uri,
+        &scoped_document_symbols_uri,
+        &kind_document_symbols_uri,
+    ]
+    .map(|uri| reference.document_symbols(uri));
+    assert!(
+        expected_document_symbols.iter().all(|symbols| symbols
+            .as_array()
+            .is_some_and(|symbols| !symbols.is_empty())),
+        "official Kotlin LSP returned no document symbols"
+    );
     // The official server uses a multi-gigabyte IntelliJ process. Tear it down before starting
     // krusty so the opt-in differential does not retain both servers at peak memory.
     drop(reference);
@@ -1735,6 +1852,13 @@ fn diagnostics_tokens_navigation_hovers_and_completions_match_official_kotlin_ls
         .collect::<Vec<_>>();
     krusty.change_document(&incremental_parity_uri, 2, incremental_changes);
     let actual_incremental_definition = krusty.definition(&incremental_parity_uri, 1, 18);
+    let actual_document_symbols = [
+        &document_symbols_uri,
+        &advanced_document_symbols_uri,
+        &scoped_document_symbols_uri,
+        &kind_document_symbols_uri,
+    ]
+    .map(|uri| krusty.document_symbols(uri));
 
     for ((name, _), (actual, expected)) in diagnostic_cases
         .iter()
@@ -1769,4 +1893,11 @@ fn diagnostics_tokens_navigation_hovers_and_completions_match_official_kotlin_ls
         actual_incremental_definition, expected_incremental_definition,
         "incremental synchronization definition/range mismatch"
     );
+    for ((name, actual), expected) in ["basic", "advanced", "scopes", "kinds"]
+        .into_iter()
+        .zip(actual_document_symbols)
+        .zip(expected_document_symbols)
+    {
+        assert_eq!(actual, expected, "document symbol mismatch for {name}");
+    }
 }

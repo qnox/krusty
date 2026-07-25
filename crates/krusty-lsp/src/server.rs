@@ -232,6 +232,533 @@ mod tests {
     }
 
     #[test]
+    fn document_symbols_match_official_hierarchy_kinds_and_ranges() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        let initialized = server.handle(request(1, "initialize", json!({})));
+        assert_eq!(
+            initialized.messages[0]["result"]["capabilities"]["documentSymbolProvider"],
+            true
+        );
+        let uri = "file:///DocumentSymbols.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "val topValue: Int = 1\n\
+                             fun topFunction(arg: Int): Int = arg\n\
+                             class Box(val item: Int) {\n\
+                             \u{20}\u{20}var mutable: String = \"\"\n\
+                             \u{20}\u{20}fun member(value: Int): Int = value\n\
+                             }\n"
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+        assert_eq!(
+            response.messages[0]["result"],
+            json!([
+                {
+                    "name": "topValue",
+                    "kind": 7,
+                    "deprecated": false,
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 21}
+                    },
+                    "selectionRange": {
+                        "start": {"line": 0, "character": 4},
+                        "end": {"line": 0, "character": 12}
+                    }
+                },
+                {
+                    "name": "topFunction",
+                    "kind": 12,
+                    "deprecated": false,
+                    "range": {
+                        "start": {"line": 1, "character": 0},
+                        "end": {"line": 1, "character": 36}
+                    },
+                    "selectionRange": {
+                        "start": {"line": 1, "character": 4},
+                        "end": {"line": 1, "character": 15}
+                    }
+                },
+                {
+                    "name": "Box",
+                    "kind": 5,
+                    "deprecated": false,
+                    "range": {
+                        "start": {"line": 2, "character": 0},
+                        "end": {"line": 5, "character": 1}
+                    },
+                    "selectionRange": {
+                        "start": {"line": 2, "character": 6},
+                        "end": {"line": 2, "character": 9}
+                    },
+                    "children": [
+                        {
+                            "name": "item",
+                            "kind": 13,
+                            "deprecated": false,
+                            "range": {
+                                "start": {"line": 2, "character": 10},
+                                "end": {"line": 2, "character": 23}
+                            },
+                            "selectionRange": {
+                                "start": {"line": 2, "character": 14},
+                                "end": {"line": 2, "character": 18}
+                            }
+                        },
+                        {
+                            "name": "Box",
+                            "kind": 9,
+                            "deprecated": false,
+                            "range": {
+                                "start": {"line": 2, "character": 9},
+                                "end": {"line": 2, "character": 24}
+                            },
+                            "selectionRange": {
+                                "start": {"line": 2, "character": 9},
+                                "end": {"line": 2, "character": 24}
+                            }
+                        },
+                        {
+                            "name": "mutable",
+                            "kind": 7,
+                            "deprecated": false,
+                            "range": {
+                                "start": {"line": 3, "character": 2},
+                                "end": {"line": 3, "character": 26}
+                            },
+                            "selectionRange": {
+                                "start": {"line": 3, "character": 6},
+                                "end": {"line": 3, "character": 13}
+                            }
+                        },
+                        {
+                            "name": "member",
+                            "kind": 6,
+                            "deprecated": false,
+                            "range": {
+                                "start": {"line": 4, "character": 2},
+                                "end": {"line": 4, "character": 37}
+                            },
+                            "selectionRange": {
+                                "start": {"line": 4, "character": 6},
+                                "end": {"line": 4, "character": 12}
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn document_symbols_are_cached_and_include_semicolon_declaration_ranges() {
+        let calls = Rc::new(Cell::new(0));
+        let calls_for_analyzer = calls.clone();
+        let mut server = LspService::new(move |sources: &[&str]| {
+            calls_for_analyzer.set(calls_for_analyzer.get() + 1);
+            super::super::analyze_for_lsp(sources)
+        });
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///SemicolonSymbols.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "object Registry { val size: Int = 1; fun clear() {} }\n"
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+
+        assert_eq!(calls.get(), 1, "document symbols must not rerun analysis");
+        assert_eq!(
+            response.messages[0]["result"][0]["children"][0]["range"],
+            json!({
+                "start": {"line": 0, "character": 18},
+                "end": {"line": 0, "character": 36}
+            })
+        );
+    }
+
+    #[test]
+    fn document_symbols_preserve_companion_hierarchy_and_exact_locations() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///CompanionSymbols.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "class Container {\n\
+                             \u{20}\u{20}companion object Factory {\n\
+                             \u{20}\u{20}\u{20}\u{20}val answer: Int = 42\n\
+                             \u{20}\u{20}\u{20}\u{20}fun create(): Container = Container()\n\
+                             \u{20}\u{20}}\n\
+                             \u{20}\u{20}fun outer(): Int = 1\n\
+                             }\n"
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+        assert_eq!(
+            response.messages[0]["result"][0]["children"][0],
+            json!({
+                "name": "Factory",
+                "kind": 19,
+                "deprecated": false,
+                "range": {
+                    "start": {"line": 1, "character": 2},
+                    "end": {"line": 4, "character": 3}
+                },
+                "selectionRange": {
+                    "start": {"line": 1, "character": 19},
+                    "end": {"line": 1, "character": 26}
+                },
+                "children": [
+                    {
+                        "name": "answer",
+                        "kind": 7,
+                        "deprecated": false,
+                        "range": {
+                            "start": {"line": 2, "character": 4},
+                            "end": {"line": 2, "character": 24}
+                        },
+                        "selectionRange": {
+                            "start": {"line": 2, "character": 8},
+                            "end": {"line": 2, "character": 14}
+                        }
+                    },
+                    {
+                        "name": "create",
+                        "kind": 6,
+                        "deprecated": false,
+                        "range": {
+                            "start": {"line": 3, "character": 4},
+                            "end": {"line": 3, "character": 41}
+                        },
+                        "selectionRange": {
+                            "start": {"line": 3, "character": 8},
+                            "end": {"line": 3, "character": 14}
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn document_symbols_match_data_class_and_typealias_kinds_and_locations() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///KindSymbols.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "data class Record(val value: Int)\n\
+                             typealias Alias = Record\n"
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+        let symbols = response.messages[0]["result"].as_array().unwrap();
+        assert_eq!(symbols[0]["kind"], 23);
+        assert_eq!(
+            symbols[0]["range"],
+            json!({
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 33}
+            })
+        );
+        assert_eq!(
+            symbols[1],
+            json!({
+                "name": "Alias",
+                "kind": 5,
+                "deprecated": false,
+                "range": {
+                    "start": {"line": 1, "character": 0},
+                    "end": {"line": 1, "character": 24}
+                },
+                "selectionRange": {
+                    "start": {"line": 1, "character": 10},
+                    "end": {"line": 1, "character": 15}
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn document_symbols_match_secondary_constructor_and_unnamed_companion_locations() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///ConstructorSymbols.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "class Secondary {\n\
+                             \u{20}\u{20}constructor(value: Int) { println(value) }\n\
+                             }\n\
+                             class DefaultCompanion {\n\
+                             \u{20}\u{20}companion object { val only: Int = 1 }\n\
+                             }\n"
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+        let symbols = response.messages[0]["result"].as_array().unwrap();
+        assert_eq!(
+            symbols[0]["children"][0],
+            json!({
+                "name": "Secondary",
+                "kind": 9,
+                "deprecated": false,
+                "range": {
+                    "start": {"line": 1, "character": 2},
+                    "end": {"line": 1, "character": 44}
+                },
+                "selectionRange": {
+                    "start": {"line": 1, "character": 2},
+                    "end": {"line": 1, "character": 44}
+                }
+            })
+        );
+        assert_eq!(
+            symbols[1]["children"][0]["selectionRange"],
+            json!({
+                "start": {"line": 4, "character": 2},
+                "end": {"line": 4, "character": 40}
+            })
+        );
+        assert_eq!(
+            symbols[1]["children"][0]["children"][0]["range"],
+            json!({
+                "start": {"line": 4, "character": 21},
+                "end": {"line": 4, "character": 38}
+            })
+        );
+    }
+
+    #[test]
+    fn document_symbols_do_not_borrow_following_headers_or_leaked_annotations() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///AdjacentSymbols.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "annotation class Marker\n\
+                             data class Record(val value: Int)\n\
+                             @Deprecated(\"old alias\")\n\
+                             typealias OldAlias = Record\n\
+                             class Injected @Deprecated(\"old constructor\") constructor(val value: Int)\n\
+                             class DefaultCompanion {\n\
+                             \u{20}\u{20}@Deprecated(\"old companion\")\n\
+                             \u{20}\u{20}companion object {}\n\
+                             }\n\
+                             class Fresh\n"
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+        let symbols = response.messages[0]["result"].as_array().unwrap();
+        let symbol = |name: &str| {
+            symbols
+                .iter()
+                .find(|symbol| symbol["name"] == name)
+                .unwrap_or_else(|| panic!("{name} symbol"))
+        };
+        assert!(symbol("Marker").get("children").is_none());
+        assert!(symbol("Fresh").get("children").is_none());
+        assert_eq!(symbol("Injected")["deprecated"], false);
+        assert_eq!(symbol("Injected")["children"][1]["deprecated"], true);
+        assert_eq!(symbol("DefaultCompanion")["deprecated"], false);
+        assert_eq!(
+            symbol("DefaultCompanion")["children"][0]["deprecated"],
+            true
+        );
+    }
+
+    #[test]
+    fn document_symbols_mark_deprecated_property_without_leaking_to_the_next_class() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///DeprecatedPropertySymbols.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "@Deprecated(\n\
+                             \u{20}\u{20}\"old\"\n\
+                             )\n\
+                             val oldProperty: Int = 1\n\
+                             @Other(Deprecated)\n\
+                             val currentProperty: Int = 2\n\
+                             class Fresh\n"
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+        let symbols = response.messages[0]["result"].as_array().unwrap();
+        assert_eq!(symbols[0]["deprecated"], true);
+        assert_eq!(symbols[0]["tags"], json!([1]));
+        assert_eq!(
+            symbols[0]["range"],
+            json!({
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 3, "character": 24}
+            })
+        );
+        assert_eq!(
+            symbols[0]["selectionRange"],
+            json!({
+                "start": {"line": 3, "character": 4},
+                "end": {"line": 3, "character": 15}
+            })
+        );
+        assert_eq!(symbols[1]["name"], "currentProperty");
+        assert_eq!(symbols[1]["deprecated"], false);
+        assert!(symbols[1].get("tags").is_none());
+        assert_eq!(
+            symbols[1]["range"],
+            json!({
+                "start": {"line": 4, "character": 0},
+                "end": {"line": 5, "character": 28}
+            })
+        );
+        assert_eq!(symbols[2]["name"], "Fresh");
+        assert_eq!(symbols[2]["deprecated"], false);
+        assert!(symbols[2].get("tags").is_none());
+    }
+
+    #[test]
+    fn document_symbols_balance_enum_arguments_and_select_explicit_constructor_range() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///BalancedSymbolRanges.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "class Injected @Deprecated(\"old constructor\") constructor(val injected: Int)\n\
+                             enum class Pair(val left: Int, val right: Int) { BOTH(1, 2) }\n"
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+        let symbols = response.messages[0]["result"].as_array().unwrap();
+        assert_eq!(symbols[0]["deprecated"], false);
+        assert_eq!(
+            symbols[0]["children"][0]["range"],
+            json!({
+                "start": {"line": 0, "character": 58},
+                "end": {"line": 0, "character": 75}
+            })
+        );
+        assert_eq!(
+            symbols[0]["children"][1],
+            json!({
+                "name": "Injected",
+                "kind": 9,
+                "deprecated": true,
+                "tags": [1],
+                "range": {
+                    "start": {"line": 0, "character": 15},
+                    "end": {"line": 0, "character": 76}
+                },
+                "selectionRange": {
+                    "start": {"line": 0, "character": 15},
+                    "end": {"line": 0, "character": 76}
+                }
+            })
+        );
+        assert_eq!(
+            symbols[1]["children"][3]["range"],
+            json!({
+                "start": {"line": 1, "character": 49},
+                "end": {"line": 1, "character": 59}
+            })
+        );
+        assert_eq!(
+            symbols[1]["children"][3]["selectionRange"],
+            json!({
+                "start": {"line": 1, "character": 49},
+                "end": {"line": 1, "character": 53}
+            })
+        );
+    }
+
+    #[test]
     fn definition_matches_official_class_parameter_and_property_ranges() {
         let calls = Rc::new(Cell::new(0));
         let calls_for_analyzer = calls.clone();

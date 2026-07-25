@@ -110,7 +110,7 @@ krusty -version | -help
 
 # LSP server over JSON-RPC on stdin/stdout
 # (incremental UTF-16 sync, diagnostics, completion + resolve, hover, go-to-definition, references,
-#  semantic highlighting):
+#  hierarchical document symbols, semantic highlighting):
 cargo build -p krusty-lsp
 target/debug/krusty-lsp --stdio -cp deps.jar:classes/
 ```
@@ -124,6 +124,8 @@ Go-to-definition and find-references use the same analyzed source set and compac
 identities; reference queries add no second occurrence index.
 Hover returns official Kotlin LSP declaration signatures and identifier ranges from a bounded,
 interned snapshot; it does not retain compiler ASTs or duplicate source strings.
+Document symbols likewise come from a bounded, compact hierarchy whose UTF-16 full and selection
+ranges are positioned once by the compiler worker; requests do not rescan source or rerun analysis.
 
 The test harness self-provisions the reference Kotlin compiler and box corpus through `just` when
 available, uses the fast `gate` profile, builds once, and runs test binaries in parallel. Pass

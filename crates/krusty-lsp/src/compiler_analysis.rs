@@ -1,6 +1,7 @@
 //! Compiler-facing source analysis isolated from the long-lived LSP supervisor.
 
 mod completion;
+mod document_symbols;
 mod navigation;
 mod rendering;
 mod semantic;
@@ -11,6 +12,7 @@ use krusty::frontend;
 use krusty::libraries::SemanticPlatform;
 
 pub(crate) use completion::{CompletionDetails, CompletionKind, CompletionSymbols};
+pub(crate) use document_symbols::{document_symbol_occurrences, DocumentSymbolOccurrence};
 pub use krusty::frontend::{FrontendSymbols, FrontendTypeInfo};
 pub use navigation::{DefinitionOccurrence, DefinitionSymbols, DefinitionTarget};
 pub(crate) use semantic::{hover_wire_cost, SemanticLimits};

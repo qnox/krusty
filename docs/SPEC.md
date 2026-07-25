@@ -1646,6 +1646,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   text. The official LSP differential applies the same edits to both servers and compares the
   resulting definition URI and both UTF-16 range endpoints.
 
+- **Document symbols match the official hierarchical Kotlin model and exact locations.** The server
+  advertises `documentSymbolProvider` and returns ordered nested declarations for top-level
+  functions/properties/classes/type aliases, primary and secondary constructors, constructor
+  properties, members, nested classes, enum entries, and companion objects. Official kinds include
+  `Struct` for data classes and `Object` for companions; deprecated declarations carry both the
+  legacy flag and `Deprecated` tag. Local declarations are omitted, matching the official server.
+  Every full and selection range is converted to UTF-16 once in the compiler worker. Long-lived state
+  is a bounded 40-byte packed record plus interned names—never an AST, source slice, or second source
+  string—and requests only encode that cached hierarchy. The opt-in official differential compares
+  the complete response, including hierarchy, kinds, tags, and every range endpoint.
+
 - **Hover returns official Kotlin LSP signatures and locations.** The server returns fenced Kotlin
   markdown for source symbols and the exact UTF-16 identifier range, and returns `null` for literals
   where the official server does. Signatures include inferred and nullable types, receiver types,

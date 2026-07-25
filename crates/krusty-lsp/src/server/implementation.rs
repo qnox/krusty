@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::super::{
-    CompletionIndex, DefinitionIndex, DocumentAnalysis, HoverIndex, SemanticTokenIndex,
-    SemanticTokenRange, SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
+    CompletionIndex, DefinitionIndex, DocumentAnalysis, DocumentSymbolIndex, HoverIndex,
+    SemanticTokenIndex, SemanticTokenRange, SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
 };
 use crate::uri::file_uri_to_path;
 use crate::worker::{source_set_fits, MAX_SOURCE_SET_BYTES};
@@ -220,6 +220,7 @@ struct OpenDocument {
     completion: CompletionIndex,
     semantic_tokens: SemanticTokenIndex,
     definitions: DefinitionIndex,
+    document_symbols: DocumentSymbolIndex,
     analysis_blocked: bool,
 }
 
@@ -294,6 +295,7 @@ where
                 open.completion = CompletionIndex::default();
                 open.semantic_tokens = SemanticTokenIndex::default();
                 open.definitions = DefinitionIndex::default();
+                open.document_symbols = DocumentSymbolIndex::default();
             }
             return uris
                 .into_iter()
@@ -321,6 +323,7 @@ where
                 open.completion = analysis.completion;
                 open.semantic_tokens = analysis.semantic_tokens;
                 open.definitions = analysis.definitions;
+                open.document_symbols = analysis.document_symbols;
                 publish_diagnostics(&uri, Some(open.version), analysis.diagnostics, &open.text)
             })
             .collect()
@@ -412,6 +415,7 @@ where
                             "hoverProvider": true,
                             "definitionProvider": true,
                             "referencesProvider": true,
+                            "documentSymbolProvider": true,
                             "completionProvider": {
                                 "resolveProvider": true,
                                 "triggerCharacters": ["."],
@@ -449,6 +453,7 @@ where
             "textDocument/hover" => self.hover(id, params),
             "textDocument/definition" => self.definition(id, params),
             "textDocument/references" => self.references(id, params),
+            "textDocument/documentSymbol" => self.document_symbols(id, params),
             "textDocument/completion" => self.completion(id, params),
             "completionItem/resolve" => self.resolve_completion(id, params),
             "textDocument/semanticTokens/full" => self.semantic_tokens(id, params, false),
@@ -510,6 +515,7 @@ where
                         completion: CompletionIndex::default(),
                         semantic_tokens: SemanticTokenIndex::default(),
                         definitions: DefinitionIndex::default(),
+                        document_symbols: DocumentSymbolIndex::default(),
                         analysis_blocked: true,
                     },
                 );
@@ -534,6 +540,7 @@ where
                 completion: CompletionIndex::default(),
                 semantic_tokens: SemanticTokenIndex::default(),
                 definitions: DefinitionIndex::default(),
+                document_symbols: DocumentSymbolIndex::default(),
                 analysis_blocked: false,
             },
         );
@@ -586,6 +593,7 @@ where
             open.completion = CompletionIndex::default();
             open.semantic_tokens = SemanticTokenIndex::default();
             open.definitions = DefinitionIndex::default();
+            open.document_symbols = DocumentSymbolIndex::default();
             open.analysis_blocked = true;
             self.analysis_dirty |= was_analyzed;
             let mut messages = vec![analysis_limit_diagnostic(
@@ -655,6 +663,22 @@ where
                     "end": byte_offset_to_position(&open.text, hover.span.hi as usize),
                 }
             }),
+        )])
+    }
+
+    fn document_symbols(&self, id: Option<Value>, params: Value) -> Dispatch {
+        let Some(id) = id else {
+            return Dispatch::none();
+        };
+        let Ok(params) = serde_json::from_value::<DocumentSymbolParams>(params) else {
+            return invalid_params(Some(id));
+        };
+        let Some(open) = self.documents.get(&params.text_document.uri) else {
+            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+        };
+        Dispatch::messages(vec![rpc_result(
+            id,
+            Value::Array(open.document_symbols.encode()),
         )])
     }
 
@@ -883,6 +907,12 @@ struct DidChangeParams {
 #[derive(Deserialize)]
 struct TextDocumentIdentifier {
     uri: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentSymbolParams {
+    text_document: TextDocumentIdentifier,
 }
 
 #[derive(Deserialize)]
