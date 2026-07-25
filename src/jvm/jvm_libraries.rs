@@ -800,6 +800,12 @@ impl JvmLibraries {
                     .unwrap_or_default()
             };
             for m in &ci.methods {
+                // A JVM bridge represents the same source declaration as its concrete target (for
+                // example `Child.copy(...): Parent` forwarding to the covariant
+                // `Child.copy(...): Child`). Exposing both creates a false named-argument overload tie.
+                if m.is_bridge() {
+                    continue;
+                }
                 // Public members are callable from anywhere; a `protected` member is surfaced too so a
                 // subclass can reach it through the supertype walk (a compiling program only reaches it
                 // from a legal subclass, which kotlinc already checked). Private/package members stay

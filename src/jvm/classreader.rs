@@ -11,6 +11,7 @@ use crate::types::{TypeName, TypeNameList};
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PROTECTED: u16 = 0x0004;
 pub const ACC_STATIC: u16 = 0x0008;
+pub const ACC_BRIDGE: u16 = 0x0040;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MethodSig {
@@ -34,6 +35,11 @@ impl MethodSig {
     }
     pub fn is_static(&self) -> bool {
         self.access & ACC_STATIC != 0
+    }
+    /// A compiler-generated covariant/generic bridge. It is a bytecode dispatch artifact, not a
+    /// source overload, and must not participate in Kotlin overload resolution.
+    pub fn is_bridge(&self) -> bool {
+        self.access & ACC_BRIDGE != 0
     }
 }
 

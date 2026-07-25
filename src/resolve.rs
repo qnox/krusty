@@ -13747,12 +13747,16 @@ impl<'a> Checker<'a> {
                 Some((score, o, params, slots))
             })
             .collect();
-        candidates.sort_by_key(|(score, _, _, _)| std::cmp::Reverse(*score));
-        if candidates
-            .get(1)
-            .zip(candidates.first())
-            .is_some_and(|((next_score, _, _, _), (best_score, _, _, _))| next_score == best_score)
-        {
+        // Named-argument mapping preserves normal member lookup precedence. A concrete override and
+        // its inherited declaration can have identical names and parameter types, so argument fit
+        // alone ties; the lower receiver rung is the more-derived declaration.
+        candidates
+            .sort_by_key(|(score, member, _, _)| (std::cmp::Reverse(*score), member.receiver_rank));
+        if candidates.get(1).zip(candidates.first()).is_some_and(
+            |((next_score, next, _, _), (best_score, best, _, _))| {
+                next_score == best_score && next.receiver_rank == best.receiver_rank
+            },
+        ) {
             self.diags.error(
                 self.span(call),
                 format!("overload resolution ambiguity for member '{name}'"),
