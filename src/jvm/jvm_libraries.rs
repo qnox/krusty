@@ -1428,7 +1428,7 @@ pub fn desc_to_ty(d: &str) -> Ty {
         "C" => Ty::Char,
         "V" => Ty::Unit,
         s if s == type_descriptor(Ty::String) => Ty::String,
-        s if s.starts_with('[') => Ty::array(desc_to_ty(&s[1..])),
+        s if s.starts_with('[') => Ty::array(field_desc_to_ty(&s[1..])),
         s if s.starts_with('L') && s.ends_with(';') => {
             let raw_internal = &s[1..s.len() - 1];
             if raw_internal == "java/lang/Void" {
@@ -3006,6 +3006,21 @@ mod tests {
     fn descriptor_void_reference_normalizes_before_core() {
         assert_eq!(desc_to_ty("Ljava/lang/Void;"), Ty::Unit);
         assert_eq!(desc_to_ty("V"), Ty::Unit);
+    }
+
+    #[test]
+    fn descriptor_arrays_preserve_primitive_element_width() {
+        assert_eq!(desc_to_ty("B"), Ty::Int);
+        assert_eq!(desc_to_ty("S"), Ty::Int);
+        assert_eq!(desc_to_ty("[B"), Ty::array(Ty::Byte));
+        assert_eq!(desc_to_ty("[S"), Ty::array(Ty::Short));
+        assert_eq!(desc_to_ty("[I"), Ty::array(Ty::Int));
+        assert_eq!(desc_to_ty("[[B"), Ty::array(Ty::array(Ty::Byte)));
+        assert_eq!(desc_to_ty("[Ljava/lang/String;"), Ty::array(Ty::String));
+        assert_eq!(
+            desc_to_ty("[[Ljava/lang/String;"),
+            Ty::array(Ty::array(Ty::String))
+        );
     }
 
     #[test]
