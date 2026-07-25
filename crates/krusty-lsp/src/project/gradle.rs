@@ -12,6 +12,7 @@ use super::runner::{Command, CommandRunner, GRADLE};
 const PROBE_VERSION: &str = "3";
 const SENTINEL: &str = "KRUSTY_MODEL_JSON ";
 const TASK: &str = "krustyModel";
+const MAX_FAILURE_DETAILS: usize = 8;
 
 /// Printed by the init script, one line per Gradle project.
 ///
@@ -237,6 +238,8 @@ impl GradleProvider {
         Command::new(self.gradle.clone(), self.root.clone()).args([
             "--quiet".to_string(),
             "--console=plain".to_string(),
+            // Gradle's configuration cache rejects the probe's execution-time project access.
+            "--no-configuration-cache".to_string(),
             "--init-script".to_string(),
             self.init_script.to_string_lossy().into_owned(),
             TASK.to_string(),
@@ -280,7 +283,7 @@ impl ProjectProvider for GradleProvider {
             return Err(ProbeError::Tool {
                 program: self.gradle.to_string_lossy().into_owned(),
                 status: output.status,
-                message: first_meaningful_line(&output.stderr, &output.stdout),
+                message: gradle_failure_summary(&output.stderr, &output.stdout),
             });
         }
         parse_model(&self.root, &output.stdout)
@@ -485,14 +488,52 @@ fn is_test_source_set(name: &str) -> bool {
     name == "test" || name.ends_with("Test") || name.ends_with("test")
 }
 
-fn first_meaningful_line(stderr: &str, stdout: &str) -> String {
-    stderr
-        .lines()
-        .chain(stdout.lines())
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or_default()
-        .to_string()
+fn gradle_failure_summary(stderr: &str, stdout: &str) -> String {
+    gradle_failure_details(stderr)
+        .or_else(|| gradle_failure_details(stdout))
+        .unwrap_or_else(|| {
+            stderr
+                .lines()
+                .chain(stdout.lines())
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or_default()
+                .to_string()
+        })
+}
+
+fn gradle_failure_details(output: &str) -> Option<String> {
+    let mut lines = output.lines().map(str::trim_end);
+    while let Some(line) = lines.next() {
+        if line.trim() != "* What went wrong:" {
+            continue;
+        }
+        let mut cause = Vec::new();
+        let mut truncated = false;
+        for detail in lines.by_ref() {
+            let detail = detail.trim();
+            if detail.is_empty() || detail.starts_with('*') {
+                break;
+            }
+            let detail = detail.trim_start_matches('>').trim();
+            if detail.is_empty() {
+                continue;
+            }
+            if cause.len() == MAX_FAILURE_DETAILS {
+                truncated = true;
+                break;
+            }
+            cause.push(detail);
+        }
+        if !cause.is_empty() {
+            let mut summary = cause.join(" — ");
+            if truncated {
+                summary.push_str(" — ...");
+            }
+            return Some(summary);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -522,12 +563,57 @@ mod tests {
         assert_eq!(command.working_directory, tree.root);
         assert_eq!(command.args[0], "--quiet");
         assert_eq!(command.args[1], "--console=plain");
-        assert_eq!(command.args[2], "--init-script");
-        assert_eq!(command.args[4], TASK);
+        assert_eq!(command.args[2], "--no-configuration-cache");
+        assert_eq!(command.args[3], "--init-script");
+        assert_eq!(command.args[5], TASK);
 
-        let script = std::fs::read_to_string(&command.args[3]).unwrap();
+        let script = std::fs::read_to_string(&command.args[4]).unwrap();
         assert!(script.contains("lenient = true"), "{script}");
         assert!(!tree.path(".krusty").exists());
+    }
+
+    #[test]
+    fn a_failure_summary_reports_gradles_what_went_wrong_not_the_banner() {
+        let output = "\
+FAILURE: Build completed with 11 failures.
+
+1: Task failed with an exception.
+-----------
+* What went wrong:
+Execution failed for task ':app:krustyModel'.
+> Could not resolve all dependencies for configuration ':app:compileClasspath'.
+   > Could not find org.example:missing:1.0.
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+";
+        assert_eq!(
+            gradle_failure_summary("", output),
+            "Execution failed for task ':app:krustyModel'. — Could not resolve all dependencies \
+             for configuration ':app:compileClasspath'. — Could not find org.example:missing:1.0."
+        );
+    }
+
+    #[test]
+    fn a_failure_without_the_expected_format_falls_back_to_the_first_line() {
+        assert_eq!(
+            gradle_failure_summary("gradle: command not found\n", ""),
+            "gradle: command not found"
+        );
+    }
+
+    #[test]
+    fn a_failure_summary_bounds_the_cause_chain() {
+        let details = (1..=10)
+            .map(|index| format!("> cause {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let output = format!("* What went wrong:\n{details}\n\n* Try:\n");
+
+        assert_eq!(
+            gradle_failure_summary(&output, ""),
+            "cause 1 — cause 2 — cause 3 — cause 4 — cause 5 — cause 6 — cause 7 — cause 8 — ..."
+        );
     }
 
     #[test]

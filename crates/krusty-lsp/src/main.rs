@@ -1,10 +1,11 @@
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use krusty_lsp::{
     detect, resolve_jdk, AnalysisWorker, DocumentAnalysis, JdkRequest, LspOptions, ProcessRunner,
-    ProjectFeedback, ProjectMessageKind, ProjectSync, RefreshOutcome, SystemEnvironment,
+    ProjectFeedback, ProjectMessageKind, ProjectSync, ProviderKind, RefreshOutcome,
+    SystemEnvironment,
 };
 
 fn main() {
@@ -87,6 +88,12 @@ impl WorkerHost {
             RefreshOutcome::Unchanged => ProjectFeedback::default(),
             RefreshOutcome::Updated => {
                 let (classpath, jdk_home) = Self::launch_from(sync, &self.options, &self.runner);
+                let logs = Self::describe_model(
+                    sync.kind(),
+                    sync.model().map_or(0, |model| model.modules.len()),
+                    &classpath,
+                    jdk_home.as_deref(),
+                );
                 if let Err(error) =
                     self.worker
                         .reconfigure(&classpath, jdk_home.as_deref(), self.options.no_jdk())
@@ -97,11 +104,13 @@ impl WorkerHost {
                             ProjectMessageKind::Error,
                             format!("krusty: could not restart analysis worker: {error}"),
                         )),
+                        logs,
                     };
                 }
                 ProjectFeedback {
                     reanalyze: true,
                     message: self.jdk_warning(jdk_home.is_some()),
+                    logs,
                 }
             }
             RefreshOutcome::Failed {
@@ -113,12 +122,45 @@ impl WorkerHost {
                 } else {
                     ProjectMessageKind::Error
                 };
+                let detail = format!("krusty: project sync failed: {error}");
                 ProjectFeedback {
                     reanalyze: false,
-                    message: Some((kind, format!("krusty: project sync failed: {error}"))),
+                    message: Some((kind, detail.clone())),
+                    logs: vec![detail],
                 }
             }
         }
+    }
+
+    fn describe_model(
+        kind: ProviderKind,
+        modules: usize,
+        classpath: &[PathBuf],
+        jdk_home: Option<&Path>,
+    ) -> Vec<String> {
+        const MAX_LISTED: usize = 60;
+        let mut logs = vec![format!(
+            "krusty: {} — {modules} module(s), {} classpath entr{}",
+            kind.as_str(),
+            classpath.len(),
+            if classpath.len() == 1 { "y" } else { "ies" },
+        )];
+        logs.push(format!(
+            "krusty: JDK = {}",
+            jdk_home.map_or_else(|| "none".to_string(), |home| home.display().to_string()),
+        ));
+        if !classpath.is_empty() {
+            let mut listing = String::from("krusty: classpath:");
+            for entry in classpath.iter().take(MAX_LISTED) {
+                listing.push_str("\n  ");
+                listing.push_str(&entry.to_string_lossy());
+            }
+            if classpath.len() > MAX_LISTED {
+                listing.push_str(&format!("\n  … {} more", classpath.len() - MAX_LISTED));
+            }
+            logs.push(listing);
+        }
+        logs
     }
 
     fn launch_from(
@@ -174,14 +216,19 @@ impl krusty_lsp::Analysis for WorkerHost {
         })
     }
 
-    fn set_workspace_root(&mut self, root: Option<PathBuf>) {
+    fn set_workspace_root(&mut self, root: Option<PathBuf>) -> ProjectFeedback {
         let root = root
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
         let provider = detect(&root, self.options.explicit_classpath());
+        let root_display = root.display().to_string();
         self.root = Some(root);
         self.sync = Some(ProjectSync::new(provider));
-        let _ = self.configure();
+        let mut feedback = self.configure();
+        feedback
+            .logs
+            .insert(0, format!("krusty: workspace {root_display}"));
+        feedback
     }
 
     fn watched_globs(&mut self) -> Vec<String> {
@@ -217,5 +264,28 @@ impl krusty_lsp::Analysis for WorkerHost {
             sync.update_provider(detect(root, self.options.explicit_classpath()));
         }
         self.configure()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_logs_bound_the_classpath_listing() {
+        let classpath = (0..61)
+            .map(|index| PathBuf::from(format!("/classpath/{index}.jar")))
+            .collect::<Vec<_>>();
+
+        let logs = WorkerHost::describe_model(ProviderKind::Gradle, 4, &classpath, None);
+
+        assert_eq!(
+            logs[0],
+            "krusty: gradle — 4 module(s), 61 classpath entries"
+        );
+        assert_eq!(logs[1], "krusty: JDK = none");
+        assert!(logs[2].contains("/classpath/59.jar"));
+        assert!(!logs[2].contains("/classpath/60.jar"));
+        assert!(logs[2].ends_with("… 1 more"));
     }
 }

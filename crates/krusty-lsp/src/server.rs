@@ -44,6 +44,8 @@ mod tests {
         globs: Vec<String>,
         refreshes: u32,
         pending: bool,
+        init_logs: Vec<String>,
+        init_message: Option<(ProjectMessageKind, String)>,
         feedback_reanalyze: bool,
         feedback_message: Option<(ProjectMessageKind, String)>,
     }
@@ -53,8 +55,13 @@ mod tests {
             sources.iter().map(|_| DocumentAnalysis::empty()).collect()
         }
 
-        fn set_workspace_root(&mut self, root: Option<std::path::PathBuf>) {
+        fn set_workspace_root(&mut self, root: Option<std::path::PathBuf>) -> ProjectFeedback {
             self.root = root;
+            ProjectFeedback {
+                message: self.init_message.clone(),
+                logs: self.init_logs.clone(),
+                ..ProjectFeedback::default()
+            }
         }
 
         fn watched_globs(&mut self) -> Vec<String> {
@@ -75,6 +82,7 @@ mod tests {
             ProjectFeedback {
                 reanalyze: self.feedback_reanalyze,
                 message: self.feedback_message.take(),
+                ..ProjectFeedback::default()
             }
         }
     }
@@ -107,6 +115,44 @@ mod tests {
             .handle(notification("initialized", json!({})))
             .messages
             .is_empty());
+    }
+
+    #[test]
+    fn the_initial_project_logs_are_sent_as_log_messages_after_initialized() {
+        let host = RecordingHost {
+            init_logs: vec![
+                "krusty: gradle build system".to_string(),
+                "krusty: classpath:\n  a.jar".to_string(),
+            ],
+            init_message: Some((
+                ProjectMessageKind::Warning,
+                "krusty: no JDK found".to_string(),
+            )),
+            ..RecordingHost::default()
+        };
+        let mut server = LspService::new(host);
+        let initialize = server.handle(request(1, "initialize", json!({})));
+        assert_eq!(initialize.messages.len(), 1);
+        assert_eq!(initialize.messages[0]["id"], 1);
+
+        let dispatch = server.handle(notification("initialized", json!({})));
+        let logs: Vec<&str> = dispatch
+            .messages
+            .iter()
+            .filter(|message| message["method"] == "window/logMessage")
+            .map(|message| message["params"]["message"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            logs,
+            vec!["krusty: gradle build system", "krusty: classpath:\n  a.jar"]
+        );
+        assert_eq!(dispatch.messages[0]["params"]["type"], 3);
+        assert_eq!(dispatch.messages[2]["method"], "window/showMessage");
+        assert_eq!(dispatch.messages[2]["params"]["type"], 2);
+        assert_eq!(
+            dispatch.messages[2]["params"]["message"],
+            "krusty: no JDK found"
+        );
     }
 
     #[test]

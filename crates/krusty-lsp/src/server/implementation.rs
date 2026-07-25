@@ -72,14 +72,28 @@ pub struct ProjectFeedback {
     pub reanalyze: bool,
     /// A one-line status to surface with `window/showMessage`.
     pub message: Option<(ProjectMessageKind, String)>,
+    /// Messages for the language-server log.
+    pub logs: Vec<String>,
+}
+
+impl ProjectFeedback {
+    fn into_messages(self) -> Vec<Value> {
+        let mut messages: Vec<Value> = self.logs.into_iter().map(log_message).collect();
+        if let Some((kind, text)) = self.message {
+            messages.push(show_message(kind, text));
+        }
+        messages
+    }
 }
 
 /// Analysis and project-model operations behind an LSP session.
 pub trait Analysis {
     fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis>;
 
-    /// Adopt the workspace root reported in `initialize`; the initial project probe happens here.
-    fn set_workspace_root(&mut self, _root: Option<PathBuf>) {}
+    /// Adopt the workspace root and report the initial project state.
+    fn set_workspace_root(&mut self, _root: Option<PathBuf>) -> ProjectFeedback {
+        ProjectFeedback::default()
+    }
 
     /// Glob patterns whose changes should trigger a project refresh, registered with the client
     /// after `initialized`. Globs rather than fixed paths so a newly created build file is caught
@@ -409,6 +423,7 @@ pub struct LspService<A> {
     analysis_dirty: bool,
     initialized: bool,
     shutdown_requested: bool,
+    pending_init_feedback: Option<ProjectFeedback>,
 }
 
 impl<A> LspService<A>
@@ -422,6 +437,7 @@ where
             analysis_dirty: false,
             initialized: false,
             shutdown_requested: false,
+            pending_init_feedback: None,
         }
     }
 
@@ -595,7 +611,8 @@ where
                     )]);
                 }
                 self.initialized = true;
-                self.analyze.set_workspace_root(workspace_root(&params));
+                self.pending_init_feedback =
+                    Some(self.analyze.set_workspace_root(workspace_root(&params)));
                 Dispatch::messages(vec![rpc_result(
                     id,
                     json!({
@@ -638,12 +655,15 @@ where
                 )])
             }
             "initialized" => {
+                let mut messages = Vec::new();
                 let globs = self.analyze.watched_globs();
-                if globs.is_empty() {
-                    Dispatch::none()
-                } else {
-                    Dispatch::messages(vec![register_watched_files(&globs)])
+                if !globs.is_empty() {
+                    messages.push(register_watched_files(&globs));
                 }
+                if let Some(feedback) = self.pending_init_feedback.take() {
+                    messages.extend(feedback.into_messages());
+                }
+                Dispatch::messages(messages)
             }
             "workspace/didChangeWatchedFiles" => self.did_change_watched_files(),
             "textDocument/didOpen" => self.did_open(id, params, defer_analysis),
@@ -685,11 +705,9 @@ where
 
     pub fn run_due_project_refresh(&mut self) -> Vec<Value> {
         let feedback = self.analyze.refresh_project();
-        let mut messages = Vec::new();
-        if let Some((kind, text)) = feedback.message {
-            messages.push(show_message(kind, &text));
-        }
-        if feedback.reanalyze {
+        let reanalyze = feedback.reanalyze;
+        let mut messages = feedback.into_messages();
+        if reanalyze {
             self.analysis_dirty = true;
             messages.extend(self.flush_analysis());
         }
@@ -1443,11 +1461,19 @@ fn register_watched_files(globs: &[String]) -> Value {
     })
 }
 
-fn show_message(kind: ProjectMessageKind, text: &str) -> Value {
+fn show_message(kind: ProjectMessageKind, text: String) -> Value {
     json!({
         "jsonrpc": "2.0",
         "method": "window/showMessage",
         "params": { "type": kind.message_type(), "message": text },
+    })
+}
+
+fn log_message(text: String) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "window/logMessage",
+        "params": { "type": 3, "message": text },
     })
 }
 
