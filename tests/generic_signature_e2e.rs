@@ -78,6 +78,21 @@ fn generic_class_emits_class_signature() {
 }
 
 #[test]
+fn parameterized_base_class_emits_class_signature() {
+    let src = "open class Parent<T>\nclass Child : Parent<String>()\n";
+    let Some(cs) = classes(src) else {
+        return;
+    };
+    let signature = cs
+        .iter()
+        .find(|(name, _)| name == "Child")
+        .and_then(|(_, bytes)| krusty::jvm::classreader::parse_class(bytes).ok())
+        .and_then(|class| class.signature);
+
+    assert_eq!(signature.as_deref(), Some("LParent<Ljava/lang/String;>;"));
+}
+
+#[test]
 fn type_parameter_fields_get_field_signatures() {
     // A field declared with a bare type parameter (`val a: A`) carries a field `Signature` (`TA;`).
     let src = "class Pair2<A, B>(val a: A, val b: B)\n";

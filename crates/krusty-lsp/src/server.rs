@@ -1623,6 +1623,85 @@ mod tests {
     }
 
     #[test]
+    fn implementation_resolves_exact_transitive_cross_file_utf16_locations_without_reanalysis() {
+        let calls = Rc::new(Cell::new(0));
+        let calls_for_analyzer = calls.clone();
+        let mut server = LspService::new(move |sources: &[&str]| {
+            calls_for_analyzer.set(calls_for_analyzer.get() + 1);
+            super::super::analyze_for_lsp(sources)
+        });
+        let initialized = server.handle(request(1, "initialize", json!({})));
+        assert_eq!(
+            initialized.messages[0]["result"]["capabilities"]["implementationProvider"],
+            true
+        );
+        for (uri, text) in [
+            (
+                "file:///ImplementationBase.kt",
+                "package impltest\n\
+                 interface Renderable { fun render(): String }\n\
+                 open class BaseRenderer : Renderable { override fun render(): String = \"base\" }\n",
+            ),
+            (
+                "file:///ImplementationLeaf.kt",
+                "package impltest\n\
+                 class EmojiRenderer : BaseRenderer() { override fun render(): String = \"😀\" }\n",
+            ),
+            (
+                "file:///ImplementationUse.kt",
+                "package impltest\n\
+                 fun use(value: Renderable): String { val emoji = \"😀\"; return value.render() }\n",
+            ),
+        ] {
+            server.handle(notification(
+                "textDocument/didOpen",
+                json!({
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": "kotlin",
+                        "version": 1,
+                        "text": text
+                    }
+                }),
+            ));
+        }
+        assert_eq!(calls.get(), 3);
+
+        let response = server.handle(request(
+            2,
+            "textDocument/implementation",
+            json!({
+                "textDocument": {"uri": "file:///ImplementationUse.kt"},
+                "position": {"line": 1, "character": 70}
+            }),
+        ));
+        assert_eq!(
+            response.messages[0]["result"],
+            json!([
+                {
+                    "uri": "file:///ImplementationBase.kt",
+                    "range": {
+                        "start": {"line": 2, "character": 52},
+                        "end": {"line": 2, "character": 58}
+                    }
+                },
+                {
+                    "uri": "file:///ImplementationLeaf.kt",
+                    "range": {
+                        "start": {"line": 1, "character": 52},
+                        "end": {"line": 1, "character": 58}
+                    }
+                }
+            ])
+        );
+        assert_eq!(
+            calls.get(),
+            3,
+            "implementation requests must use compact cached spans"
+        );
+    }
+
+    #[test]
     fn references_match_exact_cross_file_ranges_and_declaration_filtering() {
         let calls = Rc::new(Cell::new(0));
         let calls_for_analyzer = calls.clone();

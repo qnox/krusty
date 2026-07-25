@@ -410,8 +410,7 @@ pub fn lower_file_at_reporting(
                         })
                         // A GENERIC classpath BASE CLASS with an open suspend fn overridden concretely
                         // needs an erasure bridge the superclass loop can't build (a classpath base breaks
-                        // `resolve_method`), so guard it here too. `c.base_class` drops the type args, so
-                        // check the base's own genericity (and its closure) directly.
+                        // `resolve_method`), so check the base's own genericity and closure directly.
                         || c.base_class.as_deref().is_some_and(super_has_generic)))
         });
         if suspend_member_needs_bridge {
@@ -22233,12 +22232,11 @@ fn class_generic_sig(
     // A CLASS with a PARAMETERIZED supertype (`object O : Operation<Result<Int>>`): carry the superclass
     // + interfaces as `Ty`s (with their type arguments) so the backend can format a class `Signature` a
     // cross-module reader uses to recover a member's concrete generic return. Independent of own type params.
-    if c.supertypes.iter().any(|s| !s.targs.is_empty()) {
+    if !c.base_type_args.is_empty() || c.supertypes.iter().any(|s| !s.targs.is_empty()) {
         let mut supers: Vec<Ty> = Vec::new();
-        // Superclass first (kotlin/Any → the backend's Object when no base). Base-class type args aren't
-        // preserved yet (the base is a bare name), so a base class is emitted raw.
+        // Superclass first (kotlin/Any → the backend's Object when no base).
         supers.push(match &c.base_class {
-            Some(b) => Ty::obj(&resolve_super_internal(b, file, class_names)?),
+            Some(base) => supertype_parts_ty(base, &c.base_type_args, file, class_names)?,
             None => Ty::obj("kotlin/Any"),
         });
         for st in &c.supertypes {
@@ -22273,15 +22271,23 @@ fn class_generic_sig(
 /// (`Operation<Result<Int>>` → `Obj("Operation", [Obj("kotlin/Result", [Int])])`). `None` when a name
 /// can't be resolved to an internal (then no class `Signature` is emitted — a safe fallback).
 fn supertype_ty(tr: &ast::TypeRef, file: &ast::File, class_names: &ClassNames) -> Option<Ty> {
-    if let Some(t) = Ty::from_name(&tr.name) {
+    supertype_parts_ty(&tr.name, &tr.targs, file, class_names)
+}
+
+fn supertype_parts_ty(
+    name: &str,
+    arguments: &[ast::TypeRef],
+    file: &ast::File,
+    class_names: &ClassNames,
+) -> Option<Ty> {
+    if let Some(t) = Ty::from_name(name) {
         return Some(t); // a builtin scalar / String / Any / Unit
     }
-    let internal = resolve_super_internal(&tr.name, file, class_names)?;
-    if tr.targs.is_empty() {
+    let internal = resolve_super_internal(name, file, class_names)?;
+    if arguments.is_empty() {
         return Some(Ty::obj(&internal));
     }
-    let args: Vec<Ty> = tr
-        .targs
+    let args: Vec<Ty> = arguments
         .iter()
         .map(|a| supertype_ty(a, file, class_names))
         .collect::<Option<_>>()?;

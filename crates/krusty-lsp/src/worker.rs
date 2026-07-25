@@ -21,7 +21,7 @@ use crate::compiler_analysis::{
     self, CompletionSymbols, DefinitionSymbols, HighlightSymbols, SignatureHelpSymbols,
 };
 use crate::{
-    finalize_type_definitions, read_framed, write_framed, AnalysisBudgets, CompletionIndex,
+    finalize_navigation, read_framed, write_framed, AnalysisBudgets, CompletionIndex,
     DefinitionIndex, DocumentAnalysis, DocumentSymbolIndex, FoldingRangeIndex, HoverIndex,
     SemanticTokenIndex, SignatureHelpIndex, SourceSetIndexes,
 };
@@ -58,6 +58,7 @@ struct AnalysisResponse {
     semantic_tokens: SemanticTokenIndex,
     definitions: DefinitionIndex,
     type_definitions: DefinitionIndex,
+    implementations: DefinitionIndex,
     document_symbols: DocumentSymbolIndex,
     folding_ranges: FoldingRangeIndex,
 }
@@ -84,6 +85,7 @@ impl From<DocumentAnalysis> for AnalysisResponse {
             semantic_tokens: analysis.semantic_tokens,
             definitions: analysis.definitions,
             type_definitions: analysis.type_definitions,
+            implementations: analysis.implementations,
             document_symbols: analysis.document_symbols,
             folding_ranges: analysis.folding_ranges,
         }
@@ -113,6 +115,7 @@ impl AnalysisResponse {
             semantic_tokens: self.semantic_tokens,
             definitions: self.definitions,
             type_definitions: self.type_definitions,
+            implementations: self.implementations,
             document_symbols: self.document_symbols,
             folding_ranges: self.folding_ranges,
         }
@@ -356,8 +359,12 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
         let source_set = compiler_analysis::analyze_source_set(&sources, platform);
         let highlight_symbols =
             HighlightSymbols::from_source_set(&source_set.files, &source_set.symbols);
-        let definition_symbols =
-            DefinitionSymbols::from_source_set(&sources, &source_set.files, &source_set.symbols);
+        let definition_symbols = DefinitionSymbols::from_source_set(
+            &sources,
+            &source_set.files,
+            &source_set.symbols,
+            crate::analysis::MAX_SOURCE_SET_NAVIGATION_ENTRIES,
+        );
         let completion_symbols = CompletionSymbols::from_source_set(&source_set.files);
         let signature_help_symbols =
             SignatureHelpSymbols::from_source_set(&sources, &source_set.files, &source_set.symbols);
@@ -384,7 +391,7 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
                 )
             })
             .collect();
-        let analyses = finalize_type_definitions(pending, &mut budgets)
+        let analyses = finalize_navigation(pending, &mut budgets)
             .into_iter()
             .map(AnalysisResponse::from)
             .collect::<Vec<_>>();
@@ -455,6 +462,7 @@ mod tests {
     fn navigation_saturation_response(
         definitions: usize,
         type_definitions: usize,
+        implementations: usize,
     ) -> AnalysisResponse {
         AnalysisResponse {
             diagnostics: Vec::new(),
@@ -464,6 +472,7 @@ mod tests {
             semantic_tokens: SemanticTokenIndex::default(),
             definitions: DefinitionIndex::wire_saturation_fixture(definitions),
             type_definitions: DefinitionIndex::wire_saturation_fixture(type_definitions),
+            implementations: DefinitionIndex::wire_saturation_fixture(implementations),
             document_symbols: DocumentSymbolIndex::default(),
             folding_ranges: FoldingRangeIndex::default(),
         }
@@ -486,24 +495,29 @@ mod tests {
         let baseline = serde_json::to_vec(&vec![navigation_saturation_response(
             MAX_SOURCE_SET_NAVIGATION_ENTRIES,
             0,
+            0,
         )])
         .unwrap();
         assert!(baseline.len() < MAX_WORKER_MESSAGE_BYTES);
 
-        let definition_entries = MAX_SOURCE_SET_NAVIGATION_ENTRIES / 2;
+        let definition_entries = MAX_SOURCE_SET_NAVIGATION_ENTRIES / 3;
+        let type_definition_entries = MAX_SOURCE_SET_NAVIGATION_ENTRIES / 3;
         let response = navigation_saturation_response(
             definition_entries,
-            MAX_SOURCE_SET_NAVIGATION_ENTRIES - definition_entries,
+            type_definition_entries,
+            MAX_SOURCE_SET_NAVIGATION_ENTRIES - definition_entries - type_definition_entries,
         );
         assert_eq!(
-            response.definitions.entry_count() + response.type_definitions.entry_count(),
+            response.definitions.entry_count()
+                + response.type_definitions.entry_count()
+                + response.implementations.entry_count(),
             MAX_SOURCE_SET_NAVIGATION_ENTRIES
         );
         let encoded = serde_json::to_vec(&vec![response]).unwrap();
         assert!(encoded.len() < MAX_WORKER_MESSAGE_BYTES);
         assert!(
             encoded.len() <= baseline.len(),
-            "type-definition entries must share, rather than enlarge, the prior navigation frame"
+            "type-definition and implementation entries must share the prior navigation frame"
         );
     }
 
@@ -554,6 +568,18 @@ mod tests {
         let sources = [
             "package demo\nclass WorkerResult\nfun answer(): WorkerResult = WorkerResult()",
             "package demo\nfun use(): WorkerResult {\n  return answer()\n}",
+            "package demo\n\
+             interface WorkerContract {\n\
+             \u{20}\u{20}fun run(): String\n\
+             }\n\
+             open class WorkerBase : WorkerContract {\n\
+             \u{20}\u{20}override fun run(): String = \"base\"\n\
+             }",
+            "package demo\n\
+             class WorkerLeaf : WorkerBase() {\n\
+             \u{20}\u{20}override fun run(): String = \"leaf\"\n\
+             }\n\
+             fun use(value: WorkerContract): String = value.run()",
         ];
         let request = serde_json::to_vec(&AnalysisRequest { sources: &sources }).unwrap();
         let mut input = Vec::new();
@@ -567,7 +593,7 @@ mod tests {
         let analyses = serde_json::from_slice::<Vec<AnalysisResponse>>(&response).unwrap();
         let analysis = analyses
             .into_iter()
-            .nth(1)
+            .last()
             .unwrap()
             .into_document_analysis();
         assert!(analysis.diagnostics.is_empty());
@@ -577,6 +603,7 @@ mod tests {
         assert!(analysis.semantic_tokens.entry_count() > 0);
         assert!(analysis.definitions.entry_count() > 0);
         assert!(analysis.type_definitions.entry_count() > 0);
+        assert!(analysis.implementations.entry_count() > 0);
         assert!(analysis.document_symbols.entry_count() > 0);
         assert!(analysis.folding_ranges.entry_count() > 0);
     }

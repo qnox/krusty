@@ -2,7 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use krusty::ast::{ClassDecl, ClassKind, Decl, File, FunDecl, Modality, PropDecl, TypeRef};
+use krusty::ast::{
+    ClassDecl, ClassKind, Decl, DeclId, File, FunDecl, Modality, Param, PropDecl, TypeRef,
+};
 use krusty::diag::{DiagSink, Span};
 use krusty::frontend::{
     lex_name_tokens, FrontendNameToken, FrontendNameTokenKind, FrontendSymbols,
@@ -38,7 +40,52 @@ pub(crate) enum MemberKind {
 struct MemberDefinition {
     kind: MemberKind,
     params: Option<Vec<Ty>>,
+    source_method: Option<SourceMethod>,
     target: DefinitionTarget,
+    is_override: bool,
+    is_inheritable: bool,
+}
+
+#[derive(Clone, Copy)]
+struct SourceMethod {
+    file: u32,
+    declaration: u32,
+    method: u32,
+}
+
+struct ParentDefinition {
+    owner: String,
+    source: SourceParent,
+}
+
+enum SourceParent {
+    Interface { class: SourceClass, interface: u32 },
+    Base { class: SourceClass },
+}
+
+#[derive(Clone, Copy)]
+struct SourceClass {
+    file: u32,
+    declaration: u32,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ImplementationType {
+    constructor: ImplementationTypeConstructor,
+    nullable: bool,
+    argument: Option<Box<ImplementationType>>,
+    arguments: Vec<ImplementationType>,
+    function_parameters: Vec<ImplementationType>,
+    function_has_receiver: bool,
+    function_is_suspend: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ImplementationTypeConstructor {
+    RootParameter(u32),
+    MethodParameter(u32),
+    Named(Ty),
+    Function,
 }
 
 struct ExtensionDefinition {
@@ -51,13 +98,15 @@ pub struct DefinitionSymbols {
     classes: HashMap<String, DefinitionTarget>,
     class_types: HashMap<TypeName, DefinitionTarget>,
     declarations: HashMap<(u32, u32), DefinitionTarget>,
+    source_classes: HashMap<String, SourceClass>,
     members: HashMap<(String, String), Vec<MemberDefinition>>,
-    member_parents: HashMap<String, Vec<String>>,
+    member_parents: HashMap<String, Vec<ParentDefinition>>,
     object_owners: HashSet<String>,
     extensions: HashMap<(Ty, String), Vec<ExtensionDefinition>>,
     top_levels: HashMap<(String, String, MemberKind), Vec<DefinitionTarget>>,
     hover_values: HashMap<(u32, u32, u32), String>,
     self_targets: Vec<Vec<DefinitionTarget>>,
+    implementations: HashMap<DefinitionTarget, Vec<DefinitionTarget>>,
 }
 
 impl DefinitionSymbols {
@@ -65,6 +114,7 @@ impl DefinitionSymbols {
         sources: &[&str],
         files: &[FileAnalysis],
         symbols: &FrontendSymbols,
+        implementation_limit: usize,
     ) -> Self {
         let mut definitions = Self::default();
         for (file_index, (source, analysis)) in sources.iter().copied().zip(files).enumerate() {
@@ -102,9 +152,16 @@ impl DefinitionSymbols {
                         let internal_name = class.name.replace('.', "$");
                         let owner = qualified_name(&package, &internal_name);
                         definitions.classes.insert(owner.clone(), target);
+                        let source_class = SourceClass {
+                            file: file_index as u32,
+                            declaration: declaration.0,
+                        };
+                        definitions
+                            .source_classes
+                            .insert(owner.clone(), source_class);
                         let class_symbols = symbols.class_by_internal(&owner);
                         for parameter in &class.props {
-                            if parameter.is_property {
+                            if parameter.is_property && parameter.span.lo < parameter.span.hi {
                                 let target = DefinitionTarget {
                                     file: file_index as u32,
                                     span: definition_name_span(source, parameter.span),
@@ -124,7 +181,11 @@ impl DefinitionSymbols {
                                     .push(MemberDefinition {
                                         kind: MemberKind::InstanceValue,
                                         params: Some(Vec::new()),
+                                        source_method: None,
                                         target,
+                                        is_override: parameter.is_override,
+                                        is_inheritable: parameter.visibility != Visibility::Private
+                                            && parameter.is_open,
                                     });
                             }
                         }
@@ -161,7 +222,13 @@ impl DefinitionSymbols {
                                     .push(MemberDefinition {
                                         kind: MemberKind::InstanceValue,
                                         params: Some(Vec::new()),
+                                        source_method: None,
                                         target,
+                                        is_override: property.is_override,
+                                        is_inheritable: property.visibility != Visibility::Private
+                                            && (class.kind == ClassKind::Interface
+                                                || property.is_open
+                                                || property.is_abstract),
                                     });
                             }
                         }
@@ -175,15 +242,27 @@ impl DefinitionSymbols {
                             let mut parents = class_symbols
                                 .interfaces
                                 .iter_ids()
-                                .map(|parent| parent.render())
+                                .enumerate()
+                                .map(|(interface, parent)| ParentDefinition {
+                                    owner: parent.render(),
+                                    source: SourceParent::Interface {
+                                        class: source_class,
+                                        interface: interface as u32,
+                                    },
+                                })
                                 .collect::<Vec<_>>();
                             if let Some(parent) = class_symbols.super_internal {
-                                parents.push(parent.render());
+                                parents.push(ParentDefinition {
+                                    owner: parent.render(),
+                                    source: SourceParent::Base {
+                                        class: source_class,
+                                    },
+                                });
                             }
                             definitions.member_parents.insert(owner.clone(), parents);
                         }
                         let mut method_ordinals = HashMap::<String, usize>::new();
-                        for function in &class.methods {
+                        for (method_index, function) in class.methods.iter().enumerate() {
                             if let Some(span) = declaration_name_span(
                                 &tokens,
                                 source,
@@ -220,7 +299,17 @@ impl DefinitionSymbols {
                                     .push(MemberDefinition {
                                         kind: MemberKind::InstanceFunction,
                                         params: signature.map(|signature| signature.params.clone()),
+                                        source_method: Some(SourceMethod {
+                                            file: file_index as u32,
+                                            declaration: declaration.0,
+                                            method: method_index as u32,
+                                        }),
                                         target,
+                                        is_override: function.is_override,
+                                        is_inheritable: function.visibility != Visibility::Private
+                                            && (class.kind == ClassKind::Interface
+                                                || function.is_open
+                                                || function.is_abstract),
                                     });
                             }
                         }
@@ -256,7 +345,10 @@ impl DefinitionSymbols {
                                     .push(MemberDefinition {
                                         kind: MemberKind::StaticFunction,
                                         params: signature.map(|signature| signature.params.clone()),
+                                        source_method: None,
                                         target,
+                                        is_override: false,
+                                        is_inheritable: false,
                                     });
                             }
                         }
@@ -293,7 +385,10 @@ impl DefinitionSymbols {
                                     .push(MemberDefinition {
                                         kind: MemberKind::StaticValue,
                                         params: Some(Vec::new()),
+                                        source_method: None,
                                         target,
+                                        is_override: false,
+                                        is_inheritable: false,
                                     });
                             }
                         }
@@ -313,7 +408,10 @@ impl DefinitionSymbols {
                                 .push(MemberDefinition {
                                     kind: MemberKind::StaticValue,
                                     params: None,
+                                    source_method: None,
                                     target,
+                                    is_override: false,
+                                    is_inheritable: false,
                                 });
                         }
                     }
@@ -429,6 +527,7 @@ impl DefinitionSymbols {
                 .or_default()
                 .push(ExtensionDefinition { package, target });
         }
+        definitions.build_implementation_targets(files, symbols, implementation_limit);
         let mut self_targets = vec![Vec::new(); files.len()];
         for target in definitions.declarations.values().copied().chain(
             definitions
@@ -447,6 +546,357 @@ impl DefinitionSymbols {
         }
         definitions.self_targets = self_targets;
         definitions
+    }
+
+    fn build_implementation_targets(
+        &mut self,
+        files: &[FileAnalysis],
+        symbols: &FrontendSymbols,
+        limit: usize,
+    ) {
+        const WORK_PER_RELATION: usize = 16;
+
+        if limit == 0 {
+            return;
+        }
+        let mut owners = self.classes.keys().map(String::as_str).collect::<Vec<_>>();
+        owners.sort_unstable();
+        let mut exact_member_lookup =
+            HashMap::<(&str, &str, MemberKind, Option<&[Ty]>), Vec<&MemberDefinition>>::new();
+        let mut generic_member_lookup =
+            HashMap::<(&str, &str, MemberKind, Option<usize>), Vec<&MemberDefinition>>::new();
+        let mut override_members_by_owner = HashMap::<&str, Vec<(&str, &MemberDefinition)>>::new();
+        for ((owner, name), definitions) in &self.members {
+            override_members_by_owner.entry(owner).or_default().extend(
+                definitions
+                    .iter()
+                    .filter(|definition| definition.is_override)
+                    .map(|definition| (name.as_str(), definition)),
+            );
+            for definition in definitions
+                .iter()
+                .filter(|definition| definition.is_inheritable)
+            {
+                let has_type_parameters = definition
+                    .source_method
+                    .is_some_and(|source| source_method_has_type_parameters(files, source));
+                if has_type_parameters {
+                    generic_member_lookup
+                        .entry((
+                            owner.as_str(),
+                            name.as_str(),
+                            definition.kind,
+                            definition.params.as_ref().map(Vec::len),
+                        ))
+                        .or_default()
+                        .push(definition);
+                } else {
+                    exact_member_lookup
+                        .entry((
+                            owner.as_str(),
+                            name.as_str(),
+                            definition.kind,
+                            definition.params.as_deref(),
+                        ))
+                        .or_default()
+                        .push(definition);
+                }
+            }
+        }
+        for definitions in override_members_by_owner.values_mut() {
+            definitions.sort_unstable_by(|(left_name, left), (right_name, right)| {
+                (
+                    left_name,
+                    left.target.file,
+                    left.target.span.lo,
+                    left.target.span.hi,
+                )
+                    .cmp(&(
+                        right_name,
+                        right.target.file,
+                        right.target.span.lo,
+                        right.target.span.hi,
+                    ))
+            });
+        }
+        let mut relations = Vec::<(DefinitionTarget, DefinitionTarget)>::new();
+        let mut direct_member_relations = Vec::<(DefinitionTarget, DefinitionTarget)>::new();
+        let mut work_remaining = limit.saturating_mul(WORK_PER_RELATION);
+        'owners: for child_owner in owners {
+            if relations.len() + direct_member_relations.len() >= limit || work_remaining == 0 {
+                break;
+            }
+            let Some(&child_target) = self.classes.get(child_owner) else {
+                continue;
+            };
+            let ancestors = self.ancestor_owners(child_owner, &mut work_remaining);
+            for ancestor in &ancestors {
+                if let Some(&ancestor_target) = self.classes.get(*ancestor) {
+                    if relations.len() >= limit {
+                        break;
+                    }
+                    relations.push((ancestor_target, child_target));
+                }
+            }
+            if relations.len() >= limit {
+                break;
+            }
+
+            let child_members = override_members_by_owner
+                .get(child_owner)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            for &(name, child) in child_members {
+                if relations.len() + direct_member_relations.len() >= limit || work_remaining == 0 {
+                    break 'owners;
+                }
+                let direct_parents = self
+                    .member_parents
+                    .get(child_owner)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                let child_bindings = match child
+                    .source_method
+                    .and_then(|source| source_method(files, source))
+                {
+                    Some((class, _)) => {
+                        let Some(bindings) = root_type_bindings(class, &mut work_remaining) else {
+                            break 'owners;
+                        };
+                        bindings
+                    }
+                    None => Vec::new(),
+                };
+                let mut pending = Vec::new();
+                for parent in direct_parents {
+                    if work_remaining == 0 {
+                        break 'owners;
+                    }
+                    work_remaining -= 1;
+                    let Some(bindings) = self.parent_bindings(
+                        parent,
+                        &child_bindings,
+                        files,
+                        symbols,
+                        &mut work_remaining,
+                    ) else {
+                        break 'owners;
+                    };
+                    pending.push((parent.owner.as_str(), bindings));
+                }
+                pending.reverse();
+                let mut seen = HashSet::<&str>::new();
+                while let Some((parent_owner, bindings)) = pending.pop() {
+                    if relations.len() + direct_member_relations.len() >= limit
+                        || work_remaining == 0
+                    {
+                        break 'owners;
+                    }
+                    work_remaining -= 1;
+                    if !seen.insert(parent_owner) {
+                        continue;
+                    }
+                    let exact_key = (parent_owner, name, child.kind, child.params.as_deref());
+                    let compatible_key = (
+                        parent_owner,
+                        name,
+                        child.kind,
+                        child.params.as_ref().map(Vec::len),
+                    );
+                    let mut compatible = None;
+                    let mut ambiguous = false;
+                    let exact = exact_member_lookup
+                        .get(&exact_key)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    let generic = generic_member_lookup
+                        .get(&compatible_key)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    for parent in exact.iter().chain(generic) {
+                        if work_remaining == 0 {
+                            break 'owners;
+                        }
+                        work_remaining -= 1;
+                        if !member_signatures_compatible(
+                            child,
+                            parent,
+                            files,
+                            symbols,
+                            &child_bindings,
+                            &bindings,
+                            &mut work_remaining,
+                        ) {
+                            continue;
+                        }
+                        if compatible.is_some() {
+                            ambiguous = true;
+                            break;
+                        }
+                        compatible = Some(*parent);
+                    }
+                    if let (Some(parent), false) = (compatible, ambiguous) {
+                        direct_member_relations.push((parent.target, child.target));
+                        continue;
+                    }
+                    if ambiguous {
+                        continue;
+                    }
+                    if let Some(grandparents) = self.member_parents.get(parent_owner) {
+                        let mut next = Vec::new();
+                        for grandparent in grandparents {
+                            if work_remaining == 0 {
+                                break 'owners;
+                            }
+                            work_remaining -= 1;
+                            let Some(grandparent_bindings) = self.parent_bindings(
+                                grandparent,
+                                &bindings,
+                                files,
+                                symbols,
+                                &mut work_remaining,
+                            ) else {
+                                break 'owners;
+                            };
+                            next.push((grandparent.owner.as_str(), grandparent_bindings));
+                        }
+                        pending.extend(next.into_iter().rev());
+                    }
+                }
+            }
+        }
+        direct_member_relations.sort_unstable_by_key(|(parent, child)| {
+            (
+                parent.file,
+                parent.span.lo,
+                parent.span.hi,
+                child.file,
+                child.span.lo,
+                child.span.hi,
+            )
+        });
+        direct_member_relations.dedup();
+        relations.extend(
+            direct_member_relations
+                .iter()
+                .copied()
+                .take(limit - relations.len()),
+        );
+        append_transitive_member_relations(
+            &direct_member_relations,
+            &mut relations,
+            &mut work_remaining,
+            limit,
+        );
+        drop(override_members_by_owner);
+        drop(generic_member_lookup);
+        drop(exact_member_lookup);
+        for (declaration, implementation) in relations {
+            self.implementations
+                .entry(declaration)
+                .or_default()
+                .push(implementation);
+        }
+        for targets in self.implementations.values_mut() {
+            targets.sort_unstable_by_key(|target| (target.file, target.span.lo, target.span.hi));
+            targets.dedup();
+        }
+    }
+
+    fn ancestor_owners<'a>(&'a self, owner: &str, work_remaining: &mut usize) -> Vec<&'a str> {
+        let mut pending = Vec::new();
+        if let Some(parents) = self.member_parents.get(owner) {
+            let mut next = Vec::new();
+            for parent in parents.iter().rev() {
+                if *work_remaining == 0 {
+                    break;
+                }
+                *work_remaining -= 1;
+                next.push(parent.owner.as_str());
+            }
+            pending.extend(next.into_iter().rev());
+        }
+        let mut seen = HashSet::<&str>::new();
+        while let Some(parent) = pending.pop() {
+            if !seen.insert(parent) {
+                continue;
+            }
+            if let Some(grandparents) = self.member_parents.get(parent) {
+                let mut next = Vec::new();
+                for grandparent in grandparents.iter().rev() {
+                    if *work_remaining == 0 {
+                        break;
+                    }
+                    *work_remaining -= 1;
+                    next.push(grandparent.owner.as_str());
+                }
+                pending.extend(next.into_iter().rev());
+            }
+        }
+        let mut ancestors = seen.into_iter().collect::<Vec<_>>();
+        ancestors.sort_unstable();
+        ancestors
+    }
+
+    fn parent_bindings(
+        &self,
+        parent: &ParentDefinition,
+        current_bindings: &[ImplementationType],
+        files: &[FileAnalysis],
+        symbols: &FrontendSymbols,
+        work_remaining: &mut usize,
+    ) -> Option<Vec<ImplementationType>> {
+        let Some(&parent_source) = self.source_classes.get(&parent.owner) else {
+            return Some(Vec::new());
+        };
+        let Some(parent_class) = source_class(files, parent_source) else {
+            return Some(Vec::new());
+        };
+        let binding_count = parent_class.type_params.len();
+        if binding_count > *work_remaining {
+            *work_remaining = 0;
+            return None;
+        }
+        *work_remaining -= binding_count;
+        let current_source = match &parent.source {
+            SourceParent::Interface { class, .. } | SourceParent::Base { class } => *class,
+        };
+        let Some(current_class) = source_class(files, current_source) else {
+            return Some(Vec::new());
+        };
+        let arguments = match &parent.source {
+            SourceParent::Interface { class, interface } => {
+                let Some(arguments) = source_class(files, *class)
+                    .and_then(|class| class.supertypes.get(*interface as usize))
+                    .map(|parent| parent.targs.as_slice())
+                else {
+                    return Some(Vec::new());
+                };
+                arguments
+            }
+            SourceParent::Base { class } => {
+                let Some(arguments) =
+                    source_class(files, *class).map(|class| class.base_type_args.as_slice())
+                else {
+                    return Some(Vec::new());
+                };
+                arguments
+            }
+        };
+        arguments
+            .iter()
+            .take(binding_count)
+            .map(|argument| {
+                implementation_type(
+                    argument,
+                    current_class,
+                    current_bindings,
+                    &[],
+                    symbols,
+                    work_remaining,
+                )
+            })
+            .collect()
     }
 
     fn insert_hover(&mut self, target: DefinitionTarget, value: String) {
@@ -503,6 +953,13 @@ impl DefinitionSymbols {
     pub(crate) fn file_targets(&self, file: u32) -> &[DefinitionTarget] {
         self.self_targets
             .get(file as usize)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub(crate) fn implementation_targets(&self, target: DefinitionTarget) -> &[DefinitionTarget] {
+        self.implementations
+            .get(&target)
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
@@ -651,7 +1108,7 @@ impl DefinitionSymbols {
         self.member_parents.get(owner).is_some_and(|parents| {
             parents
                 .iter()
-                .any(|parent| self.collect_member_targets(parent, name, kind, seen, targets))
+                .any(|parent| self.collect_member_targets(&parent.owner, name, kind, seen, targets))
         })
     }
 
@@ -707,6 +1164,379 @@ impl DefinitionSymbols {
             _ => Vec::new(),
         }
     }
+}
+
+fn append_transitive_member_relations(
+    direct: &[(DefinitionTarget, DefinitionTarget)],
+    relations: &mut Vec<(DefinitionTarget, DefinitionTarget)>,
+    work_remaining: &mut usize,
+    limit: usize,
+) {
+    if relations.len() >= limit || *work_remaining == 0 {
+        return;
+    }
+    let mut adjacency = HashMap::<DefinitionTarget, Vec<DefinitionTarget>>::new();
+    for &(parent, child) in direct {
+        adjacency.entry(parent).or_default().push(child);
+    }
+    for children in adjacency.values_mut() {
+        children.sort_unstable_by_key(|target| (target.file, target.span.lo, target.span.hi));
+        children.dedup();
+    }
+    let mut roots = adjacency.keys().copied().collect::<Vec<_>>();
+    roots.sort_unstable_by_key(|target| (target.file, target.span.lo, target.span.hi));
+    for root in roots {
+        if relations.len() >= limit || *work_remaining == 0 {
+            break;
+        }
+        let Some(children) = adjacency.get(&root) else {
+            continue;
+        };
+        let mut seen = HashSet::from([root]);
+        seen.extend(children.iter().copied());
+        let mut pending = children.iter().rev().copied().collect::<Vec<_>>();
+        while let Some(child) = pending.pop() {
+            let Some(grandchildren) = adjacency.get(&child) else {
+                continue;
+            };
+            for &grandchild in grandchildren {
+                if relations.len() >= limit || *work_remaining == 0 {
+                    return;
+                }
+                *work_remaining -= 1;
+                if !seen.insert(grandchild) {
+                    continue;
+                }
+                relations.push((root, grandchild));
+                pending.push(grandchild);
+            }
+        }
+    }
+}
+
+fn member_signatures_compatible(
+    child: &MemberDefinition,
+    parent: &MemberDefinition,
+    files: &[FileAnalysis],
+    symbols: &FrontendSymbols,
+    child_bindings: &[ImplementationType],
+    parent_bindings: &[ImplementationType],
+    work_remaining: &mut usize,
+) -> bool {
+    if child.kind != parent.kind {
+        return false;
+    }
+    let (Some(child_params), Some(parent_params)) = (&child.params, &parent.params) else {
+        return false;
+    };
+    let child_source = child
+        .source_method
+        .and_then(|source| source_method(files, source));
+    let parent_source = parent
+        .source_method
+        .and_then(|source| source_method(files, source));
+    let (Some((child_class, child_method)), Some((parent_class, parent_method))) =
+        (child_source, parent_source)
+    else {
+        return child_source.is_none() && parent_source.is_none() && child_params == parent_params;
+    };
+    if child_params.len() != parent_params.len()
+        || child_params.len() != child_method.params.len()
+        || parent_params.len() != parent_method.params.len()
+        || child_method.type_params.len() != parent_method.type_params.len()
+    {
+        return false;
+    }
+    match (&child_method.receiver, &parent_method.receiver) {
+        (Some(child), Some(parent)) => {
+            let Some(child) = implementation_type(
+                child,
+                child_class,
+                child_bindings,
+                &child_method.type_params,
+                symbols,
+                work_remaining,
+            ) else {
+                return false;
+            };
+            let Some(parent) = implementation_type(
+                parent,
+                parent_class,
+                parent_bindings,
+                &parent_method.type_params,
+                symbols,
+                work_remaining,
+            ) else {
+                return false;
+            };
+            if child != parent {
+                return false;
+            }
+        }
+        (None, None) => {}
+        _ => return false,
+    }
+    child_method
+        .params
+        .iter()
+        .zip(&parent_method.params)
+        .all(|(child, parent)| {
+            let Some(child) = implementation_parameter_type(
+                child,
+                child_class,
+                child_bindings,
+                child_method,
+                symbols,
+                work_remaining,
+            ) else {
+                return false;
+            };
+            let Some(parent) = implementation_parameter_type(
+                parent,
+                parent_class,
+                parent_bindings,
+                parent_method,
+                symbols,
+                work_remaining,
+            ) else {
+                return false;
+            };
+            child == parent
+        })
+}
+
+fn source_method_has_type_parameters(files: &[FileAnalysis], source: SourceMethod) -> bool {
+    source_method(files, source).is_some_and(|(class, method)| {
+        !class.type_params.is_empty() || !method.type_params.is_empty()
+    })
+}
+
+fn source_method(files: &[FileAnalysis], source: SourceMethod) -> Option<(&ClassDecl, &FunDecl)> {
+    let declaration = files
+        .get(source.file as usize)?
+        .file
+        .decl(DeclId(source.declaration));
+    let Decl::Class(class) = declaration else {
+        return None;
+    };
+    Some((class, class.methods.get(source.method as usize)?))
+}
+
+fn source_class(files: &[FileAnalysis], source: SourceClass) -> Option<&ClassDecl> {
+    let declaration = files
+        .get(source.file as usize)?
+        .file
+        .decl(DeclId(source.declaration));
+    let Decl::Class(class) = declaration else {
+        return None;
+    };
+    Some(class)
+}
+
+fn root_type_bindings(
+    class: &ClassDecl,
+    work_remaining: &mut usize,
+) -> Option<Vec<ImplementationType>> {
+    if class.type_params.len() > *work_remaining {
+        *work_remaining = 0;
+        return None;
+    }
+    *work_remaining -= class.type_params.len();
+    Some(
+        class
+            .type_params
+            .iter()
+            .enumerate()
+            .map(|(index, _)| ImplementationType {
+                constructor: ImplementationTypeConstructor::RootParameter(index as u32),
+                nullable: false,
+                argument: None,
+                arguments: Vec::new(),
+                function_parameters: Vec::new(),
+                function_has_receiver: false,
+                function_is_suspend: false,
+            })
+            .collect(),
+    )
+}
+
+fn implementation_parameter_type(
+    parameter: &Param,
+    current_class: &ClassDecl,
+    current_bindings: &[ImplementationType],
+    current_method: &FunDecl,
+    symbols: &FrontendSymbols,
+    work_remaining: &mut usize,
+) -> Option<ImplementationType> {
+    let element = implementation_type(
+        &parameter.ty,
+        current_class,
+        current_bindings,
+        &current_method.type_params,
+        symbols,
+        work_remaining,
+    )?;
+    if !parameter.is_vararg {
+        return Some(element);
+    }
+    if let ImplementationType {
+        constructor: ImplementationTypeConstructor::Named(ty),
+        nullable: false,
+        argument: None,
+        arguments,
+        function_parameters,
+        ..
+    } = &element
+    {
+        if arguments.is_empty() && function_parameters.is_empty() {
+            let array = Ty::array(*ty);
+            if !array
+                .obj_internal()
+                .is_some_and(|name| name.matches("kotlin/Array"))
+            {
+                return Some(ImplementationType {
+                    constructor: ImplementationTypeConstructor::Named(array),
+                    nullable: false,
+                    argument: None,
+                    arguments: Vec::new(),
+                    function_parameters: Vec::new(),
+                    function_has_receiver: false,
+                    function_is_suspend: false,
+                });
+            }
+        }
+    }
+    Some(ImplementationType {
+        constructor: ImplementationTypeConstructor::Named(Ty::obj("kotlin/Array")),
+        nullable: false,
+        argument: Some(Box::new(element)),
+        arguments: Vec::new(),
+        function_parameters: Vec::new(),
+        function_has_receiver: false,
+        function_is_suspend: false,
+    })
+}
+
+fn implementation_type(
+    reference: &TypeRef,
+    current_class: &ClassDecl,
+    current_bindings: &[ImplementationType],
+    method_parameters: &[String],
+    symbols: &FrontendSymbols,
+    work_remaining: &mut usize,
+) -> Option<ImplementationType> {
+    if *work_remaining == 0 {
+        return None;
+    }
+    *work_remaining -= 1;
+    if let Some(parameter) = method_parameters
+        .iter()
+        .position(|parameter| parameter == &reference.name)
+    {
+        return Some(ImplementationType {
+            constructor: ImplementationTypeConstructor::MethodParameter(parameter as u32),
+            nullable: reference.nullable,
+            argument: None,
+            arguments: Vec::new(),
+            function_parameters: Vec::new(),
+            function_has_receiver: false,
+            function_is_suspend: false,
+        });
+    }
+    if let Some(parameter) = current_class
+        .type_params
+        .iter()
+        .position(|parameter| parameter == &reference.name)
+    {
+        let mut binding = current_bindings.get(parameter)?.clone();
+        binding.nullable |= reference.nullable;
+        return Some(binding);
+    }
+    if !reference.fun_params.is_empty() || reference.name == "<fun>" {
+        let function_parameters = reference
+            .fun_params
+            .iter()
+            .map(|parameter| {
+                implementation_type(
+                    parameter,
+                    current_class,
+                    current_bindings,
+                    method_parameters,
+                    symbols,
+                    work_remaining,
+                )
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let argument = match reference.arg.as_deref() {
+            Some(result) => Some(Box::new(implementation_type(
+                result,
+                current_class,
+                current_bindings,
+                method_parameters,
+                symbols,
+                work_remaining,
+            )?)),
+            None => None,
+        };
+        return Some(ImplementationType {
+            constructor: ImplementationTypeConstructor::Function,
+            nullable: reference.nullable,
+            argument,
+            arguments: Vec::new(),
+            function_parameters,
+            function_has_receiver: reference.fun_has_receiver,
+            function_is_suspend: reference.fun_suspend,
+        });
+    }
+    let named = if let Some(builtin) = Ty::from_name(&reference.name) {
+        builtin
+    } else if let Some(element) = Ty::primitive_array_element(&reference.name) {
+        Ty::array(element)
+    } else {
+        let internal = symbols.class_names.get(&reference.name)?;
+        if let Some(builtin) = internal
+            .strip_prefix("__ty/")
+            .and_then(|name| Ty::from_name(&name))
+        {
+            builtin
+        } else {
+            Ty::obj_name(internal)
+        }
+    };
+    let argument = match reference.arg.as_deref() {
+        Some(argument) => Some(Box::new(implementation_type(
+            argument,
+            current_class,
+            current_bindings,
+            method_parameters,
+            symbols,
+            work_remaining,
+        )?)),
+        None => None,
+    };
+    let arguments = reference
+        .targs
+        .iter()
+        .map(|argument| {
+            implementation_type(
+                argument,
+                current_class,
+                current_bindings,
+                method_parameters,
+                symbols,
+                work_remaining,
+            )
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(ImplementationType {
+        constructor: ImplementationTypeConstructor::Named(named),
+        nullable: reference.nullable,
+        argument,
+        arguments,
+        function_parameters: Vec::new(),
+        function_has_receiver: false,
+        function_is_suspend: false,
+    })
 }
 
 fn render_class_hover(class: &ClassDecl, name: &str, source: &str) -> String {
@@ -984,5 +1814,70 @@ pub(crate) fn definition_name_span(source: &str, span: Span) -> Span {
         Span::new(span.lo - 1, span.hi + 1)
     } else {
         span
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ancestor_walk_is_iterative_cycle_safe_and_work_bounded() {
+        let mut symbols = DefinitionSymbols::default();
+        for index in 1..10_000 {
+            symbols.member_parents.insert(
+                format!("C{index:05}"),
+                vec![ParentDefinition {
+                    owner: format!("C{:05}", index - 1),
+                    source: SourceParent::Base {
+                        class: SourceClass {
+                            file: 0,
+                            declaration: 0,
+                        },
+                    },
+                }],
+            );
+        }
+        symbols.member_parents.insert(
+            "C00000".to_string(),
+            vec![ParentDefinition {
+                owner: "C09999".to_string(),
+                source: SourceParent::Base {
+                    class: SourceClass {
+                        file: 0,
+                        declaration: 0,
+                    },
+                },
+            }],
+        );
+
+        let mut work_remaining = 1;
+        let ancestors = symbols.ancestor_owners("C09999", &mut work_remaining);
+        assert_eq!(ancestors, ["C09998"]);
+        assert_eq!(work_remaining, 0);
+    }
+
+    #[test]
+    fn ancestor_walk_does_not_collect_a_wide_parent_set_past_its_work_budget() {
+        let mut symbols = DefinitionSymbols::default();
+        symbols.member_parents.insert(
+            "Child".to_string(),
+            (0..10_000)
+                .map(|index| ParentDefinition {
+                    owner: format!("P{index:05}"),
+                    source: SourceParent::Base {
+                        class: SourceClass {
+                            file: 0,
+                            declaration: 0,
+                        },
+                    },
+                })
+                .collect(),
+        );
+
+        let mut work_remaining = 2;
+        let ancestors = symbols.ancestor_owners("Child", &mut work_remaining);
+        assert_eq!(ancestors, ["P09998", "P09999"]);
+        assert_eq!(work_remaining, 0);
     }
 }

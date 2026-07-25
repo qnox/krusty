@@ -1644,6 +1644,35 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`type_definition_snapshot_is_compact_source_free_and_exact`,
   `type_definition_resolves_exact_cross_file_utf16_location_without_reanalysis`,
   `shared_navigation_budget_keeps_saturated_worker_response_below_frame_cap`.)
+- **Go-to-implementation matches transitive Kotlin source implementations.** The server advertises
+  `implementationProvider` and returns exact class-name or member-name locations for every transitive
+  source subclass/implementor or overriding function/property. Declaration, supertype-reference,
+  selected member-call, and property-read queries resolve through the same compiler-selected
+  declaration identity. Checked signatures and arity shortlist candidates; parser-owned type
+  patterns then preserve nullability and class/method parameter identity while substitutions follow
+  direct inheritance edges across non-declaring intermediate classes. Only proven declaration edges
+  are closed transitively, so an unrelated descendant overload cannot attach to a generic
+  grandparent. A constant-factor work budget bounds hierarchy traversal and structural comparisons.
+  Ambiguous same-arity fallbacks are omitted instead of returning a wrong overload. Parser-owned
+  constructor-property modality excludes same-named non-overrides and private/final parents without
+  rescanning source.
+  The worker reduces results to the same 20-byte integer-only entries as definition and drops ASTs,
+  method references, names, and hierarchy catalogs. Definition entries consume first from the
+  256K navigation-entry cap shared with type-definition and implementation, so the feature cannot
+  enlarge the prior worst-case worker frame. Requests use cached spans,
+  never rerun analysis, return `null` when no implementation exists, and clear stale indexes on
+  incomplete or source-limit-blocked refreshes. The official differential compares complete sorted
+  URI/range arrays and exact UTF-16 endpoints for transitive classes, generic methods, overloads,
+  and queries following a supplementary-plane character. Focused tests cover properties,
+  constructor-property modifiers, private/final exclusions, and bounded traversal/storage.
+  (`implementation_snapshot_is_compact_transitive_generic_and_overload_exact`,
+  `constructor_property_override_uses_the_exact_declaration_span`,
+  `private_constructor_property_is_not_implemented_by_a_same_named_child_property`,
+  `semantic_navigation_occurrences_share_the_construction_limit`,
+  `ancestor_walk_is_iterative_cycle_safe_and_work_bounded`,
+  `implementation_resolves_exact_transitive_cross_file_utf16_locations_without_reanalysis`,
+  `implementation_locations_match_official_kotlin_lsp_exactly`,
+  `shared_navigation_budget_keeps_saturated_worker_response_below_frame_cap`.)
 
 - **Find-references reuses exact navigation identities.** The server advertises
   `referencesProvider` and returns source `Location`s whose compact definition target matches the
