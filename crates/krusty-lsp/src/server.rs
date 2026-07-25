@@ -4,6 +4,7 @@ pub use implementation::*;
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
+    use std::collections::HashSet;
     use std::io::Cursor;
     use std::rc::Rc;
 
@@ -1544,6 +1545,330 @@ mod tests {
             assert_eq!(response.messages[0]["result"], expected);
         }
         assert_eq!(calls.get(), 2, "references must use compact cached spans");
+    }
+
+    #[test]
+    fn rename_matches_official_minimal_edits_exactly_without_reanalysis() {
+        let calls = Rc::new(Cell::new(0));
+        let calls_for_analyzer = calls.clone();
+        let mut server = LspService::new(move |sources: &[&str]| {
+            calls_for_analyzer.set(calls_for_analyzer.get() + 1);
+            super::super::analyze_for_lsp(sources)
+        });
+        let initialized = server.handle(request(1, "initialize", json!({})));
+        assert_eq!(
+            initialized.messages[0]["result"]["capabilities"]["renameProvider"],
+            true
+        );
+        for (uri, text) in [
+            (
+                "file:///DefinitionTarget.kt",
+                "package demo\nfun answer(): Int = 42\n",
+            ),
+            (
+                "file:///DefinitionUse.kt",
+                "package demo\nfun use(): Int = answer()\n",
+            ),
+            (
+                "file:///RenameUnicode.kt",
+                "fun unicodeRename(): Int { val target = \"😀\"; return target.length }\n",
+            ),
+        ] {
+            server.handle(notification(
+                "textDocument/didOpen",
+                json!({
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": "kotlin",
+                        "version": 1,
+                        "text": text
+                    }
+                }),
+            ));
+        }
+        assert_eq!(calls.get(), 3);
+
+        let response = server.handle(request(
+            2,
+            "textDocument/rename",
+            json!({
+                "textDocument": {"uri": "file:///DefinitionUse.kt"},
+                "position": {"line": 1, "character": 18},
+                "newName": "renamedAnswer"
+            }),
+        ));
+        assert_eq!(
+            response.messages[0]["result"],
+            json!({
+                "documentChanges": [
+                    {
+                        "textDocument": {
+                            "uri": "file:///DefinitionUse.kt",
+                            "version": 1
+                        },
+                        "edits": [
+                            {
+                                "range": {
+                                    "start": {"line": 1, "character": 17},
+                                    "end": {"line": 1, "character": 17}
+                                },
+                                "newText": "ren"
+                            },
+                            {
+                                "range": {
+                                    "start": {"line": 1, "character": 18},
+                                    "end": {"line": 1, "character": 18}
+                                },
+                                "newText": "medA"
+                            }
+                        ]
+                    },
+                    {
+                        "textDocument": {
+                            "uri": "file:///DefinitionTarget.kt",
+                            "version": 1
+                        },
+                        "edits": [
+                            {
+                                "range": {
+                                    "start": {"line": 1, "character": 4},
+                                    "end": {"line": 1, "character": 4}
+                                },
+                                "newText": "ren"
+                            },
+                            {
+                                "range": {
+                                    "start": {"line": 1, "character": 5},
+                                    "end": {"line": 1, "character": 5}
+                                },
+                                "newText": "medA"
+                            }
+                        ]
+                    }
+                ]
+            })
+        );
+        let unicode_definition = server.handle(request(
+            3,
+            "textDocument/definition",
+            json!({
+                "textDocument": {"uri": "file:///RenameUnicode.kt"},
+                "position": {"line": 0, "character": 53}
+            }),
+        ));
+        assert!(
+            unicode_definition.messages[0]["result"]
+                .as_array()
+                .is_some_and(|locations| !locations.is_empty()),
+            "{}",
+            unicode_definition.messages[0]
+        );
+
+        let unicode_response = server.handle(request(
+            4,
+            "textDocument/rename",
+            json!({
+                "textDocument": {"uri": "file:///RenameUnicode.kt"},
+                "position": {"line": 0, "character": 53},
+                "newName": "renamedTarget"
+            }),
+        ));
+        assert_eq!(
+            unicode_response.messages[0]["result"],
+            json!({
+                "documentChanges": [{
+                    "textDocument": {
+                        "uri": "file:///RenameUnicode.kt",
+                        "version": 1
+                    },
+                    "edits": [
+                        {
+                            "range": {
+                                "start": {"line": 0, "character": 31},
+                                "end": {"line": 0, "character": 32}
+                            },
+                            "newText": "ren"
+                        },
+                        {
+                            "range": {
+                                "start": {"line": 0, "character": 33},
+                                "end": {"line": 0, "character": 33}
+                            },
+                            "newText": "medTa"
+                        },
+                        {
+                            "range": {
+                                "start": {"line": 0, "character": 53},
+                                "end": {"line": 0, "character": 54}
+                            },
+                            "newText": "ren"
+                        },
+                        {
+                            "range": {
+                                "start": {"line": 0, "character": 55},
+                                "end": {"line": 0, "character": 55}
+                            },
+                            "newText": "medTa"
+                        }
+                    ]
+                }]
+            })
+        );
+        assert_eq!(calls.get(), 3, "rename must use compact cached spans");
+    }
+
+    #[test]
+    fn rename_keeps_checker_selected_overloads_separate() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///RenameOverloads.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "fun pick(value: Int): Int = value\n\
+                             fun pick(value: String): String = value\n\
+                             fun use(): String = pick(\"x\")\n"
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/rename",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 2, "character": 21},
+                "newName": "chosen"
+            }),
+        ));
+        let changes = response.messages[0]["result"]["documentChanges"]
+            .as_array()
+            .unwrap();
+        assert_eq!(changes.len(), 1);
+        let edited_lines = changes[0]["edits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|edit| edit["range"]["start"]["line"].as_u64().unwrap())
+            .collect::<HashSet<_>>();
+        assert_eq!(edited_lines, HashSet::from([1, 2]));
+    }
+
+    #[test]
+    fn rename_reconstructs_plain_and_backticked_spellings() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///RenameSpellings.kt";
+        let source = "fun plain(): Int = 1\n\
+                      fun use(): Int = plain() + `plain`()\n";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": source
+                }
+            }),
+        ));
+
+        let use_line = source.lines().nth(1).unwrap();
+        let plain_start = use_line.find("plain()").unwrap() as u64;
+        let backticked_start = use_line.find("`plain`").unwrap() as u64;
+        let response = server.handle(request(
+            2,
+            "textDocument/rename",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 1, "character": plain_start + 1},
+                "newName": "renamed"
+            }),
+        ));
+        let edits = response.messages[0]["result"]["documentChanges"][0]["edits"]
+            .as_array()
+            .unwrap();
+        let starts = edits
+            .iter()
+            .map(|edit| {
+                (
+                    edit["range"]["start"]["line"].as_u64().unwrap(),
+                    edit["range"]["start"]["character"].as_u64().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert!(starts.iter().any(|(line, _)| *line == 0));
+        assert!(starts
+            .iter()
+            .any(|position| *position >= (1, plain_start) && *position <= (1, plain_start + 5)));
+        assert!(starts.iter().any(|position| {
+            *position >= (1, backticked_start) && *position <= (1, backticked_start + 7)
+        }));
+    }
+
+    #[test]
+    fn rename_bounds_identifier_diff_work_and_expanded_output() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///BoundedRename.kt";
+        let source = format!(
+            "fun boundedRename(): Int {{\n  var x = 0\n{}  return x\n}}\n",
+            "  x\n".repeat(1_400)
+        );
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": source
+                }
+            }),
+        ));
+
+        let output_limited = server.handle(request(
+            2,
+            "textDocument/rename",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 1, "character": 6},
+                "newName": "\u{1}".repeat(1_024)
+            }),
+        ));
+        assert_eq!(output_limited.messages[0]["result"], Value::Null);
+
+        let output_allowed = server.handle(request(
+            3,
+            "textDocument/rename",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 1, "character": 6},
+                "newName": "n".repeat(1_024)
+            }),
+        ));
+        let allowed = &output_allowed.messages[0]["result"];
+        assert!(allowed.is_object());
+        assert!(
+            serde_json::to_vec(allowed).unwrap().len()
+                <= super::implementation::MAX_RENAME_WIRE_BYTES
+        );
+
+        let identifier_limited = server.handle(request(
+            4,
+            "textDocument/rename",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 1, "character": 6},
+                "newName": "n".repeat(1_025)
+            }),
+        ));
+        assert_eq!(identifier_limited.messages[0]["error"]["code"], -32602);
     }
 
     #[test]

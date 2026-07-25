@@ -110,7 +110,7 @@ krusty -version | -help
 
 # LSP server over JSON-RPC on stdin/stdout
 # (incremental UTF-16 sync, diagnostics, completion + resolve, signature help, hover,
-#  go-to-definition, references, hierarchical document symbols, semantic highlighting):
+#  go-to-definition, references, rename, hierarchical document symbols, semantic highlighting):
 cargo build -p krusty-lsp
 target/debug/krusty-lsp --stdio -cp deps.jar:classes/
 ```
@@ -122,6 +122,8 @@ lexically scoped, includes declarations from other open files, and handles an in
 or `receiver?.` for a simple named receiver without rerunning analysis for the request.
 Go-to-definition and find-references use the same analyzed source set and compact cached file/span
 identities; reference queries add no second occurrence index.
+Rename reuses those identities and the authoritative open-document text to reconstruct the official
+minimal edits, including exact UTF-16 ranges. It retains no source copy in AST or snapshot state.
 Hover returns official Kotlin LSP declaration signatures and identifier ranges from a bounded,
 interned snapshot; it does not retain compiler ASTs or duplicate source strings.
 Document symbols likewise come from a bounded, compact hierarchy whose UTF-16 full and selection

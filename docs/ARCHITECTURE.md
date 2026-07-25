@@ -84,6 +84,11 @@ boundary.
   256K-entry budget bounds both construction and long-lived storage. Find-references deduplicates
   cursor targets into a request-local set, reverse-scans each bounded entry once, and allocates only
   the returned locations rather than retaining a duplicate reverse index.
+  Rename uses the same integer-only definition entries. During response encoding it reads identifier
+  spellings from the one authoritative open-document string, computes bounded minimal text changes,
+  and resolves every edit endpoint to UTF-16 in one forward source pass per affected document.
+  Request-local spelling and replacement buffers are capped and dropped with the response; no AST,
+  compiler snapshot, or document state retains another source string.
   A document-symbol entry is a 40-byte packed array containing an interned name id, precomputed
   UTF-16 full/selection endpoints, kind/deprecation bits, and a parent index. The worker flattens
   compiler declarations into this hierarchy, caps the source set at 32,768 entries and a conservative

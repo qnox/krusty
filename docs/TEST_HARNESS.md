@@ -23,6 +23,9 @@ and modifiers, exact go-to-definition target URIs/ranges, find-reference declara
 location sets, complete hover markdown/ranges, and stable completion labels, kinds, label details,
 ranking, and incomplete status. Diagnostic, navigation, reference, and hover locations compare both
 UTF-16 start and end positions; matching text at the wrong location fails.
+Rename compares the complete `WorkspaceEdit`, including document URI/version, edit ordering,
+replacement text, and both UTF-16 range endpoints for cross-file, lexical, overload-selected,
+Unicode-offset, and backticked identifiers.
 Hierarchical document symbols compare the complete protocol value, including order, nesting, names,
 kinds, deprecation/tags, full ranges, and selection ranges. A correct symbol at the wrong location
 therefore fails just like a diagnostic at the wrong location.
