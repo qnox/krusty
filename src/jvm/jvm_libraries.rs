@@ -2427,23 +2427,6 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         Some(Ty::obj("kotlin/reflect/KClass"))
     }
 
-    fn extension_properties(&self, receiver: Ty) -> Vec<(String, LibraryCallable)> {
-        if receiver.non_null() != Ty::obj("kotlin/reflect/KClass") {
-            return Vec::new();
-        }
-        vec![(
-            "java".to_string(),
-            LibraryCallable::library(
-                "kotlin/jvm/JvmClassMappingKt",
-                "getJavaClass",
-                vec![Ty::obj("kotlin/reflect/KClass")],
-                Ty::obj("java/lang/Class"),
-                Ty::obj("java/lang/Class"),
-                "(Lkotlin/reflect/KClass;)Ljava/lang/Class;",
-            ),
-        )]
-    }
-
     fn intrinsic_property(&self, receiver: Ty, name: &str) -> Option<LibraryMember> {
         if name != "javaClass" || !receiver.non_null().is_reference() {
             return None;

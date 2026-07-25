@@ -145,13 +145,6 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         None
     }
 
-    /// Platform-provided extension properties that are not recoverable from library metadata.
-    /// Each returned callable uses the ordinary static getter ABI and is lowered like any other
-    /// classpath extension property.
-    fn extension_properties(&self, _receiver: Ty) -> Vec<(String, LibraryCallable)> {
-        Vec::new()
-    }
-
     /// A platform property implemented by compiler lowering rather than an ordinary getter.
     fn intrinsic_property(&self, _receiver: Ty, _name: &str) -> Option<LibraryMember> {
         None

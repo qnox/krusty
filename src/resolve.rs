@@ -13632,24 +13632,6 @@ impl<'a> Checker<'a> {
             }
             return Some(ret);
         }
-        if let Some((_, getter)) = self
-            .syms
-            .libraries
-            .extension_properties(rt)
-            .into_iter()
-            .find(|(property, _)| property == name)
-        {
-            let ret = getter.ret;
-            if let Some(e) = mexpr {
-                self.expr_lowers.insert(
-                    e,
-                    ExprLowering::ExtensionPropertyGet {
-                        getter: Box::new(getter),
-                    },
-                );
-            }
-            return Some(ret);
-        }
         None
     }
 
