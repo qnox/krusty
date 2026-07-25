@@ -42,11 +42,11 @@ mod tests {
     fn lsp_compiler_analysis_uses_only_frontend_dependencies() {
         assert_allowed_external_crate_modules_in_tree(
             "crates/krusty-lsp/src/compiler_analysis",
-            &["ast", "diag", "frontend", "libraries", "types"],
+            &["ast", "diag", "features", "frontend", "libraries", "types"],
         );
         assert_allowed_external_crate_modules_in_file(
             Path::new("crates/krusty-lsp/src/compiler_analysis.rs"),
-            &["ast", "diag", "frontend", "libraries", "types"],
+            &["ast", "diag", "features", "frontend", "libraries", "types"],
         );
     }
 
@@ -83,7 +83,7 @@ mod tests {
             }
             assert_allowed_external_crate_modules_in_file(
                 &path,
-                &["analysis", "diag", "jvm", "types"],
+                &["analysis", "diag", "features", "jvm", "types"],
             );
         }
     }

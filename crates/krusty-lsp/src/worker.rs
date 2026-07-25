@@ -13,6 +13,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use krusty::diag::{Diagnostic, Severity, Span};
+use krusty::features::LangFeatures;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use serde::{Deserialize, Serialize};
@@ -34,14 +35,17 @@ const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Serialize)]
 struct AnalysisRequest<'a> {
     sources: &'a [&'a str],
+    language_features: &'a [&'a str],
 }
 
 #[derive(Deserialize)]
 struct OwnedAnalysisRequest {
     sources: Vec<String>,
+    #[serde(default)]
+    language_features: Vec<String>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct WireDiagnostic {
     lo: u32,
     hi: u32,
@@ -163,7 +167,7 @@ pub(crate) fn source_set_fits(lengths: impl IntoIterator<Item = usize>) -> bool 
         .is_some_and(|total| total <= MAX_SOURCE_SET_BYTES)
 }
 
-fn encode_request(sources: &[&str]) -> io::Result<Vec<u8>> {
+fn encode_request(sources: &[&str], features: &LangFeatures) -> io::Result<Vec<u8>> {
     if !source_set_fits(sources.iter().map(|source| source.len())) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -171,8 +175,16 @@ fn encode_request(sources: &[&str]) -> io::Result<Vec<u8>> {
         ));
     }
     let mut request = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
-    serde_json::to_writer(&mut request, &AnalysisRequest { sources })
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let mut language_features = features.iter().collect::<Vec<_>>();
+    language_features.sort_unstable();
+    serde_json::to_writer(
+        &mut request,
+        &AnalysisRequest {
+            sources,
+            language_features: &language_features,
+        },
+    )
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     Ok(request.bytes)
 }
 
@@ -242,8 +254,12 @@ impl WorkerProcess {
         }
     }
 
-    fn analyze(&mut self, sources: &[&str]) -> io::Result<Vec<DocumentAnalysis>> {
-        let request = encode_request(sources)?;
+    fn analyze(
+        &mut self,
+        sources: &[&str],
+        language_features: &LangFeatures,
+    ) -> io::Result<Vec<DocumentAnalysis>> {
+        let request = encode_request(sources, language_features)?;
         write_framed(&mut self.stdin, &request)?;
         drop(request);
         let response = self.read_response()?;
@@ -270,6 +286,7 @@ pub struct AnalysisWorker {
     process: WorkerProcess,
     analyses: usize,
     max_analyses: usize,
+    language_features: LangFeatures,
 }
 
 impl AnalysisWorker {
@@ -281,6 +298,7 @@ impl AnalysisWorker {
             process,
             analyses: 0,
             max_analyses: DEFAULT_ANALYSES_PER_WORKER,
+            language_features: LangFeatures::new(),
         })
     }
 
@@ -317,7 +335,7 @@ impl AnalysisWorker {
         if self.analyses >= self.max_analyses {
             self.restart()?;
         }
-        match self.process.analyze(sources) {
+        match self.process.analyze(sources, &self.language_features) {
             Ok(analysis) => {
                 self.analyses += 1;
                 Ok(analysis)
@@ -329,11 +347,15 @@ impl AnalysisWorker {
             }
             Err(_) => {
                 self.restart()?;
-                let analysis = self.process.analyze(sources)?;
+                let analysis = self.process.analyze(sources, &self.language_features)?;
                 self.analyses += 1;
                 Ok(analysis)
             }
         }
+    }
+
+    pub fn set_language_features(&mut self, features: LangFeatures) {
+        self.language_features = features;
     }
 }
 
@@ -347,8 +369,16 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
         let request: OwnedAnalysisRequest = serde_json::from_slice(&body).map_err(json_io)?;
         drop(body);
         let sources: Vec<_> = request.sources.iter().map(String::as_str).collect();
+        let mut language_features = LangFeatures::new();
+        for feature in &request.language_features {
+            language_features.enable(feature);
+        }
         let platform = Box::new(JvmLibraries::new(classpath.clone()));
-        let source_set = compiler_analysis::analyze_source_set(&sources, platform);
+        let source_set = compiler_analysis::analyze_source_set_with_features(
+            &sources,
+            platform,
+            &language_features,
+        );
         let highlight_symbols =
             HighlightSymbols::from_source_set(&source_set.files, &source_set.symbols);
         let definition_symbols =
@@ -550,7 +580,11 @@ mod tests {
             "package demo\nclass WorkerResult\nfun answer(): WorkerResult = WorkerResult()",
             "package demo\nfun use(): WorkerResult {\n  return answer()\n}",
         ];
-        let request = serde_json::to_vec(&AnalysisRequest { sources: &sources }).unwrap();
+        let request = serde_json::to_vec(&AnalysisRequest {
+            sources: &sources,
+            language_features: &[],
+        })
+        .unwrap();
         let mut input = Vec::new();
         write_framed(&mut input, &request).unwrap();
         let mut output = Vec::new();
@@ -574,5 +608,34 @@ mod tests {
         assert!(analysis.type_definitions.entry_count() > 0);
         assert!(analysis.document_symbols.entry_count() > 0);
         assert!(analysis.folding_ranges.entry_count() > 0);
+    }
+
+    #[test]
+    fn worker_protocol_applies_project_language_features() {
+        let sources = ["\
+data class Entry(val first: String, val second: String)
+fun combine(entries: Array<Entry>): String {
+    var result = \"\"
+    for ([left, right] in entries) {
+        result += left + right
+    }
+    return result
+}"];
+        let request = serde_json::to_vec(&AnalysisRequest {
+            sources: &sources,
+            language_features: &["NameBasedDestructuring"],
+        })
+        .unwrap();
+        let mut input = Vec::new();
+        write_framed(&mut input, &request).unwrap();
+        let mut output = Vec::new();
+        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
+
+        let response = read_framed(&mut Cursor::new(output), MAX_WORKER_MESSAGE_BYTES)
+            .unwrap()
+            .unwrap();
+        let analyses = serde_json::from_slice::<Vec<AnalysisResponse>>(&response).unwrap();
+        let diagnostics = &analyses[0].diagnostics;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 }

@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use krusty::features::LangFeatures;
+
 use super::fingerprint::{fingerprint_files, Fingerprint};
 use super::model::{ProjectModel, ProviderKind};
 use super::provider::{ProbeError, ProjectProvider};
@@ -123,6 +125,25 @@ impl ProjectSync {
             .find_map(|module| module.jvm_target.as_deref())
     }
 
+    /// The union of language features enabled by any module.
+    ///
+    /// Open documents are analyzed together against a project-wide classpath, so feature handling
+    /// follows the same permissive union until analysis becomes module-specific.
+    pub fn project_language_features(&self) -> LangFeatures {
+        let mut project_features = LangFeatures::new();
+        let Some(model) = self.model.as_ref() else {
+            return project_features;
+        };
+        for module in &model.modules {
+            let mut module_features = LangFeatures::new();
+            for argument in &module.kotlinc_args {
+                module_features.apply_cli_arg(argument);
+            }
+            project_features.extend(&module_features);
+        }
+        project_features
+    }
+
     /// Glob patterns to register with the editor's file watcher.
     pub fn watch_globs(&self) -> Vec<String> {
         self.provider.watch_globs()
@@ -231,6 +252,28 @@ mod tests {
             RefreshOutcome::Updated
         );
         assert_eq!(sync.project_classpath(), vec![PathBuf::from("/m2/b.jar")]);
+    }
+
+    #[test]
+    fn project_language_features_union_recognized_module_arguments() {
+        let mut first = Module::new(ModuleId::new(":first", "main"), "/p/first");
+        first.kotlinc_args = vec![
+            "-Xname-based-destructuring=complete".to_string(),
+            "-Xunmodeled-option".to_string(),
+        ];
+        let mut second = Module::new(ModuleId::new(":second", "main"), "/p/second");
+        second.kotlinc_args = vec!["-XXLanguage:+AnotherFeature".to_string()];
+        let model = ProjectModel::new("/p", ProviderKind::Gradle).with_modules(vec![first, second]);
+        let mut sync =
+            ProjectSync::new(Box::new(ScriptedProvider::new(Vec::new(), vec![Ok(model)])));
+
+        assert_eq!(
+            sync.refresh(&FakeRunner::default()),
+            RefreshOutcome::Updated
+        );
+        let features = sync.project_language_features();
+        assert!(features.has("NameBasedDestructuring"));
+        assert!(features.has("AnotherFeature"));
     }
 
     #[test]

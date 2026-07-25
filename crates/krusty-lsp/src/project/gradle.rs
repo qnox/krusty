@@ -9,7 +9,7 @@ use super::model::{Module, ModuleId, ProjectModel, ProviderKind, SourceRoot, Sou
 use super::provider::{ProbeError, ProjectProvider};
 use super::runner::{Command, CommandRunner, GRADLE};
 
-const PROBE_VERSION: &str = "3";
+const PROBE_VERSION: &str = "4";
 const SENTINEL: &str = "KRUSTY_MODEL_JSON ";
 const TASK: &str = "krustyModel";
 const MAX_FAILURE_DETAILS: usize = 8;
@@ -33,11 +33,18 @@ allprojects { project ->
             project.extensions.findByName("sourceSets")?.each { set ->
                 def roots = [] as Set
                 set.allSource?.srcDirs?.each { roots << it.absolutePath }
+                def compilerArgs = []
+                try {
+                    def compileTask = project.tasks.findByName(set.getCompileTaskName("kotlin"))
+                    compilerArgs = compileTask?.compilerOptions?.freeCompilerArgs?.getOrElse([]) ?: []
+                } catch (ignored) {
+                }
                 sourceSets << [
                     name      : set.name,
                     roots     : roots.toList().sort(),
                     classpath : lenient(project.configurations.findByName(set.compileClasspathConfigurationName)),
                     output    : set.output?.classesDirs?.files?.collect { it.absolutePath } ?: [],
+                    kotlincArgs: compilerArgs.collect { it.toString() },
                 ]
             }
 
@@ -56,6 +63,8 @@ allprojects { project ->
                             }
                             def associates = []
                             try { associates = compilation.associateWith.collect { it.output?.classesDirs?.files }.flatten().findAll { it != null }.collect { it.absolutePath } } catch (ignored) {}
+                            def compilerArgs = []
+                            try { compilerArgs = compilation.compileTaskProvider.get().compilerOptions?.freeCompilerArgs?.getOrElse([]) ?: [] } catch (ignored) {}
                             kotlinCompilations << [
                                 target    : target.name,
                                 name      : compilation.name,
@@ -66,6 +75,7 @@ allprojects { project ->
                                 isTest    : compilation.name.toLowerCase().contains("test"),
                                 associates: associates,
                                 jvmTarget : (target.platformType?.name == "jvm") ? (compilation.compilerOptions?.options?.jvmTarget?.getOrNull()?.target) : null,
+                                kotlincArgs: compilerArgs.collect { it.toString() },
                             ]
                         }
                     }
@@ -92,12 +102,19 @@ allprojects { project ->
                         try { classpath = classpath + variant.getCompileClasspath(null).files.collect { it.absolutePath } } catch (ignored) {}
                         def output = []
                         try { output = variant.javaCompileProvider.get().destinationDirectory.get().asFile.absolutePath } catch (ignored) {}
+                        def compilerArgs = []
+                        try {
+                            def taskName = "compile${variant.name.capitalize()}Kotlin"
+                            def compileTask = project.tasks.findByName(taskName)
+                            compilerArgs = compileTask?.compilerOptions?.freeCompilerArgs?.getOrElse([]) ?: []
+                        } catch (ignored) {}
                         androidVariants << [
                             name      : variant.name,
                             roots     : roots.toList().sort(),
                             classpath : classpath.unique(),
                             output    : output ? [output] : [],
                             isTest    : variant.name.toLowerCase().contains("test"),
+                            kotlincArgs: compilerArgs.collect { it.toString() },
                         ]
                     }
                 }
@@ -109,9 +126,10 @@ allprojects { project ->
             def kotlincArgs = []
             try {
                 jvmTarget = kotlin?.compilerOptions?.jvmTarget?.getOrNull()?.target
-                kotlincArgs = kotlin?.compilerOptions?.freeCompilerArgs?.getOrElse([]) ?: []
+                kotlincArgs.addAll(kotlin?.compilerOptions?.freeCompilerArgs?.getOrElse([]) ?: [])
             } catch (ignored) {
             }
+            kotlincArgs = kotlincArgs.collect { it.toString() }.unique()
             def javaHome = null
             try {
                 def java = project.extensions.findByType(org.gradle.api.plugins.JavaPluginExtension)
@@ -164,6 +182,7 @@ struct GradleProject {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GradleSourceSet {
     name: String,
     #[serde(default)]
@@ -172,6 +191,8 @@ struct GradleSourceSet {
     classpath: Vec<String>,
     #[serde(default)]
     output: Vec<String>,
+    #[serde(default)]
+    kotlinc_args: Vec<String>,
 }
 
 /// One Kotlin Multiplatform compilation, e.g. the `main` compilation of the `jvm` target.
@@ -194,6 +215,8 @@ struct KotlinCompilation {
     associates: Vec<String>,
     #[serde(default)]
     jvm_target: Option<String>,
+    #[serde(default)]
+    kotlinc_args: Vec<String>,
 }
 
 /// One Android build variant, e.g. `debug`.
@@ -209,6 +232,8 @@ struct AndroidVariant {
     output: Vec<String>,
     #[serde(default)]
     is_test: bool,
+    #[serde(default)]
+    kotlinc_args: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -385,7 +410,7 @@ fn module_of(project: &GradleProject, source_set: &GradleSourceSet) -> Module {
     module.classpath = source_set.classpath.iter().map(PathBuf::from).collect();
     module.output_dir = source_set.output.first().map(PathBuf::from);
     module.jvm_target = project.jvm_target.clone();
-    module.kotlinc_args = project.kotlinc_args.clone();
+    module.kotlinc_args = merged_kotlinc_args(&project.kotlinc_args, &source_set.kotlinc_args);
     module.depends_on = project
         .project_deps
         .iter()
@@ -441,7 +466,7 @@ fn kmp_module_of(project: &GradleProject, compilation: &KotlinCompilation) -> Mo
         .jvm_target
         .clone()
         .or_else(|| project.jvm_target.clone());
-    module.kotlinc_args = project.kotlinc_args.clone();
+    module.kotlinc_args = merged_kotlinc_args(&project.kotlinc_args, &compilation.kotlinc_args);
     module.depends_on = project
         .project_deps
         .iter()
@@ -475,13 +500,23 @@ fn android_module_of(project: &GradleProject, variant: &AndroidVariant) -> Modul
     module.classpath = variant.classpath.iter().map(PathBuf::from).collect();
     module.output_dir = variant.output.first().map(PathBuf::from);
     module.jvm_target = project.jvm_target.clone();
-    module.kotlinc_args = project.kotlinc_args.clone();
+    module.kotlinc_args = merged_kotlinc_args(&project.kotlinc_args, &variant.kotlinc_args);
     module.depends_on = project
         .project_deps
         .iter()
         .map(|path| ModuleId::new(path, "main"))
         .collect();
     module
+}
+
+fn merged_kotlinc_args(project: &[String], compilation: &[String]) -> Vec<String> {
+    let mut merged = Vec::new();
+    for argument in project.iter().chain(compilation) {
+        if !merged.contains(argument) {
+            merged.push(argument.clone());
+        }
+    }
+    merged
 }
 
 fn is_test_source_set(name: &str) -> bool {
@@ -543,7 +578,7 @@ mod tests {
     use crate::project::testing::TempTree;
 
     fn recorded_output() -> String {
-        let core = r#"{"path":":core","name":"core","projectDir":"/p/core","javaHome":"/jdk21","jvmTarget":"21","kotlincArgs":["-Xcontext-parameters"],"sourceSets":[{"name":"main","roots":["/p/core/src/main/kotlin"],"classpath":["/m2/kotlin-stdlib.jar"],"output":["/p/core/build/classes/kotlin/main"]}],"projectDeps":[]}"#;
+        let core = r#"{"path":":core","name":"core","projectDir":"/p/core","javaHome":"/jdk21","jvmTarget":"21","kotlincArgs":["-Xcontext-parameters"],"sourceSets":[{"name":"main","roots":["/p/core/src/main/kotlin"],"classpath":["/m2/kotlin-stdlib.jar"],"output":["/p/core/build/classes/kotlin/main"],"kotlincArgs":["-Xname-based-destructuring=complete"]}],"projectDeps":[]}"#;
         let app = r#"{"path":":app","name":"app","projectDir":"/p/app","javaHome":"/jdk21","jvmTarget":"21","kotlincArgs":[],"sourceSets":[{"name":"main","roots":["/p/app/src/main/kotlin"],"classpath":["/m2/kotlin-stdlib.jar"],"output":["/p/app/build/classes/kotlin/main"]},{"name":"test","roots":["/p/app/src/test/kotlin"],"classpath":["/m2/junit.jar"],"output":["/p/app/build/classes/kotlin/test"]}],"projectDeps":[":core"]}"#;
         format!("Configuring project\n{SENTINEL}{core}\n{SENTINEL}{app}\nBUILD SUCCESSFUL\n")
     }
@@ -569,6 +604,7 @@ mod tests {
 
         let script = std::fs::read_to_string(&command.args[4]).unwrap();
         assert!(script.contains("lenient = true"), "{script}");
+        assert!(script.contains("compileTask?.compilerOptions"), "{script}");
         assert!(!tree.path(".krusty").exists());
     }
 
@@ -625,7 +661,13 @@ Execution failed for task ':app:krustyModel'.
         let core = model.module(&ModuleId::new(":core", "main")).unwrap();
         assert_eq!(core.classpath, vec![PathBuf::from("/m2/kotlin-stdlib.jar")]);
         assert_eq!(core.jvm_target.as_deref(), Some("21"));
-        assert_eq!(core.kotlinc_args, vec!["-Xcontext-parameters".to_string()]);
+        assert_eq!(
+            core.kotlinc_args,
+            vec![
+                "-Xcontext-parameters".to_string(),
+                "-Xname-based-destructuring=complete".to_string(),
+            ]
+        );
 
         let app = model.module(&ModuleId::new(":app", "main")).unwrap();
         assert_eq!(app.depends_on, vec![ModuleId::new(":core", "main")]);
