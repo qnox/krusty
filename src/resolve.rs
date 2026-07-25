@@ -4617,11 +4617,16 @@ fn infer_lit_ty_p(
             let rt = infer_lit_ty_p(file, *hi, class_names, fun_rets, props, src, env);
             Ty::range_value_type(lt, rt).unwrap_or(Ty::Error)
         }
-        // A top-level property initialized from an unambiguous classpath function reference.
-        Expr::CallableRef {
-            receiver: None,
-            name,
-        } if name != "class" => {
+        Expr::CallableRef { receiver, name } => {
+            if name == "class" {
+                return receiver
+                    .as_ref()
+                    .and_then(|_| src.class_literal_type())
+                    .unwrap_or(Ty::Error);
+            }
+            if receiver.is_some() {
+                return Ty::Error;
+            }
             let overloads = crate::libraries::FunctionSet {
                 overloads: resolver
                     .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
