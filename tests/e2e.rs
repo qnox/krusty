@@ -118,6 +118,8 @@ mod classfile_e2e;
 mod classpath_abstract_subclass_e2e;
 #[path = "classpath_annotation_emit_e2e.rs"]
 mod classpath_annotation_emit_e2e;
+#[path = "classpath_byte_array_descriptor_e2e.rs"]
+mod classpath_byte_array_descriptor_e2e;
 #[path = "classpath_collection_and_nested_named_e2e.rs"]
 mod classpath_collection_and_nested_named_e2e;
 #[path = "classpath_collection_param_member_e2e.rs"]
