@@ -325,6 +325,35 @@ fn arg_fits_platform(lib: &dyn SemanticPlatform, param: &Ty, arg: &Ty) -> bool {
             .is_some_and(|(p, a)| usize::from(p) == a)
 }
 
+fn arg_fits_source(
+    lib: &dyn SemanticPlatform,
+    src: &dyn SymbolSource,
+    param: &Ty,
+    arg: &Ty,
+) -> bool {
+    arg_fits_platform(lib, param, arg)
+        || crate::assignable::is_assignable(
+            &crate::assignable::TyCtx::new(),
+            &SourceOracle(src),
+            *arg,
+            *param,
+        )
+}
+
+fn resolution_subtype(
+    lib: &dyn SemanticPlatform,
+    src: &dyn SymbolSource,
+    sub: Ty,
+    sup: Ty,
+) -> bool {
+    crate::assignable::is_subtype(
+        &crate::assignable::TyCtx::new(),
+        &SourceOracle(src),
+        sub,
+        sup,
+    ) || platform_subtype(lib, sub, sup)
+}
+
 fn integer_literal_adapts(param: Ty, arg: Ty, is_literal: bool) -> bool {
     is_literal && arg == Ty::Int && param == Ty::Long
 }
@@ -333,6 +362,62 @@ enum CandidateSelection<T> {
     None,
     Selected(T),
     Ambiguous,
+}
+
+fn unique_most_specific<T>(
+    candidates: impl IntoIterator<Item = (Vec<Ty>, T)>,
+    at_least_as_specific: impl Fn(usize, Ty, Ty) -> bool,
+) -> CandidateSelection<T> {
+    let mut applicable = Vec::new();
+    for (params, candidate) in candidates {
+        if applicable.iter().any(|(existing, _): &(Vec<Ty>, T)| {
+            existing.len() == params.len()
+                && existing
+                    .iter()
+                    .zip(&params)
+                    .enumerate()
+                    .all(|(position, (&left, &right))| {
+                        at_least_as_specific(position, left, right)
+                            && at_least_as_specific(position, right, left)
+                    })
+        }) {
+            continue;
+        }
+        applicable.push((params, candidate));
+    }
+    if applicable.is_empty() {
+        return CandidateSelection::None;
+    }
+
+    let mut selected = None;
+    for (index, (params, _)) in applicable.iter().enumerate() {
+        let dominated =
+            applicable
+                .iter()
+                .enumerate()
+                .any(|(other_index, (other, _))| {
+                    index != other_index
+                        && other.len() == params.len()
+                        && other.iter().zip(params).enumerate().all(
+                            |(position, (&left, &right))| {
+                                at_least_as_specific(position, left, right)
+                            },
+                        )
+                        && !params.iter().zip(other).enumerate().all(
+                            |(position, (&left, &right))| {
+                                at_least_as_specific(position, left, right)
+                            },
+                        )
+                });
+        if !dominated && selected.replace(index).is_some() {
+            return CandidateSelection::Ambiguous;
+        }
+    }
+
+    let Some(selected) = selected else {
+        return CandidateSelection::Ambiguous;
+    };
+    CandidateSelection::Selected(applicable.swap_remove(selected).1)
 }
 
 fn integer_literal_call_applies(
@@ -406,72 +491,19 @@ fn integer_literal_overload<T>(
     if !has_adaptation {
         return CandidateSelection::None;
     }
-    let maximal: Vec<usize> = applicable
-        .iter()
-        .enumerate()
-        .filter_map(|(i, (params, _))| {
-            let dominated =
-                applicable.iter().enumerate().any(|(j, (other, _))| {
-                    i != j
-                        && other.iter().zip(params).enumerate().all(
-                            |(position, (&left, &right))| {
-                                parameter_at_least_as_specific(
-                                    lib,
-                                    left,
-                                    right,
-                                    integer_literals.get(position).copied().unwrap_or(false),
-                                )
-                            },
-                        )
-                        && other != params
-                });
-            (!dominated).then_some(i)
-        })
-        .collect();
-    if maximal.len() != 1 {
-        return CandidateSelection::Ambiguous;
-    }
-    let selected = maximal[0];
-    CandidateSelection::Selected(
-        applicable
-            .into_iter()
-            .nth(selected)
-            .expect("selected candidate exists")
-            .1,
-    )
-}
-
-fn unique_best_score<K: PartialEq, T>(
-    candidates: impl Iterator<Item = (usize, K, T)>,
-) -> Option<T> {
-    let mut best = None;
-    let mut ambiguous = false;
-    for (score, key, candidate) in candidates {
-        match best
-            .as_ref()
-            .map(|(best_score, _, _)| score.cmp(best_score))
-        {
-            None | Some(std::cmp::Ordering::Greater) => {
-                best = Some((score, key, candidate));
-                ambiguous = false;
-            }
-            Some(std::cmp::Ordering::Equal) => {
-                ambiguous |= best
-                    .as_ref()
-                    .is_some_and(|(_, best_key, _)| &key != best_key);
-            }
-            Some(std::cmp::Ordering::Less) => {}
-        }
-    }
-    if ambiguous {
-        None
-    } else {
-        best.map(|(_, _, candidate)| candidate)
-    }
+    unique_most_specific(applicable, |position, left, right| {
+        parameter_at_least_as_specific(
+            lib,
+            left,
+            right,
+            integer_literals.get(position).copied().unwrap_or(false),
+        )
+    })
 }
 
 fn best_companion_overload<'a>(
     lib: &dyn SemanticPlatform,
+    src: &dyn SymbolSource,
     candidates: impl Iterator<Item = &'a LibraryMember> + Clone,
     name: &str,
     args: &[Ty],
@@ -481,6 +513,7 @@ fn best_companion_overload<'a>(
     let adapts = |p: &Ty, a: &Ty, i: usize| {
         integer_literal_adapts(*p, *a, integer_literals.get(i).copied().unwrap_or(false))
     };
+    let fits = |param: &Ty, arg: &Ty| arg_fits_source(lib, src, param, arg);
     let named = candidates.filter(|member| member.name == name);
     if let Some(exact) = named.clone().find(|member| member.params == args) {
         return Some(exact);
@@ -490,66 +523,72 @@ fn best_companion_overload<'a>(
         named.clone().map(|member| (member.params.clone(), member)),
         args,
         integer_literals,
-        |_, param, arg| param.is_erased_top() || abi_arg_subtype_of_param(lib, *arg, *param),
+        |_, param, arg| fits(param, arg),
     ) {
         CandidateSelection::Selected(member) => return Some(member),
         CandidateSelection::Ambiguous => return None,
         CandidateSelection::None => {}
     }
-    named
-        .clone()
-        .find(|member| {
-            member.params.len() == args.len()
+    match unique_most_specific(
+        named.clone().filter_map(|member| {
+            (member.params.len() == args.len()
                 && member
                     .params
                     .iter()
                     .zip(args)
-                    .all(|(param, arg)| param == arg || param.is_erased_top())
-        })
-        .or_else(|| {
-            unique_best_score(named.clone().filter_map(|member| {
-                (member.params.len() == args.len()
-                    && member
-                        .params
-                        .iter()
-                        .zip(args)
-                        .all(|(param, arg)| abi_arg_subtype_of_param(lib, *arg, *param)))
-                .then_some((0, member.params.as_slice(), member))
-            }))
-        })
-        .or_else(|| {
-            named.clone().find(|member| {
-                member.params.len() > args.len()
-                    && member.params[..args.len()]
-                        .iter()
-                        .zip(args)
-                        .enumerate()
-                        .all(|(i, (param, arg))| param == arg || adapts(param, arg, i))
+                    .all(|(param, arg)| fits(param, arg)))
+            .then_some((member.params.clone(), member))
+        }),
+        |_, left, right| resolution_subtype(lib, src, left, right),
+    ) {
+        CandidateSelection::Selected(member) => return Some(member),
+        CandidateSelection::Ambiguous => return None,
+        CandidateSelection::None => {}
+    }
+    match unique_most_specific(
+        named.clone().filter_map(|member| {
+            (member.params.len() > args.len()
+                && member.params[..args.len()]
+                    .iter()
+                    .zip(args)
+                    .enumerate()
+                    .all(|(i, (param, arg))| fits(param, arg) || adapts(param, arg, i)))
+            .then_some((member.params.clone(), member))
+        }),
+        |_, left, right| resolution_subtype(lib, src, left, right),
+    ) {
+        CandidateSelection::Selected(member) => return Some(member),
+        CandidateSelection::Ambiguous => return None,
+        CandidateSelection::None => {}
+    }
+    match unique_most_specific(
+        named.filter_map(|member| {
+            let (last, fixed) = member.params.split_last()?;
+            let element = last.array_elem()?;
+            if args.len() == member.params.len() && args.last() == Some(last) {
+                return None;
+            }
+            let applies = args.len() >= fixed.len()
+                && fixed
+                    .iter()
+                    .zip(args)
+                    .enumerate()
+                    .all(|(i, (param, arg))| fits(param, arg) || adapts(param, arg, i))
+                && args[fixed.len()..]
+                    .iter()
+                    .enumerate()
+                    .all(|(i, arg)| fits(&element, arg) || adapts(&element, arg, fixed.len() + i));
+            applies.then(|| {
+                let mut expanded = fixed.to_vec();
+                expanded.resize(args.len(), element);
+                (expanded, member)
             })
-        })
-        .or_else(|| {
-            named.clone().find(|member| {
-                let Some((last, fixed)) = member.params.split_last() else {
-                    return false;
-                };
-                let Some(element) = last.array_elem() else {
-                    return false;
-                };
-                if args.len() == member.params.len() && args.last() == Some(last) {
-                    return false;
-                }
-                args.len() >= fixed.len()
-                    && fixed.iter().zip(args).enumerate().all(|(i, (param, arg))| {
-                        param == arg || param.is_erased_top() || adapts(param, arg, i)
-                    })
-                    && args[fixed.len()..].iter().enumerate().all(|(i, arg)| {
-                        *arg == element
-                            || element.is_erased_top()
-                            || arg.is_erased_top()
-                            || adapts(&element, arg, fixed.len() + i)
-                    })
-            })
-        })
+        }),
+        |_, left, right| resolution_subtype(lib, src, left, right),
+    ) {
+        CandidateSelection::Selected(member) => Some(member),
+        CandidateSelection::None | CandidateSelection::Ambiguous => None,
+    }
 }
 
 /// Extension overloads of a receiver-filtered set, ordered most-specific-first by the SOURCE receiver rank
@@ -1088,8 +1127,15 @@ impl<'a> SymbolResolver<'a> {
                     resolve_instance_name(self.lib, internal, name, args, integer_literals)
                         .map(Symbol::Instance)
                         .or_else(|| {
-                            resolve_companion_name(self.lib, internal, name, args, integer_literals)
-                                .map(Symbol::Companion)
+                            resolve_companion_name(
+                                self.lib,
+                                &self.src,
+                                internal,
+                                name,
+                                args,
+                                integer_literals,
+                            )
+                            .map(Symbol::Companion)
                         })
                 }
             }
@@ -1485,13 +1531,7 @@ impl<'a> SymbolResolver<'a> {
     }
 
     fn arg_fits_or_subtype(&self, param: &Ty, arg: &Ty) -> bool {
-        arg_fits_platform(self.lib, param, arg)
-            || crate::assignable::is_assignable(
-                &crate::assignable::TyCtx::new(),
-                &SourceOracle(&self.src),
-                *arg,
-                *param,
-            )
+        arg_fits_source(self.lib, &self.src, param, arg)
     }
 
     fn default_arg_mapping(
@@ -1954,6 +1994,7 @@ fn resolve_synthetic_constructor_name(
 /// Resolve a companion member `Type.name(args)` (the receiver type must be public).
 fn resolve_companion_name(
     lib: &dyn SemanticPlatform,
+    src: &dyn SymbolSource,
     internal: TypeName,
     name: &str,
     args: &[Ty],
@@ -1963,7 +2004,7 @@ fn resolve_companion_name(
     if !t.is_public {
         return None;
     }
-    best_companion_overload(lib, t.companion.iter(), name, args, integer_literals).cloned()
+    best_companion_overload(lib, src, t.companion.iter(), name, args, integer_literals).cloned()
 }
 
 /// Resolve an instance member `recv.name(args)` — the receiver's static type must be public, but the
@@ -3048,6 +3089,90 @@ mod tests {
             |_, param, arg| arg_fits(param, arg),
         );
         assert!(matches!(ambiguous, CandidateSelection::Ambiguous));
+    }
+
+    #[test]
+    fn companion_overloads_use_the_composite_source_hierarchy() {
+        let source = FakeSource {
+            name: "unused",
+            receiver: None,
+            info: top_level_nullable_string_info(),
+        };
+        let member =
+            |params| LibraryMember::new("make".to_string(), params, Ty::Unit, String::new());
+
+        let broad = member(vec![Ty::obj("demo/Base")]);
+        let specific = member(vec![Ty::obj("demo/Mid")]);
+        let specific_duplicate = member(vec![Ty::obj("demo/Mid")]);
+        let selected = best_companion_overload(
+            &source,
+            &source,
+            [&broad, &specific, &specific_duplicate].into_iter(),
+            "make",
+            &[Ty::obj("demo/Leaf")],
+            &[],
+        )
+        .expect("the most specific source supertype should be selected");
+        assert_eq!(selected.params, vec![Ty::obj("demo/Mid")]);
+
+        let left = member(vec![Ty::obj("demo/Mid"), Ty::obj("demo/Base")]);
+        let right = member(vec![Ty::obj("demo/Base"), Ty::obj("demo/Mid")]);
+        assert!(best_companion_overload(
+            &source,
+            &source,
+            [&left, &right].into_iter(),
+            "make",
+            &[Ty::obj("demo/Leaf"), Ty::obj("demo/Leaf")],
+            &[],
+        )
+        .is_none());
+
+        let aliases = unique_most_specific(
+            [
+                (vec![Ty::obj("kotlin/Any")], "any"),
+                (vec![Ty::String], "string"),
+                (vec![Ty::obj("java/lang/String")], "java string"),
+            ],
+            |_, left, right| resolution_subtype(&source, &source, left, right),
+        );
+        assert!(matches!(aliases, CandidateSelection::Selected("string")));
+    }
+
+    #[test]
+    fn companion_default_and_vararg_shapes_accept_source_subtypes() {
+        let source = FakeSource {
+            name: "unused",
+            receiver: None,
+            info: top_level_nullable_string_info(),
+        };
+        let member =
+            |params| LibraryMember::new("make".to_string(), params, Ty::Unit, String::new());
+
+        let default_broad = member(vec![Ty::obj("demo/Base"), Ty::String]);
+        let default_specific = member(vec![Ty::obj("demo/Mid"), Ty::String]);
+        let selected = best_companion_overload(
+            &source,
+            &source,
+            [&default_broad, &default_specific].into_iter(),
+            "make",
+            &[Ty::obj("demo/Leaf")],
+            &[],
+        )
+        .expect("the defaulted source-supertype overload should resolve");
+        assert_eq!(selected.params[0], Ty::obj("demo/Mid"));
+
+        let vararg_broad = member(vec![Ty::array(Ty::obj("demo/Base"))]);
+        let vararg_specific = member(vec![Ty::array(Ty::obj("demo/Mid"))]);
+        let selected = best_companion_overload(
+            &source,
+            &source,
+            [&vararg_broad, &vararg_specific].into_iter(),
+            "make",
+            &[Ty::obj("demo/Leaf")],
+            &[],
+        )
+        .expect("the vararg source-supertype overload should resolve");
+        assert_eq!(selected.params[0], Ty::array(Ty::obj("demo/Mid")));
     }
 
     #[test]
