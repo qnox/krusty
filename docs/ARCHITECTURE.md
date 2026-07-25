@@ -56,6 +56,8 @@ boundary.
 - The LSP supervisor never runs the compiler in its own long-lived process. It sends source sets to
   a compiler worker that is restarted after 64 analyses. This bounds growth from the compiler's
   process-lifetime name/type interners while amortizing JVM classpath initialization across edits.
+  The request also carries the bounded set of enabled language-feature names derived from project
+  compilation arguments and explicit LSP flags; per-source directives are applied inside the worker.
 - An open document retains its source text, a bounded compact diagnostic cache for published and
   pull diagnostics, and compact indexes for hover, completion, definitions, document symbols,
   signature help, folding ranges, and semantic highlighting. The compiler's full diagnostic vector
