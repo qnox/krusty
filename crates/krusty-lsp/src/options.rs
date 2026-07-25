@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use krusty::features::LangFeatures;
 use krusty::jvm::classpath::platform_jdk_modules;
 
 #[derive(Default)]
@@ -9,6 +10,7 @@ pub struct LspOptions {
     classpath: Vec<PathBuf>,
     jdk_home: Option<PathBuf>,
     no_jdk: bool,
+    language_arguments: Vec<String>,
 }
 
 impl LspOptions {
@@ -31,7 +33,13 @@ impl LspOptions {
                     ));
                 }
                 "-no-jdk" => options.no_jdk = true,
-                _ => return Err(format!("unsupported option '{argument}'")),
+                _ => {
+                    if LangFeatures::new().apply_cli_arg(&argument) {
+                        options.language_arguments.push(argument);
+                    } else {
+                        return Err(format!("unsupported option '{argument}'"));
+                    }
+                }
             }
         }
         Ok(options)
@@ -62,6 +70,19 @@ impl LspOptions {
     pub fn no_jdk(&self) -> bool {
         self.no_jdk
     }
+
+    pub fn language_features(&self) -> LangFeatures {
+        let mut features = LangFeatures::new();
+        self.apply_language_features(&mut features);
+        features
+    }
+
+    /// Apply explicit LSP flags over project-derived features, preserving CLI order and disables.
+    pub fn apply_language_features(&self, features: &mut LangFeatures) {
+        for argument in &self.language_arguments {
+            features.apply_cli_arg(argument);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -73,12 +94,34 @@ mod tests {
     }
 
     #[test]
-    fn accepts_only_language_server_process_options() {
-        let options = parse(&["--stdio", "-cp", "a.jar:b/classes", "-no-jdk"]).unwrap();
+    fn accepts_language_server_and_language_feature_options() {
+        let options = parse(&[
+            "--stdio",
+            "-cp",
+            "a.jar:b/classes",
+            "-no-jdk",
+            "-Xname-based-destructuring=complete",
+        ])
+        .unwrap();
         assert_eq!(
             options.effective_classpath(),
             vec![PathBuf::from("a.jar"), PathBuf::from("b/classes")]
         );
+        let features = options.language_features();
+        assert!(features.has("NameBasedDestructuring"));
+        let options = parse(&[
+            "-Xname-based-destructuring=complete",
+            "-Xname-based-destructuring=disable",
+        ])
+        .unwrap();
+        let features = options.language_features();
+        assert!(!features.has("NameBasedDestructuring"));
+        let mut project_features = LangFeatures::new();
+        project_features.enable("NameBasedDestructuring");
+        project_features.enable("EnableNameBasedDestructuringShortForm");
+        options.apply_language_features(&mut project_features);
+        assert!(!project_features.has("NameBasedDestructuring"));
+        assert!(!project_features.has("EnableNameBasedDestructuringShortForm"));
         assert!(parse(&["Main.kt"]).is_err());
         assert!(parse(&["-d", "out"]).is_err());
     }
