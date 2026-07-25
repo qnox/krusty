@@ -75,23 +75,6 @@ impl FoldingRangeText {
         })
     }
 
-    #[cfg(test)]
-    fn collapsed_text(&self, source: &str) -> String {
-        let summary = self.summary();
-        let summary = source
-            .get(summary.lo as usize..summary.hi as usize)
-            .unwrap_or("");
-        match self {
-            Self::Imports => "...".to_string(),
-            Self::Parentheses => "(...)".to_string(),
-            Self::Braces => "{...}".to_string(),
-            Self::KDoc(_) => format!("/** {summary} ...*/"),
-            Self::BlockComment(_) => format!("/ {summary} .../"),
-            Self::RawString(_) => format!("\"\"\"{summary} ...\"\"\""),
-            Self::RegionLabel(_) => summary.to_string(),
-        }
-    }
-
     fn sort_key(&self) -> (u8, u32, u32) {
         let summary = self.summary();
         (self.style(), summary.lo, summary.hi)
@@ -800,11 +783,6 @@ mod tests {
     use super::*;
     use crate::compiler_analysis::analyze_standalone_source_set;
 
-    fn extract(source: &str) -> Vec<FoldingRangeOccurrence> {
-        let analysis = analyze_standalone_source_set(&[source]);
-        folding_range_occurrences(source, &analysis.files[0], 128)
-    }
-
     #[test]
     fn scanner_ignores_delimiters_inside_literals_and_comments() {
         let source = "val quoted = \"{ not a block }\"\n\
@@ -816,18 +794,44 @@ mod tests {
                       { raw body }\n\
                       \"\"\"\n\
                       fun actual() {\n\
+                        val escaped = \"\\\"} still quoted\\\"\"\n\
+                        /* outer /* } nested */ still outer */\n\
                       }\n";
-        let ranges = extract(source);
+        let comment_start = source.find("/*\n").unwrap();
+        let comment_end = comment_start + source[comment_start..].find("*/").unwrap() + "*/".len();
+        let comment_summary = source.find("{ comment body }").unwrap();
+        let raw_start = source.find("\"\"\"").unwrap();
+        let raw_end =
+            raw_start + 3 + source[raw_start + 3..].find("\"\"\"").unwrap() + "\"\"\"".len();
+        let raw_summary = source.find("{ raw body }").unwrap();
+        let brace_start = source.find("fun actual() {").unwrap() + "fun actual() ".len();
+        let brace_end = source.rfind('}').unwrap() + 1;
+        let analysis = analyze_standalone_source_set(&[source]);
 
         assert_eq!(
-            ranges
-                .iter()
-                .map(|range| range.text.collapsed_text(source))
-                .collect::<Vec<_>>(),
+            folding_range_occurrences(source, &analysis.files[0], 128),
             vec![
-                "/ { comment body } .../".to_string(),
-                "\"\"\"{ raw body } ...\"\"\"".to_string(),
-                "{...}".to_string()
+                FoldingRangeOccurrence {
+                    span: Span::new(comment_start as u32, comment_end as u32),
+                    kind: FOLDING_KIND_COMMENT,
+                    text: FoldingRangeText::BlockComment(Span::new(
+                        comment_summary as u32,
+                        (comment_summary + "{ comment body }".len()) as u32,
+                    )),
+                },
+                FoldingRangeOccurrence {
+                    span: Span::new(raw_start as u32, raw_end as u32),
+                    kind: FOLDING_KIND_REGION,
+                    text: FoldingRangeText::RawString(Span::new(
+                        raw_summary as u32,
+                        (raw_summary + "{ raw body }".len()) as u32,
+                    )),
+                },
+                FoldingRangeOccurrence {
+                    span: Span::new(brace_start as u32, brace_end as u32),
+                    kind: FOLDING_KIND_REGION,
+                    text: FoldingRangeText::Braces,
+                },
             ]
         );
     }
@@ -895,6 +899,39 @@ mod tests {
     }
 
     #[test]
+    fn scanner_budget_preserves_the_first_exact_range_and_skips_later_candidates() {
+        let source = "\"\"\"\nraw\n\"\"\"\n\
+                      /*\ncomment\n*/\n\
+                      {\nbody\n}\n";
+        let analysis = analyze_standalone_source_set(&[source]);
+
+        assert_eq!(
+            folding_range_occurrences(source, &analysis.files[0], 1),
+            vec![FoldingRangeOccurrence {
+                span: Span::new(0, 11),
+                kind: FOLDING_KIND_REGION,
+                text: FoldingRangeText::RawString(Span::new(4, 7)),
+            }]
+        );
+        assert!(folding_range_occurrences(source, &analysis.files[0], 0).is_empty());
+    }
+
+    #[test]
+    fn scanner_tracks_crlf_import_locations_exactly() {
+        let source = "import first.name\r\nimport second.name\r\n\r\n";
+        let analysis = analyze_standalone_source_set(&[source]);
+
+        assert_eq!(
+            folding_range_occurrences(source, &analysis.files[0], 8),
+            vec![FoldingRangeOccurrence {
+                span: Span::new(7, 37),
+                kind: FOLDING_KIND_IMPORTS,
+                text: FoldingRangeText::Imports,
+            }]
+        );
+    }
+
+    #[test]
     fn scanner_bounds_malformed_delimiter_and_region_nesting() {
         let source = format!(
             "{}\n{}",
@@ -918,10 +955,14 @@ mod tests {
 
     #[test]
     fn oversized_dynamic_placeholders_are_skipped_before_allocation() {
-        let source = format!("/*\n{}\n*/", "x".repeat(MAX_DYNAMIC_PLACEHOLDER_BYTES + 1));
-        let analysis = analyze_standalone_source_set(&[&source]);
-        let ranges = folding_range_occurrences(&source, &analysis.files[0], 8);
-
-        assert!(ranges.is_empty());
+        let oversized = "x".repeat(MAX_DYNAMIC_PLACEHOLDER_BYTES + 1);
+        for source in [
+            format!("/*\n{oversized}\n*/"),
+            format!("//region {oversized}\nbody\n//endregion\n"),
+            format!("\"\"\"\n{oversized}\n\"\"\""),
+        ] {
+            let analysis = analyze_standalone_source_set(&[&source]);
+            assert!(folding_range_occurrences(&source, &analysis.files[0], 8).is_empty());
+        }
     }
 }
