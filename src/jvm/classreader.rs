@@ -35,6 +35,9 @@ impl MethodSig {
     pub fn is_static(&self) -> bool {
         self.access & ACC_STATIC != 0
     }
+    pub fn is_abstract(&self) -> bool {
+        self.access & 0x0400 != 0
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -126,8 +129,7 @@ impl ClassInfo {
         self.access & 0x0010 != 0
     }
 
-    /// `ACC_ABSTRACT` — extending it requires implementing its abstract methods (and any bridges),
-    /// which krusty does not synthesize, so such a base is not a safe superclass to emit.
+    /// `ACC_ABSTRACT` class flag.
     pub fn is_abstract(&self) -> bool {
         self.access & 0x0400 != 0
     }
