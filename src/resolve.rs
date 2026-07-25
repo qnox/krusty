@@ -803,6 +803,17 @@ impl SymbolTable {
             .find(|sig| sigs.len() == 1 || sig.params == params)
     }
 
+    pub fn source_function_signature(
+        &self,
+        name: &str,
+        file: u32,
+        declaration: DeclId,
+    ) -> Option<&Signature> {
+        self.funs.get(name)?.iter().find(|signature| {
+            signature.source_file == Some(file) && signature.source_decl == Some(declaration)
+        })
+    }
+
     fn fun_ret_by_erased_params(&self, name: &str, params: &[ErasedTypeKey]) -> Option<Ty> {
         let overloads = self.funs.get(name)?;
         overloads
@@ -818,6 +829,10 @@ impl SymbolTable {
 
     pub fn class_by_type_name(&self, internal: TypeName) -> Option<&ClassSig> {
         self.classes.values().find(|sig| sig.internal == internal)
+    }
+
+    pub fn source_constructor_matcher(&self) -> SourceConstructorMatcher<'_> {
+        SourceConstructorMatcher { symbols: self }
     }
 
     pub fn class_simple_name(&self, internal: TypeName) -> Option<&str> {
@@ -1118,6 +1133,208 @@ impl SymbolTable {
             && c.inner_of.is_none()
             && !internal.contains('$')
     }
+}
+
+pub struct SourceConstructorMatcher<'a> {
+    symbols: &'a SymbolTable,
+}
+
+const MAX_SOURCE_SUPERTYPE_NODES: usize = 4096;
+
+impl SourceConstructorMatcher<'_> {
+    pub fn argument_matches(&self, expected: Ty, actual: Ty) -> bool {
+        constructor_argument_matches(self, expected, actual)
+    }
+
+    pub fn arguments_match(&self, expected: &[Ty], actual: &[Ty]) -> bool {
+        expected.len() == actual.len()
+            && expected
+                .iter()
+                .zip(actual)
+                .all(|(&expected, &actual)| self.argument_matches(expected, actual))
+    }
+
+    pub fn common_supertypes(&self, types: &[Ty]) -> Vec<crate::libraries::SemanticSupertype> {
+        let Some(first) = types.first().and_then(|ty| ty.kotlin_class_internal()) else {
+            return Vec::new();
+        };
+        let others = types
+            .iter()
+            .skip(1)
+            .map(|ty| ty.kotlin_class_internal().map(|name| self.hierarchy(name)))
+            .collect::<Option<Vec<_>>>();
+        let Some(others) = others else {
+            return Vec::new();
+        };
+        let common = self
+            .hierarchy(first)
+            .into_iter()
+            .filter(|candidate| {
+                others.iter().all(|hierarchy| {
+                    hierarchy
+                        .iter()
+                        .any(|other| self.same_name(*candidate, *other))
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut distinct = Vec::with_capacity(common.len());
+        for candidate in common {
+            if !distinct
+                .iter()
+                .any(|existing| self.same_name(*existing, candidate))
+            {
+                distinct.push(candidate);
+            }
+        }
+        let mut common = distinct;
+        let all_common = common.clone();
+        common.retain(|candidate| {
+            !all_common.iter().any(|other| {
+                !self.same_name(*candidate, *other) && self.reaches(*other, *candidate)
+            })
+        });
+        if common.len() > 1 {
+            common.retain(|name| !Ty::obj_name(*name).is_erased_top());
+        }
+        let result = common
+            .into_iter()
+            .map(|name| crate::libraries::SemanticSupertype {
+                name,
+                type_parameters: self.type_parameter_count(name),
+            })
+            .chain(self.symbols.libraries.implicit_common_supertypes(types))
+            .collect::<Vec<_>>();
+        let mut distinct = Vec::<crate::libraries::SemanticSupertype>::with_capacity(result.len());
+        for constraint in result {
+            if let Some(existing) = distinct
+                .iter_mut()
+                .find(|existing| self.same_name(existing.name, constraint.name))
+            {
+                existing.type_parameters = existing.type_parameters.max(constraint.type_parameters);
+            } else {
+                distinct.push(constraint);
+            }
+        }
+        let mut result = distinct;
+        result.sort_unstable_by(|left, right| {
+            self.source_name(left.name)
+                .cmp(&self.source_name(right.name))
+        });
+        result
+    }
+
+    fn hierarchy(&self, start: TypeName) -> Vec<TypeName> {
+        let mut seen = std::collections::HashSet::from([start]);
+        let mut result = vec![start];
+        let mut cursor = 0usize;
+        while let Some(&current) = result.get(cursor) {
+            cursor += 1;
+            for parent in self.parents(current) {
+                if result.len() >= MAX_SOURCE_SUPERTYPE_NODES {
+                    return result;
+                }
+                if seen.insert(parent) {
+                    result.push(parent);
+                }
+            }
+        }
+        result
+    }
+
+    fn reaches(&self, start: TypeName, target: TypeName) -> bool {
+        self.hierarchy(start)
+            .into_iter()
+            .any(|candidate| self.same_name(candidate, target))
+    }
+
+    pub fn source_name(&self, name: TypeName) -> String {
+        if Ty::obj_name(name).is_erased_top() {
+            return "Any".to_string();
+        }
+        self.symbols
+            .class_simple_name(name)
+            .map(str::to_string)
+            .unwrap_or_else(|| name.segment().replace('$', "."))
+    }
+
+    pub fn type_names_match(&self, left: TypeName, right: TypeName) -> bool {
+        self.same_name(left, right)
+    }
+
+    fn type_parameter_count(&self, name: TypeName) -> usize {
+        self.symbols
+            .class_by_type_name(name)
+            .map(|class| class.tparam_names.len())
+            .or_else(|| {
+                self.symbols
+                    .libraries
+                    .resolve_type_name(name)
+                    .map(|class| class.type_params.len())
+            })
+            .unwrap_or(0)
+    }
+
+    fn parents(&self, name: TypeName) -> Vec<TypeName> {
+        <Self as crate::assignable::TypeOracle>::direct_supertypes(self, name)
+    }
+
+    fn same_name(&self, left: TypeName, right: TypeName) -> bool {
+        <Self as crate::assignable::TypeOracle>::same_class_name(self, left, right)
+    }
+}
+
+impl crate::assignable::TypeOracle for SourceConstructorMatcher<'_> {
+    fn direct_supertypes(&self, internal: TypeName) -> Vec<TypeName> {
+        if let Some(class) = self.symbols.class_by_type_name(internal) {
+            let mut supertypes = Vec::with_capacity(class.interfaces.len() + 1);
+            supertypes.extend(class.interfaces.iter_ids());
+            supertypes.extend(class.super_internal);
+            return supertypes;
+        }
+        self.symbols
+            .libraries
+            .resolve_type_name(internal)
+            .map(|ty| ty.supertypes.iter_ids().collect())
+            .unwrap_or_default()
+    }
+
+    fn value_underlying(&self, ty: Ty) -> Option<Ty> {
+        let internal = ty.kotlin_class_internal()?;
+        if let Some(class) = self.symbols.class_by_type_name(internal) {
+            return class.value_field.as_ref().map(|(_, ty)| *ty);
+        }
+        self.symbols
+            .libraries
+            .resolve_type_name(internal)
+            .and_then(|ty| ty.value_underlying)
+    }
+
+    fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
+        let a = self.symbols.libraries.library_value_form_name(a);
+        let b = self.symbols.libraries.library_value_form_name(b);
+        crate::symbol_resolver::platform_type_names_match(a, b)
+    }
+}
+
+fn constructor_argument_matches(
+    oracle: &dyn crate::assignable::TypeOracle,
+    expected: Ty,
+    actual: Ty,
+) -> bool {
+    expected == actual
+        || expected == Ty::Error
+        || actual == Ty::Error
+        || actual == Ty::Nothing
+        || (actual == Ty::Null && expected.is_reference())
+        || expected.is_erased_top()
+        || actual.is_erased_top()
+        || expected.accepts_numeric(actual)
+        || crate::assignable::is_assignable(
+            &crate::assignable::TyCtx::new(),
+            oracle,
+            actual,
+            expected,
+        )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -9248,17 +9465,10 @@ impl<'a> Checker<'a> {
     /// between a same-arity primary and a secondary constructor (`Sc(Int)` vs `Sc(String)`).
     fn ctor_args_match(&self, params: &[Ty], args: &[Ty]) -> bool {
         params.len() == args.len()
-            && params.iter().zip(args).all(|(&p, &a)| {
-                p == a
-                    || p == Ty::Error
-                    || a == Ty::Error
-                    || a == Ty::Nothing
-                    || (a == Ty::Null && p.is_reference())
-                    || p.is_erased_top()
-                    || a.is_erased_top()
-                    || matches!((p, a), (Ty::Obj(e, _), Ty::Obj(x, _)) if self.obj_name_is_subtype(x, e))
-                    || p.accepts_numeric(a)
-            })
+            && params
+                .iter()
+                .zip(args)
+                .all(|(&expected, &actual)| constructor_argument_matches(self, expected, actual))
     }
 
     /// Whether `internal` is a SAM interface krusty can soundly convert a lambda to: a user

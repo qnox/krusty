@@ -219,6 +219,9 @@ impl LspProcess {
                 "capabilities": {
                     "textDocument": {
                         "diagnostic": {},
+                        "documentSymbol": {
+                            "hierarchicalDocumentSymbolSupport": true
+                        },
                         "publishDiagnostics": {"versionSupport": true},
                         "semanticTokens": {
                             "requests": {"full": true},
@@ -248,6 +251,19 @@ impl LspProcess {
             response["result"]["capabilities"]["textDocumentSync"], 2,
             "LSP must advertise the official server's incremental synchronization mode"
         );
+        assert_eq!(
+            response["result"]["capabilities"]["diagnosticProvider"],
+            json!({
+                "interFileDependencies": true,
+                "workspaceDiagnostics": false,
+                "workDoneProgress": false
+            }),
+            "LSP must advertise the official server's pull-diagnostic contract"
+        );
+        assert_eq!(
+            response["result"]["capabilities"]["foldingRangeProvider"], true,
+            "LSP must advertise the official server's folding-range contract"
+        );
         self.notify("initialized", json!({}));
         SemanticLegend {
             types: response["result"]["capabilities"]["semanticTokensProvider"]["legend"]
@@ -273,24 +289,15 @@ impl LspProcess {
         // The first opt-in run may need to download Gradle and import/index a cold project.
         let deadline = Instant::now() + ANALYSIS_TIMEOUT;
         loop {
-            if let Some(index) = self.pending.iter().position(|message| {
-                message["method"] == "textDocument/publishDiagnostics"
-                    && message["params"]["uri"] == uri
-                    && message["params"]["diagnostics"]
-                        .as_array()
-                        .is_some_and(|items| !items.is_empty())
-            }) {
-                return self.pending.swap_remove(index)["params"]["diagnostics"]
-                    .as_array()
-                    .unwrap()
-                    .clone();
-            }
-
             let request_id = self.next_request_id();
             let response = self.request(
                 request_id,
                 "textDocument/diagnostic",
                 json!({"textDocument": {"uri": uri}}),
+            );
+            assert_eq!(
+                response["result"]["kind"], "full",
+                "LSP pull diagnostics must use the official full-report shape"
             );
             if let Some(items) = response["result"]["items"].as_array() {
                 if !items.is_empty() {
@@ -354,6 +361,39 @@ impl LspProcess {
         let response = self.request(
             request_id,
             "textDocument/definition",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": line, "character": character}
+            }),
+        );
+        response.get("result").cloned().unwrap_or(Value::Null)
+    }
+
+    fn document_symbols(&mut self, uri: &str) -> Value {
+        let request_id = self.next_request_id();
+        let response = self.request(
+            request_id,
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri}}),
+        );
+        response.get("result").cloned().unwrap_or(Value::Null)
+    }
+
+    fn folding_ranges(&mut self, uri: &str) -> Value {
+        let request_id = self.next_request_id();
+        let response = self.request(
+            request_id,
+            "textDocument/foldingRange",
+            json!({"textDocument": {"uri": uri}}),
+        );
+        response.get("result").cloned().unwrap_or(Value::Null)
+    }
+
+    fn signature_help(&mut self, uri: &str, line: u32, character: u32) -> Value {
+        let request_id = self.next_request_id();
+        let response = self.request(
+            request_id,
+            "textDocument/signatureHelp",
             json!({
                 "textDocument": {"uri": uri},
                 "position": {"line": line, "character": character}
@@ -470,6 +510,18 @@ fn normalized_diagnostics(diagnostics: Vec<Value>) -> Vec<Value> {
     diagnostics
 }
 
+fn position_after_marker(source: &str, marker: &str) -> (u32, u32) {
+    let offset = source
+        .find(marker)
+        .unwrap_or_else(|| panic!("missing marker {marker:?}"))
+        + marker.len();
+    let prefix = &source[..offset];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() as u32;
+    let line_start = prefix.rfind('\n').map_or(0, |newline| newline + 1);
+    let character = prefix[line_start..].encode_utf16().count() as u32;
+    (line, character)
+}
+
 #[test]
 fn reference_version_selection_is_semantic_and_order_independent() {
     let manifest = "2.10.0 newer\n# ignored\n2.9.9 older\n";
@@ -504,7 +556,7 @@ fn diagnostic_comparison_preserves_the_exact_range_and_text() {
 }
 
 #[test]
-fn diagnostics_tokens_navigation_hovers_and_completions_match_official_kotlin_lsp() {
+fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_kotlin_lsp() {
     let Ok(kotlin_lsp) = std::env::var("KRUSTY_KOTLIN_LSP") else {
         eprintln!("skipping Kotlin LSP differential: set KRUSTY_KOTLIN_LSP");
         return;
@@ -560,6 +612,63 @@ fn diagnostics_tokens_navigation_hovers_and_completions_match_official_kotlin_ls
              }\n",
         ),
     ];
+    let signature_help_source = "package signatureparity\n\
+         fun combine(left: String, count: Int = 1): String = left.repeat(count)\n\
+         fun combine(left: Int, right: Int): Int = left + right\n\
+         fun <T> identity(value: T): T = value\n\
+         fun <T> choose(first: T, second: T): T = first\n\
+         fun unicode(π: String, count: Int = 1): String = π.repeat(count)\n\
+         fun collect(vararg values: Int): Int = values.size\n\
+         fun zero(): Int = 0\n\
+         class Box(val name: String, val size: Int = 1) {\n\
+         \u{20}\u{20}fun member(prefix: String, times: Int = 1): String = prefix.repeat(times)\n\
+         }\n\
+         class Choice {\n\
+         \u{20}\u{20}constructor(value: String) {}\n\
+         \u{20}\u{20}constructor(value: Int, count: Int = 1) {}\n\
+         }\n\
+         open class ConstructorBase\n\
+         class ConstructorDerived : ConstructorBase()\n\
+         class SubtypeChoice {\n\
+         \u{20}\u{20}constructor(value: String) {}\n\
+         \u{20}\u{20}constructor(value: ConstructorBase) {}\n\
+         }\n\
+         class SecondaryOnly { constructor(value: Int) {} }\n\
+         class Holder<T>(val value: T)\n\
+         fun <T> unwrap(holder: Holder<T>): T = holder.value\n\
+         fun <T> coalesce(value: T?, fallback: T): T = value ?: fallback\n\
+         fun advanced(maybe: Int?) {\n\
+         \u{20}\u{20}val selected = Choice(1, 2)\n\
+         \u{20}\u{20}val subtypeSelected = SubtypeChoice(ConstructorDerived())\n\
+         \u{20}\u{20}val secondary = SecondaryOnly(1)\n\
+         \u{20}\u{20}val nestedGeneric = unwrap(Holder<Int>(1))\n\
+         \u{20}\u{20}val nullableIdentity = identity(maybe)\n\
+         \u{20}\u{20}val nullableHolder = unwrap(Holder<Int?>(maybe))\n\
+         \u{20}\u{20}val mergedNullable = choose(maybe, 1)\n\
+         \u{20}\u{20}val mixed = choose(1, \"x\")\n\
+         \u{20}\u{20}val mixedReversed = choose(\"x\", 1)\n\
+         \u{20}\u{20}val nullableGeneric = coalesce(maybe, 1)\n\
+         }\n\
+         fun use(box: Box): String {\n\
+         \u{20}\u{20}val top = combine(\"top\", 2)\n\
+         \u{20}\u{20}val member = box.member(\"member\", 3)\n\
+         \u{20}\u{20}val constructed = Box(\"box\", 4)\n\
+         \u{20}\u{20}val integer = combine(1, 2)\n\
+         \u{20}\u{20}val named = combine(count = 2, left = \"named\")\n\
+         \u{20}\u{20}val nested = combine(combine(\"inner\", 1), 2)\n\
+         \u{20}\u{20}val generic = identity(1)\n\
+         \u{20}\u{20}val nonAscii = unicode(\"π\", 2)\n\
+         \u{20}\u{20}val variadic = collect(1, 2, 3)\n\
+         \u{20}\u{20}val empty = zero()\n\
+         \u{20}\u{20}fun local(value: String, count: Int = 1): String = value.repeat(count)\n\
+         \u{20}\u{20}val localResult = local(\"local\", 2)\n\
+         \u{20}\u{20}return top + member + constructed.name + integer + named + nested + generic + nonAscii + variadic + empty + localResult\n\
+         }\n";
+    let incomplete_signature_help_source =
+        "fun combine(left: String, count: Int = 1): String = left\n\
+         fun use(): String {\n\
+         \u{20}\u{20}return combine(\"x\", \n\
+         }\n";
     let definition_files = [
         (
             "DefinitionTarget.kt",
@@ -889,6 +998,161 @@ fn diagnostics_tokens_navigation_hovers_and_completions_match_official_kotlin_ls
             "IncrementalParity.kt",
             "fun before(): Int = 1\nfun use(): Int = before()\n",
         ),
+        ("SignatureHelp.kt", signature_help_source),
+        (
+            "IncompleteSignatureHelp.kt",
+            incomplete_signature_help_source,
+        ),
+        (
+            "DocumentSymbols.kt",
+            "package documentparity\n\
+             val topValue: Int = 1\n\
+             fun topFunction(arg: Int): Int = arg\n\
+             class Box(val item: Int) {\n\
+             \u{20}\u{20}var mutable: String = \"\"\n\
+             \u{20}\u{20}fun member(value: Int): Int = value\n\
+             }\n\
+             enum class Shade { RED, BLUE }\n\
+             interface Named { fun label(): String }\n\
+             object Registry { val size: Int = 1; fun clear() {} }\n",
+        ),
+        (
+            "DocumentSymbolsAdvanced.kt",
+            "package documentsymboladvanced\n\
+             @Deprecated(\"old\")\n\
+             fun oldFunction(): Int = 1\n\
+             @Deprecated(\n\
+             \u{20}\u{20}\"old property\"\n\
+             )\n\
+             val oldProperty: Int = 1\n\
+             class Advanced(seed: Int, val first: String = \"a,b\", var second: Int = 2)\n\
+             class Outer {\n\
+             \u{20}\u{20}class Inner(val nestedValue: Int) {\n\
+             \u{20}\u{20}\u{20}\u{20}fun nestedMethod(): Int = nestedValue\n\
+             \u{20}\u{20}}\n\
+             }\n\
+             fun `odd name`(): Int = 1\n",
+        ),
+        (
+            "DocumentSymbolsScopes.kt",
+            "package documentsymbolscopes\n\
+             class Container {\n\
+             \u{20}\u{20}companion object Factory {\n\
+             \u{20}\u{20}\u{20}\u{20}val answer: Int = 42\n\
+             \u{20}\u{20}\u{20}\u{20}fun create(): Container = Container()\n\
+             \u{20}\u{20}}\n\
+             \u{20}\u{20}fun outer(): Int {\n\
+             \u{20}\u{20}\u{20}\u{20}val localValue: Int = 1\n\
+             \u{20}\u{20}\u{20}\u{20}fun localFunction(): Int = localValue\n\
+             \u{20}\u{20}\u{20}\u{20}class LocalClass(val localProperty: Int)\n\
+             \u{20}\u{20}\u{20}\u{20}return localFunction()\n\
+             \u{20}\u{20}}\n\
+             }\n",
+        ),
+        (
+            "DocumentSymbolsKinds.kt",
+            "package documentsymbolkinds\n\
+             annotation class Marker\n\
+             data class Record(val value: Int)\n\
+             @JvmInline\n\
+             value class Token(val raw: Int)\n\
+             fun interface Action { fun run(): Unit }\n\
+             sealed class Base\n\
+             typealias Alias = Record\n\
+             @Deprecated(\n\
+             \u{20}\u{20}\"old alias\"\n\
+             )\n\
+             typealias OldAlias = Record\n\
+             class Injected @Deprecated(\"old constructor\") constructor(val injected: Int)\n\
+             enum class Pair(val left: Int, val right: Int) { BOTH(1, 2) }\n\
+             class Secondary {\n\
+             \u{20}\u{20}constructor(value: Int) { println(value) }\n\
+             }\n\
+             class AnnotatedMembers {\n\
+             \u{20}\u{20}@Deprecated(\"old secondary\")\n\
+             \u{20}\u{20}constructor(value: Int) { println(value) }\n\
+             \u{20}\u{20}@Deprecated(\"old companion\")\n\
+             \u{20}\u{20}companion object {}\n\
+             }\n\
+             class DefaultCompanion {\n\
+             \u{20}\u{20}companion object { val only: Int = 1 }\n\
+             }\n",
+        ),
+        (
+            "FoldingRanges.kt",
+            "package foldingparity\n\
+             import kotlin.collections.List\n\
+             import kotlin.collections.Map\n\
+             \n\
+             /**\n\
+             \u{20}* Documentation block.\n\
+             \u{20}*/\n\
+             class Box(\n\
+             \u{20}\u{20}val value: Int,\n\
+             ) {\n\
+             \u{20}\u{20}/*\n\
+             \u{20}\u{20} * Nested block comment.\n\
+             \u{20}\u{20} */\n\
+             \u{20}\u{20}fun choose(flag: Boolean): Int {\n\
+             \u{20}\u{20}\u{20}\u{20}if (flag) {\n\
+             \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}return 1\n\
+             \u{20}\u{20}\u{20}\u{20}}\n\
+             \u{20}\u{20}\u{20}\u{20}return 2\n\
+             \u{20}\u{20}}\n\
+             }\n",
+        ),
+        (
+            "FoldingRangesAdvanced.kt",
+            "package foldingadvanced\n\
+             \n\
+             //region Utilities\n\
+             // First line comment.\n\
+             // Second line comment.\n\
+             fun grouped(\n\
+             \u{20}\u{20}first: Int,\n\
+             \u{20}\u{20}second: Int,\n\
+             ): Int = listOf(\n\
+             \u{20}\u{20}first,\n\
+             \u{20}\u{20}second,\n\
+             ).map {\n\
+             \u{20}\u{20}it + 1\n\
+             }.sum()\n\
+             //endregion\n\
+             \n\
+             val raw = \"\"\"\n\
+             \u{20}\u{20}first\n\
+             \u{20}\u{20}second\n\
+             \"\"\".trimIndent()\n\
+             \n\
+             fun choose(value: Int): Int = when (value) {\n\
+             \u{20}\u{20}0 -> {\n\
+             \u{20}\u{20}\u{20}\u{20}1\n\
+             \u{20}\u{20}}\n\
+             \u{20}\u{20}else -> value\n\
+             }\n\
+             \n\
+             fun escaped(\n\
+             \u{20}\u{20}`)`: Int,\n\
+             ): Int = listOf(\n\
+             \u{20}\u{20}`)`,\n\
+             \u{20}\u{20}1,\n\
+             ).first()\n\
+             \n\
+             /* commented() */\n\
+             fun commented(/* ) commented() */\n\
+             \u{20}\u{20}value: String,\n\
+             ): String = listOf(\n\
+             \u{20}\u{20}value,\n\
+             \u{20}\u{20}\"ok\",\n\
+             ).first()\n\
+             \n\
+             fun rawHeader(value: String = \"\"\") rawHeader()\n\
+             \"\"\",\n\
+             ): String = listOf(\n\
+             \u{20}\u{20}value,\n\
+             \u{20}\u{20}\"ok\",\n\
+             ).first()\n",
+        ),
     ];
     for (name, source) in diagnostic_cases
         .iter()
@@ -1003,6 +1267,32 @@ fn diagnostics_tokens_navigation_hovers_and_completions_match_official_kotlin_ls
     let incremental_parity_uri = format!(
         "file://{}",
         source_root.join("IncrementalParity.kt").display()
+    );
+    let signature_help_uri = format!("file://{}", source_root.join("SignatureHelp.kt").display());
+    let incomplete_signature_help_uri = format!(
+        "file://{}",
+        source_root.join("IncompleteSignatureHelp.kt").display()
+    );
+    let document_symbols_uri = format!(
+        "file://{}",
+        source_root.join("DocumentSymbols.kt").display()
+    );
+    let advanced_document_symbols_uri = format!(
+        "file://{}",
+        source_root.join("DocumentSymbolsAdvanced.kt").display()
+    );
+    let scoped_document_symbols_uri = format!(
+        "file://{}",
+        source_root.join("DocumentSymbolsScopes.kt").display()
+    );
+    let kind_document_symbols_uri = format!(
+        "file://{}",
+        source_root.join("DocumentSymbolsKinds.kt").display()
+    );
+    let folding_ranges_uri = format!("file://{}", source_root.join("FoldingRanges.kt").display());
+    let advanced_folding_ranges_uri = format!(
+        "file://{}",
+        source_root.join("FoldingRangesAdvanced.kt").display()
     );
     let definition_positions = [
         ("class reference", basic_tokens_uri.as_str(), 1, 17),
@@ -1628,6 +1918,141 @@ fn diagnostics_tokens_navigation_hovers_and_completions_match_official_kotlin_ls
             })
         })
         .collect::<Vec<_>>();
+    let signature_help_positions = [
+        (
+            "top-level first argument",
+            position_after_marker(signature_help_source, "combine(\"top"),
+        ),
+        (
+            "top-level second argument",
+            position_after_marker(signature_help_source, "combine(\"top\", "),
+        ),
+        (
+            "member first argument",
+            position_after_marker(signature_help_source, "box.member(\"member"),
+        ),
+        (
+            "member second argument",
+            position_after_marker(signature_help_source, "box.member(\"member\", "),
+        ),
+        (
+            "constructor first argument",
+            position_after_marker(signature_help_source, "Box(\"box"),
+        ),
+        (
+            "constructor second argument",
+            position_after_marker(signature_help_source, "Box(\"box\", "),
+        ),
+        (
+            "selected integer overload",
+            position_after_marker(signature_help_source, "combine(1"),
+        ),
+        (
+            "named count argument",
+            position_after_marker(signature_help_source, "combine(count"),
+        ),
+        (
+            "named left argument",
+            position_after_marker(signature_help_source, "count = 2, left"),
+        ),
+        (
+            "nested outer call",
+            position_after_marker(signature_help_source, "val nested = combine("),
+        ),
+        (
+            "nested inner call",
+            position_after_marker(signature_help_source, "combine(combine("),
+        ),
+        (
+            "generic source call",
+            position_after_marker(signature_help_source, "val generic = identity("),
+        ),
+        (
+            "unicode parameter labels",
+            position_after_marker(signature_help_source, "val nonAscii = unicode("),
+        ),
+        (
+            "vararg third argument",
+            position_after_marker(signature_help_source, "val variadic = collect(1, 2, "),
+        ),
+        (
+            "zero argument call",
+            position_after_marker(signature_help_source, "val empty = zero("),
+        ),
+        (
+            "local function call",
+            position_after_marker(signature_help_source, "localResult = local(\"local"),
+        ),
+        (
+            "selected secondary constructor overload",
+            position_after_marker(signature_help_source, "Choice(1, "),
+        ),
+        (
+            "class without a primary constructor",
+            position_after_marker(signature_help_source, "SecondaryOnly("),
+        ),
+        (
+            "constructor subtype overload",
+            position_after_marker(signature_help_source, "subtypeSelected = SubtypeChoice("),
+        ),
+        (
+            "nested generic substitution",
+            position_after_marker(signature_help_source, "nestedGeneric = unwrap("),
+        ),
+        (
+            "bare nullable generic substitution",
+            position_after_marker(signature_help_source, "nullableIdentity = identity("),
+        ),
+        (
+            "nested nullable generic substitution",
+            position_after_marker(signature_help_source, "nullableHolder = unwrap("),
+        ),
+        (
+            "merged nullable generic constraints",
+            position_after_marker(signature_help_source, "mergedNullable = choose("),
+        ),
+        (
+            "mixed generic constraints",
+            position_after_marker(signature_help_source, "mixed = choose("),
+        ),
+        (
+            "reversed mixed generic constraints",
+            position_after_marker(signature_help_source, "mixedReversed = choose("),
+        ),
+        (
+            "nullable generic substitution",
+            position_after_marker(signature_help_source, "nullableGeneric = coalesce("),
+        ),
+    ];
+    let mut expected_signature_help = signature_help_positions
+        .iter()
+        .map(|(name, (line, character))| {
+            json!({
+                "case": name,
+                "result": reference.signature_help(
+                    &signature_help_uri,
+                    *line,
+                    *character
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let (incomplete_line, incomplete_character) =
+        position_after_marker(incomplete_signature_help_source, "combine(\"x\", ");
+    expected_signature_help.push(json!({
+        "case": "incomplete argument list",
+        "result": reference.signature_help(
+            &incomplete_signature_help_uri,
+            incomplete_line,
+            incomplete_character
+        )
+    }));
+    assert!(
+        expected_signature_help
+            .iter()
+            .all(|case| case["result"].is_object()),
+        "official Kotlin LSP returned no signature help: {expected_signature_help:?}"
+    );
     let incremental_changes = json!([
         {
             "range": {
@@ -1653,6 +2078,30 @@ fn diagnostics_tokens_navigation_hovers_and_completions_match_official_kotlin_ls
             .as_array()
             .is_some_and(|locations| !locations.is_empty()),
         "official Kotlin LSP returned no definition after incremental edits"
+    );
+    let expected_document_symbols = [
+        &document_symbols_uri,
+        &advanced_document_symbols_uri,
+        &scoped_document_symbols_uri,
+        &kind_document_symbols_uri,
+    ]
+    .map(|uri| reference.document_symbols(uri));
+    assert!(
+        expected_document_symbols.iter().all(|symbols| symbols
+            .as_array()
+            .is_some_and(|symbols| !symbols.is_empty())),
+        "official Kotlin LSP returned no document symbols"
+    );
+    let expected_folding_ranges = reference.folding_ranges(&folding_ranges_uri);
+    let expected_advanced_folding_ranges = reference.folding_ranges(&advanced_folding_ranges_uri);
+    assert!(
+        expected_folding_ranges
+            .as_array()
+            .is_some_and(|ranges| !ranges.is_empty())
+            && expected_advanced_folding_ranges
+                .as_array()
+                .is_some_and(|ranges| !ranges.is_empty()),
+        "official Kotlin LSP returned no folding ranges"
     );
     // The official server uses a multi-gigabyte IntelliJ process. Tear it down before starting
     // krusty so the opt-in differential does not retain both servers at peak memory.
@@ -1733,8 +2182,38 @@ fn diagnostics_tokens_navigation_hovers_and_completions_match_official_kotlin_ls
             })
         })
         .collect::<Vec<_>>();
+    let mut actual_signature_help = signature_help_positions
+        .iter()
+        .map(|(name, (line, character))| {
+            json!({
+                "case": name,
+                "result": krusty.signature_help(
+                    &signature_help_uri,
+                    *line,
+                    *character
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    actual_signature_help.push(json!({
+        "case": "incomplete argument list",
+        "result": krusty.signature_help(
+            &incomplete_signature_help_uri,
+            incomplete_line,
+            incomplete_character
+        )
+    }));
     krusty.change_document(&incremental_parity_uri, 2, incremental_changes);
     let actual_incremental_definition = krusty.definition(&incremental_parity_uri, 1, 18);
+    let actual_document_symbols = [
+        &document_symbols_uri,
+        &advanced_document_symbols_uri,
+        &scoped_document_symbols_uri,
+        &kind_document_symbols_uri,
+    ]
+    .map(|uri| krusty.document_symbols(uri));
+    let actual_folding_ranges = krusty.folding_ranges(&folding_ranges_uri);
+    let actual_advanced_folding_ranges = krusty.folding_ranges(&advanced_folding_ranges_uri);
 
     for ((name, _), (actual, expected)) in diagnostic_cases
         .iter()
@@ -1766,7 +2245,26 @@ fn diagnostics_tokens_navigation_hovers_and_completions_match_official_kotlin_ls
         "completion mismatches"
     );
     assert_eq!(
+        actual_signature_help, expected_signature_help,
+        "signature-help mismatches"
+    );
+    assert_eq!(
         actual_incremental_definition, expected_incremental_definition,
         "incremental synchronization definition/range mismatch"
+    );
+    for ((name, actual), expected) in ["basic", "advanced", "scopes", "kinds"]
+        .into_iter()
+        .zip(actual_document_symbols)
+        .zip(expected_document_symbols)
+    {
+        assert_eq!(actual, expected, "document symbol mismatch for {name}");
+    }
+    assert_eq!(
+        actual_folding_ranges, expected_folding_ranges,
+        "basic folding-range mismatch"
+    );
+    assert_eq!(
+        actual_advanced_folding_ranges, expected_advanced_folding_ranges,
+        "advanced folding-range mismatch"
     );
 }

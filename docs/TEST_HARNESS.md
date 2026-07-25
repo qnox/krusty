@@ -23,6 +23,9 @@ and modifiers, exact go-to-definition target URIs/ranges, find-reference declara
 location sets, complete hover markdown/ranges, and stable completion labels, kinds, label details,
 ranking, and incomplete status. Diagnostic, navigation, reference, and hover locations compare both
 UTF-16 start and end positions; matching text at the wrong location fails.
+Hierarchical document symbols compare the complete protocol value, including order, nesting, names,
+kinds, deprecation/tags, full ranges, and selection ranges. A correct symbol at the wrong location
+therefore fails just like a diagnostic at the wrong location.
 The same differential requires incremental synchronization capability and applies ordered ranged
 edits before comparing the resulting definition URI and exact UTF-16 range.
 The test does not compare raw protocol token indexes whose legends can differ or implementation

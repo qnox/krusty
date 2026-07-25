@@ -6,6 +6,7 @@
 
 use crate::diag::{DiagSink, Span};
 use crate::token::{keyword, Token, TokenKind};
+use unicode_general_category::{get_general_category, GeneralCategory};
 
 pub fn lex(src: &str, diags: &mut DiagSink) -> Vec<Token> {
     lexer(src, diags).run()
@@ -193,12 +194,15 @@ impl<'a> Lexer<'a> {
             b'`' => return self.backtick_ident(),
             b'0'..=b'9' => return self.number(lo),
             b'.' => return self.number(lo), // .5
-            c if is_ident_start(c) => return self.ident(lo),
+            c if is_ascii_ident_start(c) || (c >= 0x80 && is_ident_start_at(self.b, self.i)) => {
+                return self.ident(lo);
+            }
             _ => {
-                self.i += 1;
+                let unexpected = char_at(self.b, self.i).unwrap_or(char::REPLACEMENT_CHARACTER);
+                self.i += unexpected.len_utf8().min(self.b.len() - self.i);
                 self.diags.error(
                     Span::new(lo, self.i as u32),
-                    format!("unexpected character '{}'", c as char),
+                    format!("unexpected character '{unexpected}'"),
                 );
                 TokenKind::Unknown
             }
@@ -290,8 +294,8 @@ impl<'a> Lexer<'a> {
     }
 
     fn ident(&mut self, lo: u32) -> Token {
-        while self.i < self.b.len() && is_ident_continue(self.b[self.i]) {
-            self.i += 1;
+        while self.i < self.b.len() && is_ident_continue_at(self.b, self.i) {
+            self.i += utf8_char_len(self.b[self.i]);
         }
         let span = Span::new(lo, self.i as u32);
         let text = &std::str::from_utf8(self.b).unwrap()[lo as usize..self.i as usize];
@@ -480,7 +484,7 @@ impl<'a> Lexer<'a> {
             }
             if self.b[j] == b'$' {
                 let next = self.b.get(j + 1).copied().unwrap_or(0);
-                if next == b'{' || is_ident_start(next) {
+                if next == b'{' || is_ident_start_at(self.b, j + 1) {
                     return true;
                 }
             }
@@ -526,7 +530,7 @@ impl<'a> Lexer<'a> {
                 continue;
             }
             let next = self.b.get(self.i + 1).copied().unwrap_or(0);
-            if c == b'$' && (next == b'{' || is_ident_start(next)) {
+            if c == b'$' && (next == b'{' || is_ident_start_at(self.b, self.i + 1)) {
                 if self.i > chunk_lo {
                     toks.push(Token {
                         kind: TokenKind::StrChunk,
@@ -565,8 +569,8 @@ impl<'a> Lexer<'a> {
                     }
                 } else {
                     let id_lo = self.i;
-                    while self.i < self.b.len() && is_ident_continue(self.b[self.i]) {
-                        self.i += 1;
+                    while self.i < self.b.len() && is_ident_continue_at(self.b, self.i) {
+                        self.i += utf8_char_len(self.b[self.i]);
                     }
                     toks.push(Token {
                         kind: TokenKind::Ident,
@@ -597,7 +601,7 @@ impl<'a> Lexer<'a> {
             }
             if self.b[j] == b'$' {
                 let next = self.b.get(j + 1).copied().unwrap_or(0);
-                if next == b'{' || is_ident_start(next) {
+                if next == b'{' || is_ident_start_at(self.b, j + 1) {
                     return true;
                 }
             }
@@ -623,7 +627,7 @@ impl<'a> Lexer<'a> {
                 continue;
             }
             let next = self.b.get(self.i + 1).copied().unwrap_or(0);
-            if c == b'$' && (next == b'{' || is_ident_start(next)) {
+            if c == b'$' && (next == b'{' || is_ident_start_at(self.b, self.i + 1)) {
                 if self.i > chunk_lo {
                     toks.push(Token {
                         kind: TokenKind::StrChunk,
@@ -665,8 +669,8 @@ impl<'a> Lexer<'a> {
                     }
                 } else {
                     let id_lo = self.i;
-                    while self.i < self.b.len() && is_ident_continue(self.b[self.i]) {
-                        self.i += 1;
+                    while self.i < self.b.len() && is_ident_continue_at(self.b, self.i) {
+                        self.i += utf8_char_len(self.b[self.i]);
                     }
                     toks.push(Token {
                         kind: TokenKind::Ident,
@@ -700,11 +704,55 @@ impl<'a> Lexer<'a> {
     }
 }
 
-fn is_ident_start(c: u8) -> bool {
+fn is_ascii_ident_start(c: u8) -> bool {
     c == b'_' || c.is_ascii_alphabetic()
 }
-fn is_ident_continue(c: u8) -> bool {
-    c == b'_' || c.is_ascii_alphanumeric()
+
+fn is_ident_start_at(bytes: &[u8], index: usize) -> bool {
+    bytes.get(index).is_some_and(|byte| {
+        is_ascii_ident_start(*byte)
+            || (*byte >= 0x80 && char_at(bytes, index).is_some_and(is_kotlin_letter))
+    })
+}
+
+fn is_ident_continue_at(bytes: &[u8], index: usize) -> bool {
+    bytes.get(index).is_some_and(|byte| {
+        *byte == b'_'
+            || byte.is_ascii_alphanumeric()
+            || (*byte >= 0x80
+                && char_at(bytes, index).is_some_and(|character| {
+                    is_kotlin_letter(character)
+                        || get_general_category(character) == GeneralCategory::DecimalNumber
+                }))
+    })
+}
+
+fn is_kotlin_letter(character: char) -> bool {
+    matches!(
+        get_general_category(character),
+        GeneralCategory::UppercaseLetter
+            | GeneralCategory::LowercaseLetter
+            | GeneralCategory::TitlecaseLetter
+            | GeneralCategory::ModifierLetter
+            | GeneralCategory::OtherLetter
+    )
+}
+
+fn char_at(bytes: &[u8], index: usize) -> Option<char> {
+    let length = utf8_char_len(*bytes.get(index)?);
+    std::str::from_utf8(bytes.get(index..index.checked_add(length)?)?)
+        .ok()?
+        .chars()
+        .next()
+}
+
+fn utf8_char_len(first: u8) -> usize {
+    match first {
+        0x00..=0x7f => 1,
+        0xc0..=0xdf => 2,
+        0xe0..=0xef => 3,
+        _ => 4,
+    }
 }
 
 #[cfg(test)]
@@ -792,5 +840,100 @@ mod tests {
         );
         assert!(!diagnostics.has_errors());
         assert!(tokens.len() < lex("fun greet(name: String) = 1", &mut diagnostics).len());
+    }
+
+    #[test]
+    fn unicode_identifiers_keep_utf8_byte_spans_in_full_and_name_lexers() {
+        let source = "fun unicode(π: String) = π";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let identifiers = tokens
+            .iter()
+            .filter(|token| token.kind == TokenKind::Ident)
+            .map(|token| {
+                (
+                    token.span,
+                    &source[token.span.lo as usize..token.span.hi as usize],
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            identifiers,
+            vec![
+                (Span::new(4, 11), "unicode"),
+                (Span::new(12, 14), "π"),
+                (Span::new(16, 22), "String"),
+                (Span::new(26, 28), "π"),
+            ]
+        );
+        assert!(!diagnostics.has_errors());
+
+        let names = lex_name_tokens(source, &mut diagnostics);
+        assert_eq!(
+            names
+                .iter()
+                .filter(|token| token.kind == NameTokenKind::Ident)
+                .map(|token| token.text(source))
+                .collect::<Vec<_>>(),
+            vec!["unicode", "π", "String", "π"]
+        );
+        assert!(!diagnostics.has_errors());
+    }
+
+    #[test]
+    fn unicode_identifiers_follow_kotlin_categories_and_exact_utf8_spans() {
+        use TokenKind::*;
+
+        // Arabic-Indic ٢ is Nd and may continue an identifier. Roman Ⅻ is Nl,
+        // superscript ² is No, and the combining acute accent is Mn; Kotlin's
+        // ordinary identifier grammar admits none of those three categories.
+        let source = "π٢ Ⅻ ² a\u{301}";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| (token.kind, token.span))
+                .collect::<Vec<_>>(),
+            vec![
+                (Ident, Span::new(0, 4)),
+                (Unknown, Span::new(5, 8)),
+                (Unknown, Span::new(9, 11)),
+                (Ident, Span::new(12, 13)),
+                (Unknown, Span::new(13, 15)),
+                (Eof, Span::new(15, 15)),
+            ]
+        );
+        assert_eq!(
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| (diagnostic.span, diagnostic.msg.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Span::new(5, 8), "unexpected character 'Ⅻ'"),
+                (Span::new(9, 11), "unexpected character '²'"),
+                (Span::new(13, 15), "unexpected character '\u{301}'"),
+            ]
+        );
+    }
+
+    #[test]
+    fn unicode_identifier_categories_are_shared_with_string_templates() {
+        let source = "\"value=$π٢\"";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let identifiers = tokens
+            .iter()
+            .filter(|token| token.kind == TokenKind::Ident)
+            .map(|token| {
+                (
+                    token.span,
+                    &source[token.span.lo as usize..token.span.hi as usize],
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(identifiers, vec![(Span::new(8, 12), "π٢")]);
+        assert!(!diagnostics.has_errors());
     }
 }

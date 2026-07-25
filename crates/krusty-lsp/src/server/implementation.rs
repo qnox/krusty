@@ -15,8 +15,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::super::{
-    CompletionIndex, DefinitionIndex, DocumentAnalysis, HoverIndex, SemanticTokenIndex,
-    SemanticTokenRange, SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
+    CompletionIndex, DefinitionIndex, DocumentAnalysis, DocumentSymbolIndex, FoldingRangeIndex,
+    HoverIndex, SemanticTokenIndex, SemanticTokenRange, SignatureHelpIndex,
+    SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
 };
 use crate::uri::file_uri_to_path;
 use crate::worker::{source_set_fits, MAX_SOURCE_SET_BYTES};
@@ -32,6 +33,12 @@ const MAX_CONTENT_CHANGE_EDIT_BYTES: usize = MAX_SOURCE_SET_BYTES * 3;
 const MAX_CONTENT_CHANGE_UNDO_BYTES: usize = MAX_SOURCE_SET_BYTES;
 const MAX_BATCH_MESSAGES: usize = 256;
 const MAX_BATCH_VALUE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_SOURCE_SET_DIAGNOSTIC_ENTRIES: usize = 32 * 1024;
+const MAX_SOURCE_SET_DIAGNOSTIC_TEXT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_SOURCE_SET_DIAGNOSTIC_WIRE_BYTES: usize = 8 * 1024 * 1024;
+const DIAGNOSTIC_WIRE_FIXED_BYTES: usize = 256;
+const DIAGNOSTIC_WARNING_BIT: u32 = 1 << 31;
+const DIAGNOSTIC_MESSAGE_MASK: u32 = !DIAGNOSTIC_WARNING_BIT;
 const CHANGE_DEBOUNCE: Duration = Duration::from_millis(150);
 const MAX_BATCH_DURATION: Duration = Duration::from_millis(500);
 const SERVER_VERSION: &str = match option_env!("KRUSTY_VERSION") {
@@ -213,13 +220,185 @@ impl Dispatch {
     }
 }
 
+/// `(start line, start UTF-16 column, end line, end UTF-16 column,
+/// packed severity + interned message id)`.
+type DiagnosticEntry = [u32; 5];
+/// `(source lo, source hi, packed severity + interned message id)` while positions are resolved.
+type PendingDiagnosticEntry = [u32; 3];
+
+#[derive(Default)]
+struct DiagnosticBudget {
+    entries: usize,
+    text_bytes: usize,
+    wire_bytes: usize,
+}
+
+#[derive(Default)]
+struct DiagnosticIndex {
+    entries: Vec<DiagnosticEntry>,
+    messages: Vec<String>,
+}
+
+impl DiagnosticIndex {
+    fn from_diagnostics(
+        diagnostics: Vec<Diagnostic>,
+        text: &str,
+        budget: &mut DiagnosticBudget,
+    ) -> DiagnosticIndex {
+        let mut pending = Vec::with_capacity(
+            diagnostics
+                .len()
+                .min(256)
+                .min(MAX_SOURCE_SET_DIAGNOSTIC_ENTRIES.saturating_sub(budget.entries)),
+        );
+        let mut message_ids = HashMap::<String, u32>::new();
+        for diagnostic in diagnostics {
+            let message = lsp_diagnostic_message(diagnostic.msg);
+            let existing_message_id = message_ids.get(&message).copied();
+            let retained_bytes = if existing_message_id.is_none() {
+                message.capacity()
+            } else {
+                0
+            };
+            let wire_bytes =
+                DIAGNOSTIC_WIRE_FIXED_BYTES.saturating_add(json_string_wire_bytes(&message));
+            if budget.entries >= MAX_SOURCE_SET_DIAGNOSTIC_ENTRIES
+                || retained_bytes
+                    > MAX_SOURCE_SET_DIAGNOSTIC_TEXT_BYTES.saturating_sub(budget.text_bytes)
+                || wire_bytes
+                    > MAX_SOURCE_SET_DIAGNOSTIC_WIRE_BYTES.saturating_sub(budget.wire_bytes)
+            {
+                break;
+            }
+            let message_id = if let Some(message_id) = existing_message_id {
+                message_id
+            } else {
+                let Ok(message_id) = u32::try_from(message_ids.len()) else {
+                    break;
+                };
+                if message_id > DIAGNOSTIC_MESSAGE_MASK {
+                    break;
+                }
+                message_ids.insert(message, message_id);
+                message_id
+            };
+            let severity = match diagnostic.severity {
+                Severity::Error => 0,
+                Severity::Warning => DIAGNOSTIC_WARNING_BIT,
+            };
+            pending.push([
+                diagnostic.span.lo,
+                diagnostic.span.hi.max(diagnostic.span.lo),
+                severity | message_id,
+            ]);
+            budget.entries += 1;
+            budget.text_bytes += retained_bytes;
+            budget.wire_bytes += wire_bytes;
+        }
+
+        let mut messages = vec![String::new(); message_ids.len()];
+        for (message, message_id) in message_ids {
+            messages[message_id as usize] = message;
+        }
+        let entries = resolve_diagnostic_positions(text, &pending);
+        Self { entries, messages }
+    }
+
+    fn encode(&self) -> Vec<Value> {
+        self.entries
+            .iter()
+            .map(|entry| {
+                let message_id = entry[4] & DIAGNOSTIC_MESSAGE_MASK;
+                json!({
+                    "range": {
+                        "start": {"line": entry[0], "character": entry[1]},
+                        "end": {"line": entry[2], "character": entry[3]},
+                    },
+                    "severity": if entry[4] & DIAGNOSTIC_WARNING_BIT == 0 { 1 } else { 2 },
+                    "source": "Kotlin",
+                    "message": self.messages[message_id as usize],
+                })
+            })
+            .collect()
+    }
+}
+
+fn json_string_wire_bytes(value: &str) -> usize {
+    value.bytes().fold(2usize, |bytes, byte| {
+        bytes.saturating_add(match byte {
+            b'"' | b'\\' | b'\x08' | b'\t' | b'\n' | b'\x0c' | b'\r' => 2,
+            0x00..=0x1f => 6,
+            _ => 1,
+        })
+    })
+}
+
+fn resolve_diagnostic_positions(
+    text: &str,
+    pending: &[PendingDiagnosticEntry],
+) -> Vec<DiagnosticEntry> {
+    let mut entries = vec![[0u32; 5]; pending.len()];
+    let mut endpoints = Vec::<[u32; 2]>::with_capacity(pending.len().saturating_mul(2));
+    for (index, entry) in pending.iter().enumerate() {
+        let Ok(slot) = u32::try_from(index.saturating_mul(2)) else {
+            break;
+        };
+        entries[index][4] = entry[2];
+        endpoints.push([entry[0], slot]);
+        endpoints.push([entry[1], slot + 1]);
+    }
+    endpoints.sort_unstable_by_key(|endpoint| endpoint[0]);
+
+    let mut characters = text.char_indices().peekable();
+    let mut line = 0u32;
+    let mut character = 0u32;
+    let mut previous_was_cr = false;
+    for endpoint in endpoints {
+        let limit = (endpoint[0] as usize).min(text.len());
+        while let Some(&(byte, ch)) = characters.peek() {
+            if byte >= limit || byte.saturating_add(ch.len_utf8()) > limit {
+                break;
+            }
+            characters.next();
+            match ch {
+                '\r' => {
+                    line = line.saturating_add(1);
+                    character = 0;
+                    previous_was_cr = true;
+                }
+                '\n' => {
+                    if !previous_was_cr {
+                        line = line.saturating_add(1);
+                    }
+                    character = 0;
+                    previous_was_cr = false;
+                }
+                _ => {
+                    character = character.saturating_add(ch.len_utf16() as u32);
+                    previous_was_cr = false;
+                }
+            }
+        }
+        let slot = endpoint[1] as usize;
+        let entry = &mut entries[slot / 2];
+        let coordinate = (slot % 2) * 2;
+        entry[coordinate] = line;
+        entry[coordinate + 1] = character;
+    }
+    entries
+}
+
 struct OpenDocument {
     text: String,
     version: i64,
+    diagnostics: DiagnosticIndex,
     hover: HoverIndex,
     completion: CompletionIndex,
+    signature_help: SignatureHelpIndex,
     semantic_tokens: SemanticTokenIndex,
     definitions: DefinitionIndex,
+    document_symbols: DocumentSymbolIndex,
+    folding_ranges: FoldingRangeIndex,
     analysis_blocked: bool,
 }
 
@@ -274,6 +453,7 @@ where
     }
 
     fn refresh_documents(&mut self) -> Vec<Value> {
+        let mut diagnostic_budget = DiagnosticBudget::default();
         let uris = self
             .analyzed_uris()
             .into_iter()
@@ -292,24 +472,27 @@ where
                 let open = self.documents.get_mut(uri).unwrap();
                 open.hover = HoverIndex::default();
                 open.completion = CompletionIndex::default();
+                open.signature_help = SignatureHelpIndex::default();
                 open.semantic_tokens = SemanticTokenIndex::default();
                 open.definitions = DefinitionIndex::default();
+                open.document_symbols = DocumentSymbolIndex::default();
+                open.folding_ranges = FoldingRangeIndex::default();
+                open.diagnostics = DiagnosticIndex::from_diagnostics(
+                    vec![Diagnostic {
+                        span: krusty::diag::Span::new(0, 0),
+                        severity: Severity::Error,
+                        msg: "analysis worker returned an incomplete source set".to_string(),
+                        file: 0,
+                    }],
+                    &open.text,
+                    &mut diagnostic_budget,
+                );
             }
             return uris
                 .into_iter()
                 .map(|uri| {
                     let open = &self.documents[&uri];
-                    publish_diagnostics(
-                        &uri,
-                        Some(open.version),
-                        vec![Diagnostic {
-                            span: krusty::diag::Span::new(0, 0),
-                            severity: Severity::Error,
-                            msg: "analysis worker returned an incomplete source set".to_string(),
-                            file: 0,
-                        }],
-                        &open.text,
-                    )
+                    publish_diagnostics(&uri, Some(open.version), &open.diagnostics)
                 })
                 .collect();
         }
@@ -319,9 +502,17 @@ where
                 let open = self.documents.get_mut(&uri).unwrap();
                 open.hover = analysis.hover;
                 open.completion = analysis.completion;
+                open.signature_help = analysis.signature_help;
                 open.semantic_tokens = analysis.semantic_tokens;
                 open.definitions = analysis.definitions;
-                publish_diagnostics(&uri, Some(open.version), analysis.diagnostics, &open.text)
+                open.document_symbols = analysis.document_symbols;
+                open.folding_ranges = analysis.folding_ranges;
+                open.diagnostics = DiagnosticIndex::from_diagnostics(
+                    analysis.diagnostics,
+                    &open.text,
+                    &mut diagnostic_budget,
+                );
+                publish_diagnostics(&uri, Some(open.version), &open.diagnostics)
             })
             .collect()
     }
@@ -412,9 +603,21 @@ where
                             "hoverProvider": true,
                             "definitionProvider": true,
                             "referencesProvider": true,
+                            "documentSymbolProvider": true,
+                            "foldingRangeProvider": true,
+                            "diagnosticProvider": {
+                                "interFileDependencies": true,
+                                "workspaceDiagnostics": false,
+                                "workDoneProgress": false,
+                            },
                             "completionProvider": {
                                 "resolveProvider": true,
                                 "triggerCharacters": ["."],
+                            },
+                            "signatureHelpProvider": {
+                                "triggerCharacters": ["(", ","],
+                                "retriggerCharacters": [","],
+                                "workDoneProgress": false,
                             },
                             "positionEncoding": "utf-16",
                             "semanticTokensProvider": {
@@ -449,7 +652,11 @@ where
             "textDocument/hover" => self.hover(id, params),
             "textDocument/definition" => self.definition(id, params),
             "textDocument/references" => self.references(id, params),
+            "textDocument/documentSymbol" => self.document_symbols(id, params),
+            "textDocument/foldingRange" => self.folding_ranges(id, params),
+            "textDocument/diagnostic" => self.pull_diagnostics(id, params),
             "textDocument/completion" => self.completion(id, params),
+            "textDocument/signatureHelp" => self.signature_help(id, params),
             "completionItem/resolve" => self.resolve_completion(id, params),
             "textDocument/semanticTokens/full" => self.semantic_tokens(id, params, false),
             "textDocument/semanticTokens/range" => self.semantic_tokens(id, params, true),
@@ -506,20 +713,27 @@ where
                     OpenDocument {
                         text: String::new(),
                         version,
+                        diagnostics: analysis_limit_diagnostics(),
                         hover: HoverIndex::default(),
                         completion: CompletionIndex::default(),
+                        signature_help: SignatureHelpIndex::default(),
                         semantic_tokens: SemanticTokenIndex::default(),
                         definitions: DefinitionIndex::default(),
+                        document_symbols: DocumentSymbolIndex::default(),
+                        folding_ranges: FoldingRangeIndex::default(),
                         analysis_blocked: true,
                     },
                 );
             }
             self.analysis_dirty |= replaced_analyzed_document;
-            let mut messages = vec![analysis_limit_diagnostic(
-                &uri,
-                version,
-                &params.text_document.text,
-            )];
+            let fallback_diagnostics;
+            let diagnostics = if let Some(open) = self.documents.get(&uri) {
+                &open.diagnostics
+            } else {
+                fallback_diagnostics = analysis_limit_diagnostics();
+                &fallback_diagnostics
+            };
+            let mut messages = vec![publish_diagnostics(&uri, Some(version), diagnostics)];
             if !defer_analysis {
                 messages.extend(self.flush_analysis());
             }
@@ -530,10 +744,14 @@ where
             OpenDocument {
                 text: params.text_document.text,
                 version,
+                diagnostics: DiagnosticIndex::default(),
                 hover: HoverIndex::default(),
                 completion: CompletionIndex::default(),
+                signature_help: SignatureHelpIndex::default(),
                 semantic_tokens: SemanticTokenIndex::default(),
                 definitions: DefinitionIndex::default(),
+                document_symbols: DocumentSymbolIndex::default(),
+                folding_ranges: FoldingRangeIndex::default(),
                 analysis_blocked: false,
             },
         );
@@ -584,14 +802,18 @@ where
             open.text.clear();
             open.hover = HoverIndex::default();
             open.completion = CompletionIndex::default();
+            open.signature_help = SignatureHelpIndex::default();
             open.semantic_tokens = SemanticTokenIndex::default();
             open.definitions = DefinitionIndex::default();
+            open.document_symbols = DocumentSymbolIndex::default();
+            open.folding_ranges = FoldingRangeIndex::default();
+            open.diagnostics = analysis_limit_diagnostics();
             open.analysis_blocked = true;
             self.analysis_dirty |= was_analyzed;
-            let mut messages = vec![analysis_limit_diagnostic(
+            let mut messages = vec![publish_diagnostics(
                 &uri,
-                params.text_document.version,
-                &text,
+                Some(params.text_document.version),
+                &open.diagnostics,
             )];
             if !defer_analysis {
                 messages.extend(self.flush_analysis());
@@ -622,7 +844,7 @@ where
         } else {
             self.flush_analysis()
         };
-        messages.push(publish_diagnostics(&uri, None, Vec::new(), ""));
+        messages.push(publish_diagnostics(&uri, None, &DiagnosticIndex::default()));
         Dispatch::messages(messages)
     }
 
@@ -655,6 +877,38 @@ where
                     "end": byte_offset_to_position(&open.text, hover.span.hi as usize),
                 }
             }),
+        )])
+    }
+
+    fn document_symbols(&self, id: Option<Value>, params: Value) -> Dispatch {
+        let Some(id) = id else {
+            return Dispatch::none();
+        };
+        let Ok(params) = serde_json::from_value::<DocumentSymbolParams>(params) else {
+            return invalid_params(Some(id));
+        };
+        let Some(open) = self.documents.get(&params.text_document.uri) else {
+            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+        };
+        Dispatch::messages(vec![rpc_result(
+            id,
+            Value::Array(open.document_symbols.encode()),
+        )])
+    }
+
+    fn folding_ranges(&self, id: Option<Value>, params: Value) -> Dispatch {
+        let Some(id) = id else {
+            return Dispatch::none();
+        };
+        let Ok(params) = serde_json::from_value::<DocumentSymbolParams>(params) else {
+            return invalid_params(Some(id));
+        };
+        let Some(open) = self.documents.get(&params.text_document.uri) else {
+            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+        };
+        Dispatch::messages(vec![rpc_result(
+            id,
+            Value::Array(open.folding_ranges.encode(&open.text)),
         )])
     }
 
@@ -706,6 +960,25 @@ where
         Dispatch::messages(vec![rpc_result(
             id,
             json!({"isIncomplete": true, "items": items}),
+        )])
+    }
+
+    fn signature_help(&self, id: Option<Value>, params: Value) -> Dispatch {
+        let Some(id) = id else {
+            return Dispatch::none();
+        };
+        let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params) else {
+            return invalid_params(Some(id));
+        };
+        let Some(open) = self.documents.get(&params.text_document.uri) else {
+            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+        };
+        let Some(offset) = position_to_byte_offset(&open.text, params.position) else {
+            return invalid_params(Some(id));
+        };
+        Dispatch::messages(vec![rpc_result(
+            id,
+            open.signature_help.encode(offset).unwrap_or(Value::Null),
         )])
     }
 
@@ -813,6 +1086,23 @@ where
         Dispatch::messages(vec![rpc_result(id, item)])
     }
 
+    fn pull_diagnostics(&self, id: Option<Value>, params: Value) -> Dispatch {
+        let Some(id) = id else {
+            return Dispatch::none();
+        };
+        let Ok(params) = serde_json::from_value::<DocumentDiagnosticParams>(params) else {
+            return invalid_params(Some(id));
+        };
+        let items = self
+            .documents
+            .get(&params.text_document.uri)
+            .map(|open| open.diagnostics.encode())
+            .unwrap_or_default();
+        let mut report = json!({"kind": "full"});
+        report["items"] = Value::Array(items);
+        Dispatch::messages(vec![rpc_result(id, report)])
+    }
+
     fn semantic_tokens(&self, id: Option<Value>, params: Value, range: bool) -> Dispatch {
         let Some(id) = id else {
             return Dispatch::none();
@@ -883,6 +1173,18 @@ struct DidChangeParams {
 #[derive(Deserialize)]
 struct TextDocumentIdentifier {
     uri: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentSymbolParams {
+    text_document: TextDocumentIdentifier,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentDiagnosticParams {
+    text_document: TextDocumentIdentifier,
 }
 
 #[derive(Deserialize)]
@@ -1082,7 +1384,22 @@ fn invalid_params(id: Option<Value>) -> Dispatch {
 }
 
 fn rpc_result(id: Value, result: Value) -> Value {
-    json!({"jsonrpc": "2.0", "id": id, "result": result})
+    let mut response = json!({"jsonrpc": "2.0"});
+    let object = response
+        .as_object_mut()
+        .expect("the static RPC response envelope is an object");
+    object.insert("id".to_string(), id);
+    object.insert("result".to_string(), result);
+    response
+}
+
+fn rpc_notification(method: &str, params: Value) -> Value {
+    let mut notification = json!({"jsonrpc": "2.0", "method": method});
+    notification
+        .as_object_mut()
+        .expect("the static RPC notification envelope is an object")
+        .insert("params".to_string(), params);
+    notification
 }
 
 /// The workspace root from an `initialize` request: `rootUri`, else the first `workspaceFolders`
@@ -1142,40 +1459,13 @@ fn rpc_error(id: Value, code: i32, message: &str) -> Value {
     })
 }
 
-fn publish_diagnostics(
-    uri: &str,
-    version: Option<i64>,
-    diagnostics: Vec<Diagnostic>,
-    text: &str,
-) -> Value {
-    let diagnostics: Vec<Value> = diagnostics
-        .into_iter()
-        .map(|diagnostic| {
-            let start = diagnostic.span.lo as usize;
-            let end = usize::max(start, diagnostic.span.hi as usize);
-            json!({
-                "range": {
-                    "start": byte_offset_to_position(text, start),
-                    "end": byte_offset_to_position(text, end),
-                },
-                "severity": match diagnostic.severity {
-                    Severity::Error => 1,
-                    Severity::Warning => 2,
-                },
-                "source": "Kotlin",
-                "message": lsp_diagnostic_message(diagnostic.msg),
-            })
-        })
-        .collect();
-    let mut params = json!({"uri": uri, "diagnostics": diagnostics});
+fn publish_diagnostics(uri: &str, version: Option<i64>, diagnostics: &DiagnosticIndex) -> Value {
+    let mut params = json!({"uri": uri});
+    params["diagnostics"] = Value::Array(diagnostics.encode());
     if let Some(version) = version {
         params["version"] = json!(version);
     }
-    json!({
-        "jsonrpc": "2.0",
-        "method": "textDocument/publishDiagnostics",
-        "params": params,
-    })
+    rpc_notification("textDocument/publishDiagnostics", params)
 }
 
 /// IntelliJ's Kotlin LSP sentence-cases compiler diagnostics even though kotlinc's CLI renderer keeps
@@ -1189,10 +1479,8 @@ fn lsp_diagnostic_message(mut message: String) -> String {
     message
 }
 
-fn analysis_limit_diagnostic(uri: &str, version: i64, text: &str) -> Value {
-    publish_diagnostics(
-        uri,
-        Some(version),
+fn analysis_limit_diagnostics() -> DiagnosticIndex {
+    DiagnosticIndex::from_diagnostics(
         vec![Diagnostic {
             span: krusty::diag::Span::new(0, 0),
             severity: Severity::Error,
@@ -1203,7 +1491,8 @@ fn analysis_limit_diagnostic(uri: &str, version: i64, text: &str) -> Value {
             ),
             file: 0,
         }],
-        text,
+        "",
+        &mut DiagnosticBudget::default(),
     )
 }
 
@@ -1556,6 +1845,156 @@ fn json_io(error: serde_json::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_rpc_envelopes_move_array_storage_without_cloning() {
+        let result_items = vec![json!({"message": "result diagnostic"})];
+        let result_storage = result_items.as_ptr();
+        let response = rpc_result(json!(7), Value::Array(result_items));
+        assert_eq!(
+            response["result"].as_array().unwrap().as_ptr(),
+            result_storage
+        );
+
+        let params_items = vec![json!({"message": "published diagnostic"})];
+        let params_storage = params_items.as_ptr();
+        let mut params = json!({"uri": "file:///main.kt"});
+        params["diagnostics"] = Value::Array(params_items);
+        let notification = rpc_notification("textDocument/publishDiagnostics", params);
+        assert_eq!(
+            notification["params"]["diagnostics"]
+                .as_array()
+                .unwrap()
+                .as_ptr(),
+            params_storage
+        );
+    }
+
+    #[test]
+    fn diagnostic_index_is_compact_interned_and_source_set_bounded() {
+        assert_eq!(std::mem::size_of::<DiagnosticEntry>(), 20);
+        let diagnostics = vec![
+            Diagnostic {
+                span: krusty::diag::Span::new(0, 1),
+                severity: Severity::Error,
+                msg: "same message".to_string(),
+                file: 0,
+            },
+            Diagnostic {
+                span: krusty::diag::Span::new(2, 3),
+                severity: Severity::Warning,
+                msg: "same message".to_string(),
+                file: 0,
+            },
+        ];
+        let mut budget = DiagnosticBudget::default();
+        let index = DiagnosticIndex::from_diagnostics(diagnostics, "a\nb", &mut budget);
+        assert_eq!(index.entries.len(), 2);
+        assert_eq!(index.messages, ["Same message"]);
+        assert_eq!(budget.entries, 2);
+        assert_eq!(budget.text_bytes, "Same message".len());
+        assert_eq!(
+            budget.wire_bytes,
+            2 * (DIAGNOSTIC_WIRE_FIXED_BYTES + json_string_wire_bytes("Same message"))
+        );
+        assert_eq!(
+            Value::Array(index.encode()),
+            json!([
+                {
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 1}
+                    },
+                    "severity": 1,
+                    "source": "Kotlin",
+                    "message": "Same message"
+                },
+                {
+                    "range": {
+                        "start": {"line": 1, "character": 0},
+                        "end": {"line": 1, "character": 1}
+                    },
+                    "severity": 2,
+                    "source": "Kotlin",
+                    "message": "Same message"
+                }
+            ])
+        );
+
+        let diagnostic = || Diagnostic {
+            span: krusty::diag::Span::new(0, 0),
+            severity: Severity::Error,
+            msg: "bounded".to_string(),
+            file: 0,
+        };
+        let mut entry_limited = DiagnosticBudget {
+            entries: MAX_SOURCE_SET_DIAGNOSTIC_ENTRIES,
+            text_bytes: 0,
+            wire_bytes: 0,
+        };
+        assert!(
+            DiagnosticIndex::from_diagnostics(vec![diagnostic()], "", &mut entry_limited)
+                .entries
+                .is_empty()
+        );
+        let mut text_limited = DiagnosticBudget {
+            entries: 0,
+            text_bytes: MAX_SOURCE_SET_DIAGNOSTIC_TEXT_BYTES,
+            wire_bytes: 0,
+        };
+        assert!(
+            DiagnosticIndex::from_diagnostics(vec![diagnostic()], "", &mut text_limited)
+                .entries
+                .is_empty()
+        );
+        let mut wire_limited = DiagnosticBudget {
+            entries: 0,
+            text_bytes: 0,
+            wire_bytes: MAX_SOURCE_SET_DIAGNOSTIC_WIRE_BYTES,
+        };
+        assert!(
+            DiagnosticIndex::from_diagnostics(vec![diagnostic()], "", &mut wire_limited)
+                .entries
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn diagnostic_positions_are_resolved_once_and_expanded_output_is_bounded() {
+        let prefix = "x".repeat(256 * 1024);
+        let source = format!("{prefix}\r\n😀tail");
+        let emoji = u32::try_from(prefix.len() + 2).unwrap();
+        let diagnostics = (0..4096)
+            .map(|_| Diagnostic {
+                span: krusty::diag::Span::new(emoji, emoji + 4),
+                severity: Severity::Error,
+                msg: "late source diagnostic".to_string(),
+                file: 0,
+            })
+            .collect();
+        let mut position_budget = DiagnosticBudget::default();
+        let index = DiagnosticIndex::from_diagnostics(diagnostics, &source, &mut position_budget);
+        assert_eq!(index.entries.len(), 4096);
+        assert!(index.entries.iter().all(|entry| entry[..4] == [1, 0, 1, 2]));
+
+        let large_message = "m".repeat(128 * 1024);
+        let repeated = (0..100)
+            .map(|_| Diagnostic {
+                span: krusty::diag::Span::new(0, 0),
+                severity: Severity::Warning,
+                msg: large_message.clone(),
+                file: 0,
+            })
+            .collect();
+        let mut output_budget = DiagnosticBudget::default();
+        let bounded = DiagnosticIndex::from_diagnostics(repeated, "", &mut output_budget);
+        assert_eq!(bounded.messages.len(), 1);
+        assert!(!bounded.entries.is_empty());
+        assert!(bounded.entries.len() < 100);
+        assert!(output_budget.wire_bytes <= MAX_SOURCE_SET_DIAGNOSTIC_WIRE_BYTES);
+        let encoded = serde_json::to_vec(&Value::Array(bounded.encode())).unwrap();
+        assert!(encoded.len() <= MAX_SOURCE_SET_DIAGNOSTIC_WIRE_BYTES);
+    }
 
     #[test]
     fn a_file_uri_decodes_percent_escapes_and_drops_the_scheme() {

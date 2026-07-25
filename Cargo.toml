@@ -15,6 +15,8 @@ resolver = "2"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 # Inflate zlib-compressed JDK jimage resources (JetBrains Runtime / `jlink --compress` images).
 flate2 = "1"
+# Kotlin identifier categories.
+unicode-general-category = "1"
 # Heap profiler, OFF by default (optional dep, enabled only by the `dhat-heap` feature) so normal
 # builds pay zero cost. See the `dhat-heap` feature.
 dhat = { version = "0.3", optional = true }
