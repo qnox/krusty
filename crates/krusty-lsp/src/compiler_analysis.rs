@@ -1,9 +1,13 @@
 //! Compiler-facing source analysis isolated from the long-lived LSP supervisor.
 
 mod completion;
+mod document_symbols;
+mod folding_ranges;
 mod navigation;
 mod rendering;
 mod semantic;
+mod signature_help;
+mod source_scan;
 
 use krusty::ast::File;
 use krusty::diag::{DiagSink, Diagnostic};
@@ -11,10 +15,19 @@ use krusty::frontend;
 use krusty::libraries::SemanticPlatform;
 
 pub(crate) use completion::{CompletionDetails, CompletionKind, CompletionSymbols};
+pub(crate) use document_symbols::{document_symbol_occurrences, DocumentSymbolOccurrence};
+#[cfg(test)]
+pub(crate) use folding_ranges::FoldingRangeText;
+pub(crate) use folding_ranges::{
+    folding_range_occurrences, FoldingRangeOccurrence, FOLDING_KIND_COMMENT, FOLDING_KIND_IMPORTS,
+    FOLDING_KIND_REGION, TEXT_BLOCK_COMMENT, TEXT_BRACES, TEXT_IMPORTS, TEXT_KDOC,
+    TEXT_PARENTHESES, TEXT_RAW_STRING, TEXT_REGION_LABEL,
+};
 pub use krusty::frontend::{FrontendSymbols, FrontendTypeInfo};
 pub use navigation::{DefinitionOccurrence, DefinitionSymbols, DefinitionTarget};
 pub(crate) use semantic::{hover_wire_cost, SemanticLimits};
 pub use semantic::{HighlightOccurrence, HighlightSymbols, HoverOccurrence};
+pub(crate) use signature_help::{SignatureCandidate, SignatureHelpCall, SignatureHelpSymbols};
 
 pub struct FileAnalysis {
     pub file: File,

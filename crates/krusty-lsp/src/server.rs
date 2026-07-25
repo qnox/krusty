@@ -30,6 +30,14 @@ mod tests {
         })
     }
 
+    fn position_after(source: &str, marker: &str) -> Value {
+        let offset = source
+            .find(marker)
+            .unwrap_or_else(|| panic!("missing marker {marker:?}"))
+            + marker.len();
+        serde_json::to_value(byte_offset_to_position(source, offset)).unwrap()
+    }
+
     #[derive(Default)]
     struct RecordingHost {
         root: Option<std::path::PathBuf>,
@@ -229,6 +237,1021 @@ mod tests {
         assert!(!range_data.is_empty());
         assert!(range_data.len() < full_data.len());
         assert_eq!(range_data[0], 1);
+    }
+
+    #[test]
+    fn signature_help_matches_official_overloads_parameters_and_active_argument() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        let initialized = server.handle(request(1, "initialize", json!({})));
+        assert_eq!(
+            initialized.messages[0]["result"]["capabilities"]["signatureHelpProvider"],
+            json!({
+                "triggerCharacters": ["(", ","],
+                "retriggerCharacters": [","],
+                "workDoneProgress": false
+            })
+        );
+        let uri = "file:///SignatureHelp.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "fun combine(left: String, count: Int = 1): String = left.repeat(count)\n\
+                             fun combine(left: Int, right: Int): Int = left + right\n\
+                             fun use(): String = combine(\"x\", 2)\n"
+                }
+            }),
+        ));
+
+        let first = server.handle(request(
+            2,
+            "textDocument/signatureHelp",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 2, "character": 28}
+            }),
+        ));
+        assert_eq!(
+            first.messages[0]["result"],
+            json!({
+                "activeSignature": 0,
+                "signatures": [
+                    {
+                        "activeParameter": 0,
+                        "label": "combine(left: String, count: Int = 1): String",
+                        "parameters": [
+                            {"label": [8, 20]},
+                            {"label": [22, 36]}
+                        ]
+                    },
+                    {
+                        "activeParameter": 0,
+                        "label": "combine(left: Int, right: Int): Int",
+                        "parameters": [
+                            {"label": [8, 17]},
+                            {"label": [19, 29]}
+                        ]
+                    }
+                ]
+            })
+        );
+
+        let second = server.handle(request(
+            3,
+            "textDocument/signatureHelp",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 2, "character": 33}
+            }),
+        ));
+        assert_eq!(second.messages[0]["result"]["activeSignature"], 0);
+        assert_eq!(
+            second.messages[0]["result"]["signatures"][0]["activeParameter"],
+            1
+        );
+        assert_eq!(
+            second.messages[0]["result"]["signatures"][1]["activeParameter"],
+            1
+        );
+    }
+
+    #[test]
+    fn signature_help_matches_official_named_generic_local_and_unicode_labels() {
+        let source = "fun combine(left: String, count: Int = 1): String = left\n\
+                      fun combine(left: Int, right: Int): Int = left + right\n\
+                      fun <T> identity(value: T): T = value\n\
+                      fun unicode(π: String, count: Int = 1): String = π\n\
+                      fun use(): String {\n\
+                      \u{20}\u{20}val named = combine(count = 2, left = \"named\")\n\
+                      \u{20}\u{20}val generic = identity(1)\n\
+                      \u{20}\u{20}val nonAscii = unicode(\"π\", 2)\n\
+                      \u{20}\u{20}fun local(value: String, count: Int = 1): String = value\n\
+                      \u{20}\u{20}return named + generic + nonAscii + local(\"local\", 2)\n\
+                      }\n";
+        let uri = "file:///SignatureHelpAdvanced.kt";
+        let analysis_calls = Rc::new(Cell::new(0));
+        let calls_for_analyzer = analysis_calls.clone();
+        let mut server = LspService::new(move |sources: &[&str]| {
+            calls_for_analyzer.set(calls_for_analyzer.get() + 1);
+            super::super::analyze_for_lsp(sources)
+        });
+        server.handle(request(1, "initialize", json!({})));
+        let opened = server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": source
+                }
+            }),
+        ));
+        assert_eq!(opened.messages[0]["params"]["diagnostics"], json!([]));
+        let mut signature_help = |id, marker| {
+            server
+                .handle(request(
+                    id,
+                    "textDocument/signatureHelp",
+                    json!({
+                        "textDocument": {"uri": uri},
+                        "position": position_after(source, marker)
+                    }),
+                ))
+                .messages[0]["result"]
+                .clone()
+        };
+
+        assert_eq!(
+            signature_help(2, "combine(count"),
+            json!({
+                "activeSignature": 0,
+                "signatures": [
+                    {
+                        "activeParameter": 0,
+                        "label": "combine([count: Int = 1], [left: String]): String",
+                        "parameters": [{"label": [8, 24]}, {"label": [26, 40]}]
+                    },
+                    {
+                        "activeParameter": 1,
+                        "label": "combine([left: Int], [right: Int]): Int",
+                        "parameters": [
+                            {"label": [8, 19]},
+                            {"label": [20, 20]},
+                            {"label": [21, 33]}
+                        ]
+                    }
+                ]
+            })
+        );
+        assert_eq!(
+            signature_help(3, "count = 2, left"),
+            json!({
+                "activeSignature": 0,
+                "signatures": [
+                    {
+                        "activeParameter": 1,
+                        "label": "combine([count: Int = 1], [left: String]): String",
+                        "parameters": [{"label": [8, 24]}, {"label": [26, 40]}]
+                    },
+                    {
+                        "activeParameter": 0,
+                        "label": "combine([left: Int], [right: Int]): Int",
+                        "parameters": [{"label": [8, 19]}, {"label": [21, 33]}]
+                    }
+                ]
+            })
+        );
+        assert_eq!(
+            signature_help(4, "val generic = identity("),
+            json!({
+                "activeSignature": 0,
+                "signatures": [{
+                    "activeParameter": 0,
+                    "label": "identity(value: Int): Int",
+                    "parameters": [{"label": [9, 19]}]
+                }]
+            })
+        );
+        assert_eq!(
+            signature_help(5, "val nonAscii = unicode("),
+            json!({
+                "activeSignature": 0,
+                "signatures": [{
+                    "activeParameter": 0,
+                    "label": "unicode(π: String, count: Int = 1): String",
+                    "parameters": [{"label": [8, 17]}, {"label": [19, 33]}]
+                }]
+            })
+        );
+        assert_eq!(
+            signature_help(6, "local(\"local"),
+            json!({
+                "activeSignature": 0,
+                "signatures": [{
+                    "activeParameter": 0,
+                    "label": "local(value: String, count: Int = 1): String",
+                    "parameters": [{"label": [6, 19]}, {"label": [21, 35]}]
+                }]
+            })
+        );
+        assert_eq!(
+            analysis_calls.get(),
+            1,
+            "signature help must use the compact cached snapshot"
+        );
+    }
+
+    #[test]
+    fn signature_help_selects_secondary_constructors_and_substitutes_nested_types() {
+        let source = "class Choice {\n\
+                      \u{20}\u{20}constructor(value: String) {}\n\
+                      \u{20}\u{20}constructor(value: Int, count: Int = 1) {}\n\
+                      }\n\
+                      open class ConstructorBase\n\
+                      class ConstructorDerived : ConstructorBase()\n\
+                      class SubtypeChoice {\n\
+                      \u{20}\u{20}constructor(value: String) {}\n\
+                      \u{20}\u{20}constructor(value: ConstructorBase) {}\n\
+                      }\n\
+                      class SecondaryOnly { constructor(value: Int) {} }\n\
+                      class Holder<T>(val value: T)\n\
+                      fun <T> unwrap(holder: Holder<T>): T = holder.value\n\
+                      fun <T> coalesce(value: T?, fallback: T): T = value ?: fallback\n\
+                      fun use(maybe: Int?) {\n\
+                      \u{20}\u{20}val choice = Choice(1, 2)\n\
+                      \u{20}\u{20}val subtypeSelected = SubtypeChoice(ConstructorDerived())\n\
+                      \u{20}\u{20}val secondary = SecondaryOnly(1)\n\
+                      \u{20}\u{20}val nested = unwrap(Holder<Int>(1))\n\
+                      \u{20}\u{20}val nullable = coalesce(maybe, 1)\n\
+                      }\n";
+        let uri = "file:///SignatureHelpConstructors.kt";
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        let opened = server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": source
+                }
+            }),
+        ));
+        assert_eq!(opened.messages[0]["params"]["diagnostics"], json!([]));
+
+        let mut signature_help = |id, marker| {
+            server
+                .handle(request(
+                    id,
+                    "textDocument/signatureHelp",
+                    json!({
+                        "textDocument": {"uri": uri},
+                        "position": position_after(source, marker)
+                    }),
+                ))
+                .messages[0]["result"]
+                .clone()
+        };
+
+        let choice = signature_help(2, "Choice(1, ");
+        assert_eq!(choice["activeSignature"], 1);
+        assert_eq!(
+            choice["signatures"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|signature| signature["label"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "Choice(value: String)",
+                "Choice(value: Int, count: Int = 1)"
+            ]
+        );
+        assert_eq!(
+            choice["signatures"][1]["parameters"],
+            json!([{"label": [7, 17]}, {"label": [19, 33]}])
+        );
+        assert!(
+            choice["signatures"][0].get("activeParameter").is_none(),
+            "official Kotlin LSP omits an active parameter once the cursor is past a non-vararg signature"
+        );
+        assert_eq!(
+            signature_help(3, "SecondaryOnly(")["signatures"][0]["label"],
+            "SecondaryOnly(value: Int)"
+        );
+        let subtype = signature_help(4, "subtypeSelected = SubtypeChoice(");
+        assert_eq!(subtype["activeSignature"], 1);
+        assert_eq!(
+            subtype["signatures"][1]["label"],
+            "SubtypeChoice(value: ConstructorBase)"
+        );
+        assert_eq!(
+            signature_help(5, "val nested = unwrap(")["signatures"][0]["label"],
+            "unwrap(holder: Holder<Int>): Int"
+        );
+        assert_eq!(
+            signature_help(6, "val nullable = coalesce(")["signatures"][0]["label"],
+            "coalesce(value: Int?, fallback: Int): Int"
+        );
+    }
+
+    #[test]
+    fn signature_help_survives_an_incomplete_argument_list_without_reanalysis() {
+        let source = "fun combine(left: String, count: Int = 1): String = left\n\
+                      fun use(): String = combine(\"x\", ";
+        let uri = "file:///IncompleteSignatureHelp.kt";
+        let analysis_calls = Rc::new(Cell::new(0));
+        let calls_for_analyzer = analysis_calls.clone();
+        let mut server = LspService::new(move |sources: &[&str]| {
+            calls_for_analyzer.set(calls_for_analyzer.get() + 1);
+            super::super::analyze_for_lsp(sources)
+        });
+        server.handle(request(1, "initialize", json!({})));
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": source
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/signatureHelp",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": position_after(source, "combine(\"x\", ")
+            }),
+        ));
+        assert_eq!(
+            response.messages[0]["result"],
+            json!({
+                "activeSignature": 0,
+                "signatures": [{
+                    "activeParameter": 1,
+                    "label": "combine(left: String, count: Int = 1): String",
+                    "parameters": [{"label": [8, 20]}, {"label": [22, 36]}]
+                }]
+            })
+        );
+        assert_eq!(analysis_calls.get(), 1);
+    }
+
+    #[test]
+    fn document_symbols_match_official_hierarchy_kinds_and_ranges() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        let initialized = server.handle(request(1, "initialize", json!({})));
+        assert_eq!(
+            initialized.messages[0]["result"]["capabilities"]["documentSymbolProvider"],
+            true
+        );
+        let uri = "file:///DocumentSymbols.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "val topValue: Int = 1\n\
+                             fun topFunction(arg: Int): Int = arg\n\
+                             class Box(val item: Int) {\n\
+                             \u{20}\u{20}var mutable: String = \"\"\n\
+                             \u{20}\u{20}fun member(value: Int): Int = value\n\
+                             }\n"
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+        assert_eq!(
+            response.messages[0]["result"],
+            json!([
+                {
+                    "name": "topValue",
+                    "kind": 7,
+                    "deprecated": false,
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 21}
+                    },
+                    "selectionRange": {
+                        "start": {"line": 0, "character": 4},
+                        "end": {"line": 0, "character": 12}
+                    }
+                },
+                {
+                    "name": "topFunction",
+                    "kind": 12,
+                    "deprecated": false,
+                    "range": {
+                        "start": {"line": 1, "character": 0},
+                        "end": {"line": 1, "character": 36}
+                    },
+                    "selectionRange": {
+                        "start": {"line": 1, "character": 4},
+                        "end": {"line": 1, "character": 15}
+                    }
+                },
+                {
+                    "name": "Box",
+                    "kind": 5,
+                    "deprecated": false,
+                    "range": {
+                        "start": {"line": 2, "character": 0},
+                        "end": {"line": 5, "character": 1}
+                    },
+                    "selectionRange": {
+                        "start": {"line": 2, "character": 6},
+                        "end": {"line": 2, "character": 9}
+                    },
+                    "children": [
+                        {
+                            "name": "item",
+                            "kind": 13,
+                            "deprecated": false,
+                            "range": {
+                                "start": {"line": 2, "character": 10},
+                                "end": {"line": 2, "character": 23}
+                            },
+                            "selectionRange": {
+                                "start": {"line": 2, "character": 14},
+                                "end": {"line": 2, "character": 18}
+                            }
+                        },
+                        {
+                            "name": "Box",
+                            "kind": 9,
+                            "deprecated": false,
+                            "range": {
+                                "start": {"line": 2, "character": 9},
+                                "end": {"line": 2, "character": 24}
+                            },
+                            "selectionRange": {
+                                "start": {"line": 2, "character": 9},
+                                "end": {"line": 2, "character": 24}
+                            }
+                        },
+                        {
+                            "name": "mutable",
+                            "kind": 7,
+                            "deprecated": false,
+                            "range": {
+                                "start": {"line": 3, "character": 2},
+                                "end": {"line": 3, "character": 26}
+                            },
+                            "selectionRange": {
+                                "start": {"line": 3, "character": 6},
+                                "end": {"line": 3, "character": 13}
+                            }
+                        },
+                        {
+                            "name": "member",
+                            "kind": 6,
+                            "deprecated": false,
+                            "range": {
+                                "start": {"line": 4, "character": 2},
+                                "end": {"line": 4, "character": 37}
+                            },
+                            "selectionRange": {
+                                "start": {"line": 4, "character": 6},
+                                "end": {"line": 4, "character": 12}
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn document_symbols_are_cached_and_include_semicolon_declaration_ranges() {
+        let calls = Rc::new(Cell::new(0));
+        let calls_for_analyzer = calls.clone();
+        let mut server = LspService::new(move |sources: &[&str]| {
+            calls_for_analyzer.set(calls_for_analyzer.get() + 1);
+            super::super::analyze_for_lsp(sources)
+        });
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///SemicolonSymbols.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "object Registry { val size: Int = 1; fun clear() {} }\n"
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+
+        assert_eq!(calls.get(), 1, "document symbols must not rerun analysis");
+        assert_eq!(
+            response.messages[0]["result"][0]["children"][0]["range"],
+            json!({
+                "start": {"line": 0, "character": 18},
+                "end": {"line": 0, "character": 36}
+            })
+        );
+    }
+
+    #[test]
+    fn folding_ranges_match_official_text_columns_and_are_cached() {
+        let calls = Rc::new(Cell::new(0));
+        let calls_for_analyzer = calls.clone();
+        let mut server = LspService::new(move |sources: &[&str]| {
+            calls_for_analyzer.set(calls_for_analyzer.get() + 1);
+            super::super::analyze_for_lsp(sources)
+        });
+        let initialized = server.handle(request(1, "initialize", json!({})));
+        assert_eq!(
+            initialized.messages[0]["result"]["capabilities"]["foldingRangeProvider"],
+            true
+        );
+        let uri = "file:///FoldingRanges.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "package foldingparity\n\
+                             import kotlin.collections.List\n\
+                             import kotlin.collections.Map\n\
+                             \n\
+                             /**\n\
+                             \u{20}* Documentation block.\n\
+                             \u{20}*/\n\
+                             class Box(\n\
+                             \u{20}\u{20}val value: Int,\n\
+                             ) {\n\
+                             \u{20}\u{20}/*\n\
+                             \u{20}\u{20} * Nested block comment.\n\
+                             \u{20}\u{20} */\n\
+                             \u{20}\u{20}fun choose(flag: Boolean): Int {\n\
+                             \u{20}\u{20}\u{20}\u{20}if (flag) {\n\
+                             \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}return 1\n\
+                             \u{20}\u{20}\u{20}\u{20}}\n\
+                             \u{20}\u{20}\u{20}\u{20}return 2\n\
+                             \u{20}\u{20}}\n\
+                             }\n"
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/foldingRange",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+        assert_eq!(
+            response.messages[0]["result"],
+            json!([
+                {
+                    "collapsedText": "...",
+                    "endCharacter": 29,
+                    "endLine": 2,
+                    "kind": "imports",
+                    "startCharacter": 7,
+                    "startLine": 1
+                },
+                {
+                    "collapsedText": "/** Documentation block. ...*/",
+                    "endCharacter": 3,
+                    "endLine": 6,
+                    "kind": "comment",
+                    "startCharacter": 0,
+                    "startLine": 4
+                },
+                {
+                    "collapsedText": "(...)",
+                    "endCharacter": 1,
+                    "endLine": 9,
+                    "kind": "region",
+                    "startCharacter": 9,
+                    "startLine": 7
+                },
+                {
+                    "collapsedText": "{...}",
+                    "endCharacter": 1,
+                    "endLine": 19,
+                    "kind": "region",
+                    "startCharacter": 2,
+                    "startLine": 9
+                },
+                {
+                    "collapsedText": "/ Nested block comment. .../",
+                    "endCharacter": 5,
+                    "endLine": 12,
+                    "kind": "comment",
+                    "startCharacter": 2,
+                    "startLine": 10
+                },
+                {
+                    "collapsedText": "{...}",
+                    "endCharacter": 3,
+                    "endLine": 18,
+                    "kind": "region",
+                    "startCharacter": 33,
+                    "startLine": 13
+                },
+                {
+                    "collapsedText": "{...}",
+                    "endCharacter": 5,
+                    "endLine": 16,
+                    "kind": "region",
+                    "startCharacter": 14,
+                    "startLine": 14
+                }
+            ])
+        );
+        assert_eq!(calls.get(), 1, "folding requests must use cached ranges");
+
+        server.handle(notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [{"text": "fun flat(): Int = 1\n"}]
+            }),
+        ));
+        let after_change = server.handle(request(
+            3,
+            "textDocument/foldingRange",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+        assert_eq!(after_change.messages[0]["result"], json!([]));
+        assert_eq!(calls.get(), 2, "the changed snapshot must be cached");
+
+        server.handle(notification(
+            "textDocument/didClose",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+        let after_close = server.handle(request(
+            4,
+            "textDocument/foldingRange",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+        assert_eq!(after_close.messages[0]["result"], Value::Null);
+        assert_eq!(calls.get(), 3, "the request after close must not analyze");
+    }
+
+    #[test]
+    fn document_symbols_preserve_companion_hierarchy_and_exact_locations() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///CompanionSymbols.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "class Container {\n\
+                             \u{20}\u{20}companion object Factory {\n\
+                             \u{20}\u{20}\u{20}\u{20}val answer: Int = 42\n\
+                             \u{20}\u{20}\u{20}\u{20}fun create(): Container = Container()\n\
+                             \u{20}\u{20}}\n\
+                             \u{20}\u{20}fun outer(): Int = 1\n\
+                             }\n"
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+        assert_eq!(
+            response.messages[0]["result"][0]["children"][0],
+            json!({
+                "name": "Factory",
+                "kind": 19,
+                "deprecated": false,
+                "range": {
+                    "start": {"line": 1, "character": 2},
+                    "end": {"line": 4, "character": 3}
+                },
+                "selectionRange": {
+                    "start": {"line": 1, "character": 19},
+                    "end": {"line": 1, "character": 26}
+                },
+                "children": [
+                    {
+                        "name": "answer",
+                        "kind": 7,
+                        "deprecated": false,
+                        "range": {
+                            "start": {"line": 2, "character": 4},
+                            "end": {"line": 2, "character": 24}
+                        },
+                        "selectionRange": {
+                            "start": {"line": 2, "character": 8},
+                            "end": {"line": 2, "character": 14}
+                        }
+                    },
+                    {
+                        "name": "create",
+                        "kind": 6,
+                        "deprecated": false,
+                        "range": {
+                            "start": {"line": 3, "character": 4},
+                            "end": {"line": 3, "character": 41}
+                        },
+                        "selectionRange": {
+                            "start": {"line": 3, "character": 8},
+                            "end": {"line": 3, "character": 14}
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn document_symbols_match_data_class_and_typealias_kinds_and_locations() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///KindSymbols.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "data class Record(val value: Int)\n\
+                             typealias Alias = Record\n"
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+        let symbols = response.messages[0]["result"].as_array().unwrap();
+        assert_eq!(symbols[0]["kind"], 23);
+        assert_eq!(
+            symbols[0]["range"],
+            json!({
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 33}
+            })
+        );
+        assert_eq!(
+            symbols[1],
+            json!({
+                "name": "Alias",
+                "kind": 5,
+                "deprecated": false,
+                "range": {
+                    "start": {"line": 1, "character": 0},
+                    "end": {"line": 1, "character": 24}
+                },
+                "selectionRange": {
+                    "start": {"line": 1, "character": 10},
+                    "end": {"line": 1, "character": 15}
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn document_symbols_match_secondary_constructor_and_unnamed_companion_locations() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///ConstructorSymbols.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "class Secondary {\n\
+                             \u{20}\u{20}constructor(value: Int) { println(value) }\n\
+                             }\n\
+                             class DefaultCompanion {\n\
+                             \u{20}\u{20}companion object { val only: Int = 1 }\n\
+                             }\n"
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+        let symbols = response.messages[0]["result"].as_array().unwrap();
+        assert_eq!(
+            symbols[0]["children"][0],
+            json!({
+                "name": "Secondary",
+                "kind": 9,
+                "deprecated": false,
+                "range": {
+                    "start": {"line": 1, "character": 2},
+                    "end": {"line": 1, "character": 44}
+                },
+                "selectionRange": {
+                    "start": {"line": 1, "character": 2},
+                    "end": {"line": 1, "character": 44}
+                }
+            })
+        );
+        assert_eq!(
+            symbols[1]["children"][0]["selectionRange"],
+            json!({
+                "start": {"line": 4, "character": 2},
+                "end": {"line": 4, "character": 40}
+            })
+        );
+        assert_eq!(
+            symbols[1]["children"][0]["children"][0]["range"],
+            json!({
+                "start": {"line": 4, "character": 21},
+                "end": {"line": 4, "character": 38}
+            })
+        );
+    }
+
+    #[test]
+    fn document_symbols_do_not_borrow_following_headers_or_leaked_annotations() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///AdjacentSymbols.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "annotation class Marker\n\
+                             data class Record(val value: Int)\n\
+                             @Deprecated(\"old alias\")\n\
+                             typealias OldAlias = Record\n\
+                             class Injected @Deprecated(\"old constructor\") constructor(val value: Int)\n\
+                             class DefaultCompanion {\n\
+                             \u{20}\u{20}@Deprecated(\"old companion\")\n\
+                             \u{20}\u{20}companion object {}\n\
+                             }\n\
+                             class Fresh\n"
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+        let symbols = response.messages[0]["result"].as_array().unwrap();
+        let symbol = |name: &str| {
+            symbols
+                .iter()
+                .find(|symbol| symbol["name"] == name)
+                .unwrap_or_else(|| panic!("{name} symbol"))
+        };
+        assert!(symbol("Marker").get("children").is_none());
+        assert!(symbol("Fresh").get("children").is_none());
+        assert_eq!(symbol("Injected")["deprecated"], false);
+        assert_eq!(symbol("Injected")["children"][1]["deprecated"], true);
+        assert_eq!(symbol("DefaultCompanion")["deprecated"], false);
+        assert_eq!(
+            symbol("DefaultCompanion")["children"][0]["deprecated"],
+            true
+        );
+    }
+
+    #[test]
+    fn document_symbols_mark_deprecated_property_without_leaking_to_the_next_class() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///DeprecatedPropertySymbols.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "@Deprecated(\n\
+                             \u{20}\u{20}\"old\"\n\
+                             )\n\
+                             val oldProperty: Int = 1\n\
+                             @Other(Deprecated)\n\
+                             val currentProperty: Int = 2\n\
+                             class Fresh\n"
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+        let symbols = response.messages[0]["result"].as_array().unwrap();
+        assert_eq!(symbols[0]["deprecated"], true);
+        assert_eq!(symbols[0]["tags"], json!([1]));
+        assert_eq!(
+            symbols[0]["range"],
+            json!({
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 3, "character": 24}
+            })
+        );
+        assert_eq!(
+            symbols[0]["selectionRange"],
+            json!({
+                "start": {"line": 3, "character": 4},
+                "end": {"line": 3, "character": 15}
+            })
+        );
+        assert_eq!(symbols[1]["name"], "currentProperty");
+        assert_eq!(symbols[1]["deprecated"], false);
+        assert!(symbols[1].get("tags").is_none());
+        assert_eq!(
+            symbols[1]["range"],
+            json!({
+                "start": {"line": 4, "character": 0},
+                "end": {"line": 5, "character": 28}
+            })
+        );
+        assert_eq!(symbols[2]["name"], "Fresh");
+        assert_eq!(symbols[2]["deprecated"], false);
+        assert!(symbols[2].get("tags").is_none());
+    }
+
+    #[test]
+    fn document_symbols_balance_enum_arguments_and_select_explicit_constructor_range() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///BalancedSymbolRanges.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "class Injected @Deprecated(\"old constructor\") constructor(val injected: Int)\n\
+                             enum class Pair(val left: Int, val right: Int) { BOTH(1, 2) }\n"
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+        let symbols = response.messages[0]["result"].as_array().unwrap();
+        assert_eq!(symbols[0]["deprecated"], false);
+        assert_eq!(
+            symbols[0]["children"][0]["range"],
+            json!({
+                "start": {"line": 0, "character": 58},
+                "end": {"line": 0, "character": 75}
+            })
+        );
+        assert_eq!(
+            symbols[0]["children"][1],
+            json!({
+                "name": "Injected",
+                "kind": 9,
+                "deprecated": true,
+                "tags": [1],
+                "range": {
+                    "start": {"line": 0, "character": 15},
+                    "end": {"line": 0, "character": 76}
+                },
+                "selectionRange": {
+                    "start": {"line": 0, "character": 15},
+                    "end": {"line": 0, "character": 76}
+                }
+            })
+        );
+        assert_eq!(
+            symbols[1]["children"][3]["range"],
+            json!({
+                "start": {"line": 1, "character": 49},
+                "end": {"line": 1, "character": 59}
+            })
+        );
+        assert_eq!(
+            symbols[1]["children"][3]["selectionRange"],
+            json!({
+                "start": {"line": 1, "character": 49},
+                "end": {"line": 1, "character": 53}
+            })
+        );
     }
 
     #[test]
@@ -2222,6 +3245,118 @@ mod tests {
         ));
         assert_eq!(closed.messages[0]["params"]["diagnostics"], json!([]));
         assert_eq!(server.open_document_count(), 0);
+    }
+
+    #[test]
+    fn pull_diagnostics_match_published_exact_utf16_ranges_without_reanalysis() {
+        let calls = Rc::new(Cell::new(0));
+        let calls_for_analyzer = calls.clone();
+        let mut server = LspService::new(move |sources: &[&str]| {
+            calls_for_analyzer.set(calls_for_analyzer.get() + 1);
+            sources
+                .iter()
+                .map(|source| {
+                    let diagnostics = if *source == "😀\nbad" {
+                        vec![Diagnostic {
+                            span: Span::new(5, 8),
+                            severity: Severity::Error,
+                            msg: "bad document".to_string(),
+                            file: 0,
+                        }]
+                    } else {
+                        Vec::new()
+                    };
+                    super::super::DocumentAnalysis::with_diagnostics(diagnostics)
+                })
+                .collect()
+        });
+
+        let initialized = server.handle(request(1, "initialize", json!({})));
+        assert_eq!(
+            initialized.messages[0]["result"]["capabilities"]["diagnosticProvider"],
+            json!({
+                "interFileDependencies": true,
+                "workspaceDiagnostics": false,
+                "workDoneProgress": false
+            })
+        );
+
+        let opened = server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": "file:///main.kt",
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "😀\nbad"
+                }
+            }),
+        ));
+        let published = opened.messages[0]["params"]["diagnostics"].clone();
+        assert_eq!(
+            published,
+            json!([{
+                "range": {
+                    "start": {"line": 1, "character": 0},
+                    "end": {"line": 1, "character": 3}
+                },
+                "severity": 1,
+                "source": "Kotlin",
+                "message": "Bad document"
+            }])
+        );
+
+        let pulled = server.handle(request(
+            2,
+            "textDocument/diagnostic",
+            json!({
+                "textDocument": {"uri": "file:///main.kt"},
+                "previousResultId": "ignored-like-the-official-full-report"
+            }),
+        ));
+        assert_eq!(
+            pulled.messages[0]["result"],
+            json!({"kind": "full", "items": published})
+        );
+        assert_eq!(calls.get(), 1, "pull requests must use cached diagnostics");
+
+        server.handle(notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": "file:///main.kt", "version": 2},
+                "contentChanges": [{"text": "fun ok() = 1"}]
+            }),
+        ));
+        let after_change = server.handle(request(
+            3,
+            "textDocument/diagnostic",
+            json!({"textDocument": {"uri": "file:///main.kt"}}),
+        ));
+        assert_eq!(
+            after_change.messages[0]["result"],
+            json!({"kind": "full", "items": []})
+        );
+        assert_eq!(calls.get(), 2);
+
+        server.handle(notification(
+            "textDocument/didClose",
+            json!({"textDocument": {"uri": "file:///main.kt"}}),
+        ));
+        assert_eq!(
+            calls.get(),
+            3,
+            "closing reanalyzes the remaining source set"
+        );
+        let after_close = server.handle(request(
+            4,
+            "textDocument/diagnostic",
+            json!({"textDocument": {"uri": "file:///main.kt"}}),
+        ));
+        assert_eq!(
+            after_close.messages[0]["result"],
+            json!({"kind": "full", "items": []})
+        );
+        assert_eq!(calls.get(), 3, "pull after close must not run analysis");
     }
 
     #[test]

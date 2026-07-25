@@ -17,10 +17,13 @@ use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use serde::{Deserialize, Serialize};
 
-use crate::compiler_analysis::{self, CompletionSymbols, DefinitionSymbols, HighlightSymbols};
+use crate::compiler_analysis::{
+    self, CompletionSymbols, DefinitionSymbols, HighlightSymbols, SignatureHelpSymbols,
+};
 use crate::{
     read_framed, write_framed, AnalysisBudgets, CompletionIndex, DefinitionIndex, DocumentAnalysis,
-    HoverIndex, SemanticTokenIndex, SourceSetIndexes,
+    DocumentSymbolIndex, FoldingRangeIndex, HoverIndex, SemanticTokenIndex, SignatureHelpIndex,
+    SourceSetIndexes,
 };
 
 pub const DEFAULT_ANALYSES_PER_WORKER: usize = 64;
@@ -51,8 +54,11 @@ struct AnalysisResponse {
     diagnostics: Vec<WireDiagnostic>,
     hover: HoverIndex,
     completion: CompletionIndex,
+    signature_help: SignatureHelpIndex,
     semantic_tokens: SemanticTokenIndex,
     definitions: DefinitionIndex,
+    document_symbols: DocumentSymbolIndex,
+    folding_ranges: FoldingRangeIndex,
 }
 
 impl From<DocumentAnalysis> for AnalysisResponse {
@@ -73,8 +79,11 @@ impl From<DocumentAnalysis> for AnalysisResponse {
                 .collect(),
             hover: analysis.hover,
             completion: analysis.completion,
+            signature_help: analysis.signature_help,
             semantic_tokens: analysis.semantic_tokens,
             definitions: analysis.definitions,
+            document_symbols: analysis.document_symbols,
+            folding_ranges: analysis.folding_ranges,
         }
     }
 }
@@ -98,8 +107,11 @@ impl AnalysisResponse {
                 .collect(),
             hover: self.hover,
             completion: self.completion,
+            signature_help: self.signature_help,
             semantic_tokens: self.semantic_tokens,
             definitions: self.definitions,
+            document_symbols: self.document_symbols,
+            folding_ranges: self.folding_ranges,
         }
     }
 }
@@ -339,11 +351,14 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
         let definition_symbols =
             DefinitionSymbols::from_source_set(&sources, &source_set.files, &source_set.symbols);
         let completion_symbols = CompletionSymbols::from_source_set(&source_set.files);
+        let signature_help_symbols =
+            SignatureHelpSymbols::from_source_set(&sources, &source_set.files, &source_set.symbols);
         let indexes = SourceSetIndexes::new(
             &source_set.symbols,
             &highlight_symbols,
             &definition_symbols,
             &completion_symbols,
+            &signature_help_symbols,
         );
         let mut budgets = AnalysisBudgets::new();
         let analyses = source_set
@@ -483,7 +498,7 @@ mod tests {
     fn worker_protocol_analyzes_a_cross_file_source_set() {
         let sources = [
             "package demo\nfun answer(): Int = 42",
-            "package demo\nfun use(): Int = answer()",
+            "package demo\nfun use(): Int {\n  return answer()\n}",
         ];
         let request = serde_json::to_vec(&AnalysisRequest { sources: &sources }).unwrap();
         let mut input = Vec::new();
@@ -503,7 +518,10 @@ mod tests {
         assert!(analysis.diagnostics.is_empty());
         assert!(analysis.hover.entry_count() > 0);
         assert!(analysis.completion.entry_count() > 0);
+        assert!(analysis.signature_help.entry_count() > 0);
         assert!(analysis.semantic_tokens.entry_count() > 0);
         assert!(analysis.definitions.entry_count() > 0);
+        assert!(analysis.document_symbols.entry_count() > 0);
+        assert!(analysis.folding_ranges.entry_count() > 0);
     }
 }
