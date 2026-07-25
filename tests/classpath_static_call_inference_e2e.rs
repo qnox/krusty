@@ -27,6 +27,7 @@ fn property_type_from_a_classpath_static_call() {
                 package fixtures;
                 public final class Provider {
                     public static Item create(String value) { return new Item(value); }
+                    public static Item create(Class<?> type) { return new Item(type.getSimpleName()); }
                 }
             "#
             .into(),
@@ -58,6 +59,10 @@ fn property_type_from_a_classpath_static_call() {
             val member = Provider.create("member")
         }
 
+        class LiteralHolder {
+            val product = Provider.create(LiteralHolder::class.java)
+        }
+
         class Shadowed {
             val Provider = LocalProvider()
             val member = Provider.create("member")
@@ -67,6 +72,7 @@ fn property_type_from_a_classpath_static_call() {
             if (top.value != "top") return "top"
             if (qualified.value != "qualified") return "qualified"
             if (Holder().member.value != "member") return "member"
+            if (LiteralHolder().product.value != "LiteralHolder") return "literal"
             if (Shadowed().member != "local:member") return "shadowed"
             return "OK"
         }
