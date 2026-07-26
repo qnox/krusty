@@ -7173,6 +7173,12 @@ impl<'a> Parser<'a> {
                 conditions.push(self.parse_when_condition(subject));
                 while self.eat(TokenKind::Comma) {
                     self.skip_newlines();
+                    // A subjectful `when` condition list permits a trailing comma before `->`.
+                    // Subjectless entries use boolean expressions joined with `||`, so a comma
+                    // there remains a parse error.
+                    if subject.is_some() && self.at(TokenKind::Arrow) {
+                        break;
+                    }
                     conditions.push(self.parse_when_condition(subject));
                 }
             }
@@ -8440,6 +8446,17 @@ mod tests {
         assert_eq!(
             tree("fun g(n: Int): Int = when { n < 0 -> 1; else -> 2 }"),
             "(fun g (param n Int) :Int (when (arm (< n 0) => 1) (arm else => 2)))\n"
+        );
+        assert_eq!(
+            tree(
+                "fun h(n: Int): Int = when (n) {\n\
+                     0,\n\
+                     1,\n\
+                         -> 1\n\
+                     else -> 2\n\
+                 }"
+            ),
+            "(fun h (param n Int) :Int (when n (arm 0 1 => 1) (arm else => 2)))\n"
         );
     }
 
