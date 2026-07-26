@@ -333,6 +333,7 @@ type GenericMemberPlan = (GenericMethod, HashMap<String, Ty>, Vec<Vec<Ty>>);
 struct ModuleMemberLambdaShape {
     param_types: Vec<Option<Vec<Ty>>>,
     receivers: Vec<Option<Ty>>,
+    inline: bool,
 }
 
 fn generic_member_lambda_params(plan: &GenericMemberPlan, parameter: usize) -> Option<Vec<Ty>> {
@@ -890,6 +891,72 @@ impl SymbolTable {
 
     pub fn class_by_type_name(&self, internal: TypeName) -> Option<&ClassSig> {
         self.classes.values().find(|sig| sig.internal == internal)
+    }
+
+    pub(crate) fn source_class_bindings(
+        &self,
+        class: &ClassSig,
+        applied: Ty,
+    ) -> HashMap<String, Ty> {
+        class.type_parameter_bindings(applied)
+    }
+
+    fn applied_source_parents(
+        &self,
+        class: &ClassSig,
+        bindings: HashMap<String, Ty>,
+    ) -> Vec<(TypeName, Ty)> {
+        let mut parents = class
+            .interfaces
+            .iter_ids()
+            .enumerate()
+            .map(|(index, parent)| {
+                let arguments = class
+                    .interface_type_args
+                    .get(index)
+                    .map(|arguments| {
+                        arguments
+                            .iter()
+                            .map(|shape| crate::symbol_resolver::ty_subst(*shape, &bindings))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                (parent, Ty::obj_args_name(parent, &arguments))
+            })
+            .collect::<Vec<_>>();
+        if let Some(parent) = class.super_internal {
+            let arguments = class
+                .super_type_args
+                .iter()
+                .map(|shape| crate::symbol_resolver::ty_subst(*shape, &bindings))
+                .collect::<Vec<_>>();
+            parents.push((parent, Ty::obj_args_name(parent, &arguments)));
+        }
+        parents
+    }
+
+    pub(crate) fn applied_source_hierarchy(&self, root: Ty) -> Vec<(TypeName, Ty, usize)> {
+        let Some(internal) = root.obj_internal() else {
+            return Vec::new();
+        };
+        let mut pending = vec![(internal, root, 0)];
+        let mut seen = std::collections::HashSet::new();
+        let mut hierarchy = Vec::new();
+        while let Some((owner, applied, depth)) = pending.pop() {
+            if !seen.insert(owner) {
+                continue;
+            }
+            hierarchy.push((owner, applied, depth));
+            if let Some(class) = self.class_by_type_name(owner) {
+                let bindings = self.source_class_bindings(class, applied);
+                pending.extend(
+                    self.applied_source_parents(class, bindings)
+                        .into_iter()
+                        .map(|(parent, applied)| (parent, applied, depth + 1)),
+                );
+            }
+        }
+        hierarchy
     }
 
     pub fn source_constructor_matcher(&self) -> SourceConstructorMatcher<'_> {
@@ -2812,7 +2879,7 @@ pub fn collect_signatures_with_cp(
                                                 .ty_param_bound()
                                                 .unwrap_or_else(|| Ty::obj("kotlin/Any"))
                                         })
-                                        .collect(),
+                                        .collect::<Vec<_>>(),
                                     is_var: bp.is_var,
                                     visibility: bp.visibility,
                                 });
@@ -3921,6 +3988,7 @@ fn module_member_lambda_shape(
                     .flatten()
             })
             .collect(),
+        inline: member.inline.can_inline(),
     })
 }
 
@@ -5663,7 +5731,7 @@ fn source_function_display(file: &File, function: &FunDecl, resolved_ret: Ty) ->
 /// Build a member method's [`Signature`] from its declaration, given an already-resolved return type
 /// `ret` (the two call sites differ only in how they infer `ret`). A `vararg` parameter's runtime type
 /// is its `Array<elem>`; the `vararg` flag, defaults, names, and lambda-parameter shapes follow the
-/// declaration. Member methods are never `inline`.
+/// declaration.
 fn member_signature(
     m: &FunDecl,
     ret: Ty,
@@ -5707,7 +5775,7 @@ fn member_signature(
         param_names: m.params.iter().map(|p| p.name.clone()).collect(),
         lambda_param_types,
         lambda_recv: m.params.iter().map(|p| p.ty.fun_has_receiver).collect(),
-        is_inline: false,
+        is_inline: m.is_inline,
         is_operator: m.is_operator,
         is_override: m.is_override,
         visibility: m.visibility,
@@ -10868,22 +10936,6 @@ impl<'a> Checker<'a> {
     /// Check an instance method: the class properties are visible (implicit `this`), then the
     /// method's own parameters shadow them.
     fn check_method(&mut self, f: &FunDecl, props: &[(String, Ty, bool)]) {
-        if f.is_inline {
-            // A SIMPLE inline member (no type parameters — so no `reified` — and no function-type
-            // parameter — so no lambda that must be spliced) is semantically an ordinary method;
-            // inlining is only an optimization. Check + emit it as a normal method (member calls become
-            // an ordinary invokevirtual). A generic/reified or lambda-taking inline member still needs
-            // true call-site splicing, which member methods don't yet have → reject (never miscompile).
-            let needs_real_inlining = !f.type_params.is_empty()
-                || f.params.iter().any(|p| {
-                    p.ty.name == "<fun>" || !p.ty.fun_params.is_empty() || p.ty.fun_suspend
-                });
-            if needs_real_inlining {
-                self.diags
-                    .error(f.span, "krusty: inline functions are not supported");
-                return;
-            }
-        }
         self.fn_reassigned.clear();
         self.fn_closure_reassigned.clear();
         if let FunBody::Expr(b) | FunBody::Block(b) = &f.body {
@@ -15656,64 +15708,6 @@ impl<'a> Checker<'a> {
         self.expr(e)
     }
 
-    fn applied_source_parents(
-        &self,
-        class: &ClassSig,
-        bindings: HashMap<String, Ty>,
-    ) -> Vec<(TypeName, Ty)> {
-        let mut parents = class
-            .interfaces
-            .iter_ids()
-            .enumerate()
-            .map(|(index, parent)| {
-                let arguments = class
-                    .interface_type_args
-                    .get(index)
-                    .map(|arguments| {
-                        arguments
-                            .iter()
-                            .map(|shape| crate::symbol_resolver::ty_subst(*shape, &bindings))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                (parent, Ty::obj_args_name(parent, &arguments))
-            })
-            .collect::<Vec<_>>();
-        if let Some(parent) = class.super_internal {
-            let arguments = class
-                .super_type_args
-                .iter()
-                .map(|shape| crate::symbol_resolver::ty_subst(*shape, &bindings))
-                .collect::<Vec<_>>();
-            parents.push((parent, Ty::obj_args_name(parent, &arguments)));
-        }
-        parents
-    }
-
-    fn applied_source_hierarchy(&self, root: Ty) -> Vec<(TypeName, Ty, usize)> {
-        let Some(internal) = root.obj_internal() else {
-            return Vec::new();
-        };
-        let mut pending = vec![(internal, root, 0)];
-        let mut seen = std::collections::HashSet::new();
-        let mut hierarchy = Vec::new();
-        while let Some((owner, applied, depth)) = pending.pop() {
-            if !seen.insert(owner) {
-                continue;
-            }
-            hierarchy.push((owner, applied, depth));
-            if let Some(class) = self.syms.class_by_type_name(owner) {
-                let bindings = class.type_parameter_bindings(applied);
-                pending.extend(
-                    self.applied_source_parents(class, bindings)
-                        .into_iter()
-                        .map(|(parent, applied)| (parent, applied, depth + 1)),
-                );
-            }
-        }
-        hierarchy
-    }
-
     /// For a generic higher-order member call (`box.map { it.length }` where `box: Box<String>`),
     /// produce the call's substitution plan: the recorded [`GenericMethod`] shape, the class type
     /// parameter → receiver type argument bindings (`{T: String}`), and — per logical argument — the
@@ -15728,11 +15722,11 @@ impl<'a> Checker<'a> {
         partial_args: Option<&[Option<Ty>]>,
         partial_arg_names: Option<&[Option<String>]>,
     ) -> Option<GenericMemberPlan> {
-        for (owner, owner_ty, _) in self.applied_source_hierarchy(rt) {
+        for (owner, owner_ty, _) in self.syms.applied_source_hierarchy(rt) {
             let Some(class) = self.syms.class_by_type_name(owner) else {
                 continue;
             };
-            let class_binds = class.type_parameter_bindings(owner_ty);
+            let class_binds = self.syms.source_class_bindings(class, owner_ty);
             if selected_owner.is_none_or(|selected| selected == owner) {
                 if let Some(overloads) = class.generic_methods.get(name) {
                     let gm = selected_params
@@ -15820,7 +15814,8 @@ impl<'a> Checker<'a> {
     }
 
     fn applied_source_supertype(&self, root: Ty, target: TypeName) -> Option<Ty> {
-        self.applied_source_hierarchy(root)
+        self.syms
+            .applied_source_hierarchy(root)
             .into_iter()
             .find_map(|(owner, applied, _)| (owner == target).then_some(applied))
     }
@@ -16237,11 +16232,11 @@ impl<'a> Checker<'a> {
     ) -> Result<Option<(Ty, bool, Visibility, TypeName)>, ()> {
         let mut candidates = Vec::new();
         for (dispatch_rank, dispatch) in self.implicit_receiver_types().into_iter().enumerate() {
-            for (owner, owner_ty, dispatch_depth) in self.applied_source_hierarchy(dispatch) {
+            for (owner, owner_ty, dispatch_depth) in self.syms.applied_source_hierarchy(dispatch) {
                 let Some(class) = self.syms.class_by_type_name(owner) else {
                     continue;
                 };
-                let class_bindings = class.type_parameter_bindings(owner_ty);
+                let class_bindings = self.syms.source_class_bindings(class, owner_ty);
                 for sig in class.member_ext_props(name) {
                     let mut applicability_bindings = class_bindings.clone();
                     applicability_bindings.extend(
@@ -16304,11 +16299,11 @@ impl<'a> Checker<'a> {
     ) -> Vec<MemberExtensionFunctionShape> {
         let mut shapes = Vec::new();
         for (dispatch_rank, dispatch) in self.implicit_receiver_types().into_iter().enumerate() {
-            for (owner, owner_ty, dispatch_depth) in self.applied_source_hierarchy(dispatch) {
+            for (owner, owner_ty, dispatch_depth) in self.syms.applied_source_hierarchy(dispatch) {
                 let Some(class) = self.syms.class_by_type_name(owner) else {
                     continue;
                 };
-                let class_bindings = class.type_parameter_bindings(owner_ty);
+                let class_bindings = self.syms.source_class_bindings(class, owner_ty);
                 for function in class.member_ext_funs(name) {
                     let declaration_tparams = TParams::from_bindings(class_bindings.clone())
                         .extended_with(
@@ -18559,17 +18554,25 @@ impl<'a> Checker<'a> {
                     None
                 };
                 // Inline extensions splice lambdas, so captured mutable locals stay direct for this call.
-                let allow_lambda_mutation = ext_lambda_pts.is_some()
-                    && self
-                        .resolver()
-                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
-                        .map(crate::symbol_resolver::Symbol::overloads)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(crate::libraries::FunctionInfo::is_extension)
-                        .collect::<Vec<_>>()
-                        .iter()
-                        .any(|o| o.flags.inline.can_inline());
+                let allow_lambda_mutation = method_sig
+                    .as_ref()
+                    .is_some_and(|member| member.inline.can_inline())
+                    || (ext_lambda_pts.is_some()
+                        && self
+                            .resolver()
+                            .resolve_symbol(
+                                crate::symbol_resolver::SymRecv::Value(rt),
+                                &name,
+                                &[],
+                                &[],
+                            )
+                            .map(crate::symbol_resolver::Symbol::overloads)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(crate::libraries::FunctionInfo::is_extension)
+                            .collect::<Vec<_>>()
+                            .iter()
+                            .any(|o| o.flags.inline.can_inline()));
                 let arg_tys: Vec<Ty> = self.with_lambda_mutation(allow_lambda_mutation, |c| {
                     args.iter()
                         .enumerate()
@@ -19934,22 +19937,29 @@ impl<'a> Checker<'a> {
                             if let Some(pt) = ordinary_this_member_lambda_shape
                                 .as_ref()
                                 .and_then(|shape| shape.param_types.get(i))
-                                .and_then(Option::as_deref)
+                                .and_then(Option::as_ref)
+                                .cloned()
                             {
-                                if let Some(receiver) = ordinary_this_member_lambda_shape
+                                let receiver = ordinary_this_member_lambda_shape
                                     .as_ref()
                                     .and_then(|shape| shape.receivers.get(i))
                                     .copied()
-                                    .flatten()
-                                {
-                                    return self.check_lambda_with_receiver_labeled(
-                                        a,
-                                        receiver,
-                                        pt.get(1..).unwrap_or_default(),
-                                        call_fn_name.as_deref(),
-                                    );
-                                }
-                                return self.check_lambda_with_types(a, pt);
+                                    .flatten();
+                                let inline = ordinary_this_member_lambda_shape
+                                    .as_ref()
+                                    .is_some_and(|shape| shape.inline);
+                                return self.with_lambda_mutation(inline, |checker| {
+                                    if let Some(receiver) = receiver {
+                                        checker.check_lambda_with_receiver_labeled(
+                                            a,
+                                            receiver,
+                                            pt.get(1..).unwrap_or_default(),
+                                            call_fn_name.as_deref(),
+                                        )
+                                    } else {
+                                        checker.check_lambda_with_types(a, &pt)
+                                    }
+                                });
                             }
                         }
                         if let Some(ref pts) = this_member_lambda_pts {

@@ -165,6 +165,79 @@ fun box(): String {\n\
     run_ok(src, "InlineLambdaNonlocalReturnFromWhen");
 }
 
+// --- inline MEMBER lambdas preserve non-local return semantics -----------------------------------
+
+#[test]
+fn inline_member_lambda_nonlocal_return() {
+    let src = "class Gate {\n\
+    inline fun <T> pass(value: T, action: () -> T?): T? = if (value == null) null else action()\n\
+    fun choose(stop: Boolean): String? = pass(\"OK\") {\n\
+        if (stop) return null\n\
+        \"OK\"\n\
+    }\n\
+    inline fun touch(action: () -> Unit) { action() }\n\
+    fun mutate(): Int {\n\
+        var count = 0\n\
+        touch { count += 1 }\n\
+        return count\n\
+    }\n\
+}\n\
+class Caller(val prefix: String) {\n\
+    fun choose(stop: Boolean): String? {\n\
+        val value = \"caller\"\n\
+        return Gate().pass(\"callee\") {\n\
+            if (stop) return null\n\
+            prefix + value\n\
+        }\n\
+    }\n\
+}\n\
+fun outside(stop: Boolean): String? = Gate().pass(\"OK\") {\n\
+    if (stop) return null\n\
+    \"OK\"\n\
+}\n\
+fun box(): String {\n\
+    val gate = Gate()\n\
+    if (gate.choose(true) != null || gate.choose(false) != \"OK\") return \"member\"\n\
+    if (gate.mutate() != 1) return \"capture\"\n\
+    if (outside(true) != null || outside(false) != \"OK\") return \"outside\"\n\
+    val caller = Caller(\"P\")\n\
+    if (caller.choose(true) != null || caller.choose(false) != \"Pcaller\") return \"scope\"\n\
+    return \"OK\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "InlineMemberLambdaNonlocalReturn");
+}
+
+#[test]
+fn inline_member_generic_class_substitution() {
+    let src = "class Envelope<T>(val item: T) {\n\
+    inline fun <R> transform(block: (T) -> R): R = block(item)\n\
+}\n\
+fun box(): String {\n\
+    val envelope: Envelope<String> = Envelope(\"OK\")\n\
+    return if (envelope.transform { it.length } == 2) \"OK\" else \"FAIL\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "InlineMemberGenericClassSubstitution");
+}
+
+#[test]
+fn inline_member_nested_object_diverging_initializer() {
+    let src = "interface Action { fun run() }\n\
+class Container {\n\
+    inline fun execute(crossinline block: () -> Any) =\n\
+        object : Action {\n\
+            override fun run() { block() }\n\
+            val unreachable: Int = throw IllegalStateException()\n\
+        }.run()\n\
+}\n\
+fun box(): String = try {\n\
+    Container().execute {}\n\
+    \"FAIL\"\n\
+} catch (_: IllegalStateException) {\n\
+    \"OK\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "InlineMemberNestedObjectDivergingInitializer");
+}
+
 // --- inline lambda containing a throw -------------------------------------------------------------
 
 #[test]
