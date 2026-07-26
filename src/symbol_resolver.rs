@@ -1993,13 +1993,17 @@ fn platform_subtype(lib: &dyn SemanticPlatform, sub: Ty, sup: Ty) -> bool {
     )
 }
 
-/// Whether `arg` fits `param` after both are reduced to target ABI identity. The shared subtype
-/// relation handles identity plus reference widening through the symbol source.
-fn abi_arg_subtype_of_param(lib: &dyn SemanticPlatform, arg: Ty, param: Ty) -> bool {
+fn abi_arg_assignable_to_param(lib: &dyn SemanticPlatform, arg: Ty, param: Ty) -> bool {
+    let arg = lib.library_value_form(arg);
+    let param = lib.library_value_form(param);
+    platform_arg_assignable(lib, &param, &arg)
+}
+
+fn abi_param_subtype(lib: &dyn SemanticPlatform, sub: Ty, sup: Ty) -> bool {
     platform_subtype(
         lib,
-        lib.library_value_form(arg),
-        lib.library_value_form(param),
+        lib.library_value_form(sub),
+        lib.library_value_form(sup),
     )
 }
 
@@ -2027,7 +2031,7 @@ fn resolve_constructor_name(
         "resolve_constructor {internal} ctors={:?} args={args:?}",
         t.constructors.iter().map(|m| &m.params).collect::<Vec<_>>()
     );
-    if let Some(m) = t.ctor(args) {
+    if let Some(m) = t.constructors.iter().find(|m| m.params == args) {
         return Some(m.clone());
     }
     // A constructor PARAMETER of value-class type erases to its underlying in the JVM `<init>` descriptor
@@ -2036,7 +2040,7 @@ fn resolve_constructor_name(
     // argument erased to its underlying, mirroring the ABI the descriptor-read `ctor` params already carry.
     let erased = value_erased_args(lib, args);
     if erased != args {
-        if let Some(m) = t.ctor(&erased) {
+        if let Some(m) = t.constructors.iter().find(|m| m.params == erased) {
             crate::trace_compiler!(
                 "value_classes",
                 "resolve_constructor {internal} matched via value-class-erased args {args:?} -> {erased:?}"
@@ -2061,25 +2065,32 @@ fn resolve_constructor_name(
             return Some(m.clone());
         }
     }
-    if let Some(m) = t.constructors.iter().find(|m| {
-        m.params.len() == args.len()
-            && m.params
-                .iter()
-                .zip(args)
-                .all(|(p, a)| abi_arg_subtype_of_param(lib, *a, *p))
-    }) {
-        let mode = abi_args
-            .as_ref()
-            .map_or("nominal-subtype", |_| "abi-subtype");
-        crate::trace_compiler!(
-            "value_classes",
-            "resolve_constructor {internal} matched via {mode} args {args:?}"
-        );
-        return Some(m.clone());
+    match unique_most_specific(
+        t.constructors
+            .iter()
+            .filter(|m| {
+                m.params.len() == args.len()
+                    && m.params
+                        .iter()
+                        .zip(args)
+                        .all(|(p, a)| abi_arg_assignable_to_param(lib, *a, *p))
+            })
+            .map(|m| (m.params.clone(), m)),
+        |_, left, right| abi_param_subtype(lib, left, right),
+    ) {
+        CandidateSelection::Selected(m) => {
+            crate::trace_compiler!(
+                "value_classes",
+                "resolve_constructor {internal} matched assignable args {args:?}"
+            );
+            return Some(m.clone());
+        }
+        CandidateSelection::Ambiguous => return None,
+        CandidateSelection::None => {}
     }
     // A classpath `@JvmInline value class` exposes only a PRIVATE `<init>` (its public surface is the
-    // static `box-impl`/`constructor-impl`), so `ctor` finds nothing. Construction is `X(u)` over the
-    // single underlying value `u`; synthesize that constructor so the call type-checks. The
+    // static `box-impl`/`constructor-impl`). Construction is `X(u)` over the single underlying value
+    // `u`; synthesize that constructor so the call type-checks. The
     // value-classes lowering pass realizes it as the unboxed underlying / `constructor-impl`.
     if let Some(underlying) = t.value_underlying {
         // `X(u)` over the single underlying value — reference (`RoleId(String)`) or scalar
@@ -2246,13 +2257,11 @@ fn resolve_synthetic_constructor_name(
         if !has_mask && erased.len() != real_params.len() {
             continue;
         }
-        // A reference argument may be a NOMINAL SUBTYPE of its parameter (`Outer(id: Vid, a: A, b: B)`
-        // constructed with `A.X(…)`/`B.Y(…)`, sealed subclasses) — the same widening `resolve_constructor`
-        // allows for a plain constructor, composed with the value-class-erased synthetic-marker ctor.
+        // Apply the ordinary constructor's ABI assignability after value-class erasure.
         if !erased
             .iter()
             .zip(real_params)
-            .all(|(a, p)| *p == Ty::obj("kotlin/Any") || abi_arg_subtype_of_param(lib, *a, *p))
+            .all(|(a, p)| *p == Ty::obj("kotlin/Any") || abi_arg_assignable_to_param(lib, *a, *p))
         {
             continue;
         }

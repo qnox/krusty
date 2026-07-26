@@ -1033,42 +1033,6 @@ impl LibraryType {
 }
 
 impl LibraryType {
-    /// A constructor callable with `args` — exact arity, then a widening pass that erases each
-    /// reference argument to `Any` (a JDK type may only expose the `(Object)` overload).
-    pub fn ctor(&self, args: &[Ty]) -> Option<&LibraryMember> {
-        if let Some(m) = self.constructors.iter().find(|m| m.params == *args) {
-            return Some(m);
-        }
-        // A `null` argument matches any reference parameter (exact on the other positions). Lets a
-        // constructor with a reference parameter be called with an explicit `null`
-        // (e.g. `PluginGeneratedSerialDescriptor(name, null, count)`), which the exact compare misses.
-        if let Some(m) = self.constructors.iter().find(|m| {
-            args.iter().any(|a| matches!(a, Ty::Null))
-                && m.params.len() == args.len()
-                && m.params
-                    .iter()
-                    .zip(args)
-                    .all(|(p, a)| p == a || (matches!(a, Ty::Null) && p.is_reference()))
-        }) {
-            return Some(m);
-        }
-        // A constructor of a GENERIC class has erased `Object`/`Any` parameters; a reference arg widens to
-        // `Any`, and a PRIMITIVE arg boxes to `Any` too (`Pair(1, 2)` → `Pair(Object, Object)`). Match the
-        // erased ctor with both widenings (the exact-match check above already handled primitive-param
-        // ctors like `Foo(Int)`).
-        let widened: Vec<Ty> = args
-            .iter()
-            .map(|t| {
-                if t.is_reference() || t.scalar_value_repr().is_some() {
-                    Ty::obj("kotlin/Any")
-                } else {
-                    *t
-                }
-            })
-            .collect();
-        self.constructors.iter().find(|m| m.params == widened)
-    }
-
     /// Annotation members `(name, Ty)` — the no-argument accessors of an `@interface`.
     pub fn annotation_members(&self) -> Option<Vec<(String, Ty)>> {
         if !self.is_annotation() {
