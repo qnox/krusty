@@ -1858,17 +1858,18 @@ impl<'a> Parser<'a> {
             let first = self.ident_or_error("property name");
             if self.at(TokenKind::Dot) || self.at(TokenKind::Lt) || self.at(TokenKind::Question) {
                 let span = self.tok().span;
-                // Type args on the receiver — erased, EXCEPT an `Array` element (kept in `arg` so the
-                // receiver isn't a raw `Array`; see the same handling in parse_fun).
+                // Type args on the receiver are erased from the JVM descriptor but retained in the
+                // semantic type so a generic member-extension body keeps its element/member types.
+                // `Array` stores its single element separately in `arg`.
                 let recv_targs = if self.at(TokenKind::Lt) {
                     self.parse_type_args()
                 } else {
                     Vec::new()
                 };
-                let recv_arg = if first == "Array" {
-                    recv_targs.into_iter().next().map(Box::new)
+                let (recv_arg, recv_targs) = if first == "Array" {
+                    (recv_targs.into_iter().next().map(Box::new), Vec::new())
                 } else {
-                    None
+                    (None, recv_targs)
                 };
                 let nullable = self.eat_type_nullable();
                 self.expect(TokenKind::Dot, "'.'");
@@ -1876,7 +1877,7 @@ impl<'a> Parser<'a> {
                     name: first,
                     nullable,
                     arg: recv_arg,
-                    targs: vec![],
+                    targs: recv_targs,
                     span,
                     fun_params: vec![],
                     fun_has_receiver: false,
@@ -2692,19 +2693,19 @@ impl<'a> Parser<'a> {
                 // `fun RecvType<...>?.name(...)` — extension function.
                 let span = self.tok().span;
                 let mut recv_nullable = false;
-                // Type arguments on the receiver (`fun Array<String>.f()`, `fun List<T>.g()`). Erased
-                // in JVM descriptors EXCEPT an `Array` element, which forms the array descriptor
-                // (`[Ljava/lang/String;`) and must be carried in `arg` — otherwise the receiver reads as
-                // a raw `Array` (no element).
+                // Type arguments on the receiver (`fun Array<String>.f()`, `fun List<T>.g()`). They are
+                // erased from JVM descriptors but retained in the semantic type so the extension body
+                // and call-site inference preserve generic element/member types. `Array` stores its
+                // element separately in `arg` because that element forms the array descriptor.
                 let recv_targs = if self.at(TokenKind::Lt) {
                     self.parse_type_args()
                 } else {
                     Vec::new()
                 };
-                let recv_arg = if first_name == "Array" {
-                    recv_targs.into_iter().next().map(Box::new)
+                let (recv_arg, recv_targs) = if first_name == "Array" {
+                    (recv_targs.into_iter().next().map(Box::new), Vec::new())
                 } else {
-                    None
+                    (None, recv_targs)
                 };
                 if self.eat(TokenKind::Question) {
                     recv_nullable = true;
@@ -2737,7 +2738,7 @@ impl<'a> Parser<'a> {
                     name: recv_name,
                     nullable: recv_nullable,
                     arg: recv_arg,
-                    targs: vec![],
+                    targs: recv_targs,
                     span,
                     fun_params: vec![],
                     fun_has_receiver: false,

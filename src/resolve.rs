@@ -18607,14 +18607,52 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
-                let this_member_lambda_pts = ordinary_this_member_lambda_pts.or_else(|| {
-                    this_member_ext_lambda_plan
-                        .as_ref()
-                        .map(|plan| plan.param_types.clone())
-                });
+                // A stdlib/library extension invoked without an explicit receiver inside an extension
+                // body (`Collection<T>.f() = mapNotNull { ... }`) still receives that implicit `this`.
+                // Pre-type its lambda against the nearest applicable implicit receiver exactly as the
+                // explicit `this.mapNotNull { ... }` path does. Otherwise the lambda falls through to
+                // receiver-less typing and its parameter erases to `Any`.
+                let implicit_library_ext_lambda_plan = if implicit_member_lambda_enabled
+                    && ordinary_this_member_lambda_pts.is_none()
+                    && this_member_ext_lambda_plan.is_none()
+                {
+                    self.implicit_receiver_types()
+                        .into_iter()
+                        .find_map(|receiver| {
+                            let params = self.extension_lambda_param_types(
+                                receiver,
+                                &fname,
+                                this_member_partial.as_deref().unwrap_or_default(),
+                            )?;
+                            let receivers = self.extension_lambda_receivers(
+                                receiver,
+                                &fname,
+                                this_member_partial.as_deref().unwrap_or_default(),
+                            );
+                            Some((params, receivers))
+                        })
+                } else {
+                    None
+                };
+                let this_member_lambda_pts = ordinary_this_member_lambda_pts
+                    .or_else(|| {
+                        this_member_ext_lambda_plan
+                            .as_ref()
+                            .map(|plan| plan.param_types.clone())
+                    })
+                    .or_else(|| {
+                        implicit_library_ext_lambda_plan
+                            .as_ref()
+                            .map(|(params, _)| params.clone())
+                    });
                 let this_member_lambda_recvs = this_member_ext_lambda_plan
                     .as_ref()
-                    .map(|plan| plan.receivers.clone());
+                    .map(|plan| plan.receivers.clone())
+                    .or_else(|| {
+                        implicit_library_ext_lambda_plan
+                            .as_ref()
+                            .and_then(|(_, receivers)| receivers.clone())
+                    });
                 // A same-file class CONSTRUCTOR call (`C({ x, y -> x + y })`, an `enum` entry
                 // `plus({ x, y -> … })`): a lambda passed to a function-typed primary-ctor parameter
                 // binds its parameter types from that parameter's `Ty::Fun`, exactly like a top-level

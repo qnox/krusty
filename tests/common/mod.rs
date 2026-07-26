@@ -1331,25 +1331,41 @@ pub fn run_box_against_with_reflect(tag: &str, lib_src: &str, main: &str) -> Opt
 /// lowering is an orthogonal, not-yet-implemented feature. `None` (→ skip) when the toolchain is absent.
 #[allow(dead_code)]
 pub fn checker_diags_against(tag: &str, lib_src: &str, main: &str) -> Option<Vec<String>> {
-    use krusty::diag::DiagSink;
-    use krusty::frontend::{check_file, collect_signatures_with_cp};
     let libout = compile_lib(tag, lib_src)?;
     let stdlib = stdlib_jar()?;
-    let mut cp_paths = vec![libout, stdlib];
+    let mut classpath = vec![libout, stdlib];
     if let Some(jdk) = jdk_modules() {
-        cp_paths.push(jdk);
+        classpath.push(jdk);
     }
+    Some(checker_diags_with_classpath(main, classpath))
+}
+
+/// Check `main` against the Kotlin stdlib (and JDK when available), without lowering or emitting.
+/// This is the shared harness for semantic/LSP regressions whose backend support is orthogonal.
+#[allow(dead_code)]
+pub fn checker_diags_with_stdlib(main: &str) -> Option<Vec<String>> {
+    let stdlib = stdlib_jar()?;
+    let mut classpath = vec![stdlib];
+    if let Some(jdk) = jdk_modules() {
+        classpath.push(jdk);
+    }
+    Some(checker_diags_with_classpath(main, classpath))
+}
+
+fn checker_diags_with_classpath(main: &str, classpath: Vec<PathBuf>) -> Vec<String> {
+    use krusty::diag::DiagSink;
+    use krusty::frontend::{check_file, collect_signatures_with_cp};
     let mut diags = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(main);
     let toks = krusty::lexer::lex(main, &mut diags);
     let files = vec![krusty::parser::parse_with_features(
         main, &toks, &mut diags, &features,
     )];
-    let cp = std::rc::Rc::new(Classpath::new(cp_paths));
+    let cp = std::rc::Rc::new(Classpath::new(classpath));
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
     let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
     let _ = check_file(&files[0], &mut syms, &mut diags);
-    Some(diags.diags.iter().map(|m| m.msg.clone()).collect())
+    diags.diags.iter().map(|m| m.msg.clone()).collect()
 }
 
 /// Whether both the JVM toolchain AND the box corpus are provisioned (an e2e that runs a corpus case
