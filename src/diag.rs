@@ -21,7 +21,10 @@ pub enum Severity {
 
 #[derive(Clone, Debug)]
 pub struct Diagnostic {
+    /// Compiler-facing source range.
     pub span: Span,
+    /// Optional editor-facing source range.
+    pub editor_span: Option<Span>,
     pub severity: Severity,
     pub msg: String,
     /// Index of the source file this diagnostic belongs to (into the driver's `files`/`sources`
@@ -60,6 +63,22 @@ impl DiagSink {
     pub fn error(&mut self, span: Span, msg: impl Into<String>) {
         self.diags.push(Diagnostic {
             span,
+            editor_span: None,
+            severity: Severity::Error,
+            msg: msg.into(),
+            file: self.current_file,
+        });
+    }
+
+    pub fn error_with_editor_span(
+        &mut self,
+        span: Span,
+        editor_span: Span,
+        msg: impl Into<String>,
+    ) {
+        self.diags.push(Diagnostic {
+            span,
+            editor_span: Some(editor_span),
             severity: Severity::Error,
             msg: msg.into(),
             file: self.current_file,

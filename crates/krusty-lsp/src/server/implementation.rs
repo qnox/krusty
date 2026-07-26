@@ -295,6 +295,7 @@ impl DiagnosticIndex {
         );
         let mut message_ids = HashMap::<String, u32>::new();
         for diagnostic in diagnostics {
+            let span = diagnostic.editor_span.unwrap_or(diagnostic.span);
             let message = lsp_diagnostic_message(diagnostic.msg);
             let existing_message_id = message_ids.get(&message).copied();
             let retained_bytes = if existing_message_id.is_none() {
@@ -328,11 +329,7 @@ impl DiagnosticIndex {
                 Severity::Error => 0,
                 Severity::Warning => DIAGNOSTIC_WARNING_BIT,
             };
-            pending.push([
-                diagnostic.span.lo,
-                diagnostic.span.hi.max(diagnostic.span.lo),
-                severity | message_id,
-            ]);
+            pending.push([span.lo, span.hi.max(span.lo), severity | message_id]);
             budget.entries += 1;
             budget.text_bytes += retained_bytes;
             budget.wire_bytes += wire_bytes;
@@ -553,6 +550,7 @@ where
                 open.diagnostics = DiagnosticIndex::from_diagnostics(
                     vec![Diagnostic {
                         span: krusty::diag::Span::new(0, 0),
+                        editor_span: None,
                         severity: Severity::Error,
                         msg: "analysis worker returned an incomplete source set".to_string(),
                         file: 0,
@@ -1911,6 +1909,7 @@ fn analysis_limit_diagnostics() -> DiagnosticIndex {
     DiagnosticIndex::from_diagnostics(
         vec![Diagnostic {
             span: krusty::diag::Span::new(0, 0),
+            editor_span: None,
             severity: Severity::Error,
             msg: format!(
                 "workspace analysis limit exceeded (maximum {} MiB across {} open documents)",
@@ -2340,12 +2339,14 @@ mod tests {
         let diagnostics = vec![
             Diagnostic {
                 span: krusty::diag::Span::new(0, 1),
+                editor_span: None,
                 severity: Severity::Error,
                 msg: "same message".to_string(),
                 file: 0,
             },
             Diagnostic {
                 span: krusty::diag::Span::new(2, 3),
+                editor_span: None,
                 severity: Severity::Warning,
                 msg: "same message".to_string(),
                 file: 0,
@@ -2387,6 +2388,7 @@ mod tests {
 
         let diagnostic = || Diagnostic {
             span: krusty::diag::Span::new(0, 0),
+            editor_span: None,
             severity: Severity::Error,
             msg: "bounded".to_string(),
             file: 0,
@@ -2431,6 +2433,7 @@ mod tests {
         let diagnostics = (0..4096)
             .map(|_| Diagnostic {
                 span: krusty::diag::Span::new(emoji, emoji + 4),
+                editor_span: None,
                 severity: Severity::Error,
                 msg: "late source diagnostic".to_string(),
                 file: 0,
@@ -2445,6 +2448,7 @@ mod tests {
         let repeated = (0..100)
             .map(|_| Diagnostic {
                 span: krusty::diag::Span::new(0, 0),
+                editor_span: None,
                 severity: Severity::Warning,
                 msg: large_message.clone(),
                 file: 0,
