@@ -5702,7 +5702,7 @@ pub struct TypeInfo {
     pub synthetic_member_calls: HashMap<(ExprId, String), crate::libraries::LibraryMember>,
     /// Bound classpath/library property references selected while checking, keyed by the
     /// `Expr::CallableRef` expression. Lowering emits the recorded getter instead of re-resolving.
-    pub bound_property_refs: HashMap<ExprId, crate::symbol_resolver::BoundPropertyRef>,
+    pub bound_property_refs: HashMap<ExprId, crate::symbol_resolver::ResolvedPropertyRef>,
     /// Bound classpath/library member references selected while checking, keyed by the
     /// `Expr::CallableRef` expression. Lowering emits the recorded virtual target instead of re-resolving.
     pub bound_member_refs: HashMap<ExprId, crate::libraries::LibraryMember>,
@@ -6078,7 +6078,7 @@ impl TypeInfo {
     pub fn bound_property_ref(
         &self,
         e: ExprId,
-    ) -> Option<&crate::symbol_resolver::BoundPropertyRef> {
+    ) -> Option<&crate::symbol_resolver::ResolvedPropertyRef> {
         self.bound_property_refs.get(&e)
     }
     /// The resolved classpath/library member target for a bound method reference expression.
@@ -6155,6 +6155,13 @@ pub enum ExprLowering {
     /// A classpath top-level function reference (`::foo`) resolved by the checker. Lowering reads the
     /// callable instead of resolving the reference again.
     ClasspathTopLevelFunctionRef(crate::libraries::LibraryCallable),
+    /// An unbound classpath member-function reference.
+    ClasspathUnboundMemberRef {
+        receiver: Ty,
+        member: Box<crate::libraries::LibraryMember>,
+    },
+    /// An unbound classpath member or extension-property reference.
+    ClasspathUnboundPropertyRef(Box<crate::symbol_resolver::ResolvedPropertyRef>),
     /// An unqualified function reference `::foo` where `foo` is imported from a SAME-FILE `object`
     /// (`import Host.foo`) — a BOUND reference to that object's singleton member, lowered exactly like
     /// `Host::foo` (capture `Host.INSTANCE`, invoke the member).
@@ -7784,7 +7791,7 @@ struct Checker<'a> {
     resolved_destructure_components: HashMap<(StmtId, usize), DestructureComponentTarget>,
     iterator_protocols: HashMap<ExprId, IteratorProtocolTarget>,
     synthetic_member_calls: HashMap<(ExprId, String), crate::libraries::LibraryMember>,
-    bound_property_refs: HashMap<ExprId, crate::symbol_resolver::BoundPropertyRef>,
+    bound_property_refs: HashMap<ExprId, crate::symbol_resolver::ResolvedPropertyRef>,
     bound_member_refs: HashMap<ExprId, crate::libraries::LibraryMember>,
     property_setters: HashMap<StmtId, crate::libraries::LibraryCallable>,
     resolved_constructors: HashMap<ExprId, ResolvedConstructor>,
@@ -8461,11 +8468,21 @@ impl<'a> Checker<'a> {
         &self,
         recv: Ty,
         name: &str,
-    ) -> Option<crate::symbol_resolver::BoundPropertyRef> {
+    ) -> Option<crate::symbol_resolver::ResolvedPropertyRef> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
             .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
             .and_then(Symbol::property_ref)
+    }
+    fn resolve_extension_property_ref(
+        &self,
+        recv: Ty,
+        name: &str,
+    ) -> Option<crate::symbol_resolver::ResolvedPropertyRef> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
+            .and_then(Symbol::extension_property_ref)
     }
     fn resolve_instance_ref(
         &self,
@@ -13564,6 +13581,55 @@ impl<'a> Checker<'a> {
                                     }
                                 }
                             }
+                            if let Some(recv_ty) = self.class_literal_unbound_ty(&rn) {
+                                if let Some(property) = self.resolve_property_ref(recv_ty, &name) {
+                                    if let Some(ty) =
+                                        self.property_ref_ty(1, property.setter.is_some())
+                                    {
+                                        self.expr_lowers.insert(
+                                            e,
+                                            ExprLowering::ClasspathUnboundPropertyRef(Box::new(
+                                                property,
+                                            )),
+                                        );
+                                        return self.set(e, ty);
+                                    }
+                                }
+                                if let Some(member) = self.resolve_instance_ref(recv_ty, &name) {
+                                    if !member.suspend && member.ret != Ty::Nothing {
+                                        let mut params = vec![recv_ty];
+                                        params.extend(member.params.iter().copied());
+                                        self.expr_lowers.insert(
+                                            e,
+                                            ExprLowering::ClasspathUnboundMemberRef {
+                                                receiver: recv_ty,
+                                                member: Box::new(member.clone()),
+                                            },
+                                        );
+                                        return self.set(e, Ty::fun(params, member.ret));
+                                    }
+                                }
+                                if let Some((_, is_var)) = self.syms.ext_prop(recv_ty, &name) {
+                                    if let Some(ty) = self.property_ref_ty(1, is_var) {
+                                        return self.set(e, ty);
+                                    }
+                                }
+                                if let Some(property) =
+                                    self.resolve_extension_property_ref(recv_ty, &name)
+                                {
+                                    if let Some(ty) =
+                                        self.property_ref_ty(1, property.setter.is_some())
+                                    {
+                                        self.expr_lowers.insert(
+                                            e,
+                                            ExprLowering::ClasspathUnboundPropertyRef(Box::new(
+                                                property,
+                                            )),
+                                        );
+                                        return self.set(e, ty);
+                                    }
+                                }
+                            }
                         }
                         // Object/singleton method reference `O::m` → BOUND to the singleton instance,
                         // so its arity is the method's own args (the receiver is captured, not a param).
@@ -13661,7 +13727,7 @@ impl<'a> Checker<'a> {
                         // `get()` yields the value — resolve it (the resolver decides property-vs-method
                         // and emittability) BEFORE the plain-function path, so `.get()`/`.name` resolve.
                         if let Some(prop_ref) = self.resolve_property_ref(rty, &name) {
-                            if let Some(ty) = self.property_ref_ty(0, false) {
+                            if let Some(ty) = self.property_ref_ty(0, prop_ref.setter.is_some()) {
                                 self.bound_property_refs.insert(e, prop_ref);
                                 return self.set(e, ty);
                             }

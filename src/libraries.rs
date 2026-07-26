@@ -148,6 +148,11 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         ty.fun_arity().map(usize::from)
     }
 
+    /// Whether a member has a physical target suitable for a callable reference.
+    fn supports_member_reference(&self, _member: &LibraryMember) -> bool {
+        true
+    }
+
     /// The platform/library type used for a property reference with the given arity and mutability.
     /// Resolver needs this type so direct property-reference APIs (`get`, `name`) keep working, but the
     /// actual class name is provider-owned.
@@ -874,14 +879,17 @@ impl PropertyInfo {
     }
 }
 
-/// The callable half of a [`ResolvedSymbols`]: a name is functions XOR a property, never both (a `fun`
-/// and a `val` of the same name are a redeclaration error), or neither.
+/// The callable half of a [`ResolvedSymbols`].
 #[derive(Clone, Default)]
 pub enum Callables {
     #[default]
     None,
     Functions(FunctionSet),
     Properties(PropertySet),
+    Both {
+        functions: FunctionSet,
+        properties: PropertySet,
+    },
 }
 
 /// What a fully-qualified name resolves to in a [`crate::symbol_source::SymbolSource`] — the

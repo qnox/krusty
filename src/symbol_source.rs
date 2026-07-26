@@ -194,15 +194,24 @@ impl SymbolSource for CompositeSource<'_> {
                     match &r.callables {
                         Callables::Functions(f) => fns.extend(f.overloads.iter().cloned()),
                         Callables::Properties(p) => props.extend(p.overloads.iter().cloned()),
+                        Callables::Both {
+                            functions,
+                            properties,
+                        } => {
+                            fns.extend(functions.overloads.iter().cloned());
+                            props.extend(properties.overloads.iter().cloned());
+                        }
                         Callables::None => {}
                     }
                 }
-                let callables = if !fns.is_empty() {
-                    Callables::Functions(FunctionSet { overloads: fns })
-                } else if !props.is_empty() {
-                    Callables::Properties(PropertySet { overloads: props })
-                } else {
-                    Callables::None
+                let callables = match (fns.is_empty(), props.is_empty()) {
+                    (false, false) => Callables::Both {
+                        functions: FunctionSet { overloads: fns },
+                        properties: PropertySet { overloads: props },
+                    },
+                    (false, true) => Callables::Functions(FunctionSet { overloads: fns }),
+                    (true, false) => Callables::Properties(PropertySet { overloads: props }),
+                    (true, true) => Callables::None,
                 };
                 std::rc::Rc::new(ResolvedSymbols {
                     classifier,

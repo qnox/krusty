@@ -174,6 +174,8 @@ mod classpath_synthetic_ctor_e2e;
 mod classpath_type_ref_e2e;
 #[path = "classpath_typealias_e2e.rs"]
 mod classpath_typealias_e2e;
+#[path = "classpath_unbound_callable_ref_e2e.rs"]
+mod classpath_unbound_callable_ref_e2e;
 #[path = "classpath_value_class_default_e2e.rs"]
 mod classpath_value_class_default_e2e;
 #[path = "classpath_value_class_member_e2e.rs"]
