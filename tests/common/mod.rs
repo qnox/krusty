@@ -303,6 +303,7 @@ pub fn compile_in_process_files(
         .iter()
         .map(|(stem, _)| (*stem).to_string())
         .collect::<Vec<_>>();
+    krusty::jvm::prepare_module_symbols(&files, &stems, &mut symbols);
     let backend = krusty::jvm::JvmBackend::new(cp);
     let outputs =
         krusty::compiler::compile(&files, &stems, &mut symbols, &backend, "main", &mut diags);

@@ -136,12 +136,14 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
         let facade = file_class_name(stem, file.package.as_deref());
         for &d in &file.decls {
             match file.decl(d) {
-                Decl::Fun(f) if !f.is_inline => fns.push((
-                    i as u32,
-                    d.0,
-                    f.receiver.is_none().then(|| f.name.clone()),
-                    facade.clone(),
-                )),
+                Decl::Fun(f) if !f.is_inline || f.has_callable_inline_extension_body() => {
+                    fns.push((
+                        i as u32,
+                        d.0,
+                        f.receiver.is_none().then(|| f.name.clone()),
+                        facade.clone(),
+                    ))
+                }
                 Decl::Property(p) if p.receiver.is_none() => {
                     props.push((p.name.clone(), facade.clone()))
                 }
@@ -458,7 +460,9 @@ mod tests {
         let mut diags = DiagSink::new();
         let files = vec![
             parse_source_with_detected_features(
-                "package p\nfun helper(): String = \"OK\"\nval answer: Int = 42",
+                "package p\nfun helper(): String = \"OK\"\n\
+                 inline operator fun String.unaryMinus(): String = this\n\
+                 val answer: Int = 42",
                 &mut diags,
             ),
             parse_source_with_detected_features(
@@ -480,6 +484,24 @@ mod tests {
             syms.prop_facades
                 .get("answer")
                 .map(|(facade, _, _, _)| facade.render()),
+            Some("p/AKt".to_string())
+        );
+        let extension = files[0]
+            .decls
+            .iter()
+            .copied()
+            .find(|&declaration| {
+                matches!(
+                    files[0].decl(declaration),
+                    Decl::Fun(function)
+                        if function.name == "unaryMinus" && function.receiver.is_some()
+                )
+            })
+            .expect("source extension declaration");
+        assert_eq!(
+            syms.fn_facades_by_decl
+                .get(&(0, extension.0))
+                .map(|facade| facade.render()),
             Some("p/AKt".to_string())
         );
     }

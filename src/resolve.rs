@@ -50,14 +50,18 @@ pub struct Signature {
     /// True for an `inline fun` — the lowerer expands its body at each call site (so a lambda
     /// argument may capture a mutable local), instead of forming a closure.
     pub is_inline: bool,
+    /// Whether the source declaration has the `operator` modifier.
+    pub is_operator: bool,
+    /// Whether the source declaration has the `override` modifier.
+    pub is_override: bool,
+    /// Source visibility.
+    pub visibility: Visibility,
     /// True for a `final` member (a non-`open` member, or an explicit `final override`). A subclass —
     /// including a `data class` synthesizing `equals`/`hashCode`/`toString` — cannot override it.
     pub is_final: bool,
     /// True for a `suspend fun`. Flows to `FnFlags.suspend` so the resolver reports suspend-ness
     /// uniformly for same-file and classpath callees; the coroutine pass keys off it.
     pub is_suspend: bool,
-    /// Kotlin source visibility for this exact overload.
-    pub visibility: Visibility,
     /// Number of leading context parameters in `params`. Ordinary functions leave this at 0.
     pub context_count: usize,
     /// Source declaration id for a top-level function in the current compilation, when this signature
@@ -991,25 +995,62 @@ impl SymbolTable {
         name: &str,
         args: &[Ty],
     ) -> Option<(TypeName, Signature)> {
-        let mut owners = Vec::new();
-        let mut signatures = Vec::new();
+        self.method_matching_in_hierarchy(internal, name, args, false)
+    }
+
+    /// Select a source operator across class and interface hierarchies.
+    pub fn operator_method_matching_with_owner_name(
+        &self,
+        internal: TypeName,
+        name: &str,
+        args: &[Ty],
+    ) -> Option<(TypeName, Signature)> {
+        self.method_matching_in_hierarchy(internal, name, args, true)
+    }
+
+    fn method_matching_in_hierarchy(
+        &self,
+        internal: TypeName,
+        name: &str,
+        args: &[Ty],
+        include_interfaces: bool,
+    ) -> Option<(TypeName, Signature)> {
+        let mut owners = Vec::<TypeName>::new();
+        let mut signatures = Vec::<Signature>::new();
         let mut seen_owners = std::collections::HashSet::new();
-        let mut seen_params = std::collections::HashSet::new();
-        let mut current = Some(internal);
-        while let Some(owner) = current {
+        let mut seen_params = HashMap::<Vec<Ty>, usize>::new();
+        let mut pending = vec![internal];
+        while let Some(owner) = pending.pop() {
             if !seen_owners.insert(owner) {
-                break;
+                continue;
             }
-            let class = self.class_by_type_name(owner)?;
+            let Some(class) = self.class_by_type_name(owner) else {
+                if include_interfaces {
+                    continue;
+                }
+                return None;
+            };
             for signature in class.methods_named(name) {
                 // An override has the same JVM parameter signature as its parent. Keep the
-                // most-derived declaration while retaining genuinely inherited overloads.
-                if seen_params.insert(signature.params.clone()) {
+                // most-derived declaration while retaining inherited overloads.
+                if let Some(&derived) = seen_params.get(&signature.params) {
+                    if signatures[derived].is_override && signature.is_operator {
+                        signatures[derived].is_operator = true;
+                    }
+                } else {
+                    let index = signatures.len();
+                    seen_params.insert(signature.params.clone(), index);
                     owners.push(class.internal_name());
                     signatures.push(signature.clone());
                 }
             }
-            current = class.super_internal;
+            if include_interfaces {
+                let interfaces = class.interfaces.iter_ids().collect::<Vec<_>>();
+                pending.extend(interfaces.into_iter().rev());
+            }
+            if let Some(superclass) = class.super_internal {
+                pending.push(superclass);
+            }
         }
         let selected = pick_overload(&signatures, args)?;
         let owner = owners[selected];
@@ -2347,9 +2388,11 @@ pub fn collect_signatures_with_cp(
                         lambda_param_types,
                         lambda_recv: f.params.iter().map(|p| p.ty.fun_has_receiver).collect(),
                         is_inline: f.is_inline,
+                        is_operator: f.is_operator,
+                        is_override: f.is_override,
+                        visibility: f.visibility,
                         is_final: f.is_final,
                         is_suspend: f.is_suspend,
-                        visibility: f.visibility,
                         context_count: f.context_count,
                         source_decl: Some(d),
                         source_file: Some(i as u32),
@@ -2424,6 +2467,7 @@ pub fn collect_signatures_with_cp(
                         {
                             diags.error(f.span, "krusty: an operator extension on a nullable reference receiver is not supported".to_string());
                         } else {
+                            // Exact opAssign handoff supports same-arity overloads.
                             let overloads = table
                                 .ext_funs
                                 .entry((recv_ty.erased_recv(), f.name.clone()))
@@ -3032,9 +3076,11 @@ pub fn collect_signatures_with_cp(
                                     lambda_param_types: Vec::new(),
                                     lambda_recv: Vec::new(),
                                     is_inline: false,
+                                    is_operator: true,
+                                    is_override: false,
+                                    visibility: Visibility::Public,
                                     is_final: true,
                                     is_suspend: false,
-                                    visibility: Visibility::Public,
                                     context_count: 0,
                                     source_decl: None,
                                     source_file: None,
@@ -3057,9 +3103,11 @@ pub fn collect_signatures_with_cp(
                                 lambda_param_types: Vec::new(),
                                 lambda_recv: Vec::new(),
                                 is_inline: false,
+                                is_operator: false,
+                                is_override: false,
+                                visibility: Visibility::Public,
                                 is_final: true,
                                 is_suspend: false,
-                                visibility: Visibility::Public,
                                 context_count: 0,
                                 source_decl: None,
                                 source_file: None,
@@ -3221,9 +3269,11 @@ pub fn collect_signatures_with_cp(
                                 lambda_param_types: vec![],
                                 lambda_recv: vec![],
                                 is_inline: false,
+                                is_operator: false,
+                                is_override: false,
+                                visibility: Visibility::Public,
                                 is_final: true,
                                 is_suspend: false,
-                                visibility: Visibility::Public,
                                 context_count: 0,
                                 source_decl: None,
                                 source_file: None,
@@ -5521,9 +5571,11 @@ fn member_signature(
         lambda_param_types,
         lambda_recv: m.params.iter().map(|p| p.ty.fun_has_receiver).collect(),
         is_inline: false,
+        is_operator: m.is_operator,
+        is_override: m.is_override,
+        visibility: m.visibility,
         is_final: m.is_final,
         is_suspend: m.is_suspend,
-        visibility: m.visibility,
         context_count: 0,
         source_decl: None,
         source_file: None,
@@ -5773,6 +5825,7 @@ pub enum ResolvedCall {
         name: String,
         params: Vec<Ty>,
         ret: Ty,
+        owner: Option<TypeName>,
     },
     /// A same-module receiver-less top-level call selected by the checker. The lowerer maps this
     /// semantic target to the current file's lifted IR function or sibling facade; it must not
@@ -5786,6 +5839,25 @@ pub enum ResolvedCall {
     /// lookup), so the checker resolves and records it and the lowerer only READS it — emits
     /// `invokevirtual`. Distinct from [`Self::Member`] because it carries a raw `LibraryCallable`.
     LambdaReturnMember(crate::libraries::LibraryCallable),
+}
+
+impl ResolvedCall {
+    fn is_extension(&self) -> bool {
+        matches!(self, Self::Extension(_) | Self::ModuleExtension { .. })
+    }
+
+    fn owner(&self) -> Option<TypeName> {
+        match self {
+            Self::Member(resolved) => resolved.member.owner,
+            Self::TopLevel(callable)
+            | Self::Extension(callable)
+            | Self::LambdaReturnMember(callable) => Some(callable.owner_type()),
+            Self::Companion(member) => member.owner,
+            Self::ModuleMember { owner, .. } => Some(*owner),
+            Self::ModuleExtension { owner, .. } => *owner,
+            Self::ModuleTopLevel(_) | Self::LocalFunction(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -5905,6 +5977,11 @@ pub enum SyntheticOperatorCall {
     Contains,
     Set,
     Put,
+    UnaryMinus,
+    UnaryPlus,
+    Not,
+    Inc,
+    Dec,
 }
 
 impl SyntheticOperatorCall {
@@ -5914,6 +5991,11 @@ impl SyntheticOperatorCall {
             "contains" => Self::Contains,
             "set" => Self::Set,
             "put" => Self::Put,
+            "unaryMinus" => Self::UnaryMinus,
+            "unaryPlus" => Self::UnaryPlus,
+            "not" => Self::Not,
+            "inc" => Self::Inc,
+            "dec" => Self::Dec,
             _ => return None,
         })
     }
@@ -5979,6 +6061,16 @@ impl TypeInfo {
                     | ResolvedCall::LambdaReturnMember(_)
             )
         )
+    }
+
+    pub fn resolved_call_is_extension(&self, e: ExprId) -> bool {
+        self.resolved_calls
+            .get(&e)
+            .is_some_and(ResolvedCall::is_extension)
+    }
+
+    pub fn resolved_call_owner(&self, e: ExprId) -> Option<TypeName> {
+        self.resolved_calls.get(&e).and_then(ResolvedCall::owner)
     }
 
     /// Return the selected source-module member signature.
@@ -6051,6 +6143,22 @@ impl TypeInfo {
         self.resolved_stmt_operator_calls
             .get(&(s, SyntheticOperatorCall::from_name(name)?))
     }
+    pub fn resolved_operator_call_is_extension(&self, e: ExprId, name: &str) -> bool {
+        self.resolved_operator_call(e, name)
+            .is_some_and(ResolvedCall::is_extension)
+    }
+    pub fn resolved_stmt_operator_call_is_extension(&self, s: StmtId, name: &str) -> bool {
+        self.resolved_stmt_operator_call(s, name)
+            .is_some_and(ResolvedCall::is_extension)
+    }
+    pub fn resolved_operator_call_owner(&self, e: ExprId, name: &str) -> Option<TypeName> {
+        self.resolved_operator_call(e, name)
+            .and_then(ResolvedCall::owner)
+    }
+    pub fn resolved_stmt_operator_call_owner(&self, s: StmtId, name: &str) -> Option<TypeName> {
+        self.resolved_stmt_operator_call(s, name)
+            .and_then(ResolvedCall::owner)
+    }
     pub fn resolved_index_store_get_return(&self, s: StmtId) -> Option<Ty> {
         self.resolved_index_store_get_returns.get(&s).copied()
     }
@@ -6112,8 +6220,7 @@ impl TypeInfo {
     pub fn resolved_library_enum_entry_owner(&self, e: ExprId) -> Option<TypeName> {
         self.resolved_library_enum_entries.get(&e).copied()
     }
-    /// The extension callable the checker resolved for a SYNTHESIZED operator (`componentN`/`iterator`/
-    /// `plusAssign`) on the receiver expression `recv`, if any.
+    /// The extension callable the checker resolved for a synthesized protocol call.
     pub fn synthetic_ext(
         &self,
         recv: ExprId,
@@ -6320,8 +6427,7 @@ pub enum StmtLowering {
     Erased,
 }
 
-/// Checked dispatch for an in-place compound-assignment operator.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum CompoundAssignmentTarget {
     Member {
         owner: TypeName,
@@ -6333,7 +6439,7 @@ pub enum CompoundAssignmentTarget {
         parameter: Ty,
         owner: Option<TypeName>,
     },
-    LibraryExtension,
+    LibraryExtension(Box<crate::libraries::LibraryCallable>),
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -6359,13 +6465,14 @@ impl TypeInfo {
             _ => None,
         }
     }
-    pub fn compound_assignment_target(&self, stmt_id: StmtId) -> Option<CompoundAssignmentTarget> {
+    pub fn compound_assignment_target(&self, stmt_id: StmtId) -> Option<&CompoundAssignmentTarget> {
         match self.stmt_lowers.get(&stmt_id)? {
-            StmtLowering::PlusAssign(target) => Some(*target),
+            StmtLowering::PlusAssign(target) => Some(target),
             _ => None,
         }
     }
 
+    /// Whether a lambda has an implicit receiver.
     pub fn lambda_has_receiver(&self, expr_id: ExprId) -> bool {
         matches!(
             self.expr_lowers.get(&expr_id),
@@ -8591,10 +8698,33 @@ impl<'a> Checker<'a> {
         name: &str,
         arg_tys: &[Ty],
         arg_exprs: &[ExprId],
+        span: Span,
     ) -> Option<(Ty, ResolvedCall)> {
         if let Some(internal) = receiver.obj_internal() {
-            if let Some((owner, sig)) = self.syms.method_of_with_owner_name(internal, name) {
-                if sig.params.len() == arg_tys.len() {
+            if let Some((owner, sig)) = self
+                .syms
+                .operator_method_matching_with_owner_name(internal, name, arg_tys)
+            {
+                if sig.is_operator {
+                    if !self.member_accessible(sig.visibility, owner) {
+                        self.reject_if_inaccessible(sig.visibility, name, owner, span);
+                        return Some((
+                            Ty::Error,
+                            ResolvedCall::ModuleMember {
+                                receiver,
+                                owner,
+                                name: name.to_string(),
+                                params: sig.params.clone(),
+                                physical_ret: sig.ret,
+                                ret: sig.ret,
+                                interface: self
+                                    .syms
+                                    .class_by_type_name(owner)
+                                    .is_some_and(|class| class.is_interface),
+                                vararg: sig.vararg,
+                            },
+                        ));
+                    }
                     self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
                     let interface = self
                         .syms
@@ -8616,14 +8746,30 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        if let Some(sig) = self
+        let candidates = self
             .syms
             .ext_fun_overloads(receiver, name)
             .iter()
-            .find(|s| !s.vararg && s.params.len() == arg_tys.len())
+            .filter(|s| {
+                s.is_operator
+                    && !s.vararg
+                    && !(s.visibility.is_private() && s.source_file != Some(self.file_index))
+            })
             .cloned()
+            .collect::<Vec<_>>();
+        if let Some(sig) =
+            pick_overload(&candidates, arg_tys).and_then(|index| candidates.into_iter().nth(index))
         {
             self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
+            let owner = sig
+                .source_file
+                .zip(sig.source_decl)
+                .and_then(|(file, declaration)| {
+                    self.syms
+                        .fn_facades_by_decl
+                        .get(&(file, declaration.0))
+                        .copied()
+                });
             return Some((
                 sig.ret,
                 ResolvedCall::ModuleExtension {
@@ -8631,11 +8777,16 @@ impl<'a> Checker<'a> {
                     name: name.to_string(),
                     params: sig.params.clone(),
                     ret: sig.ret,
+                    owner,
                 },
             ));
         }
         self.resolve_instance_member(receiver, name, arg_tys)
             .map(|m| (m.ret, ResolvedCall::Member(m)))
+            .or_else(|| {
+                self.library_extension_callable(name, receiver, arg_tys, &[])
+                    .map(|callable| (callable.ret, ResolvedCall::Extension(callable)))
+            })
     }
     /// Resolve each context-parameter type to an in-scope source that satisfies it: the enclosing
     /// implicit receiver (the sentinel `"this"`, e.g. a `with` block's receiver) if its type is a
@@ -11879,6 +12030,15 @@ impl<'a> Checker<'a> {
                     for (i, &pt) in sig.params.iter().enumerate() {
                         self.expect_assignable(pt, its[i], self.span(indices[i]), "index");
                     }
+                    let owner =
+                        sig.source_file
+                            .zip(sig.source_decl)
+                            .and_then(|(file, declaration)| {
+                                self.syms
+                                    .fn_facades_by_decl
+                                    .get(&(file, declaration.0))
+                                    .copied()
+                            });
                     self.resolved_calls.insert(
                         e,
                         ResolvedCall::ModuleExtension {
@@ -11886,6 +12046,7 @@ impl<'a> Checker<'a> {
                             name: "get".to_string(),
                             params: sig.params.clone(),
                             ret: sig.ret,
+                            owner,
                         },
                     );
                     return self.set(e, sig.ret);
@@ -12135,11 +12296,15 @@ impl<'a> Checker<'a> {
                     // desugars to `a.rangeTo(b).contains(x)`. Resolve and record both selected
                     // operators here; lowering consumes those exact targets instead of re-resolving.
                     if let Some((range_ty, range_call)) =
-                        self.operator_call_ret(st, "rangeTo", &[et], &[end])
+                        self.operator_call_ret(st, "rangeTo", &[et], &[end], self.span(e))
                     {
-                        if let Some((Ty::Boolean, contains_call)) =
-                            self.operator_call_ret(range_ty, "contains", &[vt], &[value])
-                        {
+                        if let Some((Ty::Boolean, contains_call)) = self.operator_call_ret(
+                            range_ty,
+                            "contains",
+                            &[vt],
+                            &[value],
+                            self.span(e),
+                        ) {
                             self.resolved_operator_calls
                                 .insert((e, SyntheticOperatorCall::RangeTo), range_call);
                             self.resolved_operator_calls
@@ -12201,7 +12366,30 @@ impl<'a> Checker<'a> {
                             // where a read of `i` is narrowed to `Int`). The expression's type is the
                             // binding type for the same reason.
                             if !vt.is_numeric_or_char() {
-                                if self.inc_dec_operator_ret(vt, dec).is_none() {
+                                let operator_name = if dec { "dec" } else { "inc" };
+                                if let Some((ret, target)) = self.operator_call_ret(
+                                    vt,
+                                    operator_name,
+                                    &[],
+                                    &[],
+                                    self.span(e),
+                                ) {
+                                    self.expect_assignable(
+                                        vt,
+                                        ret,
+                                        self.span(e),
+                                        "operator result",
+                                    );
+                                    self.resolved_operator_calls.insert(
+                                        (
+                                            e,
+                                            SyntheticOperatorCall::from_name(operator_name).expect(
+                                                "increment operator has a synthetic-call key",
+                                            ),
+                                        ),
+                                        target,
+                                    );
+                                } else {
                                     self.diags.error(
                                         self.span(e),
                                         "krusty: '++'/'--' is only supported on a numeric variable"
@@ -12727,7 +12915,7 @@ impl<'a> Checker<'a> {
             },
             Expr::Unary { op, operand } => {
                 let ot = self.expr(operand);
-                self.check_unary(op, ot, self.span(e))
+                self.check_unary(e, op, ot, self.span(e))
             }
             Expr::Binary { op, lhs, rhs } => {
                 // `a && b` / `a || b`: a smart-cast established by `a` holds while checking `b`. In `&&`,
@@ -13702,14 +13890,30 @@ impl<'a> Checker<'a> {
         self.set(e, t)
     }
 
-    fn check_unary(&mut self, op: UnOp, ot: Ty, span: Span) -> Ty {
+    fn check_unary(&mut self, expression: ExprId, op: UnOp, ot: Ty, span: Span) -> Ty {
+        let name = op.operator_name();
+        let target_key = SyntheticOperatorCall::from_name(name)
+            .expect("unary operator has a synthetic-call key");
+        // Expected-type checking may revisit the same arena node.
+        self.resolved_operator_calls
+            .remove(&(expression, target_key));
+        // Treat boxed Kotlin primitives as built-in unary operands.
+        let builtin_ty = ot
+            .unboxed_primitive()
+            .or_else(|| self.syms.libraries.boxed_primitive(ot))
+            .unwrap_or(ot);
         match op {
-            UnOp::Neg if ot.is_numeric() => ot,
+            UnOp::Neg if builtin_ty.is_numeric() => builtin_ty,
             // Unary `+` is identity on the numeric types (`+x : typeof x`).
-            UnOp::Plus if ot.is_numeric() => ot,
-            UnOp::Not if ot == Ty::Boolean => Ty::Boolean,
+            UnOp::Plus if builtin_ty.is_numeric() => builtin_ty,
+            UnOp::Not if builtin_ty == Ty::Boolean => Ty::Boolean,
             _ if ot == Ty::Error => Ty::Error,
             _ => {
+                if let Some((ret, target)) = self.operator_call_ret(ot, name, &[], &[], span) {
+                    self.resolved_operator_calls
+                        .insert((expression, target_key), target);
+                    return ret;
+                }
                 self.diags.error(
                     span,
                     format!("operator cannot be applied to '{}'", ot.name()),
@@ -14676,17 +14880,6 @@ impl<'a> Checker<'a> {
         self.record_inline_expansion_synthetic_members(call, name, receiver, &c);
         self.resolved_call_arg_slots.insert(call, slots);
         Some(ret)
-    }
-
-    /// Resolve and record the extension callable for a SYNTHESIZED operator (`componentN`/`iterator`/
-    /// `plusAssign`) on `recv_ty`, keyed by the receiver expression `recv_expr` + operator name, so the
-    /// lowerer reads it instead of re-resolving. No-op when no such extension exists (the construct
-    /// resolves through a member / user path the lowerer reconstructs from `syms`).
-    fn record_synthetic_ext(&mut self, recv_expr: ExprId, name: &str, recv_ty: Ty, arg_tys: &[Ty]) {
-        if let Some(c) = self.library_extension_callable(name, recv_ty, arg_tys, &[]) {
-            self.synthetic_ext_calls
-                .insert((recv_expr, name.to_string()), c);
-        }
     }
 
     fn iterator_protocol_target(&self, iterable_ty: Ty) -> Option<IteratorProtocolTarget> {
@@ -20619,26 +20812,7 @@ impl<'a> Checker<'a> {
         Ty::Error
     }
 
-    /// The return type of a user `inc`/`dec` operator (member first, then extension) on a receiver of
-    /// type `ty`, if one exists — used to type an overloaded `x++`/`x--` on a non-numeric variable. A
-    /// no-arg member/extension `inc`()/`dec`() only.
-    fn inc_dec_operator_ret(&self, ty: Ty, dec: bool) -> Option<Ty> {
-        let name = if dec { "dec" } else { "inc" };
-        if let Some(m) = crate::module_symbols::ModuleSymbols::new(self.syms)
-            .instance_members(ty, name)
-            .into_iter()
-            .find(|m| m.params.is_empty())
-        {
-            return Some(m.ret);
-        }
-        self.syms
-            .ext_fun_overloads(ty, name)
-            .iter()
-            .find(|sig| sig.params.is_empty())
-            .map(|sig| sig.ret)
-    }
-
-    fn try_user_plus_assign(&mut self, s: StmtId, value: ExprId) -> bool {
+    fn try_in_place_assignment(&mut self, s: StmtId, value: ExprId) -> bool {
         let Expr::Binary { op, lhs, rhs } = self.file.expr(value).clone() else {
             return false;
         };
@@ -20650,73 +20824,54 @@ impl<'a> Checker<'a> {
             return false;
         }
         let rt = self.expr(rhs);
-        let module_members =
-            crate::module_symbols::ModuleSymbols::new(self.syms).instance_members(recv, aname);
-        let selected_member = pick_member_overloads(module_members, &[rt], false)
-            .into_iter()
-            .find(|member| {
-                member.ret == Ty::Unit
-                    && matches!(member.params.as_slice(), [parameter]
-                        if arg_assignable_simple(*parameter, rt))
-            });
-        if let Some(member) = selected_member {
-            let Some(owner) = member.owner.or_else(|| recv.obj_internal()) else {
-                return false;
-            };
-            let target = CompoundAssignmentTarget::Member {
+        let span = self.file.stmt_spans[s.0 as usize];
+        let Some((ret, call)) = self.operator_call_ret(recv, aname, &[rt], &[rhs], span) else {
+            return false;
+        };
+        if ret == Ty::Error {
+            return true;
+        }
+        if ret != Ty::Unit {
+            return false;
+        }
+        let target = match call {
+            ResolvedCall::ModuleMember {
                 owner,
-                parameter: member.params[0],
-                interface: member.is_interface,
-            };
-            self.stmt_lowers.insert(s, StmtLowering::PlusAssign(target));
-            return true;
-        }
-        let extension_overloads = self.syms.ext_fun_overloads(recv, aname);
-        let extension = pick_overload(extension_overloads, &[rt])
-            .and_then(|index| extension_overloads.get(index))
-            .filter(|signature| {
-                signature.ret == Ty::Unit
-                    && !signature.vararg
-                    && matches!(signature.params.as_slice(), [parameter]
-                        if arg_assignable_simple(*parameter, rt))
-            });
-        if let Some(signature) = extension {
-            let owner = signature
-                .source_file
-                .zip(signature.source_decl)
-                .and_then(|(file, declaration)| {
-                    self.syms
-                        .fn_facades_by_decl
-                        .get(&(file, declaration.0))
-                        .copied()
-                })
-                .or_else(|| self.syms.fn_facades.get(aname).copied());
-            self.stmt_lowers.insert(
-                s,
-                StmtLowering::PlusAssign(CompoundAssignmentTarget::SourceExtension {
-                    receiver: recv,
-                    parameter: signature.params[0],
+                params,
+                interface,
+                ..
+            } => {
+                let [parameter] = params.as_slice() else {
+                    return false;
+                };
+                CompoundAssignmentTarget::Member {
                     owner,
-                }),
-            );
-            return true;
-        }
-        if rt != Ty::Error && matches!(recv, Ty::Obj(..)) {
-            self.record_synthetic_ext(lhs, aname, recv, &[rt]);
-        }
-        if rt != Ty::Error
-            && matches!(recv, Ty::Obj(..))
-            && self
-                .synthetic_ext_calls
-                .contains_key(&(lhs, aname.to_string()))
-        {
-            self.stmt_lowers.insert(
-                s,
-                StmtLowering::PlusAssign(CompoundAssignmentTarget::LibraryExtension),
-            );
-            return true;
-        }
-        false
+                    parameter: *parameter,
+                    interface,
+                }
+            }
+            ResolvedCall::ModuleExtension {
+                receiver,
+                params,
+                owner,
+                ..
+            } => {
+                let [parameter] = params.as_slice() else {
+                    return false;
+                };
+                CompoundAssignmentTarget::SourceExtension {
+                    receiver,
+                    parameter: *parameter,
+                    owner,
+                }
+            }
+            ResolvedCall::Extension(callable) => {
+                CompoundAssignmentTarget::LibraryExtension(Box::new(callable))
+            }
+            _ => return false,
+        };
+        self.stmt_lowers.insert(s, StmtLowering::PlusAssign(target));
+        true
     }
 
     fn stmt(&mut self, s: StmtId) {
@@ -20952,13 +21107,27 @@ impl<'a> Checker<'a> {
                             self.diags
                                 .error(span, "'val' cannot be reassigned.".to_string());
                         }
-                        if !ty.is_numeric_or_char() && self.inc_dec_operator_ret(ty, dec).is_none()
-                        {
-                            self.diags.error(
-                                span,
-                                "krusty: '++'/'--' is only supported on a numeric variable"
-                                    .to_string(),
-                            );
+                        if !ty.is_numeric_or_char() {
+                            let operator_name = if dec { "dec" } else { "inc" };
+                            if let Some((ret, target)) =
+                                self.operator_call_ret(ty, operator_name, &[], &[], span)
+                            {
+                                self.expect_assignable(ty, ret, span, "operator result");
+                                self.resolved_stmt_operator_calls.insert(
+                                    (
+                                        s,
+                                        SyntheticOperatorCall::from_name(operator_name)
+                                            .expect("increment operator has a synthetic-call key"),
+                                    ),
+                                    target,
+                                );
+                            } else {
+                                self.diags.error(
+                                    span,
+                                    "krusty: '++'/'--' is only supported on a numeric variable"
+                                        .to_string(),
+                                );
+                            }
                         }
                     }
                     None => self
@@ -20968,7 +21137,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::Assign { name, value } => {
                 // `name op= rhs` with a user `opAssign` operator → in-place call (legal on a `val`).
-                if self.try_user_plus_assign(s, value) {
+                if self.try_in_place_assignment(s, value) {
                     return;
                 }
                 let local = self.lookup(&name).map(|local| (local.ty, local.is_var));
@@ -21085,7 +21254,7 @@ impl<'a> Checker<'a> {
                 value,
             } => {
                 // `recv.prop op= rhs` with a user `opAssign` operator → in-place call (legal on a `val`).
-                if self.try_user_plus_assign(s, value) {
+                if self.try_in_place_assignment(s, value) {
                     return;
                 }
                 let rt = self.expr(receiver);
@@ -21225,7 +21394,8 @@ impl<'a> Checker<'a> {
                 indices,
                 value,
             } => {
-                if self.try_user_plus_assign(s, value) {
+                // Try `opAssign` on the value returned by `get` before requiring `set`.
+                if self.try_in_place_assignment(s, value) {
                     return;
                 }
                 // `a[i] = v` stores an array element; `recv[i, j, …] = v` calls `set` (or Map `put`).
@@ -21254,11 +21424,11 @@ impl<'a> Checker<'a> {
                 // Resolve `set` as a member, same-module extension, or library member. A single-index Map
                 // store may resolve to `put`. Record the selected target so lowering does not choose again.
                 let selected = self
-                    .operator_call_ret(at, "set", &set_args, &set_exprs)
+                    .operator_call_ret(at, "set", &set_args, &set_exprs, span)
                     .map(|(_, call)| (SyntheticOperatorCall::Set, call))
                     .or_else(|| {
                         single_index
-                            .then(|| self.operator_call_ret(at, "put", &set_args, &set_exprs))
+                            .then(|| self.operator_call_ret(at, "put", &set_args, &set_exprs, span))
                             .flatten()
                             .map(|(_, call)| (SyntheticOperatorCall::Put, call))
                     });
@@ -21550,9 +21720,11 @@ impl<'a> Checker<'a> {
             lambda_param_types: Vec::new(),
             lambda_recv: Vec::new(),
             is_inline: false,
+            is_operator: f.is_operator,
+            is_override: f.is_override,
+            visibility: f.visibility,
             is_final: false,
             is_suspend: f.is_suspend,
-            visibility: f.visibility,
             context_count: f.context_count,
             source_decl: None,
             source_file: None,
@@ -22648,6 +22820,46 @@ fun box(): String {
     }
 
     #[test]
+    fn enum_name_and_ordinal_are_ordinary_inherited_properties() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "enum class State { READY }\n\
+             fun inspect(state: State): String = state.name + state.ordinal",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::toolchain::stdlib_classpath(),
+        ));
+        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+
+        let resolved_properties = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .filter_map(|(index, expression)| {
+                let Expr::Member { name, .. } = expression else {
+                    return None;
+                };
+                matches!(name.as_str(), "name" | "ordinal")
+                    .then_some((name.as_str(), ExprId(index as u32)))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(resolved_properties.len(), 2);
+        for (name, expression) in resolved_properties {
+            let Some(ResolvedCall::Member(target)) = info.resolved_calls.get(&expression) else {
+                panic!("enum property '{name}' did not use ordinary member resolution");
+            };
+            assert_eq!(
+                target.ret,
+                if name == "name" { Ty::String } else { Ty::Int }
+            );
+        }
+    }
+
+    #[test]
     fn classpath_member_calls_record_resolved_members_for_lowering() {
         let mut d = DiagSink::new();
         let file = parse_file(
@@ -22962,7 +23174,13 @@ fun box(): String {
         assert!(
             matches!(
                 info.resolved_calls.get(&index),
-                Some(ResolvedCall::ModuleExtension { receiver, name, params, ret })
+                Some(ResolvedCall::ModuleExtension {
+                    receiver,
+                    name,
+                    params,
+                    ret,
+                    ..
+                })
                     if *receiver == Ty::obj("Box")
                         && name == "get"
                         && params == &vec![Ty::Int]
@@ -23137,7 +23355,13 @@ fun box(): String {
         assert!(
             matches!(
                 info.resolved_stmt_operator_call(assign, "set"),
-                Some(ResolvedCall::ModuleExtension { receiver, name, params, ret })
+                Some(ResolvedCall::ModuleExtension {
+                    receiver,
+                    name,
+                    params,
+                    ret,
+                    ..
+                })
                     if *receiver == Ty::obj("Box")
                         && name == "set"
                         && params.as_slice() == [Ty::Int, Ty::String]
@@ -24001,5 +24225,354 @@ fun box(): String {
              operator fun String.plusAssign(value: List<Int>) {}",
             "conflicting extension functions with the same erased receiver and name",
         );
+    }
+
+    #[test]
+    fn unary_and_inc_dec_expressions_record_exact_operator_targets() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            r#"
+class Counter {
+    operator fun unaryMinus(): Counter = this
+    operator fun inc(): Counter = this
+}
+fun use(counter: Counter) {
+    var current = counter
+    val negative = -current
+    current++
+    ++current
+    val previous = current++
+    val next = ++current
+}
+"#,
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+
+        let unary = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| {
+                matches!(expression, Expr::Unary { op: UnOp::Neg, .. })
+                    .then_some(ExprId(index as u32))
+            })
+            .expect("user unary expression");
+        assert!(matches!(
+            info.resolved_operator_call(unary, "unaryMinus"),
+            Some(ResolvedCall::ModuleMember { name, .. }) if name == "unaryMinus"
+        ));
+
+        let expression_inc_dec = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .filter_map(|(index, _)| {
+                let expression = ExprId(index as u32);
+                (matches!(files[0].expr(expression), Expr::IncDec { .. })
+                    && info.ty(expression) != Ty::Error)
+                    .then_some(expression)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(expression_inc_dec.len(), 2);
+        let expression_targets = expression_inc_dec
+            .iter()
+            .map(|&expression| {
+                (
+                    expression,
+                    info.ty(expression),
+                    info.resolved_operator_call(expression, "inc").is_some(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            expression_targets.iter().all(|(_, _, resolved)| *resolved),
+            "missing increment targets: {expression_targets:?}"
+        );
+
+        let statement_inc_dec = files[0]
+            .stmt_arena
+            .iter()
+            .enumerate()
+            .filter_map(|(index, statement)| {
+                matches!(statement, Stmt::IncDec { .. }).then_some(StmtId(index as u32))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(statement_inc_dec.len(), 2);
+        assert!(statement_inc_dec
+            .iter()
+            .all(|&statement| info.resolved_stmt_operator_call(statement, "inc").is_some()));
+    }
+
+    #[test]
+    fn symbolic_operators_require_the_operator_modifier_at_exact_locations() {
+        let source = "class Counter {\n\
+                          fun unaryMinus(): Counter = this\n\
+                          fun inc(): Counter = this\n\
+                          fun plusAssign(value: Int) {}\n\
+                      }\n\
+                      fun use(counter: Counter) {\n\
+                          val explicit = counter.unaryMinus()\n\
+                          counter.plusAssign(1)\n\
+                          val symbolic = -counter\n\
+                          var current = counter\n\
+                          current++\n\
+                          current += 1\n\
+                      }";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        assert!(info.resolved_calls.values().any(
+            |call| matches!(call, ResolvedCall::ModuleMember { name, .. } if name == "unaryMinus")
+        ));
+        let unary = diagnostics
+            .diags
+            .iter()
+            .find(|diagnostic| diagnostic.msg.contains("operator cannot be applied"))
+            .expect("non-operator unaryMinus diagnostic");
+        assert_eq!(
+            &source[unary.span.lo as usize..unary.span.hi as usize],
+            "-counter"
+        );
+        let increment = diagnostics
+            .diags
+            .iter()
+            .find(|diagnostic| diagnostic.msg.contains("'++'/'--'"))
+            .expect("non-operator inc diagnostic");
+        assert_eq!(
+            &source[increment.span.lo as usize..increment.span.hi as usize],
+            "current++"
+        );
+        assert!(!info
+            .stmt_lowers
+            .values()
+            .any(|lowering| matches!(lowering, StmtLowering::PlusAssign(_))));
+    }
+
+    #[test]
+    fn overrides_inherit_operator_convention_from_the_base_signature() {
+        let source = "open class BaseCounter {\n\
+                          open operator fun unaryMinus(): BaseCounter = this\n\
+                          open operator fun inc(): BaseCounter = this\n\
+                      }\n\
+                      class DerivedCounter : BaseCounter() {\n\
+                          override fun unaryMinus(): DerivedCounter = this\n\
+                          override fun inc(): DerivedCounter = this\n\
+                      }\n\
+                      fun use(counter: DerivedCounter): DerivedCounter {\n\
+                          var current = counter\n\
+                          val negative = -current\n\
+                          current++\n\
+                          return negative\n\
+                      }";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+
+        let targets = info
+            .resolved_operator_calls
+            .values()
+            .chain(info.resolved_stmt_operator_calls.values())
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 2);
+        assert!(targets.iter().all(|target| {
+            matches!(
+                target,
+                ResolvedCall::ModuleMember { owner, .. }
+                    if owner.matches("DerivedCounter")
+            )
+        }));
+    }
+
+    #[test]
+    fn interface_operator_convention_reaches_overrides_and_inherited_defaults() {
+        let source = "interface OperatorBase {\n\
+                          operator fun unaryMinus(): InterfaceCounter\n\
+                          operator fun inc(): InterfaceCounter\n\
+                      }\n\
+                      class InterfaceCounter : OperatorBase {\n\
+                          override fun unaryMinus(): InterfaceCounter = this\n\
+                          override fun inc(): InterfaceCounter = this\n\
+                      }\n\
+                      interface DefaultOperators {\n\
+                          operator fun unaryMinus(): DefaultCounter = DefaultCounter()\n\
+                          operator fun inc(): DefaultCounter = DefaultCounter()\n\
+                      }\n\
+                      class DefaultCounter : DefaultOperators\n\
+                      fun useOverride(counter: InterfaceCounter) {\n\
+                          var current = counter\n\
+                          val negative = -current\n\
+                          current++\n\
+                      }\n\
+                      fun useDefault(counter: DefaultCounter) {\n\
+                          var current = counter\n\
+                          val negative = -current\n\
+                          current++\n\
+                      }";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        // Keep interface search active when superclass metadata is external.
+        symbols
+            .classes
+            .get_mut("DefaultCounter")
+            .expect("default counter signature")
+            .super_internal = Some(type_name("platform/ClasspathBase"));
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+
+        let mut owners = info
+            .resolved_operator_calls
+            .values()
+            .chain(info.resolved_stmt_operator_calls.values())
+            .filter_map(|target| match target {
+                ResolvedCall::ModuleMember {
+                    owner, interface, ..
+                } => Some((owner.render(), *interface)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        owners.sort_unstable();
+        assert_eq!(
+            owners,
+            [
+                ("DefaultOperators".to_string(), true),
+                ("DefaultOperators".to_string(), true),
+                ("InterfaceCounter".to_string(), false),
+                ("InterfaceCounter".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn private_member_operators_are_rejected_outside_the_declaring_class() {
+        let source = "class PrivateCounter {\n\
+                          private operator fun unaryMinus(): PrivateCounter = this\n\
+                          private operator fun inc(): PrivateCounter = this\n\
+                          fun inside(): PrivateCounter = -this\n\
+                      }\n\
+                      fun outside(counter: PrivateCounter) {\n\
+                          val negative = -counter\n\
+                          var current = counter\n\
+                          current++\n\
+                      }";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        let access_errors = diagnostics
+            .diags
+            .iter()
+            .filter(|diagnostic| diagnostic.msg.contains("cannot access"))
+            .collect::<Vec<_>>();
+        assert_eq!(access_errors.len(), 2, "{:?}", diagnostics.diags);
+        let mut slices = access_errors
+            .iter()
+            .map(|diagnostic| &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize])
+            .collect::<Vec<_>>();
+        slices.sort_unstable();
+        assert_eq!(slices, ["-counter", "current++"]);
+    }
+
+    #[test]
+    fn cross_file_private_operator_extension_is_not_a_candidate() {
+        let sources = [
+            "class Counter\nprivate operator fun Counter.unaryMinus(): Counter = this",
+            "fun use(counter: Counter): Counter = -counter",
+        ];
+        let mut diagnostics = DiagSink::new();
+        let files = sources
+            .iter()
+            .map(|source| parse_file(source, &mut diagnostics))
+            .collect::<Vec<_>>();
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        diagnostics.set_file(1);
+        let info = check_file_in_source_set(&files, 1, &mut symbols, &mut diagnostics);
+
+        let unary = files[1]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| {
+                matches!(expression, Expr::Unary { op: UnOp::Neg, .. })
+                    .then_some(ExprId(index as u32))
+            })
+            .expect("cross-file unary expression");
+        assert!(info.resolved_operator_call(unary, "unaryMinus").is_none());
+        let error = diagnostics
+            .diags
+            .iter()
+            .find(|diagnostic| diagnostic.file == 1)
+            .expect("private extension visibility diagnostic");
+        assert!(
+            error.msg.contains("operator cannot be applied"),
+            "{error:?}"
+        );
+        assert_eq!(
+            &sources[1][error.span.lo as usize..error.span.hi as usize],
+            "-counter"
+        );
+    }
+
+    #[test]
+    fn cast_after_unary_keeps_builtin_dispatch() {
+        let Some(jdk_modules) = crate::toolchain::jdk_modules() else {
+            return;
+        };
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "data class A(val a: Int)\n\
+             fun box(): String {\n\
+                 val v1 = A(-10.toInt()).hashCode()\n\
+                 val v2 = (-10.toInt() as Int?)!!.hashCode()\n\
+                 return if (v1 == v2) \"OK\" else \"$v1 $v2\"\n\
+             }",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut classpath_entries = crate::toolchain::classpath_jars_for("");
+        classpath_entries.push(jdk_modules);
+        let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath_entries));
+        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(classpath);
+        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+
+        let unary_expressions = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .filter_map(|(index, expression)| {
+                matches!(expression, Expr::Unary { op: UnOp::Neg, .. })
+                    .then_some(ExprId(index as u32))
+            })
+            .collect::<Vec<_>>();
+        assert!(!unary_expressions.is_empty());
+        for unary in unary_expressions {
+            assert_eq!(info.ty(unary), Ty::Int);
+            let operand = match files[0].expr(unary) {
+                Expr::Unary { operand, .. } => *operand,
+                _ => unreachable!(),
+            };
+            assert!(
+                info.resolved_operator_call(unary, "unaryMinus").is_none(),
+                "cast precedence must not select a virtual wrapper unaryMinus target: \
+                 expression={unary:?} operand={operand:?} operand_ty={:?} target={:?}",
+                info.ty(operand),
+                info.resolved_operator_call(unary, "unaryMinus")
+            );
+        }
     }
 }

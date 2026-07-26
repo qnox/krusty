@@ -83,9 +83,17 @@ impl BinOp {
 pub enum UnOp {
     Neg,
     Not,
-    /// Unary `+` — identity on the built-in numeric types (`+x == x`); a user `unaryPlus` operator is
-    /// not modeled (the lowerer bails on a non-numeric operand).
     Plus,
+}
+
+impl UnOp {
+    pub fn operator_name(self) -> &'static str {
+        match self {
+            UnOp::Neg => "unaryMinus",
+            UnOp::Plus => "unaryPlus",
+            UnOp::Not => "not",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -502,6 +510,19 @@ pub struct FunDecl {
     /// mirroring `ClassDecl.annotations`. Used by the compiler-extension surface (`crate::plugins`) to
     /// find annotated functions.
     pub annotations: Vec<String>,
+}
+
+impl FunDecl {
+    pub(crate) fn has_callable_inline_extension_body(&self) -> bool {
+        self.is_inline
+            && self.receiver.is_some()
+            && self.type_params.is_empty()
+            && self.params.iter().all(|parameter| {
+                parameter.ty.name != "<fun>"
+                    && parameter.ty.fun_params.is_empty()
+                    && !parameter.ty.fun_suspend
+            })
+    }
 }
 
 /// A primary-constructor parameter that is also a property (`val`/`var name: Type`).

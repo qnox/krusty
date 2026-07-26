@@ -5944,6 +5944,23 @@ impl<'a> Parser<'a> {
             // A newline before `||`/`&&`/`?:` is a line continuation, not a terminator — consume it so
             // the operator below (or the enclosing elvis loop, for `?:`) sees it on this logical line.
             self.skip_newlines_before_continuation_op();
+            // Prefix operators bind more tightly than casts.
+            if min_bp <= BP_CAST && self.at(TokenKind::Ident) && self.text() == "as" {
+                let lspan = self.file.expr_spans[lhs.0 as usize];
+                self.bump(); // 'as'
+                let nullable = self.eat_type_nullable();
+                let ty = self.parse_type();
+                let end = self.t[self.i.saturating_sub(1)].span;
+                lhs = self.file.add_expr(
+                    Expr::As {
+                        operand: lhs,
+                        ty,
+                        nullable,
+                    },
+                    Span::new(lspan.lo, end.hi),
+                );
+                continue;
+            }
             // `is` / `!is` type test — a "named check" at comparison precedence (binding power 7).
             if min_bp <= 7 {
                 let negated = if self.at(TokenKind::Ident) && self.text() == "is" {
@@ -6315,23 +6332,6 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 self.skip_newlines();
-            }
-            // `as T` / `as? T` cast — binds tighter than the binary operators (postfix level).
-            if self.at(TokenKind::Ident) && self.text() == "as" {
-                let lspan = self.file.expr_spans[lhs.0 as usize];
-                self.bump(); // 'as'
-                let nullable = self.eat_type_nullable();
-                let ty = self.parse_type();
-                let end = self.t[self.i.saturating_sub(1)].span;
-                lhs = self.file.add_expr(
-                    Expr::As {
-                        operand: lhs,
-                        ty,
-                        nullable,
-                    },
-                    Span::new(lspan.lo, end.hi),
-                );
-                continue;
             }
             match self.kind() {
                 // Postfix `target++` / `target--` as a value (the old value). In statement position
@@ -7486,6 +7486,7 @@ impl<'a> Parser<'a> {
 }
 
 // ---- precedence ----
+const BP_CAST: u8 = 12;
 const BP_PREFIX: u8 = 13;
 
 /// The visibility a declaration's modifier list denotes — the first visibility keyword present, or
@@ -8292,6 +8293,18 @@ mod tests {
         assert_eq!(
             tree("fun f(a: Int, b: Int, c: Int): Int = a + b * c"),
             "(fun f (param a Int) (param b Int) (param c Int) :Int (+ a (* b c)))\n"
+        );
+    }
+
+    #[test]
+    fn prefix_unary_binds_more_tightly_than_cast() {
+        assert_eq!(
+            tree("fun f(): Int? = -10.toInt() as Int?"),
+            "(fun f :Int (as (neg (call (. 10 toInt))) Int))\n"
+        );
+        assert_eq!(
+            tree("fun g(x: Int, y: Int): Int = -x as Int * y"),
+            "(fun g (param x Int) (param y Int) :Int (* (as (neg x) Int) y))\n"
         );
     }
 
