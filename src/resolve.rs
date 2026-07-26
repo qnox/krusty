@@ -184,11 +184,32 @@ pub struct MemberExtPropSig {
 
 /// Everything a caller needs about a declared Kotlin class.
 #[derive(Clone, Debug)]
+pub struct MemberExtFunSig {
+    receiver: TypeRef,
+    receiver_ty: Ty,
+    params: Vec<TypeRef>,
+    ret: Option<TypeRef>,
+    signature: Signature,
+    type_params: Vec<String>,
+    type_param_bounds: Vec<(String, TypeRef)>,
+}
+
+struct AppliedMemberExtFunSig {
+    name: String,
+    receiver: Ty,
+    params: Vec<Ty>,
+    visibility: Visibility,
+    is_final: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct ClassSig {
     pub internal: TypeName,
     pub props: Vec<(String, Ty, bool)>, // backing-field properties (name, type, is_var)
     /// Extension properties declared inside this class/object.
     pub member_ext_props: HashMap<String, Vec<MemberExtPropSig>>,
+    /// Member extension functions keyed by source name.
+    pub member_ext_funs: HashMap<String, Vec<MemberExtFunSig>>,
     pub has_primary_ctor: bool,
     /// Full primary-constructor parameter types in order (includes non-property params).
     pub ctor_params: Vec<Ty>,
@@ -296,6 +317,27 @@ pub struct GenericMethod {
 type GenericMemberPlan = (GenericMethod, HashMap<String, Ty>, Vec<Vec<Ty>>);
 
 impl ClassSig {
+    fn type_parameter_bindings(&self, applied: Ty) -> HashMap<String, Ty> {
+        let mut bindings = self
+            .tparam_names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let bound = self
+                    .tparam_bounds
+                    .get(index)
+                    .copied()
+                    .filter(|bound| *bound != Ty::Error)
+                    .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                (name.clone(), bound)
+            })
+            .collect::<HashMap<_, _>>();
+        for (name, argument) in self.tparam_names.iter().zip(applied.type_args()) {
+            bindings.insert(name.clone(), *argument);
+        }
+        bindings
+    }
+
     pub(crate) fn has_no_arg_constructor(&self) -> bool {
         (self.has_primary_ctor
             && (self.ctor_params.is_empty()
@@ -340,6 +382,10 @@ impl ClassSig {
 
     pub fn member_ext_props(&self, name: &str) -> &[MemberExtPropSig] {
         self.member_ext_props.get(name).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn member_ext_funs(&self, name: &str) -> &[MemberExtFunSig] {
+        self.member_ext_funs.get(name).map_or(&[], Vec::as_slice)
     }
 
     pub fn single_method(&self) -> Option<&Signature> {
@@ -539,41 +585,6 @@ fn pick_member_overloads(
         .filter(|&(sc, _)| sc == best)
         .map(|(_, m)| m.clone())
         .collect()
-}
-
-fn module_member_candidate_applicable(
-    member: &crate::libraries::LibraryMember,
-    args: &[ExprId],
-    arg_tys: &[Ty],
-    arg_names: Option<&[Option<String>]>,
-) -> bool {
-    if let Some(names) = arg_names {
-        let Ok(slots) = map_call_sig_args(args, Some(names), &member.call_sig) else {
-            return false;
-        };
-        return slots.iter().enumerate().all(|(index, argument)| {
-            argument.is_none_or(|argument| {
-                args.iter()
-                    .position(|candidate| *candidate == argument)
-                    .is_some_and(|source_index| {
-                        member.params.get(index).is_some_and(|parameter| {
-                            arg_tys
-                                .get(source_index)
-                                .is_some_and(|actual| arg_assignable_simple(*parameter, *actual))
-                        })
-                    })
-            })
-        });
-    }
-
-    positional_candidate_score(
-        &member.params,
-        member.call_sig.vararg,
-        member.call_sig.required,
-        &member.call_sig.param_defaults,
-        arg_tys,
-    )
-    .is_some()
 }
 
 fn local_function_candidate_score(
@@ -1046,6 +1057,27 @@ impl SymbolTable {
         out
     }
 
+    fn supertype_member_ext_funs_name(&self, internal: TypeName) -> Vec<AppliedMemberExtFunSig> {
+        let mut out = Vec::new();
+        let Some(class) = self.class_by_type_name(internal) else {
+            return out;
+        };
+        let bounds = class
+            .tparam_bounds
+            .iter()
+            .map(|bound| {
+                if *bound == Ty::Error {
+                    Ty::obj("kotlin/Any")
+                } else {
+                    *bound
+                }
+            })
+            .collect::<Vec<_>>();
+        let root = Ty::obj_args_name(internal, &bounds);
+        self.collect_super_member_ext_funs(internal, root, &mut out);
+        out
+    }
+
     fn collect_super_methods(&self, internal: TypeName, out: &mut Vec<(String, Signature)>) {
         let Some(c) = self.class_by_type_name(internal) else {
             return;
@@ -1064,6 +1096,86 @@ impl SymbolTable {
                 }
             }
             self.collect_super_methods(p, out);
+        }
+    }
+
+    fn collect_super_member_ext_funs(
+        &self,
+        internal: TypeName,
+        owner_ty: Ty,
+        out: &mut Vec<AppliedMemberExtFunSig>,
+    ) {
+        let Some(class) = self.class_by_type_name(internal) else {
+            return;
+        };
+        let class_bindings = class.type_parameter_bindings(owner_ty);
+        let mut parents = class
+            .interfaces
+            .iter_ids()
+            .enumerate()
+            .map(|(index, parent)| {
+                let arguments = class
+                    .interface_type_args
+                    .get(index)
+                    .map(|arguments| {
+                        arguments
+                            .iter()
+                            .map(|shape| crate::symbol_resolver::ty_subst(*shape, &class_bindings))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                (parent, Ty::obj_args_name(parent, &arguments))
+            })
+            .collect::<Vec<_>>();
+        if let Some(parent) = class.super_internal {
+            let arguments = class
+                .super_type_args
+                .iter()
+                .map(|shape| crate::symbol_resolver::ty_subst(*shape, &class_bindings))
+                .collect::<Vec<_>>();
+            parents.push((parent, Ty::obj_args_name(parent, &arguments)));
+        }
+        for (parent, parent_ty) in parents {
+            if let Some(parent_class) = self.class_by_type_name(parent) {
+                let parent_bindings = parent_class.type_parameter_bindings(parent_ty);
+                for (name, overloads) in &parent_class.member_ext_funs {
+                    for signature in overloads {
+                        let mut scratch = DiagSink::new();
+                        let tparams = TParams::from_bindings(parent_bindings.clone())
+                            .extended_with(
+                                &signature.type_params,
+                                &signature.type_param_bounds,
+                                &class_internal_resolver(self),
+                            );
+                        let receiver = ty_of_ref(
+                            &signature.receiver,
+                            &self.class_names,
+                            &tparams,
+                            &mut scratch,
+                        );
+                        let mut params = signature
+                            .params
+                            .iter()
+                            .map(|parameter| {
+                                ty_of_ref(parameter, &self.class_names, &tparams, &mut scratch)
+                            })
+                            .collect::<Vec<_>>();
+                        if signature.signature.vararg {
+                            if let Some(last) = params.last_mut() {
+                                *last = Ty::array(*last);
+                            }
+                        }
+                        out.push(AppliedMemberExtFunSig {
+                            name: name.clone(),
+                            receiver,
+                            params,
+                            visibility: signature.signature.visibility,
+                            is_final: signature.signature.is_final,
+                        });
+                    }
+                }
+            }
+            self.collect_super_member_ext_funs(parent, parent_ty, out);
         }
     }
 
@@ -2746,7 +2858,9 @@ pub fn collect_signatures_with_cp(
                         }
                     }
                     let mut methods: MethodMap = MethodMap::new();
-                    for (mname, msig) in c.methods.iter().map(|m| {
+                    let mut member_ext_funs: HashMap<String, Vec<MemberExtFunSig>> = HashMap::new();
+                    for method in &c.methods {
+                        let m = method;
                         let mtp = ctp.extended_with(&m.type_params, &m.type_param_bounds, &|n| {
                             class_names.get(n)
                         });
@@ -2802,17 +2916,35 @@ pub fn collect_signatures_with_cp(
                                 }
                                 Ty::Unit
                             });
-                        (
-                            m.name.clone(),
-                            member_signature(m, ret, &class_names, &mtp, diags),
-                        )
-                    }) {
-                        methods.entry(mname).or_default().push(msig);
+                        let signature = member_signature(m, ret, &class_names, &mtp, diags);
+                        if let Some(receiver) = &method.receiver {
+                            member_ext_funs
+                                .entry(method.name.clone())
+                                .or_default()
+                                .push(MemberExtFunSig {
+                                    receiver: receiver.clone(),
+                                    receiver_ty: ty_of_ref(receiver, &class_names, &mtp, diags),
+                                    params: method
+                                        .params
+                                        .iter()
+                                        .map(|parameter| parameter.ty.clone())
+                                        .collect(),
+                                    ret: method.ret.clone(),
+                                    signature,
+                                    type_params: method.type_params.clone(),
+                                    type_param_bounds: method.type_param_bounds.clone(),
+                                });
+                        } else {
+                            methods
+                                .entry(method.name.clone())
+                                .or_default()
+                                .push(signature);
+                        }
                     }
                     // Retain generic method shapes for call-site substitution and lambda typing.
                     let mut generic_methods: HashMap<String, Vec<GenericMethod>> = HashMap::new();
                     let mut method_indices: HashMap<&str, usize> = HashMap::new();
-                    for method in &c.methods {
+                    for method in c.methods.iter().filter(|method| method.receiver.is_none()) {
                         let index = method_indices.entry(&method.name).or_default();
                         let params = methods
                             .get(&method.name)
@@ -3222,6 +3354,7 @@ pub fn collect_signatures_with_cp(
                             internal: internal_ref,
                             props,
                             member_ext_props,
+                            member_ext_funs,
                             has_primary_ctor: c.has_primary_ctor,
                             ctor_params,
                             ctor_param_shapes: c
@@ -3309,6 +3442,7 @@ pub fn collect_signatures_with_cp(
                                 internal: comp_internal_ref,
                                 props: Vec::new(),
                                 member_ext_props: HashMap::new(),
+                                member_ext_funs: HashMap::new(),
                                 has_primary_ctor: true,
                                 ctor_params: Vec::new(),
                                 ctor_param_shapes: Vec::new(),
@@ -5032,6 +5166,39 @@ fn unify_ty_common(
     }
 }
 
+fn unify_ref(
+    reference: &TypeRef,
+    actual: Ty,
+    type_params: &[String],
+    bindings: &mut HashMap<String, Ty>,
+) {
+    if !reference.fun_params.is_empty() || reference.name == "<fun>" {
+        if let Ty::Fun(signature) = actual {
+            for (parameter, argument) in reference.fun_params.iter().zip(&signature.params) {
+                unify_ref(parameter, *argument, type_params, bindings);
+            }
+            if let Some(ret) = &reference.arg {
+                unify_ref(ret, signature.ret, type_params, bindings);
+            }
+        }
+        return;
+    }
+    if type_params
+        .iter()
+        .any(|parameter| parameter == &reference.name)
+    {
+        bindings.entry(reference.name.clone()).or_insert(actual);
+        return;
+    }
+    if !reference.targs.is_empty() {
+        if let Ty::Obj(_, arguments) = actual {
+            for (parameter, argument) in reference.targs.iter().zip(arguments) {
+                unify_ref(parameter, *argument, type_params, bindings);
+            }
+        }
+    }
+}
+
 fn ty_mentions_param(ty: Ty, names: &[String]) -> bool {
     match ty {
         Ty::TyParam(name, _) => names.iter().any(|parameter| parameter == name),
@@ -6275,6 +6442,7 @@ fn make_checker<'a>(
         inferred_fun_rets: HashMap::new(),
         inferred_ext_fun_rets: HashMap::new(),
         inferred_method_rets: HashMap::new(),
+        inferred_member_ext_fun_rets: HashMap::new(),
         stmt_lowers: HashMap::new(),
         local_decl_types: HashMap::new(),
         resolved_call_type_args: HashMap::new(),
@@ -6405,6 +6573,7 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
     let fun_rets = std::mem::take(&mut pre.inferred_fun_rets);
     let ext_rets = std::mem::take(&mut pre.inferred_ext_fun_rets);
     let method_rets = std::mem::take(&mut pre.inferred_method_rets);
+    let member_ext_fun_rets = std::mem::take(&mut pre.inferred_member_ext_fun_rets);
     drop(pre);
     let mut changed = false;
     for ((file, decl), ret) in fun_rets {
@@ -6434,6 +6603,20 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
         {
             changed |= sig.ret != ret;
             sig.ret = ret;
+        }
+    }
+    for ((internal, name, receiver, params), ret) in member_ext_fun_rets {
+        if let Some(signature) = syms
+            .class_by_type_name_mut(internal)
+            .and_then(|class| class.member_ext_funs.get_mut(&name))
+            .and_then(|overloads| {
+                overloads.iter_mut().find(|signature| {
+                    signature.receiver_ty == receiver && signature.signature.params == params
+                })
+            })
+        {
+            changed |= signature.signature.ret != ret;
+            signature.signature.ret = ret;
         }
     }
     for (internal, name, index, ret) in inferred_member_ext_rets {
@@ -6718,6 +6901,8 @@ fn check_file_at_impl(
                     // property-overrides are likewise out of scope — this checks methods only).
                     if c.syms.hierarchy_is_module_closed(internal) {
                         let supers = c.syms.supertype_methods_name(internal);
+                        let super_member_extensions =
+                            c.syms.supertype_member_ext_funs_name(internal);
                         // `kotlin/Any`'s universal members are overridable in every class but never
                         // appear in the module supertype walk.
                         let is_any_member = |m: &FunDecl| {
@@ -6727,12 +6912,56 @@ fn check_file_at_impl(
                             )
                         };
                         for m in &cl.methods {
-                            if m.is_override
-                                && !is_any_member(m)
-                                && !supers
+                            let overrides_super = if let Some(receiver_ref) = &m.receiver {
+                                let class = c
+                                    .syms
+                                    .class_by_type_name(internal)
+                                    .expect("checked class has a collected signature");
+                                let class_bindings = class
+                                    .type_parameter_bindings(Ty::obj_name(class.internal_name()));
+                                let method_tparams = TParams::from_bindings(class_bindings)
+                                    .extended_with(
+                                        &m.type_params,
+                                        &m.type_param_bounds,
+                                        &class_internal_resolver(c.syms),
+                                    );
+                                let mut scratch = DiagSink::new();
+                                let receiver = ty_of_ref(
+                                    receiver_ref,
+                                    &c.syms.class_names,
+                                    &method_tparams,
+                                    &mut scratch,
+                                );
+                                let params = m
+                                    .params
                                     .iter()
-                                    .any(|(n, s)| *n == m.name && s.params.len() == m.params.len())
-                            {
+                                    .map(|parameter| {
+                                        let ty = ty_of_ref(
+                                            &parameter.ty,
+                                            &c.syms.class_names,
+                                            &method_tparams,
+                                            &mut scratch,
+                                        );
+                                        if parameter.is_vararg {
+                                            Ty::array(ty)
+                                        } else {
+                                            ty
+                                        }
+                                    })
+                                    .collect::<Vec<_>>();
+                                super_member_extensions.iter().any(|signature| {
+                                    signature.name == m.name
+                                        && signature.receiver == receiver
+                                        && signature.params == params
+                                        && signature.visibility != Visibility::Private
+                                        && !signature.is_final
+                                })
+                            } else {
+                                supers.iter().any(|(name, signature)| {
+                                    *name == m.name && signature.params.len() == m.params.len()
+                                })
+                            };
+                            if m.is_override && !is_any_member(m) && !overrides_super {
                                 c.diags
                                     .error(m.span, format!("'{}' overrides nothing", m.name));
                             }
@@ -7262,6 +7491,7 @@ fn check_file_at_impl(
         inferred_fun_rets,
         inferred_ext_fun_rets,
         inferred_method_rets,
+        inferred_member_ext_fun_rets,
         stmt_lowers,
         local_decl_types,
         resolved_call_type_args,
@@ -7318,6 +7548,19 @@ fn check_file_at_impl(
             .and_then(|ov| ov.iter_mut().find(|s| s.params == params))
         {
             sig.ret = ret;
+        }
+    }
+    for ((internal, name, receiver, params), ret) in inferred_member_ext_fun_rets {
+        if let Some(signature) = syms
+            .class_by_type_name_mut(internal)
+            .and_then(|class| class.member_ext_funs.get_mut(&name))
+            .and_then(|overloads| {
+                overloads.iter_mut().find(|signature| {
+                    signature.receiver_ty == receiver && signature.signature.params == params
+                })
+            })
+        {
+            signature.signature.ret = ret;
         }
     }
     TypeInfo {
@@ -7394,6 +7637,57 @@ struct ImplicitPropertyWriteResolution {
     classpath_setter: Option<crate::libraries::LibraryCallable>,
 }
 
+#[derive(Clone)]
+struct MemberExtensionFunctionCandidate {
+    priority: MemberExtensionPriority,
+    score: (usize, std::cmp::Reverse<usize>, bool),
+    ret: Ty,
+    call_sig: crate::libraries::CallSig,
+    visibility: Visibility,
+    owner: TypeName,
+}
+
+#[derive(Clone)]
+struct MemberExtensionFunctionShape {
+    priority: MemberExtensionPriority,
+    function: MemberExtFunSig,
+    class_bindings: HashMap<String, Ty>,
+    owner: TypeName,
+}
+
+struct InstantiatedMemberExtension {
+    logical_params: Vec<Ty>,
+    ret: Ty,
+    call_sig: crate::libraries::CallSig,
+    score: (usize, std::cmp::Reverse<usize>, bool),
+    argument_parameters: Vec<(usize, usize)>,
+}
+
+struct MemberExtensionCall<'a> {
+    extension_receiver: Ty,
+    name: &'a str,
+    args: &'a [ExprId],
+    partial_arg_tys: &'a [Option<Ty>],
+    arg_names: Option<&'a [Option<String>]>,
+    explicit_type_args: &'a [Ty],
+}
+
+#[derive(Clone, Copy)]
+struct MemberExtensionPriority {
+    dispatch_rank: usize,
+    dispatch_depth: usize,
+    declared_receiver: Ty,
+    generic_receiver: bool,
+}
+
+#[derive(Clone)]
+struct MemberExtensionLambdaPlan {
+    priority: MemberExtensionPriority,
+    score: (usize, std::cmp::Reverse<usize>, bool),
+    param_types: Vec<Vec<Ty>>,
+    receivers: Vec<Option<Ty>>,
+}
+
 struct Checker<'a> {
     file: &'a File,
     syms: &'a SymbolTable,
@@ -7454,6 +7748,7 @@ struct Checker<'a> {
     inferred_fun_rets: HashMap<(u32, u32), Ty>,
     inferred_ext_fun_rets: HashMap<(Ty, String, Vec<Ty>), Ty>,
     inferred_method_rets: HashMap<(TypeName, String, Vec<Ty>), Ty>,
+    inferred_member_ext_fun_rets: HashMap<(TypeName, String, Ty, Vec<Ty>), Ty>,
     /// A class internal name → the base-constructor parameter types its `super(args)` resolved to
     /// (see [`ClassSig::super_ctor_params`]). Stashed during checking (where the argument types are
     /// known) and applied to the `ClassSig` after, since `syms` is borrowed immutably while checking.
@@ -10277,8 +10572,14 @@ impl<'a> Checker<'a> {
                                 }
                             })
                             .collect();
-                        self.inferred_method_rets
-                            .insert((internal, f.name.clone(), params), inferred);
+                        if let Some(receiver) = f.receiver.as_ref() {
+                            let receiver = self.resolve_ty(receiver);
+                            self.inferred_member_ext_fun_rets
+                                .insert((internal, f.name.clone(), receiver, params), inferred);
+                        } else {
+                            self.inferred_method_rets
+                                .insert((internal, f.name.clone(), params), inferred);
+                        }
                     }
                 }
             }
@@ -13752,6 +14053,11 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        // A member extension keeps both its extension and dispatch receivers in scope.
+        if let Some(ret) = self.check_member_extension_function_call(call, rt, name, args, arg_tys)
+        {
+            return Some(ret);
+        }
         // A MODULE extension on the receiver (`fun Recv.name(args)` declared in this compilation) — keyed
         // by the receiver's erased key, exactly as a qualified `recv.name(args)` extension call
         // resolves. Lets a bare call inside a receiver lambda reach a same-module extension on `this`.
@@ -14561,27 +14867,6 @@ impl<'a> Checker<'a> {
         self.expr(e)
     }
 
-    fn source_class_bindings(&self, class: &ClassSig, applied: Ty) -> HashMap<String, Ty> {
-        let mut bindings: HashMap<String, Ty> = class
-            .tparam_names
-            .iter()
-            .enumerate()
-            .map(|(index, name)| {
-                let bound = class
-                    .tparam_bounds
-                    .get(index)
-                    .copied()
-                    .filter(|bound| *bound != Ty::Error)
-                    .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-                (name.clone(), bound)
-            })
-            .collect();
-        for (name, argument) in class.tparam_names.iter().zip(applied.type_args()) {
-            bindings.insert(name.clone(), *argument);
-        }
-        bindings
-    }
-
     fn applied_source_parents(
         &self,
         class: &ClassSig,
@@ -14629,7 +14914,7 @@ impl<'a> Checker<'a> {
             }
             hierarchy.push((owner, applied, depth));
             if let Some(class) = self.syms.class_by_type_name(owner) {
-                let bindings = self.source_class_bindings(class, applied);
+                let bindings = class.type_parameter_bindings(applied);
                 pending.extend(
                     self.applied_source_parents(class, bindings)
                         .into_iter()
@@ -14658,7 +14943,7 @@ impl<'a> Checker<'a> {
             let Some(class) = self.syms.class_by_type_name(owner) else {
                 continue;
             };
-            let class_binds = self.source_class_bindings(class, owner_ty);
+            let class_binds = class.type_parameter_bindings(owner_ty);
             if selected_owner.is_none_or(|selected| selected == owner) {
                 if let Some(overloads) = class.generic_methods.get(name) {
                     let gm = selected_params
@@ -15104,6 +15389,58 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn maximal_member_extensions<T>(
+        &self,
+        candidates: &[T],
+        priority: impl Fn(&T) -> MemberExtensionPriority,
+    ) -> Vec<usize> {
+        let Some(nearest_dispatch) = candidates
+            .iter()
+            .map(|candidate| priority(candidate).dispatch_rank)
+            .min()
+        else {
+            return Vec::new();
+        };
+        candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| priority(candidate).dispatch_rank == nearest_dispatch)
+            .filter_map(|(index, candidate)| {
+                let candidate = priority(candidate);
+                let dominated = candidates.iter().enumerate().any(|(other_index, other)| {
+                    if index == other_index {
+                        return false;
+                    }
+                    let other = priority(other);
+                    if other.dispatch_rank != nearest_dispatch {
+                        return false;
+                    }
+                    let other_is_subtype = crate::assignable::is_assignable(
+                        &crate::assignable::TyCtx::new(),
+                        self,
+                        other.declared_receiver,
+                        candidate.declared_receiver,
+                    );
+                    let candidate_is_subtype = crate::assignable::is_assignable(
+                        &crate::assignable::TyCtx::new(),
+                        self,
+                        candidate.declared_receiver,
+                        other.declared_receiver,
+                    );
+                    if candidate.declared_receiver == other.declared_receiver
+                        || (other_is_subtype && candidate_is_subtype)
+                    {
+                        return (candidate.generic_receiver && !other.generic_receiver)
+                            || (candidate.generic_receiver == other.generic_receiver
+                                && other.dispatch_depth < candidate.dispatch_depth);
+                    }
+                    other_is_subtype && !candidate_is_subtype
+                });
+                (!dominated).then_some(index)
+            })
+            .collect()
+    }
+
     fn member_extension_property(
         &self,
         extension_receiver: Ty,
@@ -15115,7 +15452,7 @@ impl<'a> Checker<'a> {
                 let Some(class) = self.syms.class_by_type_name(owner) else {
                     continue;
                 };
-                let class_bindings = self.source_class_bindings(class, owner_ty);
+                let class_bindings = class.type_parameter_bindings(owner_ty);
                 for sig in class.member_ext_props(name) {
                     let mut applicability_bindings = class_bindings.clone();
                     applicability_bindings.extend(
@@ -15152,60 +15489,381 @@ impl<'a> Checker<'a> {
                     let ty = crate::symbol_resolver::ty_subst(sig.ret, &bindings);
                     let generic_receiver = ty_mentions_param(sig.receiver, &sig.type_params);
                     candidates.push((
-                        dispatch_rank,
-                        dispatch_depth,
-                        declared_receiver,
-                        generic_receiver,
+                        MemberExtensionPriority {
+                            dispatch_rank,
+                            dispatch_depth,
+                            declared_receiver,
+                            generic_receiver,
+                        },
                         (ty, sig.is_var, sig.visibility, owner),
                     ));
                 }
             }
         }
-        let Some(nearest_dispatch) = candidates.iter().map(|candidate| candidate.0).min() else {
-            return Ok(None);
-        };
-        candidates.retain(|candidate| candidate.0 == nearest_dispatch);
-        let mut maximal = Vec::new();
-        for index in 0..candidates.len() {
-            let (_, owner_depth, receiver, generic, _) = &candidates[index];
-            let dominated = candidates.iter().enumerate().any(
-                |(other_index, (_, other_owner_depth, other_receiver, other_generic, _))| {
-                    if index == other_index {
-                        return false;
-                    }
-                    let other_is_subtype = crate::assignable::is_assignable(
-                        &crate::assignable::TyCtx::new(),
-                        self,
-                        *other_receiver,
-                        *receiver,
-                    );
-                    let receiver_is_subtype = crate::assignable::is_assignable(
-                        &crate::assignable::TyCtx::new(),
-                        self,
-                        *receiver,
-                        *other_receiver,
-                    );
-                    if receiver == other_receiver || (other_is_subtype && receiver_is_subtype) {
-                        return (*generic && !*other_generic)
-                            || (generic == other_generic && other_owner_depth < owner_depth);
-                    }
-                    other_is_subtype && !receiver_is_subtype
-                },
-            );
-            if !dominated {
-                maximal.push(index);
-            }
-        }
+        let maximal = self.maximal_member_extensions(&candidates, |candidate| candidate.0);
         match maximal.as_slice() {
-            [index] => Ok(Some(candidates[*index].4)),
+            [index] => Ok(Some(candidates[*index].1)),
             [] => Ok(None),
             _ => Err(()),
         }
     }
 
-    /// Resolve a semantic property read `recv.name` without reporting "unresolved" on a miss. When the
-    /// selected property has a backend handle (classpath/member getter or extension getter), record it on
-    /// the read expression so lowering reads the checker-selected property instead of reconstructing it.
+    fn member_extension_function_shapes(
+        &self,
+        extension_receiver: Ty,
+        name: &str,
+    ) -> Vec<MemberExtensionFunctionShape> {
+        let mut shapes = Vec::new();
+        for (dispatch_rank, dispatch) in self.implicit_receiver_types().into_iter().enumerate() {
+            for (owner, owner_ty, dispatch_depth) in self.applied_source_hierarchy(dispatch) {
+                let Some(class) = self.syms.class_by_type_name(owner) else {
+                    continue;
+                };
+                let class_bindings = class.type_parameter_bindings(owner_ty);
+                for function in class.member_ext_funs(name) {
+                    let declaration_tparams = TParams::from_bindings(class_bindings.clone())
+                        .extended_with(
+                            &function.type_params,
+                            &function.type_param_bounds,
+                            &class_internal_resolver(self.syms),
+                        );
+                    let mut scratch = DiagSink::new();
+                    let declared_receiver = ty_of_ref(
+                        &function.receiver,
+                        &self.syms.class_names,
+                        &declaration_tparams,
+                        &mut scratch,
+                    );
+                    let receiver_applicable = declared_receiver == extension_receiver
+                        || declared_receiver.is_erased_top()
+                        || crate::assignable::is_assignable(
+                            &crate::assignable::TyCtx::new(),
+                            self,
+                            extension_receiver,
+                            declared_receiver,
+                        );
+                    if !receiver_applicable {
+                        continue;
+                    }
+                    let generic_receiver =
+                        ty_mentions_param(function.receiver_ty, &function.type_params);
+                    shapes.push(MemberExtensionFunctionShape {
+                        priority: MemberExtensionPriority {
+                            dispatch_rank,
+                            dispatch_depth,
+                            declared_receiver,
+                            generic_receiver,
+                        },
+                        function: function.clone(),
+                        class_bindings: class_bindings.clone(),
+                        owner,
+                    });
+                }
+            }
+        }
+        shapes
+    }
+
+    fn instantiate_member_extension(
+        &self,
+        shape: &MemberExtensionFunctionShape,
+        call: MemberExtensionCall<'_>,
+    ) -> Option<InstantiatedMemberExtension> {
+        let MemberExtensionCall {
+            extension_receiver,
+            name,
+            args,
+            partial_arg_tys,
+            arg_names,
+            explicit_type_args,
+        } = call;
+        let function = &shape.function;
+        if !explicit_type_args.is_empty() && explicit_type_args.len() != function.type_params.len()
+        {
+            return None;
+        }
+        let call_sig = function.signature.call_sig();
+        let argument_parameters = if function.signature.vararg && arg_names.is_none() {
+            let last = function.params.len().checked_sub(1)?;
+            args.iter()
+                .enumerate()
+                .map(|(source, _)| (source.min(last), source))
+                .collect::<Vec<_>>()
+        } else {
+            map_call_sig_args(args, arg_names, &call_sig)
+                .ok()?
+                .iter()
+                .enumerate()
+                .filter_map(|(parameter, argument)| {
+                    let argument = argument.as_ref()?;
+                    args.iter()
+                        .position(|candidate| candidate == argument)
+                        .map(|source| (parameter, source))
+                })
+                .collect::<Vec<_>>()
+        };
+        let declaration_tparams = TParams::from_bindings(shape.class_bindings.clone())
+            .extended_with(
+                &function.type_params,
+                &function.type_param_bounds,
+                &class_internal_resolver(self.syms),
+            );
+        let mut bindings = shape.class_bindings.clone();
+        for parameter in &function.type_params {
+            bindings.remove(parameter);
+        }
+        for (parameter, argument) in function.type_params.iter().zip(explicit_type_args) {
+            bindings.insert(parameter.clone(), *argument);
+        }
+        unify_ref(
+            &function.receiver,
+            extension_receiver,
+            &function.type_params,
+            &mut bindings,
+        );
+        for &(parameter, source) in &argument_parameters {
+            let Some(Some(actual)) = partial_arg_tys.get(source) else {
+                continue;
+            };
+            let Some(reference) = function.params.get(parameter) else {
+                continue;
+            };
+            let actual = if function.signature.vararg
+                && parameter + 1 == function.params.len()
+                && self.file.is_spread_arg(args[source])
+            {
+                actual.array_elem().unwrap_or(*actual)
+            } else {
+                *actual
+            };
+            unify_ref(reference, actual, &function.type_params, &mut bindings);
+        }
+        for parameter in &function.type_params {
+            bindings
+                .entry(parameter.clone())
+                .or_insert_with(|| declaration_tparams.erase(parameter));
+        }
+        let concrete_tparams = TParams::from_bindings(bindings.clone());
+        let mut scratch = DiagSink::new();
+        let logical_params = function
+            .params
+            .iter()
+            .map(|reference| {
+                ty_of_ref(
+                    reference,
+                    &self.syms.class_names,
+                    &concrete_tparams,
+                    &mut scratch,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut applicability_params = logical_params.clone();
+        if function.signature.vararg {
+            let last = applicability_params.last_mut()?;
+            *last = Ty::array(*last);
+        }
+        let mut member = crate::libraries::LibraryMember::new(
+            name.to_string(),
+            applicability_params,
+            function.signature.ret,
+            String::new(),
+        );
+        member.call_sig = call_sig.clone();
+        let score =
+            self.module_member_candidate_score(&member, args, partial_arg_tys, arg_names)?;
+        let ret = function.ret.as_ref().map_or_else(
+            || crate::symbol_resolver::ty_subst(function.signature.ret, &bindings),
+            |reference| {
+                ty_of_ref(
+                    reference,
+                    &self.syms.class_names,
+                    &concrete_tparams,
+                    &mut scratch,
+                )
+            },
+        );
+        Some(InstantiatedMemberExtension {
+            logical_params,
+            ret,
+            call_sig,
+            score,
+            argument_parameters,
+        })
+    }
+
+    fn member_extension_supports_named(&self, extension_receiver: Ty, name: &str) -> bool {
+        self.member_extension_function_shapes(extension_receiver, name)
+            .iter()
+            .any(|shape| shape.function.signature.call_sig().has_param_names())
+    }
+
+    fn member_extension_lambda_param_types(
+        &self,
+        extension_receiver: Ty,
+        name: &str,
+        args: &[ExprId],
+        partial_arg_tys: &[Option<Ty>],
+        arg_names: Option<&[Option<String>]>,
+        explicit_type_args: &[Ty],
+    ) -> Option<MemberExtensionLambdaPlan> {
+        let mut plans = Vec::new();
+        for shape in self.member_extension_function_shapes(extension_receiver, name) {
+            let Some(instantiated) = self.instantiate_member_extension(
+                &shape,
+                MemberExtensionCall {
+                    extension_receiver,
+                    name,
+                    args,
+                    partial_arg_tys,
+                    arg_names,
+                    explicit_type_args,
+                },
+            ) else {
+                continue;
+            };
+            let mut lambda_params = vec![Vec::new(); args.len()];
+            let mut lambda_receivers = vec![None; args.len()];
+            for &(parameter_index, source_index) in &instantiated.argument_parameters {
+                let Some(parameter) = instantiated.logical_params.get(parameter_index) else {
+                    continue;
+                };
+                if let Ty::Fun(signature) = parameter {
+                    lambda_params[source_index] = signature.params.clone();
+                    if instantiated
+                        .call_sig
+                        .lambda_receiver_params
+                        .get(parameter_index)
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        lambda_receivers[source_index] = signature.params.first().copied();
+                    }
+                }
+            }
+            if lambda_params
+                .iter()
+                .any(|parameters| !parameters.is_empty())
+            {
+                plans.push(MemberExtensionLambdaPlan {
+                    priority: shape.priority,
+                    score: instantiated.score,
+                    param_types: lambda_params,
+                    receivers: lambda_receivers,
+                });
+            }
+        }
+        let maximal = self.maximal_member_extensions(&plans, |plan| plan.priority);
+        maximal
+            .into_iter()
+            .max_by_key(|index| plans[*index].score)
+            .map(|index| plans.swap_remove(index))
+    }
+
+    fn member_extension_function(
+        &self,
+        extension_receiver: Ty,
+        name: &str,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+        arg_names: Option<&[Option<String>]>,
+        explicit_type_args: &[Ty],
+    ) -> Result<Option<MemberExtensionFunctionCandidate>, ()> {
+        let mut candidates = Vec::new();
+        let full_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
+        for shape in self.member_extension_function_shapes(extension_receiver, name) {
+            let Some(instantiated) = self.instantiate_member_extension(
+                &shape,
+                MemberExtensionCall {
+                    extension_receiver,
+                    name,
+                    args,
+                    partial_arg_tys: &full_arg_tys,
+                    arg_names,
+                    explicit_type_args,
+                },
+            ) else {
+                continue;
+            };
+            candidates.push(MemberExtensionFunctionCandidate {
+                priority: shape.priority,
+                score: instantiated.score,
+                ret: instantiated.ret,
+                call_sig: instantiated.call_sig,
+                visibility: shape.function.signature.visibility,
+                owner: shape.owner,
+            });
+        }
+        let mut maximal =
+            self.maximal_member_extensions(&candidates, |candidate| candidate.priority);
+        if maximal.is_empty() {
+            return Ok(None);
+        }
+        let best = maximal
+            .iter()
+            .map(|index| candidates[*index].score)
+            .max()
+            .unwrap_or_default();
+        maximal.retain(|index| candidates[*index].score == best);
+        match maximal.as_slice() {
+            [index] => Ok(Some(candidates[*index].clone())),
+            _ => Err(()),
+        }
+    }
+
+    fn check_member_extension_function_call(
+        &mut self,
+        call: ExprId,
+        extension_receiver: Ty,
+        name: &str,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+    ) -> Option<Ty> {
+        let arg_names = self.file.call_arg_names.get(&call.0).cloned();
+        let explicit_type_args = self
+            .file
+            .call_type_args
+            .get(&call.0)
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|argument| self.resolve_ty(argument))
+            .collect::<Vec<_>>();
+        match self.member_extension_function(
+            extension_receiver,
+            name,
+            args,
+            arg_tys,
+            arg_names.as_deref(),
+            &explicit_type_args,
+        ) {
+            Ok(Some(candidate)) => {
+                if candidate.visibility != Visibility::Public {
+                    self.reject_if_inaccessible(
+                        candidate.visibility,
+                        name,
+                        candidate.owner,
+                        self.call_callee_name_span(call),
+                    );
+                }
+                if let Some(names) = arg_names.as_deref() {
+                    if let Ok(slots) = map_call_sig_args(args, Some(names), &candidate.call_sig) {
+                        self.resolved_call_arg_slots.insert(call, slots);
+                    }
+                }
+                Some(candidate.ret)
+            }
+            Ok(None) => None,
+            Err(()) => {
+                self.diags.error(
+                    self.call_callee_name_span(call),
+                    format!("overload resolution ambiguity for member '{name}'"),
+                );
+                Some(Ty::Error)
+            }
+        }
+    }
+
+    /// Resolve a property read without reporting a diagnostic on a miss.
     fn resolve_property_read(
         &mut self,
         rt: Ty,
@@ -15248,7 +15906,7 @@ impl<'a> Checker<'a> {
                         } else {
                             self.applied_source_supertype(rt, owner).unwrap_or(rt)
                         };
-                        let bindings = self.source_class_bindings(cs, applied);
+                        let bindings = cs.type_parameter_bindings(applied);
                         return Some(crate::symbol_resolver::ty_subst(shape, &bindings));
                     }
                 }
@@ -15676,6 +16334,141 @@ impl<'a> Checker<'a> {
     /// positionally, so `copy(resources = x)` type-checked `x` against the FIRST parameter.
     ///
     /// `None` when no module member matches (the caller falls through to its classpath/other paths).
+    fn module_member_candidate_score(
+        &self,
+        member: &crate::libraries::LibraryMember,
+        args: &[ExprId],
+        partial_arg_tys: &[Option<Ty>],
+        arg_names: Option<&[Option<String>]>,
+    ) -> Option<(usize, std::cmp::Reverse<usize>, bool)> {
+        let score = |expected: Ty, actual: Ty| {
+            if expected == actual {
+                Some(4)
+            } else if expected.is_erased_top()
+                || crate::assignable::is_assignable(
+                    &crate::assignable::TyCtx::new(),
+                    self,
+                    actual,
+                    expected,
+                )
+            {
+                Some(1)
+            } else {
+                None
+            }
+        };
+        if arg_names.is_none() {
+            if !member.call_sig.vararg {
+                if args
+                    .iter()
+                    .any(|argument| self.file.is_spread_arg(*argument))
+                    || args.len() > member.params.len()
+                    || (args.len() < member.params.len()
+                        && (args.len()..member.params.len())
+                            .any(|index| !member.call_sig.param_has_default(index)))
+                {
+                    return None;
+                }
+                let mut type_score = 0;
+                for (expected, actual) in member.params.iter().zip(partial_arg_tys) {
+                    if let Some(actual) = actual {
+                        type_score += score(*expected, *actual)?;
+                    }
+                }
+                return Some((
+                    type_score,
+                    std::cmp::Reverse(member.params.len().saturating_sub(args.len())),
+                    true,
+                ));
+            }
+            let Some((vararg, fixed)) = member.params.split_last() else {
+                return args.is_empty().then_some((0, std::cmp::Reverse(0), false));
+            };
+            if args.len() < fixed.len()
+                && (args.len()..fixed.len()).any(|index| !member.call_sig.param_has_default(index))
+            {
+                return None;
+            }
+            let fixed_provided = args.len().min(fixed.len());
+            let mut type_score = 0;
+            for (index, (expected, actual)) in fixed[..fixed_provided]
+                .iter()
+                .zip(&partial_arg_tys[..fixed_provided])
+                .enumerate()
+            {
+                if self.file.is_spread_arg(args[index]) {
+                    return None;
+                }
+                if let Some(actual) = actual {
+                    type_score += score(*expected, *actual)?;
+                }
+            }
+            let element = vararg.array_elem().unwrap_or(Ty::Error);
+            for (offset, actual) in partial_arg_tys[fixed_provided..].iter().enumerate() {
+                if let Some(actual) = actual {
+                    let argument = args[fixed_provided + offset];
+                    let expected = if self.file.is_spread_arg(argument) {
+                        *vararg
+                    } else {
+                        element
+                    };
+                    type_score += score(expected, *actual)?;
+                }
+            }
+            return Some((
+                type_score,
+                std::cmp::Reverse(fixed.len().saturating_sub(fixed_provided)),
+                false,
+            ));
+        }
+        let slots = map_call_sig_args(args, arg_names, &member.call_sig).ok()?;
+        let mut type_score = 0;
+        for (parameter_index, argument) in slots.iter().enumerate() {
+            let Some(argument) = argument else {
+                continue;
+            };
+            let source_index = args.iter().position(|candidate| candidate == argument)?;
+            let Some(Some(actual)) = partial_arg_tys.get(source_index) else {
+                continue;
+            };
+            let parameter = member.params.get(parameter_index)?;
+            let is_vararg_slot =
+                member.call_sig.vararg && parameter_index + 1 == member.params.len();
+            let spread = self.file.is_spread_arg(*argument);
+            if spread && !is_vararg_slot {
+                return None;
+            }
+            let expected = if is_vararg_slot && !spread {
+                parameter.array_elem().unwrap_or(Ty::Error)
+            } else {
+                *parameter
+            };
+            type_score += score(expected, *actual)?;
+        }
+        Some((
+            type_score,
+            std::cmp::Reverse(slots.iter().filter(|slot| slot.is_none()).count()),
+            !member.call_sig.vararg,
+        ))
+    }
+
+    fn best_module_member_candidate<'m>(
+        &self,
+        members: &'m [crate::libraries::LibraryMember],
+        args: &[ExprId],
+        partial_arg_tys: &[Option<Ty>],
+        arg_names: Option<&[Option<String>]>,
+    ) -> Option<&'m crate::libraries::LibraryMember> {
+        members
+            .iter()
+            .filter_map(|member| {
+                self.module_member_candidate_score(member, args, partial_arg_tys, arg_names)
+                    .map(|score| (score, member))
+            })
+            .max_by_key(|(score, _)| *score)
+            .map(|(_, member)| member)
+    }
+
     fn check_module_member_call(
         &mut self,
         call: ExprId,
@@ -15704,9 +16497,13 @@ impl<'a> Checker<'a> {
                 .iter()
                 .any(|other| member.owner == other.owner && member.params != other.params)
         });
+        let full_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
         let applicable_members = all_members
             .iter()
-            .filter(|member| module_member_candidate_applicable(member, args, arg_tys, arg_names))
+            .filter(|member| {
+                self.module_member_candidate_score(member, args, &full_arg_tys, arg_names)
+                    .is_some()
+            })
             .cloned()
             .collect::<Vec<_>>();
         if has_sibling_overloads && applicable_members.is_empty() {
@@ -15919,6 +16716,9 @@ impl<'a> Checker<'a> {
                                     ) && o.call_sig.has_param_names()
                                 })
                         })
+                        || self.implicit_receiver_types().into_iter().any(|rt| {
+                            self.member_extension_supports_named(rt, n)
+                        })
                         // A CLASSPATH CONSTRUCTOR whose `@Metadata` records parameter names
                         // (`Point(y = 2, x = 1)`, or `Cfg(a = 1, c = "x")` omitting a defaulted `b`,
                         // against a data/plain class from a dependency). `constructor_named_params` returns
@@ -15963,6 +16763,7 @@ impl<'a> Checker<'a> {
                         .unwrap_or_default()
                         .iter()
                         .any(|o| o.call_sig.has_param_names())
+                        || self.member_extension_supports_named(rt, name)
                 }
                 _ => false,
             };
@@ -16463,16 +17264,19 @@ impl<'a> Checker<'a> {
                                 .unwrap_or_else(|| type_name(&class_internal(self.file, &cls)));
                             let receiver_ty = Ty::obj_name(internal);
                             let arg_names = self.file.call_arg_names.get(&call.0).cloned();
+                            let full_arg_tys =
+                                arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
                             let applicable = crate::module_symbols::ModuleSymbols::new(self.syms)
                                 .instance_members(receiver_ty, &name)
                                 .iter()
                                 .any(|member| {
-                                    module_member_candidate_applicable(
+                                    self.module_member_candidate_score(
                                         member,
                                         args,
-                                        &arg_tys,
+                                        &full_arg_tys,
                                         arg_names.as_deref(),
                                     )
+                                    .is_some()
                                 });
                             if applicable {
                                 if let Some(ret) = self.check_module_member_call(
@@ -16678,15 +17482,6 @@ impl<'a> Checker<'a> {
                 // A MODULE (user-declared) class method only: a classpath receiver leaves this `None` so
                 // the extension lambda-param path below runs (else a Java member such as
                 // `Iterable.forEach(Consumer)` would suppress the Kotlin `forEach` extension).
-                let method_sig: Option<crate::libraries::LibraryMember> =
-                    crate::module_symbols::ModuleSymbols::new(self.syms)
-                        .instance_members(rt, &name)
-                        .into_iter()
-                        .next();
-                // A generic higher-order member (`box.map { it.length }` where `box: Box<String>`):
-                // substitute the receiver's type arguments into the lambda parameter types (so `it`
-                // types as `String`/`Int`, not the erased `Any`) and remember the plan to infer the
-                // method's own `<R>` from the lambda body — the call's result type — after the args type.
                 let generic_member_partial = args
                     .iter()
                     .map(|argument| {
@@ -16697,14 +17492,27 @@ impl<'a> Checker<'a> {
                         }
                     })
                     .collect::<Vec<_>>();
-                let generic_member: Option<GenericMemberPlan> = self.plan_generic_member(
-                    rt,
-                    None,
-                    &name,
-                    None,
-                    Some(&generic_member_partial),
-                    arg_names.as_deref(),
-                );
+                let method_sig: Option<crate::libraries::LibraryMember> = self
+                    .best_module_member_candidate(
+                        &crate::module_symbols::ModuleSymbols::new(self.syms)
+                            .instance_members(rt, &name),
+                        args,
+                        &generic_member_partial,
+                        arg_names.as_deref(),
+                    )
+                    .cloned();
+                // Preserve generic receiver bindings while typing member lambda arguments.
+                let generic_member: Option<GenericMemberPlan> =
+                    method_sig.as_ref().and_then(|member| {
+                        self.plan_generic_member(
+                            rt,
+                            member.owner,
+                            &name,
+                            Some(&member.params),
+                            Some(&generic_member_partial),
+                            arg_names.as_deref(),
+                        )
+                    });
                 crate::trace_compiler!(
                     "resolve",
                     "MCALL name={name} rt={rt:?} nargs={} generic_member={}",
@@ -16736,12 +17544,42 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
-                let ext_lambda_pts: Option<Vec<Vec<Ty>>> = ext_lambda_partial
+                let member_extension_type_args = self
+                    .file
+                    .call_type_args
+                    .get(&call.0)
+                    .cloned()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|argument| self.resolve_ty(argument))
+                    .collect::<Vec<_>>();
+                let member_ext_lambda_plan: Option<MemberExtensionLambdaPlan> =
+                    ext_lambda_partial.as_ref().and_then(|partial| {
+                        self.member_extension_lambda_param_types(
+                            rt,
+                            &name,
+                            args,
+                            partial,
+                            arg_names.as_deref(),
+                            &member_extension_type_args,
+                        )
+                    });
+                let ext_lambda_pts: Option<Vec<Vec<Ty>>> = member_ext_lambda_plan
                     .as_ref()
-                    .and_then(|partial| self.extension_lambda_param_types(rt, &name, partial));
-                let ext_lambda_recvs: Option<Vec<Option<Ty>>> = ext_lambda_partial
-                    .as_ref()
-                    .and_then(|partial| self.extension_lambda_receivers(rt, &name, partial));
+                    .map(|plan| plan.param_types.clone())
+                    .or_else(|| {
+                        ext_lambda_partial.as_ref().and_then(|partial| {
+                            self.extension_lambda_param_types(rt, &name, partial)
+                        })
+                    });
+                let ext_lambda_recvs: Option<Vec<Option<Ty>>> =
+                    if let Some(plan) = &member_ext_lambda_plan {
+                        Some(plan.receivers.clone())
+                    } else {
+                        ext_lambda_partial
+                            .as_ref()
+                            .and_then(|partial| self.extension_lambda_receivers(rt, &name, partial))
+                    };
                 // Array/`String` `forEach`/`forEachIndexed` have no `Obj` generic signature; supply the
                 // lambda parameter types directly from the element (the index is `Int`).
                 let ext_lambda_pts = ext_lambda_pts.or_else(|| {
@@ -16909,6 +17747,28 @@ impl<'a> Checker<'a> {
                 if rt == Ty::Error {
                     return Ty::Error;
                 }
+                let module_members = if matches!(rt, Ty::Obj(..)) {
+                    crate::module_symbols::ModuleSymbols::new(self.syms).instance_members(rt, &name)
+                } else {
+                    Vec::new()
+                };
+                let full_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
+                let applicable_module_member = module_members.iter().any(|member| {
+                    self.module_member_candidate_score(
+                        member,
+                        args,
+                        &full_arg_tys,
+                        arg_names.as_deref(),
+                    )
+                    .is_some()
+                });
+                if applicable_module_member || generic_member.is_some() {
+                    if let Some(ret) =
+                        self.check_module_member_call(call, rt, &name, args, &arg_tys)
+                    {
+                        return ret;
+                    }
+                }
                 if let ("toString", []) = (name.as_str(), arg_tys.as_slice()) {
                     // A function value's `toString()` is Kotlin's structured `(T) -> T` form, not the
                     // JVM default — krusty can't reproduce it, so reject rather than emit the wrong text.
@@ -16957,22 +17817,22 @@ impl<'a> Checker<'a> {
                 ) {
                     return Ty::Int;
                 }
-                if let Some(m) = self.resolve_instance_member_with_literal_args(
-                    rt,
-                    &name,
-                    &arg_tys,
-                    &integer_literals,
-                ) {
-                    crate::trace_compiler!(
-                        "resolve",
-                        "RIM-9451 name={name} rt={rt:?} -> ret={:?}",
-                        m.ret
-                    );
-                    // Record the resolved member so the lowerer emits it directly rather than
-                    // re-resolving the same call (see [`TypeInfo::resolved_members`]).
-                    let ret = m.ret;
-                    self.resolved_calls.insert(call, ResolvedCall::Member(m));
-                    return ret;
+                if module_members.is_empty() {
+                    if let Some(m) = self.resolve_instance_member_with_literal_args(
+                        rt,
+                        &name,
+                        &arg_tys,
+                        &integer_literals,
+                    ) {
+                        crate::trace_compiler!(
+                            "resolve",
+                            "RIM-9451 name={name} rt={rt:?} -> ret={:?}",
+                            m.ret
+                        );
+                        let ret = m.ret;
+                        self.resolved_calls.insert(call, ResolvedCall::Member(m));
+                        return ret;
+                    }
                 }
                 // A CLASSPATH member call with NAMED or OMITTED defaulted arguments
                 // (`workspace.copy(owner = o)` on a classpath data class): the argument-fit
@@ -17032,22 +17892,6 @@ impl<'a> Checker<'a> {
                 }
                 // Instance method call on a class value: `p.method(args)` (own or inherited).
                 if matches!(rt, Ty::Obj(..)) {
-                    if let Some(ret) =
-                        self.check_module_member_call(call, rt, &name, args, &arg_tys)
-                    {
-                        return ret;
-                    }
-                    // A classpath Java object: resolve the instance method via the `.class` reader.
-                    if let Some(m) = self.resolve_instance_member_with_literal_args(
-                        rt,
-                        &name,
-                        &arg_tys,
-                        &integer_literals,
-                    ) {
-                        let ret = m.ret;
-                        self.resolved_calls.insert(call, ResolvedCall::Member(m));
-                        return ret;
-                    }
                     // A user class that EXTENDS a classpath type inherits that supertype's members
                     // (`sub.inheritedMethod()`). Runs after the module-member lookup, so a user override
                     // wins.
@@ -17160,6 +18004,12 @@ impl<'a> Checker<'a> {
                 if !call_targs.is_empty() {
                     self.resolved_call_type_args
                         .insert(call, call_targs.clone());
+                }
+                // Member extensions precede imported and top-level extensions.
+                if let Some(ret) =
+                    self.check_member_extension_function_call(call, rt, &name, args, &arg_tys)
+                {
+                    return ret;
                 }
                 if let Some(ret) = self.record_library_extension_call_with_slots(
                     call,
@@ -17462,6 +18312,13 @@ impl<'a> Checker<'a> {
                 if let Some(fun_ty) = prop_fun_ty {
                     if let Some(ret) =
                         self.record_invoke(call, callee, fun_ty, args, &arg_tys, span)
+                    {
+                        return ret;
+                    }
+                }
+                if !module_members.is_empty() {
+                    if let Some(ret) =
+                        self.check_module_member_call(call, rt, &name, args, &arg_tys)
                     {
                         return ret;
                     }
@@ -18022,38 +18879,74 @@ impl<'a> Checker<'a> {
                 // form and then fails the arity check against the parameter's `(T?) -> T?`. Mirrors the
                 // explicit-receiver `method_sig` lambda pre-typing; gated to a receiver-less name that is
                 // neither a local nor a top-level function (`known_sig` covers the latter).
-                let this_member_lambda_pts: Option<Vec<Vec<Ty>>> = if !self
-                    .lexical_value_declares(&fname)
+                let implicit_member_lambda_enabled = !self.lexical_value_declares(&fname)
                     && known_sig.is_none()
                     && args
                         .iter()
-                        .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
+                        .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }));
+                let ordinary_this_member_lambda_pts: Option<Vec<Vec<Ty>>> =
+                    if implicit_member_lambda_enabled {
+                        let partial = this_member_partial.as_deref().unwrap_or_default();
+                        self.implicit_receiver_types()
+                            .into_iter()
+                            .find_map(|receiver| {
+                                let members = crate::module_symbols::ModuleSymbols::new(self.syms)
+                                    .instance_members(receiver, &fname);
+                                let member = self.best_module_member_candidate(
+                                    &members,
+                                    args,
+                                    partial,
+                                    arg_names.as_deref(),
+                                )?;
+                                self.plan_generic_member(
+                                    receiver,
+                                    member.owner,
+                                    &fname,
+                                    Some(&member.params),
+                                    Some(partial),
+                                    arg_names.as_deref(),
+                                )
+                                .map(|(_, _, lambda_params)| lambda_params)
+                                .or_else(|| Some(member.call_sig.lambda_param_types.clone()))
+                            })
+                    } else {
+                        None
+                    };
+                let this_member_ext_lambda_plan = if implicit_member_lambda_enabled
+                    && ordinary_this_member_lambda_pts.is_none()
                 {
+                    let explicit_type_args = self
+                        .file
+                        .call_type_args
+                        .get(&call.0)
+                        .cloned()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|argument| self.resolve_ty(argument))
+                        .collect::<Vec<_>>();
                     self.implicit_receiver_types()
                         .into_iter()
                         .find_map(|receiver| {
-                            self.plan_generic_member(
+                            self.member_extension_lambda_param_types(
                                 receiver,
-                                None,
                                 &fname,
-                                None,
-                                this_member_partial.as_deref(),
+                                args,
+                                this_member_partial.as_deref().unwrap_or_default(),
                                 arg_names.as_deref(),
+                                &explicit_type_args,
                             )
-                            .map(|(_, _, lambda_params)| lambda_params)
-                        })
-                        .or_else(|| {
-                            self.this_ty.and_then(|rt| {
-                                crate::module_symbols::ModuleSymbols::new(self.syms)
-                                    .instance_members(rt, &fname)
-                                    .into_iter()
-                                    .next()
-                                    .map(|m| m.call_sig.lambda_param_types)
-                            })
                         })
                 } else {
                     None
                 };
+                let this_member_lambda_pts = ordinary_this_member_lambda_pts.or_else(|| {
+                    this_member_ext_lambda_plan
+                        .as_ref()
+                        .map(|plan| plan.param_types.clone())
+                });
+                let this_member_lambda_recvs = this_member_ext_lambda_plan
+                    .as_ref()
+                    .map(|plan| plan.receivers.clone());
                 // A same-file class CONSTRUCTOR call (`C({ x, y -> x + y })`, an `enum` entry
                 // `plus({ x, y -> … })`): a lambda passed to a function-typed primary-ctor parameter
                 // binds its parameter types from that parameter's `Ty::Fun`, exactly like a top-level
@@ -18129,6 +19022,19 @@ impl<'a> Checker<'a> {
                                 && matches!(self.file.expr(a), Expr::Lambda { .. })
                             {
                                 let pt = pts[i].clone();
+                                if let Some(receiver) = this_member_lambda_recvs
+                                    .as_ref()
+                                    .and_then(|receivers| receivers.get(i))
+                                    .copied()
+                                    .flatten()
+                                {
+                                    return self.check_lambda_with_receiver_labeled(
+                                        a,
+                                        receiver,
+                                        pt.get(1..).unwrap_or_default(),
+                                        call_fn_name.as_deref(),
+                                    );
+                                }
                                 return self.check_lambda_with_types(a, &pt);
                             }
                         }
