@@ -8099,26 +8099,27 @@ impl<'a> Emitter<'a> {
                 // conversion the target is the interface's single method, whose descriptor is the
                 // lambda's concrete signature (no erasure/boxing).
                 let (iface, sam_method, sam_desc, inst_desc) = match sam {
-                    Some((iface, method)) => {
+                    Some((iface, method, descriptor)) => {
                         // `samMethodType` is the INTERFACE method's (erased) descriptor — NOT the
                         // lambda's — so a SAM with parameters (or a generic SAM erased to `Object`)
                         // matches the abstract method the metafactory must implement.
                         // `instantiatedMethodType` is the impl's actual lambda signature; the
                         // metafactory inserts the bridge between them.
                         let inst_desc = method_descriptor(lam_tys, impl_ret);
-                        let sam_desc = self
-                            .ir
-                            .classes
-                            .iter()
-                            .find(|c| c.fq_name_matches(iface))
-                            .and_then(|c| {
-                                c.methods
-                                    .iter()
-                                    .map(|&m| &self.ir.functions[m as usize])
-                                    .find(|f| f.name == *method)
-                            })
-                            .map(|f| ir_method_desc(&f.params, &f.ret))
-                            .unwrap_or_else(|| inst_desc.clone());
+                        let sam_desc = descriptor.clone().unwrap_or_else(|| {
+                            self.ir
+                                .classes
+                                .iter()
+                                .find(|c| c.fq_name_matches(iface))
+                                .and_then(|c| {
+                                    c.methods
+                                        .iter()
+                                        .map(|&m| &self.ir.functions[m as usize])
+                                        .find(|f| f.name == *method)
+                                })
+                                .map(|f| ir_method_desc(&f.params, &f.ret))
+                                .unwrap_or_else(|| inst_desc.clone())
+                        });
                         (iface.clone(), method.clone(), sam_desc, inst_desc)
                     }
                     None => {
