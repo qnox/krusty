@@ -273,6 +273,77 @@ pub(crate) fn ty_subst_all(sigs: &[Ty], binds: &GSigBinds) -> Vec<Ty> {
     sigs.iter().map(|s| ty_subst(*s, binds)).collect()
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ClasspathSamSignature {
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+}
+
+pub(crate) fn classpath_sam_signature(
+    lib: &dyn SemanticPlatform,
+    target: Ty,
+) -> Option<ClasspathSamSignature> {
+    let target = target.non_null();
+    let internal = target.obj_internal()?;
+    let ty = lib.resolve_type_name(internal)?;
+    let sam = ty.sam_method.as_ref()?;
+    let Some(gsig) = sam.generic_sig.as_ref() else {
+        return Some(ClasspathSamSignature {
+            params: sam.params.clone(),
+            ret: sam.ret,
+        });
+    };
+
+    let mut binds = GSigBinds::new();
+    for (formal, actual) in ty.type_params.iter().zip(target.type_args()) {
+        binds.insert(formal.clone(), *actual);
+    }
+    if let Some(receiver) = gsig.receiver {
+        unify_ty(receiver, target, &mut binds);
+    }
+    Some(ClasspathSamSignature {
+        params: ty_subst_all(&gsig.params, &binds),
+        ret: ty_subst(gsig.ret, &binds),
+    })
+}
+
+pub(crate) fn specialized_sam_member_params(
+    member: &LibraryMember,
+    args: &[Ty],
+    lambda_literals: &[bool],
+) -> Vec<Ty> {
+    specialized_sam_params(
+        &member.params,
+        member.generic_sig.as_ref(),
+        args,
+        lambda_literals,
+    )
+}
+
+fn specialized_sam_params(
+    params: &[Ty],
+    generic_sig: Option<&GenericSig>,
+    args: &[Ty],
+    lambda_literals: &[bool],
+) -> Vec<Ty> {
+    let Some(gsig) = generic_sig.filter(|sig| sig.params.len() == params.len()) else {
+        return params.to_vec();
+    };
+    let mut binds = GSigBinds::new();
+    for (index, (&param, &arg)) in gsig.params.iter().zip(args).enumerate() {
+        if lambda_literals.get(index) != Some(&true) {
+            unify_inferred_ty(param, arg, &mut binds);
+        }
+    }
+    let mut specialized = params.to_vec();
+    for (index, param) in specialized.iter_mut().enumerate() {
+        if lambda_literals.get(index) == Some(&true) {
+            *param = ty_subst(gsig.params[index], &binds);
+        }
+    }
+    specialized
+}
+
 fn seeded_gsig_binds(gsig: &GenericSig, type_args: &[Ty]) -> GSigBinds {
     gsig.formals
         .iter()
@@ -380,6 +451,27 @@ pub(crate) fn arg_fits(p: &Ty, a: &Ty) -> bool {
             || crate::types::same(*n, crate::types::wk::java_object()))
         || matches!((p.fun_arity(), a.fun_arity()), (Some(pn), Some(an)) if pn == an)
         || matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
+}
+
+fn classpath_sam_arg_matches(lib: &dyn SemanticPlatform, param: Ty, arg: Ty) -> bool {
+    let Some(sam) = classpath_sam_signature(lib, param) else {
+        return false;
+    };
+    if arg == Ty::Error {
+        return sam.params.len() <= 1;
+    }
+    let Some(arity) = arg.fun_arity() else {
+        return false;
+    };
+    if sam.params.len() != usize::from(arity) {
+        return false;
+    }
+    let Some(arg_ret) = arg.fun_ret() else {
+        return false;
+    };
+    sam.ret == Ty::Unit
+        || matches!(arg_ret, Ty::Error | Ty::Nothing)
+        || platform_arg_assignable(lib, &sam.ret, &arg_ret)
 }
 
 fn arg_fits_platform(lib: &dyn SemanticPlatform, param: &Ty, arg: &Ty) -> bool {
@@ -623,21 +715,34 @@ fn best_companion_overload<'a>(
     name: &str,
     args: &[Ty],
     integer_literals: &[bool],
+    lambda_literals: &[bool],
 ) -> Option<&'a LibraryMember> {
     debug_assert!(integer_literals.is_empty() || integer_literals.len() == args.len());
     let adapts = |p: &Ty, a: &Ty, i: usize| {
         integer_literal_adapts(*p, *a, integer_literals.get(i).copied().unwrap_or(false))
     };
-    let fits = |param: &Ty, arg: &Ty| arg_fits_source(lib, src, param, arg);
+    let fits = |position: usize, param: &Ty, arg: &Ty| {
+        if lambda_literals.get(position) == Some(&true) {
+            if param.fun_arity().is_some() {
+                arg_fits_source(lib, src, param, arg)
+            } else {
+                classpath_sam_arg_matches(lib, *param, *arg)
+            }
+        } else {
+            arg_fits_source(lib, src, param, arg)
+        }
+    };
+    let logical =
+        |member: &LibraryMember| specialized_sam_member_params(member, args, lambda_literals);
     let named = candidates.filter(|member| member.name == name);
-    if let Some(exact) = named.clone().find(|member| member.params == args) {
+    if let Some(exact) = named.clone().find(|member| logical(member) == args) {
         return Some(exact);
     }
     match integer_literal_overload(
-        named.clone().map(|member| (member.params.clone(), member)),
+        named.clone().map(|member| (logical(member), member)),
         args,
         integer_literals,
-        |_, param, arg| fits(param, arg),
+        |position, param, arg| fits(position, param, arg),
         |position, left, right| {
             parameter_at_least_as_specific(
                 lib,
@@ -653,8 +758,10 @@ fn best_companion_overload<'a>(
     }
     match unique_most_specific(
         named.clone().filter_map(|member| {
-            fixed_parameter_shape(&member.params, args, |_, param, arg| fits(param, arg))
-                .map(|shape| (shape, member))
+            fixed_parameter_shape(&logical(member), args, |position, param, arg| {
+                fits(position, param, arg)
+            })
+            .map(|shape| (shape, member))
         }),
         |_, left, right| resolution_subtype(lib, src, left, right),
     ) {
@@ -664,8 +771,8 @@ fn best_companion_overload<'a>(
     }
     match unique_most_specific(
         named.clone().filter_map(|member| {
-            omitted_parameter_shape(&member.params, args, |i, param, arg| {
-                fits(param, arg) || adapts(param, arg, i)
+            omitted_parameter_shape(&logical(member), args, |i, param, arg| {
+                fits(i, param, arg) || adapts(param, arg, i)
             })
             .map(|shape| (shape, member))
         }),
@@ -677,8 +784,8 @@ fn best_companion_overload<'a>(
     }
     match unique_most_specific(
         named.filter_map(|member| {
-            vararg_parameter_shape(&member.params, args, |i, param, arg| {
-                fits(param, arg) || adapts(param, arg, i)
+            vararg_parameter_shape(&logical(member), args, |i, param, arg| {
+                fits(i, param, arg) || adapts(param, arg, i)
             })
             .map(|shape| (shape, member))
         }),
@@ -840,6 +947,16 @@ pub enum Symbol {
 }
 
 impl Symbol {
+    pub(crate) fn selected_member(self) -> Option<LibraryMember> {
+        match self {
+            Symbol::Member(f) => f.call.map(|resolved| resolved.member),
+            Symbol::Instance(member) | Symbol::Companion(member) | Symbol::Constructor(member) => {
+                Some(member)
+            }
+            Symbol::SyntheticConstructor(_) => None,
+        }
+    }
+
     /// This name invoked as a method with the resolved arguments (`recv.name(args)`).
     pub fn call(self) -> Option<ResolvedMember> {
         match self {
@@ -1086,13 +1203,40 @@ impl<'a> SymbolResolver<'a> {
         integer_literals: &[bool],
         type_args: &[Ty],
     ) -> Option<Symbol> {
+        self.resolve_symbol_with_literal_and_lambda_args(
+            recv,
+            name,
+            args,
+            integer_literals,
+            &[],
+            type_args,
+        )
+    }
+
+    pub fn resolve_symbol_with_literal_and_lambda_args(
+        &self,
+        recv: SymRecv,
+        name: &str,
+        args: &[Ty],
+        integer_literals: &[bool],
+        lambda_literals: &[bool],
+        type_args: &[Ty],
+    ) -> Option<Symbol> {
         debug_assert!(integer_literals.is_empty() || integer_literals.len() == args.len());
+        debug_assert!(lambda_literals.is_empty() || lambda_literals.len() == args.len());
         match recv {
             SymRecv::Value(ty) => {
                 // Resolve every facet the name supports on this receiver; a name can support several (a
                 // Java zero-arg method is a property read AND a callable). Each facet is exactly the
                 // former per-use resolution, so the caller's chosen facet behaves as before.
-                let call = resolve_instance_member(self.lib, ty, name, args, integer_literals);
+                let call = resolve_instance_member(
+                    self.lib,
+                    ty,
+                    name,
+                    args,
+                    integer_literals,
+                    lambda_literals,
+                );
                 let read = resolve_property_member(self.lib, ty, name);
                 let write = resolve_property_setter(self.lib, ty, name);
                 let method_ref = resolve_instance_ref(self.lib, ty, name);
@@ -1105,7 +1249,7 @@ impl<'a> SymbolResolver<'a> {
                     self.lib,
                     ty,
                     name,
-                    CallArgs::new(args, integer_literals),
+                    CallArgs::new(args, integer_literals, lambda_literals),
                     type_args,
                     FnKind::Extension,
                     ExtCtx {
@@ -1203,11 +1347,12 @@ impl<'a> SymbolResolver<'a> {
                     extension_property_getter: None,
                 })))
             }
-            SymRecv::Type(internal) => self.resolve_symbol_with_literal_args(
+            SymRecv::Type(internal) => self.resolve_symbol_with_literal_and_lambda_args(
                 SymRecv::TypeName(crate::types::type_name(internal)),
                 name,
                 args,
                 integer_literals,
+                lambda_literals,
                 type_args,
             ),
             SymRecv::TypeName(internal) => {
@@ -1222,19 +1367,27 @@ impl<'a> SymbolResolver<'a> {
                 } else {
                     // `Type.name(args)` — an object/companion instance member, else a static/companion
                     // member. The resolver discovers which.
-                    resolve_instance_name(self.lib, internal, name, args, integer_literals)
-                        .map(Symbol::Instance)
-                        .or_else(|| {
-                            resolve_companion_name(
-                                self.lib,
-                                &self.src,
-                                internal,
-                                name,
-                                args,
-                                integer_literals,
-                            )
-                            .map(Symbol::Companion)
-                        })
+                    resolve_instance_name(
+                        self.lib,
+                        internal,
+                        name,
+                        args,
+                        integer_literals,
+                        lambda_literals,
+                    )
+                    .map(Symbol::Instance)
+                    .or_else(|| {
+                        resolve_companion_name(
+                            self.lib,
+                            &self.src,
+                            internal,
+                            name,
+                            args,
+                            integer_literals,
+                            lambda_literals,
+                        )
+                        .map(Symbol::Companion)
+                    })
                 }
             }
         }
@@ -2115,12 +2268,22 @@ fn resolve_companion_name(
     name: &str,
     args: &[Ty],
     integer_literals: &[bool],
+    lambda_literals: &[bool],
 ) -> Option<LibraryMember> {
     let t = lib.resolve_type_name(internal)?;
     if !t.is_public {
         return None;
     }
-    best_companion_overload(lib, src, t.companion.iter(), name, args, integer_literals).cloned()
+    best_companion_overload(
+        lib,
+        src,
+        t.companion.iter(),
+        name,
+        args,
+        integer_literals,
+        lambda_literals,
+    )
+    .cloned()
 }
 
 /// Resolve an instance member `recv.name(args)` — the receiver's static type must be public, but the
@@ -2133,8 +2296,17 @@ fn resolve_instance_name(
     name: &str,
     args: &[Ty],
     integer_literals: &[bool],
+    lambda_literals: &[bool],
 ) -> Option<LibraryMember> {
-    select_instance_info(lib, Ty::obj_name(internal), name, args, integer_literals).map(|o| {
+    select_instance_info(
+        lib,
+        Ty::obj_name(internal),
+        name,
+        args,
+        integer_literals,
+        lambda_literals,
+    )
+    .map(|o| {
         let ret = o.ret.apply(o.callable.ret);
         o.member_with_return(ret)
     })
@@ -2236,8 +2408,9 @@ fn resolve_instance_member(
     name: &str,
     args: &[Ty],
     integer_literals: &[bool],
+    lambda_literals: &[bool],
 ) -> Option<ResolvedMember> {
-    let o = select_instance_info(lib, recv, name, args, integer_literals)?;
+    let o = select_instance_info(lib, recv, name, args, integer_literals, lambda_literals)?;
     let ret = if o.callable.physical_ret == Ty::obj("kotlin/Any") {
         o.generic_sig
             .as_ref()
@@ -2286,7 +2459,8 @@ fn property_getter_via_query(
         .min_by_key(|p| p.receiver_rank)
         .map(|p| p.getter.name)
         .filter(|getter| !getter.contains('-'))?;
-    resolve_instance_member(lib, recv, &getter, &[], &[]).filter(|m| m.ret.is_read_value_result())
+    resolve_instance_member(lib, recv, &getter, &[], &[], &[])
+        .filter(|m| m.ret.is_read_value_result())
 }
 
 /// Resolve a zero-arg property read on `recv`. The `@Metadata` `properties` query supplies the real
@@ -2298,11 +2472,11 @@ fn resolve_property_member(
     property: &str,
 ) -> Option<ResolvedMember> {
     property_getter_via_query(lib, recv, property)
-        .or_else(|| resolve_instance_member(lib, recv, property, &[], &[]))
+        .or_else(|| resolve_instance_member(lib, recv, property, &[], &[], &[]))
         .filter(|m| m.ret.is_read_value_result())
         .or_else(|| {
             let getter = lib.physical_property_getter_name(property)?;
-            resolve_instance_member(lib, recv, &getter, &[], &[])
+            resolve_instance_member(lib, recv, &getter, &[], &[], &[])
                 .filter(|m| m.ret.is_read_value_result())
         })
         .or_else(|| {
@@ -2358,12 +2532,13 @@ fn select_instance_info(
     name: &str,
     args: &[Ty],
     integer_literals: &[bool],
+    lambda_literals: &[bool],
 ) -> Option<FunctionInfo> {
     select_overload(
         lib,
         recv,
         name,
-        CallArgs::new(args, integer_literals),
+        CallArgs::new(args, integer_literals, lambda_literals),
         &[],
         FnKind::Member,
         ExtCtx {
@@ -2549,14 +2724,17 @@ struct ExtCtx<'a> {
 struct CallArgs<'a> {
     types: &'a [Ty],
     integer_literals: &'a [bool],
+    lambda_literals: &'a [bool],
 }
 
 impl<'a> CallArgs<'a> {
-    fn new(types: &'a [Ty], integer_literals: &'a [bool]) -> Self {
+    fn new(types: &'a [Ty], integer_literals: &'a [bool], lambda_literals: &'a [bool]) -> Self {
         debug_assert!(integer_literals.is_empty() || integer_literals.len() == types.len());
+        debug_assert!(lambda_literals.is_empty() || lambda_literals.len() == types.len());
         Self {
             types,
             integer_literals,
+            lambda_literals,
         }
     }
 }
@@ -2623,6 +2801,7 @@ fn select_overload(
     let CallArgs {
         types: args,
         integer_literals,
+        lambda_literals,
     } = args;
     // A MEMBER call needs a public class receiver; an EXTENSION resolves on any receiver (primitives,
     // type variables, nullable types) that may have no `resolve_type` entry, so gate only members.
@@ -2741,6 +2920,7 @@ fn select_overload(
             continue;
         }
         let lp = logical_value_params(lib, o, recv, type_args);
+        let lp = specialized_sam_params(&lp, o.generic_sig.as_ref(), args, lambda_literals);
         crate::trace_compiler!(
             "resolve",
             "  cand {name} rank={rank} logical_params={lp:?} owner={}",
@@ -2749,7 +2929,7 @@ fn select_overload(
         by_rank.entry(rank).or_default().push((o, lp));
     }
     for cands in by_rank.values() {
-        match best_by_args(lib, cands, args, integer_literals) {
+        match best_by_args(lib, cands, args, integer_literals, lambda_literals) {
             CandidateSelection::Selected(overload) => return Some(overload.clone()),
             CandidateSelection::Ambiguous => return None,
             CandidateSelection::None => {}
@@ -2841,22 +3021,38 @@ fn best_by_args<'a>(
     cands: &[(&'a FunctionInfo, Vec<Ty>)],
     args: &[Ty],
     integer_literals: &[bool],
+    lambda_literals: &[bool],
 ) -> CandidateSelection<&'a FunctionInfo> {
     let adapts = |p: &Ty, a: &Ty, i: usize| {
         integer_literal_adapts(*p, *a, integer_literals.get(i).copied().unwrap_or(false))
+    };
+    let function_like_fits = |p: &Ty, a: &Ty| {
+        p.fun_arity()
+            .zip(lib.function_like_arity(*a))
+            .is_some_and(|(param, arg)| usize::from(param) == arg)
     };
     // The DEFAULT-omitting passes accept a reference SUBTYPE / value-class-underlying argument (a
     // `joinToString(separator: CharSequence = …)` call with a `String`), matching the assignability the
     // exact-arity subtype pass in `select_overload` applies — the exact/`Any`-widened passes above stay
     // stricter so an exact call still prefers its precise overload.
-    let fits = |p: &Ty, a: &Ty| {
-        fun_arg_matches(lib, p, a)
-            || platform_arg_assignable(lib, p, a)
-            // A function-shaped argument that IS-A `FunctionN` by supertype (a `KProperty1` fits a
-            // `(T) -> R` param) — matched by arity, since it is neither a `Ty::Fun` nor equal to the param.
-            || p.fun_arity()
-                .zip(lib.function_like_arity(*a))
-                .is_some_and(|(pn, an)| usize::from(pn) == an)
+    let fits = |position: usize, p: &Ty, a: &Ty| {
+        if lambda_literals.get(position) == Some(&true) && p.fun_arity().is_none() {
+            classpath_sam_arg_matches(lib, *p, *a)
+        } else {
+            fun_arg_matches(lib, p, a)
+                || platform_arg_assignable(lib, p, a)
+                || function_like_fits(p, a)
+        }
+    };
+    let erased_fits = |position: usize, p: &Ty, a: &Ty| {
+        if lambda_literals.get(position) == Some(&true) && p.fun_arity().is_none() {
+            classpath_sam_arg_matches(lib, *p, *a)
+        } else {
+            p == a
+                || *p == Ty::obj("kotlin/Any")
+                || fun_arg_matches(lib, p, a)
+                || function_like_fits(p, a)
+        }
     };
     if let Some((exact, _)) = cands.iter().find(|(_, params)| *params == args) {
         return CandidateSelection::Selected(exact);
@@ -2867,7 +3063,7 @@ fn best_by_args<'a>(
             .map(|(candidate, params)| (params.clone(), *candidate)),
         args,
         integer_literals,
-        |_, param, arg| fits(param, arg),
+        |position, param, arg| fits(position, param, arg),
         |position, left, right| {
             parameter_at_least_as_specific(
                 lib,
@@ -2883,18 +3079,32 @@ fn best_by_args<'a>(
         CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
         CandidateSelection::None => {}
     }
+    if lambda_literals.iter().any(|literal| *literal) {
+        match unique_most_specific(
+            cands.iter().filter_map(|(candidate, params)| {
+                fixed_parameter_shape(params, args, |position, param, arg| {
+                    erased_fits(position, param, arg)
+                })
+                .map(|shape| (shape, *candidate))
+            }),
+            |_, left, right| parameter_at_least_as_specific(lib, left, right, false),
+        ) {
+            CandidateSelection::Selected(candidate) => {
+                return CandidateSelection::Selected(candidate);
+            }
+            CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
+            CandidateSelection::None => {}
+        }
+    }
     cands
         .iter()
         .find(|(_, lp)| {
             lp.len() == args.len()
-                && lp.iter().zip(args).all(|(p, a)| {
-                    p == a
-                        || *p == Ty::obj("kotlin/Any")
-                        || fun_arg_matches(lib, p, a)
-                        || p.fun_arity()
-                            .zip(lib.function_like_arity(*a))
-                            .is_some_and(|(param, arg)| usize::from(param) == arg)
-                })
+                && lp
+                    .iter()
+                    .zip(args)
+                    .enumerate()
+                    .all(|(i, (p, a))| erased_fits(i, p, a))
         })
         .or_else(|| {
             cands.iter().find(|(o, lp)| {
@@ -2904,7 +3114,7 @@ fn best_by_args<'a>(
                         .iter()
                         .zip(args)
                         .enumerate()
-                        .all(|(i, (p, a))| fits(p, a) || adapts(p, a, i))
+                        .all(|(i, (p, a))| fits(i, p, a) || adapts(p, a, i))
             })
         })
         .or_else(|| {
@@ -2919,14 +3129,14 @@ fn best_by_args<'a>(
                 };
                 let prefix = args.len() - 1;
                 prefix <= last
-                    && fun_arg_matches(lib, &lp[last], args.last().unwrap())
+                    && fits(last, &lp[last], args.last().unwrap())
                     && ((prefix..last).all(|i| o.call_sig.param_has_default(i))
                         || o.call_sig.required <= prefix)
                     && lp[..prefix.min(lp.len())]
                         .iter()
                         .zip(&args[..prefix])
                         .enumerate()
-                        .all(|(i, (p, a))| fits(p, a) || adapts(p, a, i))
+                        .all(|(i, (p, a))| fits(i, p, a) || adapts(p, a, i))
             })
         })
         .or_else(|| {
@@ -2951,11 +3161,11 @@ fn best_by_args<'a>(
                         .iter()
                         .zip(args)
                         .enumerate()
-                        .all(|(i, (p, a))| fits(p, a) || adapts(p, a, i))
-                    && args[fixed..]
-                        .iter()
-                        .enumerate()
-                        .all(|(i, a)| fits(&elem, a) || adapts(&elem, a, fixed + i))
+                        .all(|(i, (p, a))| fits(i, p, a) || adapts(p, a, i))
+                    && args[fixed..].iter().enumerate().all(|(i, a)| {
+                        let position = fixed + i;
+                        fits(position, &elem, a) || adapts(&elem, a, position)
+                    })
             })
         })
         .map(|(o, _)| *o)
@@ -3180,6 +3390,40 @@ mod tests {
     }
 
     #[test]
+    fn nested_generic_conflicts_erase_only_the_later_sam_slot() {
+        let parameter = Ty::ty_param("T", Ty::obj("kotlin/Any"));
+        let generic_values = Ty::obj_args("fixture/Duo", &[parameter, parameter]);
+        let generic_sink = Ty::obj_args("fixture/Sink", &[parameter]);
+        let mut member = LibraryMember::new(
+            "use".to_string(),
+            vec![Ty::obj("fixture/Duo"), Ty::obj("fixture/Sink")],
+            Ty::Unit,
+            "(Lfixture/Duo;Lfixture/Sink;)V".to_string(),
+        );
+        member.generic_sig = Some(GenericSig {
+            formals: vec!["T".to_string()],
+            receiver: None,
+            params: vec![generic_values, generic_sink],
+            ret: Ty::Unit,
+        });
+
+        let params = specialized_sam_member_params(
+            &member,
+            &[
+                Ty::obj_args("fixture/Duo", &[Ty::String, Ty::obj("kotlin/Any")]),
+                Ty::Error,
+            ],
+            &[false, true],
+        );
+
+        assert_eq!(params[0], Ty::obj("fixture/Duo"));
+        assert_eq!(
+            params[1],
+            Ty::obj_args("fixture/Sink", &[Ty::obj("kotlin/Any")])
+        );
+    }
+
+    #[test]
     fn receiver_mro_walks_supertypes() {
         let src = FakeSource {
             name: "unused",
@@ -3262,6 +3506,7 @@ mod tests {
             "make",
             &[Ty::obj("demo/Leaf")],
             &[],
+            &[],
         )
         .expect("the most specific source supertype should be selected");
         assert_eq!(selected.params, vec![Ty::obj("demo/Mid")]);
@@ -3274,6 +3519,7 @@ mod tests {
             [&left, &right].into_iter(),
             "make",
             &[Ty::obj("demo/Leaf"), Ty::obj("demo/Leaf")],
+            &[],
             &[],
         )
         .is_none());
@@ -3308,6 +3554,7 @@ mod tests {
             "make",
             &[Ty::obj("demo/Leaf")],
             &[],
+            &[],
         )
         .expect("the defaulted source-supertype overload should resolve");
         assert_eq!(selected.params[0], Ty::obj("demo/Mid"));
@@ -3320,6 +3567,7 @@ mod tests {
             [&vararg_broad, &vararg_specific].into_iter(),
             "make",
             &[Ty::obj("demo/Leaf")],
+            &[],
             &[],
         )
         .expect("the vararg source-supertype overload should resolve");
@@ -3665,8 +3913,9 @@ mod tests {
             receiver: Some(Ty::obj("demo/Box")),
             info: member_nullable_string_info(),
         };
-        let resolved = resolve_instance_member(&source, Ty::obj("demo/Box"), "maybe", &[], &[])
-            .expect("nullable member should resolve");
+        let resolved =
+            resolve_instance_member(&source, Ty::obj("demo/Box"), "maybe", &[], &[], &[])
+                .expect("nullable member should resolve");
         assert_eq!(resolved.ret, Ty::nullable(Ty::String));
         assert_eq!(resolved.member.physical_ret, Ty::String);
     }
@@ -3678,8 +3927,9 @@ mod tests {
             receiver: Some(Ty::obj("demo/Box")),
             info: member_metadata_class_info(),
         };
-        let resolved = resolve_instance_member(&source, Ty::obj("demo/Box"), "names", &[], &[])
-            .expect("member with metadata return class should resolve");
+        let resolved =
+            resolve_instance_member(&source, Ty::obj("demo/Box"), "names", &[], &[], &[])
+                .expect("member with metadata return class should resolve");
         assert_eq!(
             resolved.ret,
             Ty::obj_args("kotlin/collections/List", &[Ty::String])
