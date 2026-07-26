@@ -542,6 +542,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   arguments into a fresh array (`newarray`/`anewarray` + per-element store) and passes it, like kotlinc.
   Spread (`*arr`) is not modeled. `for (x in arr)` over an array iterates by index
   (`i = 0; while (i < arr.size) { x = arr[i]; …; i++ }`, array and size hoisted).
+- **Classpath Java varargs (`T...`)**: a Java varargs method's erased descriptor shows a plain `[T`
+  array, indistinguishable from a real array parameter — the only signal is the class file's
+  `ACC_VARARGS` flag. krusty reads it (`MethodSig::is_vararg`) into `CallSig::vararg` when building a
+  classpath member (`FunctionInfo::member_with_return` carries it onto the resolved member), so
+  overload resolution selects the vararg overload once the argument count exceeds the fixed-arity
+  siblings (`Logger.debug(String, Object)` / `(String, Object, Object)` vs `(String, Object...)`) and
+  the lowerer packs the trailing element arguments into the array parameter — matching how a Kotlin
+  `vararg` (whose flag comes from `@Metadata`) is handled. Without the flag, `log.debug(fmt, a, b, c)`
+  reported "none of the candidates is applicable". Test:
+  `vararg_e2e::classpath_java_instance_object_varargs_element_wise`.
 - Range expressions as **values**: `a..b` and `a..<b` are the only true range *operators* (parsed at a
   precedence tighter than infix functions, looser than additive). `a..b` over `Int`/`Long`/`Char`
   constructs the matching stdlib range object via `new IntRange/LongRange/CharRange(II/JJ/CC)` (kotlinc's

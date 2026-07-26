@@ -16,3 +16,18 @@ return \"OK\"\n\
 }\n";
     common::assert_box_ok_with_stdlib(src, "V");
 }
+
+#[test]
+fn classpath_java_instance_object_varargs_element_wise() {
+    // A classpath Java INSTANCE method with an `Object...` vararg (`Formatter.format(String, Object...)`)
+    // called with trailing element args. The method's `ACC_VARARGS` flag must be read so element-wise
+    // arguments pack into the array — previously only Kotlin `@Metadata` carried the vararg flag, so a
+    // plain Java varargs method was rejected once the arg count exceeded its fixed-arity overloads
+    // (`debug(String, Object)`, `debug(String, Object, Object)`), yielding "none of the candidates".
+    let src = "import java.util.Formatter\n\
+fun box(): String {\n\
+val s = Formatter().format(\"%s-%s-%s\", \"a\", \"b\", \"c\").toString()\n\
+return if (s == \"a-b-c\") \"OK\" else \"FAIL:$s\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "VarargsJavaInstance");
+}

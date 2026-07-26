@@ -730,6 +730,9 @@ impl FunctionInfo {
         member.generic_sig = self.generic_sig.clone();
         member.inline = self.flags.inline;
         member.suspend = self.flags.suspend;
+        // Carry the call shape (parameter names/defaults and the `vararg` flag) so the lowerer packs a
+        // Java `T...` varargs call's trailing arguments into its array parameter.
+        member.call_sig = self.call_sig.clone();
         member
     }
 }

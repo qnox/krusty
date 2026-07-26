@@ -904,10 +904,15 @@ impl JvmLibraries {
                 } else if m.is_static() {
                     // A Kotlin companion member compiles to a JVM static on the class.
                     member.call_sig = member_call_sig(&member, &m.name);
+                    // A plain Java varargs method carries no `@Metadata`, so `member_call_sig` yields a
+                    // default (non-vararg) sig; recover the vararg flag from the class file's `ACC_VARARGS`
+                    // so trailing arguments pack element-wise (`String.format(fmt, a, b, c)`).
+                    member.call_sig.vararg |= m.is_vararg();
                     member.call_sig.platform_nullable_params = platform_nullable_params;
                     companion.push(member);
                 } else {
                     member.call_sig = member_call_sig(&member, &m.name);
+                    member.call_sig.vararg |= m.is_vararg();
                     member.call_sig.platform_nullable_params = platform_nullable_params;
                     members.push(member);
                 }
@@ -2270,7 +2275,12 @@ impl SymbolSource for JvmLibraries {
                             );
                             recovered.unwrap_or(m.ret)
                         };
+                        // `member_facts` derives the call-sig from Kotlin `@Metadata`; a plain Java
+                        // method has none, so recover its `ACC_VARARGS` flag (set on the `LibraryMember`
+                        // from the class file) — otherwise a Java `T...` method is never spread over
+                        // element-wise trailing arguments.
                         let mut call_sig = member_facts.call_sig;
+                        call_sig.vararg |= m.call_sig.vararg;
                         call_sig
                             .platform_nullable_params
                             .clone_from(&m.call_sig.platform_nullable_params);

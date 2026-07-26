@@ -12,6 +12,10 @@ pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PROTECTED: u16 = 0x0004;
 pub const ACC_STATIC: u16 = 0x0008;
 pub const ACC_BRIDGE: u16 = 0x0040;
+/// `ACC_VARARGS` — the method's last parameter is a Java `T...` vararg. The erased descriptor shows a
+/// plain `[T` array (indistinguishable from a real array parameter), so this flag is the only signal
+/// that trailing arguments may be packed element-wise at the call site.
+pub const ACC_VARARGS: u16 = 0x0080;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JavaNullability {
@@ -49,6 +53,11 @@ impl MethodSig {
     }
     pub fn is_bridge(&self) -> bool {
         self.access & ACC_BRIDGE != 0
+    }
+    /// A Java varargs method (`f(T...)`) — its trailing `[T` array parameter accepts element-wise
+    /// arguments at the call site. The erased descriptor cannot express this; only `ACC_VARARGS` can.
+    pub fn is_vararg(&self) -> bool {
+        self.access & ACC_VARARGS != 0
     }
     pub fn has_same_parameter_descriptor(&self, other: &Self) -> bool {
         self.descriptor

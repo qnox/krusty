@@ -22006,6 +22006,16 @@ impl<'a> Lower<'a> {
                             self.lower_call_slot_args_with_element(
                                 &args, &slots, &mparams, elem_prim,
                             )?
+                        } else if member.call_sig.vararg && !mparams.is_empty() {
+                            // A Java `T...` varargs member packs the trailing arguments into its array
+                            // parameter (`Formatter.format(fmt, a, b, c)`); without this they are pushed
+                            // unpacked and the verifier rejects the call. `ACC_VARARGS` → `call_sig.vararg`.
+                            let n_fixed = mparams.len() - 1;
+                            if args.len() < n_fixed {
+                                return None;
+                            }
+                            let ir_params: Vec<Ty> = mparams.iter().map(|&p| ty_to_ir(p)).collect();
+                            self.lower_call_args_vararg(&args, &ir_params, true, n_fixed)?
                         } else {
                             let mut lowered = Vec::new();
                             for (i, &arg) in args.iter().enumerate() {
