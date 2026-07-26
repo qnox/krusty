@@ -9886,6 +9886,12 @@ impl<'a> Checker<'a> {
         if expected.nullable_primitive() == Some(actual) {
             return;
         }
+        if (!actual.is_nullable() || expected.is_nullable())
+            && self.syms.libraries.boxed_primitive(actual)
+                == Some(expected.nullable_primitive().unwrap_or(expected))
+        {
+            return;
+        }
         // In Kotlin every type is a subtype of `Any`/`Object`, and the top type narrows back to a
         // specific type by an unchecked cast. Both directions are assignable; the primitive-vs-boxed
         // *representation* (and any box/unbox or checkcast) is the backend's concern, decided at the
@@ -10710,7 +10716,10 @@ impl<'a> Checker<'a> {
                 let rt = self.expr(rhs);
                 // The elvis value when lhs is non-null: a nullable-primitive lhs (`Int?`) unwraps to its
                 // unboxed primitive, so `intNullable ?: 0` is `Int`.
-                let lt = lt0.nullable_primitive().unwrap_or(lt0);
+                let lt = lt0
+                    .nullable_primitive()
+                    .or_else(|| self.syms.libraries.boxed_primitive(lt0))
+                    .unwrap_or(lt0);
                 // A `Unit`-coerced elvis (`x ?: someUnitExpr`) trips a StackMapTable mismatch in
                 // codegen (the branches push incompatible stack shapes) — skip rather than VerifyError.
                 if rt == Ty::Unit {
@@ -10747,7 +10756,8 @@ impl<'a> Checker<'a> {
                 {
                     rt
                 } else if rt == Ty::Null {
-                    lt
+                    // A null fallback preserves the boxed lhs representation.
+                    lt0
                 } else {
                     self.join(lt, rt, self.span(e))
                 }

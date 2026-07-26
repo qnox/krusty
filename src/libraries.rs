@@ -114,6 +114,11 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
             .unwrap_or(internal)
     }
 
+    /// Primitive represented by a platform wrapper type.
+    fn boxed_primitive(&self, _ty: Ty) -> Option<Ty> {
+        None
+    }
+
     /// The receiver-MRO RUNG of an extension whose declared receiver is `decl_recv`, for an actual receiver
     /// `recv`: `0` when the extension's receiver IS the receiver's own type, increasing up the receiver's
     /// supertype chain (with the platform's primitive/array/value-class widening — an `Int` widens through
@@ -1261,5 +1266,9 @@ mod tests {
 
         let source: &dyn super::SemanticPlatform = &SemanticOnly;
         assert_eq!(source.platform_default_import_packages(), &["kotlin"]);
+        assert_eq!(
+            source.boxed_primitive(crate::types::Ty::obj("platform/Box")),
+            None
+        );
     }
 }

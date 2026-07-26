@@ -2421,6 +2421,12 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         super::jvm_class_map::to_jvm_type_name(internal)
     }
 
+    fn boxed_primitive(&self, ty: Ty) -> Option<Ty> {
+        let internal = ty.non_null().obj_internal()?;
+        super::jvm_class_map::wrapper_to_kotlin_prim_name(internal)
+            .map(super::classpath::kotlin_name_to_ty)
+    }
+
     fn function_like_arity(&self, ty: Ty) -> Option<usize> {
         ty.fun_arity().map(usize::from).or_else(|| {
             let internal = ty.obj_internal()?;

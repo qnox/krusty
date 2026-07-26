@@ -264,6 +264,100 @@ fn run_mixed(java: &[(&str, &str)], kotlin: &str) {
     assert_eq!(got, "OK");
 }
 
+#[test]
+fn boxed_java_primitive_returns_work_in_kotlin_contexts() {
+    run_mixed(
+        &[(
+            "BoxedSource.java",
+            r#"
+                package fixtures;
+                public final class BoxedSource {
+                    private final Integer value;
+                    public BoxedSource(Integer value) { this.value = value; }
+                    public Integer read() { return value; }
+                    public static Integer readStatic() { return null; }
+                    public Boolean positive() { return value != null && value > 0; }
+                    public static Byte byteValue() { return (byte) 1; }
+                    public static Short shortValue() { return (short) 2; }
+                    public static Long longValue() { return 3L; }
+                    public static Character charValue() { return 'x'; }
+                    public static Float floatValue() { return 4.0f; }
+                    public static Double doubleValue() { return 5.0; }
+                }
+            "#,
+        )],
+        r#"
+            import fixtures.BoxedSource
+
+            fun boxedReturn(): Int = BoxedSource(5).read()
+            fun acceptInt(value: Int): Int = value
+            tailrec fun boxedTail(n: Int): Int =
+                if (BoxedSource(n).positive()) boxedTail(n - 1) else n
+            tailrec fun boxedTailUnit(n: Int, result: IntArray) {
+                if (BoxedSource(n).positive()) boxedTailUnit(n - 1, result)
+                else result[0] = n
+            }
+
+            fun box(): String {
+                val fallback = BoxedSource(null).read() ?: 7
+                val present = BoxedSource(4).read() ?: 7
+                val staticFallback = BoxedSource.readStatic() ?: 9
+                val assigned: Int = BoxedSource(5).read()
+                val returned = boxedReturn()
+                val accepted = acceptInt(BoxedSource(6).read())
+                val nullable: Int? = BoxedSource(null).read()
+                val nullFallback = BoxedSource(null).read() ?: null
+                val indexed = intArrayOf(11)[BoxedSource(0).read()]
+                val conditional = if (BoxedSource(1).positive()) 12 else 0
+                val selected = when {
+                    BoxedSource(1).positive() -> 13
+                    else -> 0
+                }
+                var remaining = 1
+                while (BoxedSource(remaining).positive()) {
+                    remaining--
+                }
+                var doRemaining = 1
+                do {
+                    doRemaining--
+                } while (BoxedSource(doRemaining).positive())
+                val tail = boxedTail(2)
+                val tailUnit = intArrayOf(-1)
+                boxedTailUnit(2, tailUnit)
+                val byte: Byte = BoxedSource.byteValue()
+                val short: Short = BoxedSource.shortValue()
+                val long: Long = BoxedSource.longValue()
+                val char: Char = BoxedSource.charValue()
+                val float: Float = BoxedSource.floatValue()
+                val double: Double = BoxedSource.doubleValue()
+                return if (
+                    fallback == 7 &&
+                    present == 4 &&
+                    staticFallback == 9 &&
+                    assigned == 5 &&
+                    returned == 5 &&
+                    accepted == 6 &&
+                    nullable == null &&
+                    nullFallback == null &&
+                    indexed == 11 &&
+                    conditional == 12 &&
+                    selected == 13 &&
+                    remaining == 0 &&
+                    doRemaining == 0 &&
+                    tail == 0 &&
+                    tailUnit[0] == 0 &&
+                    byte == 1.toByte() &&
+                    short == 2.toShort() &&
+                    long == 3L &&
+                    char == 'x' &&
+                    float == 4.0f &&
+                    double == 5.0
+                ) "OK" else "fail"
+            }
+        "#,
+    );
+}
+
 /// Expression-position static call on a same-(root-)package class must resolve like the ctor and
 /// type positions do (the `imported_type_internal` fallback in the static-receiver path).
 #[test]
