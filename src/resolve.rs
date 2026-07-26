@@ -5815,9 +5815,8 @@ pub struct TypeInfo {
     /// Library companion constants selected while checking (`Int.MAX_VALUE`, `Double.NaN`, ...), keyed by
     /// the member-read expression. Lowering inlines the recorded constant instead of probing the classpath.
     pub resolved_library_companion_consts: HashMap<ExprId, crate::libraries::LibraryConst>,
-    /// Classpath/library enum entries selected while checking (`Kind.PENDING`), keyed by the member-read
-    /// expression. Lowering emits the recorded owner field instead of resolving imports again.
-    pub resolved_library_enum_entries: HashMap<ExprId, TypeName>,
+    /// Selected enum-entry owners keyed by member-read expression.
+    pub resolved_enum_entries: HashMap<ExprId, TypeName>,
     /// For a resolved classpath member, extension, or top-level call, maps callee parameter slots to
     /// source arguments. `None` means the target default-call ABI fills that slot.
     pub resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
@@ -6290,9 +6289,9 @@ impl TypeInfo {
     ) -> Option<crate::libraries::LibraryConst> {
         self.resolved_library_companion_consts.get(&e).copied()
     }
-    /// The classpath/library enum-entry owner selected for member-read expression `e`, if any.
-    pub fn resolved_library_enum_entry_owner(&self, e: ExprId) -> Option<TypeName> {
-        self.resolved_library_enum_entries.get(&e).copied()
+    /// The selected enum-entry owner for member-read expression `e`.
+    pub fn resolved_enum_entry_owner(&self, e: ExprId) -> Option<TypeName> {
+        self.resolved_enum_entries.get(&e).copied()
     }
     /// The extension callable the checker resolved for a synthesized protocol call.
     pub fn synthetic_ext(
@@ -6666,7 +6665,7 @@ fn make_checker<'a>(
         resolved_super_calls: HashMap::new(),
         resolved_default_member_calls: HashMap::new(),
         resolved_library_companion_consts: HashMap::new(),
-        resolved_library_enum_entries: HashMap::new(),
+        resolved_enum_entries: HashMap::new(),
         resolved_call_arg_slots: HashMap::new(),
         synthetic_ext_calls: HashMap::new(),
         delegate_getvalue_targets: HashMap::new(),
@@ -7715,7 +7714,7 @@ fn check_file_at_impl(
         resolved_super_calls,
         resolved_default_member_calls,
         resolved_library_companion_consts,
-        resolved_library_enum_entries,
+        resolved_enum_entries,
         resolved_call_arg_slots,
         synthetic_ext_calls,
         delegate_getvalue_targets,
@@ -7789,7 +7788,7 @@ fn check_file_at_impl(
         resolved_super_calls,
         resolved_default_member_calls,
         resolved_library_companion_consts,
-        resolved_library_enum_entries,
+        resolved_enum_entries,
         resolved_call_arg_slots,
         synthetic_ext_calls,
         delegate_getvalue_targets,
@@ -7983,7 +7982,7 @@ struct Checker<'a> {
     resolved_super_calls: HashMap<ExprId, ResolvedSuperCall>,
     resolved_default_member_calls: HashMap<ExprId, ResolvedDefaultMemberCall>,
     resolved_library_companion_consts: HashMap<ExprId, crate::libraries::LibraryConst>,
-    resolved_library_enum_entries: HashMap<ExprId, TypeName>,
+    resolved_enum_entries: HashMap<ExprId, TypeName>,
     resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
     synthetic_ext_calls: HashMap<(ExprId, String), crate::libraries::LibraryCallable>,
     delegate_getvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
@@ -9964,6 +9963,19 @@ impl<'a> Checker<'a> {
             }
         }
         None
+    }
+
+    fn source_enum_entry_owner(&self, name: &str, entry: &str) -> Option<TypeName> {
+        let internal = self
+            .enclosing_nested_type_name(name)
+            .or_else(|| self.syms.classes.get(name).map(ClassSig::internal_name))?;
+        let declaration = self.syms.class_simple_name(internal)?;
+        self.syms
+            .enums
+            .get(declaration)?
+            .iter()
+            .any(|candidate| candidate == entry)
+            .then_some(internal)
     }
 
     /// If a bare type name `n` denotes a reference type usable as an unbound class literal `n::class`,
@@ -13464,9 +13476,10 @@ impl<'a> Checker<'a> {
                                         .syms
                                         .classes
                                         .get(&path)
-                                        .map(ClassSig::internal)
-                                        .unwrap_or_else(|| path.replace('.', "$"));
-                                    return self.set(e, Ty::obj(&internal));
+                                        .map(ClassSig::internal_name)
+                                        .unwrap_or_else(|| type_name(&path.replace('.', "$")));
+                                    self.resolved_enum_entries.insert(e, internal);
+                                    return self.set(e, Ty::obj_name(internal));
                                 }
                             }
                         }
@@ -13475,23 +13488,20 @@ impl<'a> Checker<'a> {
                 // `EnumName.ENTRY` — a static enum entry access (receiver is the enum type name).
                 if let Expr::Name(en) = self.file.expr(receiver).clone() {
                     if !self.value_root_shadows_classifier(&en) {
-                        if let Some(entries) = self.syms.enums.get(&en) {
-                            if entries.iter().any(|e| e == &name) {
-                                let internal = self
-                                    .syms
-                                    .classes
-                                    .get(&en)
-                                    .map(ClassSig::internal)
-                                    .unwrap_or(en.clone());
-                                return self.set(e, Ty::obj(&internal));
-                            }
+                        let has_lexical_classifier = self.enclosing_nested_type_name(&en).is_some();
+                        if let Some(internal) = self.source_enum_entry_owner(&en, &name) {
+                            self.resolved_enum_entries.insert(e, internal);
+                            return self.set(e, Ty::obj_name(internal));
                         }
                         // `Kind.PENDING` on a CLASSPATH enum — a static enum-constant field of the enum's
                         // own type. Lowering emits `getstatic <internal>.ENTRY:L<internal>;`.
-                        if let Some(internal) = self
-                            .imported_type_name(&en)
-                            .or_else(|| self.syms.class_names.get(&en))
-                        {
+                        let classpath_enum = if has_lexical_classifier {
+                            None
+                        } else {
+                            self.imported_type_name(&en)
+                                .or_else(|| self.syms.class_names.get(&en))
+                        };
+                        if let Some(internal) = classpath_enum {
                             if self
                                 .resolved_type_name(internal)
                                 .is_some_and(|t| t.is_enum_entry(&name))
@@ -13501,7 +13511,7 @@ impl<'a> Checker<'a> {
                                     "resolve",
                                     "classpath enum entry {en}.{name} -> {rendered}"
                                 );
-                                self.resolved_library_enum_entries.insert(e, internal);
+                                self.resolved_enum_entries.insert(e, internal);
                                 return self.set(e, Ty::obj_name(internal));
                             }
                         }
@@ -22378,7 +22388,7 @@ fun box(): String {
             .expect("source should contain Kind.PENDING member read");
         assert_eq!(info.ty(member), Ty::String);
         assert!(
-            info.resolved_library_enum_entry_owner(member).is_none(),
+            info.resolved_enum_entry_owner(member).is_none(),
             "local value root must not be recorded as an enum-entry classifier path"
         );
     }

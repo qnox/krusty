@@ -18502,15 +18502,14 @@ impl<'a> Lower<'a> {
                     };
                     return Some(self.emit_const(c));
                 }
-                // `EnumClass.ENTRY` — a static enum-constant read.
-                if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
-                    let internal = class_internal(self.afile, &rn);
-                    if let Some(ci) = self.class_info(&internal) {
+                // Use the enum owner selected by the checker.
+                if let Some(enum_internal) = self.info.resolved_enum_entry_owner(e) {
+                    if let Some(ci) = self.class_info_name(enum_internal) {
                         let cls = ci.id;
                         if let Some(idx) = self.ir.classes[cls as usize]
                             .enum_entries
                             .iter()
-                            .position(|e| e.name == name)
+                            .position(|entry| entry.name == name)
                         {
                             return Some(self.ir.add_expr(IrExpr::EnumEntry {
                                 class: cls,
@@ -18518,6 +18517,15 @@ impl<'a> Lower<'a> {
                             }));
                         }
                     }
+                    let enum_internal = enum_internal.render();
+                    return Some(self.emit_external_static_field(
+                        enum_internal.clone(),
+                        name.clone(),
+                        format!("L{enum_internal};"),
+                    ));
+                }
+                if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
+                    let internal = class_internal(self.afile, &rn);
                     // `Obj.NAME` where `NAME` is a `const val` of an `object` → inline the literal
                     // (kotlinc inlines a const read; no `getstatic`).
                     let internal_name = type_name(&internal);
@@ -18536,55 +18544,6 @@ impl<'a> Lower<'a> {
                             name.clone(),
                             self.runtime.type_descriptor(*cty)?,
                         ));
-                    }
-                    // `Kind.PENDING` on a CLASSPATH enum -> `getstatic <internal>.PENDING:L<internal>;`.
-                    if let Some(enum_internal) = self.info.resolved_library_enum_entry_owner(e) {
-                        let enum_internal = enum_internal.render();
-                        return Some(self.emit_external_static_field(
-                            enum_internal.clone(),
-                            name.clone(),
-                            format!("L{enum_internal};"),
-                        ));
-                    }
-                    // `Kind.PENDING` on a SAME-MODULE (other-file) enum. The enum isn't in this file's
-                    // IR (so `class_info` above missed) and isn't classpath, but the module symbols know
-                    // `rn` is an enum with the entry `name` -> `getstatic <internal>.PENDING:L<internal>;`.
-                    // `class_names` maps the simple name to the enum's real internal (its own package),
-                    // which `class_internal` above cannot (it assumes the current file's package).
-                    if self
-                        .syms
-                        .enums
-                        .get(&rn)
-                        .is_some_and(|entries| entries.contains(&name))
-                    {
-                        if let Some(internal) = self.syms.class_names.get(&rn) {
-                            let internal = internal.render();
-                            return Some(self.emit_external_static_field(
-                                internal.clone(),
-                                name.clone(),
-                                format!("L{internal};"),
-                            ));
-                        }
-                    }
-                }
-                // `Outer.NestedEnum.ENTRY` — receiver is a `Member` chain naming a nested enum. The
-                // checker typed this expression as the enum's own type; use that internal to emit the
-                // enum-constant read (the bare-`Name` case above only covers a top-level enum).
-                if matches!(self.afile.expr(receiver), Expr::Member { .. }) {
-                    if let Some(internal) = self.info.ty(e).obj_internal() {
-                        if let Some(ci) = self.class_info_name(internal) {
-                            let cls = ci.id;
-                            if let Some(idx) = self.ir.classes[cls as usize]
-                                .enum_entries
-                                .iter()
-                                .position(|en| en.name == name)
-                            {
-                                return Some(self.ir.add_expr(IrExpr::EnumEntry {
-                                    class: cls,
-                                    index: idx as u32,
-                                }));
-                            }
-                        }
                     }
                 }
                 if rt == Ty::Char && name == "code" {
