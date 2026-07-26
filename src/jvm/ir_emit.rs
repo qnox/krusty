@@ -3088,6 +3088,16 @@ fn emit_enum_entry_subclass(
 /// `super(owner.class, name, "getName()desc", 0)`, a `get(Object)Object` override that reads
 /// `((Owner) it).getName()` (boxing a primitive), and a `<clinit>` that builds the singleton. `.name`
 /// is inherited from `PropertyReference1Impl` (returns the constructor's name argument).
+fn emit_object_as(cw: &mut ClassWriter, code: &mut CodeBuilder, ty: Ty) {
+    let ty = ir_ty_to_jvm(&ty);
+    if ty.is_jvm_scalar() {
+        unbox_prim(cw, code, ty);
+    } else if let Some(internal) = checkcast_internal(ty) {
+        let class = cw.class_ref(&internal);
+        code.checkcast(class);
+    }
+}
+
 fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str, opts: &EmitOptions) -> Vec<u8> {
     let pr = c.prop_ref.as_ref().unwrap();
     if pr.static_dispatch {
@@ -3103,18 +3113,39 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str, opts: &EmitOptions)
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER (package-private)
     cw.add_field(0x0019, "INSTANCE", &self_desc); // PUBLIC | STATIC | FINAL
 
-    let owner_internal = pr.owner().expect("unbound property reference owner");
+    let owner_internal = crate::jvm::jvm_class_map::to_jvm_internal(
+        &pr.owner().expect("unbound property reference owner"),
+    )
+    .to_string();
     let prop_jvm = ir_ty_to_jvm(&pr.prop_ty);
-    let getter_desc = format!("(){}", type_descriptor(prop_jvm));
-    let signature = format!("{}{}", pr.getter_name, getter_desc); // e.g. "getX()I"
+    let ext = pr.ext_facade_or_facade(facade);
+    let derived_getter_desc = ext.as_ref().map_or_else(
+        || format!("(){}", type_descriptor(prop_jvm)),
+        |_| {
+            format!(
+                "({}){}",
+                type_descriptor(Ty::obj(&owner_internal)),
+                type_descriptor(prop_jvm)
+            )
+        },
+    );
+    let getter_desc = pr
+        .getter_descriptor
+        .as_deref()
+        .unwrap_or(&derived_getter_desc);
+    let (getter_params, getter_ret) = crate::jvm::jvm_libraries::parse_method_desc(getter_desc)
+        .expect("validated property getter descriptor");
+    let getter_ret = ir_ty_to_jvm(&getter_ret);
+    let signature = format!("{}{}", pr.getter_name, getter_desc);
+    let reflection_owner = ext.as_deref().unwrap_or(&owner_internal);
 
     // `<init>()V`: super(owner.class, "name", "getName()desc", 0).
     let mut ctor = CodeBuilder::new(1);
     ctor.aload(0);
-    ctor.ldc_class(&owner_internal, &mut cw);
+    ctor.ldc_class(reflection_owner, &mut cw);
     ctor.push_string(&pr.prop_name, &mut cw);
     ctor.push_string(&signature, &mut cw);
-    ctor.push_int(0, &mut cw);
+    ctor.push_int(ext.is_some() as i32, &mut cw);
     let sup = cw.methodref(
         &superclass,
         "<init>",
@@ -3124,15 +3155,26 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str, opts: &EmitOptions)
     ctor.ret_void();
     finish_code::<0x0000>(&mut cw, "<init>", "()V", &mut ctor, 1);
 
-    // `get(Object)Object`: ((Owner) it).getName(), boxed if primitive.
+    // `get(Object)Object`: a member invokes `((Owner) it).getName()`; an extension invokes the static
+    // `Facade.getName((Owner) it)`. Box a primitive result in either case.
     let mut get = CodeBuilder::new(2);
-    get.aload(1);
-    let owner_ref = cw.class_ref(&owner_internal);
-    get.checkcast(owner_ref);
-    let gref = cw.methodref(&owner_internal, &pr.getter_name, &getter_desc);
-    get.invokevirtual(gref, 0, slot_words(prop_jvm) as i32);
-    if prop_jvm.is_jvm_scalar() {
-        box_prim_free(&mut cw, &mut get, prop_jvm);
+    if let Some(facade) = &ext {
+        get.aload(1);
+        emit_object_as(&mut cw, &mut get, getter_params[0]);
+        let gref = cw.methodref(facade, &pr.getter_name, getter_desc);
+        get.invokestatic(
+            gref,
+            slot_words(ir_ty_to_jvm(&getter_params[0])) as i32,
+            slot_words(getter_ret) as i32,
+        );
+    } else {
+        get.aload(1);
+        emit_object_as(&mut cw, &mut get, Ty::obj(&owner_internal));
+        let gref = cw.methodref(&owner_internal, &pr.getter_name, getter_desc);
+        get.invokevirtual(gref, 0, slot_words(getter_ret) as i32);
+    }
+    if getter_ret.is_jvm_scalar() {
+        box_prim_free(&mut cw, &mut get, getter_ret);
     }
     get.areturn();
     finish_code::<0x0001>(
@@ -3143,28 +3185,50 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str, opts: &EmitOptions)
         2,
     );
 
-    // `set(Object, Object)V` (an unbound `var` reference): `((Owner) it).setName(v)` after
-    // casting/unboxing the value argument to the property type.
+    // `set(Object, Object)V` (an unbound `var` reference): dispatch virtually for a member or
+    // statically to the extension facade after casting/unboxing the value.
     if pr.mutable {
-        let setter = property_setter_name(&pr.prop_name);
-        let setter_desc = format!("({}){}", type_descriptor(prop_jvm), "V");
+        let setter = pr
+            .setter_name
+            .clone()
+            .unwrap_or_else(|| property_setter_name(&pr.prop_name));
+        let derived_setter_desc = ext.as_ref().map_or_else(
+            || format!("({})V", type_descriptor(prop_jvm)),
+            |_| {
+                format!(
+                    "({}{})V",
+                    type_descriptor(Ty::obj(&owner_internal)),
+                    type_descriptor(prop_jvm)
+                )
+            },
+        );
+        let setter_desc = pr
+            .setter_descriptor
+            .as_deref()
+            .unwrap_or(&derived_setter_desc);
+        let (setter_params, _) = crate::jvm::jvm_libraries::parse_method_desc(setter_desc)
+            .expect("validated property setter descriptor");
         let mut set = CodeBuilder::new(3);
-        set.aload(1);
-        let owner_ref = cw.class_ref(&owner_internal);
-        set.checkcast(owner_ref);
-        set.aload(2);
-        if prop_jvm.is_jvm_scalar() {
-            let wref = cw.class_ref(
-                crate::jvm::jvm_class_map::wrapper_internal(prop_jvm).unwrap_or("java/lang/Object"),
-            );
-            set.checkcast(wref);
-            unbox_prim(&mut cw, &mut set, prop_jvm);
-        } else if let Some(internal) = checkcast_internal(prop_jvm) {
-            let cref = cw.class_ref(&internal);
-            set.checkcast(cref);
+        if let Some(facade) = &ext {
+            set.aload(1);
+            emit_object_as(&mut cw, &mut set, setter_params[0]);
+            set.aload(2);
+            emit_object_as(&mut cw, &mut set, setter_params[1]);
+            let arg_words: i32 = setter_params
+                .iter()
+                .map(|param| slot_words(ir_ty_to_jvm(param)) as i32)
+                .sum();
+            let sref = cw.methodref(facade, &setter, setter_desc);
+            set.invokestatic(sref, arg_words, 0);
+        } else {
+            set.aload(1);
+            emit_object_as(&mut cw, &mut set, Ty::obj(&owner_internal));
+            set.aload(2);
+            emit_object_as(&mut cw, &mut set, setter_params[0]);
+            let value_words = slot_words(ir_ty_to_jvm(&setter_params[0])) as i32;
+            let sref = cw.methodref(&owner_internal, &setter, setter_desc);
+            set.invokevirtual(sref, value_words, 0);
         }
-        let sref = cw.methodref(&owner_internal, &setter, &setter_desc);
-        set.invokevirtual(sref, slot_words(prop_jvm) as i32, 0);
         set.ret_void();
         finish_code::<0x0001>(
             &mut cw,
@@ -3205,22 +3269,41 @@ fn emit_bound_prop_ref_class(
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER
 
     let prop_jvm = ir_ty_to_jvm(&pr.prop_ty);
-    let getter_desc = format!("(){}", type_descriptor(prop_jvm));
-    let signature = format!("{}{}", pr.getter_name, getter_desc);
-    let owner_internal = pr.owner().expect("bound property reference owner");
+    let owner_internal = crate::jvm::jvm_class_map::to_jvm_internal(
+        &pr.owner().expect("bound property reference owner"),
+    )
+    .to_string();
     // An EXTENSION property: get/set dispatch to a STATIC accessor `getName(Recv)`/`setName(Recv, v)`
     // on the facade, with the captured receiver passed as the first argument.
     let ext = pr.ext_facade_or_facade(facade);
-    let ext_get_desc = format!("(L{};){}", owner_internal, type_descriptor(prop_jvm));
+    let derived_getter_desc = ext.as_ref().map_or_else(
+        || format!("(){}", type_descriptor(prop_jvm)),
+        |_| {
+            format!(
+                "({}){}",
+                type_descriptor(Ty::obj(&owner_internal)),
+                type_descriptor(prop_jvm)
+            )
+        },
+    );
+    let getter_desc = pr
+        .getter_descriptor
+        .as_deref()
+        .unwrap_or(&derived_getter_desc);
+    let (getter_params, getter_ret) = crate::jvm::jvm_libraries::parse_method_desc(getter_desc)
+        .expect("validated property getter descriptor");
+    let getter_ret = ir_ty_to_jvm(&getter_ret);
+    let signature = format!("{}{}", pr.getter_name, getter_desc);
+    let reflection_owner = ext.as_deref().unwrap_or(&owner_internal);
 
     // `<init>(Object)V`: super(receiver, owner.class, name, "getName()desc", 0).
     let mut ctor = CodeBuilder::new(2);
     ctor.aload(0);
     ctor.aload(1);
-    ctor.ldc_class(&owner_internal, &mut cw);
+    ctor.ldc_class(reflection_owner, &mut cw);
     ctor.push_string(&pr.prop_name, &mut cw);
     ctor.push_string(&signature, &mut cw);
-    ctor.push_int(0, &mut cw);
+    ctor.push_int(ext.is_some() as i32, &mut cw);
     let sup = cw.methodref(
         &superclass,
         "<init>",
@@ -3236,17 +3319,21 @@ fn emit_bound_prop_ref_class(
     get.aload(0);
     let recv_f = cw.fieldref(&superclass, "receiver", "Ljava/lang/Object;");
     get.getfield(recv_f, 1);
-    let owner_ref = cw.class_ref(&owner_internal);
-    get.checkcast(owner_ref);
     if let Some(facade) = &ext {
-        let gref = cw.methodref(facade, &pr.getter_name, &ext_get_desc);
-        get.invokestatic(gref, 1, slot_words(prop_jvm) as i32);
+        emit_object_as(&mut cw, &mut get, getter_params[0]);
+        let gref = cw.methodref(facade, &pr.getter_name, getter_desc);
+        get.invokestatic(
+            gref,
+            slot_words(ir_ty_to_jvm(&getter_params[0])) as i32,
+            slot_words(getter_ret) as i32,
+        );
     } else {
-        let gref = cw.methodref(&owner_internal, &pr.getter_name, &getter_desc);
-        get.invokevirtual(gref, 0, slot_words(prop_jvm) as i32);
+        emit_object_as(&mut cw, &mut get, Ty::obj(&owner_internal));
+        let gref = cw.methodref(&owner_internal, &pr.getter_name, getter_desc);
+        get.invokevirtual(gref, 0, slot_words(getter_ret) as i32);
     }
-    if prop_jvm.is_jvm_scalar() {
-        box_prim_free(&mut cw, &mut get, prop_jvm);
+    if getter_ret.is_jvm_scalar() {
+        box_prim_free(&mut cw, &mut get, getter_ret);
     }
     get.areturn();
     finish_code::<0x0001>(&mut cw, "get", "()Ljava/lang/Object;", &mut get, 1);
@@ -3254,32 +3341,47 @@ fn emit_bound_prop_ref_class(
     // `set(Object)V` (a bound `var` reference): `((Owner) this.receiver).setName(v)` after
     // casting/unboxing the argument to the property type.
     if pr.mutable {
-        let setter = property_setter_name(&pr.prop_name);
-        let setter_desc = format!("({}){}", type_descriptor(prop_jvm), "V");
+        let setter = pr
+            .setter_name
+            .clone()
+            .unwrap_or_else(|| property_setter_name(&pr.prop_name));
+        let derived_setter_desc = ext.as_ref().map_or_else(
+            || format!("({})V", type_descriptor(prop_jvm)),
+            |_| {
+                format!(
+                    "({}{})V",
+                    type_descriptor(Ty::obj(&owner_internal)),
+                    type_descriptor(prop_jvm)
+                )
+            },
+        );
+        let setter_desc = pr
+            .setter_descriptor
+            .as_deref()
+            .unwrap_or(&derived_setter_desc);
+        let (setter_params, _) = crate::jvm::jvm_libraries::parse_method_desc(setter_desc)
+            .expect("validated property setter descriptor");
         let mut set = CodeBuilder::new(2);
         set.aload(0);
         let recv_f = cw.fieldref(&superclass, "receiver", "Ljava/lang/Object;");
         set.getfield(recv_f, 1);
-        let owner_ref = cw.class_ref(&owner_internal);
-        set.checkcast(owner_ref);
-        set.aload(1);
-        if prop_jvm.is_jvm_scalar() {
-            let wref = cw.class_ref(
-                crate::jvm::jvm_class_map::wrapper_internal(prop_jvm).unwrap_or("java/lang/Object"),
-            );
-            set.checkcast(wref);
-            unbox_prim(&mut cw, &mut set, prop_jvm);
-        } else if let Some(internal) = checkcast_internal(prop_jvm) {
-            let cref = cw.class_ref(&internal);
-            set.checkcast(cref);
-        }
         if let Some(facade) = &ext {
-            let ext_set_desc = format!("(L{};{})V", owner_internal, type_descriptor(prop_jvm));
-            let sref = cw.methodref(facade, &setter, &ext_set_desc);
-            set.invokestatic(sref, 1 + slot_words(prop_jvm) as i32, 0);
+            emit_object_as(&mut cw, &mut set, setter_params[0]);
+            set.aload(1);
+            emit_object_as(&mut cw, &mut set, setter_params[1]);
+            let arg_words: i32 = setter_params
+                .iter()
+                .map(|param| slot_words(ir_ty_to_jvm(param)) as i32)
+                .sum();
+            let sref = cw.methodref(facade, &setter, setter_desc);
+            set.invokestatic(sref, arg_words, 0);
         } else {
-            let sref = cw.methodref(&owner_internal, &setter, &setter_desc);
-            set.invokevirtual(sref, slot_words(prop_jvm) as i32, 0);
+            emit_object_as(&mut cw, &mut set, Ty::obj(&owner_internal));
+            set.aload(1);
+            emit_object_as(&mut cw, &mut set, setter_params[0]);
+            let value_words = slot_words(ir_ty_to_jvm(&setter_params[0])) as i32;
+            let sref = cw.methodref(&owner_internal, &setter, setter_desc);
+            set.invokevirtual(sref, value_words, 0);
         }
         set.ret_void();
         finish_code::<0x0001>(&mut cw, "set", "(Ljava/lang/Object;)V", &mut set, 2);
@@ -3404,7 +3506,9 @@ fn emit_func_ref_class(
     // A missing `owner_class`/`call_owner` is the facade sentinel (a top-level function lives on the
     // file facade, whose name isn't known until emit) — resolve it here.
     let owner_class = fr.owner_class_or_facade(facade);
+    let owner_class = crate::jvm::jvm_class_map::to_jvm_internal(&owner_class).to_string();
     let call_owner = fr.call_owner_or_facade(facade);
+    let call_owner = crate::jvm::jvm_class_map::to_jvm_internal(&call_owner).to_string();
     let fq = c.fq_name();
     let self_desc = format!("L{fq};");
     let superclass = c.superclass();
@@ -3427,24 +3531,34 @@ fn emit_func_ref_class(
         FrDispatch::StaticBound => 1usize,
         _ => 0,
     };
-    let ret_jvm = ir_ty_to_jvm(&fr.ret_ty);
+    let target_ret_jvm = ir_ty_to_jvm(&fr.target_ret_ty);
     let returns_void = matches!(fr.ret_ty, Ty::Unit | Ty::Nothing);
-    // The Kotlin reference metadata signature stays logical; the target JVM call descriptor follows
-    // backend lowerings such as value-class erasure. Both exclude the unbound receiver parameter.
+    // FunctionReferenceImpl's reflection signature is the target's physical JVM signature (generic
+    // returns erased to Object, value classes lowered, a bound static extension retaining its receiver).
+    // An unbound virtual member's leading reference parameter is the dispatch receiver, not a descriptor
+    // parameter, so `first_arg` excludes it from both the signature and target call descriptor.
     let mut signature_desc = String::from("(");
-    for pt in fr.param_tys.iter().skip(first_arg) {
+    for pt in fr.target_param_tys.iter().skip(first_arg) {
         signature_desc.push_str(&ir_type_desc(pt));
     }
     signature_desc.push(')');
     let signature_ret = if returns_void {
         "V".to_string()
     } else {
-        type_descriptor(ret_jvm)
+        type_descriptor(target_ret_jvm)
     };
     signature_desc.push_str(&signature_ret);
-    let signature = format!("{}{}", fr.fn_name, signature_desc);
+    let reflection_name = fr.reflection_name.as_deref().unwrap_or(&fr.fn_name);
+    let signature_name = match fr.dispatch {
+        FrDispatch::Static | FrDispatch::StaticBound | FrDispatch::SuspendConvert => {
+            reflection_name
+        }
+        FrDispatch::VirtualUnbound | FrDispatch::VirtualBound => {
+            crate::jvm::names::mapped_builtin_virtual_name(&call_owner, reflection_name)
+        }
+    };
+    let signature = format!("{signature_name}{signature_desc}");
 
-    let target_ret_jvm = ir_ty_to_jvm(&fr.target_ret_ty);
     let call_desc = if matches!(fr.dispatch, FrDispatch::SuspendConvert) {
         // The delegated call is the wrapped value's ERASED `Function{n}.invoke` — `n` erased Object
         // parameters (the invoke's trailing continuation is dropped), Object return.
@@ -3644,12 +3758,12 @@ fn emit_func_ref_class(
         // A bound reference to a mapped-builtin member (`"KOTLIN"::get`) invokes the same PHYSICAL JVM
         // method a direct call would (`String.get` → `charAt`) — apply the backend's name mapping here too.
         _ if fr.call_interface => {
-            let vn = mapped_builtin_virtual_name(&call_owner, &fr.call_name);
+            let vn = crate::jvm::names::mapped_builtin_virtual_name(&call_owner, &fr.call_name);
             let m = cw.interface_methodref(&call_owner, vn, &call_desc);
             inv.invokeinterface(m, call_arg_words, ret_words);
         }
         _ => {
-            let vn = mapped_builtin_virtual_name(&call_owner, &fr.call_name);
+            let vn = crate::jvm::names::mapped_builtin_virtual_name(&call_owner, &fr.call_name);
             let m = cw.methodref(&call_owner, vn, &call_desc);
             inv.invokevirtual(m, call_arg_words, ret_words);
         }
@@ -6584,12 +6698,12 @@ impl<'a> Emitter<'a> {
             // A bound mapped-builtin member ref invokes the same physical JVM method a direct call would
             // (`String.get` → `charAt`) — apply the backend's name mapping (see the free-function twin).
             _ if fr.call_interface => {
-                let vn = mapped_builtin_virtual_name(&call_owner, &fr.call_name);
+                let vn = crate::jvm::names::mapped_builtin_virtual_name(&call_owner, &fr.call_name);
                 let m = self.cw.interface_methodref(&call_owner, vn, &call_desc);
                 scratch.invokeinterface(m, call_arg_words, ret_words);
             }
             _ => {
-                let vn = mapped_builtin_virtual_name(&call_owner, &fr.call_name);
+                let vn = crate::jvm::names::mapped_builtin_virtual_name(&call_owner, &fr.call_name);
                 let m = self.cw.methodref(&call_owner, vn, &call_desc);
                 scratch.invokevirtual(m, call_arg_words, ret_words);
             }
@@ -7801,7 +7915,7 @@ impl<'a> Emitter<'a> {
                         .map(|&a| slot_words(self.value_ty(a)) as i32)
                         .sum();
                     let ret = ty_from_descriptor_ret(&descriptor);
-                    let jvm_name = mapped_builtin_virtual_name(&owner, &name);
+                    let jvm_name = crate::jvm::names::mapped_builtin_virtual_name(&owner, &name);
                     if interface {
                         let m = self.cw.interface_methodref(&owner, jvm_name, &descriptor);
                         code.invokeinterface(m, aw, slot_words(ret) as i32);
@@ -10658,45 +10772,6 @@ fn discard(t: Ty, code: &mut CodeBuilder) {
         2 => code.pop2(),
         1 => code.pop(),
         _ => {}
-    }
-}
-
-fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str) -> &'a str {
-    match (owner, name) {
-        ("java/lang/CharSequence", "get") => "charAt",
-        ("java/lang/String", "get") | ("kotlin/String", "get") => "charAt",
-        ("java/lang/StringBuilder", "get") | ("kotlin/text/StringBuilder", "get") => "charAt",
-        (
-            "kotlin/ranges/IntRange" | "kotlin/ranges/LongRange" | "kotlin/ranges/CharRange",
-            "start",
-        ) => "getFirst",
-        (
-            "kotlin/ranges/IntRange" | "kotlin/ranges/LongRange" | "kotlin/ranges/CharRange",
-            "endInclusive",
-        ) => "getLast",
-        ("java/util/Map" | "kotlin/collections/Map" | "kotlin/collections/MutableMap", "keys") => {
-            "keySet"
-        }
-        (
-            "java/util/Map" | "kotlin/collections/Map" | "kotlin/collections/MutableMap",
-            "entries",
-        ) => "entrySet",
-        (
-            "kotlin/reflect/KCallable"
-            | "kotlin/reflect/KProperty"
-            | "kotlin/reflect/KProperty0"
-            | "kotlin/reflect/KProperty1"
-            | "kotlin/reflect/KMutableProperty0"
-            | "kotlin/reflect/KMutableProperty1",
-            "name",
-        ) => "getName",
-        ("java/lang/Number", "toByte") => "byteValue",
-        ("java/lang/Number", "toShort") => "shortValue",
-        ("java/lang/Number", "toInt") => "intValue",
-        ("java/lang/Number", "toLong") => "longValue",
-        ("java/lang/Number", "toFloat") => "floatValue",
-        ("java/lang/Number", "toDouble") => "doubleValue",
-        _ => name,
     }
 }
 

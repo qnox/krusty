@@ -138,6 +138,13 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         ty.fun_arity().map(usize::from)
     }
 
+    /// Whether a resolved semantic member has a directly invocable platform method suitable for a
+    /// callable reference. Kotlin builtins also describe compiler intrinsics (`Boolean.not`,
+    /// `String.plus`) that support ordinary source calls but have no corresponding virtual JVM method.
+    fn supports_member_reference(&self, _receiver: Ty, _member: &LibraryMember) -> bool {
+        true
+    }
+
     /// The platform/library type used for a property reference with the given arity and mutability.
     /// Resolver needs this type so direct property-reference APIs (`get`, `name`) keep working, but the
     /// actual class name is provider-owned.

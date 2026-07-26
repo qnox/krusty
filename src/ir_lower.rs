@@ -10279,6 +10279,9 @@ impl<'a> Lower<'a> {
                 owner_internal: Some(owner),
                 prop_name: name.to_string(),
                 getter_name: property_getter_name(name),
+                getter_descriptor: None,
+                setter_name: None,
+                setter_descriptor: None,
                 prop_ty,
                 bound,
                 static_dispatch: false,
@@ -10309,12 +10312,21 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Lower a BOUND property reference on a LIBRARY-type receiver (`"kotlin"::length`) to a bound
-    /// `PropertyReference0Impl` subclass whose `get()` dispatches the resolved classpath getter
-    /// (`String.length()I`) on the captured receiver. The user-property `lower_prop_ref` needs an IR
-    /// class + a `Name` receiver, so a library owner / arbitrary-expression receiver lands here.
-    /// The checker makes every property-vs-method / null-safety / emittability decision and records the
-    /// getter target; the lowerer just emits its descriptor.
+    /// Lower an UNBOUND classpath member or extension property (`Type::property`) through the same
+    /// recorded property-reference path as a bound library receiver. The resulting
+    /// `PropertyReference1Impl` takes the receiver as its single `get` argument.
+    fn lower_unbound_library_prop_ref(
+        &mut self,
+        _e: AstExprId,
+        name: &str,
+        property: crate::symbol_resolver::BoundPropertyRef,
+    ) -> Option<u32> {
+        self.lower_library_prop_ref(name, property, None)
+    }
+
+    /// Lower a BOUND property reference on a LIBRARY-type receiver (`"kotlin"::length`). The checker
+    /// records the exact getter; this wrapper only evaluates the receiver once before delegating to the
+    /// common classpath property-reference builder.
     fn lower_bound_library_prop_ref(
         &mut self,
         e: AstExprId,
@@ -10329,15 +10341,38 @@ impl<'a> Lower<'a> {
         {
             return None;
         }
-        let p = self.info.bound_property_ref(e)?.clone();
+        let property = self.info.bound_property_ref(e)?.clone();
+        let capture = self.expr(recv)?;
+        self.lower_library_prop_ref(name, property, Some(capture))
+    }
+
+    fn lower_library_prop_ref(
+        &mut self,
+        name: &str,
+        property: crate::symbol_resolver::BoundPropertyRef,
+        capture: Option<u32>,
+    ) -> Option<u32> {
+        let bound = capture.is_some();
+        let p = property;
         let prop_ty = ty_to_ir(p.prop_ty);
-        let cap = self.expr(recv)?;
+        let mutable = p.setter.is_some();
+        let owner = match p.extension_facade {
+            Some(_) => p
+                .getter
+                .params
+                .first()
+                .copied()
+                .and_then(Ty::kotlin_class_internal)?,
+            None => p.getter.owner,
+        };
         let synth_fq = class_internal(
             self.afile,
             &format!("{}$propref${}${}", self.cur_fn_name, name, self.lambda_seq),
         );
         self.lambda_seq += 1;
-        let superclass = self.property_reference_impl(0, false)?.internal;
+        let superclass = self
+            .property_reference_impl(if bound { 0 } else { 1 }, mutable)?
+            .internal;
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
             is_value: false,
@@ -10364,14 +10399,17 @@ impl<'a> Lower<'a> {
             enum_entries: vec![],
             enum_entry_of: None,
             prop_ref: Some(crate::ir::PropRef {
-                owner_internal: Some(p.owner),
+                owner_internal: Some(owner),
                 prop_name: name.to_string(),
-                getter_name: p.getter_name,
+                getter_name: p.getter.name,
+                getter_descriptor: Some(p.getter.descriptor),
+                setter_name: p.setter.as_ref().map(|setter| setter.name.clone()),
+                setter_descriptor: p.setter.map(|setter| setter.descriptor),
                 prop_ty,
-                bound: true,
+                bound,
                 static_dispatch: false,
-                mutable: false,
-                ext_facade: None,
+                mutable,
+                ext_facade: p.extension_facade.map(Some),
             }),
             func_ref: None,
             bridges: vec![],
@@ -10385,11 +10423,14 @@ impl<'a> Lower<'a> {
             field_annotations: Vec::new(),
             runtime_retained: false,
         });
-        Some(self.emit_new(
-            synth_id,
-            vec![cap],
-            Some(vec![ty_to_ir(Ty::obj("kotlin/Any"))]),
-        ))
+        match capture {
+            Some(cap) => Some(self.emit_new(
+                synth_id,
+                vec![cap],
+                Some(vec![ty_to_ir(Ty::obj("kotlin/Any"))]),
+            )),
+            None => Some(self.emit_static_instance(synth_id, synth_id, "INSTANCE")),
+        }
     }
 
     /// Lower an ADAPTED top-level function reference (`::foo` where `foo` has trailing default parameters,
@@ -10617,6 +10658,9 @@ impl<'a> Lower<'a> {
                 owner_internal: owner,
                 prop_name: name.to_string(),
                 getter_name: property_getter_name(name),
+                getter_descriptor: None,
+                setter_name: None,
+                setter_descriptor: None,
                 prop_ty,
                 bound: false,
                 static_dispatch: true,
@@ -10668,6 +10712,47 @@ impl<'a> Lower<'a> {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         })
+    }
+
+    /// Lower an unbound classpath member reference (`Type::method`). The first `invoke` parameter is
+    /// the receiver and the remaining parameters are forwarded to the checker-recorded virtual target.
+    fn lower_unbound_library_member_ref(
+        &mut self,
+        e: AstExprId,
+        name: &str,
+        receiver: Ty,
+        member: crate::libraries::LibraryMember,
+        params: &[Ty],
+        ret: Ty,
+    ) -> Option<u32> {
+        if member.suspend
+            || ret == Ty::Nothing
+            || params.len() != member.params.len().saturating_add(1)
+        {
+            return None;
+        }
+        let owner = member.owner?;
+        let receiver_owner = receiver.kotlin_class_internal()?;
+        let call_interface = self.library_type_is_interface(owner);
+        let mut target_params = vec![ty_to_ir(receiver)];
+        target_params.extend(tys_to_ir(&member.params));
+        let target_ret = ty_to_ir(member.physical_ret);
+        self.make_func_ref(
+            e.0,
+            false,
+            params.len() as u8,
+            Some(receiver_owner),
+            name.to_string(),
+            0,
+            crate::ir::FrDispatch::VirtualUnbound,
+            Some(owner),
+            member.physical_name.unwrap_or(member.name),
+            call_interface,
+            tys_to_ir(params),
+            ty_to_ir(ret),
+            None,
+            Some((target_params, target_ret)),
+        )
     }
 
     fn lower_method_ref(
@@ -10952,7 +11037,7 @@ impl<'a> Lower<'a> {
                     param_tys,
                     ty_to_ir(ret),
                     Some(cap),
-                    Some(target),
+                    Some((target, ty_to_ir(ret))),
                 );
             }
             // A PRIMITIVE-receiver bound extension (`1::plusFour`): the captured receiver boxes into the
@@ -11005,6 +11090,8 @@ impl<'a> Lower<'a> {
             let call_interface = self.library_type_is_interface(owner);
             let cap = self.expr(recv)?;
             let param_tys = tys_to_ir(params);
+            let target_params = tys_to_ir(&m.params);
+            let target_ret = ty_to_ir(m.physical_ret);
             return self.make_func_ref(
                 e.0,
                 true,
@@ -11019,7 +11106,7 @@ impl<'a> Lower<'a> {
                 param_tys,
                 ty_to_ir(ret),
                 Some(cap),
-                None,
+                Some((target_params, target_ret)),
             );
         }
         // Bound member reference on a user-class receiver: synthesize `(recv, args…) -> recv.name(args…)`
@@ -11167,9 +11254,10 @@ impl<'a> Lower<'a> {
         param_tys: Vec<Ty>,
         ret_ty: Ty,
         capture: Option<u32>,
-        // For `StaticBound` the physical target call takes the captured receiver as a leading argument,
-        // so its signature has one more entry than the (invoke) `param_tys`. `None` ⇒ same as `param_tys`.
-        target_override: Option<Vec<Ty>>,
+        // Exact physical target shape when it differs from the logical reference type. `StaticBound`
+        // prepends its captured receiver; classpath members may erase a generic/covariant return.
+        // `None` means the target has the same params/return as the logical reference.
+        target_override: Option<(Vec<Ty>, Ty)>,
     ) -> Option<u32> {
         // A suspend-conversion adapter gets its own name space: its `uniq` is the ARG expr id, which
         // the wrapped value (a callable reference lowered from the same arg) may already have claimed
@@ -11181,6 +11269,15 @@ impl<'a> Lower<'a> {
             "$fnref$"
         };
         let synth_fq = class_internal(self.afile, &format!("{}{marker}{}", self.cur_fn_name, uniq));
+        // A classpath virtual target carries its exact physical descriptor and may also have a JVM
+        // name distinct from the source declaration (`@JvmName`, value-class mangling, mapped ABI).
+        // Source targets start with no override; the value-class pass records a mangled reflection
+        // name later. In particular, a synthetic private accessor remains invocation-only.
+        let reflection_name = (matches!(
+            &dispatch,
+            crate::ir::FrDispatch::VirtualUnbound | crate::ir::FrDispatch::VirtualBound
+        ) && target_override.is_some())
+        .then(|| call_name.clone());
         let superclass = self
             .runtime
             .function_reference_impl_type()?
@@ -11221,9 +11318,12 @@ impl<'a> Lower<'a> {
                 dispatch,
                 call_owner,
                 call_name,
+                reflection_name,
                 call_interface,
-                target_param_tys: target_override.unwrap_or_else(|| param_tys.clone()),
-                target_ret_ty: ret_ty,
+                target_param_tys: target_override
+                    .as_ref()
+                    .map_or_else(|| param_tys.clone(), |(params, _)| params.clone()),
+                target_ret_ty: target_override.map_or(ret_ty, |(_, ret)| ret),
                 // Per-INVOKE-parameter (indexed by the invoke arg `k`), so always `param_tys.len()` —
                 // independent of `target_param_tys` (which may lead with a `StaticBound` receiver).
                 unbox_params: vec![None; param_tys.len()],
@@ -12080,7 +12180,7 @@ impl<'a> Lower<'a> {
                             param_tys,
                             Ty::obj("kotlin/Any"),
                             Some(v),
-                            Some(target_param_tys),
+                            Some((target_param_tys, Ty::obj("kotlin/Any"))),
                         );
                     }
                 }
@@ -17313,6 +17413,25 @@ impl<'a> Lower<'a> {
                         crate::libraries::InlineKind::None,
                         vec![raw],
                     ));
+                }
+                if let Some(ExprLowering::ClasspathUnboundPropertyRef(property)) =
+                    self.info.expr_lowers.get(&e).cloned()
+                {
+                    return self.lower_unbound_library_prop_ref(e, &name, *property);
+                }
+                if let Some(ExprLowering::ClasspathUnboundMemberRef { receiver, member }) =
+                    self.info.expr_lowers.get(&e).cloned()
+                {
+                    if let Ty::Fun(sig) = self.info.ty(e) {
+                        return self.lower_unbound_library_member_ref(
+                            e,
+                            &name,
+                            receiver,
+                            *member,
+                            &sig.params,
+                            sig.ret,
+                        );
+                    }
                 }
                 // A property reference is typed by its callable shape, but still lowers to the Kotlin
                 // property-reference runtime object on the JVM.

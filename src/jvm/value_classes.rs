@@ -1078,7 +1078,7 @@ pub fn lower_value_classes(
         };
         let fr_suspend =
             suspend_sig.contains(&(call_owner, fr.call_name.clone(), target_decl_params.len()));
-        fr.call_name = vc_mangle(
+        let mangled_call_name = vc_mangle(
             &fr.call_name,
             &mangle_params,
             &fr.ret_ty,
@@ -1086,11 +1086,24 @@ pub fn lower_value_classes(
             is_file_class,
             fr_suspend,
         );
-        let erase_src = if staticbound {
-            fr.target_param_tys.clone()
-        } else {
-            fr.param_tys.clone()
-        };
+        let reflection_base = fr.reflection_name.as_deref().unwrap_or(&fr.fn_name);
+        let mangled_reflection_name = vc_mangle(
+            reflection_base,
+            &mangle_params,
+            &fr.ret_ty,
+            &under,
+            is_file_class,
+            fr_suspend,
+        );
+        fr.reflection_name =
+            (mangled_reflection_name != fr.fn_name).then_some(mangled_reflection_name);
+        fr.call_name = mangled_call_name;
+        // `make_func_ref` may already carry an exact classpath target shape that differs from the
+        // logical `FunctionN` shape (a generic/covariant member physically returns Object, for example).
+        // Preserve that target and only apply this pass's value-class erasure to it. Rebuilding it from
+        // `param_tys`/`ret_ty` would silently replace the classfile descriptor with the source type.
+        let erase_src = fr.target_param_tys.clone();
+        let erase_ret = fr.target_ret_ty;
         // A StaticBound receiver that is a VALUE CLASS is captured boxed (`Object`) but the mangled target
         // takes the erased underlying — record it so the emitter unboxes the receiver at `invoke`.
         if staticbound {
@@ -1100,12 +1113,14 @@ pub fn lower_value_classes(
                 .filter(|fq| under.contains_key(fq));
         }
         fr.target_param_tys = erase_src.iter().map(|t| erase(t, &under)).collect();
-        fr.target_ret_ty = erase(&fr.ret_ty, &under);
+        fr.target_ret_ty = erase(&erase_ret, &under);
+        let target_offset = usize::from(staticbound);
         fr.unbox_params = fr
             .param_tys
             .iter()
-            .zip(&fr.target_param_tys)
-            .map(|(logical, target)| {
+            .enumerate()
+            .map(|(i, logical)| {
+                let target = fr.target_param_tys.get(i + target_offset)?;
                 let fq = logical.non_null().obj_internal()?;
                 (under.contains_key(&fq) && logical != target).then_some(fq)
             })
@@ -1125,8 +1140,14 @@ pub fn lower_value_classes(
         if fr
             .unbox_param_nullable
             .iter()
-            .zip(&fr.target_param_tys)
-            .any(|(nullable, target)| *nullable && ir_ty_to_jvm(target).jvm_boxed_ref().is_some())
+            .enumerate()
+            .any(|(i, nullable)| {
+                *nullable
+                    && fr
+                        .target_param_tys
+                        .get(i + target_offset)
+                        .is_some_and(|target| ir_ty_to_jvm(target).jvm_boxed_ref().is_some())
+            })
         {
             return false;
         }

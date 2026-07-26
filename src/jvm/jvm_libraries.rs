@@ -78,6 +78,29 @@ impl JvmLibraries {
     fn top_level_overloads(&self, name: &str, pkg: TypeName) -> Vec<FunctionInfo> {
         let mut overloads = Vec::new();
         for c in self.cp.functions_in_scope(name, &[pkg]) {
+            // The package's static-method index also contains property accessors. Most getters have a
+            // different JVM name from their source property (`tag` -> `getTag`) and therefore are not
+            // reached by a source-name query. A Boolean `isTagged` property is the important exception:
+            // its source name and getter name are identical, so treating that static as a function makes
+            // the function namespace hide the property namespace. Metadata already classifies the exact
+            // accessor; exclude any getter/setter whose JVM name AND descriptor match, without inferring
+            // property names from accessor spelling.
+            if self
+                .cp
+                .meta_properties_name(c.owner)
+                .iter()
+                .any(|property| {
+                    property
+                        .getter
+                        .as_ref()
+                        .is_some_and(|getter| getter.name == c.name && getter.desc == c.descriptor)
+                        || property.setter.as_ref().is_some_and(|setter| {
+                            setter.name == c.name && setter.desc == c.descriptor
+                        })
+                })
+            {
+                continue;
+            }
             let is_default = c.name.ends_with("$default");
             let meta_name = c.name.strip_suffix("$default").unwrap_or(&c.name);
             // Suspend-ness lives on the SOURCE function's `@Metadata`; a `$default` synthetic is not in
@@ -92,7 +115,10 @@ impl JvmLibraries {
             } else {
                 c.descriptor.clone()
             };
-            let (mut params, physical_ret) = parse_method_desc_with_field_params(&descriptor);
+            let Some((mut params, physical_ret)) = parse_method_desc_with_field_params(&descriptor)
+            else {
+                continue;
+            };
             if is_default && params.len() >= 2 {
                 params.truncate(params.len() - 2);
             }
@@ -447,7 +473,9 @@ impl JvmLibraries {
                 .iter()
                 .filter(|m| m.is_public() && !m.is_static() && m.name == name)
                 .find(|m| {
-                    let (params, _) = parse_method_desc(&m.descriptor);
+                    let Some((params, _)) = parse_method_desc(&m.descriptor) else {
+                        return false;
+                    };
                     params.len() == args.len()
                         && params.iter().zip(args).all(|(p, a)| arg_fits(p, a))
                 });
@@ -500,7 +528,7 @@ impl JvmLibraries {
         // overload the WRONG signature). Only when `@Metadata` has no FUNCTION for the name (a Java method,
         // a synthetic, or a PROPERTY getter — recorded as a property, not a function) do we read the JVM
         // `Signature`, which uses the legacy receiver-in-`params[0]` shape.
-        let (desc_params, desc_ret) = parse_method_desc_with_field_params(jvm_desc);
+        let (desc_params, desc_ret) = parse_method_desc_with_field_params(jvm_desc)?;
         if let Some(gsig) =
             self.cp
                 .aligned_generic_sig_name(owner, jvm_name, &desc_params, &desc_ret)
@@ -604,7 +632,9 @@ impl JvmLibraries {
             if sam.is_some() {
                 return None;
             }
-            let (params, ret) = parse_method_desc(&m.descriptor);
+            let Some((params, ret)) = parse_method_desc(&m.descriptor) else {
+                continue;
+            };
             let mut member = LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
             member.signature = m.signature.clone();
             member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
@@ -634,7 +664,7 @@ impl JvmLibraries {
             .filter(|m| m.is_public)
             .filter_map(|m| {
                 let descriptor = m.jvm_desc?;
-                let (params, _) = parse_method_desc(descriptor);
+                let (params, _) = parse_method_desc(descriptor)?;
                 Some(crate::libraries::CompanionFn {
                     class_internal: type_name(&internal),
                     companion_internal: type_name(&companion_internal),
@@ -672,7 +702,7 @@ impl JvmLibraries {
             .filter(|m| m.is_public && !m.is_extension)
             .filter_map(|m| {
                 let descriptor = m.jvm_desc?.to_string();
-                let (params, physical_ret) = parse_method_desc(&descriptor);
+                let (params, physical_ret) = parse_method_desc(&descriptor)?;
                 // Value-class implementation methods are static and take the erased receiver as their
                 // first JVM parameter. Source member resolution sees only the value parameters.
                 let logical_params = params.get(1..).unwrap_or(&[]).to_vec();
@@ -817,7 +847,9 @@ impl JvmLibraries {
                 if !m.is_public() && !m.is_protected() {
                     continue;
                 }
-                let (params, ret) = parse_method_desc(&m.descriptor);
+                let Some((params, ret)) = parse_method_desc(&m.descriptor) else {
+                    continue;
+                };
                 let mut member =
                     LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
                 member.visibility = if m.is_public() {
@@ -885,7 +917,9 @@ impl JvmLibraries {
                 let Some(desc) = mf.jvm_desc else {
                     continue;
                 };
-                let (params, physical_ret) = parse_method_desc(desc);
+                let Some((params, physical_ret)) = parse_method_desc(desc) else {
+                    continue;
+                };
                 // A `suspend` member appends a `Continuation` JVM parameter the SOURCE signature
                 // (`value_params`) excludes — drop it (the CPS pass re-threads it) and match the leading
                 // value parameters. Any OTHER count mismatch (`@Composable`, …) isn't a plain mangled member.
@@ -1587,26 +1621,56 @@ fn strip_continuation_param(desc: &str) -> String {
     desc.to_string()
 }
 
-pub(crate) fn parse_method_desc(desc: &str) -> (Vec<Ty>, Ty) {
-    let close = desc.find(')').unwrap_or(0);
-    let mut rest = &desc[1..close];
+fn valid_field_desc(desc: &str) -> bool {
+    let base = desc.trim_start_matches('[');
+    if base.is_empty() {
+        return false;
+    }
+    matches!(base, "B" | "C" | "D" | "F" | "I" | "J" | "S" | "Z")
+        || (base.starts_with('L')
+            && base.ends_with(';')
+            && base.len() > 2
+            && !base[1..base.len() - 1].contains([';', '[']))
+}
+
+pub(crate) fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
+    let params_desc = desc.strip_prefix('(')?;
+    let close = params_desc.find(')')?;
+    let mut rest = &params_desc[..close];
     let mut params = Vec::new();
-    while let Some((one, tail)) = split_one(rest) {
+    while !rest.is_empty() {
+        let (one, tail) = split_one(rest)?;
+        if !valid_field_desc(one) {
+            return None;
+        }
         params.push(desc_to_ty(one));
         rest = tail;
     }
-    (params, desc_to_ty(&desc[close + 1..]))
+    let ret_desc = &params_desc[close + 1..];
+    if ret_desc != "V" && !valid_field_desc(ret_desc) {
+        return None;
+    }
+    Some((params, desc_to_ty(ret_desc)))
 }
 
-fn parse_method_desc_with_field_params(desc: &str) -> (Vec<Ty>, Ty) {
-    let close = desc.find(')').unwrap_or(0);
-    let mut rest = &desc[1..close];
+fn parse_method_desc_with_field_params(desc: &str) -> Option<(Vec<Ty>, Ty)> {
+    let params_desc = desc.strip_prefix('(')?;
+    let close = params_desc.find(')')?;
+    let mut rest = &params_desc[..close];
     let mut params = Vec::new();
-    while let Some((one, tail)) = split_one(rest) {
+    while !rest.is_empty() {
+        let (one, tail) = split_one(rest)?;
+        if !valid_field_desc(one) {
+            return None;
+        }
         params.push(field_desc_to_ty(one));
         rest = tail;
     }
-    (params, desc_to_ty(&desc[close + 1..]))
+    let ret_desc = &params_desc[close + 1..];
+    if ret_desc != "V" && !valid_field_desc(ret_desc) {
+        return None;
+    }
+    Some((params, desc_to_ty(ret_desc)))
 }
 
 /// The receiver type's descriptor and those of its supertypes (superclass chain + interfaces),
@@ -1698,23 +1762,33 @@ impl SymbolSource for JvmLibraries {
                         .ret_class
                         .map_or(Ty::obj("kotlin/Any"), kotlin_type_name_to_ty);
                     let ty = mp.ret_class.map_or(Ty::obj("kotlin/Any"), Ty::obj_name);
+                    let Some((getter_params, getter_ret)) = parse_method_desc(&getter.desc) else {
+                        continue;
+                    };
+                    if !getter_params.is_empty() {
+                        continue;
+                    }
                     let getter = LibraryCallable::library(
                         cn,
                         getter.name,
-                        vec![],
+                        getter_params,
                         ret_ty,
-                        ret_ty,
+                        getter_ret,
                         getter.desc,
                     );
-                    let setter = mp.setter.clone().map(|s| {
-                        LibraryCallable::library(
+                    let setter = mp.setter.clone().and_then(|s| {
+                        let (params, physical_ret) = parse_method_desc(&s.desc)?;
+                        if params.len() != 1 || physical_ret != Ty::Unit {
+                            return None;
+                        }
+                        Some(LibraryCallable::library(
                             cn,
                             s.name,
-                            vec![ret_ty],
+                            params,
                             Ty::Unit,
-                            Ty::Unit,
+                            physical_ret,
                             s.desc,
-                        )
+                        ))
                     });
                     overloads.push(PropertyInfo {
                         kind: PropKind::Member,
@@ -1957,7 +2031,9 @@ impl SymbolSource for JvmLibraries {
                     continue;
                 };
                 let bytecode_public = cand.as_ref().map_or(mf.is_public, |c| c.public);
-                let (params, pret) = parse_method_desc(&descriptor);
+                let Some((params, pret)) = parse_method_desc(&descriptor) else {
+                    continue;
+                };
                 if params.is_empty() {
                     continue;
                 }
@@ -2023,8 +2099,21 @@ impl SymbolSource for JvmLibraries {
                 let Some(getter_sig) = mp.getter else {
                     continue;
                 };
-                let (gparams, gret) = parse_method_desc(&getter_sig.desc);
-                if gparams.is_empty() {
+                let Some(facade_class) = self.cp.find_name(facade) else {
+                    continue;
+                };
+                if !facade_class.methods.iter().any(|method| {
+                    method.is_public()
+                        && method.is_static()
+                        && method.name == getter_sig.name
+                        && method.descriptor == getter_sig.desc
+                }) {
+                    continue;
+                }
+                let Some((gparams, gret)) = parse_method_desc(&getter_sig.desc) else {
+                    continue;
+                };
+                if gparams.len() != 1 {
                     continue;
                 }
                 let ret_ty = mp.ret_class.map_or(gret, kotlin_type_name_to_ty);
@@ -2036,16 +2125,27 @@ impl SymbolSource for JvmLibraries {
                     gret,
                     getter_sig.desc,
                 );
-                let setter = mp.setter.map(|setter_sig| {
-                    let (sparams, sret) = parse_method_desc(&setter_sig.desc);
-                    LibraryCallable::library(
+                let setter = mp.setter.and_then(|setter_sig| {
+                    let (sparams, sret) = parse_method_desc(&setter_sig.desc)?;
+                    if sparams.len() != 2 || sret != Ty::Unit {
+                        return None;
+                    }
+                    if !facade_class.methods.iter().any(|method| {
+                        method.is_public()
+                            && method.is_static()
+                            && method.name == setter_sig.name
+                            && method.descriptor == setter_sig.desc
+                    }) {
+                        return None;
+                    }
+                    Some(LibraryCallable::library(
                         facade,
                         setter_sig.name,
                         sparams,
-                        sret,
+                        Ty::Unit,
                         sret,
                         setter_sig.desc,
-                    )
+                    ))
                 });
                 props.push(PropertyInfo {
                     kind: PropKind::Extension,
@@ -2283,6 +2383,25 @@ impl SymbolSource for JvmLibraries {
 impl crate::libraries::SemanticPlatform for JvmLibraries {
     fn function_type(&self, arity: usize) -> Option<Ty> {
         Some(Ty::obj(&format!("kotlin/jvm/functions/Function{arity}")))
+    }
+
+    fn supports_member_reference(&self, _receiver: Ty, member: &LibraryMember) -> bool {
+        let Some(owner) = member.owner else {
+            return false;
+        };
+        let owner = super::jvm_class_map::to_jvm_type_name(owner);
+        let owner_rendered = owner.render();
+        let source_name = member.physical_name.as_deref().unwrap_or(&member.name);
+        let physical_name =
+            crate::jvm::names::mapped_builtin_virtual_name(&owner_rendered, source_name);
+        self.cp.find_name(owner).is_some_and(|ci| {
+            ci.methods.iter().any(|method| {
+                method.is_public()
+                    && !method.is_static()
+                    && method.name == physical_name
+                    && method.descriptor == member.descriptor
+            })
+        })
     }
 
     fn implicit_common_supertypes(&self, types: &[Ty]) -> Vec<crate::libraries::SemanticSupertype> {
@@ -3006,7 +3125,7 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
 
 #[cfg(test)]
 mod tests {
-    use super::desc_to_ty;
+    use super::{desc_to_ty, parse_method_desc};
     use crate::types::Ty;
 
     #[test]
@@ -3028,6 +3147,32 @@ mod tests {
             desc_to_ty("[[Ljava/lang/String;"),
             Ty::array(Ty::array(Ty::String))
         );
+    }
+
+    #[test]
+    fn method_descriptor_parser_rejects_partial_or_malformed_input() {
+        assert_eq!(
+            parse_method_desc("(ILjava/lang/String;)[B"),
+            Some((vec![Ty::Int, Ty::String], Ty::array(Ty::Byte),))
+        );
+        for invalid in [
+            "",
+            "I)V",
+            "(I",
+            "(I)",
+            "(V)V",
+            "([V)V",
+            "(Q)V",
+            "(Ljava/lang/String)V",
+            "(Ljava/lang/String;;)V",
+            "()Ljava/lang/String;I",
+        ] {
+            assert_eq!(
+                parse_method_desc(invalid),
+                None,
+                "accepted malformed descriptor {invalid}"
+            );
+        }
     }
 
     #[test]

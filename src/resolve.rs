@@ -6123,6 +6123,15 @@ pub enum ExprLowering {
     /// A classpath top-level function reference (`::foo`) resolved by the checker. Lowering reads the
     /// callable instead of resolving the reference again.
     ClasspathTopLevelFunctionRef(crate::libraries::LibraryCallable),
+    /// An unbound classpath member-function reference (`Type::method`). The receiver is the first
+    /// function parameter; lowering invokes the recorded virtual target without resolving it again.
+    ClasspathUnboundMemberRef {
+        receiver: Ty,
+        member: Box<crate::libraries::LibraryMember>,
+    },
+    /// An unbound classpath member or extension-property reference (`Type::property`). Lowering emits
+    /// the recorded virtual getter or static extension getter as a `PropertyReference1Impl`.
+    ClasspathUnboundPropertyRef(Box<crate::symbol_resolver::BoundPropertyRef>),
     /// An unqualified function reference `::foo` where `foo` is imported from a SAME-FILE `object`
     /// (`import Host.foo`) — a BOUND reference to that object's singleton member, lowered exactly like
     /// `Host::foo` (capture `Host.INSTANCE`, invoke the member).
@@ -8266,6 +8275,52 @@ impl<'a> Checker<'a> {
         self.resolver()
             .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
             .and_then(Symbol::property_ref)
+    }
+    fn resolve_extension_property_ref(
+        &self,
+        recv: Ty,
+        name: &str,
+    ) -> Option<crate::symbol_resolver::BoundPropertyRef> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        let getter = self
+            .resolver()
+            .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
+            .and_then(Symbol::extension_property_getter)?;
+        let property = crate::symbol_resolver::resolve_symbols_in_scope(
+            &self.fed_source(),
+            name,
+            &self.fn_scope,
+        )
+        .into_iter()
+        .flat_map(|(_, symbols)| match &symbols.callables {
+            crate::libraries::Callables::Properties(properties) => properties.overloads.clone(),
+            _ => Vec::new(),
+        })
+        .find(|property| {
+            property.kind == crate::libraries::PropKind::Extension
+                && property.getter.owner == getter.owner
+                && property.getter.name == getter.name
+                && property.getter.descriptor == getter.descriptor
+        })?;
+        if !matches!(getter.origin, crate::libraries::Origin::Library)
+            || getter.suspend
+            || getter.default_call
+            || getter.params.len() != 1
+            || getter.name.contains('-')
+            || getter.physical_ret != getter.ret
+        {
+            return None;
+        }
+        let prop_ty = getter.ret;
+        let setter = property
+            .setter
+            .filter(|setter| setter.params.len() == 2 && setter.physical_ret == Ty::Unit);
+        Some(crate::symbol_resolver::BoundPropertyRef {
+            getter,
+            setter,
+            prop_ty,
+            extension_facade: Some(property.getter.owner),
+        })
     }
     fn resolve_instance_ref(
         &self,
@@ -12894,6 +12949,63 @@ impl<'a> Checker<'a> {
                                     .find_map(|(n, _, v)| (*n == name).then_some(*v))
                                 {
                                     if let Some(ty) = self.property_ref_ty(1, is_var) {
+                                        return self.set(e, ty);
+                                    }
+                                }
+                            }
+                            if let Some(recv_ty) = self.class_literal_unbound_ty(&rn) {
+                                // Classpath member properties take precedence over methods/extensions,
+                                // matching the bound-reference path. Record the exact getter so lowering
+                                // never re-resolves a name-only callable reference.
+                                if let Some(property) = self.resolve_property_ref(recv_ty, &name) {
+                                    if let Some(ty) =
+                                        self.property_ref_ty(1, property.setter.is_some())
+                                    {
+                                        self.expr_lowers.insert(
+                                            e,
+                                            ExprLowering::ClasspathUnboundPropertyRef(Box::new(
+                                                property,
+                                            )),
+                                        );
+                                        return self.set(e, ty);
+                                    }
+                                }
+                                if let Some(member) = self.resolve_instance_ref(recv_ty, &name) {
+                                    if !member.suspend && member.ret != Ty::Nothing {
+                                        let mut params = vec![recv_ty];
+                                        params.extend(member.params.iter().copied());
+                                        self.expr_lowers.insert(
+                                            e,
+                                            ExprLowering::ClasspathUnboundMemberRef {
+                                                receiver: recv_ty,
+                                                member: Box::new(member.clone()),
+                                            },
+                                        );
+                                        return self.set(e, Ty::fun(params, member.ret));
+                                    }
+                                }
+                                // A same-module extension property is considered only after classpath
+                                // members: Kotlin member declarations take precedence over extensions.
+                                // Its existing lowering uses the receiver as the reference's single input.
+                                if let Some((_, is_var)) = self.syms.ext_prop(recv_ty, &name) {
+                                    if let Some(ty) = self.property_ref_ty(1, is_var) {
+                                        return self.set(e, ty);
+                                    }
+                                }
+                                // An imported classpath extension property is a static getter on its
+                                // facade, but remains a `KProperty1<Receiver, Value>` at the source level.
+                                if let Some(property) =
+                                    self.resolve_extension_property_ref(recv_ty, &name)
+                                {
+                                    if let Some(ty) =
+                                        self.property_ref_ty(1, property.setter.is_some())
+                                    {
+                                        self.expr_lowers.insert(
+                                            e,
+                                            ExprLowering::ClasspathUnboundPropertyRef(Box::new(
+                                                property,
+                                            )),
+                                        );
                                         return self.set(e, ty);
                                     }
                                 }

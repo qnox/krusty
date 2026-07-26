@@ -43,6 +43,47 @@ pub fn collection_property_stub_name(prop: &str) -> Option<&'static str> {
 
 pub use crate::names::property_setter_name;
 
+/// The physical JVM method name for a Kotlin mapped-builtin virtual member. Shared by target
+/// validation and bytecode emission so a callable reference is checked against the same ABI it calls.
+pub fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str) -> &'a str {
+    match (owner, name) {
+        ("java/lang/CharSequence", "get") => "charAt",
+        ("java/lang/String", "get") | ("kotlin/String", "get") => "charAt",
+        ("java/lang/StringBuilder", "get") | ("kotlin/text/StringBuilder", "get") => "charAt",
+        (
+            "kotlin/ranges/IntRange" | "kotlin/ranges/LongRange" | "kotlin/ranges/CharRange",
+            "start",
+        ) => "getFirst",
+        (
+            "kotlin/ranges/IntRange" | "kotlin/ranges/LongRange" | "kotlin/ranges/CharRange",
+            "endInclusive",
+        ) => "getLast",
+        ("java/util/Map" | "kotlin/collections/Map" | "kotlin/collections/MutableMap", "keys") => {
+            "keySet"
+        }
+        (
+            "java/util/Map" | "kotlin/collections/Map" | "kotlin/collections/MutableMap",
+            "entries",
+        ) => "entrySet",
+        (
+            "kotlin/reflect/KCallable"
+            | "kotlin/reflect/KProperty"
+            | "kotlin/reflect/KProperty0"
+            | "kotlin/reflect/KProperty1"
+            | "kotlin/reflect/KMutableProperty0"
+            | "kotlin/reflect/KMutableProperty1",
+            "name",
+        ) => "getName",
+        ("java/lang/Number", "toByte") => "byteValue",
+        ("java/lang/Number", "toShort") => "shortValue",
+        ("java/lang/Number", "toInt") => "intValue",
+        ("java/lang/Number", "toLong") => "longValue",
+        ("java/lang/Number", "toFloat") => "floatValue",
+        ("java/lang/Number", "toDouble") => "doubleValue",
+        _ => name,
+    }
+}
+
 pub(crate) fn reference_array_element(ty: Ty) -> Ty {
     match ty {
         Ty::Nullable(inner) => Ty::nullable(reference_array_element(*inner)),

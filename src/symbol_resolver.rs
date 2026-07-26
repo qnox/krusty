@@ -2279,18 +2279,23 @@ fn resolve_instance_ref(lib: &dyn SemanticPlatform, recv: Ty, name: &str) -> Opt
         return None;
     }
     let ret = o.ret.apply(o.callable.ret);
-    Some(o.member_with_return(ret))
+    let member = o.member_with_return(ret);
+    lib.supports_member_reference(recv, &member)
+        .then_some(member)
 }
 
-/// A bound PROPERTY reference on a library receiver (`"kotlin"::length`), fully resolved to what the
-/// backend emits: the getter's owner + physical name + the property type. Every classification and
-/// emittability decision is made HERE — the checker and lowerer just consume this, never re-deriving
-/// value-class-ness, interface-ness, or property-vs-function from the platform themselves.
+/// A PROPERTY reference on a library receiver, fully resolved to what the backend emits. The exact
+/// getter/setter callables retain their physical owners, names, descriptors, and erased return types;
+/// `prop_ty` remains the logical Kotlin value type. Every classification and emittability decision is
+/// made before lowering, so the backend never reconstructs an accessor signature from a source name.
 #[derive(Clone, Debug)]
 pub struct BoundPropertyRef {
-    pub owner: TypeName,
-    pub getter_name: String,
+    pub getter: LibraryCallable,
+    pub setter: Option<LibraryCallable>,
     pub prop_ty: Ty,
+    /// An extension property's getter is static on this facade and takes `owner` as its first argument.
+    /// `None` denotes an ordinary virtual member getter.
+    pub extension_facade: Option<TypeName>,
 }
 
 /// Resolve a bound property reference on `recv` (`"kotlin"::length`) to its emittable getter descriptor,
@@ -2313,23 +2318,66 @@ fn resolve_property_ref(
     if !lib.member_is_property(recv, name) {
         return None;
     }
-    let m = resolve_property_member(lib, recv, name)?;
-    if m.suspend {
+    let resolved = resolve_property_member(lib, recv, name)?;
+    if resolved.suspend {
         return None;
     }
-    let owner = m.member.owner?;
-    if m.member.name.contains('-')
+    let property = lib
+        .property_members(recv, name)
+        .overloads
+        .into_iter()
+        .min_by_key(|property| property.receiver_rank);
+    let (getter, setter) = if let Some(property) = property {
+        (
+            property.getter,
+            property
+                .setter
+                .filter(|setter| setter.params.len() == 1 && setter.physical_ret == Ty::Unit),
+        )
+    } else {
+        let member = resolved.member.clone();
+        let owner = member.owner?;
+        (
+            LibraryCallable::library(
+                owner,
+                member.physical_name.unwrap_or(member.name),
+                member.params,
+                resolved.ret,
+                member.physical_ret,
+                member.descriptor,
+            ),
+            resolve_property_setter(lib, recv, name),
+        )
+    };
+    let direct_member = |callable: &LibraryCallable| {
+        let mut member = LibraryMember::new(
+            callable.name.clone(),
+            callable.params.clone(),
+            callable.ret,
+            callable.descriptor.clone(),
+        );
+        member.owner = Some(callable.owner);
+        member.physical_ret = callable.physical_ret;
+        member
+    };
+    let owner = getter.owner;
+    if !getter.params.is_empty()
+        || getter.name.contains('-')
         || lib.is_value_name(owner)
         || lib
             .resolve_type_name(owner)
             .is_some_and(|t| t.is_interface())
+        || !lib.supports_member_reference(recv, &direct_member(&getter))
     {
         return None;
     }
+    let setter =
+        setter.filter(|callable| lib.supports_member_reference(recv, &direct_member(callable)));
     Some(BoundPropertyRef {
-        owner,
-        getter_name: m.member.name,
-        prop_ty: m.ret,
+        getter,
+        setter,
+        prop_ty: resolved.ret,
+        extension_facade: None,
     })
 }
 
