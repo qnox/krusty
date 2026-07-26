@@ -512,16 +512,34 @@ pub fn front_end_diagnostics(
     cp_jars: &[PathBuf],
     jdk_modules: Option<&std::path::Path>,
 ) -> Vec<String> {
+    front_end_diagnostics_files(&[src], cp_jars, jdk_modules)
+}
+
+/// Multi-file form of [`front_end_diagnostics`]. All signatures are collected before every file is
+/// checked, matching the module pipeline and keeping cross-file tests on the shared harness.
+#[allow(dead_code)]
+pub fn front_end_diagnostics_files(
+    sources: &[&str],
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Vec<String> {
     use krusty::diag::DiagSink;
-    use krusty::frontend::{check_file, collect_signatures_with_cp};
+    use krusty::frontend::{
+        check_file_in_source_set, collect_signatures_with_cp, preinfer_module_returns,
+    };
 
     let mut diags = DiagSink::new();
-    let features = krusty::features::LangFeatures::from_source(src);
-    let toks = krusty::lexer::lex(src, &mut diags);
-    let mut files = vec![krusty::parser::parse_with_features(
-        src, &toks, &mut diags, &features,
-    )];
-    if features.has("MultiPlatformProjects") {
+    let mut files = sources
+        .iter()
+        .map(|source| {
+            let features = krusty::features::LangFeatures::from_source(source);
+            let tokens = krusty::lexer::lex(source, &mut diags);
+            krusty::parser::parse_with_features(source, &tokens, &mut diags, &features)
+        })
+        .collect::<Vec<_>>();
+    if sources.iter().any(|source| {
+        krusty::features::LangFeatures::from_source(source).has("MultiPlatformProjects")
+    }) {
         krusty::frontend::strip_matched_expects(&mut files);
     }
     if !diags.has_errors() {
@@ -533,7 +551,11 @@ pub fn front_end_diagnostics(
         let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
         let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
         if !diags.has_errors() {
-            let _ = check_file(&files[0], &mut syms, &mut diags);
+            preinfer_module_returns(&files, &mut syms, &mut diags);
+            for (index, _) in files.iter().enumerate() {
+                diags.set_file(index as u32);
+                let _ = check_file_in_source_set(&files, index as u32, &mut syms, &mut diags);
+            }
         }
     }
     diags.diags.iter().map(|d| d.msg.clone()).collect()
