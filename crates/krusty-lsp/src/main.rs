@@ -220,6 +220,7 @@ impl krusty_lsp::Analysis for WorkerHost {
                 .map(|_| {
                     DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
                         span: krusty::diag::Span::new(0, 0),
+                        editor_span: None,
                         severity: krusty::diag::Severity::Error,
                         msg: format!("analysis worker failed: {error}"),
                         file: 0,
@@ -242,6 +243,7 @@ impl krusty_lsp::Analysis for WorkerHost {
                     .map(|_| {
                         DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
                             span: krusty::diag::Span::new(0, 0),
+                            editor_span: None,
                             severity: krusty::diag::Severity::Error,
                             msg: message.clone(),
                             file: 0,
@@ -269,6 +271,7 @@ impl krusty_lsp::Analysis for WorkerHost {
                     .map(|_| {
                         DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
                             span: krusty::diag::Span::new(0, 0),
+                            editor_span: None,
                             severity: krusty::diag::Severity::Error,
                             msg: format!("analysis worker failed: {error}"),
                             file: 0,

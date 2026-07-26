@@ -210,6 +210,8 @@ pub enum Expr {
         op: BinOp,
         lhs: ExprId,
         rhs: ExprId,
+        /// Source span of the operator token.
+        operator_span: Span,
     },
     /// `receiver.name` (no call). For a bare name use `Name`.
     Member {
@@ -883,6 +885,8 @@ pub struct File {
     /// at Kotlin's operator location without retaining source text or adding a span field to every AST
     /// node. Keyed by the value expression's `ExprId`; absent for expression bodies and synthetic values.
     pub value_operator_spans: std::collections::HashMap<u32, Span>,
+    /// Assignment lvalue spans keyed by statement ID.
+    pub assignment_target_spans: std::collections::HashMap<u32, Span>,
     /// 1-based source line of each expression's start (parallel to `expr_spans`; 0 = unknown).
     /// Filled by the parser post-pass for the `LineNumberTable`.
     pub expr_lines: Vec<u32>,
@@ -1464,7 +1468,7 @@ impl File {
                 self.write_expr(*operand, out);
                 out.push(')');
             }
-            Expr::Binary { op, lhs, rhs } => {
+            Expr::Binary { op, lhs, rhs, .. } => {
                 out.push_str(&format!("({} ", binop(*op)));
                 self.write_expr(*lhs, out);
                 out.push(' ');
@@ -1716,6 +1720,15 @@ mod tests {
 
     fn span() -> Span {
         Span::new(0, 0)
+    }
+
+    #[test]
+    fn binary_operator_location_does_not_widen_the_expression_arena_entry() {
+        assert!(
+            std::mem::size_of::<Expr>() <= 104,
+            "Expr grew to {} bytes",
+            std::mem::size_of::<Expr>()
+        );
     }
 
     #[test]

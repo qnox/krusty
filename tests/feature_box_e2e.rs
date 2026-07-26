@@ -888,14 +888,17 @@ fun box(): String {
 open class BaseStep {
     open operator fun unaryMinus(): DerivedStep = DerivedStep()
     open operator fun inc(): DerivedStep = DerivedStep()
+    open operator fun plus(other: DerivedStep): DerivedStep = DerivedStep()
 }
 class DerivedStep : BaseStep() {
     override fun unaryMinus(): DerivedStep = this
     override fun inc(): DerivedStep = this
+    override fun plus(other: DerivedStep): DerivedStep = this
 }
 fun box(): String {
     var step = DerivedStep()
     if (-step !== step) return "unary"
+    if (step + DerivedStep() !== step) return "binary"
     val old = step++
     return if (old === step) "OK" else "increment"
 }
@@ -917,6 +920,17 @@ fun box(): String {
     if ((-step).value != -2) return "unary"
     val old = step++
     return if (old.value == 2 && step.value == 3) "OK" else "increment"
+}
+"#,
+    ),
+    (
+        "ReferenceExtensionBinaryOperator",
+        r#"
+class Extended(val value: Int)
+operator fun Extended.plus(other: Extended): Extended = Extended(value + other.value)
+fun box(): String {
+    val sum = Extended(2) + Extended(3)
+    return if (sum.value == 5) "OK" else "value=${sum.value}"
 }
 "#,
     ),

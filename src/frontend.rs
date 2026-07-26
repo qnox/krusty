@@ -271,7 +271,7 @@ impl CopyExpr {
             | Expr::CharLit(_)
             | Expr::NullLit
             | Expr::Name(_)) => CopyExpr::Leaf(leaf.clone()),
-            Expr::Binary { op, lhs, rhs } => CopyExpr::Binary {
+            Expr::Binary { op, lhs, rhs, .. } => CopyExpr::Binary {
                 op: *op,
                 lhs: Box::new(CopyExpr::lift(file, *lhs)?),
                 rhs: Box::new(CopyExpr::lift(file, *rhs)?),
@@ -292,6 +292,7 @@ impl CopyExpr {
                         op: *op,
                         lhs: l,
                         rhs: r,
+                        operator_span: span,
                     },
                     span,
                 )
@@ -503,6 +504,7 @@ mod tests {
         let mut diags = DiagSink::new();
         diags.diags.push(Diagnostic {
             span: Span::new(0, 0),
+            editor_span: None,
             severity: Severity::Warning,
             msg: "existing warning".to_string(),
             file: 0,

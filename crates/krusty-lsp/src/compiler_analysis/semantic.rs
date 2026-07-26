@@ -1316,7 +1316,7 @@ impl<'a> SemanticClassifier<'a> {
 
     fn mark_compound_assignment_operator(&mut self, statement: StmtId, value: ExprId) {
         match self.file.expr(value) {
-            Expr::Binary { op, lhs, rhs } => {
+            Expr::Binary { op, lhs, rhs, .. } => {
                 let expression_span = self.file.expr_spans[value.0 as usize];
                 let lhs_span = self.file.expr_spans[lhs.0 as usize];
                 if expression_span.lo == lhs_span.lo && expression_span.hi == lhs_span.hi {
@@ -1709,7 +1709,7 @@ impl<'a> SemanticClassifier<'a> {
                     self.push_hover(span, value);
                 }
             }
-            Expr::Binary { op, lhs, rhs } => {
+            Expr::Binary { op, lhs, rhs, .. } => {
                 let expression_span = self.file.expr_spans[id.0 as usize];
                 let lhs_span = self.file.expr_spans[lhs.0 as usize];
                 if expression_span.lo != lhs_span.lo || expression_span.hi != lhs_span.hi {

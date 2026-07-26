@@ -808,6 +808,62 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
             "NullableReturnType.kt",
             "fun nullableReturnMismatch(): String = null\n",
         ),
+        (
+            "TooManyArguments.kt",
+            "fun exact(value: Int): Int = value\n\
+             fun tooManyArguments(): Int = exact(1, 2)\n",
+        ),
+        (
+            "MissingArgument.kt",
+            "fun pair(left: Int, right: String): Int = left\n\
+             fun missingArgument(): Int = pair(1)\n",
+        ),
+        (
+            "MissingNamedArgument.kt",
+            "fun namedPair(left: Int, right: String): Int = left\n\
+             fun missingNamedArgument(): Int = namedPair(left = 1)\n",
+        ),
+        (
+            "MissingMemberArgument.kt",
+            "class PairHolder { fun pair(left: Int, right: String): Int = left }\n\
+             fun missingMemberArgument(holder: PairHolder): Int = holder.pair(1)\n",
+        ),
+        (
+            "MissingConstructorArgument.kt",
+            "class RequiredPair(val left: Int, val right: String)\n\
+             fun missingConstructorArgument(): RequiredPair = RequiredPair(1)\n",
+        ),
+        (
+            "ValReassignment.kt",
+            "fun reassignValue(): Int {\n\
+             \u{20}\u{20}val value = 1\n\
+             \u{20}\u{20}value = 2\n\
+             \u{20}\u{20}return value\n\
+             }\n",
+        ),
+        (
+            "MemberValReassignment.kt",
+            "class ImmutableHolder(val value: Int)\n\
+             fun reassignMember(holder: ImmutableHolder) { holder.value = 2 }\n",
+        ),
+        (
+            "ValIncrement.kt",
+            "fun incrementValue(): Int {\n\
+             \u{20}\u{20}val value = 1\n\
+             \u{20}\u{20}value++\n\
+             \u{20}\u{20}return value\n\
+             }\n",
+        ),
+        (
+            "NonOperatorUnary.kt",
+            "class NotAnOperator { fun unaryMinus(): NotAnOperator = this }\n\
+             fun invalidUnary(): NotAnOperator = -NotAnOperator()\n",
+        ),
+        (
+            "NonOperatorIncrement.kt",
+            "class NotIncrementable { fun inc(): NotIncrementable = this }\n\
+             fun invalidIncrement(input: NotIncrementable) { var value = input; value++ }\n",
+        ),
     ];
     let clean_diagnostic_cases = [(
         "ContextArray.kt",

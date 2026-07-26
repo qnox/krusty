@@ -107,6 +107,9 @@ fn errors_match_kotlinc_in_text_and_location() {
         "fun f(): Int = when { 1 -> 1; else -> 0 }",
         "class C\ncontext(c: C) fun f(x: Int): Int = x\nfun g(c: C): Int = with(c) { f() }",
         "class C\ncontext(c: C) fun f(x: Int): Int = x\nfun g(c: C): Int = with(c) { f(1, 2) }",
+        "class C { fun unaryMinus(): C = this }\nfun g(): C = -C()",
+        "class C { fun inc(): C = this }\nfun g(c: C) { var value = c; value++ }",
+        "class C { fun plus(other: C): C = this }\nfun g(left: C, right: C): C = left + right",
         // A type present on NO classpath in either compiler (`Widget` resolves to the JDK-internal
         // `jdk.internal.org.jline.reader.Widget` when the JDK is on the classpath, so it is a poor
         // choice for an "unresolved" probe).

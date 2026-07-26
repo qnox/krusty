@@ -14487,7 +14487,7 @@ impl<'a> Lower<'a> {
         value: AstExprId,
         target: CompoundAssignmentTarget,
     ) -> Option<u32> {
-        let Expr::Binary { op, lhs, rhs } = self.afile.expr(value).clone() else {
+        let Expr::Binary { op, lhs, rhs, .. } = self.afile.expr(value).clone() else {
             return None;
         };
         let aname = match op {
@@ -18634,7 +18634,7 @@ impl<'a> Lower<'a> {
                     self.lower_member_read_on(recv, rt, &name, e)?
                 }
             }
-            Expr::Binary { op, lhs, rhs } => {
+            Expr::Binary { op, lhs, rhs, .. } => {
                 // `&&` / `||` SHORT-CIRCUIT: the right operand must not be evaluated when the left
                 // already decides the result (`x != 0 && 10 / x > 0` must not divide when `x == 0`).
                 // Lower to a branch — `a && b` → `if (a) b else false`, `a || b` → `if (a) true else b`
@@ -18696,6 +18696,13 @@ impl<'a> Lower<'a> {
                 // A user `operator fun LhsType.plus(…)` (etc.) extension overrides the builtin operator.
                 let op_name = op.arith_operator_name();
                 if let Some(opn) = op_name {
+                    // Prefer the checker-selected operator target.
+                    if self.info.resolved_operator_call(e, opn).is_some() {
+                        let receiver = self.expr(lhs)?;
+                        let (call, _) =
+                            self.lower_op_call(receiver, self.recv_ty(lhs), opn, &[rhs], e)?;
+                        return Some(call);
+                    }
                     if let Some(fid) = self.unique_ext_fun_id_by_arity(self.recv_ty(lhs), opn, 1) {
                         let params = self.ir.functions[fid as usize].params.clone();
                         // Only route to the extension when the RIGHT operand matches its parameter —
@@ -18824,6 +18831,7 @@ impl<'a> Lower<'a> {
                                 op: BinOp::Add,
                                 lhs: l2,
                                 rhs: r2,
+                                ..
                             } if is_concat(self, l2, r2) => {
                                 operands.push(r2);
                                 cur = l2;

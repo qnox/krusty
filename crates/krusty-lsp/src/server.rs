@@ -3821,6 +3821,7 @@ mod tests {
                     let diagnostics = if source.contains("bad") {
                         vec![Diagnostic {
                             span: Span::new(0, source.len() as u32),
+                            editor_span: None,
                             severity: Severity::Error,
                             msg: "bad document".to_string(),
                             file: 0,
@@ -3910,6 +3911,7 @@ mod tests {
                     let diagnostics = if *source == "😀\nbad" {
                         vec![Diagnostic {
                             span: Span::new(5, 8),
+                            editor_span: None,
                             severity: Severity::Error,
                             msg: "bad document".to_string(),
                             file: 0,

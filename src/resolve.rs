@@ -3718,13 +3718,48 @@ pub fn collect_signatures_with_cp(
 /// slots. Returns a vector of length `param_names.len()`: each slot holds the supplied argument or
 /// `None` (the parameter falls back to its default). Errors describe the first problem found
 /// (unknown/duplicate name, positional-after-named, arity, or a missing required argument).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CallArgMappingError {
+    NoParameterNamed(String),
+    AlreadyPassed(String),
+    PositionalAfterNamed,
+    TooManyArguments { expected: usize },
+    MissingRequired(String),
+}
+
+impl CallArgMappingError {
+    fn highlights_callee(&self) -> bool {
+        matches!(self, Self::MissingRequired(_))
+    }
+}
+
+impl std::fmt::Display for CallArgMappingError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoParameterNamed(name) => write!(formatter, "no parameter named '{name}'"),
+            Self::AlreadyPassed(name) => {
+                write!(formatter, "an argument is already passed for '{name}'")
+            }
+            Self::PositionalAfterNamed => {
+                formatter.write_str("a positional argument cannot follow a named argument")
+            }
+            Self::TooManyArguments { expected } => {
+                write!(formatter, "too many arguments: expected at most {expected}")
+            }
+            Self::MissingRequired(name) => {
+                write!(formatter, "no value passed for parameter '{name}'.")
+            }
+        }
+    }
+}
+
 pub fn map_call_args(
     args: &[ExprId],
     names: Option<&[Option<String>]>,
     param_names: &[String],
     required: usize,
     param_defaults: &[bool],
-) -> Result<Vec<Option<ExprId>>, String> {
+) -> Result<Vec<Option<ExprId>>, CallArgMappingError> {
     let n = param_names.len();
     let mut slots: Vec<Option<ExprId>> = vec![None; n];
     let mut pos = 0usize;
@@ -3736,9 +3771,9 @@ pub fn map_call_args(
                 let idx = param_names
                     .iter()
                     .position(|p| p == nm)
-                    .ok_or_else(|| format!("no parameter named '{nm}'"))?;
+                    .ok_or_else(|| CallArgMappingError::NoParameterNamed(nm.clone()))?;
                 if slots[idx].is_some() {
-                    return Err(format!("an argument is already passed for '{nm}'"));
+                    return Err(CallArgMappingError::AlreadyPassed(nm.clone()));
                 }
                 slots[idx] = Some(a);
             }
@@ -3750,13 +3785,11 @@ pub fn map_call_args(
                     if i == args.len() - 1 && n > 0 && slots[n - 1].is_none() {
                         slots[n - 1] = Some(a);
                     } else {
-                        return Err(
-                            "a positional argument cannot follow a named argument".to_string()
-                        );
+                        return Err(CallArgMappingError::PositionalAfterNamed);
                     }
                 } else {
                     if pos >= n {
-                        return Err(format!("too many arguments: expected at most {n}"));
+                        return Err(CallArgMappingError::TooManyArguments { expected: n });
                     }
                     slots[pos] = Some(a);
                     pos += 1;
@@ -3774,9 +3807,11 @@ pub fn map_call_args(
             param_defaults.get(i).copied().unwrap_or(false)
         };
         if slot.is_none() && !has_default {
-            return Err(format!(
-                "no value passed for parameter '{}'.",
-                param_names.get(i).map(|s| s.as_str()).unwrap_or("?")
+            return Err(CallArgMappingError::MissingRequired(
+                param_names
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| "?".to_string()),
             ));
         }
     }
@@ -3787,7 +3822,7 @@ pub fn map_call_sig_args(
     args: &[ExprId],
     names: Option<&[Option<String>]>,
     sig: &CallSig,
-) -> Result<Vec<Option<ExprId>>, String> {
+) -> Result<Vec<Option<ExprId>>, CallArgMappingError> {
     map_call_args(
         args,
         names,
@@ -3831,7 +3866,7 @@ pub fn map_param_list_args(
     args: &[ExprId],
     names: Option<&[Option<String>]>,
     params: &ParamList,
-) -> Result<Vec<Option<ExprId>>, String> {
+) -> Result<Vec<Option<ExprId>>, CallArgMappingError> {
     map_call_args(
         args,
         names,
@@ -4428,7 +4463,7 @@ fn infer_getter_ty(file: &File, e: ExprId, locals: &HashMap<&str, Ty>) -> Ty {
             UnOp::Not => Ty::Boolean,
             UnOp::Neg | UnOp::Plus => infer_getter_ty(file, *operand, locals),
         },
-        Expr::Binary { op, lhs, rhs } => {
+        Expr::Binary { op, lhs, rhs, .. } => {
             let lt = infer_getter_ty(file, *lhs, locals);
             let rt = infer_getter_ty(file, *rhs, locals);
             match op {
@@ -4759,7 +4794,7 @@ fn infer_lit_ty_p(
                 infer_lit_ty_p(file, *operand, class_names, fun_rets, props, src, env)
             }
         },
-        Expr::Binary { op, lhs, rhs } => {
+        Expr::Binary { op, lhs, rhs, .. } => {
             let (lt, rt) = (
                 infer_lit_ty_p(file, *lhs, class_names, fun_rets, props, src, env),
                 infer_lit_ty_p(file, *rhs, class_names, fun_rets, props, src, env),
@@ -6005,6 +6040,11 @@ pub enum SyntheticOperatorCall {
     Contains,
     Set,
     Put,
+    Plus,
+    Minus,
+    Times,
+    Div,
+    Rem,
     UnaryMinus,
     UnaryPlus,
     Not,
@@ -6019,6 +6059,11 @@ impl SyntheticOperatorCall {
             "contains" => Self::Contains,
             "set" => Self::Set,
             "put" => Self::Put,
+            "plus" => Self::Plus,
+            "minus" => Self::Minus,
+            "times" => Self::Times,
+            "div" => Self::Div,
+            "rem" => Self::Rem,
             "unaryMinus" => Self::UnaryMinus,
             "unaryPlus" => Self::UnaryPlus,
             "not" => Self::Not,
@@ -8945,6 +8990,14 @@ impl<'a> Checker<'a> {
         self.file.expr_spans[e.0 as usize]
     }
 
+    fn assignment_target_span(&self, statement: StmtId) -> Span {
+        self.file
+            .assignment_target_spans
+            .get(&statement.0)
+            .copied()
+            .unwrap_or(self.file.stmt_spans[statement.0 as usize])
+    }
+
     fn value_operator_span(&self, value: ExprId) -> Span {
         self.file
             .value_operator_spans
@@ -8998,6 +9051,33 @@ impl<'a> Checker<'a> {
             .copied()
             .or_else(|| args.first().map(|argument| self.span(*argument)))
             .unwrap_or_else(|| self.call_open_paren_span(call))
+    }
+
+    fn report_call_arg_mapping_error(
+        &mut self,
+        call: ExprId,
+        args: &[ExprId],
+        error: CallArgMappingError,
+    ) {
+        let message = error.to_string();
+        self.report_call_arg_mapping_error_message(call, args, error, message);
+    }
+
+    fn report_call_arg_mapping_error_message(
+        &mut self,
+        call: ExprId,
+        args: &[ExprId],
+        error: CallArgMappingError,
+        message: String,
+    ) {
+        let compiler_span = self.call_argument_list_span(call, args);
+        if error.highlights_callee() {
+            let editor_span = self.call_callee_name_span(call);
+            self.diags
+                .error_with_editor_span(compiler_span, editor_span, message);
+        } else {
+            self.diags.error(compiler_span, message);
+        }
     }
 
     fn arity_diagnostic_span(&self, call: ExprId, args: &[ExprId], expected: usize) -> Span {
@@ -9411,6 +9491,71 @@ impl<'a> Checker<'a> {
                     .map(|method| source_function_display(file, method, resolved_ret))
             })
         })
+    }
+
+    fn source_member_operator_display(
+        &self,
+        internal: TypeName,
+        name: &str,
+        signature: &Signature,
+    ) -> Option<(String, String)> {
+        let files = self
+            .source_files
+            .unwrap_or_else(|| std::slice::from_ref(self.file));
+        files.iter().find_map(|file| {
+            file.decls.iter().find_map(|&decl| {
+                let Decl::Class(class) = file.decl(decl) else {
+                    return None;
+                };
+                if class_internal(file, &class.name) != internal.render() {
+                    return None;
+                }
+                let method = class.methods.iter().find(|method| {
+                    method.name == name
+                        && method.params.len() == signature.params.len()
+                        && method
+                            .params
+                            .iter()
+                            .map(|parameter| self.resolve_ty_no_diag(&parameter.ty))
+                            .eq(signature.params.iter().copied())
+                })?;
+                Some((
+                    source_function_display(file, method, signature.ret),
+                    class.name.clone(),
+                ))
+            })
+        })
+    }
+
+    fn report_required_operator_modifier(
+        &mut self,
+        receiver: Ty,
+        name: &str,
+        arg_tys: &[Ty],
+        operator_span: Span,
+    ) -> bool {
+        let Some(internal) = receiver.obj_internal() else {
+            return false;
+        };
+        let Some((owner, signature)) = self
+            .syms
+            .operator_method_matching_with_owner_name(internal, name, arg_tys)
+        else {
+            return false;
+        };
+        if signature.is_operator {
+            return false;
+        }
+        let Some((function, owner_name)) =
+            self.source_member_operator_display(owner, name, &signature)
+        else {
+            return false;
+        };
+        self.diags.error(
+            operator_span,
+            format!("'operator' modifier is required on '{function}' defined in '{owner_name}'."),
+        );
+        true
     }
 
     /// Select the Kotlin invoke-operator convention for `receiver(args)`. One entry point covers both
@@ -10357,7 +10502,7 @@ impl<'a> Checker<'a> {
     fn smartcast_binding(&self, cond: ExprId, for_else: bool) -> Option<(String, Ty)> {
         // `x != null` (then-branch) / `x == null` (else-branch) narrows `T?` to `T`. Only a stable
         // `val`/parameter narrows soundly.
-        if let Expr::Binary { op, lhs, rhs } = self.file.expr(cond).clone() {
+        if let Expr::Binary { op, lhs, rhs, .. } = self.file.expr(cond).clone() {
             if matches!(op, BinOp::Ne | BinOp::Eq) {
                 let narrows_then = matches!(op, BinOp::Ne); // `!= null` narrows in the then-branch
                 if narrows_then != for_else {
@@ -10448,6 +10593,7 @@ impl<'a> Checker<'a> {
             op: BinOp::And,
             lhs,
             rhs,
+            ..
         } = self.file.expr(cond).clone()
         {
             self.collect_and_narrowings_inner(lhs, out, nonnull);
@@ -10461,6 +10607,7 @@ impl<'a> Checker<'a> {
             op: BinOp::Ne,
             lhs,
             rhs,
+            ..
         } = self.file.expr(cond).clone()
         {
             match (self.file.expr(lhs).clone(), self.file.expr(rhs).clone()) {
@@ -11028,8 +11175,10 @@ impl<'a> Checker<'a> {
             if let Some(parameter) =
                 missing.and_then(|index| names_complete.then(|| &param_names[index]))
             {
-                self.diags.error(
+                let editor_span = self.call_callee_name_span(call);
+                self.diags.error_with_editor_span(
                     span,
+                    editor_span,
                     format!("no value passed for parameter '{parameter}'."),
                 );
                 return;
@@ -11101,8 +11250,10 @@ impl<'a> Checker<'a> {
                 .get(got..)
                 .and_then(|remaining| remaining.iter().find(|(_, has_default)| !*has_default))
             {
-                self.diags.error(
+                let editor_span = self.call_callee_name_span(call);
+                self.diags.error_with_editor_span(
                     span,
+                    editor_span,
                     format!("no value passed for parameter '{parameter}'."),
                 );
                 return;
@@ -12447,7 +12598,11 @@ impl<'a> Checker<'a> {
                     Ty::Error
                 }
             }
-            Expr::IncDec { target, dec, .. } => {
+            Expr::IncDec {
+                target,
+                dec,
+                prefix,
+            } => {
                 // `target++`/`++target` as a value: a simple mutable numeric/Char variable (the built-in
                 // `inc`/`dec`), or a variable whose type has a user `inc`/`dec` operator. The result type
                 // is the variable's type.
@@ -12460,8 +12615,10 @@ impl<'a> Checker<'a> {
                     {
                         Some((vt, is_var)) => {
                             if !is_var {
-                                self.diags
-                                    .error(self.span(e), "'val' cannot be reassigned.".to_string());
+                                self.diags.error(
+                                    self.span(target),
+                                    "'val' cannot be reassigned.".to_string(),
+                                );
                             }
                             // Dispatch on the variable's BINDING type, not a flow-narrowed use type:
                             // the update writes back to the variable, and the lowerer keys the
@@ -12494,11 +12651,30 @@ impl<'a> Checker<'a> {
                                         target,
                                     );
                                 } else {
-                                    self.diags.error(
-                                        self.span(e),
-                                        "krusty: '++'/'--' is only supported on a numeric variable"
-                                            .to_string(),
-                                    );
+                                    let expression_span = self.span(e);
+                                    let operator_span = if prefix {
+                                        Span::new(
+                                            expression_span.lo,
+                                            expression_span.lo.saturating_add(2),
+                                        )
+                                    } else {
+                                        Span::new(
+                                            expression_span.hi.saturating_sub(2),
+                                            expression_span.hi,
+                                        )
+                                    };
+                                    if !self.report_required_operator_modifier(
+                                        vt,
+                                        operator_name,
+                                        &[],
+                                        operator_span,
+                                    ) {
+                                        self.diags.error(
+                                            expression_span,
+                                            "krusty: '++'/'--' is only supported on a numeric variable"
+                                                .to_string(),
+                                        );
+                                    }
                                 }
                                 tt = vt;
                             }
@@ -13081,7 +13257,12 @@ impl<'a> Checker<'a> {
                 let ot = self.expr(operand);
                 self.check_unary(e, op, ot, self.span(e))
             }
-            Expr::Binary { op, lhs, rhs } => {
+            Expr::Binary {
+                op,
+                lhs,
+                rhs,
+                operator_span,
+            } => {
                 // `a && b` / `a || b`: a smart-cast established by `a` holds while checking `b`. In `&&`,
                 // the RHS is reached when `a` is TRUE (`x is String && x.length`); in `||`, when `a` is
                 // FALSE, so the RHS gets `a`'s NEGATED narrowing (`x !is String || x.length` — reaching
@@ -13173,20 +13354,25 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // A class member operator (`a + b` -> `a.plus(b)`). Lowering re-resolves it.
+                // Resolve reference arithmetic through operator-call selection.
                 if let Ty::Obj(internal, _) = &lt {
                     let op_name = op.arith_operator_name();
                     if let Some(fname) = op_name {
-                        if let Some(sig) = self.syms.method_of_name(*internal, fname) {
-                            if let Some(param) = sig.single_param().filter(|_| rt != Ty::Error) {
-                                self.expect_assignable(
-                                    param,
-                                    rt,
-                                    self.span(rhs),
-                                    "operator argument",
-                                );
-                                return self.set(e, sig.ret);
-                            }
+                        if let Some((ret, target)) =
+                            self.operator_call_ret(lt, fname, &[rt], &[rhs], self.span(e))
+                        {
+                            self.resolved_operator_calls.insert(
+                                (
+                                    e,
+                                    SyntheticOperatorCall::from_name(fname)
+                                        .expect("arithmetic operator has a synthetic-call key"),
+                                ),
+                                target,
+                            );
+                            return self.set(e, ret);
+                        }
+                        if self.report_required_operator_modifier(lt, fname, &[rt], operator_span) {
+                            return self.set(e, Ty::Error);
                         }
                     }
                     // A class `compareTo(o): Int` drives `<`/`<=`/`>`/`>=`.
@@ -14077,6 +14263,10 @@ impl<'a> Checker<'a> {
                     self.resolved_operator_calls
                         .insert((expression, target_key), target);
                     return ret;
+                }
+                let operator_span = Span::new(span.lo, span.lo.saturating_add(1));
+                if self.report_required_operator_modifier(ot, name, &[], operator_span) {
+                    return Ty::Error;
                 }
                 self.diags.error(
                     span,
@@ -15624,7 +15814,7 @@ impl<'a> Checker<'a> {
         internal: TypeName,
         args: &[ExprId],
         arg_names: &[Option<String>],
-    ) -> Result<Option<ResolvedConstructor>, String> {
+    ) -> Result<Option<ResolvedConstructor>, CallArgMappingError> {
         let Some(ctor_params) = self
             .resolved_type_name(internal)
             .and_then(|t| t.constructor_named_params(args.len()))
@@ -17106,9 +17296,7 @@ impl<'a> Checker<'a> {
                     }
                     mapped_slots = Some(slots);
                 }
-                Err(msg) => self
-                    .diags
-                    .error(self.call_argument_list_span(call, args), msg),
+                Err(error) => self.report_call_arg_mapping_error(call, args, error),
             }
             // Fall through to the shared return-type logic below (generic `<R>` inference /
             // `inferred_member_ret`) rather than returning the erased `fi.callable.ret`.
@@ -17471,10 +17659,12 @@ impl<'a> Checker<'a> {
                                             }
                                         }
                                     }
-                                    Err(msg) => self.diags.error(
-                                        self.call_argument_list_span(call, args),
-                                        format!("constructor '{qname}': {msg}"),
-                                    ),
+                                    Err(error) => {
+                                        let message = format!("constructor '{qname}': {error}");
+                                        self.report_call_arg_mapping_error_message(
+                                            call, args, error, message,
+                                        );
+                                    }
                                 }
                                 return self.ctor_result_name(call, cls.internal_name());
                             }
@@ -17575,10 +17765,10 @@ impl<'a> Checker<'a> {
                             {
                                 Ok(Some(_)) => return Ty::obj_name(internal),
                                 Ok(None) => {}
-                                Err(msg) => {
-                                    self.diags.error(
-                                        self.call_argument_list_span(call, args),
-                                        format!("constructor '{qualified}': {msg}"),
+                                Err(error) => {
+                                    let message = format!("constructor '{qualified}': {error}");
+                                    self.report_call_arg_mapping_error_message(
+                                        call, args, error, message,
                                     );
                                     return Ty::Error;
                                 }
@@ -18691,9 +18881,7 @@ impl<'a> Checker<'a> {
                                         }
                                     }
                                 }
-                                Err(msg) => self
-                                    .diags
-                                    .error(self.call_argument_list_span(call, args), msg),
+                                Err(error) => self.report_call_arg_mapping_error(call, args, error),
                             }
                         } else if logical.len() != arg_tys.len() {
                             self.diags.error(
@@ -19051,11 +19239,8 @@ impl<'a> Checker<'a> {
                                         sig.param_defaults.get(ctx_count..).unwrap_or_default(),
                                     ) {
                                         Ok(slots) => Some(slots),
-                                        Err(message) => {
-                                            self.diags.error(
-                                                self.call_argument_list_span(call, args),
-                                                message,
-                                            );
+                                        Err(error) => {
+                                            self.report_call_arg_mapping_error(call, args, error);
                                             return sig.ret;
                                         }
                                     }
@@ -19158,9 +19343,8 @@ impl<'a> Checker<'a> {
                                 &sig.param_defaults,
                             ) {
                                 Ok(slots) => slots,
-                                Err(message) => {
-                                    self.diags
-                                        .error(self.call_argument_list_span(call, args), message);
+                                Err(error) => {
+                                    self.report_call_arg_mapping_error(call, args, error);
                                     return sig.ret;
                                 }
                             };
@@ -19924,9 +20108,9 @@ impl<'a> Checker<'a> {
                                             inferred,
                                         );
                                     }
-                                    Err(msg) => self
-                                        .diags
-                                        .error(self.call_argument_list_span(call, args), msg),
+                                    Err(error) => {
+                                        self.report_call_arg_mapping_error(call, args, error)
+                                    }
                                 }
                                 return self.ctor_result_name(call, cls.internal_name());
                             }
@@ -20053,9 +20237,7 @@ impl<'a> Checker<'a> {
                                     return self.ctor_result_name(call, internal);
                                 }
                                 Ok(None) => {}
-                                Err(msg) => self
-                                    .diags
-                                    .error(self.call_argument_list_span(call, args), msg),
+                                Err(error) => self.report_call_arg_mapping_error(call, args, error),
                             }
                         }
                     }
@@ -20221,9 +20403,8 @@ impl<'a> Checker<'a> {
                             let value_sig = call_sig_without_context(&fi.call_sig, ctx_count);
                             match map_call_sig_args(args, Some(names), &value_sig) {
                                 Ok(slots) => Some(slots),
-                                Err(message) => {
-                                    self.diags
-                                        .error(self.call_argument_list_span(call, args), message);
+                                Err(error) => {
+                                    self.report_call_arg_mapping_error(call, args, error);
                                     return ret_ty;
                                 }
                             }
@@ -20319,11 +20500,8 @@ impl<'a> Checker<'a> {
                                     let value_sig = call_sig_without_context(cs, ctx_count);
                                     match map_call_sig_args(args, Some(names), &value_sig) {
                                         Ok(slots) => Some(slots),
-                                        Err(message) => {
-                                            self.diags.error(
-                                                self.call_argument_list_span(call, args),
-                                                message,
-                                            );
+                                        Err(error) => {
+                                            self.report_call_arg_mapping_error(call, args, error);
                                             return ret_ty;
                                         }
                                     }
@@ -20396,8 +20574,11 @@ impl<'a> Checker<'a> {
                                     .get(ctx_count + missing)
                                     .map(String::as_str)
                                     .unwrap_or("value");
-                                self.diags.error(
-                                    self.call_argument_list_span(call, args),
+                                let compiler_span = self.call_argument_list_span(call, args);
+                                let editor_span = self.call_callee_name_span(call);
+                                self.diags.error_with_editor_span(
+                                    compiler_span,
+                                    editor_span,
                                     format!("no value passed for parameter '{name}'."),
                                 );
                             } else {
@@ -20494,9 +20675,7 @@ impl<'a> Checker<'a> {
                                     }
                                 }
                             }
-                            Err(msg) => self
-                                .diags
-                                .error(self.call_argument_list_span(call, args), msg),
+                            Err(error) => self.report_call_arg_mapping_error(call, args, error),
                         }
                     } else if self.file.call_has_trailing_lambda.contains(&call.0)
                         && !args.is_empty()
@@ -20530,9 +20709,7 @@ impl<'a> Checker<'a> {
                                     }
                                 }
                             }
-                            Err(msg) => self
-                                .diags
-                                .error(self.call_argument_list_span(call, args), msg),
+                            Err(error) => self.report_call_arg_mapping_error(call, args, error),
                         }
                     } else if arg_tys.len() < cs.required.saturating_sub(ctx_count)
                         || arg_tys.len() > value_count
@@ -21000,7 +21177,7 @@ impl<'a> Checker<'a> {
     }
 
     fn try_in_place_assignment(&mut self, s: StmtId, value: ExprId) -> bool {
-        let Expr::Binary { op, lhs, rhs } = self.file.expr(value).clone() else {
+        let Expr::Binary { op, lhs, rhs, .. } = self.file.expr(value).clone() else {
             return false;
         };
         let Some(aname) = assign_op_name(op) else {
@@ -21268,11 +21445,12 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Stmt::IncDec { name, dec, .. } => {
+            Stmt::IncDec { name, dec, prefix } => {
                 // `inc`/`dec` are overloadable operators: the built-in numeric ones, or a user
                 // `inc`/`dec` operator on the variable's type. Anything else is rejected (never
                 // miscompiled).
                 let span = self.file.stmt_spans[s.0 as usize];
+                let target_span = self.assignment_target_span(s);
                 let local = self.lookup(&name).map(|local| (local.ty, local.is_var));
                 let implicit_property = local
                     .is_none()
@@ -21292,7 +21470,7 @@ impl<'a> Checker<'a> {
                     Some((ty, is_var)) => {
                         if !is_var {
                             self.diags
-                                .error(span, "'val' cannot be reassigned.".to_string());
+                                .error(target_span, "'val' cannot be reassigned.".to_string());
                         }
                         if !ty.is_numeric_or_char() {
                             let operator_name = if dec { "dec" } else { "inc" };
@@ -21309,11 +21487,23 @@ impl<'a> Checker<'a> {
                                     target,
                                 );
                             } else {
-                                self.diags.error(
-                                    span,
-                                    "krusty: '++'/'--' is only supported on a numeric variable"
-                                        .to_string(),
-                                );
+                                let operator_span = if prefix {
+                                    Span::new(span.lo, span.lo.saturating_add(2))
+                                } else {
+                                    Span::new(span.hi.saturating_sub(2), span.hi)
+                                };
+                                if !self.report_required_operator_modifier(
+                                    ty,
+                                    operator_name,
+                                    &[],
+                                    operator_span,
+                                ) {
+                                    self.diags.error(
+                                        span,
+                                        "krusty: '++'/'--' is only supported on a numeric variable"
+                                            .to_string(),
+                                    );
+                                }
                             }
                         }
                     }
@@ -21349,6 +21539,7 @@ impl<'a> Checker<'a> {
                     Some(expected) => self.expr_expected(value, expected),
                     None => self.expr(value),
                 };
+                let target_span = self.assignment_target_span(s);
                 // `field = …` inside a setter writes the backing field.
                 if name == "field" && local.is_none() && self.field_ty.is_some() {
                     let fty = self.field_ty.unwrap();
@@ -21362,10 +21553,8 @@ impl<'a> Checker<'a> {
                     match local {
                         Some((lty, is_var)) => {
                             if !is_var {
-                                self.diags.error(
-                                    self.file.stmt_spans[s.0 as usize],
-                                    "'val' cannot be reassigned.".to_string(),
-                                );
+                                self.diags
+                                    .error(target_span, "'val' cannot be reassigned.".to_string());
                             }
                             self.expect_assignable(
                                 lty,
@@ -21399,8 +21588,10 @@ impl<'a> Checker<'a> {
                             match implicit_property {
                                 Some(resolution) => {
                                     if !resolution.is_var {
-                                        self.diags
-                                            .error(span, "'val' cannot be reassigned.".to_string());
+                                        self.diags.error(
+                                            target_span,
+                                            "'val' cannot be reassigned.".to_string(),
+                                        );
                                     }
                                     self.expect_assignable(
                                         resolution.property_ty,
@@ -21414,7 +21605,7 @@ impl<'a> Checker<'a> {
                                     Some((lty, is_var, _)) => {
                                         if !is_var {
                                             self.diags.error(
-                                                span,
+                                                target_span,
                                                 "'val' cannot be reassigned.".to_string(),
                                             );
                                         }
@@ -21497,10 +21688,11 @@ impl<'a> Checker<'a> {
                     None => self.expr(value),
                 };
                 let span = self.file.stmt_spans[s.0 as usize];
+                let target_span = self.assignment_target_span(s);
                 if let Some((lty, is_var)) = source_property {
                     if !is_var {
                         self.diags
-                            .error(span, "'val' cannot be reassigned.".to_string());
+                            .error(target_span, "'val' cannot be reassigned.".to_string());
                     }
                     self.expect_assignable(
                         lty,
@@ -21523,7 +21715,7 @@ impl<'a> Checker<'a> {
                 }
                 if classpath_property.is_some() {
                     self.diags
-                        .error(span, "'val' cannot be reassigned.".to_string());
+                        .error(target_span, "'val' cannot be reassigned.".to_string());
                     return;
                 }
                 match member_extension {
@@ -21533,7 +21725,7 @@ impl<'a> Checker<'a> {
                         }
                         if !is_var {
                             self.diags
-                                .error(span, "'val' cannot be reassigned.".to_string());
+                                .error(target_span, "'val' cannot be reassigned.".to_string());
                         }
                         self.expect_assignable(
                             lty,
@@ -21553,7 +21745,7 @@ impl<'a> Checker<'a> {
                         if let Some((lty, is_var)) = extension_property {
                             if !is_var {
                                 self.diags
-                                    .error(span, "'val' cannot be reassigned.".to_string());
+                                    .error(target_span, "'val' cannot be reassigned.".to_string());
                             }
                             self.expect_assignable(
                                 lty,
@@ -24335,6 +24527,26 @@ fun box(): String {
     }
 
     #[test]
+    fn val_reassignment_diagnostic_points_at_assignment_target() {
+        let source = "fun reassignValue(): Int {\n  val value = 1\n  value = 2\n  return value\n}";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        let diagnostic = diagnostics
+            .diags
+            .iter()
+            .find(|diagnostic| diagnostic.msg == "'val' cannot be reassigned.")
+            .expect("immutable-write diagnostic");
+        assert_eq!(
+            &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
+            "value"
+        );
+    }
+
+    #[test]
     fn var_reassign_ok() {
         ok("fun f(): Int {\n var x = 1\n x = 2\n return x\n}");
     }
@@ -24349,6 +24561,58 @@ fun box(): String {
         err_contains(
             "fun a(x: Int): Int = x\nfun b(): Int = a(\"s\")",
             "argument type mismatch: actual type is 'String', but 'Int' was expected.",
+        );
+    }
+
+    #[test]
+    fn missing_required_argument_diagnostic_points_at_callee() {
+        let source = "fun pair(left: Int, right: String): Int = left\n\
+                      fun missingArgument(): Int = pair(1)";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        let diagnostic = diagnostics
+            .diags
+            .iter()
+            .find(|diagnostic| diagnostic.msg == "no value passed for parameter 'right'.")
+            .expect("missing-argument diagnostic");
+        assert_eq!(
+            &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
+            "1"
+        );
+        let editor_span = diagnostic.editor_span.expect("official editor range");
+        assert_eq!(
+            &source[editor_span.lo as usize..editor_span.hi as usize],
+            "pair"
+        );
+    }
+
+    #[test]
+    fn missing_named_argument_diagnostic_points_at_callee() {
+        let source = "fun namedPair(left: Int, right: String): Int = left\n\
+                      fun missingNamedArgument(): Int = namedPair(left = 1)";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        let diagnostic = diagnostics
+            .diags
+            .iter()
+            .find(|diagnostic| diagnostic.msg == "no value passed for parameter 'right'.")
+            .expect("missing-named-argument diagnostic");
+        assert_eq!(
+            &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
+            "left"
+        );
+        let editor_span = diagnostic.editor_span.expect("official editor range");
+        assert_eq!(
+            &source[editor_span.lo as usize..editor_span.hi as usize],
+            "namedPair"
         );
     }
 
@@ -24500,11 +24764,15 @@ fun use(counter: Counter) {
                           fun unaryMinus(): Counter = this\n\
                           fun inc(): Counter = this\n\
                           fun plusAssign(value: Int) {}\n\
+                          fun plus(other: Int): Counter = this\n\
+                          fun plus(other: Counter): Counter = this\n\
                       }\n\
                       fun use(counter: Counter) {\n\
                           val explicit = counter.unaryMinus()\n\
                           counter.plusAssign(1)\n\
+                          val explicitBinary = counter.plus(counter)\n\
                           val symbolic = -counter\n\
+                          val binary = counter + counter\n\
                           var current = counter\n\
                           current++\n\
                           current += 1\n\
@@ -24518,23 +24786,42 @@ fun use(counter: Counter) {
         assert!(info.resolved_calls.values().any(
             |call| matches!(call, ResolvedCall::ModuleMember { name, .. } if name == "unaryMinus")
         ));
+        assert!(info
+            .resolved_calls
+            .values()
+            .any(|call| matches!(call, ResolvedCall::ModuleMember { name, .. } if name == "plus")));
         let unary = diagnostics
             .diags
             .iter()
-            .find(|diagnostic| diagnostic.msg.contains("operator cannot be applied"))
+            .find(|diagnostic| {
+                diagnostic.msg
+                    == "'operator' modifier is required on 'fun unaryMinus(): Counter' defined in 'Counter'."
+            })
             .expect("non-operator unaryMinus diagnostic");
-        assert_eq!(
-            &source[unary.span.lo as usize..unary.span.hi as usize],
-            "-counter"
-        );
+        assert_eq!(&source[unary.span.lo as usize..unary.span.hi as usize], "-");
         let increment = diagnostics
             .diags
             .iter()
-            .find(|diagnostic| diagnostic.msg.contains("'++'/'--'"))
+            .find(|diagnostic| {
+                diagnostic.msg
+                    == "'operator' modifier is required on 'fun inc(): Counter' defined in 'Counter'."
+            })
             .expect("non-operator inc diagnostic");
         assert_eq!(
             &source[increment.span.lo as usize..increment.span.hi as usize],
-            "current++"
+            "++"
+        );
+        let binary = diagnostics
+            .diags
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.msg
+                    == "'operator' modifier is required on 'fun plus(other: Counter): Counter' defined in 'Counter'."
+            })
+            .expect("non-operator plus diagnostic");
+        assert_eq!(
+            &source[binary.span.lo as usize..binary.span.hi as usize],
+            "+"
         );
         assert!(!info
             .stmt_lowers
@@ -24547,14 +24834,17 @@ fun use(counter: Counter) {
         let source = "open class BaseCounter {\n\
                           open operator fun unaryMinus(): BaseCounter = this\n\
                           open operator fun inc(): BaseCounter = this\n\
+                          open operator fun plus(other: DerivedCounter): DerivedCounter = other\n\
                       }\n\
                       class DerivedCounter : BaseCounter() {\n\
                           override fun unaryMinus(): DerivedCounter = this\n\
                           override fun inc(): DerivedCounter = this\n\
+                          override fun plus(other: DerivedCounter): DerivedCounter = this\n\
                       }\n\
                       fun use(counter: DerivedCounter): DerivedCounter {\n\
                           var current = counter\n\
                           val negative = -current\n\
+                          val combined = current + current\n\
                           current++\n\
                           return negative\n\
                       }";
@@ -24570,7 +24860,7 @@ fun use(counter: Counter) {
             .values()
             .chain(info.resolved_stmt_operator_calls.values())
             .collect::<Vec<_>>();
-        assert_eq!(targets.len(), 2);
+        assert_eq!(targets.len(), 3);
         assert!(targets.iter().all(|target| {
             matches!(
                 target,

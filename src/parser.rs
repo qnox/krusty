@@ -4869,8 +4869,15 @@ impl<'a> Parser<'a> {
     }
 
     /// Desugar `name++`/`name--`/`++name`/`--name` (statement) to `name = name ± 1`.
-    fn parse_incdec(&mut self, name: String, dec: bool, prefix: bool, start: Span) -> StmtId {
-        self.finish_stmt(Stmt::IncDec { name, dec, prefix }, start)
+    fn parse_incdec(
+        &mut self,
+        name: String,
+        dec: bool,
+        prefix: bool,
+        start: Span,
+        target: Span,
+    ) -> StmtId {
+        self.finish_assignment_stmt(Stmt::IncDec { name, dec, prefix }, start, target)
     }
 
     /// A full-form destructuring statement starts with `(` (name-based) or `[` (positional, only
@@ -5280,26 +5287,32 @@ impl<'a> Parser<'a> {
                 }
                 // assignment: `name = value` or `receiver.name = value`.
                 if self.at(TokenKind::Eq) {
+                    let target_span = self.assignment_target_span(e);
                     match self.file.expr(e).clone() {
                         Expr::Name(n) => {
                             let operator = self.bump().span; // '='
                             self.skip_newlines();
                             let value = self.parse_expr();
                             self.file.value_operator_spans.insert(value.0, operator);
-                            return self.finish_stmt(Stmt::Assign { name: n, value }, start);
+                            return self.finish_assignment_stmt(
+                                Stmt::Assign { name: n, value },
+                                start,
+                                target_span,
+                            );
                         }
                         Expr::Member { receiver, name } => {
                             let operator = self.bump().span; // '='
                             self.skip_newlines();
                             let value = self.parse_expr();
                             self.file.value_operator_spans.insert(value.0, operator);
-                            return self.finish_stmt(
+                            return self.finish_assignment_stmt(
                                 Stmt::AssignMember {
                                     receiver,
                                     name,
                                     value,
                                 },
                                 start,
+                                target_span,
                             );
                         }
                         Expr::Index { array, indices } => {
@@ -5307,13 +5320,14 @@ impl<'a> Parser<'a> {
                             self.skip_newlines();
                             let value = self.parse_expr();
                             self.file.value_operator_spans.insert(value.0, operator);
-                            return self.finish_stmt(
+                            return self.finish_assignment_stmt(
                                 Stmt::AssignIndex {
                                     array,
                                     indices,
                                     value,
                                 },
                                 start,
+                                target_span,
                             );
                         }
                         _ => self
@@ -5324,14 +5338,27 @@ impl<'a> Parser<'a> {
                 // compound assignment: `target op= value` → `target = target op value`.
                 if let Some(op) = compound_op(self.kind()) {
                     let op_span = self.tok().span;
+                    let target_span = self.assignment_target_span(e);
                     match self.file.expr(e).clone() {
                         Expr::Name(n) => {
                             self.bump();
                             self.skip_newlines();
                             let rhs = self.parse_expr();
                             let lhs = self.file.add_expr(Expr::Name(n.clone()), op_span);
-                            let value = self.file.add_expr(Expr::Binary { op, lhs, rhs }, op_span);
-                            return self.finish_stmt(Stmt::Assign { name: n, value }, start);
+                            let value = self.file.add_expr(
+                                Expr::Binary {
+                                    op,
+                                    lhs,
+                                    rhs,
+                                    operator_span: op_span,
+                                },
+                                op_span,
+                            );
+                            return self.finish_assignment_stmt(
+                                Stmt::Assign { name: n, value },
+                                start,
+                                target_span,
+                            );
                         }
                         Expr::Member { receiver, name } => {
                             self.bump();
@@ -5344,14 +5371,23 @@ impl<'a> Parser<'a> {
                                 },
                                 op_span,
                             );
-                            let value = self.file.add_expr(Expr::Binary { op, lhs, rhs }, op_span);
-                            return self.finish_stmt(
+                            let value = self.file.add_expr(
+                                Expr::Binary {
+                                    op,
+                                    lhs,
+                                    rhs,
+                                    operator_span: op_span,
+                                },
+                                op_span,
+                            );
+                            return self.finish_assignment_stmt(
                                 Stmt::AssignMember {
                                     receiver,
                                     name,
                                     value,
                                 },
                                 start,
+                                target_span,
                             );
                         }
                         Expr::Index { array, indices } => {
@@ -5365,14 +5401,23 @@ impl<'a> Parser<'a> {
                                 },
                                 op_span,
                             );
-                            let value = self.file.add_expr(Expr::Binary { op, lhs, rhs }, op_span);
-                            return self.finish_stmt(
+                            let value = self.file.add_expr(
+                                Expr::Binary {
+                                    op,
+                                    lhs,
+                                    rhs,
+                                    operator_span: op_span,
+                                },
+                                op_span,
+                            );
+                            return self.finish_assignment_stmt(
                                 Stmt::AssignIndex {
                                     array,
                                     indices,
                                     value,
                                 },
                                 start,
+                                target_span,
                             );
                         }
                         _ => self
@@ -5612,6 +5657,7 @@ impl<'a> Parser<'a> {
                                                 op: BinOp::Sub,
                                                 lhs: start_base,
                                                 rhs: one,
+                                                operator_span: sp,
                                             },
                                             sp,
                                         )
@@ -5821,6 +5867,29 @@ impl<'a> Parser<'a> {
     fn finish_stmt(&mut self, s: Stmt, start: Span) -> StmtId {
         let end = self.t[self.i.saturating_sub(1)].span;
         self.file.add_stmt(s, Span::new(start.lo, end.hi))
+    }
+
+    fn assignment_target_span(&self, expression: ExprId) -> Span {
+        match self.file.expr(expression) {
+            Expr::Member { name, .. } => self
+                .file
+                .exact_member_name_spans
+                .get(&expression.0)
+                .copied()
+                .unwrap_or_else(|| {
+                    let span = self.file.expr_spans[expression.0 as usize];
+                    Span::new(span.hi.saturating_sub(name.len() as u32), span.hi)
+                }),
+            _ => self.file.expr_spans[expression.0 as usize],
+        }
+    }
+
+    fn finish_assignment_stmt(&mut self, statement: Stmt, start: Span, target: Span) -> StmtId {
+        let statement = self.finish_stmt(statement, start);
+        self.file
+            .assignment_target_spans
+            .insert(statement.0, target);
+        statement
     }
 
     fn ident_or_error(&mut self, what: &str) -> String {
@@ -6156,10 +6225,15 @@ impl<'a> Parser<'a> {
             let rhs = self.parse_bp(rbp);
             let lspan = self.file.expr_spans[lhs.0 as usize];
             let rspan = self.file.expr_spans[rhs.0 as usize];
-            lhs = self
-                .file
-                .add_expr(Expr::Binary { op, lhs, rhs }, Span::new(lspan.lo, rspan.hi));
-            let _ = op_span;
+            lhs = self.file.add_expr(
+                Expr::Binary {
+                    op,
+                    lhs,
+                    rhs,
+                    operator_span: op_span,
+                },
+                Span::new(lspan.lo, rspan.hi),
+            );
         }
         lhs
     }
@@ -7068,8 +7142,9 @@ impl<'a> Parser<'a> {
         // it exactly once — not yet modeled — so bail (skip the file) rather than double-evaluate.
         // `.inc()`/`.dec()` covers both the built-in numeric operators and a user `inc`/`dec` operator.
         let op_name = if dec { "dec" } else { "inc" };
+        let target_span = self.assignment_target_span(e);
         match self.file.expr(e).clone() {
-            Expr::Name(n) => self.parse_incdec(n, dec, prefix, start),
+            Expr::Name(n) => self.parse_incdec(n, dec, prefix, start, target_span),
             Expr::Member { receiver, name } if self.is_pure_path(receiver) => {
                 let lhs = self.file.add_expr(
                     Expr::Member {
@@ -7079,13 +7154,14 @@ impl<'a> Parser<'a> {
                     op_span,
                 );
                 let value = self.build_inc_dec_call(lhs, op_name, op_span);
-                self.finish_stmt(
+                self.finish_assignment_stmt(
                     Stmt::AssignMember {
                         receiver,
                         name,
                         value,
                     },
                     start,
+                    target_span,
                 )
             }
             Expr::Index { array, indices }
@@ -7099,13 +7175,14 @@ impl<'a> Parser<'a> {
                     op_span,
                 );
                 let value = self.build_inc_dec_call(lhs, op_name, op_span);
-                self.finish_stmt(
+                self.finish_assignment_stmt(
                     Stmt::AssignIndex {
                         array,
                         indices,
                         value,
                     },
                     start,
+                    target_span,
                 )
             }
             _ => {
@@ -7841,6 +7918,19 @@ mod tests {
         for span in file.value_operator_spans.values() {
             assert_eq!(&source[span.lo as usize..span.hi as usize], "=");
         }
+        let binary_operators = file
+            .expr_arena
+            .iter()
+            .filter_map(|expression| match expression {
+                Expr::Binary { operator_span, .. } => Some(operator_span),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(binary_operators.len(), 1);
+        assert_eq!(
+            &source[binary_operators[0].lo as usize..binary_operators[0].hi as usize],
+            "+"
+        );
         let labels = file
             .call_arg_name_spans
             .values()
