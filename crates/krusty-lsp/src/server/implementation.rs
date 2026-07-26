@@ -95,6 +95,19 @@ impl ProjectFeedback {
 pub trait Analysis {
     fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis>;
 
+    /// Analyze open documents together with project support sources.
+    fn analyze_open_documents(
+        &mut self,
+        documents: &[(&str, &str)],
+        _open_uris: &[&str],
+    ) -> (Vec<DocumentAnalysis>, Vec<(String, String)>) {
+        let sources = documents
+            .iter()
+            .map(|(_, source)| *source)
+            .collect::<Vec<_>>();
+        (self.analyze(&sources), Vec::new())
+    }
+
     fn analysis_ready(&self) -> bool {
         true
     }
@@ -112,6 +125,12 @@ pub trait Analysis {
     }
 
     fn note_project_change(&mut self) {}
+
+    /// Return true when a watched change requires immediate source analysis.
+    fn note_watched_file_change(&mut self, _uri: &str) -> bool {
+        self.note_project_change();
+        false
+    }
 
     fn project_refresh_due_in(&self) -> Option<Duration> {
         None
@@ -441,6 +460,7 @@ struct OpenDocument {
 /// Stateful LSP dispatcher with an injected analysis function for deterministic unit testing.
 pub struct LspService<A> {
     documents: HashMap<String, OpenDocument>,
+    source_set: Vec<(String, String)>,
     analyze: A,
     analysis_dirty: bool,
     initialized: bool,
@@ -455,6 +475,7 @@ where
     pub fn new(analyze: A) -> Self {
         Self {
             documents: HashMap::new(),
+            source_set: Vec::new(),
             analyze,
             analysis_dirty: false,
             initialized: false,
@@ -499,12 +520,22 @@ where
             .collect::<Vec<_>>();
         let analyses = if self.analyze.analysis_ready() {
             let documents = &self.documents;
-            let sources: Vec<_> = uris
+            let open_documents = uris
                 .iter()
-                .map(|uri| documents[uri].text.as_str())
+                .map(|uri| (uri.as_str(), documents[uri].text.as_str()))
+                .collect::<Vec<_>>();
+            let open_uris = documents.keys().map(String::as_str).collect::<Vec<_>>();
+            let (analyses, support_documents) = self
+                .analyze
+                .analyze_open_documents(&open_documents, &open_uris);
+            self.source_set = open_documents
+                .into_iter()
+                .map(|(uri, source)| (uri.to_string(), source.to_string()))
+                .chain(support_documents)
                 .collect();
-            self.analyze.analyze(&sources)
+            analyses
         } else {
+            self.source_set.clear();
             uris.iter().map(|_| DocumentAnalysis::empty()).collect()
         };
         if analyses.len() != uris.len() {
@@ -696,7 +727,9 @@ where
                 }
                 Dispatch::messages(messages)
             }
-            "workspace/didChangeWatchedFiles" => self.did_change_watched_files(),
+            "workspace/didChangeWatchedFiles" => {
+                self.did_change_watched_files(params, defer_analysis)
+            }
             "textDocument/didOpen" => self.did_open(id, params, defer_analysis),
             "textDocument/didChange" => self.did_change(id, params, defer_analysis),
             "textDocument/didClose" => self.did_close(id, params, defer_analysis),
@@ -728,9 +761,23 @@ where
         }
     }
 
-    fn did_change_watched_files(&mut self) -> Dispatch {
-        self.analyze.note_project_change();
-        Dispatch::none()
+    fn did_change_watched_files(&mut self, params: Value, defer_analysis: bool) -> Dispatch {
+        let Ok(params) = serde_json::from_value::<DidChangeWatchedFilesParams>(params) else {
+            return Dispatch::none();
+        };
+        let mut source_changed = false;
+        for change in params.changes {
+            source_changed |= self.analyze.note_watched_file_change(&change.uri);
+        }
+        if !source_changed {
+            return Dispatch::none();
+        }
+        self.analysis_dirty = true;
+        if defer_analysis {
+            Dispatch::none()
+        } else {
+            Dispatch::messages(self.flush_analysis())
+        }
     }
 
     pub fn project_refresh_due_in(&self) -> Option<Duration> {
@@ -1112,21 +1159,19 @@ where
         if targets.is_empty() {
             return Vec::new();
         }
-        let uris = self.analyzed_uris();
         targets
             .into_iter()
             .filter_map(|target| {
-                let uri = uris.get(target.file as usize)?;
-                let target_document = self.documents.get(*uri)?;
+                let (uri, source) = self.source_set.get(target.file as usize)?;
                 Some(json!({
                     "uri": uri,
                     "range": {
                         "start": byte_offset_to_position(
-                            &target_document.text,
+                            source,
                             target.span.lo as usize
                         ),
                         "end": byte_offset_to_position(
-                            &target_document.text,
+                            source,
                             target.span.hi as usize
                         ),
                     }
@@ -1156,6 +1201,12 @@ where
         let uris = self.analyzed_uris();
 
         let mut occurrences = Vec::new();
+        if params.context.include_declaration {
+            occurrences.extend(target_ids.iter().filter_map(|target| {
+                let (uri, _) = self.source_set.get(target.file as usize)?;
+                Some((uri.as_str(), target.span))
+            }));
+        }
         for (source_file, uri) in uris.iter().enumerate() {
             let document = &self.documents[*uri];
             occurrences.extend(
@@ -1175,12 +1226,20 @@ where
         let locations = occurrences
             .into_iter()
             .filter_map(|(uri, span)| {
-                let document = self.documents.get(uri)?;
+                let source = self
+                    .documents
+                    .get(uri)
+                    .map(|document| document.text.as_str())
+                    .or_else(|| {
+                        self.source_set.iter().find_map(|(source_uri, source)| {
+                            (source_uri == uri).then_some(source.as_str())
+                        })
+                    })?;
                 Some(json!({
                     "uri": uri,
                     "range": {
-                        "start": byte_offset_to_position(&document.text, span.lo as usize),
-                        "end": byte_offset_to_position(&document.text, span.hi as usize),
+                        "start": byte_offset_to_position(source, span.lo as usize),
+                        "end": byte_offset_to_position(source, span.hi as usize),
                     }
                 }))
             })
@@ -1210,6 +1269,12 @@ where
         }
 
         let analyzed_uris = self.analyzed_uris();
+        if targets
+            .iter()
+            .any(|target| target.file as usize >= analyzed_uris.len())
+        {
+            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
+        }
         let mut response_uris = Vec::with_capacity(analyzed_uris.len());
         response_uris.push(params.text_document.uri.as_str());
         response_uris.extend(
@@ -1393,6 +1458,16 @@ struct ContentChange {
 struct DidChangeParams {
     text_document: VersionedTextDocumentIdentifier,
     content_changes: Vec<ContentChange>,
+}
+
+#[derive(Deserialize)]
+struct DidChangeWatchedFilesParams {
+    changes: Vec<WatchedFileChange>,
+}
+
+#[derive(Deserialize)]
+struct WatchedFileChange {
+    uri: String,
 }
 
 #[derive(Deserialize)]

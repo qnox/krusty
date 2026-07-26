@@ -16,6 +16,7 @@ use krusty::diag::{Diagnostic, Severity, Span};
 use krusty::features::LangFeatures;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
+use krusty::source::{SourceInput, SourceKind};
 use serde::{Deserialize, Serialize};
 
 use crate::compiler_analysis::{
@@ -35,12 +36,17 @@ const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Serialize)]
 struct AnalysisRequest<'a> {
     sources: &'a [&'a str],
+    source_kinds: &'a [u8],
+    result_count: usize,
     language_features: &'a [&'a str],
 }
 
 #[derive(Deserialize)]
 struct OwnedAnalysisRequest {
     sources: Vec<String>,
+    #[serde(default)]
+    source_kinds: Vec<u8>,
+    result_count: usize,
     #[serde(default)]
     language_features: Vec<String>,
 }
@@ -170,20 +176,37 @@ pub(crate) fn source_set_fits(lengths: impl IntoIterator<Item = usize>) -> bool 
         .is_some_and(|total| total <= MAX_SOURCE_SET_BYTES)
 }
 
-fn encode_request(sources: &[&str], features: &LangFeatures) -> io::Result<Vec<u8>> {
-    if !source_set_fits(sources.iter().map(|source| source.len())) {
+fn encode_request(
+    inputs: &[SourceInput<'_>],
+    result_count: usize,
+    features: &LangFeatures,
+) -> io::Result<Vec<u8>> {
+    if !source_set_fits(inputs.iter().map(|source| source.text.len())) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "open source set exceeds analysis limit",
         ));
     }
+    if result_count > inputs.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "analysis result count exceeds source count",
+        ));
+    }
+    let sources = inputs.iter().map(|source| source.text).collect::<Vec<_>>();
+    let source_kinds = inputs
+        .iter()
+        .map(|source| source.kind.wire_code())
+        .collect::<Vec<_>>();
     let mut request = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
     let mut language_features = features.iter().collect::<Vec<_>>();
     language_features.sort_unstable();
     serde_json::to_writer(
         &mut request,
         &AnalysisRequest {
-            sources,
+            sources: &sources,
+            source_kinds: &source_kinds,
+            result_count,
             language_features: &language_features,
         },
     )
@@ -259,10 +282,11 @@ impl WorkerProcess {
 
     fn analyze(
         &mut self,
-        sources: &[&str],
+        inputs: &[SourceInput<'_>],
+        result_count: usize,
         language_features: &LangFeatures,
     ) -> io::Result<Vec<DocumentAnalysis>> {
-        let request = encode_request(sources, language_features)?;
+        let request = encode_request(inputs, result_count, language_features)?;
         write_framed(&mut self.stdin, &request)?;
         drop(request);
         let response = self.read_response()?;
@@ -340,10 +364,25 @@ impl AnalysisWorker {
     }
 
     pub fn analyze(&mut self, sources: &[&str]) -> io::Result<Vec<DocumentAnalysis>> {
+        let inputs = sources
+            .iter()
+            .map(|source| SourceInput::kotlin(source))
+            .collect::<Vec<_>>();
+        self.analyze_inputs_prefix(&inputs, sources.len())
+    }
+
+    pub fn analyze_inputs_prefix(
+        &mut self,
+        inputs: &[SourceInput<'_>],
+        result_count: usize,
+    ) -> io::Result<Vec<DocumentAnalysis>> {
         if self.analyses >= self.max_analyses {
             self.restart()?;
         }
-        match self.process.analyze(sources, &self.language_features) {
+        match self
+            .process
+            .analyze(inputs, result_count, &self.language_features)
+        {
             Ok(analysis) => {
                 self.analyses += 1;
                 Ok(analysis)
@@ -355,7 +394,9 @@ impl AnalysisWorker {
             }
             Err(_) => {
                 self.restart()?;
-                let analysis = self.process.analyze(sources, &self.language_features)?;
+                let analysis =
+                    self.process
+                        .analyze(inputs, result_count, &self.language_features)?;
                 self.analyses += 1;
                 Ok(analysis)
             }
@@ -376,14 +417,51 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
     while let Some(body) = read_framed(reader, MAX_WORKER_MESSAGE_BYTES)? {
         let request: OwnedAnalysisRequest = serde_json::from_slice(&body).map_err(json_io)?;
         drop(body);
-        let sources: Vec<_> = request.sources.iter().map(String::as_str).collect();
+        if request.result_count > request.sources.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "analysis result count exceeds source count",
+            ));
+        }
+        if !source_set_fits(request.sources.iter().map(String::len)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "analysis source set exceeds size limit",
+            ));
+        }
+        let source_kinds = if request.source_kinds.is_empty() {
+            vec![0; request.sources.len()]
+        } else {
+            request.source_kinds
+        };
+        if source_kinds.len() != request.sources.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "analysis source kinds do not align with source texts",
+            ));
+        }
+        let inputs = request
+            .sources
+            .iter()
+            .zip(source_kinds)
+            .map(|(source, kind)| {
+                let kind = SourceKind::from_wire_code(kind).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "analysis request contains an unknown source kind",
+                    )
+                })?;
+                Ok(SourceInput::new(kind, source))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let sources = inputs.iter().map(|input| input.text).collect::<Vec<_>>();
         let mut language_features = LangFeatures::new();
         for feature in &request.language_features {
             language_features.enable(feature);
         }
         let platform = Box::new(JvmLibraries::new(classpath.clone()));
-        let source_set = compiler_analysis::analyze_source_set_with_features(
-            &sources,
+        let source_set = compiler_analysis::analyze_source_inputs_with_features(
+            &inputs,
             platform,
             &language_features,
         );
@@ -411,6 +489,7 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             .into_iter()
             .zip(&sources)
             .enumerate()
+            .take(request.result_count)
             .map(|(file_index, (file, source))| {
                 DocumentAnalysis::from_file_analysis(
                     source,
@@ -611,8 +690,11 @@ mod tests {
              }\n\
              fun use(value: WorkerContract): String = value.run()",
         ];
+        let source_kinds = vec![0; sources.len()];
         let request = serde_json::to_vec(&AnalysisRequest {
             sources: &sources,
+            source_kinds: &source_kinds,
+            result_count: sources.len(),
             language_features: &[],
         })
         .unwrap();
@@ -653,8 +735,11 @@ fun combine(entries: Array<Entry>): String {
     }
     return result
 }"];
+        let source_kinds = vec![0; sources.len()];
         let request = serde_json::to_vec(&AnalysisRequest {
             sources: &sources,
+            source_kinds: &source_kinds,
+            result_count: sources.len(),
             language_features: &["NameBasedDestructuring"],
         })
         .unwrap();

@@ -81,6 +81,15 @@ mod tests {
             self.pending = true;
         }
 
+        fn note_watched_file_change(&mut self, uri: &str) -> bool {
+            if uri.ends_with(".kt") {
+                true
+            } else {
+                self.note_project_change();
+                false
+            }
+        }
+
         fn project_refresh_due_in(&self) -> Option<std::time::Duration> {
             self.pending.then(std::time::Duration::default)
         }
@@ -219,6 +228,37 @@ mod tests {
             message["method"] == "textDocument/publishDiagnostics"
                 && message["params"]["uri"] == "file:///p/A.kt"
         }));
+    }
+
+    #[test]
+    fn a_watched_kotlin_source_change_reanalyzes_open_documents_immediately() {
+        let analysis_calls = Rc::new(Cell::new(0));
+        let host = RecordingHost {
+            analysis_calls: analysis_calls.clone(),
+            ..RecordingHost::default()
+        };
+        let mut server = LspService::new(host);
+        server.handle(request(1, "initialize", json!({})));
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({ "textDocument": {
+                "uri": "file:///p/Use.kt", "languageId": "kotlin", "version": 1,
+                "text": "fun use() = value"
+            }}),
+        ));
+        let previous_calls = analysis_calls.get();
+
+        let dispatch = server.handle(notification(
+            "workspace/didChangeWatchedFiles",
+            json!({ "changes": [{ "uri": "file:///p/Model.kt", "type": 2 }] }),
+        ));
+
+        assert_eq!(analysis_calls.get(), previous_calls + 1);
+        assert!(dispatch.messages.iter().any(|message| {
+            message["method"] == "textDocument/publishDiagnostics"
+                && message["params"]["uri"] == "file:///p/Use.kt"
+        }));
+        assert_eq!(server.project_refresh_due_in(), None);
     }
 
     #[test]

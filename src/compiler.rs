@@ -2,10 +2,8 @@
 
 use crate::ast::File;
 use crate::backend::{Artifact, Backend};
-use crate::diag::DiagSink;
-use crate::frontend::{
-    check_file_in_source_set, preinfer_module_returns, CheckedFile, FrontendSymbols,
-};
+use crate::diag::{DiagSink, Span};
+use crate::frontend::{check_source_set, CheckedFile, FrontendSymbols};
 
 /// Check each parsed file and hand it to the backend.
 pub fn compile<B: Backend>(
@@ -16,15 +14,34 @@ pub fn compile<B: Backend>(
     module_name: &str,
     diags: &mut DiagSink,
 ) -> Vec<Artifact> {
+    let types = check_source_set(files, syms, diags);
+    emit_checked(files, stems, &types, syms, backend, module_name, diags)
+}
+
+/// Hand a checked source set to a backend.
+pub fn emit_checked<B: Backend>(
+    files: &[File],
+    stems: &[String],
+    types: &[Option<crate::frontend::FrontendTypeInfo>],
+    syms: &FrontendSymbols,
+    backend: &B,
+    module_name: &str,
+    diags: &mut DiagSink,
+) -> Vec<Artifact> {
+    if files.len() != stems.len() || files.len() != types.len() {
+        diags.error(
+            Span::new(0, 0),
+            "internal error: source files, stems, and checked types have different lengths",
+        );
+        return Vec::new();
+    }
     let mut outputs = Vec::new();
     let mut state = B::State::default();
-    // Pre-infer expression-body return types across ALL files first, so a call in one file to an
-    // expression-body function/method defined in ANOTHER resolves to its real (inferred) return rather
-    // than the erased collection default — `check_file_at` alone only pre-infers its own file.
-    preinfer_module_returns(files, syms, diags);
-    for (i, file) in files.iter().enumerate() {
+    for (i, ((file, stem), info)) in files.iter().zip(stems).zip(types).enumerate() {
         diags.set_file(i as u32);
-        let info = check_file_in_source_set(files, i as u32, syms, diags);
+        let Some(info) = info.as_ref() else {
+            continue;
+        };
         if diags.has_errors() {
             continue;
         }
@@ -32,11 +49,11 @@ pub fn compile<B: Backend>(
             CheckedFile {
                 file,
                 file_index: i as u32,
-                info: &info,
+                info,
                 symbols: syms,
                 module_name,
             },
-            &stems[i],
+            stem,
             &mut state,
             diags,
         ));
@@ -118,5 +135,27 @@ mod tests {
 
         assert!(diags.has_errors());
         assert!(outputs.is_empty());
+    }
+
+    #[test]
+    fn checked_emission_rejects_misaligned_source_metadata() {
+        let mut diags = DiagSink::new();
+        let files = vec![parse_source_with_detected_features(
+            "fun box(): String = \"OK\"",
+            &mut diags,
+        )];
+        let syms = collect_signatures(&files, &mut diags);
+        let outputs = emit_checked(
+            &files,
+            &[],
+            &[],
+            &syms,
+            &RecordingBackend,
+            "main",
+            &mut diags,
+        );
+
+        assert!(outputs.is_empty());
+        assert!(diags.has_errors());
     }
 }
