@@ -8409,13 +8409,30 @@ impl<'a> Checker<'a> {
         args: &[Ty],
         integer_literals: &[bool],
     ) -> Option<crate::symbol_resolver::ResolvedMember> {
+        self.resolve_instance_member_with_literal_and_lambda_args(
+            recv,
+            name,
+            args,
+            integer_literals,
+            &[],
+        )
+    }
+    fn resolve_instance_member_with_literal_and_lambda_args(
+        &self,
+        recv: Ty,
+        name: &str,
+        args: &[Ty],
+        integer_literals: &[bool],
+        lambda_literals: &[bool],
+    ) -> Option<crate::symbol_resolver::ResolvedMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol_with_literal_args(
+            .resolve_symbol_with_literal_and_lambda_args(
                 SymRecv::Value(recv),
                 name,
                 args,
                 integer_literals,
+                lambda_literals,
                 &[],
             )
             .and_then(Symbol::call)
@@ -8488,14 +8505,16 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &[Ty],
         integer_literals: &[bool],
+        lambda_literals: &[bool],
     ) -> Option<crate::libraries::LibraryMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol_with_literal_args(
+            .resolve_symbol_with_literal_and_lambda_args(
                 SymRecv::Type(internal),
                 name,
                 args,
                 integer_literals,
+                lambda_literals,
                 &[],
             )
             .and_then(Symbol::companion)
@@ -11467,6 +11486,100 @@ impl<'a> Checker<'a> {
 
     fn arg_tys(&mut self, args: &[ExprId]) -> Vec<Ty> {
         args.iter().map(|&a| self.expr(a)).collect()
+    }
+
+    fn lambda_probe_ty(&self, arg: ExprId) -> Option<Ty> {
+        match self.file.expr(arg) {
+            Expr::Lambda { params, .. } if !params.is_empty() => {
+                Some(Ty::fun(vec![Ty::Error; params.len()], Ty::Error))
+            }
+            Expr::Lambda { body, .. } if self.file.expr_uses_name(*body, "it") => {
+                Some(Ty::fun(vec![Ty::Error], Ty::Error))
+            }
+            Expr::Lambda { .. } => Some(Ty::Error),
+            _ => None,
+        }
+    }
+
+    fn classpath_sam_param_types(
+        &self,
+        receiver: crate::symbol_resolver::SymRecv<'_>,
+        name: &str,
+        args: &[ExprId],
+        partial: &[Option<Ty>],
+    ) -> Option<Vec<Option<Vec<Ty>>>> {
+        let lambda_literals = self.lambda_literal_args(args);
+        let integer_literals = self.integer_literal_args(args);
+        let provisional = args
+            .iter()
+            .enumerate()
+            .map(|(index, &arg)| {
+                self.lambda_probe_ty(arg)
+                    .or_else(|| partial.get(index).copied().flatten())
+                    .unwrap_or(Ty::Error)
+            })
+            .collect::<Vec<_>>();
+        let candidate = self
+            .resolver()
+            .resolve_symbol_with_literal_and_lambda_args(
+                receiver,
+                name,
+                &provisional,
+                &integer_literals,
+                &lambda_literals,
+                &[],
+            )?
+            .selected_member()?;
+        Some(
+            crate::symbol_resolver::specialized_sam_member_params(
+                &candidate,
+                &provisional,
+                &lambda_literals,
+            )
+            .into_iter()
+            .enumerate()
+            .map(|(index, param)| {
+                if lambda_literals.get(index) == Some(&true) {
+                    crate::symbol_resolver::classpath_sam_signature(&*self.syms.libraries, param)
+                        .map(|sam| sam.params)
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        )
+    }
+
+    fn classpath_sam_arg_tys(
+        &mut self,
+        receiver: crate::symbol_resolver::SymRecv<'_>,
+        name: &str,
+        args: &[ExprId],
+    ) -> Vec<Ty> {
+        let partial = args
+            .iter()
+            .map(|&arg| self.lambda_probe_ty(arg).is_none().then(|| self.expr(arg)))
+            .collect::<Vec<_>>();
+        let lambda_params = self.classpath_sam_param_types(receiver, name, args, &partial);
+        let mut types = Vec::with_capacity(args.len());
+        for (index, &arg) in args.iter().enumerate() {
+            if let Some(params) = lambda_params
+                .as_ref()
+                .and_then(|all| all.get(index))
+                .and_then(Option::as_deref)
+            {
+                types.push(self.check_lambda_with_types(arg, params));
+            } else {
+                types.push(partial[index].unwrap_or_else(|| self.expr(arg)));
+            }
+        }
+        types
+    }
+
+    fn lambda_literal_args(&self, args: &[ExprId]) -> Vec<bool> {
+        args.iter()
+            .map(|&arg| matches!(self.file.expr(arg), Expr::Lambda { .. }))
+            .collect()
     }
 
     fn is_integer_literal_arg(&self, expr: ExprId) -> bool {
@@ -16819,7 +16932,9 @@ impl<'a> Checker<'a> {
                 // of that package (compiled to `a/b/<File>Kt`). Resolve it by name among the classpath
                 // top-level overloads and confirm the owning facade sits in the receiver's package.
                 if let Some(root) = self.dotted_root(receiver) {
-                    if !self.value_root_shadows_classifier(&root) {
+                    if !self.value_root_shadows_classifier(&root)
+                        && self.classpath_type_receiver_internal(receiver).is_none()
+                    {
                         if let Some(pkg) = qualified_path(self.file, receiver) {
                             let arg_tys = self.arg_tys(args);
                             let targs: Vec<Ty> = self
@@ -17245,13 +17360,19 @@ impl<'a> Checker<'a> {
                     if let Some(fq) = qualified_path(self.file, receiver) {
                         let leftmost = fq.split('/').next().unwrap_or("");
                         if self.lookup(leftmost).is_none() && self.resolved_type(&fq).is_some() {
-                            let arg_tys = self.arg_tys(args);
+                            let arg_tys = self.classpath_sam_arg_tys(
+                                crate::symbol_resolver::SymRecv::Type(&fq),
+                                &name,
+                                args,
+                            );
                             let integer_literals = self.integer_literal_args(args);
+                            let lambda_literals = self.lambda_literal_args(args);
                             if let Some(m) = self.resolve_companion_with_literal_args(
                                 &fq,
                                 &name,
                                 &arg_tys,
                                 &integer_literals,
+                                &lambda_literals,
                             ) {
                                 self.set(receiver, Ty::obj(&fq));
                                 let ret = m.ret;
@@ -17389,13 +17510,19 @@ impl<'a> Checker<'a> {
                             .cloned()
                             .or_else(|| self.imported_type_internal(&cls));
                         if let Some(internal) = receiver_class {
-                            let arg_tys = self.arg_tys(args);
+                            let arg_tys = self.classpath_sam_arg_tys(
+                                crate::symbol_resolver::SymRecv::Type(&internal),
+                                &name,
+                                args,
+                            );
                             let integer_literals = self.integer_literal_args(args);
+                            let lambda_literals = self.lambda_literal_args(args);
                             let companion = self.resolve_companion_with_literal_args(
                                 &internal,
                                 &name,
                                 &arg_tys,
                                 &integer_literals,
+                                &lambda_literals,
                             );
                             return match companion {
                                 Some(m) => {
@@ -17416,11 +17543,12 @@ impl<'a> Checker<'a> {
                                         .resolved_type(&internal)
                                         .and_then(|lt| lt.companion_object)
                                         .and_then(|(_, cty)| {
-                                            self.resolve_instance_member_with_literal_args(
+                                            self.resolve_instance_member_with_literal_and_lambda_args(
                                                 Ty::obj_name(cty),
                                                 &name,
                                                 &arg_tys,
                                                 &integer_literals,
+                                                &lambda_literals,
                                             )
                                             .map(|m| (cty, m))
                                         });
@@ -17459,11 +17587,12 @@ impl<'a> Checker<'a> {
                                                 .is_some_and(|t| t.is_object());
                                             if is_object {
                                                 if let Some(m) = self
-                                                    .resolve_instance_member_with_literal_args(
+                                                    .resolve_instance_member_with_literal_and_lambda_args(
                                                         Ty::obj(&internal),
                                                         &name,
                                                         &arg_tys,
                                                         &integer_literals,
+                                                        &lambda_literals,
                                                     )
                                                 {
                                                     crate::trace_compiler!(
@@ -17696,6 +17825,16 @@ impl<'a> Checker<'a> {
                             .collect(),
                     )
                 });
+                let classpath_sam_pts = if ext_lambda_pts.is_none() {
+                    self.classpath_sam_param_types(
+                        crate::symbol_resolver::SymRecv::Value(rt),
+                        &name,
+                        args,
+                        &generic_member_partial,
+                    )
+                } else {
+                    None
+                };
                 // Inline extensions splice lambdas, so captured mutable locals stay direct for this call.
                 let allow_lambda_mutation = ext_lambda_pts.is_some()
                     && self
@@ -17732,6 +17871,11 @@ impl<'a> Checker<'a> {
                                     return c.check_lambda_with_types(a, &pt);
                                 }
                             }
+                            if let Some(ref pts) = classpath_sam_pts {
+                                if let Some(pt) = pts.get(i).and_then(Option::as_deref) {
+                                    return c.check_lambda_with_types(a, pt);
+                                }
+                            }
                             if let Some(ref pts) = ext_lambda_pts {
                                 if pts.get(i).map_or(false, |v| !v.is_empty())
                                     && matches!(c.file.expr(a), Expr::Lambda { .. })
@@ -17760,6 +17904,14 @@ impl<'a> Checker<'a> {
                         .collect()
                 });
                 let integer_literals = self.integer_literal_args(args);
+                let has_classpath_sam = classpath_sam_pts
+                    .as_ref()
+                    .is_some_and(|params| params.iter().any(Option::is_some));
+                let lambda_literals = if has_classpath_sam {
+                    self.lambda_literal_args(args)
+                } else {
+                    Vec::new()
+                };
                 if rt == Ty::Error {
                     return Ty::Error;
                 }
@@ -17803,11 +17955,12 @@ impl<'a> Checker<'a> {
                     ClasspathMemberSlotCall::NoMatch => {}
                 }
                 if rt == Ty::String {
-                    if let Some(m) = self.resolve_instance_member_with_literal_args(
+                    if let Some(m) = self.resolve_instance_member_with_literal_and_lambda_args(
                         rt,
                         &name,
                         &arg_tys,
                         &integer_literals,
+                        &lambda_literals,
                     ) {
                         let ret = m.ret;
                         self.resolved_calls.insert(call, ResolvedCall::Member(m));
@@ -17834,11 +17987,12 @@ impl<'a> Checker<'a> {
                     return Ty::Int;
                 }
                 if module_members.is_empty() {
-                    if let Some(m) = self.resolve_instance_member_with_literal_args(
+                    if let Some(m) = self.resolve_instance_member_with_literal_and_lambda_args(
                         rt,
                         &name,
                         &arg_tys,
                         &integer_literals,
+                        &lambda_literals,
                     ) {
                         crate::trace_compiler!(
                             "resolve",

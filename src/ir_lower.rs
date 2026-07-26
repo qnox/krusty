@@ -7444,15 +7444,12 @@ impl<'a> Lower<'a> {
         self.lower_lambda_sam(e, params, body, None)
     }
 
-    /// `sam`: `(interface internal name, abstract-method name, method returns void)`. The void flag
-    /// distinguishes a SAM whose method is `()V` (`Runnable.run`) — the impl runs the body for effect
-    /// and returns void — from a `Unit`-typed-but-`Object`-returning target (`FunctionN.invoke`).
     fn lower_lambda_sam(
         &mut self,
         e: AstExprId,
         params: &[String],
         body: AstExprId,
-        sam: Option<(String, String, bool)>,
+        sam: Option<(String, String, Option<String>, bool)>,
     ) -> Option<u32> {
         let Ty::Fun(sig) = self.info.ty(e) else {
             return None;
@@ -7595,7 +7592,7 @@ impl<'a> Lower<'a> {
             self.scope.push((name.clone(), v, *pty));
         }
         // Closures return `Unit` through its reference carrier, including for `Unit?`.
-        let sam_void_pre = matches!(&sam, Some((_, _, true)));
+        let sam_void_pre = matches!(&sam, Some((_, _, _, true)));
         let returns_unit_ref =
             sig.ret.non_null() == Ty::Unit && !sam_void_pre && self.info.ty(body) != Ty::Nothing;
         let saved_unit_ref =
@@ -7645,7 +7642,7 @@ impl<'a> Lower<'a> {
         // The SAM's `invoke` returns `Object`, so the impl method returns a reference. A `Unit` lambda
         // runs its body for effect then returns the `kotlin/Unit` singleton; a value lambda returns its
         // (boxed) body value; a diverging body falls through to its own `throw`/`return`.
-        let sam_void = matches!(&sam, Some((_, _, true)));
+        let sam_void = matches!(&sam, Some((_, _, _, true)));
         // `block` is the impl-method body (with a synthetic `return`); `inline_body` is the equivalent
         // *value-producing* form (no synthetic return) the bytecode inliner emits directly — so a
         // user `return` in the lambda becomes a real return from the *enclosing* method (a correct
@@ -7725,7 +7722,7 @@ impl<'a> Lower<'a> {
             impl_fn: fid,
             arity: arity as u8,
             captures: capture_vals,
-            sam: sam.map(|(i, m, _)| (i, m)),
+            sam: sam.map(|(i, m, descriptor, _)| (i, m, descriptor)),
             inline_body: Some(inline_body),
         }))
     }
@@ -11939,9 +11936,7 @@ impl<'a> Lower<'a> {
         Some(a)
     }
 
-    /// The single abstract method of a same-module interface `internal` as `(method_name, returns_void)`
-    /// — used for SAM conversion. `None` if not a single-method interface in this module.
-    fn sam_target(&self, internal: &str) -> Option<(String, bool)> {
+    fn sam_target(&self, internal: &str) -> Option<(String, Option<String>, bool)> {
         let ci = self.class_info(internal)?;
         let cls = &self.ir.classes[ci.id as usize];
         if !cls.is_interface {
@@ -11957,7 +11952,7 @@ impl<'a> Lower<'a> {
             return None; // more than one abstract method — not a SAM
         }
         let f = &self.ir.functions[*only as usize];
-        Some((f.name.clone(), f.ret == ty_to_ir(Ty::Unit)))
+        Some((f.name.clone(), None, f.ret == ty_to_ir(Ty::Unit)))
     }
 
     /// Whether `internal` is a SAM interface a lambda ARGUMENT can be soundly converted to: a non-generic
@@ -12016,21 +12011,30 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        // SAM conversion: a lambda flowing into a simple `fun interface` parameter becomes an instance of
-        // that interface whose single abstract method runs the lambda (the checker validated the target).
         if let Some(internal) = target.non_null().obj_internal() {
             let internal = internal.render();
-            if self.is_simple_fun_interface(&internal) {
-                if let Expr::Lambda { params, body } = self.afile.expr(arg).clone() {
-                    if let Some((method, void)) = self.sam_target(&internal) {
-                        return self.lower_lambda_sam(
-                            arg,
-                            &params,
-                            body,
-                            Some((internal.to_string(), method, void)),
-                        );
-                    }
+            if let Expr::Lambda { params, body } = self.afile.expr(arg).clone() {
+                let target = if self.is_simple_fun_interface(&internal) {
+                    self.sam_target(&internal)
+                } else {
+                    self.syms
+                        .libraries
+                        .resolve_type(&internal)
+                        .and_then(|ty| ty.sam_method)
+                        .map(|method| {
+                            (method.name, Some(method.descriptor), method.ret == Ty::Unit)
+                        })
+                };
+                if let Some((method, descriptor, void)) = target {
+                    return self.lower_lambda_sam(
+                        arg,
+                        &params,
+                        body,
+                        Some((internal.to_string(), method, descriptor, void)),
+                    );
                 }
+            }
+            if self.is_simple_fun_interface(&internal) {
                 // A non-literal FUNCTION value (`fnVal`, `expr::ref`) SAM-converted to the interface needs
                 // a wrapper forwarding to its `invoke`. A naive wrapper miscompiles a NULLABLE value
                 // (wrapping `null` into a non-null instance changes `r == null`), a contravariant
@@ -19566,15 +19570,15 @@ impl<'a> Lower<'a> {
                                     .libraries
                                     .resolve_type(&internal)
                                     .and_then(|t| t.sam_method)
-                                    .map(|m| (m.name, m.ret == Ty::Unit))
+                                    .map(|m| (m.name, Some(m.descriptor), m.ret == Ty::Unit))
                             });
-                            if let Some((method, void)) = target {
+                            if let Some((method, descriptor, void)) = target {
                                 let iface = internal.to_string();
                                 return self.lower_lambda_sam(
                                     *arg,
                                     params,
                                     *body,
-                                    Some((iface, method, void)),
+                                    Some((iface, method, descriptor, void)),
                                 );
                             }
                         }
