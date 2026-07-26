@@ -17,7 +17,7 @@ use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
 
 #[derive(Clone, Debug, Default)]
-pub struct TopLevelLambdaShape {
+pub struct LambdaCallShape {
     pub param_types: Option<Vec<Vec<Ty>>>,
     pub receivers: Option<Vec<Option<Ty>>>,
     pub materialized: Option<Vec<bool>>,
