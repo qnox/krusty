@@ -3910,6 +3910,119 @@ mod tests {
     }
 
     #[test]
+    fn semantic_tokens_match_official_unary_inc_and_constructor_sites() {
+        let source = concat!(
+            "class Counter {\n",
+            "operator fun unaryMinus(): Counter = this\n",
+            "operator fun inc(): Counter = this\n",
+            "}\n",
+            "class Marker\n",
+            "operator fun Marker.not(): Marker = this\n",
+            "fun use(input: Int, counter: Counter) {\n",
+            "var current = counter\n",
+            "val builtin = -input\n",
+            "val user = -current\n",
+            "current++\n",
+            "val previous = current++\n",
+            "val extension = !Marker()\n",
+            "}\n",
+        );
+        let analysis = analyze_standalone_source_set(&[source]);
+        let index =
+            SemanticTokenIndex::from_file_analysis(source, &analysis.files[0], &analysis.symbols);
+        let tokens = decoded_tokens(&index);
+
+        assert!(
+            tokens.contains(&(1, 37, 4, 1, 0)),
+            "member this: {tokens:?}"
+        );
+        assert!(
+            tokens.contains(&(8, 14, 1, 21, 512)),
+            "builtin unary operator: {tokens:?}"
+        );
+        assert!(
+            tokens.contains(&(9, 11, 1, 21, 0)),
+            "member unary operator: {tokens:?}"
+        );
+        assert!(
+            tokens.contains(&(10, 7, 2, 21, 0)),
+            "statement increment operator: {tokens:?}"
+        );
+        assert!(
+            tokens.contains(&(11, 22, 2, 21, 0)),
+            "expression increment operator: {tokens:?}"
+        );
+        assert!(
+            tokens.contains(&(12, 16, 1, 21, 8)),
+            "extension unary operator: {tokens:?}"
+        );
+        assert!(
+            tokens.contains(&(12, 17, 6, 13, 0)),
+            "constructor invocation: {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn semantic_tokens_use_inc_target_for_member_and_index_storage() {
+        let source = concat!(
+            "class StorageCounter { operator fun inc(): StorageCounter = this }\n",
+            "class StorageHolder(var value: StorageCounter)\n",
+            "class StorageCounters(var value: StorageCounter) {\n",
+            "operator fun get(index: Int): StorageCounter = value\n",
+            "operator fun set(index: Int, value: StorageCounter) { this.value = value }\n",
+            "}\n",
+            "fun useStorage(holder: StorageHolder, counters: StorageCounters) {\n",
+            "holder.value++\n",
+            "counters[0]++\n",
+            "}\n",
+        );
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(
+            std::rc::Rc::new(krusty::toolchain::stdlib_classpath()),
+        ));
+        let analysis = crate::compiler_analysis::analyze_source_set(&[source], platform);
+        let index =
+            SemanticTokenIndex::from_file_analysis(source, &analysis.files[0], &analysis.symbols);
+        let tokens = decoded_tokens(&index);
+        let types = analysis.files[0].types.as_ref().expect("checked types");
+        let inc_calls = analysis.files[0]
+            .file
+            .expr_arena
+            .iter()
+            .enumerate()
+            .filter_map(|(index, expression)| {
+                let krusty::ast::Expr::Call { callee, args } = expression else {
+                    return None;
+                };
+                matches!(
+                    analysis.files[0].file.expr(*callee),
+                    krusty::ast::Expr::Member { name, .. } if name == "inc" && args.is_empty()
+                )
+                .then_some(krusty::ast::ExprId(index as u32))
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            tokens.contains(&(7, 12, 2, 21, 0)),
+            "member-storage increment uses StorageCounter.inc; calls={:?}: {tokens:?}",
+            inc_calls
+                .iter()
+                .map(|&call| (
+                    call,
+                    types.resolved_call_is_member(call),
+                    types.resolved_call_is_extension(call),
+                    types.resolved_call_owner(call)
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !tokens
+                .iter()
+                .any(|&(line, start, length, _, _)| (line, start, length) == (8, 11, 2)),
+            "official Kotlin LSP omits the index-storage increment token: {tokens:?}"
+        );
+    }
+
+    #[test]
     fn semantic_tokens_match_official_advanced_symbol_classification() {
         let source = concat!(
             "package tokenparity\n",
@@ -4058,7 +4171,7 @@ mod tests {
         assert!(tokens.contains(&(7, lines[7].find("target").unwrap() as u32, 6, 13, 0)));
         assert!(tokens.contains(&(8, lines[8].find("RED").unwrap() as u32, 3, 10, 4)));
         assert!(tokens.contains(&(9, lines[9].find("Old").unwrap() as u32, 3, 1, 16)));
-        assert!(tokens.contains(&(9, lines[9].rfind("Old").unwrap() as u32, 3, 1, 16)));
+        assert!(tokens.contains(&(9, lines[9].rfind("Old").unwrap() as u32, 3, 13, 0)));
     }
 
     #[test]

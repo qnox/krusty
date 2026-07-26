@@ -883,6 +883,42 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
                  accumulator -= 1\n\
              }\n",
         ),
+        (
+            "UnaryOperatorTokens.kt",
+            "class Counter(var value: Int) {\n\
+                 operator fun unaryMinus(): Counter = this\n\
+                 operator fun inc(): Counter = this\n\
+             }\n\
+             class Marker\n\
+             @Deprecated(\"old\") class OldMarker\n\
+             operator fun Marker.not(): Marker = this\n\
+             fun use(input: Int, counter: Counter): Int {\n\
+                 var current = counter\n\
+                 val negative = -input\n\
+                 val inverted = !false\n\
+                 val userNegative = -current\n\
+                 current++\n\
+                 ++current\n\
+                 val previous = current++\n\
+                 val next = ++current\n\
+                 val extensionInverted = !Marker()\n\
+                 val old = OldMarker()\n\
+                 return negative\n\
+             }\n",
+        ),
+        (
+            "IncDecStorageTokens.kt",
+            "class StorageCounter { operator fun inc(): StorageCounter = this }\n\
+             class StorageHolder(var value: StorageCounter)\n\
+             class StorageCounters(var value: StorageCounter) {\n\
+                 operator fun get(index: Int): StorageCounter = value\n\
+                 operator fun set(index: Int, value: StorageCounter) { this.value = value }\n\
+             }\n\
+             fun useStorage(holder: StorageHolder, counters: StorageCounters) {\n\
+                 holder.value++\n\
+                 counters[0]++\n\
+             }\n",
+        ),
     ];
     let signature_help_source = "package signatureparity\n\
          fun combine(left: String, count: Int = 1): String = left.repeat(count)\n\

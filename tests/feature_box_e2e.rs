@@ -861,6 +861,109 @@ fun box(): String {
 }
 "#,
     ),
+    (
+        "UserUnaryOperators",
+        r#"
+class Signed(val value: Int) {
+    operator fun unaryMinus(): Signed = Signed(-value)
+}
+class Toggle(val enabled: Boolean) {
+    operator fun not(): Toggle = Toggle(!enabled)
+}
+class Raised(val value: Int)
+operator fun Raised.unaryPlus(): Raised = Raised(value + 1)
+fun box(): String {
+    val signed = -Signed(7)
+    if (signed.value != -7) return "minus"
+    val toggled = !Toggle(false)
+    if (!toggled.enabled) return "not"
+    val raised = +Raised(8)
+    return if (raised.value == 9) "OK" else "plus"
+}
+"#,
+    ),
+    (
+        "InheritedOperatorModifier",
+        r#"
+open class BaseStep {
+    open operator fun unaryMinus(): DerivedStep = DerivedStep()
+    open operator fun inc(): DerivedStep = DerivedStep()
+}
+class DerivedStep : BaseStep() {
+    override fun unaryMinus(): DerivedStep = this
+    override fun inc(): DerivedStep = this
+}
+fun box(): String {
+    var step = DerivedStep()
+    if (-step !== step) return "unary"
+    val old = step++
+    return if (old === step) "OK" else "increment"
+}
+"#,
+    ),
+    (
+        "InheritedInterfaceOperatorModifier",
+        r#"
+interface StepOperators {
+    operator fun unaryMinus(): InterfaceStep
+    operator fun inc(): InterfaceStep
+}
+class InterfaceStep(val value: Int) : StepOperators {
+    override fun unaryMinus(): InterfaceStep = InterfaceStep(-value)
+    override fun inc(): InterfaceStep = InterfaceStep(value + 1)
+}
+fun box(): String {
+    var step = InterfaceStep(2)
+    if ((-step).value != -2) return "unary"
+    val old = step++
+    return if (old.value == 2 && step.value == 3) "OK" else "increment"
+}
+"#,
+    ),
+    (
+        "BoxedPrimitiveUnaryValues",
+        r#"
+fun box(): String {
+    if (-10.toInt() != -10) return "int"
+    if (-10.toLong() != -10L) return "long"
+    if (-10.toFloat() != -10.0f) return "float"
+    if (-10.toDouble() != -10.0) return "double"
+    return "OK"
+}
+"#,
+    ),
+    (
+        "UserIncOperatorsAcrossStorage",
+        r#"
+class Counter(val value: Int) {
+    operator fun inc(): Counter = Counter(value + 1)
+}
+var global = Counter(1)
+class Holder(var current: Counter) {
+    fun advance() {
+        current++
+    }
+}
+fun box(): String {
+    val oldGlobal = global++
+    val newGlobal = ++global
+    if (oldGlobal.value != 1 || newGlobal.value != 3 || global.value != 3) return "global"
+
+    val holder = Holder(Counter(4))
+    holder.advance()
+    if (holder.current.value != 5) return "property"
+
+    var captured = Counter(6)
+    val advanceCaptured = {
+        val old = captured++
+        captured++
+        if (old.value == 6) "OK" else "old"
+    }
+    if (advanceCaptured() != "OK" || captured.value != 8) return "capture"
+    return "OK"
+}
+"#,
+    ),
     // Collection `+=`: resolved exactly as kotlinc (no mutability predicate). A `MutableList`/`MutableSet`/
     // `MutableMap` receiver (and a concrete `ArrayList`) resolves `MutableCollection.plusAssign`, spliced
     // to in-place `add`/`addAll`; a read-only `List` has NO applicable `plusAssign` (the candidate's Kotlin
