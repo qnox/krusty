@@ -35,3 +35,105 @@ fun box(): String {
 "#;
     common::expect_box_ok_with_stdlib(src, "NestedEnumBody");
 }
+
+#[test]
+fn nested_enum_entry_uses_lexical_class_scope() {
+    let src = r#"
+class Catalog {
+    fun read(): String {
+        val state = Mode.READY
+        return if (state.name == "READY") "OK" else "FAIL"
+    }
+
+    private enum class Mode {
+        READY
+    }
+}
+
+fun box(): String = Catalog().read()
+"#;
+
+    let Some(diagnostics) = common::checker_diags_with_stdlib(src) else {
+        return;
+    };
+    assert!(
+        diagnostics.is_empty(),
+        "expected no diagnostics, got: {diagnostics:?}"
+    );
+    common::expect_box_ok_with_stdlib(src, "LexicalNestedEnum");
+}
+
+#[test]
+fn nested_classifier_shadows_top_level_enum() {
+    let src = r#"
+enum class Mode {
+    READY
+}
+
+class Catalog {
+    class Mode
+
+    fun read(): Any = Mode.READY
+}
+"#;
+
+    let Some(diagnostics) = common::checker_diags_with_stdlib(src) else {
+        return;
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic == "unresolved reference 'Mode'."),
+        "expected the shadowed enum entry to stay unresolved, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn enum_typed_static_property_is_not_an_enum_entry() {
+    let src = r#"
+enum class Mode {
+    READY,
+    OTHER
+}
+
+class Holder {
+    companion object {
+        val READY: Mode = Mode.OTHER
+    }
+}
+
+fun box(): String = if (Holder.READY == Mode.OTHER) "OK" else "FAIL"
+"#;
+
+    common::expect_box_ok_with_stdlib(src, "EnumTypedStaticProperty");
+}
+
+#[test]
+fn enum_entry_from_another_source_file_uses_its_declaring_owner() {
+    if common::java_home().is_none() || common::stdlib_jar().is_none() {
+        return;
+    }
+    let output = common::compile_and_run_files_with_stdlib(&[
+        (
+            "State",
+            r#"
+package sample
+
+enum class State {
+    READY
+}
+"#,
+        ),
+        (
+            "Main",
+            r#"
+package app
+
+import sample.State
+
+fun box(): String = if (State.READY.name == "READY") "OK" else "FAIL"
+"#,
+        ),
+    ]);
+    assert_eq!(output.as_deref(), Some("OK"));
+}
