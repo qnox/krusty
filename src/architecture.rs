@@ -16,6 +16,7 @@ mod tests {
                 "libraries",
                 "parser",
                 "resolve",
+                "source",
             ],
         );
     }
@@ -42,11 +43,19 @@ mod tests {
     fn lsp_compiler_analysis_uses_only_frontend_dependencies() {
         assert_allowed_external_crate_modules_in_tree(
             "crates/krusty-lsp/src/compiler_analysis",
-            &["ast", "diag", "frontend", "libraries", "types"],
+            &["ast", "diag", "frontend", "libraries", "source", "types"],
         );
         assert_allowed_external_crate_modules_in_file(
             Path::new("crates/krusty-lsp/src/compiler_analysis.rs"),
-            &["ast", "diag", "features", "frontend", "libraries", "types"],
+            &[
+                "ast",
+                "diag",
+                "features",
+                "frontend",
+                "libraries",
+                "source",
+                "types",
+            ],
         );
     }
 
@@ -67,7 +76,7 @@ mod tests {
     fn compiler_cli_uses_only_public_compiler_layers() {
         assert_allowed_external_crate_modules_in_tree(
             "crates/krusty-cli/src",
-            &["compiler", "diag", "features", "frontend", "jvm"],
+            &["compiler", "diag", "features", "frontend", "jvm", "source"],
         );
     }
 
@@ -81,7 +90,7 @@ mod tests {
             {
                 continue;
             }
-            let mut allowed = vec!["analysis", "diag", "jvm", "types"];
+            let mut allowed = vec!["analysis", "diag", "jvm", "source", "types"];
             if path.ends_with("options.rs")
                 || path.ends_with("project/sync.rs")
                 || path.ends_with("worker.rs")

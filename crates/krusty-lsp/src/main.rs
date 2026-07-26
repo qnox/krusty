@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use krusty_lsp::{
     detect, resolve_jdk, AnalysisWorker, DocumentAnalysis, JdkRequest, LspOptions, ProcessRunner,
-    ProjectFeedback, ProjectMessageKind, ProjectSync, ProviderKind, RefreshOutcome,
+    ProjectFeedback, ProjectMessageKind, ProjectSources, ProjectSync, ProviderKind, RefreshOutcome,
     SystemEnvironment,
 };
 
@@ -61,6 +61,7 @@ struct WorkerHost {
     clock: Instant,
     root: Option<PathBuf>,
     jdk_warning_shown: bool,
+    project_sources: ProjectSources,
 }
 
 impl WorkerHost {
@@ -74,6 +75,7 @@ impl WorkerHost {
             clock: Instant::now(),
             root: None,
             jdk_warning_shown: false,
+            project_sources: ProjectSources::default(),
         }
     }
 
@@ -89,6 +91,7 @@ impl WorkerHost {
         match sync.refresh(&self.runner) {
             RefreshOutcome::Unchanged => ProjectFeedback::default(),
             RefreshOutcome::Updated => {
+                self.project_sources.invalidate();
                 let (classpath, jdk_home) = Self::launch_from(sync, &self.options, &self.runner);
                 let mut language_features = sync.project_language_features();
                 self.options.apply_language_features(&mut language_features);
@@ -226,6 +229,56 @@ impl krusty_lsp::Analysis for WorkerHost {
         })
     }
 
+    fn analyze_open_documents(
+        &mut self,
+        documents: &[(&str, &str)],
+        open_uris: &[&str],
+    ) -> (Vec<DocumentAnalysis>, Vec<(String, String)>) {
+        let support_documents = match self.project_support_sources(documents, open_uris) {
+            Ok(sources) => sources.to_vec(),
+            Err(message) => {
+                let analyses = documents
+                    .iter()
+                    .map(|_| {
+                        DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
+                            span: krusty::diag::Span::new(0, 0),
+                            severity: krusty::diag::Severity::Error,
+                            msg: message.clone(),
+                            file: 0,
+                        }])
+                    })
+                    .collect();
+                return (analyses, Vec::new());
+            }
+        };
+        let mut inputs = documents
+            .iter()
+            .map(|(uri, source)| {
+                krusty::source::SourceInput::new(source_kind_from_uri(uri), source)
+            })
+            .collect::<Vec<_>>();
+        inputs.extend(support_documents.iter().map(|(uri, source)| {
+            krusty::source::SourceInput::new(source_kind_from_uri(uri), source)
+        }));
+        let analyses = self
+            .worker
+            .analyze_inputs_prefix(&inputs, documents.len())
+            .unwrap_or_else(|error| {
+                documents
+                    .iter()
+                    .map(|_| {
+                        DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
+                            span: krusty::diag::Span::new(0, 0),
+                            severity: krusty::diag::Severity::Error,
+                            msg: format!("analysis worker failed: {error}"),
+                            file: 0,
+                        }])
+                    })
+                    .collect()
+            });
+        (analyses, support_documents)
+    }
+
     fn set_workspace_root(&mut self, root: Option<PathBuf>) -> ProjectFeedback {
         let root = root
             .or_else(|| std::env::current_dir().ok())
@@ -242,16 +295,55 @@ impl krusty_lsp::Analysis for WorkerHost {
     }
 
     fn watched_globs(&mut self) -> Vec<String> {
-        self.sync
+        let mut globs = self
+            .sync
             .as_ref()
             .map(ProjectSync::watch_globs)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        for extension in krusty::source::SUPPORTED_EXTENSIONS {
+            let source_glob = format!("**/*.{extension}");
+            if !globs.iter().any(|glob| glob == source_glob.as_str()) {
+                globs.push(source_glob);
+            }
+        }
+        globs
     }
 
     fn note_project_change(&mut self) {
         let now = self.now_ms();
         if let Some(sync) = self.sync.as_mut() {
             sync.note_change(now);
+        }
+    }
+
+    fn note_watched_file_change(&mut self, uri: &str) -> bool {
+        let path = url::Url::parse(uri)
+            .ok()
+            .and_then(|uri| uri.to_file_path().ok());
+        let is_project_change = path.as_ref().is_some_and(|path| {
+            self.sync
+                .as_ref()
+                .is_some_and(|sync| sync.watch_paths().iter().any(|watched| watched == path))
+        });
+        if is_project_change {
+            self.note_project_change();
+            return false;
+        }
+        let is_kotlin_source = path.as_ref().is_some_and(|path| {
+            krusty::source::is_supported_path(path)
+                && self
+                    .sync
+                    .as_ref()
+                    .and_then(ProjectSync::model)
+                    .and_then(|model| model.module_for_source(path))
+                    .is_some()
+        });
+        if is_kotlin_source {
+            self.project_sources.invalidate();
+            true
+        } else {
+            self.note_project_change();
+            false
         }
     }
 
@@ -275,6 +367,33 @@ impl krusty_lsp::Analysis for WorkerHost {
         }
         self.configure()
     }
+}
+
+impl WorkerHost {
+    fn project_support_sources(
+        &mut self,
+        documents: &[(&str, &str)],
+        open_uris: &[&str],
+    ) -> Result<&[(String, String)], String> {
+        let Some(model) = self.sync.as_ref().and_then(ProjectSync::model) else {
+            return Ok(&[]);
+        };
+        self.project_sources.load(
+            model,
+            documents,
+            open_uris,
+            krusty_lsp::MAX_SOURCE_SET_BYTES,
+        )
+    }
+}
+
+fn source_kind_from_uri(uri: &str) -> krusty::source::SourceKind {
+    url::Url::parse(uri)
+        .ok()
+        .and_then(|uri| uri.to_file_path().ok())
+        .as_deref()
+        .and_then(krusty::source::kind)
+        .unwrap_or(krusty::source::SourceKind::Kotlin)
 }
 
 #[cfg(test)]

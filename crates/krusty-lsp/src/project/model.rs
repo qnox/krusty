@@ -140,6 +140,22 @@ impl ProjectModel {
             .find(|module| module.id.as_ref() == Some(id))
     }
 
+    pub fn module_for_source(&self, path: &Path) -> Option<&Module> {
+        self.modules
+            .iter()
+            .filter_map(|module| {
+                module
+                    .source_roots
+                    .iter()
+                    .filter(|root| path.starts_with(&root.path))
+                    .map(|root| root.path.components().count())
+                    .max()
+                    .map(|depth| (depth, module))
+            })
+            .max_by_key(|(depth, _)| *depth)
+            .map(|(_, module)| module)
+    }
+
     /// Classpath handed to the compiler for `module`: its own classpath, its friend paths, and the
     /// output of everything it depends on. Deduplicated, first occurrence wins.
     pub fn compile_classpath(&self, module: &Module) -> Vec<PathBuf> {
@@ -209,5 +225,21 @@ mod tests {
             model.compile_classpath(test),
             vec![PathBuf::from("/p/app/build/classes/kotlin/main")]
         );
+    }
+
+    #[test]
+    fn source_paths_select_the_module_with_the_most_specific_root() {
+        let model = model();
+
+        assert_eq!(
+            model
+                .module_for_source(Path::new("/p/app/src/test/kotlin/Example.kt"))
+                .and_then(|module| module.id.as_ref())
+                .map(ModuleId::as_str),
+            Some(":app:test")
+        );
+        assert!(model
+            .module_for_source(Path::new("/p/unowned/Example.kt"))
+            .is_none());
     }
 }

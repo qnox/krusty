@@ -14,6 +14,7 @@ use krusty::diag::{DiagSink, Diagnostic};
 use krusty::features::LangFeatures;
 use krusty::frontend;
 use krusty::libraries::SemanticPlatform;
+use krusty::source::SourceInput;
 use krusty::types::Ty;
 
 pub(crate) use completion::{CompletionDetails, CompletionKind, CompletionSymbols};
@@ -101,43 +102,22 @@ pub fn analyze_source_set_with_features(
     platform: Box<dyn SemanticPlatform>,
     project_features: &LangFeatures,
 ) -> SourceSetAnalysis {
-    let mut diags = DiagSink::new();
-    let mut files = Vec::with_capacity(sources.len());
-    for (index, source) in sources.iter().enumerate() {
-        diags.set_file(index as u32);
-        let mut features = project_features.clone();
-        features.apply_source_directives(source);
-        files.push(frontend::parse_source(source, &features, &mut diags));
-    }
-
-    let parse_errors: Vec<_> = (0..sources.len())
-        .map(|index| {
-            diags
-                .diags
-                .iter()
-                .any(|diagnostic| diagnostic.file as usize == index)
-        })
-        .collect();
-    let mut symbols = frontend::collect_signatures_with_cp(&files, platform, &mut diags);
-    frontend::preinfer_module_returns(&files, &mut symbols, &mut diags);
-    let types: Vec<_> = files
+    let inputs = sources
         .iter()
-        .enumerate()
-        .map(|(index, _file)| {
-            if parse_errors[index] {
-                None
-            } else {
-                diags.set_file(index as u32);
-                Some(frontend::check_file_in_source_set(
-                    &files,
-                    index as u32,
-                    &mut symbols,
-                    &mut diags,
-                ))
-            }
-        })
-        .collect();
-    let mut diagnostics = vec![Vec::new(); sources.len()];
+        .map(|source| SourceInput::kotlin(source))
+        .collect::<Vec<_>>();
+    analyze_source_inputs_with_features(&inputs, platform, project_features)
+}
+
+pub fn analyze_source_inputs_with_features(
+    inputs: &[SourceInput<'_>],
+    platform: Box<dyn SemanticPlatform>,
+    project_features: &LangFeatures,
+) -> SourceSetAnalysis {
+    let mut diags = DiagSink::new();
+    let analysis =
+        frontend::analyze_source_set_with_features(inputs, platform, project_features, &mut diags);
+    let mut diagnostics = vec![Vec::new(); inputs.len()];
     for mut diagnostic in diags.diags {
         let file = diagnostic.file as usize;
         if let Some(file_diagnostics) = diagnostics.get_mut(file) {
@@ -145,9 +125,10 @@ pub fn analyze_source_set_with_features(
             file_diagnostics.push(diagnostic);
         }
     }
-    let files = files
+    let files = analysis
+        .files
         .into_iter()
-        .zip(types)
+        .zip(analysis.types)
         .zip(diagnostics)
         .map(|((file, types), diagnostics)| FileAnalysis {
             file,
@@ -155,7 +136,10 @@ pub fn analyze_source_set_with_features(
             diagnostics,
         })
         .collect();
-    SourceSetAnalysis { files, symbols }
+    SourceSetAnalysis {
+        files,
+        symbols: analysis.symbols,
+    }
 }
 
 pub fn analyze_standalone_source_set(sources: &[&str]) -> SourceSetAnalysis {
