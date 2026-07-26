@@ -121,6 +121,9 @@ pub fn analyze_source_inputs_with_features(
     for mut diagnostic in diags.diags {
         let file = diagnostic.file as usize;
         if let Some(file_diagnostics) = diagnostics.get_mut(file) {
+            if let Some(editor_span) = diagnostic.editor_span.take() {
+                diagnostic.span = editor_span;
+            }
             diagnostic.file = 0;
             file_diagnostics.push(diagnostic);
         }
@@ -186,6 +189,26 @@ mod tests {
                 span.lo <= value_offset && value_offset < span.hi && ty == krusty::types::Ty::Int
             }),
             "caller was checked before value() acquired its inferred Int return"
+        );
+    }
+
+    #[test]
+    fn source_set_uses_editor_diagnostic_span_without_retaining_both_ranges() {
+        let source = "fun pair(left: Int, right: String): Int = left\n\
+                      fun missing(): Int = pair(1)";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let diagnostic = analysis.files[0]
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.msg == "no value passed for parameter 'right'.")
+            .expect("missing-argument diagnostic");
+        assert_eq!(
+            &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
+            "pair"
+        );
+        assert_eq!(
+            diagnostic.editor_span, None,
+            "the LSP handoff must consume the alternate span instead of retaining duplicate metadata"
         );
     }
 
