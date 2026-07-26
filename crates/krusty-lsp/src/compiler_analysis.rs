@@ -213,6 +213,22 @@ mod tests {
     }
 
     #[test]
+    fn source_set_preserves_unknown_named_argument_diagnostic_and_exact_name_span() {
+        let source = "fun pair(left: Int, right: String): String = right\n\
+                      fun invalid(): String = pair(left = 1, unknown = 2, right = \"ok\")";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let diagnostic = analysis.files[0]
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.msg == "no parameter with name 'unknown' found.")
+            .expect("unknown named-argument diagnostic");
+        assert_eq!(
+            &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
+            "unknown"
+        );
+    }
+
+    #[test]
     fn empty_source_set_is_valid_after_last_document_closes() {
         let analysis = analyze_standalone_source_set(&[]);
         assert!(analysis.files.is_empty());
