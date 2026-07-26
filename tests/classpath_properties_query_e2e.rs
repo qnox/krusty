@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
+use krusty::libraries::SemanticPlatform;
 use krusty::symbol_source::SymbolSource;
 use krusty::types::Ty;
 
@@ -19,7 +20,10 @@ fn member_property_getter_and_setter_from_metadata() {
     };
     let Some(dir) = common::compile_lib(
         "propquery",
-        "class Holder(val label: String) { var count: Int = 0 }\nval Holder.tag: String get() = \"t\"",
+        "class Holder(val label: String) { var count: Int = 0 }\n\
+         val Holder.tag: String get() = \"t\"\n\
+         fun Holder.tag(): String = \"f\"\n\
+         val Holder.isTagged: Boolean get() = true",
     ) else {
         eprintln!("skip: kotlinc unavailable");
         return;
@@ -60,8 +64,10 @@ fn member_property_getter_and_setter_from_metadata() {
     // `val Holder.tag` — an EXTENSION property. Extension/top-level declarations are surfaced by the
     // receiver-AGNOSTIC `resolve_symbols` fqn seam (member properties by `property_members`); its getter
     // (a static `getTag(Holder)` on the facade) carries the extension receiver from the Package metadata.
-    let props = match lib.resolve_symbols("tag").callables {
-        krusty::libraries::Callables::Properties(p) => p.overloads,
+    let symbols = lib.resolve_symbols("tag");
+    let props = match &symbols.callables {
+        krusty::libraries::Callables::Properties(p) => p.overloads.clone(),
+        krusty::libraries::Callables::Both { properties, .. } => properties.overloads.clone(),
         _ => Vec::new(),
     };
     let tag = props
@@ -69,6 +75,20 @@ fn member_property_getter_and_setter_from_metadata() {
         .find(|p| p.kind == krusty::libraries::PropKind::Extension)
         .expect("extension property tag resolved from @Metadata");
     assert_eq!(tag.getter.name, "getTag");
+    assert!(matches!(
+        symbols.callables,
+        krusty::libraries::Callables::Both { .. }
+    ));
+
+    let props = match lib.resolve_symbols("isTagged").callables {
+        krusty::libraries::Callables::Properties(p) => p.overloads,
+        _ => Vec::new(),
+    };
+    let is_tagged = props
+        .iter()
+        .find(|p| p.kind == krusty::libraries::PropKind::Extension)
+        .expect("is-prefixed extension property resolved from @Metadata");
+    assert_eq!(is_tagged.getter.name, "isTagged");
 }
 
 #[test]
@@ -117,4 +137,36 @@ fn classpath_jvmname_var_setter_assigns_via_metadata() {
             "an @JvmName var setter must resolve via its metadata setter"
         );
     }
+}
+
+#[test]
+fn callable_reference_targets_must_have_a_real_virtual_method() {
+    let Some(stdlib) = common::stdlib_jar() else {
+        eprintln!("skip: no kotlin-stdlib jar");
+        return;
+    };
+    let Some(jdk) = common::jdk_modules() else {
+        eprintln!("skip: no JDK modules");
+        return;
+    };
+    let lib = JvmLibraries::new(Rc::new(Classpath::new(vec![stdlib, jdk])));
+
+    let target = |receiver, name: &str| {
+        let overload = lib
+            .member_overloads(receiver, name)
+            .overloads
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("missing builtin member {name}"));
+        overload.member_with_return(overload.callable.ret)
+    };
+
+    let string_get = target(Ty::String, "get");
+    assert!(lib.supports_member_reference(&string_get));
+
+    let string_plus = target(Ty::String, "plus");
+    assert!(!lib.supports_member_reference(&string_plus));
+
+    let boolean_not = target(Ty::Boolean, "not");
+    assert!(!lib.supports_member_reference(&boolean_not));
 }

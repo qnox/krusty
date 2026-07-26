@@ -11,7 +11,7 @@
 
 use crate::libraries::{
     FnKind, FunctionInfo, FunctionSet, GenericSig, InlineKind, LibraryCallable, LibraryMember,
-    Origin, PropKind, SemanticPlatform,
+    Origin, PropKind, PropertyInfo, SemanticPlatform,
 };
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
@@ -911,7 +911,7 @@ pub struct MemberFacets {
     pub read: Option<ResolvedMember>,
     pub write: Option<LibraryCallable>,
     pub method_ref: Option<LibraryMember>,
-    pub property_ref: Option<BoundPropertyRef>,
+    pub property_ref: Option<ResolvedPropertyRef>,
     /// Every overload named `name` applicable to the receiver — instance members, operators, AND in-scope
     /// extension functions with a matching receiver — most-derived/member-first. A caller inspecting the
     /// whole family (named-arg mapping, defaults, return agreement, member-vs-extension dispatch) filters
@@ -924,9 +924,7 @@ pub struct MemberFacets {
     /// `args`/`type_args` (default/vararg-aware; admits `@InlineOnly` splice candidates), ready for the emit
     /// seam. A same-module extension is `None` (it emits through the module path, not a library callable).
     pub extension_call: Option<LibraryCallable>,
-    /// For a value receiver: the getter of a classpath EXTENSION PROPERTY `recv.name` (`@Metadata` accessor,
-    /// most-specific applicable receiver rung). `None` when no in-scope extension property matches.
-    pub extension_property_getter: Option<LibraryCallable>,
+    pub extension_property: Option<PropertyInfo>,
 }
 
 pub enum Symbol {
@@ -986,7 +984,7 @@ impl Symbol {
         }
     }
     /// A bound property reference to this name (`recv::name`).
-    pub fn property_ref(self) -> Option<BoundPropertyRef> {
+    pub fn property_ref(self) -> Option<ResolvedPropertyRef> {
         match self {
             Symbol::Member(f) => f.property_ref,
             _ => None,
@@ -1016,7 +1014,15 @@ impl Symbol {
     /// The getter of a classpath extension property `recv.name`.
     pub fn extension_property_getter(self) -> Option<LibraryCallable> {
         match self {
-            Symbol::Member(f) => f.extension_property_getter,
+            Symbol::Member(f) => f.extension_property.map(|property| property.getter),
+            _ => None,
+        }
+    }
+    pub fn extension_property_ref(self) -> Option<ResolvedPropertyRef> {
+        match self {
+            Symbol::Member(f) => f
+                .extension_property
+                .and_then(resolve_extension_property_ref),
             _ => None,
         }
     }
@@ -1259,15 +1265,15 @@ impl<'a> SymbolResolver<'a> {
                 )
                 .filter(|o| !matches!(o.callable.origin, Origin::Module { .. }))
                 .and_then(|o| self.build_extension_callable(name, ty, args, type_args, &o));
-                // The getter of an in-scope classpath extension PROPERTY `recv.name` — its `@Metadata`
-                // accessor at the most-specific applicable receiver rung, read-value results only.
-                // ONE receiver-closure BFS ranks every property AND extension candidate below.
                 let recv_mro = ReceiverMro::new(&self.src, ty);
-                let extension_property_getter = self
+                let extension_property = self
                     .symbols_in_scope(name)
                     .into_iter()
                     .flat_map(|(_, r)| match &r.callables {
                         crate::libraries::Callables::Properties(p) => p.overloads.clone(),
+                        crate::libraries::Callables::Both { properties, .. } => {
+                            properties.overloads.clone()
+                        }
                         _ => Vec::new(),
                     })
                     .filter(|p| p.kind == PropKind::Extension)
@@ -1277,8 +1283,8 @@ impl<'a> SymbolResolver<'a> {
                         Some((rank, p))
                     })
                     .min_by_key(|(rank, _)| *rank)
-                    .map(|(_, p)| p.getter)
-                    .filter(|c| c.ret.is_read_value_result());
+                    .map(|(_, property)| property)
+                    .filter(|property| property.getter.ret.is_read_value_result());
                 // EVERY overload named `name` applicable to the receiver: instance members and operators
                 // (the receiver-aware member query, federated over module + libraries) UNION the in-scope
                 // extension functions whose declared receiver is in the receiver's supertype closure. This
@@ -1306,7 +1312,7 @@ impl<'a> SymbolResolver<'a> {
                     && property_ref.is_none()
                     && overloads.is_empty()
                     && extension_call.is_none()
-                    && extension_property_getter.is_none()
+                    && extension_property.is_none()
                 {
                     return None;
                 }
@@ -1319,7 +1325,7 @@ impl<'a> SymbolResolver<'a> {
                     overloads,
                     top_level_call: None,
                     extension_call,
-                    extension_property_getter,
+                    extension_property,
                 })))
             }
             SymRecv::TopLevel => {
@@ -1344,7 +1350,7 @@ impl<'a> SymbolResolver<'a> {
                     overloads,
                     top_level_call,
                     extension_call: None,
-                    extension_property_getter: None,
+                    extension_property: None,
                 })))
             }
             SymRecv::Type(internal) => self.resolve_symbol_with_literal_and_lambda_args(
@@ -2336,18 +2342,39 @@ fn resolve_instance_ref(lib: &dyn SemanticPlatform, recv: Ty, name: &str) -> Opt
         return None;
     }
     let ret = o.ret.apply(o.callable.ret);
-    Some(o.member_with_return(ret))
+    let member = o.member_with_return(ret);
+    lib.supports_member_reference(&member).then_some(member)
 }
 
-/// A bound PROPERTY reference on a library receiver (`"kotlin"::length`), fully resolved to what the
-/// backend emits: the getter's owner + physical name + the property type. Every classification and
-/// emittability decision is made HERE — the checker and lowerer just consume this, never re-deriving
-/// value-class-ness, interface-ness, or property-vs-function from the platform themselves.
 #[derive(Clone, Debug)]
-pub struct BoundPropertyRef {
-    pub owner: TypeName,
-    pub getter_name: String,
+pub struct ResolvedPropertyRef {
+    pub getter: LibraryCallable,
+    pub setter: Option<LibraryCallable>,
     pub prop_ty: Ty,
+    pub extension_facade: Option<TypeName>,
+}
+
+fn resolve_extension_property_ref(property: PropertyInfo) -> Option<ResolvedPropertyRef> {
+    let getter = property.getter;
+    if !matches!(getter.origin, Origin::Library)
+        || getter.suspend
+        || getter.default_call
+        || getter.params.len() != 1
+        || getter.name.contains('-')
+        || getter.physical_ret != getter.ret
+    {
+        return None;
+    }
+    let setter = property
+        .setter
+        .filter(|setter| setter.params.len() == 2 && setter.physical_ret == Ty::Unit);
+    let prop_ty = getter.ret;
+    Some(ResolvedPropertyRef {
+        extension_facade: Some(getter.owner),
+        getter,
+        setter,
+        prop_ty,
+    })
 }
 
 /// Resolve a bound property reference on `recv` (`"kotlin"::length`) to its emittable getter descriptor,
@@ -2361,7 +2388,7 @@ fn resolve_property_ref(
     lib: &dyn SemanticPlatform,
     recv: Ty,
     name: &str,
-) -> Option<BoundPropertyRef> {
+) -> Option<ResolvedPropertyRef> {
     if matches!(recv, Ty::TyParam(..) | Ty::Nullable(..))
         || recv.kotlin_class_internal() == Some(crate::types::wk::any())
     {
@@ -2370,23 +2397,65 @@ fn resolve_property_ref(
     if !lib.member_is_property(recv, name) {
         return None;
     }
-    let m = resolve_property_member(lib, recv, name)?;
-    if m.suspend {
+    let resolved = resolve_property_member(lib, recv, name)?;
+    if resolved.suspend {
         return None;
     }
-    let owner = m.member.owner?;
-    if m.member.name.contains('-')
+    let property = lib
+        .property_members(recv, name)
+        .overloads
+        .into_iter()
+        .min_by_key(|property| property.receiver_rank);
+    let (getter, setter) = if let Some(property) = property {
+        (
+            property.getter,
+            property
+                .setter
+                .filter(|setter| setter.params.len() == 1 && setter.physical_ret == Ty::Unit),
+        )
+    } else {
+        let member = resolved.member.clone();
+        let owner = member.owner?;
+        (
+            LibraryCallable::library(
+                owner,
+                member.physical_name.unwrap_or(member.name),
+                member.params,
+                resolved.ret,
+                member.physical_ret,
+                member.descriptor,
+            ),
+            resolve_property_setter(lib, recv, name),
+        )
+    };
+    let direct_member = |callable: &LibraryCallable| {
+        let mut member = LibraryMember::new(
+            callable.name.clone(),
+            callable.params.clone(),
+            callable.ret,
+            callable.descriptor.clone(),
+        );
+        member.owner = Some(callable.owner);
+        member.physical_ret = callable.physical_ret;
+        member
+    };
+    let owner = getter.owner;
+    if !getter.params.is_empty()
+        || getter.name.contains('-')
         || lib.is_value_name(owner)
         || lib
             .resolve_type_name(owner)
             .is_some_and(|t| t.is_interface())
+        || !lib.supports_member_reference(&direct_member(&getter))
     {
         return None;
     }
-    Some(BoundPropertyRef {
-        owner,
-        getter_name: m.member.name,
-        prop_ty: m.ret,
+    let setter = setter.filter(|callable| lib.supports_member_reference(&direct_member(callable)));
+    Some(ResolvedPropertyRef {
+        getter,
+        setter,
+        prop_ty: resolved.ret,
+        extension_facade: None,
     })
 }
 
@@ -2688,6 +2757,7 @@ fn function_set_from_symbols(
             .into_iter()
             .flat_map(|(_, r)| match &r.callables {
                 crate::libraries::Callables::Functions(f) => f.overloads.clone(),
+                crate::libraries::Callables::Both { functions, .. } => functions.overloads.clone(),
                 _ => Vec::new(),
             })
             .collect(),
@@ -2838,6 +2908,7 @@ fn select_overload(
             .flat_map(|(_, r)| {
                 let fns: &[FunctionInfo] = match &r.callables {
                     crate::libraries::Callables::Functions(f) => &f.overloads,
+                    crate::libraries::Callables::Both { functions, .. } => &functions.overloads,
                     _ => &[],
                 };
                 fns.iter()

@@ -775,6 +775,7 @@ pub struct FuncRef {
     /// Class the target method is invoked on; `None` = the file facade.
     pub call_owner: Option<TypeName>,
     pub call_name: String,
+    pub reflection_name: Option<String>,
     /// The target method is declared on an INTERFACE (`invokeinterface`, not `invokevirtual`).
     pub call_interface: bool,
     /// The LOGICAL `invoke` parameter types. For `VirtualUnbound`, `param_tys[0]` is the receiver
@@ -809,6 +810,9 @@ pub struct PropRef {
     pub owner_internal: Option<TypeName>,
     pub prop_name: String,
     pub getter_name: String,
+    pub getter_descriptor: Option<String>,
+    pub setter_name: Option<String>,
+    pub setter_descriptor: Option<String>,
     pub prop_ty: Ty,
     /// `false` = an unbound `Type::prop` (a `PropertyReference1Impl` singleton with `get(Object)`);
     /// `true` = a bound `obj::prop` (a `PropertyReference0Impl` constructed with the captured receiver,

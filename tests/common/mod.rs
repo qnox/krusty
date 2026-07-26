@@ -1308,6 +1308,21 @@ pub fn run_box_against(tag: &str, lib_src: &str, main: &str) -> Option<String> {
     compile_and_run_box(main, "Main", &[libout, stdlib], jdk_modules().as_deref())
 }
 
+/// [`run_box_against`] with `kotlin-reflect` on the classpath.
+#[allow(dead_code)]
+pub fn run_box_against_with_reflect(tag: &str, lib_src: &str, main: &str) -> Option<String> {
+    let libout = compile_lib(tag, lib_src)?;
+    let stdlib = stdlib_jar()?;
+    let reflect =
+        dist_jar("kotlin-reflect.jar").or_else(|| find_jar("kotlin-reflect-", &["sources"]))?;
+    compile_and_run_box(
+        main,
+        "Main",
+        &[libout, stdlib, reflect],
+        jdk_modules().as_deref(),
+    )
+}
+
 /// Compile `main` against a kotlinc-built `lib_src` up to the CHECKER only (no lowering/emit), returning
 /// the diagnostic messages (empty = clean). For asserting the RESOLUTION of a shape whose end-to-end
 /// lowering is an orthogonal, not-yet-implemented feature. `None` (→ skip) when the toolchain is absent.
