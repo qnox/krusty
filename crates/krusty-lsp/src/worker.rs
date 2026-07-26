@@ -33,7 +33,7 @@ const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_SOURCE_SET_BYTES: usize = 32 * 1024 * 1024;
 const BASE_ANALYSIS_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ANALYSIS_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const ANALYSIS_MILLIS_PER_ADDITIONAL_SOURCE: u64 = 500;
+const ANALYSIS_MILLIS_PER_ADDITIONAL_SOURCE: u64 = 1_000;
 const ANALYSIS_SECS_PER_SOURCE_MIB: u64 = 2;
 
 #[derive(Serialize)]
@@ -629,7 +629,7 @@ mod tests {
         let module = vec![SourceInput::kotlin(""); 96];
         assert_eq!(
             analysis_timeout(&module),
-            BASE_ANALYSIS_TIMEOUT + Duration::from_millis(95 * 500)
+            BASE_ANALYSIS_TIMEOUT + Duration::from_secs(95)
         );
         let one_mib = "x".repeat(1024 * 1024);
         assert_eq!(
