@@ -31,7 +31,10 @@ use crate::{
 pub const DEFAULT_ANALYSES_PER_WORKER: usize = 64;
 const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_SOURCE_SET_BYTES: usize = 32 * 1024 * 1024;
-const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(30);
+const BASE_ANALYSIS_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_ANALYSIS_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const ANALYSIS_MILLIS_PER_ADDITIONAL_SOURCE: u64 = 500;
+const ANALYSIS_SECS_PER_SOURCE_MIB: u64 = 2;
 
 #[derive(Serialize)]
 struct AnalysisRequest<'a> {
@@ -221,6 +224,22 @@ fn encode_response(analyses: &[AnalysisResponse]) -> io::Result<Vec<u8>> {
     Ok(response.bytes)
 }
 
+fn analysis_timeout(sources: &[SourceInput<'_>]) -> Duration {
+    let additional_sources = sources.len().saturating_sub(1) as u64;
+    let source_bytes = sources.iter().fold(0usize, |total, source| {
+        total.saturating_add(source.text.len())
+    });
+    let source_mib = (source_bytes / (1024 * 1024)) as u64;
+    BASE_ANALYSIS_TIMEOUT
+        .saturating_add(Duration::from_millis(
+            additional_sources.saturating_mul(ANALYSIS_MILLIS_PER_ADDITIONAL_SOURCE),
+        ))
+        .saturating_add(Duration::from_secs(
+            source_mib.saturating_mul(ANALYSIS_SECS_PER_SOURCE_MIB),
+        ))
+        .min(MAX_ANALYSIS_TIMEOUT)
+}
+
 impl WorkerProcess {
     fn spawn(executable: &Path, arguments: &[String]) -> io::Result<Self> {
         let mut child = Command::new(executable)
@@ -245,7 +264,7 @@ impl WorkerProcess {
         })
     }
 
-    fn read_response(&mut self) -> io::Result<Vec<u8>> {
+    fn read_response(&mut self, timeout: Duration) -> io::Result<Vec<u8>> {
         let mut stdout = self
             .stdout
             .take()
@@ -255,7 +274,7 @@ impl WorkerProcess {
             let response = read_framed(&mut stdout, MAX_WORKER_MESSAGE_BYTES);
             let _ = sender.send((stdout, response));
         });
-        match receiver.recv_timeout(ANALYSIS_TIMEOUT) {
+        match receiver.recv_timeout(timeout) {
             Ok((stdout, response)) => {
                 self.stdout = Some(stdout);
                 response?.ok_or_else(|| {
@@ -289,7 +308,7 @@ impl WorkerProcess {
         let request = encode_request(inputs, result_count, language_features)?;
         write_framed(&mut self.stdin, &request)?;
         drop(request);
-        let response = self.read_response()?;
+        let response = self.read_response(analysis_timeout(inputs))?;
         let analyses =
             serde_json::from_slice::<Vec<AnalysisResponse>>(&response).map_err(json_io)?;
         drop(response);
@@ -597,6 +616,28 @@ mod tests {
         let error = output.write_all(b"5").unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(output.bytes, b"1234");
+    }
+
+    #[test]
+    fn analysis_deadline_scales_with_the_complete_source_set_and_stays_bounded() {
+        assert_eq!(
+            analysis_timeout(&[SourceInput::kotlin("fun one() = 1")]),
+            BASE_ANALYSIS_TIMEOUT
+        );
+
+        let module = vec![SourceInput::kotlin(""); 96];
+        assert_eq!(
+            analysis_timeout(&module),
+            BASE_ANALYSIS_TIMEOUT + Duration::from_millis(95 * 500)
+        );
+        let one_mib = "x".repeat(1024 * 1024);
+        assert_eq!(
+            analysis_timeout(&[SourceInput::kotlin(&one_mib)]),
+            BASE_ANALYSIS_TIMEOUT + Duration::from_secs(2)
+        );
+
+        let maximum = vec![SourceInput::kotlin(""); 1_000];
+        assert_eq!(analysis_timeout(&maximum), MAX_ANALYSIS_TIMEOUT);
     }
 
     #[test]
