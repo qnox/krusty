@@ -56,6 +56,8 @@ pub struct Signature {
     /// True for a `suspend fun`. Flows to `FnFlags.suspend` so the resolver reports suspend-ness
     /// uniformly for same-file and classpath callees; the coroutine pass keys off it.
     pub is_suspend: bool,
+    /// Kotlin source visibility for this exact overload.
+    pub visibility: Visibility,
     /// Number of leading context parameters in `params`. Ordinary functions leave this at 0.
     pub context_count: usize,
     /// Source declaration id for a top-level function in the current compilation, when this signature
@@ -2256,6 +2258,7 @@ pub fn collect_signatures_with_cp(
                         is_inline: f.is_inline,
                         is_final: f.is_final,
                         is_suspend: f.is_suspend,
+                        visibility: f.visibility,
                         context_count: f.context_count,
                         source_decl: Some(d),
                         source_file: Some(i as u32),
@@ -2932,6 +2935,7 @@ pub fn collect_signatures_with_cp(
                                     is_inline: false,
                                     is_final: true,
                                     is_suspend: false,
+                                    visibility: Visibility::Public,
                                     context_count: 0,
                                     source_decl: None,
                                     source_file: None,
@@ -2956,6 +2960,7 @@ pub fn collect_signatures_with_cp(
                                 is_inline: false,
                                 is_final: true,
                                 is_suspend: false,
+                                visibility: Visibility::Public,
                                 context_count: 0,
                                 source_decl: None,
                                 source_file: None,
@@ -3115,6 +3120,7 @@ pub fn collect_signatures_with_cp(
                                 is_inline: false,
                                 is_final: true,
                                 is_suspend: false,
+                                visibility: Visibility::Public,
                                 context_count: 0,
                                 source_decl: None,
                                 source_file: None,
@@ -5265,6 +5271,7 @@ fn member_signature(
         is_inline: false,
         is_final: m.is_final,
         is_suspend: m.is_suspend,
+        visibility: m.visibility,
         context_count: 0,
         source_decl: None,
         source_file: None,
@@ -5508,6 +5515,7 @@ pub enum ResolvedCall {
         ret: Ty,
         interface: bool,
         vararg: bool,
+        visibility: Visibility,
     },
     /// A same-module extension operator selected by the checker for a source expression.
     ModuleExtension {
@@ -8099,6 +8107,7 @@ impl<'a> Checker<'a> {
                             ret: sig.ret,
                             interface,
                             vararg: sig.vararg,
+                            visibility: sig.visibility,
                         },
                     ));
                 }
@@ -10785,6 +10794,7 @@ impl<'a> Checker<'a> {
                                     ret: sig.ret,
                                     interface,
                                     vararg: sig.vararg,
+                                    visibility: sig.visibility,
                                 },
                             );
                             return self.set(e, sig.ret);
@@ -14837,6 +14847,7 @@ impl<'a> Checker<'a> {
                     ret,
                     interface,
                     vararg: fi.call_sig.vararg,
+                    visibility: fi.visibility,
                 },
             );
         } else {
@@ -15015,7 +15026,6 @@ impl<'a> Checker<'a> {
             && !all_members
                 .iter()
                 .any(|member| module_member_candidate_applicable(member, args, arg_tys, arg_names));
-        let members = pick_member_overloads(all_members, arg_tys, arg_names.is_some());
         if has_sibling_overloads && no_applicable_sibling {
             self.diags.error(
                 self.call_callee_name_span(call),
@@ -15023,6 +15033,19 @@ impl<'a> Checker<'a> {
             );
             return Some(Ty::Error);
         }
+        let members = arg_names
+            .map(|names| {
+                all_members
+                    .iter()
+                    .filter(|member| {
+                        module_member_candidate_applicable(member, args, arg_tys, Some(names))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .filter(|members| !members.is_empty())
+            .map(|members| pick_member_overloads(members, arg_tys, false))
+            .unwrap_or_else(|| pick_member_overloads(all_members, arg_tys, arg_names.is_some()));
         // The first Member overload is the most-derived override (for dispatch/return). For an
         // OMITTED-argument call, the default may be declared on a SUPERTYPE (an interface method's default
         // isn't redeclared on the override) — prefer an overload that records defaults so the omitted args
@@ -15109,11 +15132,7 @@ impl<'a> Checker<'a> {
         } else {
             // A `vararg` member (`fun f(vararg s: T)`) accepts trailing `T` args packed into the array
             // param — element-type them, don't match the array positionally.
-            let vararg = self
-                .syms
-                .method_of_name(internal_name, name)
-                .is_some_and(|s| s.vararg);
-            self.expect_call_args(&params, vararg, args, arg_tys);
+            self.expect_call_args(&params, cs.vararg, args, arg_tys);
         }
         // A generic higher-order member: the result is the method's `<R>` inferred from the lambda body
         // (`box.map { it.length }` → `Int`), not the erased `Object`.
@@ -15149,6 +15168,7 @@ impl<'a> Checker<'a> {
                 ret,
                 interface: fi.is_interface,
                 vararg: cs.vararg,
+                visibility: fi.visibility,
             },
         );
         if let Some(slots) = mapped_slots {
@@ -15735,6 +15755,60 @@ impl<'a> Checker<'a> {
                 // path and let the receiver resolve as that property value below.
                 if let Expr::Name(cls) = self.file.expr(receiver).clone() {
                     if !self.value_root_shadows_classifier(&cls) {
+                        let is_object = self.syms.objects.contains(&cls);
+                        // A Kotlin `object` is a singleton VALUE whose ordinary methods participate in
+                        // instance-member resolution, including inherited overloads. Try that hierarchy
+                        // before the static table; plugin-synthesized object statics (for example
+                        // `serializer()`) remain a fallback below.
+                        if is_object {
+                            let arg_tys = self.arg_tys(args);
+                            let internal = self
+                                .syms
+                                .classes
+                                .get(&cls)
+                                .map(ClassSig::internal_name)
+                                .unwrap_or_else(|| type_name(&class_internal(self.file, &cls)));
+                            let receiver_ty = Ty::obj_name(internal);
+                            let arg_names = self.file.call_arg_names.get(&call.0).cloned();
+                            let applicable = crate::module_symbols::ModuleSymbols::new(self.syms)
+                                .instance_members(receiver_ty, &name)
+                                .iter()
+                                .any(|member| {
+                                    module_member_candidate_applicable(
+                                        member,
+                                        args,
+                                        &arg_tys,
+                                        arg_names.as_deref(),
+                                    )
+                                });
+                            if applicable {
+                                if let Some(ret) = self.check_module_member_call(
+                                    call,
+                                    receiver_ty,
+                                    &name,
+                                    args,
+                                    &arg_tys,
+                                ) {
+                                    if let Some(ResolvedCall::ModuleMember {
+                                        owner,
+                                        visibility,
+                                        ..
+                                    }) = self.resolved_calls.get(&call)
+                                    {
+                                        let owner = *owner;
+                                        self.reject_if_inaccessible(
+                                            *visibility,
+                                            &name,
+                                            owner,
+                                            span,
+                                        );
+                                    }
+                                    self.expr_lowers
+                                        .insert(call, ExprLowering::ObjectMemberCall { internal });
+                                    return ret;
+                                }
+                            }
+                        }
                         // `ClassName.fn(args)` — a companion (static) method call.
                         if let Some(sig) = self
                             .syms
@@ -15784,8 +15858,9 @@ impl<'a> Checker<'a> {
                             }
                             return sig.ret;
                         }
-                        // `Object.member(args)` — a singleton member call.
-                        if self.syms.objects.contains(&cls) {
+                        // The singleton had neither an applicable instance member nor a synthesized
+                        // static target.
+                        if is_object {
                             let arg_tys = self.arg_tys(args);
                             let internal = self
                                 .syms
@@ -15793,37 +15868,18 @@ impl<'a> Checker<'a> {
                                 .get(&cls)
                                 .map(ClassSig::internal_name)
                                 .unwrap_or_else(|| type_name(&class_internal(self.file, &cls)));
-                            return match self
-                                .syms
-                                .classes
-                                .get(&cls)
-                                .and_then(|c| c.method_matching(&name, &arg_tys))
-                                .cloned()
-                            {
-                                Some(sig) => {
-                                    // Default arguments on object/companion methods aren't filled by the
-                                    // emitter yet, so the call must supply exactly the declared params.
-                                    if sig.params.len() != arg_tys.len() {
-                                        self.diags.error(
-                                            span,
-                                            format!(
-                                                "method '{cls}.{name}' expects {} args, got {}",
-                                                sig.params.len(),
-                                                arg_tys.len()
-                                            ),
-                                        );
-                                    }
-                                    self.expect_call_args(&sig.params, false, args, &arg_tys);
-                                    self.expr_lowers
-                                        .insert(call, ExprLowering::ObjectMemberCall { internal });
-                                    sig.ret
-                                }
-                                None => {
-                                    self.diags
-                                        .error(span, format!("unresolved reference '{name}'."));
-                                    Ty::Error
-                                }
-                            };
+                            if let Some(ret) = self.check_module_member_call(
+                                call,
+                                Ty::obj_name(internal),
+                                &name,
+                                args,
+                                &arg_tys,
+                            ) {
+                                return ret;
+                            }
+                            self.diags
+                                .error(span, format!("unresolved reference '{name}'."));
+                            return Ty::Error;
                         }
                         // An explicit import maps the name directly; otherwise resolve through the
                         // import levels (same-package — including the ROOT package for a classpath
@@ -19522,6 +19578,7 @@ impl<'a> Checker<'a> {
             is_inline: false,
             is_final: false,
             is_suspend: f.is_suspend,
+            visibility: f.visibility,
             context_count: f.context_count,
             source_decl: None,
             source_file: None,
