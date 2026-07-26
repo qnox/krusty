@@ -412,6 +412,8 @@ mod function_typed_property_e2e;
 mod generic_base_member_type_e2e;
 #[path = "generic_delegate_e2e.rs"]
 mod generic_delegate_e2e;
+#[path = "generic_extension_chain_destructure_e2e.rs"]
+mod generic_extension_chain_destructure_e2e;
 #[path = "generic_fn_e2e.rs"]
 mod generic_fn_e2e;
 #[path = "generic_hof_method_check.rs"]
