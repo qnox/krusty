@@ -8167,7 +8167,7 @@ impl<'a> Checker<'a> {
         &self,
         name: &str,
         arg_tys: &[Option<Ty>],
-    ) -> Option<crate::symbol_resolver::TopLevelLambdaShape> {
+    ) -> Option<crate::symbol_resolver::LambdaCallShape> {
         let fs = crate::libraries::FunctionSet {
             overloads: self
                 .resolver()
@@ -8176,7 +8176,7 @@ impl<'a> Checker<'a> {
                 .unwrap_or_default(),
         };
         let has_exact = fs.has_top_level_arity(arg_tys.len());
-        let mut shape = crate::symbol_resolver::TopLevelLambdaShape::default();
+        let mut shape = crate::symbol_resolver::LambdaCallShape::default();
         for o in fs.top_level() {
             if shape.param_types.is_none() {
                 if let Some(gsig) = o.generic_sig.as_ref() {
@@ -8248,14 +8248,12 @@ impl<'a> Checker<'a> {
             .then_some(shape)
     }
 
-    /// Lambda parameter types for an extension call before lambda bodies are typed — binds the selected
-    /// extension's generic signature from the receiver plus already-typed non-lambda args.
-    fn extension_lambda_param_types(
+    fn extension_lambda_shape(
         &self,
         receiver: Ty,
         name: &str,
         arg_tys: &[Option<Ty>],
-    ) -> Option<Vec<Vec<Ty>>> {
+    ) -> Option<crate::symbol_resolver::LambdaCallShape> {
         let src = self.fed_source();
         let fs = crate::libraries::FunctionSet {
             overloads: self
@@ -8293,105 +8291,57 @@ impl<'a> Checker<'a> {
                 if let Some(recv_sig) = gsig.receiver {
                     crate::symbol_resolver::unify_ty(recv_sig, receiver, &mut binds);
                 }
-                for (ps, at) in mapped.iter().zip(arg_tys) {
-                    if let Some(t) = at {
-                        crate::symbol_resolver::unify_ty(*ps, *t, &mut binds);
+                for (parameter, actual) in mapped.iter().zip(arg_tys) {
+                    if let Some(actual) = actual {
+                        crate::symbol_resolver::unify_ty(*parameter, *actual, &mut binds);
                     }
                 }
-                let out: Vec<Vec<Ty>> = mapped
+                let param_types: Vec<Vec<Ty>> = mapped
                     .iter()
-                    .map(|ps| crate::symbol_resolver::function_input_types(*ps, &binds))
-                    .collect();
-                if out.iter().any(|v| !v.is_empty()) {
-                    return Some(out);
-                }
-            }
-        }
-        None
-    }
-
-    /// Lambda RECEIVER types for an extension call before lambda bodies are typed (a `Recv.() -> R`
-    /// lambda parameter binds its implicit `this`).
-    fn extension_lambda_receivers(
-        &self,
-        receiver: Ty,
-        name: &str,
-        arg_tys: &[Option<Ty>],
-    ) -> Option<Vec<Option<Ty>>> {
-        let src = self.fed_source();
-        let fs = crate::libraries::FunctionSet {
-            overloads: self
-                .resolver()
-                .resolve_symbol(
-                    crate::symbol_resolver::SymRecv::Value(receiver),
-                    name,
-                    &[],
-                    &[],
-                )
-                .map(crate::symbol_resolver::Symbol::overloads)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(crate::libraries::FunctionInfo::is_extension)
-                .collect(),
-        };
-        for allow_must_inline in [false, true] {
-            for o in crate::symbol_resolver::ranked_extension_overloads_by_recv(
-                &src,
-                receiver,
-                &fs,
-                allow_must_inline,
-            ) {
-                let Some(gsig) = o.generic_sig.as_ref() else {
-                    continue;
-                };
-                if gsig.params.is_empty() {
-                    continue;
-                }
-                let Some(param_indices) = crate::symbol_resolver::trailing_default_arg_indices(
-                    gsig.params.len() - 1,
-                    arg_tys,
-                ) else {
-                    continue;
-                };
-                let mapped: Vec<(usize, Ty)> = param_indices
-                    .iter()
-                    .map(|&i| (i, gsig.params[i + 1]))
-                    .collect();
-                let mut binds = std::collections::HashMap::new();
-                crate::symbol_resolver::unify_ty(gsig.params[0], receiver, &mut binds);
-                for ((_, ps), at) in mapped.iter().zip(arg_tys) {
-                    if let Some(t) = at {
-                        crate::symbol_resolver::unify_ty(*ps, *t, &mut binds);
-                    }
-                }
-                let out: Vec<Option<Ty>> = mapped
-                    .iter()
-                    .map(|(logical_idx, ps)| {
-                        if let Some(recv) = o
-                            .call_sig
-                            .lambda_receivers
-                            .get(*logical_idx)
-                            .copied()
-                            .flatten()
-                        {
-                            return Some(recv);
-                        }
-                        if o.call_sig
-                            .lambda_receiver_params
-                            .get(*logical_idx)
-                            .copied()
-                            .unwrap_or(false)
-                        {
-                            return crate::symbol_resolver::function_input_types(*ps, &binds)
-                                .first()
-                                .copied();
-                        }
-                        None
+                    .map(|parameter| {
+                        crate::symbol_resolver::function_input_types(*parameter, &binds)
                     })
                     .collect();
-                if out.iter().any(Option::is_some) {
-                    return Some(out);
+                if !param_types.iter().any(|types| !types.is_empty()) {
+                    continue;
                 }
+                let receivers = crate::symbol_resolver::trailing_default_arg_indices(
+                    o.call_sig.lambda_receivers.len(),
+                    arg_tys,
+                )
+                .map(|indices| {
+                    indices
+                        .iter()
+                        .enumerate()
+                        .map(|(argument_index, &parameter_index)| {
+                            o.call_sig
+                                .lambda_receivers
+                                .get(parameter_index)
+                                .copied()
+                                .flatten()
+                                .or_else(|| {
+                                    o.call_sig
+                                        .lambda_receiver_params
+                                        .get(parameter_index)
+                                        .copied()
+                                        .unwrap_or(false)
+                                        .then(|| {
+                                            param_types
+                                                .get(argument_index)
+                                                .and_then(|types| types.first())
+                                                .copied()
+                                        })
+                                        .flatten()
+                                })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .filter(|receivers| receivers.iter().any(Option::is_some));
+                return Some(crate::symbol_resolver::LambdaCallShape {
+                    param_types: Some(param_types),
+                    receivers,
+                    materialized: None,
+                });
             }
         }
         None
@@ -11636,7 +11586,9 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|&x| (!matches!(self.file.expr(x), Expr::Lambda { .. })).then(|| self.expr(x)))
             .collect();
-        let pts = self.extension_lambda_param_types(receiver, name, &partial);
+        let pts = self
+            .extension_lambda_shape(receiver, name, &partial)
+            .and_then(|shape| shape.param_types);
         args.iter()
             .enumerate()
             .map(|(i, &x)| match pts.as_ref().and_then(|p| p.get(i)) {
@@ -17775,22 +17727,29 @@ impl<'a> Checker<'a> {
                             &member_extension_type_args,
                         )
                     });
+                let ext_lambda_shape = if member_ext_lambda_plan.is_none() {
+                    ext_lambda_partial
+                        .as_ref()
+                        .and_then(|partial| self.extension_lambda_shape(rt, &name, partial))
+                } else {
+                    None
+                };
                 let ext_lambda_pts: Option<Vec<Vec<Ty>>> = member_ext_lambda_plan
                     .as_ref()
                     .map(|plan| plan.param_types.clone())
                     .or_else(|| {
-                        ext_lambda_partial.as_ref().and_then(|partial| {
-                            self.extension_lambda_param_types(rt, &name, partial)
-                        })
-                    });
-                let ext_lambda_recvs: Option<Vec<Option<Ty>>> =
-                    if let Some(plan) = &member_ext_lambda_plan {
-                        Some(plan.receivers.clone())
-                    } else {
-                        ext_lambda_partial
+                        ext_lambda_shape
                             .as_ref()
-                            .and_then(|partial| self.extension_lambda_receivers(rt, &name, partial))
-                    };
+                            .and_then(|shape| shape.param_types.clone())
+                    });
+                let ext_lambda_recvs: Option<Vec<Option<Ty>>> = member_ext_lambda_plan
+                    .as_ref()
+                    .map(|plan| plan.receivers.clone())
+                    .or_else(|| {
+                        ext_lambda_shape
+                            .as_ref()
+                            .and_then(|shape| shape.receivers.clone())
+                    });
                 // Array/`String` `forEach`/`forEachIndexed` have no `Obj` generic signature; supply the
                 // lambda parameter types directly from the element (the index is `Int`).
                 let ext_lambda_pts = ext_lambda_pts.or_else(|| {
@@ -19175,14 +19134,43 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
-                let this_member_lambda_pts = ordinary_this_member_lambda_pts.or_else(|| {
-                    this_member_ext_lambda_plan
-                        .as_ref()
-                        .map(|plan| plan.param_types.clone())
-                });
+                let implicit_library_ext_lambda_shape = if implicit_member_lambda_enabled
+                    && ordinary_this_member_lambda_pts.is_none()
+                    && this_member_ext_lambda_plan.is_none()
+                {
+                    self.implicit_receiver_types()
+                        .into_iter()
+                        .find_map(|receiver| {
+                            let shape = self.extension_lambda_shape(
+                                receiver,
+                                &fname,
+                                this_member_partial.as_deref().unwrap_or_default(),
+                            )?;
+                            shape.param_types.as_ref()?;
+                            Some(shape)
+                        })
+                } else {
+                    None
+                };
+                let this_member_lambda_pts = ordinary_this_member_lambda_pts
+                    .or_else(|| {
+                        this_member_ext_lambda_plan
+                            .as_ref()
+                            .map(|plan| plan.param_types.clone())
+                    })
+                    .or_else(|| {
+                        implicit_library_ext_lambda_shape
+                            .as_ref()
+                            .and_then(|shape| shape.param_types.clone())
+                    });
                 let this_member_lambda_recvs = this_member_ext_lambda_plan
                     .as_ref()
-                    .map(|plan| plan.receivers.clone());
+                    .map(|plan| plan.receivers.clone())
+                    .or_else(|| {
+                        implicit_library_ext_lambda_shape
+                            .as_ref()
+                            .and_then(|shape| shape.receivers.clone())
+                    });
                 // A same-file class CONSTRUCTOR call (`C({ x, y -> x + y })`, an `enum` entry
                 // `plus({ x, y -> … })`): a lambda passed to a function-typed primary-ctor parameter
                 // binds its parameter types from that parameter's `Ty::Fun`, exactly like a top-level
