@@ -1,33 +1,79 @@
+mod common;
+
 use std::io::{BufReader, Write};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use krusty_lsp::{read_framed, write_framed, MAX_MESSAGE_BYTES};
 use serde_json::{json, Value};
 
-fn run_server(arguments: &[&str], messages: &[Value]) -> Vec<Value> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_krusty-lsp"));
-    command.args(["--stdio", "-no-jdk"]).args(arguments);
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("start krusty-lsp");
-    {
-        let stdin = child.stdin.as_mut().unwrap();
-        for message in messages {
-            write_framed(stdin, &serde_json::to_vec(message).unwrap()).unwrap();
-        }
-        stdin.flush().unwrap();
-    }
-    drop(child.stdin.take());
+use common::TempProject;
 
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    let mut output = Vec::new();
-    while let Some(body) = read_framed(&mut stdout, MAX_MESSAGE_BYTES).unwrap() {
-        output.push(serde_json::from_slice(&body).unwrap());
+struct ServerProcess {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl ServerProcess {
+    fn start(arguments: &[&str]) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_krusty-lsp"));
+        command.args(["--stdio", "-no-jdk"]).args(arguments);
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("start krusty-lsp");
+        let stdin = child.stdin.take().unwrap();
+        let stdout = BufReader::new(child.stdout.take().unwrap());
+        Self {
+            child,
+            stdin,
+            stdout,
+        }
     }
-    assert!(child.wait().unwrap().success());
-    output
+
+    fn send(&mut self, message: &Value) {
+        write_framed(&mut self.stdin, &serde_json::to_vec(message).unwrap()).unwrap();
+        self.stdin.flush().unwrap();
+    }
+
+    fn receive(&mut self) -> Option<Value> {
+        read_framed(&mut self.stdout, MAX_MESSAGE_BYTES)
+            .unwrap()
+            .map(|body| serde_json::from_slice(&body).unwrap())
+    }
+
+    fn receive_until(&mut self, predicate: impl Fn(&Value) -> bool) -> Value {
+        loop {
+            let message = self.receive().expect("LSP response");
+            if predicate(&message) {
+                return message;
+            }
+        }
+    }
+
+    fn finish(self) -> Vec<Value> {
+        let Self {
+            mut child,
+            stdin,
+            mut stdout,
+        } = self;
+        drop(stdin);
+        let mut output = Vec::new();
+        while let Some(body) = read_framed(&mut stdout, MAX_MESSAGE_BYTES).unwrap() {
+            output.push(serde_json::from_slice(&body).unwrap());
+        }
+        assert!(child.wait().unwrap().success());
+        output
+    }
+}
+
+fn run_server(arguments: &[&str], messages: &[Value]) -> Vec<Value> {
+    let mut server = ServerProcess::start(arguments);
+    for message in messages {
+        server.send(message);
+    }
+    server.finish()
 }
 
 #[test]
@@ -132,4 +178,204 @@ fun combine(entries: Array<Entry>): String {
         .and_then(|message| message["params"]["diagnostics"].as_array())
         .expect("published diagnostics");
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn stdio_server_indexes_unopened_project_sources() {
+    let project = TempProject::new("unopened-source");
+    project.write(
+        "src/Model.kt",
+        "package sample\ndata class Item(val label: String, val rank: Int?)\n",
+    );
+    let use_uri = project.uri("src/Use.kt");
+    let root_uri: String = url::Url::from_directory_path(project.path())
+        .expect("temporary project root is a file URI")
+        .into();
+    let messages = [
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"rootUri": root_uri}
+        }),
+        json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": use_uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "package sample\nfun make() = Item(label = \"ok\", rank = null)\n"
+                }
+            }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": {"uri": use_uri},
+                "position": {"line": 1, "character": 14}
+            }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/rename",
+            "params": {
+                "textDocument": {"uri": use_uri},
+                "position": {"line": 1, "character": 14},
+                "newName": "Renamed"
+            }
+        }),
+        json!({"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": null}),
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    ];
+
+    let output = run_server(&[], &messages);
+    let watchers = output
+        .iter()
+        .find(|message| message["method"] == "client/registerCapability")
+        .and_then(|message| {
+            message["params"]["registrations"][0]["registerOptions"]["watchers"].as_array()
+        })
+        .expect("registered file watchers");
+    assert!(watchers
+        .iter()
+        .any(|watcher| watcher["globPattern"] == "**/*.kt"));
+    let diagnostics = output
+        .iter()
+        .find(|message| {
+            message["method"] == "textDocument/publishDiagnostics"
+                && message["params"]["uri"] == use_uri
+        })
+        .and_then(|message| message["params"]["diagnostics"].as_array())
+        .expect("published use-site diagnostics");
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let definition = output
+        .iter()
+        .find(|message| message["id"] == 2)
+        .expect("definition response");
+    assert_eq!(definition["result"][0]["uri"], project.uri("src/Model.kt"));
+    let rename = output
+        .iter()
+        .find(|message| message["id"] == 3)
+        .expect("rename response");
+    assert_eq!(rename["result"], Value::Null);
+}
+
+#[test]
+fn stdio_server_reanalyzes_after_an_unopened_source_changes() {
+    let project = TempProject::new("changed-unopened-source");
+    project.write("src/Model.kt", "package sample\nclass Item\n");
+    let use_uri = project.uri("src/Use.kt");
+    let root_uri: String = url::Url::from_directory_path(project.path())
+        .expect("temporary project root is a file URI")
+        .into();
+    let mut server = ServerProcess::start(&[]);
+    server.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {"rootUri": root_uri}
+    }));
+    server.receive_until(|message| message["id"] == 1);
+    server.send(&json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": use_uri,
+                "languageId": "kotlin",
+                "version": 1,
+                "text": "package sample\nfun make() = Item()\n"
+            }
+        }
+    }));
+    let initial = server.receive_until(|message| {
+        message["method"] == "textDocument/publishDiagnostics"
+            && message["params"]["uri"] == use_uri
+    });
+    assert_eq!(initial["params"]["diagnostics"], json!([]));
+
+    project.write("src/Model.kt", "package sample\nclass Replacement\n");
+    server.send(&json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didChangeWatchedFiles",
+        "params": {
+            "changes": [{"uri": project.uri("src/Model.kt"), "type": 2}]
+        }
+    }));
+    let changed = server.receive_until(|message| {
+        message["method"] == "textDocument/publishDiagnostics"
+            && message["params"]["uri"] == use_uri
+    });
+    let diagnostics = changed["params"]["diagnostics"].as_array().unwrap();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["message"] == "Unresolved function 'Item'"),
+        "{diagnostics:?}"
+    );
+
+    server.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "shutdown",
+        "params": null
+    }));
+    server.send(&json!({"jsonrpc": "2.0", "method": "exit", "params": null}));
+    let _ = server.finish();
+}
+
+#[test]
+fn stdio_server_suppresses_semantic_diagnostics_for_an_incomplete_source_set() {
+    let project = TempProject::new("oversized-source-set");
+    let oversized = project.path().join("src/Oversized.kt");
+    std::fs::create_dir_all(oversized.parent().unwrap()).unwrap();
+    let file = std::fs::File::create(oversized).unwrap();
+    file.set_len(krusty_lsp::MAX_SOURCE_SET_BYTES as u64 + 1)
+        .unwrap();
+    let use_uri = project.uri("src/Use.kt");
+    let root_uri: String = url::Url::from_directory_path(project.path())
+        .expect("temporary project root is a file URI")
+        .into();
+    let messages = [
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"rootUri": root_uri}
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": use_uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "fun use() = missing()\n"
+                }
+            }
+        }),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": null}),
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    ];
+
+    let output = run_server(&[], &messages);
+    let diagnostics = output
+        .iter()
+        .find(|message| {
+            message["method"] == "textDocument/publishDiagnostics"
+                && message["params"]["uri"] == use_uri
+        })
+        .and_then(|message| message["params"]["diagnostics"].as_array())
+        .expect("published source-limit diagnostic");
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert!(diagnostics[0]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("semantic diagnostics suppressed")));
 }

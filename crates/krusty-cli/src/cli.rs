@@ -103,8 +103,8 @@ fn split_classpath(v: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Recursively collect `.kt` files from a directory; pass through `.kt` files directly. `.java`
-/// inputs are noted as unsupported (krusty has no Java front end yet).
+/// Recursively collect batch-compilable source files from a directory. Known source kinds without
+/// batch semantics, plus `.java` inputs, are noted as unsupported.
 fn collect_sources(path: &str, out: &mut Vec<String>, ignored: &mut Vec<String>) {
     let p = std::path::Path::new(path);
     if p.is_dir() {
@@ -115,8 +115,10 @@ fn collect_sources(path: &str, out: &mut Vec<String>, ignored: &mut Vec<String>)
                 collect_sources(&e.to_string_lossy(), out, ignored);
             }
         }
-    } else if path.ends_with(".kt") {
+    } else if krusty::source::is_batch_compilable_path(p) {
         out.push(path.to_string());
+    } else if krusty::source::kind(p).is_some() {
+        ignored.push(format!("{path} (script compilation is not supported yet)"));
     } else if path.ends_with(".java") {
         ignored.push(format!("{path} (no Java source front end yet)"));
     }
@@ -244,7 +246,8 @@ Common options (kotlinc-compatible):
   -version              print version and exit
   -help                 print this help and exit
 
-Sources may be .kt files or directories (scanned recursively for .kt). Unsupported options are
+Sources may be .kt files or directories (scanned recursively). Kotlin scripts are not yet compiled.
+Unsupported options are
 ignored with a note so existing build invocations keep working.";
 
 #[cfg(test)]
@@ -273,6 +276,19 @@ mod tests {
         );
         assert_eq!(o.module_name, "lib");
         assert_eq!(o.sources, vec!["x.kt".to_string()]);
+    }
+
+    #[test]
+    fn source_inputs_follow_shared_batch_capabilities() {
+        let o = parse_args(&["main.kt", "script.kts", "Ignored.java"]);
+        assert_eq!(o.sources, vec!["main.kt".to_string()]);
+        assert_eq!(
+            o.ignored,
+            vec![
+                "script.kts (script compilation is not supported yet)".to_string(),
+                "Ignored.java (no Java source front end yet)".to_string(),
+            ]
+        );
     }
 
     #[test]

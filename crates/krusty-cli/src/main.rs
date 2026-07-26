@@ -6,7 +6,6 @@ use std::io::Write;
 use std::path::Path;
 
 use krusty::diag::DiagSink;
-use krusty::frontend::{collect_signatures_with_cp, parse_source};
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty_cli::cli;
@@ -32,30 +31,46 @@ fn main() {
 
     let mut diags = DiagSink::new();
     let mut sources = Vec::new();
-    let mut files = Vec::new();
     let mut stems = Vec::new();
     for path in &opts.sources {
         let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
             eprintln!("krusty: cannot read {path}: {e}");
             std::process::exit(1);
         });
-        files.push(parse_source(&src, &opts.features, &mut diags));
         stems.push(file_stem(path));
         sources.push(src);
     }
 
     let cp = std::rc::Rc::new(Classpath::new(opts.effective_classpath()));
     let platform = Box::new(JvmLibraries::new(cp.clone()));
-    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
-    krusty::jvm::prepare_module_symbols(&files, &stems, &mut syms);
+    let source_inputs = opts
+        .sources
+        .iter()
+        .zip(&sources)
+        .map(|(path, source)| {
+            krusty::source::SourceInput::new(
+                krusty::source::kind(Path::new(path))
+                    .expect("CLI source collection must classify every source"),
+                source,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut analysis = krusty::frontend::analyze_source_set_with_features(
+        &source_inputs,
+        platform,
+        &opts.features,
+        &mut diags,
+    );
+    krusty::jvm::prepare_module_symbols(&analysis.files, &stems, &mut analysis.symbols);
 
     // A `-jvm-target` sets the emitted class-file version (kotlinc's `jvmToolchain(25)` ⇒ v69).
     // Absent, the backend keeps krusty's v52 default.
     let backend = krusty::jvm::JvmBackend::new(cp).with_class_major(opts.jvm_target_major);
-    let outputs = krusty::compiler::compile(
-        &files,
+    let outputs = krusty::compiler::emit_checked(
+        &analysis.files,
         &stems,
-        &mut syms,
+        &analysis.types,
+        &analysis.symbols,
         &backend,
         &opts.module_name,
         &mut diags,

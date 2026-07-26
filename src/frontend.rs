@@ -3,7 +3,7 @@
 //! Source analysis: lexing, parsing, signature collection, and checking.
 
 use crate::ast::File;
-use crate::diag::DiagSink;
+use crate::diag::{DiagSink, Severity};
 use crate::features::LangFeatures;
 pub use crate::lexer::{NameToken as FrontendNameToken, NameTokenKind as FrontendNameTokenKind};
 use crate::libraries::{EmptySymbolSource, SemanticPlatform};
@@ -21,6 +21,7 @@ pub(crate) use crate::resolve::{
     ResolvedConstructor, ResolvedLocalFunctionCall, ResolvedMember, ResolvedModuleTopLevelCall,
     Signature, StmtLowering,
 };
+use crate::source::{SourceInput, SourceKind};
 
 /// A single parsed file together with the frontend facts needed by a backend.
 pub struct CheckedFile<'a> {
@@ -31,6 +32,15 @@ pub struct CheckedFile<'a> {
     /// The compilation's module name (kotlinc `-module-name`), for the serialization plugin's
     /// `write$Self$<module>` helper. `"main"` by default.
     pub module_name: &'a str,
+}
+
+/// Parsed and checked frontend state for one jointly compiled source set. Both the batch compiler and
+/// editor analysis consume this result, so parsing, global signature collection, return pre-inference,
+/// and per-file checking have one orchestration path.
+pub struct SourceSetAnalysis {
+    pub files: Vec<File>,
+    pub symbols: FrontendSymbols,
+    pub types: Vec<Option<FrontendTypeInfo>>,
 }
 
 /// Multiplatform `expect`/`actual` resolution over ONE compiled source set (kotlinc's JVM MPP
@@ -309,6 +319,102 @@ pub fn parse_source_with_detected_features(src: &str, diags: &mut DiagSink) -> F
     parse_source(src, &features, diags)
 }
 
+/// Analyze a jointly compiled in-memory source set with project-wide language features.
+///
+/// Each source may add its own `// LANGUAGE:` directives. A parse error suppresses checking only for
+/// that file; valid siblings still contribute declarations and receive diagnostics, which is required
+/// by editor analysis. Diagnostics retain their source-set file index in `diags`.
+pub fn analyze_source_set_with_features(
+    sources: &[SourceInput<'_>],
+    platform: Box<dyn SemanticPlatform>,
+    project_features: &LangFeatures,
+    diags: &mut DiagSink,
+) -> SourceSetAnalysis {
+    let mut files = Vec::with_capacity(sources.len());
+    let mut parse_errors = Vec::with_capacity(sources.len());
+    let mut multiplatform = project_features.has("MultiPlatformProjects");
+    for (index, source) in sources.iter().enumerate() {
+        diags.set_file(index as u32);
+        let mut features = project_features.clone();
+        features.apply_source_directives(source.text);
+        multiplatform |= features.has("MultiPlatformProjects");
+        let diagnostics_before = diags.diags.len();
+        let file = match source.kind {
+            SourceKind::Kotlin | SourceKind::KotlinScript => {
+                parse_source(source.text, &features, diags)
+            }
+        };
+        parse_errors.push(
+            diags.diags[diagnostics_before..]
+                .iter()
+                .any(|diagnostic| diagnostic.severity == Severity::Error),
+        );
+        files.push(file);
+    }
+
+    if multiplatform {
+        strip_matched_expects(&mut files);
+    }
+    let mut symbols = collect_signatures_with_cp(&files, platform, diags);
+    let types = check_source_set_skipping(&files, &mut symbols, &parse_errors, diags);
+    SourceSetAnalysis {
+        files,
+        symbols,
+        types,
+    }
+}
+
+fn check_source_set_skipping(
+    files: &[File],
+    symbols: &mut FrontendSymbols,
+    skip: &[bool],
+    diags: &mut DiagSink,
+) -> Vec<Option<FrontendTypeInfo>> {
+    preinfer_module_returns(files, symbols, diags);
+    files
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            if skip.get(index).copied().unwrap_or(false) {
+                None
+            } else {
+                diags.set_file(index as u32);
+                Some(check_file_in_source_set(
+                    files,
+                    index as u32,
+                    symbols,
+                    diags,
+                ))
+            }
+        })
+        .collect()
+}
+
+/// Check a parsed source set whose signatures have already been collected.
+///
+/// This is also the compatibility path for backend callers that construct ASTs themselves; normal
+/// source-text consumers should use [`analyze_source_set_with_features`].
+pub fn check_source_set(
+    files: &[File],
+    symbols: &mut FrontendSymbols,
+    diags: &mut DiagSink,
+) -> Vec<Option<FrontendTypeInfo>> {
+    check_source_set_skipping(files, symbols, &[], diags)
+}
+
+/// Analyze a source set with no project-wide feature flags beyond per-source directives.
+pub fn analyze_source_set(
+    sources: &[&str],
+    platform: Box<dyn SemanticPlatform>,
+    diags: &mut DiagSink,
+) -> SourceSetAnalysis {
+    let inputs = sources
+        .iter()
+        .map(|source| SourceInput::kotlin(source))
+        .collect::<Vec<_>>();
+    analyze_source_set_with_features(&inputs, platform, &LangFeatures::new(), diags)
+}
+
 /// Parse a single source and run signature collection plus checking against `platform`.
 pub fn analyze_source(
     src: &str,
@@ -340,6 +446,8 @@ pub fn analyze_source_standalone(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diag::{Diagnostic, Span};
+    use crate::source::SourceInput;
 
     #[test]
     fn standalone_analysis_accepts_simple_function() {
@@ -358,5 +466,42 @@ mod tests {
         assert!(diags.has_errors());
         assert!(syms.is_some());
         assert!(info.is_some());
+    }
+
+    #[test]
+    fn source_set_analysis_applies_multiplatform_actualization() {
+        let source = "// LANGUAGE: +MultiPlatformProjects\n\
+                      expect fun value(): String\n\
+                      actual fun value(): String = \"OK\"\n\
+                      fun box(): String = value()";
+        let inputs = [SourceInput::kotlin(source)];
+        let mut diags = DiagSink::new();
+        let analysis = analyze_source_set_with_features(
+            &inputs,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diags,
+        );
+        assert!(!diags.has_errors(), "{:?}", diags.diags);
+        assert!(analysis.types[0].is_some());
+    }
+
+    #[test]
+    fn preexisting_warning_does_not_mark_a_source_as_unparseable() {
+        let mut diags = DiagSink::new();
+        diags.diags.push(Diagnostic {
+            span: Span::new(0, 0),
+            severity: Severity::Warning,
+            msg: "existing warning".to_string(),
+            file: 0,
+        });
+        let inputs = [SourceInput::kotlin("fun value(): Int = 1")];
+        let analysis = analyze_source_set_with_features(
+            &inputs,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diags,
+        );
+        assert!(analysis.types[0].is_some());
     }
 }
