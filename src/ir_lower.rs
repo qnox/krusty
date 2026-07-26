@@ -4813,6 +4813,15 @@ struct ForeachOpts<'a> {
     hof_splice: bool,
 }
 
+struct RecordedImplicitPropertyWrite {
+    receiver_value: u32,
+    receiver_ty: Ty,
+    property_ty: Ty,
+    source_owner: Option<TypeName>,
+    classpath_getter: Option<crate::symbol_resolver::ResolvedMember>,
+    classpath_setter: Option<crate::libraries::LibraryCallable>,
+}
+
 pub(crate) struct Lower<'a> {
     afile: &'a ast::File,
     file_index: u32,
@@ -5614,6 +5623,200 @@ impl<'a> Lower<'a> {
         let store = write(self, nv);
         let value = as_value.then(|| self.emit_get_value(tmp));
         Some(self.emit_block(vec![var, store], value))
+    }
+
+    fn recorded_implicit_property_write(
+        &self,
+        stmt: ast::StmtId,
+    ) -> Option<RecordedImplicitPropertyWrite> {
+        let (receiver, property_ty, source_owner, classpath_getter, classpath_setter) =
+            match self.info.stmt_lowers.get(&stmt)? {
+                StmtLowering::ImplicitPropertyWrite {
+                    receiver,
+                    property_ty,
+                    source_owner,
+                    classpath_getter,
+                    classpath_setter,
+                } => (
+                    *receiver,
+                    *property_ty,
+                    *source_owner,
+                    classpath_getter.as_deref().cloned(),
+                    classpath_setter.as_deref().cloned(),
+                ),
+                _ => return None,
+            };
+        let value = self
+            .scope
+            .iter()
+            .rev()
+            .find(|(name, _, ty)| name == "this" && *ty == receiver)
+            .map(|(_, value, _)| *value)?;
+        Some(RecordedImplicitPropertyWrite {
+            receiver_value: value,
+            receiver_ty: receiver,
+            property_ty,
+            source_owner,
+            classpath_getter,
+            classpath_setter,
+        })
+    }
+
+    fn implicit_source_property_field(
+        &self,
+        owner: TypeName,
+        name: &str,
+        writable: bool,
+    ) -> Option<(u32, u32)> {
+        if self.cur_class != Some(owner)
+            || (writable
+                && self
+                    .field_accessor_var_props
+                    .contains(&(owner, name.to_string())))
+            || (!writable
+                && self
+                    .field_accessor_props
+                    .contains(&(owner, name.to_string())))
+        {
+            return None;
+        }
+        self.class_info_name(owner).and_then(|class| {
+            class
+                .fields
+                .iter()
+                .position(|(field, _)| field == name)
+                .map(|index| (class.id, index as u32))
+        })
+    }
+
+    fn source_property_interface(&self, owner: TypeName) -> bool {
+        self.syms
+            .class_by_type_name(owner)
+            .is_some_and(|class| class.is_interface)
+    }
+
+    fn emit_source_property_get(
+        &mut self,
+        receiver: u32,
+        owner: TypeName,
+        name: &str,
+        property_ty: Ty,
+    ) -> u32 {
+        self.emit_call(
+            Callee::Virtual {
+                owner,
+                name: property_getter_name(name),
+                descriptor: String::new(),
+                params: Some((vec![], property_ty)),
+                interface: self.source_property_interface(owner),
+            },
+            Some(receiver),
+            vec![],
+        )
+    }
+
+    fn emit_source_property_set(
+        &mut self,
+        receiver: u32,
+        owner: TypeName,
+        name: &str,
+        property_ty: Ty,
+        value: u32,
+    ) -> u32 {
+        self.emit_call(
+            Callee::Virtual {
+                owner,
+                name: property_setter_name(name),
+                descriptor: String::new(),
+                params: Some((vec![ty_to_ir(property_ty)], Ty::Unit)),
+                interface: self.source_property_interface(owner),
+            },
+            Some(receiver),
+            vec![value],
+        )
+    }
+
+    fn emit_classpath_property_set(
+        &mut self,
+        receiver: u32,
+        setter: crate::libraries::LibraryCallable,
+        value: u32,
+    ) -> u32 {
+        let owner = setter.owner_type();
+        self.emit_virtual_call(
+            owner,
+            setter.name,
+            setter.descriptor,
+            self.library_type_is_interface(owner),
+            receiver,
+            vec![value],
+        )
+    }
+
+    fn lower_implicit_property_assign(
+        &mut self,
+        stmt: ast::StmtId,
+        name: &str,
+        value: AstExprId,
+    ) -> Option<u32> {
+        let target = self.recorded_implicit_property_write(stmt)?;
+        let value = self.lower_arg(value, &ty_to_ir(target.property_ty))?;
+        let receiver = self.emit_get_value(target.receiver_value);
+        if let Some(setter) = target.classpath_setter {
+            return Some(self.emit_classpath_property_set(receiver, setter, value));
+        }
+        let owner = target.source_owner?;
+        if let Some((class, index)) = self.implicit_source_property_field(owner, name, true) {
+            return Some(self.emit_set_field(receiver, class, index, value));
+        }
+        Some(self.emit_source_property_set(receiver, owner, name, target.property_ty, value))
+    }
+
+    fn lower_implicit_property_incdec(
+        &mut self,
+        stmt: ast::StmtId,
+        name: &str,
+        decrement: bool,
+    ) -> Option<u32> {
+        let target = self.recorded_implicit_property_write(stmt)?;
+        let receiver = self.emit_get_value(target.receiver_value);
+        let source_field = target
+            .source_owner
+            .and_then(|owner| self.implicit_source_property_field(owner, name, false));
+        let current = if let Some((class, index)) = source_field {
+            self.emit_get_field(receiver, class, index)
+        } else if let Some(owner) = target.source_owner {
+            self.emit_source_property_get(receiver, owner, name, target.property_ty)
+        } else {
+            let getter = target.classpath_getter?;
+            self.emit_library_member_call(
+                receiver,
+                target.receiver_ty.obj_internal()?,
+                getter.member,
+                getter.ret,
+                getter.suspend,
+                vec![],
+            )
+        };
+        let one = self.scalar_one_const(target.property_ty)?;
+        let operation = if decrement {
+            IrBinOp::Sub
+        } else {
+            IrBinOp::Add
+        };
+        let updated = self.scalar_update_value(current, target.property_ty, operation, one);
+        let receiver = self.emit_get_value(target.receiver_value);
+        if let Some(setter) = target.classpath_setter {
+            return Some(self.emit_classpath_property_set(receiver, setter, updated));
+        }
+        let owner = target.source_owner?;
+        Some(
+            if let Some((class, index)) = self.implicit_source_property_field(owner, name, true) {
+                self.emit_set_field(receiver, class, index, updated)
+            } else {
+                self.emit_source_property_set(receiver, owner, name, target.property_ty, updated)
+            },
+        )
     }
 
     /// A bare `name` inside a member body could bind to an ENCLOSING-SCOPE property shadowing a
@@ -14279,6 +14482,12 @@ impl<'a> Lower<'a> {
                         value: val,
                     }));
                 }
+                if matches!(
+                    self.info.stmt_lowers.get(&s),
+                    Some(StmtLowering::ImplicitPropertyWrite { .. })
+                ) {
+                    return self.lower_implicit_property_assign(s, &name, value);
+                }
                 // A backing field of the enclosing class (`this.<field>`) shadows a same-named top-level
                 // property — resolve it BEFORE `statics` (kotlinc: a member's unqualified name binds to the
                 // class member first). Requires `this` in scope (a class member, not a top-level function).
@@ -14376,6 +14585,12 @@ impl<'a> Lower<'a> {
                         elem: ty_to_ir(elem),
                         value: nv,
                     }));
+                }
+                if matches!(
+                    self.info.stmt_lowers.get(&s),
+                    Some(StmtLowering::ImplicitPropertyWrite { .. })
+                ) {
+                    return self.lower_implicit_property_incdec(s, &name, dec);
                 }
                 // A `var` field of the enclosing class (`this.x++` written bare) inside its own method —
                 // `this.x = this.x ± 1` via a direct field read/write. (`obj.x++`/`arr[i]++` were already
