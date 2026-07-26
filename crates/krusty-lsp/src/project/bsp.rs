@@ -10,7 +10,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::fingerprint::collect_build_files;
-use super::model::{Module, ModuleId, ProjectModel, ProviderKind, SourceRoot, SourceRootKind};
+use super::model::{
+    Module, ModuleId, ModuleOutput, ProjectModel, ProviderKind, SourceRoot, SourceRootKind,
+};
 use super::provider::{ProbeError, ProjectProvider};
 use super::runner::CommandRunner;
 use crate::server::{read_framed, write_framed};
@@ -120,7 +122,7 @@ impl BspProvider {
                 self.root.display()
             ))
         })?;
-        transport.request(
+        let initialize = transport.request(
             "build/initialize",
             json!({
                 "displayName": CLIENT_NAME,
@@ -130,6 +132,10 @@ impl BspProvider {
                 "capabilities": { "languageIds": ["kotlin", "java"] },
             }),
         )?;
+        let output_paths_supported = initialize
+            .pointer("/capabilities/outputPathsProvider")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         transport.notify("build/initialized", json!({}))?;
 
         let targets_response = transport.request("workspace/buildTargets", json!({}))?;
@@ -147,13 +153,22 @@ impl BspProvider {
             "buildTarget/jvmCompileClasspath",
             json!({ "targets": target_ids }),
         )?)?;
+        let output_paths = if output_paths_supported {
+            parse(transport.request("buildTarget/outputPaths", json!({ "targets": target_ids }))?)?
+        } else {
+            OutputPathsResult::default()
+        };
 
         transport.request("build/shutdown", json!({})).ok();
         transport.notify("build/exit", json!({})).ok();
         transport.close();
 
         Ok(model_from_responses(
-            &self.root, &targets, &sources, &classpath,
+            &self.root,
+            &targets,
+            &sources,
+            &classpath,
+            &output_paths,
         ))
     }
 }
@@ -268,11 +283,32 @@ struct ClasspathItem {
     classpath: Vec<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OutputPathsResult {
+    #[serde(default)]
+    items: Vec<OutputPathsItem>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OutputPathsItem {
+    target: TargetId,
+    #[serde(default)]
+    output_paths: Vec<OutputPathItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OutputPathItem {
+    uri: String,
+}
+
 fn model_from_responses(
     root: &Path,
     targets: &BuildTargets,
     sources: &SourcesResult,
     classpath: &ClasspathResult,
+    output_paths: &OutputPathsResult,
 ) -> ProjectModel {
     let jdk_home = targets
         .targets
@@ -314,6 +350,10 @@ fn model_from_responses(
             .unwrap_or_else(|| target.id.uri.clone());
         module.source_roots = source_roots_for(&target.id.uri, sources, kind);
         module.classpath = classpath_for(&target.id.uri, classpath);
+        module.outputs = output_paths_for(&target.id.uri, output_paths)
+            .into_iter()
+            .map(ModuleOutput::location)
+            .collect();
         module.jvm_target = target
             .data
             .as_ref()
@@ -383,6 +423,20 @@ fn classpath_for(target_uri: &str, classpath: &ClasspathResult) -> Vec<PathBuf> 
             item.classpath
                 .iter()
                 .filter_map(|entry| file_uri_or_path(entry))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn output_paths_for(target_uri: &str, output_paths: &OutputPathsResult) -> Vec<PathBuf> {
+    output_paths
+        .items
+        .iter()
+        .find(|item| item.target.uri == target_uri)
+        .map(|item| {
+            item.output_paths
+                .iter()
+                .filter_map(|entry| file_uri_or_path(&entry.uri))
                 .collect()
         })
         .unwrap_or_default()
@@ -615,6 +669,15 @@ mod tests {
     fn responses() -> HashMap<String, Value> {
         let mut map = HashMap::new();
         map.insert(
+            "build/initialize".to_string(),
+            json!({
+                "displayName": "test",
+                "version": "1",
+                "bspVersion": "2.1.0",
+                "capabilities": { "outputPathsProvider": true }
+            }),
+        );
+        map.insert(
             "workspace/buildTargets".to_string(),
             json!({ "targets": [
                 {
@@ -659,7 +722,20 @@ mod tests {
                 { "target": { "uri": "file:///p/app?id=app%3Amain" },
                   "classpath": ["file:///m2/kotlin-stdlib.jar", "file:///p/core/build/classes"] },
                 { "target": { "uri": "file:///p/app?id=app%3Atest" },
-                  "classpath": ["file:///m2/junit.jar"] }
+                  "classpath": ["file:///m2/junit.jar", "file:///outside/app/classes/"] }
+            ]}),
+        );
+        map.insert(
+            "buildTarget/outputPaths".to_string(),
+            json!({ "items": [
+                { "target": { "uri": "file:///p/app?id=app%3Amain" },
+                  "outputPaths": [
+                      { "uri": "file:///outside/app/classes/", "kind": 2 }
+                  ] },
+                { "target": { "uri": "file:///p/app?id=app%3Atest" },
+                  "outputPaths": [
+                      { "uri": "file:///outside/app/test-classes/", "kind": 2 }
+                  ] }
             ]}),
         );
         map
@@ -686,10 +762,38 @@ mod tests {
                 "workspace/buildTargets",
                 "buildTarget/sources",
                 "buildTarget/jvmCompileClasspath",
+                "buildTarget/outputPaths",
                 "build/shutdown",
             ]
         );
         assert_eq!(transport.notified, vec!["build/initialized", "build/exit"]);
+    }
+
+    #[test]
+    fn output_paths_are_requested_only_when_the_server_supports_them() {
+        let provider = BspProvider::new(
+            "/p",
+            BspConnection {
+                name: "test".to_string(),
+                version: String::new(),
+                languages: vec!["kotlin".to_string()],
+                argv: vec!["server".to_string()],
+            },
+        );
+        let mut responses = responses();
+        responses.insert(
+            "build/initialize".to_string(),
+            json!({ "capabilities": { "outputPathsProvider": false } }),
+        );
+        let mut transport = FakeTransport::new(responses);
+
+        let model = provider.probe_with(&mut transport).unwrap();
+
+        assert!(transport
+            .requested
+            .iter()
+            .all(|method| method != "buildTarget/outputPaths"));
+        assert!(model.modules.iter().all(|module| module.outputs.is_empty()));
     }
 
     #[test]
@@ -726,6 +830,10 @@ mod tests {
                 PathBuf::from("/p/core/build/classes"),
             ]
         );
+        assert_eq!(
+            main.outputs,
+            vec![ModuleOutput::location("/outside/app/classes")]
+        );
 
         let test = model
             .module(&ModuleId::raw("file:///p/app?id=app%3Atest"))
@@ -739,6 +847,13 @@ mod tests {
         assert!(test
             .depends_on
             .contains(&ModuleId::raw("file:///p/app?id=app%3Amain")));
+        assert_eq!(
+            model.compile_classpath(test),
+            vec![
+                PathBuf::from("/m2/junit.jar"),
+                PathBuf::from("/outside/app/classes"),
+            ]
+        );
         assert!(model
             .module(&ModuleId::raw("file:///p/native?id=native%3Amain"))
             .is_none());

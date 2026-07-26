@@ -58,6 +58,35 @@ impl SourceRoot {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModuleOutput {
+    Classes(PathBuf),
+    Location(PathBuf),
+}
+
+impl ModuleOutput {
+    pub fn classes(path: impl Into<PathBuf>) -> Self {
+        Self::Classes(path.into())
+    }
+
+    pub fn location(path: impl Into<PathBuf>) -> Self {
+        Self::Location(path.into())
+    }
+
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Classes(path) | Self::Location(path) => path,
+        }
+    }
+
+    fn classpath_entry(&self) -> Option<&Path> {
+        match self {
+            Self::Classes(path) => Some(path),
+            Self::Location(_) => None,
+        }
+    }
+}
+
 /// One compilation unit of the project.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Module {
@@ -67,7 +96,7 @@ pub struct Module {
     pub source_roots: Vec<SourceRoot>,
     /// Resolved compile classpath: jars and class directories, in build-tool order.
     pub classpath: Vec<PathBuf>,
-    pub output_dir: Option<PathBuf>,
+    pub outputs: Vec<ModuleOutput>,
     pub depends_on: Vec<ModuleId>,
     /// BSP `associates`: outputs whose `internal` declarations this module may see.
     pub friend_paths: Vec<PathBuf>,
@@ -156,8 +185,7 @@ impl ProjectModel {
             .map(|(_, module)| module)
     }
 
-    /// Classpath handed to the compiler for `module`: its own classpath, its friend paths, and the
-    /// output of everything it depends on. Deduplicated, first occurrence wins.
+    /// Classpath handed to the compiler for `module`, deduplicated in build-tool order.
     pub fn compile_classpath(&self, module: &Module) -> Vec<PathBuf> {
         let mut entries: Vec<PathBuf> = Vec::new();
         let push = |entry: &Path, entries: &mut Vec<PathBuf>| {
@@ -172,11 +200,12 @@ impl ProjectModel {
             push(entry, &mut entries);
         }
         for dependency in &module.depends_on {
-            if let Some(output) = self
-                .module(dependency)
-                .and_then(|m| m.output_dir.as_deref())
-            {
-                push(output, &mut entries);
+            if let Some(dependency) = self.module(dependency) {
+                for output in &dependency.outputs {
+                    if let Some(entry) = output.classpath_entry() {
+                        push(entry, &mut entries);
+                    }
+                }
             }
         }
         entries
@@ -190,31 +219,42 @@ mod tests {
     fn model() -> ProjectModel {
         let mut core = Module::new(ModuleId::new(":core", "main"), "/p/core");
         core.source_roots = vec![SourceRoot::source("/p/core/src/main/kotlin")];
-        core.output_dir = Some(PathBuf::from("/p/core/build/classes/kotlin/main"));
+        core.outputs = vec![
+            ModuleOutput::classes("/p/core/build/classes/java/main"),
+            ModuleOutput::classes("/p/core/build/classes/kotlin/main"),
+        ];
         core.classpath = vec![PathBuf::from("/m2/kotlin-stdlib.jar")];
+
+        let mut generated = Module::new(ModuleId::new(":generated", "main"), "/p/generated");
+        generated.outputs = vec![ModuleOutput::location("/p/generated/build")];
 
         let mut app = Module::new(ModuleId::new(":app", "main"), "/p/app");
         app.source_roots = vec![SourceRoot::source("/p/app/src/main/kotlin")];
-        app.output_dir = Some(PathBuf::from("/p/app/build/classes/kotlin/main"));
+        app.outputs = vec![ModuleOutput::classes("/p/app/build/classes/kotlin/main")];
         app.classpath = vec![PathBuf::from("/m2/kotlin-stdlib.jar")];
-        app.depends_on = vec![ModuleId::new(":core", "main")];
+        app.depends_on = vec![
+            ModuleId::new(":core", "main"),
+            ModuleId::new(":generated", "main"),
+        ];
 
         let mut app_test = Module::new(ModuleId::new(":app", "test"), "/p/app");
         app_test.source_roots = vec![SourceRoot::test("/p/app/src/test/kotlin")];
         app_test.depends_on = vec![ModuleId::new(":app", "main")];
         app_test.friend_paths = vec![PathBuf::from("/p/app/build/classes/kotlin/main")];
 
-        ProjectModel::new("/p", ProviderKind::Gradle).with_modules(vec![core, app, app_test])
+        ProjectModel::new("/p", ProviderKind::Gradle)
+            .with_modules(vec![core, generated, app, app_test])
     }
 
     #[test]
-    fn compile_classpath_adds_friend_paths_and_dependency_output_without_duplicates() {
+    fn compile_classpath_adds_class_outputs_but_not_opaque_locations() {
         let model = model();
         let app = model.module(&ModuleId::new(":app", "main")).unwrap();
         assert_eq!(
             model.compile_classpath(app),
             vec![
                 PathBuf::from("/m2/kotlin-stdlib.jar"),
+                PathBuf::from("/p/core/build/classes/java/main"),
                 PathBuf::from("/p/core/build/classes/kotlin/main"),
             ]
         );
