@@ -43,9 +43,9 @@ type Suspension = (Option<(u32, Ty)>, ExprId);
 const CONTINUATION: &str = "kotlin/coroutines/Continuation";
 const CONTINUATION_IMPL: &str = "kotlin/coroutines/jvm/internal/ContinuationImpl";
 
-/// JVM `DebugMetadata` values computed before continuation spill scopes are discarded.
+/// JVM class metadata computed before continuation spill scopes are discarded.
 #[derive(Clone, Debug, Default)]
-pub struct ContinuationDebug {
+pub struct ContinuationMetadata {
     pub l: Vec<i32>,
     pub nl: Vec<i32>,
     pub i: Vec<i32>,
@@ -54,9 +54,12 @@ pub struct ContinuationDebug {
     pub m: String,
     pub c: String,
     pub v: i32,
+    pub enclosing_class: String,
+    pub enclosing_method: String,
+    pub enclosing_descriptor: String,
 }
 
-pub type ContinuationDebugMap = std::collections::HashMap<String, ContinuationDebug>;
+pub type ContinuationMetadataMap = std::collections::HashMap<String, ContinuationMetadata>;
 
 fn object_ty() -> Ty {
     Ty::nullable(Ty::obj("kotlin/Any"))
@@ -72,7 +75,11 @@ fn continuation_ty() -> Ty {
 /// name (e.g. `SKt`) — the continuation class for `bar` is `SKt$bar$1`. Returns `false` (skip the whole
 /// file, never miscompile) on any suspend shape this pass can't yet transform.
 #[must_use]
-pub fn lower_suspend(ir: &mut IrFile, facade: &str, cont_debug: &mut ContinuationDebugMap) -> bool {
+pub fn lower_suspend(
+    ir: &mut IrFile,
+    facade: &str,
+    continuation_metadata: &mut ContinuationMetadataMap,
+) -> bool {
     let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
     // Snapshot every function's *declared* (pre-CPS) return type, so hoisted suspension temps are typed
     // by the callee's logical result type even after the callee has itself been CPS-rewritten to `Object`.
@@ -274,7 +281,14 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str, cont_debug: &mut Continuatio
             }
         } else {
             let unit_ret = orig_rets[fid as usize] == Ty::Unit;
-            if !build_state_machine(ir, facade, fid, body.unwrap(), unit_ret, cont_debug) {
+            if !build_state_machine(
+                ir,
+                facade,
+                fid,
+                body.unwrap(),
+                unit_ret,
+                continuation_metadata,
+            ) {
                 return false;
             }
         }
@@ -1405,7 +1419,7 @@ fn build_state_machine(
     fid: u32,
     b: ExprId,
     unit_ret: bool,
-    cont_debug: &mut ContinuationDebugMap,
+    continuation_metadata: &mut ContinuationMetadataMap,
 ) -> bool {
     // Normalize a block-valued initializer (`val a = (x ?: foo())`, `a?.b ?: foo()` — elvis / safe-call
     // lower to `Variable{ init: Block{ prelude…, value: When } }`) into `prelude…; Variable{ init: When }`,
@@ -1823,7 +1837,7 @@ fn build_state_machine(
                 )
             })
             .collect();
-        let dbg = ContinuationDebug {
+        let metadata = ContinuationMetadata {
             l,
             nl,
             i: vec![0; s.len()],
@@ -1832,8 +1846,14 @@ fn build_state_machine(
             m: fname.clone(),
             c: cont_owner.replace('/', "."),
             v: 2,
+            enclosing_class: cont_owner.clone(),
+            enclosing_method: fname.clone(),
+            enclosing_descriptor: crate::jvm::names::method_descriptor(
+                &ir.functions[fid as usize].params,
+                ir.functions[fid as usize].ret,
+            ),
         };
-        cont_debug.insert(cont_internal.clone(), dbg);
+        continuation_metadata.insert(cont_internal.clone(), metadata);
     }
 
     // Flatten the body into a state graph.
