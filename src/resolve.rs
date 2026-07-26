@@ -6079,6 +6079,7 @@ pub enum ResolvedCall {
         inline: InlineKind,
         interface: bool,
         vararg: bool,
+        suspend: bool,
     },
     /// A class-body extension emitted as an instance method with a leading receiver parameter.
     ModuleMemberExtension {
@@ -9236,6 +9237,7 @@ impl<'a> Checker<'a> {
                                     .class_by_type_name(owner)
                                     .is_some_and(|class| class.is_interface),
                                 vararg: sig.vararg,
+                                suspend: sig.is_suspend,
                             },
                         ));
                     }
@@ -9256,6 +9258,7 @@ impl<'a> Checker<'a> {
                             inline: InlineKind::from_flags(sig.is_inline, false),
                             interface,
                             vararg: sig.vararg,
+                            suspend: sig.is_suspend,
                         },
                     ));
                 }
@@ -12765,6 +12768,7 @@ impl<'a> Checker<'a> {
                                     inline: InlineKind::from_flags(sig.is_inline, false),
                                     interface,
                                     vararg: sig.vararg,
+                                    suspend: sig.is_suspend,
                                 },
                             );
                             return self.set(e, sig.ret);
@@ -17406,6 +17410,7 @@ impl<'a> Checker<'a> {
                     inline: fi.flags.inline,
                     interface,
                     vararg: fi.call_sig.vararg,
+                    suspend: fi.callable.suspend,
                 },
             );
         } else {
@@ -17889,6 +17894,7 @@ impl<'a> Checker<'a> {
                 inline: fi.inline,
                 interface: fi.is_interface,
                 vararg: cs.vararg,
+                suspend: fi.suspend,
             },
         );
         if let Some(slots) = mapped_slots {
@@ -18605,6 +18611,7 @@ impl<'a> Checker<'a> {
                                         inline: InlineKind::from_flags(sig.is_inline, false),
                                         interface: false,
                                         vararg: sig.vararg,
+                                        suspend: sig.is_suspend,
                                     },
                                 );
                             }
