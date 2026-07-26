@@ -7203,6 +7203,9 @@ impl<'a> Parser<'a> {
                 conditions.push(self.parse_when_condition(subject));
                 while self.eat(TokenKind::Comma) {
                     self.skip_newlines();
+                    if subject.is_some() && self.at(TokenKind::Arrow) {
+                        break;
+                    }
                     conditions.push(self.parse_when_condition(subject));
                 }
             }
@@ -8472,6 +8475,30 @@ mod tests {
         assert_eq!(
             tree("fun g(n: Int): Int = when { n < 0 -> 1; else -> 2 }"),
             "(fun g (param n Int) :Int (when (arm (< n 0) => 1) (arm else => 2)))\n"
+        );
+        assert_eq!(
+            tree("fun h(n: Int): Int = when (n) { 0, -> 1; else -> 2 }"),
+            "(fun h (param n Int) :Int (when n (arm 0 => 1) (arm else => 2)))\n"
+        );
+        assert_eq!(
+            tree(
+                "fun i(n: Int): Int = when (n) {\n\
+                     0,\n\
+                     1,\n\
+                         -> 1\n\
+                     else -> 2\n\
+                 }"
+            ),
+            "(fun i (param n Int) :Int (when n (arm 0 1 => 1) (arm else => 2)))\n"
+        );
+
+        let source = "fun invalid(): Int = when { true, -> 1; else -> 2 }";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        parse(source, &tokens, &mut diagnostics);
+        assert!(
+            diagnostics.has_errors(),
+            "subjectless when accepted a comma-separated condition"
         );
     }
 
