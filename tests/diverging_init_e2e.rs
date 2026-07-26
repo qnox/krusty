@@ -60,3 +60,20 @@ fn diverging_property_initializer_runs() {
     };
     assert_eq!(out, "OK");
 }
+
+#[test]
+fn diverging_nested_class_property_initializer_runs() {
+    let src = r#"
+interface Action { fun run() }
+fun box(): String = try {
+    object : Action {
+        override fun run() {}
+        val unreachable: Int = throw IllegalStateException()
+    }.run()
+    "FAIL"
+} catch (_: IllegalStateException) {
+    "OK"
+}
+"#;
+    common::expect_box_ok_with_stdlib(src, "DivergingNestedClassInitializer");
+}
