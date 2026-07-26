@@ -35,6 +35,47 @@ return \"OK\"\n\
 }
 
 #[test]
+fn zero_arg_lambda_targeting_maps_member_arguments() {
+    const SRC: &str = "class Item\n\
+class Picker {\n\
+    fun select(candidate: Item?): Item? {\n\
+        val value = candidate?.let {\n\
+            guarded { convert(it) }\n\
+        }\n\
+        return value\n\
+    }\n\
+    fun direct(): Item? = this.guarded { Item() }\n\
+    fun safe(other: Picker?): Item? = other?.guarded { Item() }\n\
+    fun named(): Item? = guarded(body = { Item() })\n\
+    fun directNamed(): Item? = this.guarded(body = { Item() })\n\
+    fun namedTrailing(): Item? = guarded(tag = 1) { Item() }\n\
+    fun directNamedTrailing(): Item? = this.guarded(tag = 1) { Item() }\n\
+    private fun convert(value: Item): Item? = value\n\
+    private fun <T> guarded(tag: Int = 0, body: () -> T): T? = body()\n\
+}\n";
+    let diags = common::checker_diags_with_stdlib(SRC)
+        .expect("stdlib is required for generic member diagnostics");
+    assert!(diags.is_empty(), "{diags:#?}");
+}
+
+#[test]
+fn zero_arg_lambda_to_generic_member_runs() {
+    const SRC: &str = "class Item\n\
+class Picker {\n\
+    fun select(candidate: Item?): Item? = candidate?.let { guarded { convert(it) } }\n\
+    fun direct(): Item? = this.guarded { Item() }\n\
+    fun safe(other: Picker?): Item? = other?.guarded { Item() }\n\
+    private fun convert(value: Item): Item? = value\n\
+    private fun <T> guarded(body: () -> T): T? = body()\n\
+}\n\
+fun box(): String {\n\
+    val picker = Picker()\n\
+    return if (picker.select(Item()) != null && picker.direct() != null && picker.safe(picker) != null) \"OK\" else \"fail\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "ZeroArgGenericMember");
+}
+
+#[test]
 fn property_ref_keeps_api_and_fits_function_shape() {
     const SRC: &str = "class C(val n: Int)\n\
 fun apply1(f: (C) -> Int, c: C): Int = f(c)\n\
