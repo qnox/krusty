@@ -90,3 +90,155 @@ fn property_type_from_a_classpath_static_call() {
     }
     assert_eq!(output.trim(), "OK");
 }
+
+#[test]
+fn class_literal_binds_nested_java_generic_returns() {
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let java = [
+        (
+            "Authentication.java".into(),
+            r#"
+                package fixtures;
+                import java.util.Map;
+                public interface Authentication {
+                    String getName();
+                    Map<String, Object> getAttributes();
+                }
+            "#
+            .into(),
+        ),
+        (
+            "Request.java".into(),
+            r#"
+                package fixtures;
+                import java.util.Map;
+                import java.util.Optional;
+                public final class Request {
+                    public <T> Optional<T> getAttribute(String key, Class<T> type) {
+                        Authentication auth = new Authentication() {
+                            public String getName() { return "alice"; }
+                            public Map<String, Object> getAttributes() {
+                                return Map.of("iss", "issuer");
+                            }
+                        };
+                        return Optional.of(type.cast(auth));
+                    }
+                    public Optional<Object> anyAttribute() {
+                        return Optional.of("value");
+                    }
+                }
+            "#
+            .into(),
+        ),
+    ];
+    let Some((library, _)) = common::javac_compile(&java, &[]) else {
+        return;
+    };
+    let root = library.parent().map(std::path::Path::to_path_buf);
+    let classpath = vec![library, stdlib];
+    let source = r#"
+        import fixtures.Authentication
+        import fixtures.Request
+
+        val topAuth =
+            Request()
+                .getAttribute("auth", Authentication::class.java)
+                .orElse(null)
+
+        fun box(): String {
+            val auth =
+                Request()
+                    .getAttribute("auth", Authentication::class.java)
+                    .orElse(null)
+
+            if (auth != null) {
+                if (auth.name != "alice") return "name"
+                if (auth.attributes["iss"] != "issuer") return "attributes"
+            }
+            if (topAuth?.name != "alice") return "top-level"
+            return "OK"
+        }
+    "#;
+    let classes = common::compile_in_process(source, "Main", &classpath, Some(&jdk))
+        .unwrap_or_else(|| {
+            panic!(
+                "{:?}",
+                common::front_end_diagnostics(source, &classpath, Some(&jdk))
+            )
+        });
+    let output = common::run_box(&classes, "MainKt", &classpath).expect("run box");
+    let invalid_source = r#"
+        import fixtures.Request
+
+        fun bad(): Int =
+            Request()
+                .anyAttribute()
+                .orElse("fallback")
+                .length
+    "#;
+    let diagnostics = common::front_end_diagnostics(invalid_source, &classpath, Some(&jdk));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("unresolved reference 'length'")),
+        "Optional<Any>.orElse(String) must remain Any, got {diagnostics:?}"
+    );
+    if let Some(root) = root {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    assert_eq!(output.trim(), "OK");
+}
+
+#[test]
+fn generic_extension_property_keeps_nullability_and_kotlin_collection_type() {
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(library) = common::compile_lib(
+        "generic_extension_property",
+        r#"
+            package fixtures
+
+            class Box<T>(val value: T?)
+
+            val <T> Box<T>.maybe: T?
+                get() = value
+
+            val <T : Any> Box<T>.items: List<T>
+                get() = listOfNotNull(value)
+        "#,
+    ) else {
+        return;
+    };
+    let classpath = vec![library, stdlib];
+    let source = r#"
+        import fixtures.Box
+        import fixtures.items
+        import fixtures.maybe
+
+        fun box(): String {
+            val empty = Box<Int>(null)
+            if ((empty.maybe ?: 7) != 7) return "nullable"
+
+            val full = Box(3)
+            if (full.items.sum() != 3) return "collection"
+            return "OK"
+        }
+    "#;
+    let output = common::compile_and_run_box(source, "Main", &classpath, Some(&jdk))
+        .unwrap_or_else(|| {
+            panic!(
+                "{:?}",
+                common::front_end_diagnostics(source, &classpath, Some(&jdk))
+            )
+        });
+    assert_eq!(output.trim(), "OK");
+}

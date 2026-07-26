@@ -5066,6 +5066,13 @@ fn common_lit_ty(a: Ty, b: Ty) -> Ty {
     }
 }
 
+fn parameterized_class_literal_type(base: Ty, represented: Ty) -> Ty {
+    match base {
+        Ty::Obj(internal, []) => Ty::obj_args_name(internal, &[represented]),
+        _ => base,
+    }
+}
+
 /// Cross-call environment for [`infer_lit_ty_p`]: the module-class property resolver (`up`) plus the
 /// cycle-guard set of expression bodies currently being inferred. Passed explicitly (formerly two of
 /// these were an ambient thread-local) so the guard is per-inference and cannot leak across calls.
@@ -5506,10 +5513,17 @@ fn infer_lit_ty_p(
         }
         Expr::CallableRef { receiver, name } => {
             if name == "class" {
-                return receiver
+                let represented = receiver
                     .as_ref()
-                    .and_then(|_| src.class_literal_type())
-                    .unwrap_or(Ty::Error);
+                    .and_then(|receiver| type_receiver(file, *receiver, class_names, props, src))
+                    .map(Ty::obj_name);
+                return match (src.class_literal_type(), represented) {
+                    (Some(base), Some(represented)) => {
+                        parameterized_class_literal_type(base, represented)
+                    }
+                    (Some(base), None) if receiver.is_some() => base,
+                    _ => Ty::Error,
+                };
             }
             if receiver.is_some() {
                 return Ty::Error;
@@ -14881,6 +14895,9 @@ impl<'a> Checker<'a> {
                         }
                     }
                     if let Some(ty) = self.syms.libraries.class_literal_type() {
+                        let ty = unbound
+                            .map(|represented| parameterized_class_literal_type(ty, represented))
+                            .unwrap_or(ty);
                         self.expr_lowers
                             .insert(e, ExprLowering::ClassLiteral { unbound });
                         return self.set(e, ty);

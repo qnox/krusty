@@ -63,6 +63,9 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
 - `Property`: `f2 = name`, `f3 = return_type` (`Type`), `f11 = flags` (emitted as **1798** only for a
   `var`; `val` ⇒ 0, omitted), `f100 = JvmPropertySignature` `{f1 = field (empty ⇒ derived backing
   field), f3 = getter JvmMethodSignature, f4 = setter (var only)}`.
+- A property's return `Type` may instead be referenced by `return_type_id` (`f9`). Its nullable flag
+  lives on that metadata `Type`, not in the getter's JVM descriptor or generic `Signature`; classpath
+  decoding therefore retains it separately when specializing a generic extension-property result.
 - `JvmMethodSignature`: `f1 = name`, `f2 = desc`.
 
 String table for a class id: `Record.f3 = 2` (operation `DESC_TO_CLASS_ID`) over the descriptor

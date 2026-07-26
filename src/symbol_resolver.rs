@@ -260,6 +260,86 @@ fn unify_inferred_ty(sig: Ty, actual: Ty, binds: &mut GSigBinds) {
     }
 }
 
+/// A JVM method signature may reference owner type parameters without declaring them. Recover those
+/// bindings from the provider's receiver-specialized return; method-owned formals still bind from args.
+fn seed_undeclared_return_bindings(
+    sig: Ty,
+    actual: Ty,
+    declared_formals: &[String],
+    binds: &mut GSigBinds,
+) {
+    match sig {
+        Ty::TyParam(n, _)
+            if !declared_formals.iter().any(|formal| formal == n) && actual != Ty::Error =>
+        {
+            binds.entry(n.to_string()).or_insert(actual);
+        }
+        Ty::Fun(fsig) => {
+            if let Ty::Fun(afsig) = actual {
+                for (s, a) in fsig.params.iter().zip(afsig.params.iter()) {
+                    seed_undeclared_return_bindings(*s, *a, declared_formals, binds);
+                }
+                seed_undeclared_return_bindings(fsig.ret, afsig.ret, declared_formals, binds);
+            }
+        }
+        Ty::Nullable(inner) => {
+            if let Ty::Nullable(actual_inner) = actual {
+                seed_undeclared_return_bindings(*inner, *actual_inner, declared_formals, binds);
+            } else {
+                seed_undeclared_return_bindings(*inner, actual, declared_formals, binds);
+            }
+        }
+        Ty::Obj(_, args) => {
+            if let Ty::Obj(_, actual_args) = actual {
+                for (s, a) in args.iter().zip(actual_args.iter()) {
+                    seed_undeclared_return_bindings(*s, *a, declared_formals, binds);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn merge_specialized_return(provider: Ty, inferred: Ty) -> Ty {
+    if provider == Ty::Error {
+        return inferred;
+    }
+    if inferred == Ty::Error || inferred.is_erased_top() {
+        return provider;
+    }
+    if provider.is_erased_top() {
+        return inferred;
+    }
+    match (provider, inferred) {
+        (Ty::Nullable(provider), Ty::Nullable(inferred)) => {
+            Ty::nullable(merge_specialized_return(*provider, *inferred))
+        }
+        (Ty::Nullable(provider), inferred) => {
+            Ty::nullable(merge_specialized_return(*provider, inferred))
+        }
+        (provider, Ty::Nullable(inferred)) => {
+            Ty::nullable(merge_specialized_return(provider, *inferred))
+        }
+        (Ty::Obj(provider_name, provider_args), Ty::Obj(inferred_name, inferred_args))
+            if platform_type_names_match(provider_name, inferred_name) =>
+        {
+            if provider_args.is_empty() {
+                return Ty::obj_args_name(provider_name, inferred_args);
+            }
+            if inferred_args.is_empty() || provider_args.len() != inferred_args.len() {
+                return Ty::obj_args_name(provider_name, provider_args);
+            }
+            let args = provider_args
+                .iter()
+                .zip(inferred_args)
+                .map(|(&provider, &inferred)| merge_specialized_return(provider, inferred))
+                .collect::<Vec<_>>();
+            Ty::obj_args_name(provider_name, &args)
+        }
+        _ => provider,
+    }
+}
+
 /// Realize a signature `Ty` under the current bindings — a bound type variable substitutes to its
 /// binding, an unbound one erases to `Any`; a class substitutes its carried type arguments in place.
 pub(crate) fn ty_subst(sig: Ty, binds: &GSigBinds) -> Ty {
@@ -384,6 +464,30 @@ fn bind_gsig_return(
         unify_ty(gsig.ret, expected, &mut binds);
     }
     ty_subst(gsig.ret, &binds)
+}
+
+fn bind_member_return(gsig: &GenericSig, receiver: Ty, args: &[Ty], provider_ret: Ty) -> Ty {
+    let mut binds = GSigBinds::new();
+    if let Some(declared_receiver) = gsig.receiver {
+        unify_ty(declared_receiver, receiver, &mut binds);
+    } else {
+        seed_undeclared_return_bindings(gsig.ret, provider_ret, &gsig.formals, &mut binds);
+    }
+    for (&parameter, &argument) in gsig.params.iter().zip(args) {
+        unify_ty(parameter, argument, &mut binds);
+    }
+    let ret = ty_subst(gsig.ret, &binds);
+    merge_specialized_return(provider_ret, ret)
+}
+
+fn specialize_property(mut property: PropertyInfo, receiver: Ty) -> PropertyInfo {
+    let mut binds = GSigBinds::new();
+    if let Some(declared_receiver) = property.receiver {
+        unify_ty(declared_receiver, receiver, &mut binds);
+    }
+    property.ty = ty_subst(property.ty, &binds);
+    property.getter.ret = property.ty;
+    property
 }
 
 fn bind_ext_ret(gsig: &GenericSig, receiver: Ty, args: &[Ty], targs: &[Ty]) -> Ty {
@@ -1386,7 +1490,7 @@ impl<'a> SymbolResolver<'a> {
                         Some((rank, p))
                     })
                     .min_by_key(|(rank, _)| *rank)
-                    .map(|(_, property)| property)
+                    .map(|(_, property)| specialize_property(property, ty))
                     .filter(|property| property.getter.ret.is_read_value_result());
                 // EVERY overload named `name` applicable to the receiver: instance members and operators
                 // (the receiver-aware member query, federated over module + libraries) UNION the in-scope
@@ -2647,25 +2751,11 @@ fn resolve_instance_member(
     lambda_literals: &[bool],
 ) -> Option<ResolvedMember> {
     let o = select_instance_info(lib, recv, name, args, integer_literals, lambda_literals)?;
-    let ret = if o.callable.physical_ret == Ty::obj("kotlin/Any") {
-        o.generic_sig
-            .as_ref()
-            .map(|gsig| {
-                let mut binds = std::collections::HashMap::new();
-                for (ps, a) in gsig.params.iter().zip(args) {
-                    unify_ty(*ps, *a, &mut binds);
-                }
-                let arg_bound = ty_subst(gsig.ret, &binds);
-                if arg_bound == Ty::obj("kotlin/Any") && o.callable.ret != Ty::obj("kotlin/Any") {
-                    o.callable.ret
-                } else {
-                    arg_bound
-                }
-            })
-            .unwrap_or(o.callable.ret)
-    } else {
-        o.callable.ret
-    };
+    let ret = o
+        .generic_sig
+        .as_ref()
+        .map(|gsig| bind_member_return(gsig, recv, args, o.callable.ret))
+        .unwrap_or(o.callable.ret);
     let ret = o.ret.apply(ret);
     let member = o.member_with_return(o.callable.ret);
     Some(ResolvedMember {
@@ -3630,6 +3720,81 @@ mod tests {
         assert_eq!(
             function_input_types(function, &GSigBinds::new()),
             vec![Ty::String]
+        );
+    }
+
+    #[test]
+    fn member_return_separates_method_and_owner_bindings() {
+        let any = Ty::obj("kotlin/Any");
+        let value = Ty::obj("demo/Value");
+        let parameter = Ty::ty_param("T", any);
+        let class_of = |ty| Ty::obj_args("java/lang/Class", &[ty]);
+        let optional_of = |ty| Ty::obj_args("java/util/Optional", &[ty]);
+
+        let method_generic = GenericSig {
+            formals: vec!["T".to_string()],
+            formal_bounds: vec![Vec::new()],
+            receiver: None,
+            params: vec![class_of(parameter)],
+            ret: optional_of(parameter),
+        };
+        assert_eq!(
+            bind_member_return(
+                &method_generic,
+                Ty::obj("demo/Provider"),
+                &[class_of(value)],
+                optional_of(any),
+            ),
+            optional_of(value)
+        );
+
+        let owner_generic = GenericSig {
+            formals: Vec::new(),
+            formal_bounds: Vec::new(),
+            receiver: None,
+            params: vec![parameter],
+            ret: parameter,
+        };
+        assert_eq!(
+            bind_member_return(&owner_generic, optional_of(value), &[Ty::Null], value,),
+            value
+        );
+        assert_eq!(
+            bind_member_return(&owner_generic, optional_of(any), &[Ty::String], any,),
+            any
+        );
+    }
+
+    #[test]
+    fn member_return_preserves_canonical_provider_types() {
+        let any = Ty::obj("kotlin/Any");
+        let kotlin_list = Ty::obj_args("kotlin/collections/List", &[Ty::Int]);
+        let jvm_list = Ty::obj_args("java/util/List", &[Ty::obj("java/lang/Integer")]);
+        let signature = GenericSig {
+            formals: Vec::new(),
+            formal_bounds: Vec::new(),
+            receiver: None,
+            params: Vec::new(),
+            ret: jvm_list,
+        };
+
+        assert_eq!(
+            bind_member_return(&signature, Ty::obj("demo/Provider"), &[], kotlin_list),
+            kotlin_list
+        );
+
+        let erased_signature = GenericSig {
+            ret: Ty::obj_args("java/util/List", &[any]),
+            ..signature
+        };
+        assert_eq!(
+            bind_member_return(
+                &erased_signature,
+                Ty::obj("demo/Provider"),
+                &[],
+                kotlin_list
+            ),
+            kotlin_list
         );
     }
 
