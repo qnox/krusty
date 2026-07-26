@@ -9939,30 +9939,31 @@ impl<'a> Checker<'a> {
         resolve_nested_internal_name(internal, &source)
     }
 
-    /// The internal name of an ENCLOSING class's nested type named `name` (`Inner` inside `Outer` →
-    /// `Outer$Inner`), walking outward through the current `this_ty`'s `$`-separated enclosing chain
-    /// (nearest first). `None` if no enclosing class declares such a nested type — the scope in which a
-    /// nested type SHADOWS a same-named top-level (Kotlin nested-type scoping).
-    fn enclosing_nested_type(&self, name: &str) -> Option<String> {
-        self.enclosing_nested_type_name(name).map(TypeName::render)
-    }
-
+    /// Find a nested type visible from the lexical class receiver stack.
     fn enclosing_nested_type_name(&self, name: &str) -> Option<TypeName> {
-        let Some(Ty::Obj(outer, _)) = self.this_ty else {
-            return None;
-        };
-        let outer = outer.render();
-        let mut prefix: &str = &outer;
-        loop {
-            let cand = type_name(&format!("{prefix}${name}"));
-            if self.syms.class_by_type_name(cand).is_some() {
-                return Some(cand);
-            }
-            match prefix.rsplit_once('$') {
-                Some((p, _)) => prefix = p,
-                None => return None,
+        for receiver in self
+            .this_labels
+            .iter()
+            .rev()
+            .filter_map(|(_, receiver, is_class)| is_class.then_some(*receiver))
+        {
+            let Ty::Obj(outer, _) = receiver.non_null() else {
+                continue;
+            };
+            let outer = outer.render();
+            let mut prefix: &str = &outer;
+            loop {
+                let candidate = type_name(&format!("{prefix}${name}"));
+                if self.syms.class_by_type_name(candidate).is_some() {
+                    return Some(candidate);
+                }
+                match prefix.rsplit_once('$') {
+                    Some((enclosing, _)) => prefix = enclosing,
+                    None => break,
+                }
             }
         }
+        None
     }
 
     /// If a bare type name `n` denotes a reference type usable as an unbound class literal `n::class`,
@@ -10058,21 +10059,6 @@ impl<'a> Checker<'a> {
             self.obj_with_targs_name(internal, r)
         } else if let Some(internal) = self.resolve_qualified_nested_name(&r.name) {
             // A dotted CLASSPATH nested type (`Subject.User`, `SlugValidation.Ok`) → `Outer$Nested`.
-            self.obj_with_targs_name(internal, r)
-        } else if let Some(internal) = {
-            // An UNQUALIFIED reference to a sibling nested type within the enclosing class body (`Inner`
-            // in `class Outer { class Inner }`) → `Outer$Inner` (Kotlin nested-type scoping). Reached only
-            // when nothing else resolved, in a checker-only position (`val v: Inner`, `x as Inner`);
-            // member SIGNATURE positions are covered by the collect_signatures class-scope extension.
-            if let Some(Ty::Obj(outer, _)) = self.this_ty {
-                let nested = type_name(&format!("{outer}${}", r.name));
-                self.syms
-                    .class_by_type_name(nested)
-                    .map(ClassSig::internal_name)
-            } else {
-                None
-            }
-        } {
             self.obj_with_targs_name(internal, r)
         } else {
             Ty::Error
@@ -10431,6 +10417,8 @@ impl<'a> Checker<'a> {
             t
         } else if self.tparams.contains(&r.name) {
             self.tparams.erase(&r.name)
+        } else if let Some(internal) = self.enclosing_nested_type_name(&r.name) {
+            Ty::obj_name(internal)
         } else if let Some(cs) = self.syms.classes.get(&r.name) {
             Ty::obj(&cs.internal())
         } else if let Some(internal) = self.syms.class_names.get(&r.name) {
@@ -10452,15 +10440,6 @@ impl<'a> Checker<'a> {
             // narrowing was dropped, and every member access on the smart-cast value failed ("member … on
             // <parent>").
             Ty::obj_name(internal)
-        } else if let Some(Ty::Obj(outer, _)) = self.this_ty {
-            // A sibling nested type unqualified within the enclosing class body (`is Inner` in
-            // `class Outer { class Inner }`) → `Outer$Inner`, so a nested-type `is`/`as` smart-cast
-            // narrows. Mirrors the same fallback in `resolve_ty`.
-            let nested = type_name(&format!("{outer}${}", r.name));
-            self.syms
-                .class_by_type_name(nested)
-                .map(|s| Ty::obj_name(s.internal_name()))
-                .unwrap_or(Ty::Error)
         } else {
             Ty::Error
         };
@@ -20062,14 +20041,8 @@ impl<'a> Checker<'a> {
                 // `resolve_type`, so the construction's type matches the field/return-position type.
                 if !self.value_root_shadows_classifier(&fname) {
                     let ctor_cls = self
-                        .enclosing_nested_type(&fname)
-                        .and_then(|nested| {
-                            self.syms
-                                .classes
-                                .values()
-                                .find(|s| s.internal_matches(&nested))
-                                .cloned()
-                        })
+                        .enclosing_nested_type_name(&fname)
+                        .and_then(|internal| self.syms.class_by_type_name(internal).cloned())
                         .or_else(|| self.syms.classes.get(&fname).cloned())
                         .or_else(|| {
                             // An IMPORTED nested class (`import demo.Outer.Inner` → `Inner`): the
@@ -20885,44 +20858,6 @@ impl<'a> Checker<'a> {
                             }
                         }
                         return c.ret;
-                    }
-                }
-                // An unqualified reference to a SIBLING nested class inside the enclosing class body
-                // (`Inner()` in `class Outer { class Inner { … } }`) resolves to `Outer$Inner` — Kotlin's
-                // nested-class scoping (a qualified `Outer.Inner()` already resolves). Exact-arity
-                // positional construction only; named/omitted-default nested ctors are a later slice.
-                if let Some(Ty::Obj(outer, _)) = self.this_ty {
-                    let nested = format!("{outer}${fname}");
-                    if let Some(cls) = self
-                        .syms
-                        .classes
-                        .values()
-                        .find(|s| s.internal_matches(&nested))
-                        .cloned()
-                    {
-                        // A sibling nested class — plain or `inner`. An `inner class` also needs the
-                        // enclosing INSTANCE (a synthetic `this$0` the lowerer supplies from the current
-                        // `this`); its source `ctor_params` (like a plain class) exclude it, so the arity
-                        // check is the same. It is valid ONLY inside the enclosing instance where `this`
-                        // is available — this branch requires `this_ty == outer`, and an inner class must
-                        // declare exactly that outer (`inner_of == outer`) so `this` is the right instance.
-                        let inner_ok = cls.inner_of_name().is_none_or(|o| o == outer);
-                        if inner_ok && cls.ctor_params.len() == arg_tys.len() && arg_names.is_none()
-                        {
-                            let inferred = self.expect_source_constructor_args(
-                                call,
-                                &cls,
-                                &cls.ctor_params,
-                                args,
-                                &arg_tys,
-                                None,
-                            );
-                            return self.ctor_result_name_with_inferred(
-                                call,
-                                cls.internal_name(),
-                                inferred,
-                            );
-                        }
                     }
                 }
                 // An unqualified call to a MEMBER function of a classpath `object` imported through
