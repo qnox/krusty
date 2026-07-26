@@ -9,8 +9,8 @@ mod worker;
 pub use analysis::*;
 pub use options::*;
 pub use project::{
-    detect, resolve_jdk, JdkRequest, ProcessRunner, ProjectModel, ProjectSync, ProviderKind,
-    RefreshOutcome, SystemEnvironment,
+    detect, resolve_jdk, JdkRequest, ProcessRunner, ProjectModel, ProjectSources, ProjectSync,
+    ProviderKind, RefreshOutcome, SystemEnvironment,
 };
 pub use server::*;
 pub use worker::*;

@@ -5,8 +5,9 @@
 //! `bin/intellij-server`). The official distribution is intentionally not downloaded by the normal
 //! test suite: it is large, platform-specific, and released independently from krusty.
 
+mod common;
+
 use std::io::{BufReader, Write};
-use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Mutex;
@@ -14,6 +15,8 @@ use std::time::{Duration, Instant};
 
 use krusty_lsp::{read_framed, write_framed, MAX_MESSAGE_BYTES};
 use serde_json::{json, Value};
+
+use common::TempProject;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(300);
@@ -50,30 +53,6 @@ fn reference_kotlin_version_from(manifest: &str) -> &str {
 
 fn reference_kotlin_version() -> &'static str {
     reference_kotlin_version_from(include_str!("../../../kotlin-versions"))
-}
-
-struct TempProject {
-    root: PathBuf,
-}
-
-impl TempProject {
-    fn new() -> Self {
-        let root =
-            std::env::temp_dir().join(format!("krusty_lsp_diff_project_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        Self { root }
-    }
-
-    fn path(&self) -> &Path {
-        &self.root
-    }
-}
-
-impl Drop for TempProject {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
 }
 
 struct SemanticLegend {
@@ -635,7 +614,7 @@ fn implementation_locations_match_official_kotlin_lsp_exactly() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    let project = TempProject::new();
+    let project = TempProject::new("differential");
     let root = project.path();
     let source_root = root.join("src/main/kotlin");
     std::fs::create_dir_all(&source_root).unwrap();
@@ -792,7 +771,7 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    let project = TempProject::new();
+    let project = TempProject::new("differential");
     let root = project.path();
     let source_root = root.join("src/main/kotlin");
     std::fs::create_dir_all(&source_root).unwrap();

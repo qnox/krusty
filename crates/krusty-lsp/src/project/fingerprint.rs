@@ -67,17 +67,6 @@ pub fn fingerprint_files(paths: &[PathBuf], salt: &str) -> Fingerprint {
     hasher.finish()
 }
 
-/// Directories that never contain build configuration and can be large.
-const SKIPPED_DIRECTORIES: &[&str] = &[
-    ".git",
-    ".gradle",
-    ".idea",
-    "build",
-    "node_modules",
-    "out",
-    "target",
-];
-
 /// Collect the build files under `root` that `matches` accepts, in a deterministic order.
 ///
 /// `buildSrc` and `build-logic` are walked despite the `build` prefix filter: convention plugins
@@ -108,7 +97,7 @@ fn walk(
             continue;
         };
         if file_type.is_dir() {
-            if depth_left == 0 || is_skipped(&path) {
+            if depth_left == 0 || super::walk::is_ignored_directory(&path) {
                 continue;
             }
             walk(&path, depth_left - 1, matches, found);
@@ -116,16 +105,6 @@ fn walk(
             found.push(path);
         }
     }
-}
-
-fn is_skipped(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return true;
-    };
-    if name == "buildSrc" || name == "build-logic" {
-        return false;
-    }
-    SKIPPED_DIRECTORIES.contains(&name)
 }
 
 #[cfg(test)]
