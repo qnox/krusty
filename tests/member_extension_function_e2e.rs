@@ -299,3 +299,24 @@ fn member_extension_function_resolution() {
         }
     }
 }
+
+#[test]
+fn generic_member_extension_boxes_erased_argument() {
+    const SOURCE: &str = r#"
+        class Collector {
+            fun <T> ArrayList<T>.append(value: T): Boolean = add(value)
+
+            fun fill(values: ArrayList<Int>) {
+                values.append(1)
+            }
+        }
+
+        fun box(): String {
+            val values = ArrayList<Int>()
+            Collector().fill(values)
+            return if (values[0] == 1) "OK" else "FAIL"
+        }
+    "#;
+
+    common::expect_box_ok_with_stdlib(SOURCE, "GenericMemberExtensionArgument");
+}

@@ -6202,7 +6202,6 @@ impl<'a> Lower<'a> {
             owner,
             physical_receiver,
             name,
-            params,
             physical_params,
             ret,
             physical_ret,
@@ -6220,7 +6219,7 @@ impl<'a> Lower<'a> {
             ty_to_ir(*physical_receiver),
         );
         let (provided, prelude) =
-            self.lower_selected_module_member_args(call_expr, args, params, *vararg)?;
+            self.lower_selected_module_member_args(call_expr, args, physical_params, *vararg)?;
         let mut lowered = Vec::with_capacity(provided.len() + 1);
         lowered.push(Some(extension_value));
         lowered.extend(provided);
