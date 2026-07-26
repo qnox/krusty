@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use super::fingerprint::collect_build_files;
-use super::model::{Module, ModuleId, ProjectModel, ProviderKind, SourceRoot};
+use super::model::{Module, ModuleId, ModuleOutput, ProjectModel, ProviderKind, SourceRoot};
 use super::provider::{ProbeError, ProjectProvider};
 use super::runner::{Command, CommandRunner, MAVEN};
 use super::xml::{self, Element};
@@ -289,8 +289,9 @@ fn main_module(entry: &ReactorModule, reactor: &[ReactorModule]) -> Module {
         "target/generated-sources",
         false,
     );
-    module.output_dir =
-        Some(entry.directory_of(entry.build_value("outputDirectory"), "target/classes"));
+    module.outputs = vec![ModuleOutput::classes(
+        entry.directory_of(entry.build_value("outputDirectory"), "target/classes"),
+    )];
     module.classpath = classpath_of(entry, COMPILE_CLASSPATH_FILE, reactor);
     module.jvm_target = jvm_target(entry);
     module.depends_on = reactor_dependencies(entry, reactor);
@@ -310,10 +311,10 @@ fn test_module(entry: &ReactorModule, reactor: &[ReactorModule]) -> Module {
         "target/generated-test-sources",
         true,
     );
-    module.output_dir = Some(entry.directory_of(
+    module.outputs = vec![ModuleOutput::classes(entry.directory_of(
         entry.build_value("testOutputDirectory"),
         "target/test-classes",
-    ));
+    ))];
     module.classpath = classpath_of(entry, TEST_CLASSPATH_FILE, reactor);
     module.jvm_target = jvm_target(entry);
     module.depends_on = reactor_dependencies(entry, reactor);
