@@ -330,6 +330,34 @@ pub struct GenericMethod {
 
 type GenericMemberPlan = (GenericMethod, HashMap<String, Ty>, Vec<Vec<Ty>>);
 
+struct ModuleMemberLambdaShape {
+    param_types: Vec<Option<Vec<Ty>>>,
+    receivers: Vec<Option<Ty>>,
+}
+
+fn generic_member_lambda_params(plan: &GenericMemberPlan, parameter: usize) -> Option<Vec<Ty>> {
+    let (method, _, parameter_types) = plan;
+    matches!(method.param_shapes.get(parameter), Some(Ty::Fun(_)))
+        .then(|| parameter_types.get(parameter).cloned().unwrap_or_default())
+}
+
+fn module_member_lambda_params(
+    member: &crate::libraries::LibraryMember,
+    parameter: usize,
+) -> Option<Vec<Ty>> {
+    let Ty::Fun(function) = member.params.get(parameter)? else {
+        return None;
+    };
+    Some(
+        member
+            .call_sig
+            .lambda_param_types
+            .get(parameter)
+            .cloned()
+            .unwrap_or_else(|| function.params.clone()),
+    )
+}
+
 impl ClassSig {
     fn type_parameter_bindings(&self, applied: Ty) -> HashMap<String, Ty> {
         let mut bindings = self
@@ -3830,6 +3858,70 @@ pub fn map_call_sig_args(
         sig.required,
         &sig.param_defaults,
     )
+}
+
+fn mapped_call_arg_names(
+    args: &[ExprId],
+    names: Option<&[Option<String>]>,
+    trailing_lambda: bool,
+    sig: &CallSig,
+) -> Option<Vec<Option<String>>> {
+    let mut mapped = names.map(<[Option<String>]>::to_vec);
+    if trailing_lambda && !args.is_empty() && !sig.vararg {
+        let names = mapped.get_or_insert_with(|| vec![None; args.len()]);
+        if let (Some(argument), Some(parameter)) = (names.last_mut(), sig.param_names.last()) {
+            *argument = Some(parameter.clone());
+        }
+    }
+    mapped
+}
+
+fn call_argument_parameter_indices(
+    args: &[ExprId],
+    names: Option<&[Option<String>]>,
+    trailing_lambda: bool,
+    sig: &CallSig,
+) -> Option<Vec<usize>> {
+    let mapped_names = mapped_call_arg_names(args, names, trailing_lambda, sig);
+    let slots = map_call_sig_args(args, mapped_names.as_deref(), sig).ok()?;
+    args.iter()
+        .map(|argument| {
+            slots
+                .iter()
+                .position(|slot| slot.as_ref() == Some(argument))
+        })
+        .collect()
+}
+
+fn module_member_lambda_shape(
+    member: &crate::libraries::LibraryMember,
+    generic_member: Option<&GenericMemberPlan>,
+    args: &[ExprId],
+    names: Option<&[Option<String>]>,
+    trailing_lambda: bool,
+) -> Option<ModuleMemberLambdaShape> {
+    let indices = call_argument_parameter_indices(args, names, trailing_lambda, &member.call_sig)?;
+    Some(ModuleMemberLambdaShape {
+        param_types: indices
+            .iter()
+            .map(|&parameter| {
+                generic_member
+                    .and_then(|plan| generic_member_lambda_params(plan, parameter))
+                    .or_else(|| module_member_lambda_params(member, parameter))
+            })
+            .collect(),
+        receivers: indices
+            .iter()
+            .map(|&parameter| {
+                member
+                    .call_sig
+                    .lambda_receivers
+                    .get(parameter)
+                    .copied()
+                    .flatten()
+            })
+            .collect(),
+    })
 }
 
 fn call_sig_without_context(sig: &CallSig, context_count: usize) -> CallSig {
@@ -11920,8 +12012,13 @@ impl<'a> Checker<'a> {
             .collect::<Vec<_>>();
         let members =
             crate::module_symbols::ModuleSymbols::new(self.syms).instance_members(receiver, name);
-        let method_sig =
-            self.best_module_member_candidate(&members, args, &partial, arg_names.as_deref());
+        let method_sig = self.best_module_member_candidate(
+            &members,
+            args,
+            &partial,
+            arg_names.as_deref(),
+            self.file.call_has_trailing_lambda.contains(&call.0),
+        );
         let generic_member = self.plan_generic_member(
             receiver,
             None,
@@ -11941,24 +12038,15 @@ impl<'a> Checker<'a> {
             )
         });
         let member_extension_plan = member_extension_plan.flatten();
-        let member_shape = method_sig.as_ref().map(|member| {
-            let param_types = generic_member
-                .as_ref()
-                .map(|(_, _, param_types)| param_types.clone())
-                .unwrap_or_else(|| member.call_sig.lambda_param_types.clone());
-            crate::symbol_resolver::LambdaCallShape {
-                param_types: param_types
-                    .iter()
-                    .any(|types| !types.is_empty())
-                    .then_some(param_types),
-                receivers: member
-                    .call_sig
-                    .lambda_receivers
-                    .iter()
-                    .any(Option::is_some)
-                    .then(|| member.call_sig.lambda_receivers.clone()),
-                materialized: None,
-            }
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let module_shape = method_sig.and_then(|member| {
+            module_member_lambda_shape(
+                member,
+                generic_member.as_ref(),
+                args,
+                arg_names.as_deref(),
+                trailing_lambda,
+            )
         });
         let member_extension_shape =
             member_extension_plan.map(|plan| crate::symbol_resolver::LambdaCallShape {
@@ -11970,29 +12058,46 @@ impl<'a> Checker<'a> {
                     .then_some(plan.receivers),
                 materialized: None,
             });
-        let shape = member_shape
-            .or(member_extension_shape)
+        let shape = member_extension_shape
             .or_else(|| self.extension_lambda_shape(receiver, name, &partial));
         let pts = shape.as_ref().and_then(|shape| shape.param_types.as_ref());
         let receivers = shape.as_ref().and_then(|shape| shape.receivers.as_ref());
         args.iter()
             .enumerate()
-            .map(|(i, &x)| match pts.and_then(|p| p.get(i)) {
-                Some(pt) if !pt.is_empty() && matches!(self.file.expr(x), Expr::Lambda { .. }) => {
-                    if let Some(lambda_receiver) =
-                        receivers.and_then(|items| items.get(i)).copied().flatten()
-                    {
-                        self.check_lambda_with_receiver_labeled(
-                            x,
-                            lambda_receiver,
-                            pt.get(1..).unwrap_or_default(),
-                            Some(name),
-                        )
-                    } else {
-                        self.check_lambda_with_types(x, pt)
+            .map(|(i, &x)| {
+                let module_pt = module_shape
+                    .as_ref()
+                    .and_then(|shape| shape.param_types.get(i))
+                    .and_then(Option::as_deref);
+                let pt = module_pt.or_else(|| {
+                    pts.and_then(|parameters| parameters.get(i))
+                        .filter(|parameters| !parameters.is_empty())
+                        .map(Vec::as_slice)
+                });
+                match pt {
+                    Some(pt) if matches!(self.file.expr(x), Expr::Lambda { .. }) => {
+                        let lambda_receiver = if module_pt.is_some() {
+                            module_shape
+                                .as_ref()
+                                .and_then(|shape| shape.receivers.get(i))
+                                .copied()
+                                .flatten()
+                        } else {
+                            receivers.and_then(|items| items.get(i)).copied().flatten()
+                        };
+                        if let Some(lambda_receiver) = lambda_receiver {
+                            self.check_lambda_with_receiver_labeled(
+                                x,
+                                lambda_receiver,
+                                pt.get(1..).unwrap_or_default(),
+                                Some(name),
+                            )
+                        } else {
+                            self.check_lambda_with_types(x, pt)
+                        }
                     }
+                    _ => partial[i].unwrap_or_else(|| self.expr(x)),
                 }
-                _ => partial[i].unwrap_or_else(|| self.expr(x)),
             })
             .collect()
     }
@@ -12855,6 +12960,7 @@ impl<'a> Checker<'a> {
                                             a,
                                             &full_arg_tys,
                                             arg_names.as_deref(),
+                                            self.file.call_has_trailing_lambda.contains(&e.0),
                                         )
                                         .is_some()
                                     });
@@ -16353,7 +16459,7 @@ impl<'a> Checker<'a> {
         );
         member.call_sig = call_sig.clone();
         let score =
-            self.module_member_candidate_score(&member, args, partial_arg_tys, arg_names)?;
+            self.module_member_candidate_score(&member, args, partial_arg_tys, arg_names, false)?;
         let ret = function.ret.as_ref().map_or_else(
             || crate::symbol_resolver::ty_subst(function.signature.ret, &bindings),
             |reference| {
@@ -17046,6 +17152,7 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         partial_arg_tys: &[Option<Ty>],
         arg_names: Option<&[Option<String>]>,
+        trailing_lambda: bool,
     ) -> Option<(usize, std::cmp::Reverse<usize>, bool)> {
         let score = |expected: Ty, actual: Ty| {
             if expected == actual {
@@ -17063,7 +17170,9 @@ impl<'a> Checker<'a> {
                 None
             }
         };
-        if arg_names.is_none() {
+        let mapped_names =
+            mapped_call_arg_names(args, arg_names, trailing_lambda, &member.call_sig);
+        if mapped_names.is_none() {
             if !member.call_sig.vararg {
                 if args
                     .iter()
@@ -17127,7 +17236,7 @@ impl<'a> Checker<'a> {
                 false,
             ));
         }
-        let slots = map_call_sig_args(args, arg_names, &member.call_sig).ok()?;
+        let slots = map_call_sig_args(args, mapped_names.as_deref(), &member.call_sig).ok()?;
         let mut type_score = 0;
         for (parameter_index, argument) in slots.iter().enumerate() {
             let Some(argument) = argument else {
@@ -17164,12 +17273,19 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         partial_arg_tys: &[Option<Ty>],
         arg_names: Option<&[Option<String>]>,
+        trailing_lambda: bool,
     ) -> Option<&'m crate::libraries::LibraryMember> {
         members
             .iter()
             .filter_map(|member| {
-                self.module_member_candidate_score(member, args, partial_arg_tys, arg_names)
-                    .map(|score| (score, member))
+                self.module_member_candidate_score(
+                    member,
+                    args,
+                    partial_arg_tys,
+                    arg_names,
+                    trailing_lambda,
+                )
+                .map(|score| (score, member))
             })
             .max_by_key(|(score, _)| *score)
             .map(|(_, member)| member)
@@ -17207,8 +17323,14 @@ impl<'a> Checker<'a> {
         let applicable_members = all_members
             .iter()
             .filter(|member| {
-                self.module_member_candidate_score(member, args, &full_arg_tys, arg_names)
-                    .is_some()
+                self.module_member_candidate_score(
+                    member,
+                    args,
+                    &full_arg_tys,
+                    arg_names,
+                    self.file.call_has_trailing_lambda.contains(&call.0),
+                )
+                .is_some()
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -17244,6 +17366,12 @@ impl<'a> Checker<'a> {
         let fi = module_member?;
         let params = fi.params.clone();
         let cs = &fi.call_sig;
+        let mapped_names = mapped_call_arg_names(
+            args,
+            arg_names,
+            self.file.call_has_trailing_lambda.contains(&call.0),
+            cs,
+        );
         let mut mapped_slots: Option<Vec<Option<ExprId>>> = None;
         if !cs.vararg && arg_tys.len() > params.len() {
             let source_display =
@@ -17268,10 +17396,10 @@ impl<'a> Checker<'a> {
         // (`z.test(b = …, a = …)`), so a positional check would pair each argument with the wrong
         // parameter. Fires for any named call, and for an omitted-argument call to a method with defaults.
         } else if cs.has_param_names()
-            && (arg_names.is_some()
+            && (mapped_names.is_some()
                 || (!cs.vararg && arg_tys.len() != params.len() && cs.required < params.len()))
         {
-            match map_call_sig_args(args, arg_names, cs) {
+            match map_call_sig_args(args, mapped_names.as_deref(), cs) {
                 Ok(slots) => {
                     for (i, slot) in slots.iter().enumerate() {
                         if let Some(a) = slot {
@@ -17989,6 +18117,7 @@ impl<'a> Checker<'a> {
                                         args,
                                         &full_arg_tys,
                                         arg_names.as_deref(),
+                                        self.file.call_has_trailing_lambda.contains(&call.0),
                                     )
                                     .is_some()
                                 });
@@ -18221,6 +18350,7 @@ impl<'a> Checker<'a> {
                         args,
                         &generic_member_partial,
                         arg_names.as_deref(),
+                        self.file.call_has_trailing_lambda.contains(&call.0),
                     )
                     .cloned();
                 // Preserve generic receiver bindings while typing member lambda arguments.
@@ -18235,6 +18365,15 @@ impl<'a> Checker<'a> {
                             arg_names.as_deref(),
                         )
                     });
+                let module_lambda_shape = method_sig.as_ref().and_then(|member| {
+                    module_member_lambda_shape(
+                        member,
+                        generic_member.as_ref(),
+                        args,
+                        arg_names.as_deref(),
+                        self.file.call_has_trailing_lambda.contains(&call.0),
+                    )
+                });
                 crate::trace_compiler!(
                     "resolve",
                     "MCALL name={name} rt={rt:?} nargs={} generic_member={}",
@@ -18435,24 +18574,26 @@ impl<'a> Checker<'a> {
                     args.iter()
                         .enumerate()
                         .map(|(i, &a)| {
-                            // A generic member's substituted lambda parameter types (`it: String`) take
-                            // precedence over the method signature's erased ones (`it: Any`).
-                            if let Some((_, _, ref lpt)) = generic_member {
-                                if lpt.get(i).is_some_and(|v| !v.is_empty())
-                                    && matches!(c.file.expr(a), Expr::Lambda { .. })
+                            if matches!(c.file.expr(a), Expr::Lambda { .. }) {
+                                if let Some(pt) = module_lambda_shape
+                                    .as_ref()
+                                    .and_then(|shape| shape.param_types.get(i))
+                                    .and_then(Option::as_deref)
                                 {
-                                    let pt = lpt[i].clone();
-                                    return c.check_lambda_with_types(a, &pt);
-                                }
-                            }
-                            if let Some(ref sig) = method_sig {
-                                let lpt = &sig.call_sig.lambda_param_types;
-                                if i < lpt.len()
-                                    && !lpt[i].is_empty()
-                                    && matches!(c.file.expr(a), Expr::Lambda { .. })
-                                {
-                                    let pt = lpt[i].clone();
-                                    return c.check_lambda_with_types(a, &pt);
+                                    if let Some(receiver) = module_lambda_shape
+                                        .as_ref()
+                                        .and_then(|shape| shape.receivers.get(i))
+                                        .copied()
+                                        .flatten()
+                                    {
+                                        return c.check_lambda_with_receiver_labeled(
+                                            a,
+                                            receiver,
+                                            pt.get(1..).unwrap_or_default(),
+                                            call_fn_name.as_deref(),
+                                        );
+                                    }
+                                    return c.check_lambda_with_types(a, pt);
                                 }
                             }
                             if let Some(ref pts) = classpath_sam_pts {
@@ -18511,6 +18652,7 @@ impl<'a> Checker<'a> {
                         args,
                         &full_arg_tys,
                         arg_names.as_deref(),
+                        self.file.call_has_trailing_lambda.contains(&call.0),
                     )
                     .is_some()
                 });
@@ -19620,19 +19762,12 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
-                // An implicit-`this` member higher-order call (`update { … }` reached inside a member or
-                // extension body, with no explicit receiver): resolve the member through the module
-                // hierarchy and pre-type each lambda argument from the member's declared function-type
-                // parameter. Without this a no-parameter lambda (`{ null }`) adopts the erased zero-arg
-                // form and then fails the arity check against the parameter's `(T?) -> T?`. Mirrors the
-                // explicit-receiver `method_sig` lambda pre-typing; gated to a receiver-less name that is
-                // neither a local nor a top-level function (`known_sig` covers the latter).
                 let implicit_member_lambda_enabled = !self.lexical_value_declares(&fname)
                     && known_sig.is_none()
                     && args
                         .iter()
                         .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }));
-                let ordinary_this_member_lambda_pts: Option<Vec<Vec<Ty>>> =
+                let ordinary_this_member_lambda_shape: Option<ModuleMemberLambdaShape> =
                     if implicit_member_lambda_enabled {
                         let partial = this_member_partial.as_deref().unwrap_or_default();
                         self.implicit_receiver_types()
@@ -19645,23 +19780,29 @@ impl<'a> Checker<'a> {
                                     args,
                                     partial,
                                     arg_names.as_deref(),
+                                    self.file.call_has_trailing_lambda.contains(&call.0),
                                 )?;
-                                self.plan_generic_member(
+                                let generic_member = self.plan_generic_member(
                                     receiver,
                                     member.owner,
                                     &fname,
                                     Some(&member.params),
                                     Some(partial),
                                     arg_names.as_deref(),
+                                );
+                                module_member_lambda_shape(
+                                    member,
+                                    generic_member.as_ref(),
+                                    args,
+                                    arg_names.as_deref(),
+                                    self.file.call_has_trailing_lambda.contains(&call.0),
                                 )
-                                .map(|(_, _, lambda_params)| lambda_params)
-                                .or_else(|| Some(member.call_sig.lambda_param_types.clone()))
                             })
                     } else {
                         None
                     };
                 let this_member_ext_lambda_plan = if implicit_member_lambda_enabled
-                    && ordinary_this_member_lambda_pts.is_none()
+                    && ordinary_this_member_lambda_shape.is_none()
                 {
                     let explicit_type_args = self
                         .file
@@ -19688,7 +19829,7 @@ impl<'a> Checker<'a> {
                     None
                 };
                 let implicit_library_ext_lambda_shape = if implicit_member_lambda_enabled
-                    && ordinary_this_member_lambda_pts.is_none()
+                    && ordinary_this_member_lambda_shape.is_none()
                     && this_member_ext_lambda_plan.is_none()
                 {
                     self.implicit_receiver_types()
@@ -19705,12 +19846,9 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
-                let this_member_lambda_pts = ordinary_this_member_lambda_pts
-                    .or_else(|| {
-                        this_member_ext_lambda_plan
-                            .as_ref()
-                            .map(|plan| plan.param_types.clone())
-                    })
+                let this_member_lambda_pts = this_member_ext_lambda_plan
+                    .as_ref()
+                    .map(|plan| plan.param_types.clone())
                     .or_else(|| {
                         implicit_library_ext_lambda_shape
                             .as_ref()
@@ -19792,8 +19930,28 @@ impl<'a> Checker<'a> {
                                 return self.check_lambda_with_types(a, &pt);
                             }
                         }
-                        // Implicit-`this` member HOF: pre-type the lambda from the member's declared
-                        // function-type parameter (see `this_member_lambda_pts`).
+                        if matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                            if let Some(pt) = ordinary_this_member_lambda_shape
+                                .as_ref()
+                                .and_then(|shape| shape.param_types.get(i))
+                                .and_then(Option::as_deref)
+                            {
+                                if let Some(receiver) = ordinary_this_member_lambda_shape
+                                    .as_ref()
+                                    .and_then(|shape| shape.receivers.get(i))
+                                    .copied()
+                                    .flatten()
+                                {
+                                    return self.check_lambda_with_receiver_labeled(
+                                        a,
+                                        receiver,
+                                        pt.get(1..).unwrap_or_default(),
+                                        call_fn_name.as_deref(),
+                                    );
+                                }
+                                return self.check_lambda_with_types(a, pt);
+                            }
+                        }
                         if let Some(ref pts) = this_member_lambda_pts {
                             if pts.get(i).is_some_and(|v| !v.is_empty())
                                 && matches!(self.file.expr(a), Expr::Lambda { .. })
@@ -20640,42 +20798,14 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
-                    } else if let Some(names) = &arg_names {
-                        match map_call_sig_args(args, Some(names), cs) {
-                            Ok(slots) => {
-                                for (i, slot) in slots.iter().enumerate() {
-                                    if let Some(a) = slot {
-                                        let aty = self.expr_types[a.0 as usize];
-                                        self.expect_assignable(
-                                            generic_expectations
-                                                .get(a)
-                                                .copied()
-                                                .unwrap_or(params[i]),
-                                            aty,
-                                            self.span(*a),
-                                            "argument",
-                                        );
-                                    }
-                                }
-                            }
-                            Err(error) => self.report_call_arg_mapping_error(call, args, error),
-                        }
-                    } else if self.file.call_has_trailing_lambda.contains(&call.0)
-                        && !args.is_empty()
-                        && arg_tys.len() <= params.len()
-                    {
-                        // A purely-positional call with a SYNTACTIC trailing lambda: the lambda binds to the
-                        // LAST parameter, preceding positionals fill from the front, and any skipped middle
-                        // parameter must have a default (`host("x") { }` on `host(a, modifier = d, builder)`
-                        // ⇒ `modifier` defaults, the lambda fills `builder`). Route through `map_call_args`
-                        // by labelling the trailing lambda with the last parameter's name; it validates gaps
-                        // against `param_defaults` per-slot.
-                        let mut synth: Vec<Option<String>> = vec![None; args.len()];
-                        if let (Some(last), Some(name)) = (synth.last_mut(), cs.param_names.last())
-                        {
-                            *last = Some(name.clone());
-                        }
-                        match map_call_sig_args(args, Some(&synth), cs) {
+                    } else if let Some(names) = mapped_call_arg_names(
+                        args,
+                        arg_names.as_deref(),
+                        self.file.call_has_trailing_lambda.contains(&call.0)
+                            && arg_tys.len() <= params.len(),
+                        cs,
+                    ) {
+                        match map_call_sig_args(args, Some(&names), cs) {
                             Ok(slots) => {
                                 for (i, slot) in slots.iter().enumerate() {
                                     if let Some(a) = slot {
