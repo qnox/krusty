@@ -43,7 +43,10 @@ fn subsystem_corpus_cases_box_ok() {
 
 /// `removeLastOrNull() ?: throw ...` inside `buildList` exposes nullable generic extension returns:
 /// Elvis with a diverging RHS must produce the non-null LHS type, not keep `Any?` and lose conformance.
-const ELVIS_NOTHING_GENERIC_CASES: &[&str] = &["inference/pcla/issues/kt49887.kt"];
+const ELVIS_NOTHING_GENERIC_CASES: &[&str] = &[
+    "elvis/withNothingConstraintAndExpectedType.kt",
+    "inference/pcla/issues/kt49887.kt",
+];
 
 #[test]
 fn elvis_nothing_generic_corpus_cases_box_ok() {
@@ -274,6 +277,24 @@ const VALUE_CLASS_GENERIC_BOUNDARY_CASES: &[&str] = &[
 #[test]
 fn value_class_generic_boundary_corpus_cases_box_ok() {
     assert_corpus_cases_box_ok(VALUE_CLASS_GENERIC_BOUNDARY_CASES);
+}
+
+const NULLABLE_GENERIC_AND_VALUE_CLASS_BRIDGE_CASES: &[&str] = &[
+    "casts/kt80795.kt",
+    "inlineClasses/boxReturnValueOnOverride/overrideGenericWithNullableInlineClassUpperBoundWithNonNullAny.kt",
+    "inlineClasses/interfaceMethodCalls/complexGenericMethodWithInlineClassOverride3.kt",
+    "inlineClasses/interfaceMethodCalls/complexGenericMethodWithInlineClassOverride3Generic.kt",
+    "inlineClasses/kt27096_functionalGeneric.kt",
+    "inlineClasses/kt27096_referenceGeneric.kt",
+    "inlineClasses/unboxValueFromPlatformTypeGeneric.kt",
+    "inlineClasses/unboxValueOfAnyBeforeMethodInvocation.kt",
+    "inlineClasses/unboxValueOfAnyBeforeMethodInvocationGeneric.kt",
+    "inlineClasses/unboxValueOfAnyBeforeMethodInvocationGeneric2.kt",
+];
+
+#[test]
+fn nullable_generic_and_value_class_bridge_corpus_cases_box_ok() {
+    assert_corpus_cases_box_ok(NULLABLE_GENERIC_AND_VALUE_CLASS_BRIDGE_CASES);
 }
 
 /// Run each corpus case; a case that RAN must be `box()=OK` (any other value is a real miscompile),

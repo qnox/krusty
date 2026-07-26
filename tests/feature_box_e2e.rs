@@ -797,6 +797,70 @@ fun box(): String {
 }
 "#,
     ),
+    (
+        "MemberPlusAssignBeatsExtension",
+        r#"
+class Both(var result: String) {
+    operator fun plusAssign(value: Int) { result += "member" }
+}
+operator fun Both.plusAssign(value: Int) { result += "extension" }
+fun box(): String {
+    val both = Both("")
+    both += 1
+    return if (both.result == "member") "OK" else both.result
+}
+"#,
+    ),
+    (
+        "OverloadedOpAssignSelection",
+        r#"
+class MemberAcc(var result: String) {
+    operator fun plusAssign(value: String) { result = "wrong-member" }
+    operator fun plusAssign(value: Int) { result = "member" }
+}
+class ExtensionAcc(var result: String)
+operator fun ExtensionAcc.plusAssign(value: String) { result = "wrong-extension" }
+operator fun ExtensionAcc.plusAssign(value: Int) { result = "extension" }
+fun box(): String {
+    val member = MemberAcc("")
+    member += 1
+    if (member.result != "member") return member.result
+    val extension = ExtensionAcc("")
+    extension += 1
+    return if (extension.result == "extension") "OK" else extension.result
+}
+"#,
+    ),
+    (
+        "IndexedOpAssign",
+        r#"
+class Cell(var value: String) {
+    operator fun plusAssign(suffix: String) { value += suffix }
+}
+class Cells(private val cell: Cell) {
+    operator fun get(index: Int): Cell = cell
+}
+fun box(): String {
+    val cell = Cell("O")
+    val cells = Cells(cell)
+    cells[0] += "K"
+    return if (cell.value == "OK") "OK" else cell.value
+}
+"#,
+    ),
+    (
+        "ZeroArityLambdaCapturesOuterIt",
+        r#"
+fun invokeInt(block: () -> Int): Int = block()
+class ReceiverScope
+fun box(): String {
+    val ordinary: (Int) -> Int = { invokeInt { it } }
+    if (ordinary(7) != 7) return "ordinary"
+    val receiver: (Int) -> Int = { with(ReceiverScope()) { it } }
+    return if (receiver(8) == 8) "OK" else "receiver"
+}
+"#,
+    ),
     // Collection `+=`: resolved exactly as kotlinc (no mutability predicate). A `MutableList`/`MutableSet`/
     // `MutableMap` receiver (and a concrete `ArrayList`) resolves `MutableCollection.plusAssign`, spliced
     // to in-place `add`/`addAll`; a read-only `List` has NO applicable `plusAssign` (the candidate's Kotlin

@@ -114,6 +114,11 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
             .unwrap_or(internal)
     }
 
+    /// Whether a library owner belongs to the platform's default Kotlin library surface.
+    fn is_default_library_owner(&self, _internal: TypeName) -> bool {
+        false
+    }
+
     /// Primitive represented by a platform wrapper type.
     fn boxed_primitive(&self, _ty: Ty) -> Option<Ty> {
         None

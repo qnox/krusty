@@ -1157,8 +1157,48 @@ pub fn lower_value_classes(
             let owner_fq = c.fq_name();
             for b in &mut c.bridges {
                 let target = b.target_name.clone().unwrap_or_else(|| b.name.clone());
-                if let Some(m) = mangle_map.get(&(c.fq_name, target, b.concrete_params.len())) {
+                if let Some(m) =
+                    mangle_map.get(&(c.fq_name, target.clone(), b.concrete_params.len()))
+                {
                     b.target_name = Some(m.clone());
+                }
+                let target_mentions_vc = b
+                    .concrete_params
+                    .iter()
+                    .chain(std::iter::once(&b.concrete_ret))
+                    .any(|ty| {
+                        ty.non_null()
+                            .obj_internal()
+                            .is_some_and(|name| under.contains_key(&name))
+                    });
+                let bridge_mentions_vc = b
+                    .erased_params
+                    .iter()
+                    .chain(std::iter::once(&b.erased_ret))
+                    .any(|ty| {
+                        ty.non_null()
+                            .obj_internal()
+                            .is_some_and(|name| under.contains_key(&name))
+                    });
+                if b.target_name.is_none()
+                    && target_mentions_vc
+                    && !is_property_getter_bridge_name(&target)
+                {
+                    let mangled = vc_mangle(
+                        &target,
+                        &b.concrete_params,
+                        &b.concrete_ret,
+                        &under,
+                        false,
+                        suspend_sig.contains(&(
+                            Some(c.fq_name),
+                            target.clone(),
+                            b.concrete_params.len(),
+                        )),
+                    );
+                    if mangled != target {
+                        b.target_name = Some(mangled);
+                    }
                 }
                 crate::trace_compiler!(
                     "value_classes",
@@ -1179,6 +1219,27 @@ pub fn lower_value_classes(
                     .non_null()
                     .obj_internal()
                     .filter(|fq_name| under.contains_key(fq_name));
+                if !owner_is_value && !bridge_mentions_vc {
+                    let vc_params: Vec<Option<TypeName>> = b
+                        .concrete_params
+                        .iter()
+                        .zip(b.erased_params.iter())
+                        .map(|(concrete, erased)| match concrete {
+                            Ty::Obj(fq_name, _)
+                                if under.contains_key(fq_name) && is_ref(erased) =>
+                            {
+                                Some(*fq_name)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    if vc_params.iter().any(Option::is_some) {
+                        for parameter in &mut b.concrete_params {
+                            *parameter = erase(parameter, &under);
+                        }
+                        b.unbox_params = vc_params;
+                    }
+                }
                 if let Some(fq_name) = concrete_ret_vc {
                     if b.target_name.is_none() {
                         b.target_name = Some(b.name.clone());
@@ -1189,7 +1250,7 @@ pub fn lower_value_classes(
                     // (`fun bar(): Gx`) also mangles by the return; a generic `T` return (erased
                     // `Object`) does not.
                     // A bridge lives on a class (never a file class); its value-class return mangles.
-                    if !is_property_getter_bridge_name(&b.name) {
+                    if bridge_mentions_vc && !is_property_getter_bridge_name(&b.name) {
                         b.name = vc_mangle(
                             &b.name,
                             &b.concrete_params,
@@ -1280,7 +1341,7 @@ pub fn lower_value_classes(
                     if supertype_returns_unboxed_vc {
                         b.erased_ret = erase(&b.erased_ret, &under);
                     }
-                } else if !owner_is_value {
+                } else if !owner_is_value && bridge_mentions_vc {
                     // A bridge (mangled `f-<hash>` OR same-name) delegating to a concrete method with a
                     // VALUE-CLASS PARAM, where the bridge's OWN param is the erased-generic `Object`: a
                     // generic supertype method (`I<Result>.foo(T)`) keeps its `foo(Object)` bridge signature,
@@ -1554,6 +1615,7 @@ pub fn lower_value_classes(
             slots,
             under: &under,
             logical: &ir.logical_types,
+            physical: &ir.physical_types,
             field_getters: &field_getters,
         };
         let boxed_this = body.2;
@@ -1879,6 +1941,7 @@ pub fn lower_value_classes(
             slots,
             under: &under,
             logical: &ir.logical_types,
+            physical: &ir.physical_types,
             field_getters: &field_getters,
         };
         let mut reach = HashSet::new();
@@ -1957,10 +2020,6 @@ pub fn lower_value_classes(
                         ops.push((*arg, repr_ctx.box_op(*arg, x)));
                     }
                 }
-                // A `checkcast X?` to a NULLABLE value class over a NON-NULL REFERENCE underlying is
-                // retargeted to that underlying (`Str?`→`String`, `StrArr?`→`String[]`): the unboxed value
-                // IS the underlying reference, so a `checkcast` to the box class `X` would fail. (A boxed
-                // nullable — primitive underlying, `nullable_is_boxed` — keeps its box-class cast.)
                 if to_self
                     && matches!(
                         op,
@@ -1969,7 +2028,9 @@ pub fn lower_value_classes(
                     && type_operand.is_nullable()
                 {
                     let fq = type_operand.non_null().obj_internal().unwrap();
-                    if !nullable_is_boxed(fq, &under) {
+                    if !nullable_is_boxed(fq, &under)
+                        && !matches!(repr_ctx.repr(id), Repr::Boxed(boxed) if boxed == fq)
+                    {
                         retarget.push((id, erase(&under[&fq], &under)));
                     }
                 }
@@ -2465,7 +2526,12 @@ pub fn lower_value_classes(
                         ops.push((a, repr_ctx.box_op(a, x)));
                     }
                     Repr::Boxed(x) if matches!(&tgt, Target::UnboxedX(tx) if *tx == x) => {
-                        ops.push((a, BoxOp::Unbox(x)))
+                        let op = if p.is_nullable() {
+                            BoxOp::UnboxNull(x)
+                        } else {
+                            BoxOp::Unbox(x)
+                        };
+                        ops.push((a, op));
                     }
                     // A boxed element read from a stdlib reference array (`arr[i]` → `Object`/boxed `X`)
                     // flowing into an unboxed value-class slot must `unbox-impl`.
@@ -2478,7 +2544,12 @@ pub fn lower_value_classes(
                                     ..
                                 }
                             ) {
-                                ops.push((a, BoxOp::Unbox(*x)));
+                                let op = if p.is_nullable() {
+                                    BoxOp::UnboxNull(*x)
+                                } else {
+                                    BoxOp::Unbox(*x)
+                                };
+                                ops.push((a, op));
                             }
                         }
                     }
@@ -2529,6 +2600,10 @@ pub fn lower_value_classes(
                 fresh += 1;
             }
             BoxOp::Unbox(x) => unbox_wrap(ir, id, x, &under),
+            BoxOp::UnboxNull(x) => {
+                unbox_wrap_nullable(ir, id, x, &under, fresh);
+                fresh += 1;
+            }
         }
     }
 
@@ -2766,6 +2841,7 @@ enum BoxOp {
     Box(TypeName),
     BoxNull(TypeName),
     Unbox(TypeName),
+    UnboxNull(TypeName),
 }
 
 /// The representation a value-class value currently has.
@@ -2789,6 +2865,7 @@ struct ReprCtx<'a> {
     slots: &'a HashMap<u32, Ty>,
     under: &'a Under,
     logical: &'a HashMap<u32, Ty>,
+    physical: &'a HashMap<u32, Ty>,
     field_getters: &'a FieldGetters,
 }
 
@@ -2801,6 +2878,7 @@ impl ReprCtx<'_> {
             self.slots,
             self.under,
             self.logical,
+            self.physical,
             self.field_getters,
             id,
         )
@@ -2933,6 +3011,7 @@ fn repr(
     slots: &HashMap<u32, Ty>,
     under: &Under,
     logical: &HashMap<u32, Ty>,
+    physical: &HashMap<u32, Ty>,
     field_getters: &FieldGetters,
     id: ExprId,
 ) -> Repr {
@@ -2998,15 +3077,17 @@ fn repr(
                 slots,
                 under,
                 logical,
+                physical,
                 field_getters,
                 *arg,
             ) {
                 Repr::Unboxed(x) if x == fq_name => Repr::Unboxed(x),
-                // A cast to a NULLABLE value class over a NON-NULL REFERENCE underlying (`Str?` = `String?`,
-                // `nullable_is_boxed == false`) yields the UNBOXED underlying, not a boxed `X` — matching
-                // `repr_of_ty(X?)`. The cast itself is retargeted to that underlying (see the boundary
-                // pass), so a `.boxed` read of `BoxT<Str?>` flows as the plain `String`/`null` without a
-                // spurious `unbox-impl` (which would NPE on `null`).
+                _ if physical.get(arg).is_some_and(|physical| {
+                    physical.is_reference() && physical.non_null().obj_internal() != Some(fq_name)
+                }) =>
+                {
+                    Repr::Boxed(fq_name)
+                }
                 _ if type_operand.is_nullable() && !nullable_is_boxed(fq_name, under) => {
                     Repr::Unboxed(fq_name)
                 }
@@ -3027,6 +3108,7 @@ fn repr(
             slots,
             under,
             logical,
+            physical,
             field_getters,
             *operand,
         ),
@@ -3040,6 +3122,7 @@ fn repr(
             slots,
             under,
             logical,
+            physical,
             field_getters,
             *v,
         ),
@@ -3057,6 +3140,7 @@ fn repr(
                     slots,
                     under,
                     logical,
+                    physical,
                     field_getters,
                     *v,
                 )
@@ -3133,6 +3217,56 @@ fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
     };
 }
 
+fn unbox_wrap_nullable(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under, slot: u32) {
+    let orig = ir.exprs[id as usize].clone();
+    let orig_id = ir.exprs.len() as ExprId;
+    ir.exprs.push(orig);
+    let boxed_ty = Ty::nullable(Ty::obj_name(x));
+    let var = ir.exprs.len() as ExprId;
+    ir.exprs.push(IrExpr::Variable {
+        index: slot,
+        ty: boxed_ty,
+        init: Some(orig_id),
+        named: false,
+    });
+    let get_for_test = ir.exprs.len() as ExprId;
+    ir.exprs.push(IrExpr::GetValue(slot));
+    let null1 = ir.exprs.len() as ExprId;
+    ir.exprs.push(IrExpr::Const(crate::ir::IrConst::Null));
+    let is_null = ir.exprs.len() as ExprId;
+    ir.exprs.push(IrExpr::PrimitiveBinOp {
+        op: crate::ir::IrBinOp::Eq,
+        lhs: get_for_test,
+        rhs: null1,
+    });
+    let null2 = ir.exprs.len() as ExprId;
+    ir.exprs.push(IrExpr::Const(crate::ir::IrConst::Null));
+    let get_for_unbox = ir.exprs.len() as ExprId;
+    ir.exprs.push(IrExpr::GetValue(slot));
+    let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
+    let d = desc(&u);
+    let unboxed = ir.exprs.len() as ExprId;
+    ir.exprs.push(IrExpr::Call {
+        callee: Callee::Virtual {
+            owner: x,
+            name: "unbox-impl".to_string(),
+            descriptor: format!("(){d}"),
+            params: None,
+            interface: false,
+        },
+        dispatch_receiver: Some(get_for_unbox),
+        args: vec![],
+    });
+    let when = ir.exprs.len() as ExprId;
+    ir.exprs.push(IrExpr::When {
+        branches: vec![(Some(is_null), null2), (None, unboxed)],
+    });
+    ir.exprs[id as usize] = IrExpr::Block {
+        stmts: vec![var],
+        value: Some(when),
+    };
+}
+
 /// Build a sole-property access `x.v`: identity (`Block` yielding the receiver) when the receiver is an
 /// unboxed value, or `receiver.unbox-impl()` when it is a boxed `X` (e.g. from a nullable-returning
 /// function).
@@ -3163,6 +3297,7 @@ fn prop_access(
             slots,
             under,
             &ir.logical_types,
+            &ir.physical_types,
             field_getters,
             receiver,
             x,
@@ -3200,6 +3335,7 @@ fn is_boxed_vc(
     slots: &HashMap<u32, Ty>,
     under: &Under,
     logical: &HashMap<u32, Ty>,
+    physical: &HashMap<u32, Ty>,
     field_getters: &FieldGetters,
     id: ExprId,
     x: TypeName,
@@ -3266,7 +3402,7 @@ fn is_boxed_vc(
             type_operand,
         } => {
             is_x(type_operand)
-                && !matches!(repr(exprs, rets, fields, slots, under, logical, field_getters, *arg), Repr::Unboxed(c) if c == x)
+                && !matches!(repr(exprs, rets, fields, slots, under, logical, physical, field_getters, *arg), Repr::Unboxed(c) if c == x)
         }
         IrExpr::NotNullAssert { operand } => is_boxed_vc(
             exprs,
@@ -3276,6 +3412,7 @@ fn is_boxed_vc(
             slots,
             under,
             logical,
+            physical,
             field_getters,
             *operand,
             x,
@@ -3291,6 +3428,7 @@ fn is_boxed_vc(
                 slots,
                 under,
                 logical,
+                physical,
                 field_getters,
                 *r,
                 x,
@@ -3311,6 +3449,7 @@ fn is_boxed_vc(
             slots,
             under,
             logical,
+            physical,
             field_getters,
             *arg,
             x,
@@ -3323,6 +3462,7 @@ fn is_boxed_vc(
             slots,
             under,
             logical,
+            physical,
             field_getters,
             *v,
             x,
@@ -3390,6 +3530,7 @@ fn unbox_tail(
                 slots,
                 under,
                 &ir.logical_types,
+                &ir.physical_types,
                 field_getters,
                 id,
                 x,
@@ -3477,6 +3618,7 @@ fn box_ref_tail(
                 slots,
                 under,
                 &ir.logical_types,
+                &ir.physical_types,
                 field_getters,
                 id,
                 x,
@@ -3579,7 +3721,17 @@ fn box_nullable_vc_tail(
                     .and_then(|t| t.non_null().obj_internal())
                     .is_some_and(|n| n == x);
                 let repr_unboxed_x = matches!(
-                    repr(&ir.exprs, rets, fields, slots, under, &ir.logical_types, field_getters, id),
+                    repr(
+                        &ir.exprs,
+                        rets,
+                        fields,
+                        slots,
+                        under,
+                        &ir.logical_types,
+                        &ir.physical_types,
+                        field_getters,
+                        id,
+                    ),
                     Repr::Unboxed(c) if c == x
                 );
                 let already_boxed = is_boxed_vc(
@@ -3590,6 +3742,7 @@ fn box_nullable_vc_tail(
                     slots,
                     under,
                     &ir.logical_types,
+                    &ir.physical_types,
                     field_getters,
                     id,
                     x,
