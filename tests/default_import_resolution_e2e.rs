@@ -51,6 +51,84 @@ fn explicit_import_makes_it_resolve() {
 }
 
 #[test]
+fn java_util_star_import_resolves_mapped_collection_types() {
+    const EXPLICIT: &str = "package first\n\
+    import java.util.*\n\
+    fun count(values: Collection<String>): Int = values.size\n\
+    fun first(values: List<String>): String = values[0]\n";
+    const DEFAULT: &str = "package second\n\
+    fun last(values: List<String>): String = values[values.size - 1]\n";
+    const MAIN: &str = "fun box(): String = \"OK\"\n";
+    for sources in [
+        [
+            ("Explicit.kt", EXPLICIT),
+            ("Default.kt", DEFAULT),
+            ("Main.kt", MAIN),
+        ],
+        [
+            ("Default.kt", DEFAULT),
+            ("Explicit.kt", EXPLICIT),
+            ("Main.kt", MAIN),
+        ],
+    ] {
+        assert_eq!(
+            common::compile_and_run_files_with_stdlib(&sources)
+                .expect("mapped collection imports resolve independently across files"),
+            "OK"
+        );
+    }
+}
+
+#[test]
+fn files_may_resolve_the_same_simple_name_through_different_imports() {
+    const UTIL: &str = "package first\n\
+    import java.util.Date\n\
+    fun millis(value: Date): Long = value.time\n";
+    const SQL: &str = "package second\n\
+    import java.sql.Date\n\
+    fun millis(value: Date): Long = value.time\n";
+    const MAIN: &str = "fun box(): String = \"OK\"\n";
+
+    for sources in [
+        [("Util.kt", UTIL), ("Sql.kt", SQL), ("Main.kt", MAIN)],
+        [("Sql.kt", SQL), ("Util.kt", UTIL), ("Main.kt", MAIN)],
+    ] {
+        assert_eq!(
+            common::compile_and_run_files_with_stdlib(&sources).expect("imports are file-local"),
+            "OK"
+        );
+    }
+}
+
+#[test]
+fn one_files_import_does_not_leak_into_another_file() {
+    const IMPORTED: &str = "package first\n\
+    import java.util.Scanner\n\
+    fun read(value: Scanner): String = value.next()\n";
+    const UNIMPORTED: &str = "package second\n\
+    fun read(value: Scanner): String = value.next()\n";
+    const MAIN: &str = "fun box(): String = \"OK\"\n";
+
+    for sources in [
+        [
+            ("Imported.kt", IMPORTED),
+            ("Unimported.kt", UNIMPORTED),
+            ("Main.kt", MAIN),
+        ],
+        [
+            ("Unimported.kt", UNIMPORTED),
+            ("Imported.kt", IMPORTED),
+            ("Main.kt", MAIN),
+        ],
+    ] {
+        assert!(
+            common::compile_and_run_files_with_stdlib(&sources).is_none(),
+            "an import became visible outside its file"
+        );
+    }
+}
+
+#[test]
 fn ambiguous_star_imports_are_rejected_like_kotlinc() {
     // kotlinc rejects a bare `Date` when TWO star-imports both supply it (`java.util.*` AND
     // `java.sql.*`): the name is ambiguous. krusty must also leave it unresolved (a compile error),
