@@ -825,6 +825,10 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
             "ConditionType.kt",
             "fun conditionMismatch(): Int { if (1) return 1; return 0 }\n",
         ),
+        (
+            "NullableReturnType.kt",
+            "fun nullableReturnMismatch(): String = null\n",
+        ),
     ];
     let clean_diagnostic_cases = [(
         "ContextArray.kt",
@@ -843,6 +847,61 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
              fun paint(holder: Holder): Shade {\n\
                  holder.mutable = holder.fixed\n\
                  return Shade.RED\n\
+             }\n",
+        ),
+        (
+            "AdvancedTokens.kt",
+            "package tokenparity\n\
+             @Deprecated(\"old\") data class Record(val value: Int)\n\
+             interface Named { fun name(): String }\n\
+             object Registry { var current: Record? = null }\n\
+             enum class State { READY }\n\
+             typealias Alias = Record\n\
+             operator fun Record.plus(other: Record): Record = this\n\
+             fun use(input: Alias): Int {\n\
+                 Registry.current = input\n\
+                 return State.READY.ordinal + input.value\n\
+             }\n",
+        ),
+        (
+            "EnumInheritedMemberTokens.kt",
+            "enum class Direction { NORTH }\n\
+             fun describe(direction: Direction): String =\n\
+                 direction.name + Direction.NORTH.ordinal\n",
+        ),
+        (
+            "LabelTokens.kt",
+            "fun sumPositive(values: IntArray): Int {\n\
+                 var result = 0\n\
+                 outer@ for (value in values) {\n\
+                     if (value < 0) continue@outer\n\
+                     if (value == 0) break@outer\n\
+                     result += value\n\
+                 }\n\
+                 return result\n\
+             }\n\
+             fun pick(value: Int): Int = value.let {\n\
+                 if (it > 0) return@let it\n\
+                 return 0\n\
+             }\n",
+        ),
+        (
+            "ReceiverLabelTokens.kt",
+            "interface LabelBase { fun value(): Int = 1 }\n\
+             class LabelOuter : LabelBase {\n\
+                 override fun value(): Int = super<LabelBase>@LabelOuter.value()\n\
+                 fun self(): LabelOuter = noreturn@ this\n\
+             }\n",
+        ),
+        (
+            "UserCompoundOperatorTokens.kt",
+            "class Accumulator {\n\
+                 operator fun plusAssign(value: Int) {}\n\
+             }\n\
+             operator fun Accumulator.minusAssign(value: Int) {}\n\
+             fun use(accumulator: Accumulator) {\n\
+                 accumulator += 1\n\
+                 accumulator -= 1\n\
              }\n",
         ),
     ];

@@ -29,3 +29,28 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run(SRC).expect("Unit? closure result"), "OK");
 }
+
+#[test]
+fn elvis_with_null_keeps_nullable_unit_value() {
+    const SRC: &str = "fun isNull(x: Unit?) = x == null\n\
+fun box(): String {\n\
+    val x: Unit? = null\n\
+    return if (isNull(x ?: null)) \"OK\" else \"fail\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("Unit? elvis null result"), "OK");
+}
+
+#[test]
+fn valueless_labeled_return_in_nullable_unit_lambda_returns_unit_value() {
+    const SRC: &str = "class Inv<T>\n\
+fun Inv<*>.nullableUnit(): Unit? = null\n\
+fun <R> runBlock(block: () -> R): R = block()\n\
+fun test(c: Inv<*>) {\n\
+    runBlock {\n\
+        if (true) return@runBlock\n\
+        c.nullableUnit()\n\
+    }\n\
+}\n\
+fun box(): String { test(Inv<Int>()); return \"OK\" }\n";
+    assert_eq!(run(SRC).expect("valueless return in Unit? lambda"), "OK");
+}

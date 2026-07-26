@@ -472,7 +472,7 @@ pub enum Ty {
     /// so equal instantiations share a pointer and the front end can recover element/member types.
     /// Empty for a non-generic class.
     Obj(TypeName, &'static [Ty]),
-    /// The type of the `null` literal — assignable to any reference type.
+    /// The type of the `null` literal — assignable only to nullable types.
     Null,
     /// The bottom type (`Nothing`): the type of `throw`/`return` expressions. Assignable to every
     /// type; an expression of this type never yields a value (it always diverges).
@@ -891,7 +891,7 @@ impl Ty {
             Ty::Nothing => "Nothing".to_string(),
             Ty::Error => "<error>".to_string(),
             Ty::Fun(_) => "Function".to_string(),
-            Ty::Nullable(inner) => inner.name(),
+            Ty::Nullable(inner) => format!("{}?", inner.name()),
             Ty::TyParam(n, _) => n.to_string(),
         }
     }

@@ -182,6 +182,94 @@ fn cross_file_top_level_function_and_property() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn cross_file_nullable_generic_return_remains_null_safe() {
+    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+        return;
+    };
+    let java = format!("{java_home}/bin/java");
+    let javac = format!("{java_home}/bin/javac");
+    if !std::path::Path::new(&javac).exists() {
+        return;
+    }
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let krusty = common::krusty_binary();
+    let dir = std::env::temp_dir().join(format!("krusty_xgeneric_null_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("A.kt"),
+        "fun <T> id(x: T): T = x\n\
+         fun <T> inferredId(x: T) = x\n\
+         fun <T : Any?> boundedId(x: T): T = x\n\
+         fun <A : Any?, T : A> chainedId(x: T): T = x\n\
+         fun <T : Comparable<T>> collect(vararg values: T, block: Array<T>.() -> Unit) {}\n\
+         class GenericBox<T>(private val value: T) { fun get(): T = value }\n\
+         class ExtensionAcc(var result: String)\n\
+         operator fun ExtensionAcc.plusAssign(value: String) { result = \"wrong-extension\" }\n\
+         operator fun ExtensionAcc.plusAssign(value: Int) { result = \"extension\" }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("B.kt"),
+        "fun box(): String {\n\
+         \x20 if (id(null).hashCode() != 0) return \"unbounded\"\n\
+         \x20 if (inferredId(null).hashCode() != 0) return \"inferred\"\n\
+         \x20 if (boundedId(null).hashCode() != 0) return \"bounded\"\n\
+         \x20 if (chainedId(null).hashCode() != 0) return \"chained\"\n\
+         \x20 if (id(\"OK\").length != 2) return \"concrete\"\n\
+         \x20 if (GenericBox(\"OK\").get().length != 2) return \"member\"\n\
+         \x20 if (GenericBox(null).get().hashCode() != 0) return \"nullable-member\"\n\
+         \x20 collect(42, 43) { }\n\
+         \x20 val accumulator = ExtensionAcc(\"\")\n\
+         \x20 accumulator += 1\n\
+         \x20 if (accumulator.result != \"extension\") return accumulator.result\n\
+         \x20 return \"OK\"\n\
+         }\n",
+    )
+    .unwrap();
+    let compiled = Command::new(&krusty)
+        .args(["-d", dir.to_str().unwrap()])
+        .arg(dir.join("A.kt"))
+        .arg(dir.join("B.kt"))
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "krusty failed cross-file nullable generic compile: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    fs::write(
+        dir.join("M.java"),
+        "public class M { public static void main(String[] a) { System.out.println(BKt.box()); } }",
+    )
+    .unwrap();
+    let javac_output = Command::new(&javac)
+        .args(["-cp", dir.to_str().unwrap(), "-d", dir.to_str().unwrap()])
+        .arg(dir.join("M.java"))
+        .output()
+        .unwrap();
+    assert!(
+        javac_output.status.success(),
+        "javac failed: {}",
+        String::from_utf8_lossy(&javac_output.stderr)
+    );
+    let classpath = format!("{}:{}", dir.to_str().unwrap(), stdlib.to_string_lossy());
+    let run = Command::new(&java)
+        .args(["-Xverify:all", "-cp", &classpath, "M"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "OK",
+        "stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// Multi-file: construct a class declared in ANOTHER file, read a property, CALL a method, and WRITE a
 /// `var` — all lower to cross-file bytecode (`new`/`invokespecial <init>`, `getX`, `invokevirtual`,
 /// `setX`), not a bail. Compile both files, run `box()`.

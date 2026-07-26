@@ -12,7 +12,8 @@ pub use crate::resolve::SymbolTable as FrontendSymbols;
 pub use crate::resolve::TypeInfo as FrontendTypeInfo;
 pub use crate::resolve::{
     check_file, check_file_at, check_file_in_source_set, collect_signatures,
-    collect_signatures_with_cp, preinfer_module_returns, SourceConstructorMatcher,
+    collect_signatures_with_cp, preinfer_module_returns, CompoundAssignmentTarget,
+    SourceConstructorMatcher,
 };
 pub(crate) use crate::resolve::{
     pick_overload, qualified_path, typeref_leaf, ClassNames, CtorDefaultValue,

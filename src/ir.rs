@@ -1049,6 +1049,8 @@ pub struct IrFile {
     /// value class's UNBOXED underlying, not an opaque `Object`. Populated for every lowered expression;
     /// consumed ONLY by the value-class pass (the sole owner of value-class knowledge).
     pub logical_types: std::collections::HashMap<u32, Ty>,
+    /// Physical type before a semantic read coercion.
+    pub physical_types: std::collections::HashMap<u32, Ty>,
     /// `FunId` → source parameter names and, when present, default-value expressions.
     pub fn_params: std::collections::HashMap<u32, FnParamInfo>,
     /// Per declared method/function, whether each SOURCE parameter was declared nullable (`a: String?`).

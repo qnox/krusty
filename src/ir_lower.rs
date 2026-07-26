@@ -10,11 +10,11 @@ use std::collections::HashMap;
 
 use crate::ast::{self, BinOp, Decl, Expr, ExprId as AstExprId, FunBody, Stmt, TemplatePart};
 use crate::frontend::{
-    qualified_path, typeref_leaf, ClassNames, CtorDefaultValue, DelegateGetValueTarget,
-    DestructureComponentTarget, ExprLowering, FrontendSymbols, FrontendTypeInfo, InlineCall,
-    InvokeKind, IteratorDispatchTarget, LambdaCapture, LambdaInfo, ReceiverLambda, ResolvedCall,
-    ResolvedConstructor, ResolvedLocalFunctionCall, ResolvedMember, ResolvedModuleTopLevelCall,
-    Signature, StmtLowering,
+    qualified_path, typeref_leaf, ClassNames, CompoundAssignmentTarget, CtorDefaultValue,
+    DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, FrontendSymbols,
+    FrontendTypeInfo, InlineCall, InvokeKind, IteratorDispatchTarget, LambdaCapture, LambdaInfo,
+    ReceiverLambda, ResolvedCall, ResolvedConstructor, ResolvedLocalFunctionCall, ResolvedMember,
+    ResolvedModuleTopLevelCall, Signature, StmtLowering,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
@@ -137,7 +137,6 @@ pub fn lower_file_at_reporting(
         fun_ids: HashMap::new(),
         fun_ids_by_decl: HashMap::new(),
         ext_fun_ids: HashMap::new(),
-        ext_fun_id_by_arity: HashMap::new(),
         ext_fun_id_by_sig: HashMap::new(),
         ext_prop_get_ids: HashMap::new(),
         companion_consts: HashMap::new(),
@@ -1721,7 +1720,6 @@ pub fn lower_file_at_reporting(
                     .iter()
                     .find(|s| s.params == want)
                     .or_else(|| syms.ext_fun_overloads(recv_ty, &f.name).first())?;
-                let arity = sig.params.len();
                 let recv_param = if recv_ref.nullable {
                     mark_nullable(ty_to_ir(recv_ty))
                 } else {
@@ -1739,8 +1737,6 @@ pub fn lower_file_at_reporting(
                     dispatch_receiver: None,
                     param_checks: vec![],
                 });
-                lo.ext_fun_id_by_arity
-                    .insert((recv_key, f.name.clone(), arity), id);
                 lo.ext_fun_id_by_sig
                     .insert((recv_key, f.name.clone(), sig.params.clone()), id);
                 lo.ext_fun_ids
@@ -2007,7 +2003,7 @@ pub fn lower_file_at_reporting(
                 lo.lambda_seq = 0;
                 let (fid, sig) = if let Some(recv_ref) = &f.receiver {
                     // Extension body: `this` is the receiver (parameter 0), then the declared params.
-                    // Pick THIS declaration's overload (by parameter list) and its arity-keyed method id.
+                    // Pick this declaration's exact signature and its signature-keyed method id.
                     let recv_ty = lo.ext_receiver_ty(file, recv_ref);
                     let recv_key = recv_ty.erased_recv();
                     let want: Vec<Ty> = f
@@ -2026,10 +2022,10 @@ pub fn lower_file_at_reporting(
                         .ext_fun_overloads(recv_ty, &f.name)
                         .iter()
                         .find(|s| s.params == want)?;
-                    let fid = *lo.ext_fun_id_by_arity.get(&(
+                    let fid = *lo.ext_fun_id_by_sig.get(&(
                         recv_key,
                         f.name.clone(),
-                        sig.params.len(),
+                        sig.params.clone(),
                     ))?;
                     let this_v = lo.fresh_value();
                     lo.scope.push(("this".to_string(), this_v, recv_ty));
@@ -4838,17 +4834,9 @@ pub(crate) struct Lower<'a> {
     /// Top-level function ids keyed by source declaration id. This is the preferred path for
     /// checker-resolved module calls; the name/params map remains for older call sites during migration.
     fun_ids_by_decl: HashMap<crate::ast::DeclId, u32>,
-    /// Top-level extension functions, keyed by `(erased receiver, name)` ([`Ty::erased_recv`]) —
-    /// separate from `fun_ids` since `fun Int.foo()` and `fun String.foo()` share a name but differ by
-    /// receiver. Same key scheme as `FrontendSymbols::ext_funs` so the two never disagree. Holds the FIRST
-    /// overload's id (the common case is a single overload); an extension overloaded by arity is
-    /// disambiguated at the call site through [`Self::ext_fun_id_by_arity`].
+    /// First extension id for an erased receiver and name.
     ext_fun_ids: HashMap<(Ty, String), u32>,
-    /// Every extension overload id keyed additionally by its logical parameter arity, so a call resolves
-    /// `fun R.f()` vs `fun R.f(x)` to the right emitted static method. Filled alongside `ext_fun_ids`.
-    ext_fun_id_by_arity: HashMap<(Ty, String, usize), u32>,
-    /// Every extension overload id keyed by the full selected source signature. Source expressions whose
-    /// checker handoff carries params use this instead of reselecting from receiver/name.
+    /// Extension ids keyed by their checked source signature.
     ext_fun_id_by_sig: HashMap<(Ty, String, Vec<Ty>), u32>,
     /// Top-level extension PROPERTIES (`val/var Recv.name: T get() = … [set(v) = …]`), keyed by
     /// `(erased receiver, name)` → the synthesized static getter (`getName(Recv): T`) / setter
@@ -5524,7 +5512,7 @@ impl<'a> Lower<'a> {
         // nullable PRIMITIVE (`Int?.inc`, keyed under its boxed wrapper, where the variable slot
         // already holds the boxed form).
         if ty.erased_recv().is_reference() {
-            if let Some(&fid) = self.ext_fun_ids.get(&(ty.erased_recv(), op.to_string())) {
+            if let Some(fid) = self.unique_ext_fun_id_by_arity(ty, op, 0) {
                 let recv = self.emit_get_value(var_slot);
                 let call = self.emit_local_call(fid, vec![recv]);
                 // The extension may return the NON-null form (`operator fun Int?.inc(): Int`) while
@@ -6856,26 +6844,39 @@ impl<'a> Lower<'a> {
         unit_targ || !self.inline_active.is_empty()
     }
 
-    /// A call whose declared return is a type parameter erases to `Object`; the checker recovers the
-    /// real static type at the call site (a primitive type argument arrives here as its boxed wrapper,
-    /// `Integer` — the erased slot's actual reference representation). When that type is a more specific
-    /// reference, insert the `checkcast` kotlinc emits so a member access on the result resolves and
-    /// verifies (`asSeq<String>(x).length`); the wrapper is unboxed to a primitive only at a use site
-    /// that needs it, by the normal coercion path — never eagerly here (an `Int?` consumer keeps it
-    /// boxed, and `null` must not be unboxed).
-    /// If `v` is the compiler-inserted unbox of a CALL result (an `ImplicitCoercion` of a `Call`/
-    /// `MethodCall` to a primitive — `map.put(k,v): V?` typed as a primitive), return the inner call;
-    /// otherwise `v` unchanged. Used to drop the pointless, null-NPE-prone unbox of a DISCARDED statement
-    /// value. Restricted to call results so it never strips a user `as`-to-primitive (whose operand is
-    /// not a call), which has an observable `ClassCastException` side effect.
-    fn strip_discarded_unbox(&self, v: u32) -> u32 {
+    fn strip_call_unbox(&self, v: u32) -> u32 {
         if let IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
+            op,
             arg,
             type_operand,
         } = self.ir.expr(v)
         {
-            if !ir_type_is_reference(type_operand)
+            let call_result = matches!(
+                self.ir.expr(*arg),
+                IrExpr::Call { .. } | IrExpr::MethodCall { .. }
+            );
+            if call_result
+                && *op == IrTypeOp::ImplicitCoercion
+                && !ir_type_is_reference(type_operand)
+            {
+                return *arg;
+            }
+        }
+        v
+    }
+
+    fn strip_discarded_call_coercion(&self, source: AstExprId, v: u32) -> u32 {
+        let stripped = self.strip_call_unbox(v);
+        if stripped != v {
+            return stripped;
+        }
+        if let IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg,
+            ..
+        } = self.ir.expr(v)
+        {
+            if matches!(self.afile.expr(source), Expr::Call { .. })
                 && matches!(
                     self.ir.expr(*arg),
                     IrExpr::Call { .. } | IrExpr::MethodCall { .. }
@@ -6960,6 +6961,10 @@ impl<'a> Lower<'a> {
                 Expr::BoolLit(false) => else_branch.is_some_and(|eb| self.expr_diverges(eb)),
                 _ => false,
             };
+        }
+        if let Expr::Block { stmts, trailing } = self.afile.expr(e) {
+            return stmts.iter().any(|stmt| self.stmt_diverges(*stmt))
+                || trailing.is_some_and(|tail| self.expr_diverges(tail));
         }
         false
     }
@@ -7466,12 +7471,10 @@ impl<'a> Lower<'a> {
             let v = self.fresh_value();
             self.scope.push((name.clone(), v, *pty));
         }
-        // The closure method returns the `kotlin/Unit` SINGLETON (a reference) when the lambda is
-        // `() -> Unit` and not a `void` SAM (`Runnable`) nor a diverging body — so a `return@lambda`
-        // inside it (a LOCAL return from the closure method) must `areturn Unit.INSTANCE`, not `return`.
+        // Closures return `Unit` through its reference carrier, including for `Unit?`.
         let sam_void_pre = matches!(&sam, Some((_, _, true)));
         let returns_unit_ref =
-            sig.ret == Ty::Unit && !sam_void_pre && self.info.ty(body) != Ty::Nothing;
+            sig.ret.non_null() == Ty::Unit && !sam_void_pre && self.info.ty(body) != Ty::Nothing;
         let saved_unit_ref =
             std::mem::replace(&mut self.cur_method_returns_unit_ref, returns_unit_ref);
         // When this closure does NOT capture the enclosing `this`, lower its body with `cur_class`
@@ -7515,7 +7518,7 @@ impl<'a> Lower<'a> {
         self.scope = saved_scope;
         self.next_value = saved_next;
         let ve = ve?;
-        let diverges = self.info.ty(body) == Ty::Nothing;
+        let diverges = self.expr_diverges(body);
         // The SAM's `invoke` returns `Object`, so the impl method returns a reference. A `Unit` lambda
         // runs its body for effect then returns the `kotlin/Unit` singleton; a value lambda returns its
         // (boxed) body value; a diverging body falls through to its own `throw`/`return`.
@@ -9470,14 +9473,33 @@ impl<'a> Lower<'a> {
         facade: TypeName,
         args: &[AstExprId],
     ) -> Option<u32> {
-        if target.call_sig.vararg {
-            return None;
-        }
         let ir_params = tys_to_ir(&target.params);
         let n = ir_params.len();
         let ctx_n = target.context_args.len();
         if ctx_n > n {
             return None;
+        }
+        if let Some(vararg) = target.vararg_index {
+            if ctx_n != 0 || vararg >= ir_params.len() {
+                return None;
+            }
+            let lowered_args = if vararg + 1 < ir_params.len() {
+                self.lower_non_last_vararg_args(call, args, &ir_params, vararg)?
+            } else {
+                self.lower_call_args_vararg(args, &ir_params, true, vararg)?
+            };
+            let physical_ret = ty_to_ir(target.physical_ret);
+            let emitted = self.emit_cross_file_call(
+                facade,
+                target.name.clone(),
+                ir_params,
+                physical_ret,
+                lowered_args,
+            );
+            if target.suspend {
+                self.ir.suspend_calls.insert(emitted, physical_ret);
+            }
+            return Some(self.coerce_to_static(emitted, target.ret, target.physical_ret));
         }
 
         let names = self
@@ -9571,7 +9593,7 @@ impl<'a> Lower<'a> {
             }
         }
 
-        let ret = ty_to_ir(target.ret);
+        let ret = ty_to_ir(target.physical_ret);
         let emitted = self.emit_cross_file_call(
             facade,
             target.name.clone(),
@@ -9582,6 +9604,7 @@ impl<'a> Lower<'a> {
         if target.suspend {
             self.ir.suspend_calls.insert(emitted, ret);
         }
+        let emitted = self.coerce_to_static(emitted, target.ret, target.physical_ret);
         Some(self.wrap_arg_prelude(emitted, prelude))
     }
 
@@ -9780,18 +9803,29 @@ impl<'a> Lower<'a> {
         self.info.ty(receiver)
     }
 
+    fn unique_ext_fun_id_by_arity(&self, receiver: Ty, name: &str, arity: usize) -> Option<u32> {
+        let mut matches = self
+            .syms
+            .ext_fun_overloads(receiver, name)
+            .iter()
+            .filter(|signature| signature.params.len() == arity);
+        let signature = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        self.ext_fun_id_by_sig
+            .get(&(
+                receiver.erased_recv(),
+                name.to_string(),
+                signature.params.clone(),
+            ))
+            .copied()
+    }
+
     /// The emitted id of a top-level extension `name` applicable to `recv_ty`, plus the receiver type
     /// the extension was found on. Exact receiver matches win before walking supertypes.
     fn ext_fun_id_for_recv(&self, recv_ty: Ty, name: &str, n_args: usize) -> Option<(u32, Ty)> {
-        let pick = |recv: Ty| {
-            self.ext_fun_id_by_arity
-                .get(&(recv.erased_recv(), name.to_string(), n_args))
-                .or_else(|| {
-                    self.ext_fun_ids
-                        .get(&(recv.erased_recv(), name.to_string()))
-                })
-                .copied()
-        };
+        let pick = |recv: Ty| self.unique_ext_fun_id_by_arity(recv, name, n_args);
         if let Some(fid) = pick(recv_ty) {
             return Some((fid, recv_ty));
         }
@@ -10568,9 +10602,13 @@ impl<'a> Lower<'a> {
         // `obj::ext` is handled by `lower_bound_expr_ref`. A value-class receiver is skipped.)
         if capture.is_none()
             && self.resolve_method_name(internal, name).is_none()
-            && self
-                .ext_fun_ids
-                .contains_key(&(recv_ty.erased_recv(), name.to_string()))
+            && params.get(1..).is_some_and(|extension_params| {
+                self.ext_fun_id_by_sig.contains_key(&(
+                    recv_ty.erased_recv(),
+                    name.to_string(),
+                    extension_params.to_vec(),
+                ))
+            })
         {
             let param_tys = tys_to_ir(params);
             return self.make_func_ref(
@@ -10780,7 +10818,11 @@ impl<'a> Lower<'a> {
         // receiver; the metafactory binds it and `invoke(args)` supplies the rest (same as a local-fun
         // ref). `arity` = the extension's declared params (the receiver is bound, not a parameter). A
         // `Unit` return is wrapped so `invoke` yields the `Unit` singleton.
-        if let Some(&fid) = self.ext_fun_ids.get(&(rty.erased_recv(), name.to_string())) {
+        if let Some(fid) = self
+            .ext_fun_id_by_sig
+            .get(&(rty.erased_recv(), name.to_string(), params.to_vec()))
+            .copied()
+        {
             // An ADAPTED extension reference (the target has trailing default/vararg params the reference
             // omits) can't use the direct metafactory bind — that would call a non-existent lower-arity
             // static. Decline (skip) until the synthesized-adapter path lands. `params` is the exposed
@@ -11189,6 +11231,7 @@ impl<'a> Lower<'a> {
                 owner,
                 name: target,
                 params: selected_params,
+                physical_ret,
                 ret: selected_ret,
                 interface,
                 ..
@@ -11201,7 +11244,7 @@ impl<'a> Lower<'a> {
                     a.push(self.lower_arg(arg, &ty_to_ir(selected_params[k]))?);
                 }
                 let owner = owner.render();
-                if let Some((class, midx, _fid, _ret)) =
+                if let Some((class, midx, _fid, method_ret)) =
                     self.link_local_method(&owner, name, &selected_params)
                 {
                     let call = self.emit_method_call(
@@ -11210,20 +11253,26 @@ impl<'a> Lower<'a> {
                         recv_v,
                         a.into_iter().map(Some).collect(),
                     );
-                    Some((call, selected_ret))
+                    Some((
+                        self.coerce_to_static(call, selected_ret, method_ret),
+                        selected_ret,
+                    ))
                 } else {
                     let call = self.emit_call(
                         Callee::Virtual {
                             owner: type_name(&owner),
                             name: target,
                             descriptor: String::new(),
-                            params: Some((tys_to_ir(&selected_params), ty_to_ir(selected_ret))),
+                            params: Some((tys_to_ir(&selected_params), ty_to_ir(physical_ret))),
                             interface,
                         },
                         Some(recv_v),
                         a,
                     );
-                    Some((call, selected_ret))
+                    Some((
+                        self.coerce_to_static(call, selected_ret, physical_ret),
+                        selected_ret,
+                    ))
                 }
             }
             ResolvedCall::ModuleExtension {
@@ -11968,7 +12017,7 @@ impl<'a> Lower<'a> {
             // (`null as T` NPEs at the unbox where kotlinc keeps the reference). A numeric
             // CONVERSION target (`Long?` from an `Int` result) still needs the unbox + re-box.
             if target.nullable_primitive() == Some(at) || target.is_erased_top() {
-                let stripped = self.strip_discarded_unbox(e);
+                let stripped = self.strip_call_unbox(e);
                 if stripped != e {
                     return Some(if target.is_erased_top() {
                         stripped
@@ -12306,6 +12355,7 @@ impl<'a> Lower<'a> {
         if logical == physical || matches!(logical, Ty::Null | Ty::Error) {
             return read;
         }
+        self.ir.physical_types.insert(read, ty_to_ir(physical));
         // An unsigned value out of an erased reference: checkcast to the inline-class object, then
         // `unbox-impl` — the wrapper is `kotlin/UInt`, not `Integer`.
         if logical.is_unsigned() && physical.is_reference() {
@@ -12959,6 +13009,38 @@ impl<'a> Lower<'a> {
         Some(out)
     }
 
+    fn lower_non_last_vararg_args(
+        &mut self,
+        call: AstExprId,
+        args: &[AstExprId],
+        params: &[Ty],
+        vararg: usize,
+    ) -> Option<Vec<u32>> {
+        if vararg + 2 != params.len()
+            || !self.afile.call_has_trailing_lambda.contains(&call.0)
+            || args.len() < vararg + 1
+            || self.afile.call_arg_names.contains_key(&call.0)
+        {
+            return None;
+        }
+        let mut lowered = Vec::with_capacity(params.len());
+        for (index, &argument) in args.iter().take(vararg).enumerate() {
+            lowered.push(self.lower_arg(argument, &params[index])?);
+        }
+        let lambda = args.len() - 1;
+        let element = params[vararg].array_elem()?;
+        let mut elements = Vec::with_capacity(lambda.saturating_sub(vararg));
+        for &argument in &args[vararg..lambda] {
+            if is_branchy(self.afile, argument) {
+                return None;
+            }
+            elements.push(self.lower_arg(argument, &element)?);
+        }
+        lowered.push(self.emit_vararg(params[vararg], elements));
+        lowered.push(self.lower_arg(args[lambda], &params[vararg + 1])?);
+        Some(lowered)
+    }
+
     fn lower_selected_module_member_args(
         &mut self,
         call: AstExprId,
@@ -13190,14 +13272,7 @@ impl<'a> Lower<'a> {
         // `invokestatic <facade>.name(this, args)` (the receiver is the first parameter of the lowered
         // static impl). Mirrors a qualified `recv.name(args)` module-extension call. Prefer the overload
         // whose arity matches the call (`fun R.f()` vs `fun R.f(x)`), else the primary id.
-        if let Some(&fid) = self
-            .ext_fun_id_by_arity
-            .get(&(this_ty.erased_recv(), name.to_string(), args.len()))
-            .or_else(|| {
-                self.ext_fun_ids
-                    .get(&(this_ty.erased_recv(), name.to_string()))
-            })
-        {
+        if let Some(fid) = self.unique_ext_fun_id_by_arity(this_ty, name, args.len()) {
             let params = self.ir.functions[fid as usize].params.clone();
             if params.len() == args.len() + 1 {
                 let recv = self.emit_get_value(this_v);
@@ -13310,7 +13385,14 @@ impl<'a> Lower<'a> {
             "apply" if params.is_empty() => ("this".to_string(), true),
             _ => return None,
         };
-        self.lower_scope_inline_on(recv_val, rty, &pname, body, returns_receiver)
+        // The safe-call branch binds the scope lambda to a non-null receiver.
+        let non_null = rty.non_null();
+        let recv_val = if rty.nullable_primitive().is_some() {
+            self.emit_type_op(IrTypeOp::ImplicitCoercion, recv_val, ty_to_ir(non_null))
+        } else {
+            recv_val
+        };
+        self.lower_scope_inline_on(recv_val, non_null, &pname, body, returns_receiver)
     }
 
     /// A field's declared type: `ty_of` (file-local classes + built-ins), falling back to the
@@ -13920,12 +14002,11 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Lower a compound assignment the checker selected as an `opAssign` operator call
-    /// (`StmtLowering::PlusAssign`):
-    /// `target op= rhs` → `target.plusAssign(rhs)` (member `invokevirtual`, or extension `invokestatic`
-    /// with the receiver as the first argument). `value` is the parser's desugared `Binary { op, lhs, rhs }`
-    /// where `lhs` is the target read.
-    fn lower_plus_assign(&mut self, value: AstExprId) -> Option<u32> {
+    fn lower_plus_assign(
+        &mut self,
+        value: AstExprId,
+        target: CompoundAssignmentTarget,
+    ) -> Option<u32> {
         let Expr::Binary { op, lhs, rhs } = self.afile.expr(value).clone() else {
             return None;
         };
@@ -13937,35 +14018,75 @@ impl<'a> Lower<'a> {
             BinOp::Rem => "remAssign",
             _ => return None,
         };
-        let recv_key = self.recv_ty(lhs).erased_recv();
-        // Extension operator: `invokestatic owner.plusAssign(recv, arg)` (receiver is the first param).
-        if let Some(&fid) = self.ext_fun_ids.get(&(recv_key, aname.to_string())) {
-            let params = self.ir.functions[fid as usize].params.clone();
-            if params.len() == 2 {
-                let r = self.lower_arg(lhs, &params[0])?;
-                let a = self.lower_arg(rhs, &params[1])?;
-                return Some(self.emit_local_call(fid, vec![r, a]));
+        match target {
+            CompoundAssignmentTarget::SourceExtension {
+                receiver,
+                parameter,
+                owner,
+            } => {
+                let recv_key = receiver.erased_recv();
+                let selected_params = vec![parameter];
+                if let Some(&fid) =
+                    self.ext_fun_id_by_sig
+                        .get(&(recv_key, aname.to_string(), selected_params))
+                {
+                    let params = self.ir.functions[fid as usize].params.clone();
+                    if params.len() != 2 {
+                        return None;
+                    }
+                    let r = self.lower_arg(lhs, &params[0])?;
+                    let a = self.lower_arg(rhs, &params[1])?;
+                    return Some(self.emit_local_call(fid, vec![r, a]));
+                }
+                let owner = owner?;
+                let r = self.lower_arg(lhs, &receiver)?;
+                let a = self.lower_arg(rhs, &parameter)?;
+                let descriptor = self
+                    .runtime
+                    .method_descriptor(&[receiver, parameter], Ty::Unit)?;
+                Some(self.emit_static_call(
+                    owner,
+                    aname.to_string(),
+                    descriptor,
+                    InlineKind::None,
+                    vec![r, a],
+                ))
             }
-        }
-        let internal = self.recv_ty(lhs).obj_internal().map(|s| s.to_string())?;
-        if let Some((class, index, mfid, _)) = self.resolve_method(&internal, aname) {
-            let params = self.ir.functions[mfid as usize].params.clone();
-            if let [param] = params.as_slice() {
+            CompoundAssignmentTarget::Member {
+                owner,
+                parameter,
+                interface,
+            } => {
                 let r = self.expr(lhs)?;
-                let a = self.lower_arg(rhs, param)?;
-                return Some(self.emit_method_call(class, index, r, vec![Some(a)]));
+                let a = self.lower_arg(rhs, &parameter)?;
+                let owner_name = owner.render();
+                if let Some((class, index, _, _)) =
+                    self.link_local_method(&owner_name, aname, &[parameter])
+                {
+                    return Some(self.emit_method_call(class, index, r, vec![Some(a)]));
+                }
+                Some(self.emit_call(
+                    Callee::Virtual {
+                        owner,
+                        name: aname.to_string(),
+                        descriptor: String::new(),
+                        params: Some((tys_to_ir(&[parameter]), ty_to_ir(Ty::Unit))),
+                        interface,
+                    },
+                    Some(r),
+                    vec![a],
+                ))
+            }
+            CompoundAssignmentTarget::LibraryExtension => {
+                let c = self.info.synthetic_ext(lhs, aname).cloned()?;
+                if c.params.len() == 2 {
+                    let r = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
+                    let a = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
+                    return Some(self.emit_library_static_call(c, vec![r, a], false));
+                }
+                None
             }
         }
-        // Classpath inline `MutableCollection.plusAssign` (`@InlineOnly`): emit an inline
-        // `invokestatic owner.plusAssign(recv, arg)` — the bytecode splicer expands its real body
-        // (`add`/`addAll`) at the call site. The CHECKER resolved and recorded it (keyed by the target).
-        let c = self.info.synthetic_ext(lhs, aname).cloned()?;
-        if c.params.len() == 2 {
-            let r = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
-            let a = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
-            return Some(self.emit_library_static_call(c, vec![r, a], false));
-        }
-        None
     }
 
     fn stmt(&mut self, s: crate::ast::StmtId) -> Option<u32> {
@@ -13981,14 +14102,12 @@ impl<'a> Lower<'a> {
 
     fn stmt_inner(&mut self, s: crate::ast::StmtId) -> Option<u32> {
         // A compound assignment routed to an `opAssign` operator (checker-selected) — emit the call.
-        if matches!(
-            self.info.stmt_lowers.get(&s),
-            Some(StmtLowering::PlusAssign)
-        ) {
-            if let Stmt::Assign { value, .. } | Stmt::AssignMember { value, .. } =
-                self.afile.stmt(s).clone()
+        if let Some(StmtLowering::PlusAssign(target)) = self.info.stmt_lowers.get(&s) {
+            if let Stmt::Assign { value, .. }
+            | Stmt::AssignMember { value, .. }
+            | Stmt::AssignIndex { value, .. } = self.afile.stmt(s).clone()
             {
-                return self.lower_plus_assign(value);
+                return self.lower_plus_assign(value, *target);
             }
         }
         match self.afile.stmt(s).clone() {
@@ -13999,7 +14118,7 @@ impl<'a> Lower<'a> {
                 // coerced `Object` → `int`), drop the unbox: kotlinc pops the reference, and unboxing a
                 // null result would NPE. A statement top is never a numeric widening (no target type),
                 // so a coercion to a non-reference here is always that unbox.
-                Some(self.strip_discarded_unbox(v))
+                Some(self.strip_discarded_call_coercion(e, v))
             }
             Stmt::Return(e, ret_label) => {
                 // Inside a `tailrec` function (no spliced-lambda label): a `return f(args)` to the same
@@ -16346,9 +16465,7 @@ impl<'a> Lower<'a> {
             InvokeKind::ExtensionOperator { receiver_ty: rt } => {
                 // `recv(args)` via an `operator fun Recv.invoke(...)` EXTENSION → `invokestatic
                 // <facade>.invoke(recv, args)`. The receiver is the lifted static's leading argument.
-                let &fid = self
-                    .ext_fun_ids
-                    .get(&(rt.erased_recv(), "invoke".to_string()))?;
+                let fid = self.unique_ext_fun_id_by_arity(rt, "invoke", args.len())?;
                 let target_params = self.ir.functions[fid as usize].params.clone();
                 let recv = self.lower_arg(receiver, target_params.first()?)?;
                 let mut a = vec![recv];
@@ -16849,8 +16966,8 @@ impl<'a> Lower<'a> {
                                     recv2,
                                     a.into_iter().map(Some).collect(),
                                 )
-                            } else if let Some(&fid) =
-                                self.ext_fun_ids.get(&(nn.erased_recv(), name.clone()))
+                            } else if let Some(fid) =
+                                self.unique_ext_fun_id_by_arity(nn, &name, args.len())
                             {
                                 // A same-module EXTENSION function via safe call (`s?.id()` where
                                 // `fun String.id()` is declared in this module): a static call whose first
@@ -16921,7 +17038,7 @@ impl<'a> Lower<'a> {
                 // both `when` branches are the wrapper reference (the other branch is `null`).
                 let member = if result_ty.nullable_primitive().is_some() {
                     self.emit_type_op(IrTypeOp::ImplicitCoercion, member, ty_to_ir(result_ty))
-                } else if result_ty.obj_internal().is_some_and(|i| {
+                } else if result_ty.non_null().obj_internal().is_some_and(|i| {
                     self.syms
                         .classes
                         .get(i.render().rsplit('/').next().unwrap_or(""))
@@ -17947,26 +18064,6 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
-                // `e.ordinal` / `e.name` on an enum value: dispatched on the receiver's STATIC type while
-                // the platform owns the inherited accessor's physical name/descriptor.
-                if let Some(accessor) = self.runtime.enum_member_accessor(&name) {
-                    if let Some(ci) = self.class_of(rt) {
-                        let cid = ci.id as usize;
-                        if !self.ir.classes[cid].enum_entries.is_empty() {
-                            // Read the owner before the mutable `self.expr` borrow (drops `ci`'s borrow).
-                            let owner = self.ir.classes[cid].fq_name();
-                            let recv = self.expr(receiver)?;
-                            return Some(self.emit_virtual_call(
-                                owner,
-                                accessor.name,
-                                accessor.descriptor,
-                                false,
-                                recv,
-                                vec![],
-                            ));
-                        }
-                    }
-                }
                 if rt == Ty::Char && name == "code" {
                     // `c.code` → the `Char`'s code unit as an `Int` (a no-op coercion on the JVM stack).
                     let c = self.expr(receiver)?;
@@ -18076,8 +18173,7 @@ impl<'a> Lower<'a> {
                 // A user `operator fun LhsType.plus(…)` (etc.) extension overrides the builtin operator.
                 let op_name = op.arith_operator_name();
                 if let Some(opn) = op_name {
-                    let recv_key = self.recv_ty(lhs).erased_recv();
-                    if let Some(&fid) = self.ext_fun_ids.get(&(recv_key, opn.to_string())) {
+                    if let Some(fid) = self.unique_ext_fun_id_by_arity(self.recv_ty(lhs), opn, 1) {
                         let params = self.ir.functions[fid as usize].params.clone();
                         // Only route to the extension when the RIGHT operand matches its parameter —
                         // `Int + Int` inside an `Int.plus(V)` body is the builtin op, not a re-entry into
@@ -18113,10 +18209,7 @@ impl<'a> Lower<'a> {
                     // builtin comparison. Nullable-primitive ONLY, matching the checker's gate (a
                     // nullable REFERENCE erases to the non-null form's key).
                     if lty.nullable_primitive().is_some() {
-                        if let Some(&fid) = self
-                            .ext_fun_ids
-                            .get(&(lty.erased_recv(), "compareTo".to_string()))
-                        {
+                        if let Some(fid) = self.unique_ext_fun_id_by_arity(lty, "compareTo", 1) {
                             let params = self.ir.functions[fid as usize].params.clone();
                             if params.len() == 2 {
                                 let l = self.lower_arg(lhs, &params[0])?;
@@ -19406,11 +19499,18 @@ impl<'a> Lower<'a> {
                                 .flatten()
                         })
                     {
-                        // A `vararg` function: pack the trailing arguments into a fresh array for the
-                        // last (array) parameter. (Spread `*arr` and a branchy element are unsupported.)
-                        if target.call_sig.vararg {
+                        // Pack the source vararg elements without consuming a trailing lambda.
+                        if let Some(vararg_index) = target.vararg_index {
                             let params = self.ir.functions[fid as usize].params.clone();
-                            let fixed = params.len() - 1;
+                            let fixed = vararg_index;
+                            if fixed >= params.len() {
+                                return None;
+                            }
+                            if fixed + 1 < params.len() {
+                                let lowered =
+                                    self.lower_non_last_vararg_args(e, &args, &params, fixed)?;
+                                return Some(self.emit_local_call(fid, lowered));
+                            }
                             if args.len() < fixed {
                                 // Fewer than the fixed parameters were supplied — a trailing fixed
                                 // parameter (a DEFAULT) is omitted along with the vararg. Route through the
@@ -20886,6 +20986,7 @@ impl<'a> Lower<'a> {
                         owner,
                         name: target,
                         params,
+                        physical_ret,
                         ret,
                         interface,
                         vararg,
@@ -20942,7 +21043,7 @@ impl<'a> Lower<'a> {
                                         dparams.push(Ty::obj("java/lang/Object"));
                                         let desc = self
                                             .runtime
-                                            .method_descriptor(&dparams, ty_to_ir(ret))?;
+                                            .method_descriptor(&dparams, ty_to_ir(physical_ret))?;
                                         let call = self.emit_static_call(
                                             owner.clone(),
                                             format!("{target}$default"),
@@ -20950,6 +21051,7 @@ impl<'a> Lower<'a> {
                                             InlineKind::None,
                                             a,
                                         );
+                                        let call = self.coerce_to_static(call, ret, physical_ret);
                                         return Some(self.wrap_arg_prelude(call, prelude));
                                     }
                                 }
@@ -20962,12 +21064,13 @@ impl<'a> Lower<'a> {
                                     owner: type_name(&owner),
                                     name: target,
                                     descriptor: String::new(),
-                                    params: Some((tys_to_ir(&params), ty_to_ir(ret))),
+                                    params: Some((tys_to_ir(&params), ty_to_ir(physical_ret))),
                                     interface,
                                 },
                                 Some(recv),
                                 a,
                             );
+                            let call = self.coerce_to_static(call, ret, physical_ret);
                             self.wrap_arg_prelude(call, prelude)
                         }
                     } else if matches!(name.as_str(), "toString" | "hashCode") && args.is_empty() {

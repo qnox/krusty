@@ -849,6 +849,20 @@ fun box(): String = if (\"OK\".firstC == 'O') \"OK\" else \"no\"\n";
 }
 
 #[test]
+fn nullable_and_generic_extension_properties_accept_nullable_receivers() {
+    const SRC: &str = "val String?.nullableTag: String get() = if (this == null) \"O\" else this\n\
+val <T> T.genericTag: String get() = \"K\"\n\
+fun box(): String {\n\
+  val value: String? = null\n\
+  return value.nullableTag + value.genericTag\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("nullable extension receivers compile + run"),
+        "OK"
+    );
+}
+
+#[test]
 fn string_length_member_precedes_extension_property() {
     const SRC: &str = "val String.length: String get() = \"bad\"\n\
 fun box(): String {\n\

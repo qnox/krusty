@@ -2421,6 +2421,13 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         super::jvm_class_map::to_jvm_type_name(internal)
     }
 
+    fn is_default_library_owner(&self, internal: TypeName) -> bool {
+        internal.starts_with("kotlin/")
+            || super::jvm_class_map::jvm_to_kotlin_builtin_with_members_name(internal).is_some()
+            || super::jvm_class_map::jvm_collection_to_kotlin_type_name(internal).is_some()
+            || super::jvm_class_map::jvm_mapped_builtin_is_interface_name(internal).is_some()
+    }
+
     fn boxed_primitive(&self, ty: Ty) -> Option<Ty> {
         let internal = ty.non_null().obj_internal()?;
         super::jvm_class_map::wrapper_to_kotlin_prim_name(internal)
@@ -2556,20 +2563,6 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
 
     fn function_reference_impl_type(&self) -> Option<Ty> {
         Some(Ty::obj("kotlin/jvm/internal/FunctionReferenceImpl"))
-    }
-
-    fn enum_member_accessor(&self, name: &str) -> Option<PlatformAccessor> {
-        match name {
-            "ordinal" => Some(PlatformAccessor {
-                name: "ordinal".to_string(),
-                descriptor: "()I".to_string(),
-            }),
-            "name" => Some(PlatformAccessor {
-                name: "name".to_string(),
-                descriptor: "()Ljava/lang/String;".to_string(),
-            }),
-            _ => None,
-        }
     }
 
     fn object_instance_field(&self, internal: &str) -> Option<PlatformField> {

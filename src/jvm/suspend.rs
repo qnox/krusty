@@ -452,14 +452,14 @@ fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret
                     init: Some(dflt),
                     named: false,
                 });
-                let new_body = assign_branch_to_tmp(ir, body, tmp, ret_ty, suspend_set);
+                let new_body = assign_branch_to_tmp(ir, body, tmp, ret_ty, suspend_set, None);
                 let new_catches: Vec<crate::ir::IrCatch> = catches
                     .into_iter()
                     .map(|c| crate::ir::IrCatch {
                         var: c.var,
                         name: c.name,
                         exc_internal: c.exc_internal,
-                        body: assign_branch_to_tmp(ir, c.body, tmp, ret_ty, suspend_set),
+                        body: assign_branch_to_tmp(ir, c.body, tmp, ret_ty, suspend_set, None),
                     })
                     .collect();
                 let new_try = ir.add_expr(IrExpr::Try {
@@ -502,13 +502,25 @@ fn desugar_value_when(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, re
     let mut changed = false;
     for s in stmts {
         if let IrExpr::Return(Some(e)) = ir.exprs[s as usize] {
+            // Move a result cast onto each selected branch.
+            let (when_expr, branch_wrap) = match ir.exprs[e as usize].clone() {
+                IrExpr::When { .. } => (e, None),
+                IrExpr::TypeOp {
+                    op,
+                    arg,
+                    type_operand,
+                } if matches!(ir.exprs[arg as usize], IrExpr::When { .. }) => {
+                    (arg, Some((op, type_operand)))
+                }
+                _ => (e, None),
+            };
             // Only a `when` whose BRANCH values suspend and whose CONDITIONS do NOT (those are hoisted
             // before this pass) — otherwise leave it to the condition-hoist / a skip.
-            if matches!(ir.exprs[e as usize], IrExpr::When { .. })
-                && expr_calls_suspend(ir, e, suspend_set)
-                && !when_cond_suspends(ir, e, suspend_set)
+            if matches!(ir.exprs[when_expr as usize], IrExpr::When { .. })
+                && expr_calls_suspend(ir, when_expr, suspend_set)
+                && !when_cond_suspends(ir, when_expr, suspend_set)
             {
-                let IrExpr::When { branches } = ir.exprs[e as usize].clone() else {
+                let IrExpr::When { branches } = ir.exprs[when_expr as usize].clone() else {
                     unreachable!()
                 };
                 let tmp = max_value_index(ir) + 1;
@@ -524,7 +536,7 @@ fn desugar_value_when(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, re
                     .map(|(cond, body)| {
                         (
                             cond,
-                            assign_branch_to_tmp(ir, body, tmp, ret_ty, suspend_set),
+                            assign_branch_to_tmp(ir, body, tmp, ret_ty, suspend_set, branch_wrap),
                         )
                     })
                     .collect();
@@ -560,36 +572,46 @@ fn assign_branch_to_tmp(
     tmp: u32,
     ty: &Ty,
     suspend_set: &HashSet<u32>,
+    wrap: Option<(IrTypeOp, Ty)>,
 ) -> ExprId {
     let (mut stmts, value) = match ir.exprs[branch as usize].clone() {
         IrExpr::Block { stmts, value } => (stmts, value),
         _ => (Vec::new(), Some(branch)),
     };
-    if let Some(v) = value {
+    if let Some(mut v) = value {
         if stmt_diverges(ir, v) {
             // A divergent branch VALUE (`else -> throw …`, `-> return …`, or a nested all-arms-divergent
             // `if`/`when`) produces no value to bind: emit it as a plain statement. Assigning it to `tmp`
             // would leave a dead `goto` after the `athrow`/`return` (a frameless VerifyError);
             // `stmt_diverges` on this same value suppresses that trailing goto.
             stmts.push(v);
-        } else if expr_calls_suspend(ir, v, suspend_set) {
-            let fresh = max_value_index(ir) + 1;
-            let var = ir.add_expr(IrExpr::Variable {
-                index: fresh,
-                ty: *ty,
-                init: Some(v),
-                named: false,
-            });
-            let get = ir.add_expr(IrExpr::GetValue(fresh));
-            let set = ir.add_expr(IrExpr::SetValue {
-                var: tmp,
-                value: get,
-            });
-            stmts.push(var);
-            stmts.push(set);
         } else {
-            let set = ir.add_expr(IrExpr::SetValue { var: tmp, value: v });
-            stmts.push(set);
+            if let Some((op, type_operand)) = wrap {
+                v = ir.add_expr(IrExpr::TypeOp {
+                    op,
+                    arg: v,
+                    type_operand,
+                });
+            }
+            if expr_calls_suspend(ir, v, suspend_set) {
+                let fresh = max_value_index(ir) + 1;
+                let var = ir.add_expr(IrExpr::Variable {
+                    index: fresh,
+                    ty: *ty,
+                    init: Some(v),
+                    named: false,
+                });
+                let get = ir.add_expr(IrExpr::GetValue(fresh));
+                let set = ir.add_expr(IrExpr::SetValue {
+                    var: tmp,
+                    value: get,
+                });
+                stmts.push(var);
+                stmts.push(set);
+            } else {
+                let set = ir.add_expr(IrExpr::SetValue { var: tmp, value: v });
+                stmts.push(set);
+            }
         }
     }
     ir.add_expr(IrExpr::Block { stmts, value: None })

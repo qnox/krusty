@@ -130,15 +130,18 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
         return;
     }
 
-    let mut fns: Vec<(u32, u32, String, String)> = Vec::new();
+    let mut fns: Vec<(u32, u32, Option<String>, String)> = Vec::new();
     let mut props: Vec<(String, String)> = Vec::new();
     for (i, (file, stem)) in files.iter().zip(stems).enumerate() {
         let facade = file_class_name(stem, file.package.as_deref());
         for &d in &file.decls {
             match file.decl(d) {
-                Decl::Fun(f) if f.receiver.is_none() && !f.is_inline => {
-                    fns.push((i as u32, d.0, f.name.clone(), facade.clone()))
-                }
+                Decl::Fun(f) if !f.is_inline => fns.push((
+                    i as u32,
+                    d.0,
+                    f.receiver.is_none().then(|| f.name.clone()),
+                    facade.clone(),
+                )),
                 Decl::Property(p) if p.receiver.is_none() => {
                     props.push((p.name.clone(), facade.clone()))
                 }
@@ -150,7 +153,9 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
     for (file_index, decl_id, name, facade) in fns {
         syms.fn_facades_by_decl
             .insert((file_index, decl_id), type_name(&facade));
-        syms.fn_facades.insert(name, type_name(&facade));
+        if let Some(name) = name {
+            syms.fn_facades.insert(name, type_name(&facade));
+        }
     }
     for (name, facade) in props {
         if let Some(&(ty, is_var, is_const)) = syms.props.get(&name) {
