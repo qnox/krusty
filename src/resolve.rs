@@ -3862,7 +3862,9 @@ impl CallArgMappingError {
 impl std::fmt::Display for CallArgMappingError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NoParameterNamed(name) => write!(formatter, "no parameter named '{name}'"),
+            Self::NoParameterNamed(name) => {
+                write!(formatter, "no parameter with name '{name}' found.")
+            }
             Self::AlreadyPassed(name) => {
                 write!(formatter, "an argument is already passed for '{name}'")
             }
@@ -9490,6 +9492,19 @@ impl<'a> Checker<'a> {
             .unwrap_or_else(|| self.call_open_paren_span(call))
     }
 
+    fn named_call_argument_span(&self, call: ExprId, name: &str) -> Option<Span> {
+        self.file
+            .call_arg_names
+            .get(&call.0)?
+            .iter()
+            .zip(self.file.call_arg_name_spans.get(&call.0)?)
+            .find_map(|(argument_name, span)| {
+                (argument_name.as_deref() == Some(name))
+                    .then_some(*span)
+                    .flatten()
+            })
+    }
+
     fn report_call_arg_mapping_error(
         &mut self,
         call: ExprId,
@@ -9507,7 +9522,12 @@ impl<'a> Checker<'a> {
         error: CallArgMappingError,
         message: String,
     ) {
-        let compiler_span = self.call_argument_list_span(call, args);
+        let compiler_span = match &error {
+            CallArgMappingError::NoParameterNamed(name) => self
+                .named_call_argument_span(call, name)
+                .unwrap_or_else(|| self.call_argument_list_span(call, args)),
+            _ => self.call_argument_list_span(call, args),
+        };
         if error.highlights_callee() {
             let editor_span = self.call_callee_name_span(call);
             self.diags
@@ -25040,7 +25060,7 @@ fun box(): String {
         // Rejected: unknown parameter name.
         err_contains(
             "fun f(a: Int): Int = a\nfun g(): Int = f(z = 1)",
-            "no parameter named 'z'",
+            "no parameter with name 'z' found.",
         );
     }
 
