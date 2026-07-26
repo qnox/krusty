@@ -541,6 +541,26 @@ fn rewrite_anon_captures(file: &mut File) {
                         push_body(params, tps, root);
                     }
                 }
+                // An anonymous object can also appear in a class property INITIALIZER or delegate
+                // (`val s = object : T { … x … }`, `val s: T by lazy { object … }`), not only a method
+                // body. Such an expression is evaluated during construction, where the primary-constructor
+                // immutable properties are already set — so they are capturable by value exactly as from a
+                // method body. Body properties are deliberately NOT offered: a forward reference to a
+                // later-declared one would read a not-yet-initialized value, so those stay unresolved and
+                // the file cleanly skips.
+                let ctor_props: Vec<(String, TypeRef)> = c
+                    .props
+                    .iter()
+                    .filter(|p| p.is_property && !p.is_var)
+                    .map(|p| (p.name.clone(), p.ty.clone()))
+                    .collect();
+                if !ctor_props.is_empty() {
+                    for p in &c.body_props {
+                        for &root in p.init.iter().chain(p.delegate.iter()) {
+                            push_body(ctor_props.clone(), class_tps.clone(), root);
+                        }
+                    }
+                }
             }
             _ => {}
         }

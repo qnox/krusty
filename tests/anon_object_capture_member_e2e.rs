@@ -31,6 +31,22 @@ fn anon_object_reads_enclosing_body_val() {
 }
 
 #[test]
+fn anon_object_in_property_initializer_reads_enclosing_val() {
+    // An anonymous object in a class PROPERTY INITIALIZER (not a method body) must also capture the
+    // enclosing class's immutable properties — `class A(val x) { val s = object : T { … x … } }`. The
+    // capture rewrite previously walked only method bodies, so this form left `x` unresolved.
+    const SRC: &str = "interface T { fun result(): String }\n\
+        class A(val x: String) {\n\
+        \x20 val s: T = object : T { override fun result() = x }\n\
+        }\n\
+        fun box(): String = A(\"OK\").s.result()\n";
+    assert_eq!(
+        run(SRC).expect("anon in prop init reads enclosing val"),
+        "OK"
+    );
+}
+
+#[test]
 fn anon_object_plain_backing_body_prop_captured() {
     // A plain immutable BACKING-field body property (no custom getter, explicit type) is captured by
     // value — its value at the anon's construction equals a `this@A.doubled` read (it never changes).

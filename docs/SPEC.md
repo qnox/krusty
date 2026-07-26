@@ -1503,6 +1503,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   making the by-value capture stale) — the checker records `local_fun_captures` as ordered `(name,
   type)` and the lowerer passes each captured value (or holder) at the call site.
 
+- **Anonymous-object capture** (`object : I { … }` expression): desugared to a hoisted synth class +
+  a construction. `rewrite_anon_captures` turns each captured enclosing name — a function/method
+  parameter, a read-only local, or an enclosing-class immutable (`val`) property — into a synth-class
+  constructor `val` and passes it at construction, after which ordinary member resolution handles the
+  body reference. This holds not only inside method bodies but inside a class **property initializer
+  or delegate** (`val s = object : T { … x … }`, `val s: T by lazy { object … }`): such an expression
+  runs during construction, where the primary-constructor immutable properties are already set, so they
+  are captured by value exactly as from a method body (`::anon_object_in_property_initializer_reads_enclosing_val`).
+  A body property is NOT offered to an initializer's anon (a forward reference would read a
+  not-yet-initialized value) — it stays unresolved and the file cleanly skips.
+
 - **Captured-`var` boxing rule** (precise): a captured `var` is boxed into a `Ref$XxxRef` iff it is
   *reassigned somewhere in the function* (`fn_reassigned`, scanned over the whole body including nested
   closures). A captured `var` that's never reassigned is effectively final and passed by value, like a
