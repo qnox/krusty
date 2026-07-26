@@ -3171,13 +3171,19 @@ fn repr(
                 return Repr::NotVc;
             };
             let phys_ret = match callee {
+                Callee::Virtual {
+                    params: Some((_, ret)),
+                    ..
+                } => Some(desc(ret)),
                 Callee::Static { descriptor, .. }
                 | Callee::Virtual { descriptor, .. }
-                | Callee::Special { descriptor, .. } => descriptor.rsplit(')').next(),
+                | Callee::Special { descriptor, .. } => {
+                    descriptor.rsplit(')').next().map(str::to_string)
+                }
                 _ => None,
             };
             let u_desc = desc(&erase(&under[&x], under));
-            if phys_ret == Some(u_desc.as_str()) {
+            if phys_ret.as_deref() == Some(u_desc.as_str()) {
                 repr_of_ty(t, under)
             } else {
                 Repr::Boxed(x)

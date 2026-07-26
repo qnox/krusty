@@ -194,6 +194,7 @@ impl<'a> ModuleSymbols<'a> {
                 is_inline: fi.flags.inline.can_inline(),
                 is_final: true,
                 is_suspend: fi.flags.suspend,
+                visibility: fi.visibility,
                 context_count: fi.context_count,
                 source_decl: None,
                 source_file: None,
@@ -299,6 +300,7 @@ fn lib_member(name: &str, sig: &Signature, owner: TypeName, is_interface: bool) 
     m.owner = Some(owner);
     m.is_interface = is_interface;
     m.suspend = sig.is_suspend;
+    m.visibility = sig.visibility;
     m.inline = crate::libraries::InlineKind::from_flags(sig.is_inline, false);
     m.call_sig = sig.call_sig();
     m
@@ -351,6 +353,7 @@ fn fn_info(
             // reports suspend-ness uniformly with classpath callees (whose flag comes from @Metadata).
             suspend: sig.is_suspend,
         },
+        visibility: sig.visibility,
         ..FunctionInfo::plain(kind, receiver, callable)
     }
 }
@@ -472,6 +475,7 @@ mod tests {
             is_inline: false,
             is_final: false,
             is_suspend: false,
+            visibility: crate::types::Visibility::Public,
             context_count: 0,
             source_decl: None,
             source_file: None,
@@ -516,7 +520,6 @@ mod tests {
             value_field: None,
             generic_methods: HashMap::new(),
             prop_visibility: std::collections::HashMap::new(),
-            fn_visibility: std::collections::HashMap::new(),
         }
     }
 

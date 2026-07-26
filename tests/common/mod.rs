@@ -173,6 +173,48 @@ fn sweep_stale_temp_dirs() {
     });
 }
 
+fn parse_source_set(
+    sources: &[&str],
+    diags: &mut krusty::diag::DiagSink,
+) -> Option<Vec<krusty::ast::File>> {
+    let mut files = sources
+        .iter()
+        .map(|source| {
+            let features = krusty::features::LangFeatures::from_source(source);
+            let tokens = krusty::lexer::lex(source, diags);
+            krusty::parser::parse_with_features(source, &tokens, diags, &features)
+        })
+        .collect::<Vec<_>>();
+    if diags.has_errors() {
+        return None;
+    }
+    if sources.iter().any(|source| {
+        krusty::features::LangFeatures::from_source(source).has("MultiPlatformProjects")
+    }) {
+        krusty::frontend::strip_matched_expects(&mut files);
+    }
+    Some(files)
+}
+
+fn cached_classpath(cp_jars: &[PathBuf], jdk_modules: Option<&Path>) -> std::rc::Rc<Classpath> {
+    let mut paths = cp_jars.to_vec();
+    if let Some(path) = jdk_modules {
+        paths.push(path.to_path_buf());
+    }
+    thread_local! {
+        static CACHE: std::cell::RefCell<
+            std::collections::HashMap<Vec<PathBuf>, std::rc::Rc<Classpath>>,
+        > = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .entry(paths.clone())
+            .or_insert_with(|| std::rc::Rc::new(Classpath::new(paths)))
+            .clone()
+    })
+}
+
 /// Compile Kotlin `src` to `(internal_name, class_bytes)` pairs entirely in-process — the same pipeline
 /// (`lex → parse → check → ir_lower → ir_emit`) the conformance harness uses, sharing the process-global
 /// classpath caches (type/ext/jimage indexes) across every call. This is dramatically faster than
@@ -191,35 +233,8 @@ pub fn compile_in_process(
 
     let _pg = ProfGuard::new("krusty");
     let mut diags = DiagSink::new();
-    // Language features are taken from the source's `// LANGUAGE:` directives, exactly as the kotlinc
-    // test infrastructure supplies them — so flag-gated syntax compiles iff the test enables it.
-    let features = krusty::features::LangFeatures::from_source(src);
-    let toks = krusty::lexer::lex(src, &mut diags);
-    let mut files = vec![krusty::parser::parse_with_features(
-        src, &toks, &mut diags, &features,
-    )];
-    if diags.has_errors() {
-        return None;
-    }
-    // Multiplatform: a matched `expect` header is replaced by its `actual` in the same set.
-    if features.has("MultiPlatformProjects") {
-        krusty::frontend::strip_matched_expects(&mut files);
-    }
-    let mut cp_paths: Vec<PathBuf> = cp_jars.to_vec();
-    if let Some(p) = jdk_modules {
-        cp_paths.push(p.to_path_buf());
-    }
-    // Reuse one `Classpath` per classpath set on this thread (warm caches across snippets).
-    thread_local! {
-        static CP: std::cell::RefCell<std::collections::HashMap<Vec<PathBuf>, std::rc::Rc<Classpath>>> =
-            std::cell::RefCell::new(std::collections::HashMap::new());
-    }
-    let cp = CP.with(|c| {
-        c.borrow_mut()
-            .entry(cp_paths.clone())
-            .or_insert_with(|| std::rc::Rc::new(Classpath::new(cp_paths.clone())))
-            .clone()
-    });
+    let files = parse_source_set(&[src], &mut diags)?;
+    let cp = cached_classpath(cp_jars, jdk_modules);
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
     let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
     if diags.has_errors() {
@@ -259,6 +274,48 @@ pub fn compile_in_process(
     } else {
         Some(outputs)
     }
+}
+
+/// Compile a source set through the module-wide compiler driver.
+#[allow(dead_code)]
+pub fn compile_in_process_files(
+    sources: &[(&str, &str)],
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    use krusty::diag::DiagSink;
+    use krusty::frontend::collect_signatures_with_cp;
+
+    let _pg = ProfGuard::new("krusty");
+    let mut diags = DiagSink::new();
+    let source_texts = sources
+        .iter()
+        .map(|(_, source)| *source)
+        .collect::<Vec<_>>();
+    let files = parse_source_set(&source_texts, &mut diags)?;
+    let cp = cached_classpath(cp_jars, jdk_modules);
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let mut symbols = collect_signatures_with_cp(&files, platform, &mut diags);
+    if diags.has_errors() {
+        return None;
+    }
+    let stems = sources
+        .iter()
+        .map(|(stem, _)| (*stem).to_string())
+        .collect::<Vec<_>>();
+    let backend = krusty::jvm::JvmBackend::new(cp);
+    let outputs =
+        krusty::compiler::compile(&files, &stems, &mut symbols, &backend, "main", &mut diags);
+    let classes = outputs
+        .into_iter()
+        .map(|(path, bytes)| {
+            (
+                path.strip_suffix(".class").unwrap_or(&path).to_string(),
+                bytes,
+            )
+        })
+        .collect::<Vec<_>>();
+    (!diags.has_errors() && !classes.is_empty()).then_some(classes)
 }
 
 /// Like [`compile_in_process`], but forces the opt-in per-class `@kotlin.Metadata` on (default emit
@@ -1154,12 +1211,32 @@ pub fn compile_and_run_box(
     run_box(&classes, &box_class, cp_jars)
 }
 
+/// Compile a same-module source set and run its `box()` entry point.
+#[allow(dead_code)]
+pub fn compile_and_run_box_files(
+    sources: &[(&str, &str)],
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&Path>,
+) -> Option<String> {
+    let classes = compile_in_process_files(sources, cp_jars, jdk_modules)?;
+    let box_class = find_box_class(&classes)?;
+    run_box(&classes, &box_class, cp_jars)
+}
+
 /// Compile `src` with kotlin-stdlib plus the provisioned JDK modules, then run `box()`.
 #[allow(dead_code)]
 pub fn compile_and_run_with_stdlib(src: &str, stem: &str) -> Option<String> {
     let stdlib = stdlib_jar()?;
     let jdk = jdk_modules()?;
     compile_and_run_box(src, stem, &[stdlib], Some(&jdk))
+}
+
+/// Multi-file form of [`compile_and_run_with_stdlib`].
+#[allow(dead_code)]
+pub fn compile_and_run_files_with_stdlib(sources: &[(&str, &str)]) -> Option<String> {
+    let stdlib = stdlib_jar()?;
+    let jdk = jdk_modules()?;
+    compile_and_run_box_files(sources, &[stdlib], Some(&jdk))
 }
 
 /// Compile `src` with kotlin-stdlib + JDK modules, run `box()`, and assert it returns `OK`.
