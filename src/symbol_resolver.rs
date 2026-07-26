@@ -1255,6 +1255,99 @@ impl<'a> SymbolResolver<'a> {
         self.pick_top_level(name, &fs, args, integer_literals, type_args, Some(expected))
     }
 
+    fn top_level_return_for_slots(
+        &self,
+        overload: &FunctionInfo,
+        slots: &[Option<Ty>],
+        type_args: &[Ty],
+    ) -> Option<Ty> {
+        if overload.kind != FnKind::TopLevel
+            || !overload.public()
+            || overload.context_count != 0
+            || overload.callable.params.len() != slots.len()
+        {
+            return None;
+        }
+        for (parameter, argument) in overload.callable.params.iter().zip(slots) {
+            if let Some(argument) = argument {
+                if !self.arg_fits_or_subtype(parameter, argument) {
+                    return None;
+                }
+            }
+        }
+        let ret = overload
+            .generic_sig
+            .as_ref()
+            .map_or(overload.callable.ret, |signature| {
+                let mut bindings = seeded_gsig_binds(signature, type_args);
+                for (parameter, argument) in signature.params.iter().zip(slots) {
+                    if let Some(argument) = argument {
+                        unify_ty(*parameter, *argument, &mut bindings);
+                    }
+                }
+                ty_subst(signature.ret, &bindings)
+            });
+        Some(overload.ret.apply(if overload.flags.suspend {
+            overload.callable.ret
+        } else {
+            ret
+        }))
+    }
+
+    /// Select and specialize a top-level overload from arguments already aligned to each candidate's
+    /// logical parameter slots. `provided_params` follows source argument order, allowing ordinary
+    /// most-specific selection even when named arguments reorder declaration slots.
+    pub(crate) fn select_top_level_return_for_slots<'b>(
+        &self,
+        candidates: impl IntoIterator<Item = (&'b FunctionInfo, Vec<Option<Ty>>, Vec<Ty>)>,
+        type_args: &[Ty],
+    ) -> Option<Ty> {
+        let mut applicable = candidates
+            .into_iter()
+            .filter_map(|(overload, slots, provided_params)| {
+                let ret = self.top_level_return_for_slots(overload, &slots, type_args)?;
+                let omitted = slots.iter().filter(|slot| slot.is_none()).count();
+                Some((overload, provided_params, ret, omitted))
+            })
+            .collect::<Vec<_>>();
+        if applicable
+            .iter()
+            .any(|(overload, ..)| matches!(overload.callable.origin, Origin::Module { .. }))
+        {
+            applicable
+                .retain(|(overload, ..)| matches!(overload.callable.origin, Origin::Module { .. }));
+        }
+        let at_least_as_specific = |left: &[Ty], right: &[Ty]| {
+            left.len() == right.len()
+                && left.iter().zip(right).all(|(&left, &right)| {
+                    parameter_at_least_as_specific(self.lib, left, right, false)
+                        || resolution_subtype(self.lib, &self.src, left, right)
+                })
+        };
+        let mut maximal = (0..applicable.len())
+            .filter(|&index| {
+                !applicable
+                    .iter()
+                    .enumerate()
+                    .any(|(other_index, (_, other, _, _))| {
+                        if index == other_index {
+                            return false;
+                        }
+                        let current = &applicable[index].1;
+                        at_least_as_specific(other, current)
+                            && !at_least_as_specific(current, other)
+                    })
+            })
+            .collect::<Vec<_>>();
+        let fewest_defaults = maximal.iter().map(|&index| applicable[index].3).min()?;
+        maximal.retain(|&index| applicable[index].3 == fewest_defaults);
+        let first = applicable[*maximal.first()?].2;
+        maximal
+            .iter()
+            .all(|&index| applicable[index].2 == first)
+            .then_some(first)
+    }
+
     /// Expected types for postponed generic arguments of the selected extension overload. A direct
     /// formal `C` constrained as `C : Bound<R>` can be specialized after another argument binds `R`;
     /// the returned expectation keeps the argument's concrete outer class (`MutableSet<R>`, not merely
@@ -1468,8 +1561,9 @@ impl<'a> SymbolResolver<'a> {
                                 .map(Symbol::SyntheticConstructor)
                         })
                 } else {
-                    // `Type.name(args)` — an object/companion instance member, else a static/companion
-                    // member. The resolver discovers which.
+                    // `Type.name(args)` — an object instance member, a static/`@JvmStatic` member, or
+                    // an ordinary method on the type's companion object. The resolver discovers which;
+                    // consumers that only accept a physical static call keep selecting `Companion`.
                     resolve_instance_name(
                         self.lib,
                         internal,
@@ -1490,6 +1584,22 @@ impl<'a> SymbolResolver<'a> {
                             lambda_literals,
                         )
                         .map(Symbol::Companion)
+                    })
+                    .or_else(|| {
+                        self.lib
+                            .resolve_type_name(internal)
+                            .and_then(|ty| ty.companion_object.as_ref().map(|(_, name)| *name))
+                            .and_then(|companion| {
+                                resolve_instance_name(
+                                    self.lib,
+                                    companion,
+                                    name,
+                                    args,
+                                    integer_literals,
+                                    lambda_literals,
+                                )
+                            })
+                            .map(Symbol::Instance)
                     })
                 }
             }

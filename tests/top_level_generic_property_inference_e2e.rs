@@ -31,3 +31,52 @@ fn top_level_set_property_infers_from_args() {
         fun box(): String = if (s.size == 2 && s.contains(\"x\")) \"OK\" else \"no\"\n";
     assert_eq!(run(SRC).expect("setOf property infers"), "OK");
 }
+
+#[test]
+fn classpath_generic_property_inference_respects_named_argument_order() {
+    const LIB: &str = r#"
+package sample
+
+data class Parcel<A, B>(val first: A, val second: B)
+
+fun <A, B> parcel(first: A, second: B): Parcel<A, B> = Parcel(first, second)
+"#;
+    const MAIN: &str = r#"
+import sample.parcel
+
+val value = parcel(second = "text", first = 7)
+
+fun result(): Int = value.first
+"#;
+
+    let Some(diagnostics) = common::checker_diags_against("named_generic_property", LIB, MAIN)
+    else {
+        return;
+    };
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn named_generic_overload_uses_specific_parameter_and_omitted_default() {
+    const LIB: &str = r#"
+package sample
+
+data class Selection<T>(val value: T)
+
+fun <T> select(value: T, ignored: Int = 0): Selection<T> = Selection(value)
+fun <T> select(value: List<T>): Selection<T> = Selection(value.first())
+"#;
+    const MAIN: &str = r#"
+import sample.select
+
+val selected = select(value = listOf("text"))
+
+fun result(): String = selected.value
+"#;
+
+    let Some(diagnostics) = common::checker_diags_against("named_generic_overload", LIB, MAIN)
+    else {
+        return;
+    };
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}

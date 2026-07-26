@@ -144,6 +144,7 @@ impl JvmLibraries {
                     params.truncate(keep);
                 }
             }
+            apply_parameter_nullability(&mut params, &meta.param_nullable);
             let inline_desc = if is_default {
                 method_descriptor(&params, physical_ret)
             } else {
@@ -856,11 +857,23 @@ impl JvmLibraries {
                 // infer a generic return from the receiver's type arguments (`Repo<Config>.load(): Config`).
                 member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
                 member.suspend = self.cp.is_suspend_method_name(internal_name, &m.name);
+                let value_arity = if member.suspend && !member.params.is_empty() {
+                    member.params.len() - 1
+                } else {
+                    member.params.len()
+                };
+                if let Some(function) = member_meta(&m.name, value_arity) {
+                    let nullable = function
+                        .value_params
+                        .iter()
+                        .map(|parameter| parameter.nullable)
+                        .collect::<Vec<_>>();
+                    apply_parameter_nullability(&mut member.params[..value_arity], &nullable);
+                }
                 // A `suspend` member's descriptor erases its return to `Object` (the CPS convention). Recover
                 // the LOGICAL return from `@Metadata` (`Int`, not `Object`) so a caller unboxes the suspension
                 // result — keeping the erased type as `physical_ret` for the emitter.
                 if member.suspend {
-                    let value_arity = member.params.len().saturating_sub(1);
                     if let Some(f) = member_meta(&m.name, value_arity) {
                         member.physical_ret = member.ret;
                         let logical = metadata_return_info(f.ret_class, f.ret_nullable)
@@ -1477,6 +1490,17 @@ pub fn desc_to_ty(d: &str) -> Ty {
     }
 }
 
+/// Apply Kotlin source nullability from `@Metadata` to the descriptor-derived value parameters.
+/// Metadata omits an extension receiver from `value_params`, so align the facts to the parameter suffix.
+fn apply_parameter_nullability(params: &mut [Ty], nullable: &[bool]) {
+    let start = params.len().saturating_sub(nullable.len());
+    for (parameter, declared_nullable) in params[start..].iter_mut().zip(nullable) {
+        if *declared_nullable {
+            *parameter = Ty::nullable(parameter.non_null());
+        }
+    }
+}
+
 fn field_desc_to_ty(d: &str) -> Ty {
     match d {
         "B" => Ty::Byte,
@@ -1970,12 +1994,18 @@ impl SymbolSource for JvmLibraries {
                     continue;
                 };
                 let bytecode_public = cand.as_ref().map_or(mf.is_public, |c| c.public);
-                let Some((params, pret)) = parse_method_desc(&descriptor) else {
+                let Some((mut params, pret)) = parse_method_desc(&descriptor) else {
                     continue;
                 };
                 if params.is_empty() {
                     continue;
                 }
+                let nullable = mf
+                    .value_params
+                    .iter()
+                    .map(|parameter| parameter.nullable)
+                    .collect::<Vec<_>>();
+                apply_parameter_nullability(&mut params, &nullable);
                 let call_sig = mf.extension_call_sig();
                 let ret_class = mf.ret_class.map(kotlin_type_name_to_ty);
                 let ret = match ret_class {

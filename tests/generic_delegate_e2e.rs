@@ -37,3 +37,39 @@ fun box(): String {\n\
     let out = run(SRC).expect("var generic delegate should compile + run");
     assert_eq!(out, "OK");
 }
+
+#[test]
+fn classpath_factory_lambda_preserves_delegated_property_type() {
+    const LIB: &str = r#"
+package sample
+
+class Token
+
+class Endpoint private constructor() {
+    fun combine(first: String, second: String?): String = first + (second ?: "")
+
+    companion object {
+        fun acquire(token: Token): Endpoint = Endpoint()
+    }
+}
+
+fun <T> deferred(initializer: () -> T): Lazy<T> = lazy(initializer)
+"#;
+    const MAIN: &str = r#"
+import sample.Endpoint
+import sample.Token
+import sample.deferred
+
+class Consumer(private val token: Token) {
+    private val endpoint by deferred { Endpoint.acquire(token) }
+
+    fun result(): String = endpoint.combine(first = "OK", second = null)
+}
+"#;
+
+    let Some(diagnostics) = common::checker_diags_against("generic_delegate_factory", LIB, MAIN)
+    else {
+        return;
+    };
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}

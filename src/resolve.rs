@@ -5019,24 +5019,12 @@ fn infer_lit_ty_p(
                         }
                         return Ty::obj_name(internal);
                     }
-                    // A top-level library/stdlib function — federated resolution (no hardcoded names).
-                    if let Some(t) = resolved_ret(&resolver, n, None) {
-                        return t;
-                    }
-                    // A member of a classpath OBJECT imported unqualified (`import Obj.member`; the
-                    // top-level `val logger = logger {}` idiom): resolve the member's return on the
-                    // object's singleton type — mirroring the checker's `object_member_import`.
-                    if let Some(internal) = object_member_import_sig(file, n, src) {
-                        if let Some(t) = resolved_ret(&resolver, n, Some(Ty::obj(&internal))) {
-                            return t;
-                        }
-                    }
                     // A GENERIC top-level function whose return type depends on its arguments
                     // (`arrayOf("a","b")` → `Array<String>`, `mapOf(1 to "x")` → `Map<Int,String>`):
-                    // the return-agreement probe above can't decide it (the erased return is the same
-                    // for every call), so resolve through the SAME federated `SymbolResolver` the full
-                    // checker uses, binding the type parameters from the inferred argument types. Only
-                    // reached when the simpler probe returned `None`, so it never overrides an inference.
+                    // resolve through the SAME federated `SymbolResolver` the full checker uses, binding
+                    // the type parameters from the inferred argument types. This must run BEFORE the
+                    // return-agreement fallback: a raw generic return has already erased its unbound
+                    // type variables, while argument-aware resolution preserves their concrete types.
                     let arg_tys: Vec<Ty> = args
                         .iter()
                         .map(|a| infer_lit_ty_p(file, *a, class_names, fun_rets, props, src, env))
@@ -5048,7 +5036,60 @@ fn infer_lit_ty_p(
                     if let Some(t) = array_builtin_ret(n, &arg_tys) {
                         return t;
                     }
-                    if !arg_tys.contains(&Ty::Error) {
+                    let named_args = file
+                        .call_arg_names
+                        .get(&e.0)
+                        .filter(|names| names.iter().any(Option::is_some));
+                    if let Some(names) = named_args {
+                        let empty_tp = TParams::from_bindings([]);
+                        let mut sink = crate::diag::DiagSink::new();
+                        let type_args = file
+                            .call_type_args
+                            .get(&e.0)
+                            .into_iter()
+                            .flatten()
+                            .map(|reference| {
+                                ty_of_ref(reference, class_names, &empty_tp, &mut sink)
+                            })
+                            .collect::<Vec<_>>();
+                        let overloads = resolver
+                            .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, n, &[], &[])
+                            .map(crate::symbol_resolver::Symbol::overloads)
+                            .unwrap_or_default();
+                        let candidates = overloads.iter().filter_map(|overload| {
+                            let slots =
+                                map_call_sig_args(args, Some(names), &overload.call_sig).ok()?;
+                            let source_slot = |argument: ExprId| {
+                                slots
+                                    .iter()
+                                    .position(|slot| slot.as_ref() == Some(&argument))
+                            };
+                            let slot_types = slots
+                                .iter()
+                                .map(|slot| {
+                                    slot.and_then(|argument| {
+                                        args.iter()
+                                            .position(|candidate| *candidate == argument)
+                                            .map(|source| arg_tys[source])
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+                            let provided_params = args
+                                .iter()
+                                .map(|argument| {
+                                    source_slot(*argument).and_then(|slot| {
+                                        overload.callable.params.get(slot).copied()
+                                    })
+                                })
+                                .collect::<Option<Vec<_>>>()?;
+                            Some((overload, slot_types, provided_params))
+                        });
+                        if let Some(ret) =
+                            resolver.select_top_level_return_for_slots(candidates, &type_args)
+                        {
+                            return ret;
+                        }
+                    } else if !arg_tys.contains(&Ty::Error) {
                         if let Some(c) = resolver
                             .resolve_symbol(
                                 crate::symbol_resolver::SymRecv::TopLevel,
@@ -5059,6 +5100,19 @@ fn infer_lit_ty_p(
                             .and_then(crate::symbol_resolver::Symbol::top_level_call)
                         {
                             return c.ret;
+                        }
+                    }
+                    // A top-level library/stdlib function whose arguments cannot be inferred in this
+                    // lightweight pass — use a return type only when every visible overload agrees.
+                    if let Some(t) = resolved_ret(&resolver, n, None) {
+                        return t;
+                    }
+                    // A member of a classpath OBJECT imported unqualified (`import Obj.member`; the
+                    // top-level `val logger = logger {}` idiom): resolve the member's return on the
+                    // object's singleton type — mirroring the checker's `object_member_import`.
+                    if let Some(internal) = object_member_import_sig(file, n, src) {
+                        if let Some(t) = resolved_ret(&resolver, n, Some(Ty::obj(&internal))) {
+                            return t;
                         }
                     }
                 }
@@ -5220,6 +5274,17 @@ fn infer_lit_ty_p(
         Expr::Block {
             trailing: Some(t), ..
         } => infer_lit_ty_p(file, *t, class_names, fun_rets, props, src, env),
+        // A zero-input lambda can be typed without target information when its body does not use the
+        // implicit `it`. Preserve its result so a generic higher-order call can bind a return-dependent
+        // type parameter during signature collection (`factory { Concrete() }`).
+        Expr::Lambda { params, body } if params.is_empty() && !file.expr_uses_name(*body, "it") => {
+            let ret = infer_lit_ty_p(file, *body, class_names, fun_rets, props, src, env);
+            if ret == Ty::Error {
+                Ty::Error
+            } else {
+                Ty::fun(Vec::new(), ret)
+            }
+        }
         // A range value (`val r = 1..10`, `0 until n`, `4 downTo 1`) — the matching stdlib range type
         // (mirrors the checker's `RangeTo` typing), so a range-typed property's type infers.
         Expr::RangeTo { lo, hi, .. } => {

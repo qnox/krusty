@@ -675,6 +675,7 @@ type MetaFnsCache = RefCell<crate::lru::LruCache<TypeName, std::rc::Rc<ClassMeta
 pub struct MetadataCallFacts {
     pub kept_params: Option<usize>,
     pub call_sig: CallSig,
+    pub param_nullable: Vec<bool>,
     pub ret: ReturnInfo,
 }
 
@@ -683,6 +684,7 @@ impl MetadataCallFacts {
         MetadataCallFacts {
             kept_params: None,
             call_sig,
+            param_nullable: Vec::new(),
             ret: ReturnInfo::default(),
         }
     }
@@ -1429,6 +1431,7 @@ impl Classpath {
                     vararg,
                 )
             },
+            param_nullable: c.value_params.iter().map(|p| p.nullable).collect(),
             ret: metadata_return_info(c.ret_class, c.ret_nullable),
         }
     }
@@ -1455,6 +1458,7 @@ impl Classpath {
         MetadataCallFacts {
             kept_params: None,
             call_sig: f.member_call_sig(),
+            param_nullable: f.value_params.iter().map(|p| p.nullable).collect(),
             ret: metadata_return_info(f.ret_class, f.ret_nullable),
         }
     }

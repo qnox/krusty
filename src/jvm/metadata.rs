@@ -943,6 +943,9 @@ fn build_generic_sig(
 #[derive(Clone, Debug)]
 pub struct MetaValueParam {
     pub ty: Option<TypeName>,
+    /// Kotlin source nullability from `ValueParameter.type`. JVM descriptors erase this for reference
+    /// parameters, so argument checking must carry it separately from the physical descriptor.
+    pub nullable: bool,
     pub name: String,
     pub has_default: bool,
     pub materialized: bool,
@@ -1239,6 +1242,7 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64) -> Vec<MetaFn> {
                                     .class_id
                                     .and_then(|id| resolve_class_name(records, d2, id as usize))
                                     .map(|name| type_name(&name)),
+                                nullable: parse_type_nullable(&p.type_body),
                                 // Param names are plain string-table entries (like the JVM name/desc), not class names.
                                 name: resolve_string(records, d2, p.name_id as usize)
                                     .unwrap_or_default(),
