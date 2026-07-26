@@ -586,6 +586,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   branch — an `if`/`when`/elvis or a **safe call** `c?.calc()` — is rejected (the file skips): a branch
   mid-`Vararg`-fill emits a StackMapTable frame inside the element-store sequence that the verifier
   rejects, so `is_branchy` treats those as non-spliceable (`ArrayOfRef` in `tests/feature_box_e2e.rs`).
+- **Enum reflection intrinsics** `enumValueOf<E>(name)` / `enumValues<E>()`: declared in the kotlin
+  builtins (`kotlin.kotlin_builtins`) but, like the array creators, realized in codegen with **no JVM
+  facade** — kotlinc emits the enum's own synthetic statics `E.valueOf(name)` / `E.values()`. krusty
+  does the same: the synthetic registry (`synthetics.rs`) contributes the IR body, resolving the reified
+  `E` from the call's type argument (or, inside an expanded `<reified …>` inline body, from
+  `reified_subst`); the checker types the call as `E` / `Array<E>`. Gated on the name not being shadowed
+  by a user declaration/local, like the array intrinsics. Test:
+  `enum_value_of_intrinsic_e2e::{enum_value_of_and_values_intrinsics_run,enum_value_of_forwarded_through_reified_inline}`.
 - **Primitive-array init constructor** `IntArray(n) { i -> elem }` (and `Long`/`Double`/`Float`/`Boolean`/
   `Char`/`Byte`/`Short`): kotlinc inlines the index lambda into a fill loop, which krusty reproduces by
   desugaring to `{ val n = <size>; val a = new T[n]; var i = 0; while (i < n) { a[i] = <body[it:=i]>; i++ }; a }`

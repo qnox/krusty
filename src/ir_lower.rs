@@ -22568,6 +22568,47 @@ impl crate::synthetics::SyntheticIrBuilder for Lower<'_> {
     ) -> Option<ExprId> {
         Lower::build_fill_array(self, elem, size_arg, params, body)
     }
+
+    fn synth_reified_type_arg(&self, call: AstExprId) -> Option<Ty> {
+        let mut tr = self
+            .afile
+            .call_type_args
+            .get(&call.0)
+            .and_then(|ts| ts.first())
+            .cloned()?;
+        // A reified type PARAMETER of an enclosing expanded inline body → its call-site type.
+        if let Some(sub) = self
+            .reified_subst
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(&tr.name).cloned())
+        {
+            tr = sub;
+        }
+        self.ty_ref(&tr)
+    }
+
+    fn synth_enum_static(
+        &mut self,
+        enum_ty: Ty,
+        values: bool,
+        args: Vec<ExprId>,
+    ) -> Option<ExprId> {
+        let internal = enum_ty.obj_internal()?;
+        let rendered = internal.render();
+        let (name, descriptor) = if values {
+            ("values", format!("()[L{rendered};"))
+        } else {
+            ("valueOf", format!("(Ljava/lang/String;)L{rendered};"))
+        };
+        Some(self.emit_static_call(
+            internal,
+            name.to_string(),
+            descriptor,
+            crate::libraries::InlineKind::None,
+            args,
+        ))
+    }
 }
 
 fn platform_field_expr(ir: &mut IrFile, field: PlatformField) -> ExprId {

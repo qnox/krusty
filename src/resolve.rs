@@ -20901,6 +20901,37 @@ impl<'a> Checker<'a> {
                                 return Ty::obj_args("kotlin/Array", &[Ty::nullable(elem)]);
                             }
                         }
+                        // `enumValueOf<E>(name)` / `enumValues<E>()` are compiler intrinsics (declared in
+                        // the kotlin builtins, no JVM facade). The value type is the reified enum type
+                        // ARGUMENT; lowering synthesizes `E.valueOf(name)` / `E.values()`.
+                        if fname == "enumValueOf" && args.len() == 1 {
+                            let arg = self
+                                .file
+                                .call_type_args
+                                .get(&call.0)
+                                .and_then(|ts| ts.first())
+                                .cloned();
+                            self.expect_assignable(
+                                Ty::String,
+                                arg_tys[0],
+                                self.span(args[0]),
+                                "enum name",
+                            );
+                            return arg
+                                .map(|r| self.resolve_ty(&r))
+                                .unwrap_or_else(|| Ty::obj("kotlin/Enum"));
+                        }
+                        if fname == "enumValues" && args.is_empty() {
+                            if let Some(r) = self
+                                .file
+                                .call_type_args
+                                .get(&call.0)
+                                .and_then(|ts| ts.first())
+                                .cloned()
+                            {
+                                return Ty::array(self.resolve_ty(&r));
+                            }
+                        }
                         let element_hint = self
                             .file
                             .call_type_args
