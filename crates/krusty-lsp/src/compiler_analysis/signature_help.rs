@@ -1631,6 +1631,7 @@ mod tests {
             targs: vec![function.params[0].ty.clone()],
             span: Span::new(0, 0),
             fun_params: Vec::new(),
+            fun_context_count: 0,
             fun_has_receiver: false,
             fun_suspend: false,
         };
