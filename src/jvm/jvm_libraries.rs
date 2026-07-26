@@ -2421,6 +2421,10 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         super::jvm_class_map::to_jvm_type_name(internal)
     }
 
+    fn canonical_source_type_name(&self, internal: TypeName) -> TypeName {
+        super::jvm_class_map::jvm_collection_to_kotlin_type_name(internal).unwrap_or(internal)
+    }
+
     fn is_default_library_owner(&self, internal: TypeName) -> bool {
         internal.starts_with("kotlin/")
             || super::jvm_class_map::jvm_to_kotlin_builtin_with_members_name(internal).is_some()
@@ -2999,6 +3003,8 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
 #[cfg(test)]
 mod tests {
     use super::desc_to_ty;
+    use crate::libraries::SemanticPlatform;
+    use crate::types::type_name;
     use crate::types::Ty;
 
     #[test]
@@ -3019,6 +3025,22 @@ mod tests {
         assert_eq!(
             desc_to_ty("[[Ljava/lang/String;"),
             Ty::array(Ty::array(Ty::String))
+        );
+    }
+
+    #[test]
+    fn source_names_normalize_raw_collections_without_collapsing_mutability() {
+        let libs = super::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(Vec::new()),
+        ));
+
+        assert_eq!(
+            libs.canonical_source_type_name(type_name("java/util/List")),
+            type_name("kotlin/collections/List")
+        );
+        assert_eq!(
+            libs.canonical_source_type_name(type_name("kotlin/collections/MutableList")),
+            type_name("kotlin/collections/MutableList")
         );
     }
 
