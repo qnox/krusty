@@ -1860,18 +1860,7 @@ impl<'a> Parser<'a> {
             let first = self.ident_or_error("property name");
             if self.at(TokenKind::Dot) || self.at(TokenKind::Lt) || self.at(TokenKind::Question) {
                 let span = self.tok().span;
-                // Type args on the receiver — erased, EXCEPT an `Array` element (kept in `arg` so the
-                // receiver isn't a raw `Array`; see the same handling in parse_fun).
-                let recv_targs = if self.at(TokenKind::Lt) {
-                    self.parse_type_args()
-                } else {
-                    Vec::new()
-                };
-                let recv_arg = if first == "Array" {
-                    recv_targs.into_iter().next().map(Box::new)
-                } else {
-                    None
-                };
+                let (recv_arg, recv_targs) = self.parse_extension_receiver_args(&first);
                 let nullable = self.eat_type_nullable();
                 self.expect(TokenKind::Dot, "'.'");
                 let recv = TypeRef {
@@ -1879,7 +1868,7 @@ impl<'a> Parser<'a> {
                     nullable,
                     definitely_non_null: false,
                     arg: recv_arg,
-                    targs: vec![],
+                    targs: recv_targs,
                     span,
                     fun_params: vec![],
                     fun_has_receiver: false,
@@ -2696,20 +2685,8 @@ impl<'a> Parser<'a> {
                 // `fun RecvType<...>?.name(...)` — extension function.
                 let span = first_span;
                 let mut recv_nullable = false;
-                // Type arguments on the receiver (`fun Array<String>.f()`, `fun List<T>.g()`). Erased
-                // in JVM descriptors EXCEPT an `Array` element, which forms the array descriptor
-                // (`[Ljava/lang/String;`) and must be carried in `arg` — otherwise the receiver reads as
-                // a raw `Array` (no element).
-                let recv_targs = if self.at(TokenKind::Lt) {
-                    self.parse_type_args()
-                } else {
-                    Vec::new()
-                };
-                let recv_arg = if first_name == "Array" {
-                    recv_targs.into_iter().next().map(Box::new)
-                } else {
-                    None
-                };
+                let (mut recv_arg, mut recv_targs) =
+                    self.parse_extension_receiver_args(&first_name);
                 if self.eat(TokenKind::Question) {
                     recv_nullable = true;
                 }
@@ -2730,6 +2707,8 @@ impl<'a> Parser<'a> {
                         break;
                     };
                     if self.eat(TokenKind::Dot) {
+                        recv_arg = None;
+                        recv_targs.clear();
                         recv_name.push('.');
                         recv_name.push_str(&seg);
                     } else {
@@ -2742,7 +2721,7 @@ impl<'a> Parser<'a> {
                     nullable: recv_nullable,
                     definitely_non_null: false,
                     arg: recv_arg,
-                    targs: vec![],
+                    targs: recv_targs,
                     span,
                     fun_params: vec![],
                     fun_has_receiver: false,
@@ -4502,6 +4481,22 @@ impl<'a> Parser<'a> {
         }
         self.expect(TokenKind::Gt, "'>'");
         args
+    }
+
+    fn parse_extension_receiver_args(
+        &mut self,
+        receiver_name: &str,
+    ) -> (Option<Box<TypeRef>>, Vec<TypeRef>) {
+        let args = if self.at(TokenKind::Lt) {
+            self.parse_type_args()
+        } else {
+            Vec::new()
+        };
+        if receiver_name == "Array" {
+            (args.into_iter().next().map(Box::new), Vec::new())
+        } else {
+            (None, args)
+        }
     }
 
     /// Parse a `<T, reified U : Bound, out V>` type-parameter list, returning the parameter names,
@@ -7944,6 +7939,36 @@ mod tests {
         assert_eq!(ret.name, "Outer.Inner.Innermost");
         // Only the last segment's (erased) arguments are retained.
         assert_eq!(ret.targs.len(), 2);
+    }
+
+    #[test]
+    fn extension_receivers_keep_type_arguments() {
+        let mut diagnostics = DiagSink::new();
+        let source = "class Entry\n\
+                      fun Collection<Entry>.selected() {}\n\
+                      val Collection<Entry>.counted: Int get() = 0\n";
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected: {}",
+            diagnostics.render("t", source)
+        );
+        let receivers: Vec<_> = file
+            .decls
+            .iter()
+            .filter_map(|&id| match file.decl(id) {
+                Decl::Fun(function) => function.receiver.as_ref(),
+                Decl::Property(property) => property.receiver.as_ref(),
+                Decl::Class(_) => None,
+            })
+            .collect();
+        assert_eq!(receivers.len(), 2);
+        for receiver in receivers {
+            assert_eq!(receiver.name, "Collection");
+            assert_eq!(receiver.targs.len(), 1);
+            assert_eq!(receiver.targs[0].name, "Entry");
+        }
     }
 
     #[test]
