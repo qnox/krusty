@@ -55,3 +55,28 @@ fn classpath_object_and_nested_resolution() {
         None => eprintln!("skipping: box runner unavailable"),
     }
 }
+
+#[test]
+fn classpath_nested_type_static_member_via_outer_name() {
+    // `Outer.Nested.MEMBER` on a classpath type, reached through the OUTER class name (e.g.
+    // `jakarta.mail.Message.RecipientType.TO`). The receiver `Locale.Category` is a `Member` chain
+    // naming a NESTED type; its static member (`DISPLAY`, an enum constant) must resolve. Previously the
+    // outer name was left `unresolved` because the receiver was flattened with `/` instead of `$`.
+    let Some(jdk) = common::jdk_modules() else {
+        eprintln!("skipping: no JDK modules");
+        return;
+    };
+    let Some(sl) = common::stdlib_jar() else {
+        eprintln!("skipping: no kotlin-stdlib jar");
+        return;
+    };
+    let main = "import java.util.Locale\n\
+        fun box(): String =\n\
+        \x20 if (Locale.Category.DISPLAY.name == \"DISPLAY\") \"OK\" else \"no\"\n";
+    let classes = common::compile_in_process(main, "Main", std::slice::from_ref(&sl), Some(&jdk))
+        .expect("krusty failed to compile nested-type static member access");
+    match common::run_box(&classes, "MainKt", &[sl]) {
+        Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),
+        None => eprintln!("skipping: box runner unavailable"),
+    }
+}

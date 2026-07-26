@@ -17711,8 +17711,16 @@ impl<'a> Checker<'a> {
                 if self.value_root_shadows_classifier(root) {
                     return None;
                 }
-                let internal = type_name(&path);
-                self.resolved_type_name(internal).map(|_| internal)
+                // Map the (possibly imported) OUTER name to its classpath FQN, then let
+                // `nested_internal_name` fold the trailing segments into `$`-joined nested classes
+                // (`Message.RecipientType` → `jakarta/mail/Message$RecipientType`). A path that is
+                // already fully qualified resolves without the prefix step. Without this, the receiver
+                // was flattened with `/` and never matched the real nested internal name.
+                let fq = self
+                    .imported_type_internal(root)
+                    .map(|outer| format!("{outer}{}", &path[root.len()..]))
+                    .unwrap_or(path);
+                self.nested_internal_name(&fq)
             }
             _ => None,
         }

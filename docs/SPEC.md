@@ -1059,6 +1059,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `$`, existence verified through `resolve_type`) — mirrored in both `resolve_ty` (checker) and `ty_ref`
   (lowerer) so `is`/`as`/`when` targets and a nested-class constructor (`Subject.User("x")` → `new
   lib/Subject$User`) all resolve the same `Outer$Nested` internal. Test: `tests/classpath_object_nested_e2e.rs`.
+  A **static member reached through the outer class name** (`Message.RecipientType.TO`,
+  `Thread.State.NEW`) follows the same rule in expression position: `classpath_type_receiver_internal`
+  maps the outer simple name to its classpath FQN and folds the trailing segments into `$`-joined
+  nested classes via `nested_internal_name`, so the receiver `Outer.Nested` types as
+  `<pkg>/Outer$Nested` and its `static_field`/enum-constant member resolves. Previously the receiver
+  was flattened with `/` and never matched the real nested internal, leaving the outer name unresolved
+  (test: `::classpath_nested_type_static_member_via_outer_name`).
 
 - **Unqualified sibling nested-class construction (`Inner()` inside `class Outer { class Inner }`).** Kotlin
   scopes a nested class unqualified within its enclosing class body. When a `Name`-callee call is otherwise
