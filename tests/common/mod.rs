@@ -261,6 +261,65 @@ pub fn compile_in_process(
     }
 }
 
+/// Multi-file form of [`compile_in_process`]. The shared compiler driver performs module-wide
+/// signature collection/checking before lowering each file, so sibling-file tests exercise the same
+/// pipeline as the CLI without rebuilding that setup in each test.
+#[allow(dead_code)]
+pub fn compile_in_process_files(
+    sources: &[(&str, &str)],
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    use krusty::diag::DiagSink;
+    use krusty::frontend::collect_signatures_with_cp;
+
+    let _pg = ProfGuard::new("krusty");
+    let mut diags = DiagSink::new();
+    let mut files = sources
+        .iter()
+        .map(|(_, source)| {
+            let features = krusty::features::LangFeatures::from_source(source);
+            let tokens = krusty::lexer::lex(source, &mut diags);
+            krusty::parser::parse_with_features(source, &tokens, &mut diags, &features)
+        })
+        .collect::<Vec<_>>();
+    if diags.has_errors() {
+        return None;
+    }
+    if sources.iter().any(|(_, source)| {
+        krusty::features::LangFeatures::from_source(source).has("MultiPlatformProjects")
+    }) {
+        krusty::frontend::strip_matched_expects(&mut files);
+    }
+    let mut cp_paths = cp_jars.to_vec();
+    if let Some(path) = jdk_modules {
+        cp_paths.push(path.to_path_buf());
+    }
+    let cp = std::rc::Rc::new(Classpath::new(cp_paths));
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let mut symbols = collect_signatures_with_cp(&files, platform, &mut diags);
+    if diags.has_errors() {
+        return None;
+    }
+    let stems = sources
+        .iter()
+        .map(|(stem, _)| (*stem).to_string())
+        .collect::<Vec<_>>();
+    let backend = krusty::jvm::JvmBackend::new(cp);
+    let outputs =
+        krusty::compiler::compile(&files, &stems, &mut symbols, &backend, "main", &mut diags);
+    let classes = outputs
+        .into_iter()
+        .map(|(path, bytes)| {
+            (
+                path.strip_suffix(".class").unwrap_or(&path).to_string(),
+                bytes,
+            )
+        })
+        .collect::<Vec<_>>();
+    (!diags.has_errors() && !classes.is_empty()).then_some(classes)
+}
+
 /// Like [`compile_in_process`], but forces the opt-in per-class `@kotlin.Metadata` on (default emit
 /// keeps it off — see [`krusty::jvm::ir_emit::EmitOptions::emit_class_metadata`]). Lets a test decode
 /// the metadata krusty computes from IR (the wiring), independent of the CLI env-var flag.
@@ -1154,12 +1213,32 @@ pub fn compile_and_run_box(
     run_box(&classes, &box_class, cp_jars)
 }
 
+/// Compile a same-module source set and run its `box()` entry point.
+#[allow(dead_code)]
+pub fn compile_and_run_box_files(
+    sources: &[(&str, &str)],
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&Path>,
+) -> Option<String> {
+    let classes = compile_in_process_files(sources, cp_jars, jdk_modules)?;
+    let box_class = find_box_class(&classes)?;
+    run_box(&classes, &box_class, cp_jars)
+}
+
 /// Compile `src` with kotlin-stdlib plus the provisioned JDK modules, then run `box()`.
 #[allow(dead_code)]
 pub fn compile_and_run_with_stdlib(src: &str, stem: &str) -> Option<String> {
     let stdlib = stdlib_jar()?;
     let jdk = jdk_modules()?;
     compile_and_run_box(src, stem, &[stdlib], Some(&jdk))
+}
+
+/// Multi-file form of [`compile_and_run_with_stdlib`].
+#[allow(dead_code)]
+pub fn compile_and_run_files_with_stdlib(sources: &[(&str, &str)]) -> Option<String> {
+    let stdlib = stdlib_jar()?;
+    let jdk = jdk_modules()?;
+    compile_and_run_box_files(sources, &[stdlib], Some(&jdk))
 }
 
 /// Compile `src` with kotlin-stdlib + JDK modules, run `box()`, and assert it returns `OK`.
