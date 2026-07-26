@@ -554,26 +554,109 @@ fn member_extension_property_resolution() {
 }
 
 #[test]
-fn member_extension_classpath_receiver_specificity() {
+fn member_extension_classpath_members() {
     let Some(stdlib) = common::stdlib_jar() else {
         return;
     };
     let jdk = common::jdk_modules();
-    let diagnostics = common::front_end_diagnostics(
-        "
-            class Container {
-                val Any.marker: String get() = \"fallback\"
-                val CharSequence.marker: Int get() = 1
-                fun read(token: String): Int = token.marker
-            }
-        ",
-        &[stdlib],
-        jdk.as_deref(),
-    );
-    assert!(
-        diagnostics.is_empty(),
-        "the classpath supertype must beat Any: {diagnostics:?}"
-    );
+    const CASES: &[(&str, &str)] = &[
+        (
+            "receiver specificity",
+            "
+                class Container {
+                    val Any.marker: String get() = \"fallback\"
+                    val CharSequence.marker: Int get() = 1
+                    fun read(token: String): Int = token.marker
+                }
+            ",
+        ),
+        (
+            "receiver classpath properties",
+            "
+                import kotlin.reflect.KClass
+
+                class Container {
+                    val KClass<*>.label: String
+                        get() = buildString {
+                            append(simpleName)
+                            if (typeParameters.isNotEmpty()) {
+                                append(typeParameters.size)
+                            }
+                        }
+                }
+            ",
+        ),
+        (
+            "function receiver survives a nested receiver lambda",
+            "
+                import kotlin.reflect.KClass
+
+                class Container {
+                    fun KClass<*>.label(): String =
+                        buildString {
+                            append(simpleName)
+                            if (typeParameters.isNotEmpty()) {
+                                append(typeParameters.size)
+                            }
+                        }
+                }
+            ",
+        ),
+        (
+            "extension property beats dispatch property",
+            "
+                class Token(val value: String)
+                class Container(val value: Int) {
+                    val Token.marker: Int get() = value.length
+                }
+            ",
+        ),
+        (
+            "extension property wins after a nested receiver misses",
+            "
+                class Token(val value: String)
+                class Container(val value: Int) {
+                    val Token.marker: Int
+                        get() = buildString {
+                            append(value.length)
+                        }.length
+                }
+            ",
+        ),
+        (
+            "setter writes the dispatch receiver",
+            "
+                class Token
+                class Container(var count: Int) {
+                    var Token.marker: Int
+                        get() = count
+                        set(value) {
+                            count = value
+                        }
+                }
+            ",
+        ),
+        (
+            "function updates the dispatch receiver",
+            "
+                class Token
+                class Container(var count: Int) {
+                    fun Token.update() {
+                        count++
+                    }
+                }
+            ",
+        ),
+    ];
+
+    for &(case, source) in CASES {
+        let diagnostics =
+            common::front_end_diagnostics(source, std::slice::from_ref(&stdlib), jdk.as_deref());
+        assert!(
+            diagnostics.is_empty(),
+            "{case}: unexpected diagnostics: {diagnostics:?}"
+        );
+    }
 }
 
 #[test]
@@ -597,6 +680,75 @@ fn member_extension_receiver_inference_is_cross_file_order_independent() {
             .any(|message| message.contains("unresolved reference 'missing'")),
         "expected the inferred String return to expose the bad chained read: {diagnostics:?}"
     );
+}
+
+#[test]
+fn extension_receiver_writes_lower_from_the_selected_implicit_receiver() {
+    const CASES: &[(&str, &str)] = &[
+        (
+            "assignment",
+            "
+                class State(var amount: Int)
+                fun State.replace(next: Int): Int {
+                    amount = next
+                    return amount
+                }
+                fun box(): String =
+                    if (State(1).replace(7) == 7) \"OK\" else \"fail\"
+            ",
+        ),
+        (
+            "increment",
+            "
+                class State(var amount: Int)
+                fun State.advance(): Int {
+                    amount++
+                    return amount
+                }
+                fun box(): String =
+                    if (State(1).advance() == 2) \"OK\" else \"fail\"
+            ",
+        ),
+        (
+            "interface accessors",
+            "
+                interface State {
+                    var amount: Int
+                }
+                class StateImpl(override var amount: Int) : State
+                fun State.advance(): Int {
+                    amount++
+                    return amount
+                }
+                fun box(): String =
+                    if (StateImpl(1).advance() == 2) \"OK\" else \"fail\"
+            ",
+        ),
+    ];
+
+    for &(case, source) in CASES {
+        assert_eq!(run(source).as_deref(), Some("OK"), "{case}");
+    }
+
+    let classpath_result = common::run_box_against(
+        "implicit_property_write",
+        "
+            package fixture
+            class State(var amount: Int)
+        ",
+        "
+            import fixture.State
+            fun State.advance(): Int {
+                amount++
+                return amount
+            }
+            fun box(): String =
+                if (State(1).advance() == 2) \"OK\" else \"fail\"
+        ",
+    );
+    if let Some(result) = classpath_result {
+        assert_eq!(result, "OK", "classpath accessors");
+    }
 }
 
 #[test]

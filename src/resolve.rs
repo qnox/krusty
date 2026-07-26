@@ -6038,6 +6038,15 @@ pub enum StmtLowering {
     LocalFunction(Box<LocalFunInfo>),
     /// A compound assignment (`target op= rhs`) selected as an in-place `opAssign` operator call.
     PlusAssign,
+    /// A bare property write selected on an implicit receiver other than a lexical local. Lowering
+    /// uses the recorded receiver instead of assuming the innermost `this`.
+    ImplicitPropertyWrite {
+        receiver: Ty,
+        property_ty: Ty,
+        source_owner: Option<TypeName>,
+        classpath_getter: Option<Box<crate::symbol_resolver::ResolvedMember>>,
+        classpath_setter: Option<Box<crate::libraries::LibraryCallable>>,
+    },
     /// A `kotlin.contracts.contract { … }` statement: erased metadata, never executed and emits no
     /// bytecode (kotlinc drops it at codegen). The lowerer skips it entirely.
     Erased,
@@ -6251,7 +6260,10 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
                     &property.type_param_bounds,
                     &class_internal_resolver(pre.syms),
                 );
-                pre.this_ty = Some(pre.resolve_ty(receiver));
+                let receiver_ty = pre.resolve_ty(receiver);
+                pre.this_ty = Some(receiver_ty);
+                pre.this_labels
+                    .push((property.name.clone(), receiver_ty, false));
                 pre.symbolic_signature_inference = true;
                 let inferred = pre.expr(*getter);
                 pre.symbolic_signature_inference = false;
@@ -6261,6 +6273,7 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
                     extension_index,
                     inferred,
                 ));
+                pre.this_labels.pop();
                 pre.this_ty = Some(dispatch_ty);
                 pre.tparams.clear();
             }
@@ -6851,8 +6864,28 @@ fn check_file_at_impl(
                         bp.receiver.as_ref().map(|receiver| c.resolve_ty(receiver));
                     if let Some(receiver) = extension_receiver {
                         c.this_ty = Some(receiver);
+                        c.this_labels.push((bp.name.clone(), receiver, false));
                         c.symbolic_signature_inference = true;
                     }
+                    // Class properties are cached in the surrounding class-body scope for ordinary
+                    // accessors. A member-extension accessor must instead resolve every implicit
+                    // property through the receiver chain: extension receiver first, then dispatch
+                    // receiver. Temporarily hide only those cached bindings; accessor locals (including
+                    // a setter's value parameter) live in inner scopes and retain lexical priority.
+                    let hidden_dispatch_bindings = if extension_receiver.is_some() {
+                        let names = props
+                            .iter()
+                            .map(|(name, _, _)| name.clone())
+                            .chain(cl.props.iter().map(|property| property.name.clone()))
+                            .collect::<Vec<_>>();
+                        let scope = c.scopes.last_mut().expect("class body scope");
+                        names
+                            .into_iter()
+                            .filter_map(|name| scope.remove(&name).map(|local| (name, local)))
+                            .collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    };
                     let prop_ty = bp
                         .ty
                         .as_ref()
@@ -6903,6 +6936,13 @@ fn check_file_at_impl(
                                 c.pop_scope();
                             });
                         }
+                    }
+                    c.scopes
+                        .last_mut()
+                        .expect("class body scope")
+                        .extend(hidden_dispatch_bindings);
+                    if extension_receiver.is_some() {
+                        c.this_labels.pop();
                     }
                     c.this_ty = dispatch_this;
                     c.symbolic_signature_inference = outer_symbolic_signature_inference;
@@ -7020,6 +7060,7 @@ fn check_file_at_impl(
                 let recv_ty = p.receiver.as_ref().map(|r| c.resolve_ty(r));
                 if let Some(rt) = recv_ty {
                     c.this_ty = Some(rt);
+                    c.this_labels.push((p.name.clone(), rt, false));
                 }
                 let prop_ty =
                     p.ty.as_ref()
@@ -7072,6 +7113,9 @@ fn check_file_at_impl(
                             });
                         }
                     }
+                }
+                if recv_ty.is_some() {
+                    c.this_labels.pop();
                 }
                 c.this_ty = prev_this;
                 // A delegated property's delegate expression (`by Del()`) must be type-checked so its
@@ -7234,6 +7278,15 @@ struct DiagnosticFunction<'a> {
     ret: Ty,
     source_display: Option<String>,
 }
+
+type ImplicitPropertyWriteResolution = (
+    Ty,
+    Ty,
+    bool,
+    Option<TypeName>,
+    Option<crate::symbol_resolver::ResolvedMember>,
+    Option<crate::libraries::LibraryCallable>,
+);
 
 struct Checker<'a> {
     file: &'a File,
@@ -9594,6 +9647,7 @@ impl<'a> Checker<'a> {
         if let Some(recv_ref) = &f.receiver {
             let recv_ty = self.resolve_ty(recv_ref);
             self.this_ty = Some(recv_ty);
+            self.this_labels.push((f.name.clone(), recv_ty, false));
             // Pick THIS declaration's overload out of the receiver+name overload set by matching its
             // parameter list (an extension may be overloaded by arity — `fun R.f()` and `fun R.f(x)`).
             let want: Vec<Ty> = f
@@ -9682,6 +9736,9 @@ impl<'a> Checker<'a> {
         }
         self.pop_scope();
         self.pop_local_funs();
+        if f.receiver.is_some() {
+            self.this_labels.pop();
+        }
         self.this_ty = prev_this;
         self.allow_lambda_mutation = prev_allow;
     }
@@ -9723,7 +9780,9 @@ impl<'a> Checker<'a> {
             .collect();
         let dispatch_this = self.this_ty;
         if let Some(recv_ref) = &f.receiver {
-            self.this_ty = Some(self.resolve_ty(recv_ref));
+            let receiver = self.resolve_ty(recv_ref);
+            self.this_ty = Some(receiver);
+            self.this_labels.push((f.name.clone(), receiver, false));
         }
         let object_contract_ret = match (f.receiver.is_none(), f.name.as_str(), f.params.len()) {
             (true, "compareTo", 1) => Some(Ty::Int),
@@ -9824,6 +9883,9 @@ impl<'a> Checker<'a> {
         for t in reified_added {
             self.reified_tparams.remove(&t);
         }
+        if f.receiver.is_some() {
+            self.this_labels.pop();
+        }
         self.this_ty = dispatch_this;
     }
 
@@ -9887,6 +9949,15 @@ impl<'a> Checker<'a> {
     }
 
     fn lookup_prop_name(&self, internal: TypeName, name: &str) -> Option<(Ty, bool)> {
+        self.lookup_prop_name_with_owner(internal, name)
+            .map(|(_, ty, is_var)| (ty, is_var))
+    }
+
+    fn lookup_prop_name_with_owner(
+        &self,
+        internal: TypeName,
+        name: &str,
+    ) -> Option<(TypeName, Ty, bool)> {
         let mut pending = vec![internal];
         let mut seen = std::collections::HashSet::new();
         while let Some(current) = pending.pop() {
@@ -9897,10 +9968,35 @@ impl<'a> Checker<'a> {
                 continue;
             };
             if let Some(property) = class.prop(name) {
-                return Some(property);
+                return Some((current, property.0, property.1));
             }
             pending.extend(class.super_internal);
             pending.extend(class.interfaces.iter_ids());
+        }
+        None
+    }
+
+    /// Resolve a bare property write through Kotlin's ordered implicit receivers. Source properties
+    /// expose mutability directly; classpath properties are writable only when their setter resolves.
+    /// A read-only property on a nearer receiver is terminal and must not fall through to a farther
+    /// writable receiver.
+    fn implicit_property_write(&self, name: &str) -> Option<ImplicitPropertyWriteResolution> {
+        for receiver in self.implicit_receiver_types() {
+            if let Some((owner, ty, is_var)) = receiver
+                .obj_internal()
+                .and_then(|internal| self.lookup_prop_name_with_owner(internal, name))
+            {
+                return Some((receiver, ty, is_var, Some(owner), None, None));
+            }
+            let getter = self.resolve_property_member(receiver, name);
+            let setter = self.resolve_property_setter(receiver, name);
+            if let Some(setter) = setter {
+                let ty = setter.params.first().copied().unwrap_or(Ty::Error);
+                return Some((receiver, ty, true, None, getter, Some(setter)));
+            }
+            if let Some(property) = getter {
+                return Some((receiver, property.ret, false, None, Some(property), None));
+            }
         }
         None
     }
@@ -18811,17 +18907,31 @@ impl<'a> Checker<'a> {
                 // `inc`/`dec` operator on the variable's type. Anything else is rejected (never
                 // miscompiled).
                 let span = self.file.stmt_spans[s.0 as usize];
-                let inherited = || {
-                    if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                        self.lookup_prop_name(internal, &name)
-                    } else {
-                        None
-                    }
-                };
-                let found = self
-                    .lookup(&name)
-                    .map(|l| (l.ty, l.is_var))
-                    .or_else(inherited)
+                let local = self.lookup(&name).map(|local| (local.ty, local.is_var));
+                let implicit_property = local
+                    .is_none()
+                    .then(|| self.implicit_property_write(&name))
+                    .flatten();
+                if let Some((receiver, property_ty, _, source_owner, getter, setter)) =
+                    &implicit_property
+                {
+                    self.stmt_lowers.insert(
+                        s,
+                        StmtLowering::ImplicitPropertyWrite {
+                            receiver: *receiver,
+                            property_ty: *property_ty,
+                            source_owner: *source_owner,
+                            classpath_getter: getter.clone().map(Box::new),
+                            classpath_setter: setter.clone().map(Box::new),
+                        },
+                    );
+                }
+                let found = local
+                    .or_else(|| {
+                        implicit_property
+                            .as_ref()
+                            .map(|(_, ty, is_var, ..)| (*ty, *is_var))
+                    })
                     .or_else(|| self.syms.props.get(&name).map(|&(t, v, _)| (t, v)));
                 match found {
                     Some((ty, is_var)) => {
@@ -18848,19 +18958,18 @@ impl<'a> Checker<'a> {
                 if self.try_user_plus_assign(s, value) {
                     return;
                 }
+                let local = self.lookup(&name).map(|local| (local.ty, local.is_var));
+                let implicit_property = local
+                    .is_none()
+                    .then(|| self.implicit_property_write(&name))
+                    .flatten();
                 let assignment_expected =
-                    if name == "field" && self.lookup(&name).is_none() && self.field_ty.is_some() {
+                    if name == "field" && local.is_none() && self.field_ty.is_some() {
                         self.field_ty
                     } else {
-                        self.lookup(&name)
-                            .map(|local| local.ty)
-                            .or_else(|| {
-                                self.this_ty.and_then(|ty| {
-                                    ty.obj_internal()
-                                        .and_then(|internal| self.lookup_prop_name(internal, &name))
-                                        .map(|(ty, _)| ty)
-                                })
-                            })
+                        local
+                            .map(|(ty, _)| ty)
+                            .or_else(|| implicit_property.as_ref().map(|(_, ty, ..)| *ty))
                             .or_else(|| self.syms.props.get(&name).map(|&(ty, _, _)| ty))
                     };
                 let vt = match assignment_expected {
@@ -18868,17 +18977,16 @@ impl<'a> Checker<'a> {
                     None => self.expr(value),
                 };
                 // `field = …` inside a setter writes the backing field.
-                if name == "field" && self.lookup(&name).is_none() && self.field_ty.is_some() {
+                if name == "field" && local.is_none() && self.field_ty.is_some() {
                     let fty = self.field_ty.unwrap();
                     self.expect_assignable(fty, vt, self.value_operator_span(value), "assignment");
                 } else {
-                    match self.lookup(&name) {
-                        Some(l) => {
-                            let (lty, is_var) = (l.ty, l.is_var);
+                    match local {
+                        Some((lty, is_var)) => {
                             if !is_var {
                                 self.diags.error(
                                     self.file.stmt_spans[s.0 as usize],
-                                    format!("'val' cannot be reassigned."),
+                                    "'val' cannot be reassigned.".to_string(),
                                 );
                             }
                             self.expect_assignable(
@@ -18910,21 +19018,11 @@ impl<'a> Checker<'a> {
                         }
                         None => {
                             let span = self.file.stmt_spans[s.0 as usize];
-                            // A bare write to an *inherited* `var` member (`x = …` where `x` is declared in a
-                            // superclass): the own properties are in the implicit-`this` scope (found by
-                            // `lookup` above), but inherited ones are resolved through `this`'s class chain.
-                            let inherited = if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                                self.lookup_prop_name(internal, &name)
-                            } else {
-                                None
-                            };
-                            match inherited
-                                .or_else(|| self.syms.props.get(&name).map(|&(t, v, _)| (t, v)))
-                            {
-                                Some((lty, is_var)) => {
+                            match implicit_property {
+                                Some((receiver, lty, is_var, source_owner, getter, setter)) => {
                                     if !is_var {
                                         self.diags
-                                            .error(span, format!("'val' cannot be reassigned."));
+                                            .error(span, "'val' cannot be reassigned.".to_string());
                                     }
                                     self.expect_assignable(
                                         lty,
@@ -18932,11 +19030,37 @@ impl<'a> Checker<'a> {
                                         self.value_operator_span(value),
                                         "assignment",
                                     );
+                                    self.stmt_lowers.insert(
+                                        s,
+                                        StmtLowering::ImplicitPropertyWrite {
+                                            receiver,
+                                            property_ty: lty,
+                                            source_owner,
+                                            classpath_getter: getter.map(Box::new),
+                                            classpath_setter: setter.map(Box::new),
+                                        },
+                                    );
                                 }
-                                None => {
-                                    self.diags
-                                        .error(span, format!("unresolved reference '{name}'."));
-                                }
+                                None => match self.syms.props.get(&name).copied() {
+                                    Some((lty, is_var, _)) => {
+                                        if !is_var {
+                                            self.diags.error(
+                                                span,
+                                                "'val' cannot be reassigned.".to_string(),
+                                            );
+                                        }
+                                        self.expect_assignable(
+                                            lty,
+                                            vt,
+                                            self.value_operator_span(value),
+                                            "assignment",
+                                        );
+                                    }
+                                    None => {
+                                        self.diags
+                                            .error(span, format!("unresolved reference '{name}'."));
+                                    }
+                                },
                             }
                         }
                     }
