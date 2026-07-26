@@ -606,6 +606,7 @@ fn local_function_candidate_score(
     args: &[ExprId],
     arg_tys: &[Ty],
     arg_names: Option<&[Option<String>]>,
+    trailing_lambda: bool,
 ) -> Option<(usize, std::cmp::Reverse<usize>, bool)> {
     let context_count = signature.context_count.min(signature.params.len());
     let params = &signature.params[context_count..];
@@ -627,6 +628,7 @@ fn local_function_candidate_score(
             names,
             signature.required.saturating_sub(context_count),
             defaults,
+            trailing_lambda,
         ) else {
             return None;
         };
@@ -3722,7 +3724,7 @@ pub fn collect_signatures_with_cp(
 pub enum CallArgMappingError {
     NoParameterNamed { name: String, argument: usize },
     AlreadyPassed { argument: usize },
-    PositionalAfterNamed,
+    PositionalAfterNamed { argument: usize },
     TooManyArguments { expected: usize },
     MissingRequired(String),
 }
@@ -3742,8 +3744,10 @@ impl std::fmt::Display for CallArgMappingError {
             Self::AlreadyPassed { .. } => {
                 formatter.write_str("argument already passed for this parameter.")
             }
-            Self::PositionalAfterNamed => {
-                formatter.write_str("a positional argument cannot follow a named argument")
+            Self::PositionalAfterNamed { .. } => {
+                formatter.write_str(
+                    "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.",
+                )
             }
             Self::TooManyArguments { expected } => {
                 write!(formatter, "too many arguments: expected at most {expected}")
@@ -3761,11 +3765,13 @@ pub fn map_call_args(
     param_names: &[String],
     required: usize,
     param_defaults: &[bool],
+    trailing_lambda: bool,
 ) -> Result<Vec<Option<ExprId>>, CallArgMappingError> {
     let n = param_names.len();
     let mut slots: Vec<Option<ExprId>> = vec![None; n];
     let mut pos = 0usize;
     let mut seen_named = false;
+    let mut named_order_matches = true;
     for (i, &a) in args.iter().enumerate() {
         match names.and_then(|ns| ns.get(i)).and_then(|o| o.as_ref()) {
             Some(nm) => {
@@ -3776,6 +3782,7 @@ pub fn map_call_args(
                         argument: i,
                     }
                 })?;
+                named_order_matches &= idx == i;
                 if slots[idx].is_some() {
                     return Err(CallArgMappingError::AlreadyPassed { argument: i });
                 }
@@ -3783,13 +3790,25 @@ pub fn map_call_args(
             }
             None => {
                 if seen_named {
-                    // A TRAILING LAMBDA is the one positional argument Kotlin allows after named args —
-                    // it fills the LAST parameter (a function type). Only the FINAL argument may be such;
-                    // any other positional-after-named is an error.
-                    if i == args.len() - 1 && n > 0 && slots[n - 1].is_none() {
-                        slots[n - 1] = Some(a);
+                    // Kotlin permits an ordinary positional argument after named arguments only while
+                    // every preceding argument occupies the parameter at the same source-order index.
+                    // A syntactic trailing lambda is the explicit exception: it always fills the final
+                    // parameter, even after reordered named arguments.
+                    let idx = if trailing_lambda && i + 1 == args.len() {
+                        n.checked_sub(1).filter(|&idx| slots[idx].is_none())
+                    } else if !named_order_matches {
+                        None
+                    } else if i >= n {
+                        return Err(CallArgMappingError::TooManyArguments { expected: n });
                     } else {
-                        return Err(CallArgMappingError::PositionalAfterNamed);
+                        slots[i].is_none().then_some(i)
+                    };
+                    let Some(idx) = idx else {
+                        return Err(CallArgMappingError::PositionalAfterNamed { argument: i });
+                    };
+                    slots[idx] = Some(a);
+                    if !trailing_lambda || i + 1 != args.len() {
+                        named_order_matches &= idx == i;
                     }
                 } else {
                     if pos >= n {
@@ -3826,6 +3845,7 @@ pub fn map_call_sig_args(
     args: &[ExprId],
     names: Option<&[Option<String>]>,
     sig: &CallSig,
+    trailing_lambda: bool,
 ) -> Result<Vec<Option<ExprId>>, CallArgMappingError> {
     map_call_args(
         args,
@@ -3833,6 +3853,7 @@ pub fn map_call_sig_args(
         &sig.param_names,
         sig.required,
         &sig.param_defaults,
+        trailing_lambda,
     )
 }
 
@@ -3870,6 +3891,7 @@ pub fn map_param_list_args(
     args: &[ExprId],
     names: Option<&[Option<String>]>,
     params: &ParamList,
+    trailing_lambda: bool,
 ) -> Result<Vec<Option<ExprId>>, CallArgMappingError> {
     map_call_args(
         args,
@@ -3877,6 +3899,7 @@ pub fn map_param_list_args(
         &params.names,
         required_arity(params.names.len(), &params.defaults),
         &params.defaults,
+        trailing_lambda,
     )
 }
 
@@ -7881,6 +7904,13 @@ struct MemberExtensionCall<'a> {
     partial_arg_tys: &'a [Option<Ty>],
     arg_names: Option<&'a [Option<String>]>,
     explicit_type_args: &'a [Ty],
+    trailing_lambda: bool,
+}
+
+#[derive(Clone, Copy)]
+struct CallArgumentShape<'a> {
+    names: Option<&'a [Option<String>]>,
+    trailing_lambda: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -8021,6 +8051,13 @@ struct Checker<'a> {
 enum ClasspathMemberSlotCall {
     Resolved(Ty),
     Ambiguous,
+    Rejected,
+    NoMatch,
+}
+
+enum ClasspathExtensionSlotCall {
+    Resolved(Ty),
+    Rejected,
     NoMatch,
 }
 
@@ -9075,6 +9112,20 @@ impl<'a> Checker<'a> {
         self.report_call_arg_mapping_error_message(call, args, error, message);
     }
 
+    fn report_callable_arg_mapping_error(
+        &mut self,
+        call: ExprId,
+        args: &[ExprId],
+        function: DiagnosticFunction<'_>,
+        error: CallArgMappingError,
+    ) {
+        if matches!(error, CallArgMappingError::TooManyArguments { .. }) {
+            self.report_function_arity(call, function, args);
+        } else {
+            self.report_call_arg_mapping_error(call, args, error);
+        }
+    }
+
     fn report_call_arg_mapping_error_message(
         &mut self,
         call: ExprId,
@@ -9086,6 +9137,10 @@ impl<'a> Checker<'a> {
             CallArgMappingError::NoParameterNamed { argument, .. }
             | CallArgMappingError::AlreadyPassed { argument } => self
                 .call_argument_name_span(call, *argument)
+                .unwrap_or_else(|| self.call_argument_list_span(call, args)),
+            CallArgMappingError::PositionalAfterNamed { argument } => args
+                .get(*argument)
+                .map(|argument| self.span(*argument))
                 .unwrap_or_else(|| self.call_argument_list_span(call, args)),
             _ => self.call_argument_list_span(call, args),
         };
@@ -9345,7 +9400,12 @@ impl<'a> Checker<'a> {
                 None
             };
             if let Some(names) = names {
-                let Ok(slots) = map_call_sig_args(args, Some(&names), &value_signature) else {
+                let Ok(slots) = map_call_sig_args(
+                    args,
+                    Some(&names),
+                    &value_signature,
+                    self.file.call_has_trailing_lambda.contains(&call.0),
+                ) else {
                     return HashMap::new();
                 };
                 mapped.extend(
@@ -11939,8 +11999,14 @@ impl<'a> Checker<'a> {
             .collect::<Vec<_>>();
         let members =
             crate::module_symbols::ModuleSymbols::new(self.syms).instance_members(receiver, name);
-        let method_sig =
-            self.best_module_member_candidate(&members, args, &partial, arg_names.as_deref());
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let method_sig = self.best_module_member_candidate(
+            &members,
+            args,
+            &partial,
+            arg_names.as_deref(),
+            trailing_lambda,
+        );
         let generic_member = self.plan_generic_member(
             receiver,
             None,
@@ -11955,8 +12021,11 @@ impl<'a> Checker<'a> {
                 name,
                 args,
                 &partial,
-                arg_names.as_deref(),
                 &explicit_type_args,
+                CallArgumentShape {
+                    names: arg_names.as_deref(),
+                    trailing_lambda,
+                },
             )
         });
         let member_extension_plan = member_extension_plan.flatten();
@@ -12874,6 +12943,7 @@ impl<'a> Checker<'a> {
                                             a,
                                             &full_arg_tys,
                                             arg_names.as_deref(),
+                                            self.file.call_has_trailing_lambda.contains(&e.0),
                                         )
                                         .is_some()
                                     });
@@ -12892,8 +12962,14 @@ impl<'a> Checker<'a> {
                                         &name,
                                         a,
                                         &arg_tys,
-                                        arg_names.as_deref(),
                                         &explicit_type_args,
+                                        CallArgumentShape {
+                                            names: arg_names.as_deref(),
+                                            trailing_lambda: self
+                                                .file
+                                                .call_has_trailing_lambda
+                                                .contains(&e.0),
+                                        },
                                     )
                                     .is_ok_and(|candidate| candidate.is_some());
                                 (applicable_module_member || !applicable_member_extension)
@@ -14704,7 +14780,9 @@ impl<'a> Checker<'a> {
         if rt == Ty::String {
             match self.record_classpath_member_call_with_slots(call, rt, name, args) {
                 ClasspathMemberSlotCall::Resolved(ret) => return Some(ret),
-                ClasspathMemberSlotCall::Ambiguous => return Some(Ty::Error),
+                ClasspathMemberSlotCall::Ambiguous | ClasspathMemberSlotCall::Rejected => {
+                    return Some(Ty::Error);
+                }
                 ClasspathMemberSlotCall::NoMatch => {}
             }
             if let Some(m) = self.resolve_instance_member(rt, name, arg_tys) {
@@ -14752,7 +14830,9 @@ impl<'a> Checker<'a> {
             }
             match self.record_classpath_member_call_with_slots(call, rt, name, args) {
                 ClasspathMemberSlotCall::Resolved(ret) => return Some(ret),
-                ClasspathMemberSlotCall::Ambiguous => return Some(Ty::Error),
+                ClasspathMemberSlotCall::Ambiguous | ClasspathMemberSlotCall::Rejected => {
+                    return Some(Ty::Error);
+                }
                 ClasspathMemberSlotCall::NoMatch => {}
             }
             if let Some(m) = self.resolve_instance_member(rt, name, arg_tys) {
@@ -14798,9 +14878,10 @@ impl<'a> Checker<'a> {
         // (keyed by the call `ExprId`) — not just its return type — so the lowerer emits it through the
         // ordinary extension path instead of bailing (`lower_ext_call_on` reads `resolved_extension`).
         // Mirrors the qualified `recv.name(args)` extension typing + recording.
-        if let Some(ret) = self.record_library_extension_call_with_slots(call, name, rt, args, &[])
-        {
-            return Some(ret);
+        match self.record_library_extension_call_with_slots(call, name, rt, args, &[]) {
+            ClasspathExtensionSlotCall::Resolved(ret) => return Some(ret),
+            ClasspathExtensionSlotCall::Rejected => return Some(Ty::Error),
+            ClasspathExtensionSlotCall::NoMatch => {}
         }
         if let Some(ret) = self.record_library_extension_call(Some(call), name, rt, arg_tys, &[]) {
             return Some(ret);
@@ -15180,13 +15261,18 @@ impl<'a> Checker<'a> {
         receiver: Ty,
         args: &[ExprId],
         type_args: &[Ty],
-    ) -> Option<Ty> {
-        let names = self
+    ) -> ClasspathExtensionSlotCall {
+        let Some(names) = self
             .file
             .call_arg_names
             .get(&call.0)
             .cloned()
-            .filter(|ns| ns.iter().any(Option::is_some))?;
+            .filter(|ns| ns.iter().any(Option::is_some))
+        else {
+            return ClasspathExtensionSlotCall::NoMatch;
+        };
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let mut mapping_errors = Vec::new();
         let mut candidates: Vec<_> = self
             .resolver()
             .resolve_symbol(
@@ -15202,30 +15288,94 @@ impl<'a> Checker<'a> {
             .filter(|o| o.call_sig.has_param_names())
             .filter_map(|o| {
                 let params = o.extension_value_params().to_vec();
-                let slots = map_call_sig_args(args, Some(&names), &o.call_sig).ok()?;
-                let mut score = self.call_slot_score(&params, &slots)?;
+                let slots =
+                    match map_call_sig_args(args, Some(&names), &o.call_sig, trailing_lambda) {
+                        Ok(slots) => slots,
+                        Err(error) => {
+                            mapping_errors.push((error, o));
+                            return None;
+                        }
+                    };
+                let mut score = self.call_slot_score(&params, &slots);
                 if matches!(o.callable.origin, Origin::Module { .. }) {
-                    score += 1_000_000;
+                    score = score.map(|score| score + 1_000_000);
                 }
                 Some((score, o, params, slots))
             })
             .collect();
+        if candidates.is_empty() {
+            if let Some((error, candidate)) = mapping_errors.into_iter().next() {
+                self.report_callable_arg_mapping_error(
+                    call,
+                    args,
+                    DiagnosticFunction {
+                        name,
+                        params: candidate.extension_value_params(),
+                        param_names: &candidate.call_sig.param_names,
+                        param_defaults: &candidate.call_sig.param_defaults,
+                        required: candidate.call_sig.required,
+                        vararg: candidate.call_sig.vararg,
+                        context_count: 0,
+                        ret: candidate.callable.ret,
+                        source_display: None,
+                    },
+                    error,
+                );
+                return ClasspathExtensionSlotCall::Rejected;
+            }
+            return ClasspathExtensionSlotCall::NoMatch;
+        }
+        if candidates.iter().all(|(score, _, _, _)| score.is_none()) {
+            if candidates.len() == 1 {
+                let (_, _, params, slots) = candidates.pop().unwrap();
+                for (parameter, argument) in params.iter().zip(slots.iter()) {
+                    if let Some(argument) = argument {
+                        self.expect_assignable(
+                            *parameter,
+                            self.expr_types[argument.0 as usize],
+                            self.span(*argument),
+                            "argument",
+                        );
+                    }
+                }
+            } else {
+                self.diags.error(
+                    self.span(call),
+                    "none of the following candidates is applicable:".to_string(),
+                );
+            }
+            return ClasspathExtensionSlotCall::Rejected;
+        }
+        candidates.retain(|(score, _, _, _)| score.is_some());
         candidates.sort_by_key(|(score, _, _, _)| std::cmp::Reverse(*score));
         if candidates
             .get(1)
             .zip(candidates.first())
             .is_some_and(|((next_score, _, _, _), (best_score, _, _, _))| next_score == best_score)
         {
-            return None;
+            self.diags.error(
+                self.span(call),
+                format!("overload resolution ambiguity for extension '{name}'"),
+            );
+            return ClasspathExtensionSlotCall::Rejected;
         }
-        let (_, fi, params, slots) = candidates.into_iter().next()?;
+        let Some((_, fi, params, slots)) = candidates.into_iter().next() else {
+            return ClasspathExtensionSlotCall::NoMatch;
+        };
         let slot_tys: Vec<Option<Ty>> = slots
             .iter()
             .map(|slot| slot.map(|arg| self.expr_types[arg.0 as usize]))
             .collect();
         let c = self
             .resolver()
-            .build_extension_callable_for_slots(name, receiver, type_args, &fi, &slot_tys)?;
+            .build_extension_callable_for_slots(name, receiver, type_args, &fi, &slot_tys);
+        let Some(c) = c else {
+            self.diags.error(
+                self.span(call),
+                "krusty: named arguments for this extension call are not supported".to_string(),
+            );
+            return ClasspathExtensionSlotCall::Rejected;
+        };
         for (i, slot) in slots.iter().enumerate() {
             if let Some(arg) = slot {
                 self.expect_assignable(
@@ -15241,7 +15391,7 @@ impl<'a> Checker<'a> {
             .insert(call, ResolvedCall::Extension(c.clone()));
         self.record_inline_expansion_synthetic_members(call, name, receiver, &c);
         self.resolved_call_arg_slots.insert(call, slots);
-        Some(ret)
+        ClasspathExtensionSlotCall::Resolved(ret)
     }
 
     fn iterator_protocol_target(&self, iterable_ty: Ty) -> Option<IteratorProtocolTarget> {
@@ -15829,7 +15979,12 @@ impl<'a> Checker<'a> {
         else {
             return Ok(None);
         };
-        let slots = map_param_list_args(args, Some(arg_names), &ctor_params)?;
+        let slots = map_param_list_args(
+            args,
+            Some(arg_names),
+            &ctor_params,
+            self.file.call_has_trailing_lambda.contains(&call.0),
+        )?;
         for &a in slots.iter().flatten() {
             self.expr(a);
         }
@@ -16278,6 +16433,7 @@ impl<'a> Checker<'a> {
             partial_arg_tys,
             arg_names,
             explicit_type_args,
+            trailing_lambda,
         } = call;
         let function = &shape.function;
         if !explicit_type_args.is_empty() && explicit_type_args.len() != function.type_params.len()
@@ -16292,7 +16448,7 @@ impl<'a> Checker<'a> {
                 .map(|(source, _)| (source.min(last), source))
                 .collect::<Vec<_>>()
         } else {
-            map_call_sig_args(args, arg_names, &call_sig)
+            map_call_sig_args(args, arg_names, &call_sig, trailing_lambda)
                 .ok()?
                 .iter()
                 .enumerate()
@@ -16371,8 +16527,13 @@ impl<'a> Checker<'a> {
             String::new(),
         );
         member.call_sig = call_sig.clone();
-        let score =
-            self.module_member_candidate_score(&member, args, partial_arg_tys, arg_names)?;
+        let score = self.module_member_candidate_score(
+            &member,
+            args,
+            partial_arg_tys,
+            arg_names,
+            trailing_lambda,
+        )?;
         let ret = function.ret.as_ref().map_or_else(
             || crate::symbol_resolver::ty_subst(function.signature.ret, &bindings),
             |reference| {
@@ -16405,8 +16566,8 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &[ExprId],
         partial_arg_tys: &[Option<Ty>],
-        arg_names: Option<&[Option<String>]>,
         explicit_type_args: &[Ty],
+        argument_shape: CallArgumentShape<'_>,
     ) -> Option<MemberExtensionLambdaPlan> {
         let mut plans = Vec::new();
         for shape in self.member_extension_function_shapes(extension_receiver, name) {
@@ -16417,8 +16578,9 @@ impl<'a> Checker<'a> {
                     name,
                     args,
                     partial_arg_tys,
-                    arg_names,
+                    arg_names: argument_shape.names,
                     explicit_type_args,
+                    trailing_lambda: argument_shape.trailing_lambda,
                 },
             ) else {
                 continue;
@@ -16467,8 +16629,8 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &[ExprId],
         arg_tys: &[Ty],
-        arg_names: Option<&[Option<String>]>,
         explicit_type_args: &[Ty],
+        argument_shape: CallArgumentShape<'_>,
     ) -> Result<Option<MemberExtensionFunctionCandidate>, ()> {
         let mut candidates = Vec::new();
         let full_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
@@ -16480,8 +16642,9 @@ impl<'a> Checker<'a> {
                     name,
                     args,
                     partial_arg_tys: &full_arg_tys,
-                    arg_names,
+                    arg_names: argument_shape.names,
                     explicit_type_args,
+                    trailing_lambda: argument_shape.trailing_lambda,
                 },
             ) else {
                 continue;
@@ -16539,8 +16702,11 @@ impl<'a> Checker<'a> {
             name,
             args,
             arg_tys,
-            arg_names.as_deref(),
             &explicit_type_args,
+            CallArgumentShape {
+                names: arg_names.as_deref(),
+                trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
+            },
         ) {
             Ok(Some(candidate)) => {
                 if candidate.visibility != Visibility::Public {
@@ -16552,7 +16718,12 @@ impl<'a> Checker<'a> {
                     );
                 }
                 if let Some(names) = arg_names.as_deref() {
-                    if let Ok(slots) = map_call_sig_args(args, Some(names), &candidate.call_sig) {
+                    if let Ok(slots) = map_call_sig_args(
+                        args,
+                        Some(names),
+                        &candidate.call_sig,
+                        self.file.call_has_trailing_lambda.contains(&call.0),
+                    ) {
                         self.resolved_call_arg_slots.insert(call, slots);
                     }
                 }
@@ -16849,7 +17020,11 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
     ) -> ClasspathMemberSlotCall {
         let arg_names = self.file.call_arg_names.get(&call.0).cloned();
+        let has_named = arg_names
+            .as_deref()
+            .is_some_and(|names| names.iter().any(Option::is_some));
         let needs_slot_map = arg_names.is_some();
+        let mut mapping_errors = Vec::new();
         let mut candidates: Vec<_> = self
             .resolver()
             .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
@@ -16864,13 +17039,71 @@ impl<'a> Checker<'a> {
                 if !needs_slot_map {
                     return None;
                 }
-                let slots = map_call_sig_args(args, arg_names.as_deref(), &o.call_sig).ok()?;
-                let score = self.call_slot_score(&params, &slots)?;
+                let slots = match map_call_sig_args(
+                    args,
+                    arg_names.as_deref(),
+                    &o.call_sig,
+                    self.file.call_has_trailing_lambda.contains(&call.0),
+                ) {
+                    Ok(slots) => slots,
+                    Err(error) => {
+                        mapping_errors.push((error, o));
+                        return None;
+                    }
+                };
+                let score = self.call_slot_score(&params, &slots);
                 Some((score, o, params, slots))
             })
             .collect();
-        candidates
-            .sort_by_key(|(score, member, _, _)| (std::cmp::Reverse(*score), member.receiver_rank));
+        if candidates.is_empty() && has_named {
+            if let Some((error, candidate)) = mapping_errors.into_iter().next() {
+                self.report_callable_arg_mapping_error(
+                    call,
+                    args,
+                    DiagnosticFunction {
+                        name,
+                        params: &candidate.callable.params,
+                        param_names: &candidate.call_sig.param_names,
+                        param_defaults: &candidate.call_sig.param_defaults,
+                        required: candidate.call_sig.required,
+                        vararg: candidate.call_sig.vararg,
+                        context_count: 0,
+                        ret: candidate.callable.ret,
+                        source_display: None,
+                    },
+                    error,
+                );
+                return ClasspathMemberSlotCall::Rejected;
+            }
+        }
+        if !candidates.is_empty() && candidates.iter().all(|(score, _, _, _)| score.is_none()) {
+            if candidates.len() == 1 {
+                let (_, _, params, slots) = candidates.pop().unwrap();
+                for (parameter, argument) in params.iter().zip(slots.iter()) {
+                    if let Some(argument) = argument {
+                        self.expect_assignable(
+                            *parameter,
+                            self.expr_types[argument.0 as usize],
+                            self.span(*argument),
+                            "argument",
+                        );
+                    }
+                }
+            } else {
+                self.diags.error(
+                    self.span(call),
+                    "none of the following candidates is applicable:".to_string(),
+                );
+            }
+            return ClasspathMemberSlotCall::Rejected;
+        }
+        candidates.retain(|(score, _, _, _)| score.is_some());
+        candidates.sort_by_key(|(score, member, _, _)| {
+            (
+                std::cmp::Reverse(score.unwrap_or_default()),
+                member.receiver_rank,
+            )
+        });
         if candidates.get(1).zip(candidates.first()).is_some_and(
             |((next_score, next, _, _), (best_score, best, _, _))| {
                 next_score == best_score && next.receiver_rank == best.receiver_rank
@@ -17065,6 +17298,7 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         partial_arg_tys: &[Option<Ty>],
         arg_names: Option<&[Option<String>]>,
+        trailing_lambda: bool,
     ) -> Option<(usize, std::cmp::Reverse<usize>, bool)> {
         let score = |expected: Ty, actual: Ty| {
             if expected == actual {
@@ -17146,7 +17380,7 @@ impl<'a> Checker<'a> {
                 false,
             ));
         }
-        let slots = map_call_sig_args(args, arg_names, &member.call_sig).ok()?;
+        let slots = map_call_sig_args(args, arg_names, &member.call_sig, trailing_lambda).ok()?;
         let mut type_score = 0;
         for (parameter_index, argument) in slots.iter().enumerate() {
             let Some(argument) = argument else {
@@ -17183,12 +17417,19 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         partial_arg_tys: &[Option<Ty>],
         arg_names: Option<&[Option<String>]>,
+        trailing_lambda: bool,
     ) -> Option<&'m crate::libraries::LibraryMember> {
         members
             .iter()
             .filter_map(|member| {
-                self.module_member_candidate_score(member, args, partial_arg_tys, arg_names)
-                    .map(|score| (score, member))
+                self.module_member_candidate_score(
+                    member,
+                    args,
+                    partial_arg_tys,
+                    arg_names,
+                    trailing_lambda,
+                )
+                .map(|score| (score, member))
             })
             .max_by_key(|(score, _)| *score)
             .map(|(_, member)| member)
@@ -17208,6 +17449,7 @@ impl<'a> Checker<'a> {
         // The `name =` argument labels, in source order.
         let arg_names = self.file.call_arg_names.get(&call.0).cloned();
         let arg_names = arg_names.as_deref();
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         // The user member resolved through the current module as a `SymbolSource` (`ModuleSymbols`); its
         // DFS member walk matches `lookup_method`, so the first Member overload is the same one hand-rolled
         // lookup would pick. Collected owned so the borrow of `syms` ends before the mutating type-checks
@@ -17226,8 +17468,14 @@ impl<'a> Checker<'a> {
         let applicable_members = all_members
             .iter()
             .filter(|member| {
-                self.module_member_candidate_score(member, args, &full_arg_tys, arg_names)
-                    .is_some()
+                self.module_member_candidate_score(
+                    member,
+                    args,
+                    &full_arg_tys,
+                    arg_names,
+                    trailing_lambda,
+                )
+                .is_some()
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -17290,7 +17538,12 @@ impl<'a> Checker<'a> {
             && (arg_names.is_some()
                 || (!cs.vararg && arg_tys.len() != params.len() && cs.required < params.len()))
         {
-            match map_call_sig_args(args, arg_names, cs) {
+            match map_call_sig_args(
+                args,
+                arg_names,
+                cs,
+                self.file.call_has_trailing_lambda.contains(&call.0),
+            ) {
                 Ok(slots) => {
                     for (i, slot) in slots.iter().enumerate() {
                         if let Some(a) = slot {
@@ -17649,7 +17902,12 @@ impl<'a> Checker<'a> {
                     if let Some(cls) = self.syms.classes.get(&qname).cloned() {
                         if arg_names.is_some() {
                             if let Some(param_list) = self.primary_ctor_param_list(&qname) {
-                                match map_param_list_args(args, arg_names.as_deref(), &param_list) {
+                                match map_param_list_args(
+                                    args,
+                                    arg_names.as_deref(),
+                                    &param_list,
+                                    self.file.call_has_trailing_lambda.contains(&call.0),
+                                ) {
                                     Ok(slots) => {
                                         for &a in slots.iter().flatten() {
                                             self.expr(a);
@@ -18008,6 +18266,7 @@ impl<'a> Checker<'a> {
                                         args,
                                         &full_arg_tys,
                                         arg_names.as_deref(),
+                                        self.file.call_has_trailing_lambda.contains(&call.0),
                                     )
                                     .is_some()
                                 });
@@ -18240,6 +18499,7 @@ impl<'a> Checker<'a> {
                         args,
                         &generic_member_partial,
                         arg_names.as_deref(),
+                        self.file.call_has_trailing_lambda.contains(&call.0),
                     )
                     .cloned();
                 // Preserve generic receiver bindings while typing member lambda arguments.
@@ -18301,8 +18561,14 @@ impl<'a> Checker<'a> {
                             &name,
                             args,
                             partial,
-                            arg_names.as_deref(),
                             &member_extension_type_args,
+                            CallArgumentShape {
+                                names: arg_names.as_deref(),
+                                trailing_lambda: self
+                                    .file
+                                    .call_has_trailing_lambda
+                                    .contains(&call.0),
+                            },
                         )
                     });
                 let ext_lambda_shape = if member_ext_lambda_plan.is_none() {
@@ -18530,6 +18796,7 @@ impl<'a> Checker<'a> {
                         args,
                         &full_arg_tys,
                         arg_names.as_deref(),
+                        self.file.call_has_trailing_lambda.contains(&call.0),
                     )
                     .is_some()
                 });
@@ -18554,7 +18821,9 @@ impl<'a> Checker<'a> {
                 }
                 match self.record_classpath_member_call_with_slots(call, rt, &name, args) {
                     ClasspathMemberSlotCall::Resolved(ret) => return ret,
-                    ClasspathMemberSlotCall::Ambiguous => return Ty::Error,
+                    ClasspathMemberSlotCall::Ambiguous | ClasspathMemberSlotCall::Rejected => {
+                        return Ty::Error;
+                    }
                     ClasspathMemberSlotCall::NoMatch => {}
                 }
                 if rt == Ty::String {
@@ -18628,9 +18897,12 @@ impl<'a> Checker<'a> {
                                 && o.call_sig.can_map_omitted_args(o.callable.params.len())
                         });
                     if let Some(fi) = member {
-                        if let Ok(slots) =
-                            map_call_sig_args(args, arg_names.as_deref(), &fi.call_sig)
-                        {
+                        if let Ok(slots) = map_call_sig_args(
+                            args,
+                            arg_names.as_deref(),
+                            &fi.call_sig,
+                            self.file.call_has_trailing_lambda.contains(&call.0),
+                        ) {
                             let logical = &fi.callable.params;
                             for (i, slot) in slots.iter().enumerate() {
                                 if let Some(a) = slot {
@@ -18784,14 +19056,16 @@ impl<'a> Checker<'a> {
                 {
                     return ret;
                 }
-                if let Some(ret) = self.record_library_extension_call_with_slots(
+                match self.record_library_extension_call_with_slots(
                     call,
                     &name,
                     rt,
                     args,
                     &call_targs,
                 ) {
-                    return ret;
+                    ClasspathExtensionSlotCall::Resolved(ret) => return ret,
+                    ClasspathExtensionSlotCall::Rejected => return Ty::Error,
+                    ClasspathExtensionSlotCall::NoMatch => {}
                 }
                 if let Some(ret) = self.record_library_extension_call_with_literal_args(
                     Some(call),
@@ -18876,7 +19150,12 @@ impl<'a> Checker<'a> {
                             && cs.can_map_omitted_args(logical.len())
                         {
                             // Omitted/named extension arguments filled by parameter defaults.
-                            match map_call_sig_args(args, arg_names.as_deref(), cs) {
+                            match map_call_sig_args(
+                                args,
+                                arg_names.as_deref(),
+                                cs,
+                                self.file.call_has_trailing_lambda.contains(&call.0),
+                            ) {
                                 Ok(slots) => {
                                     for (i, slot) in slots.iter().enumerate() {
                                         if let Some(a) = slot {
@@ -19146,6 +19425,7 @@ impl<'a> Checker<'a> {
                                     args,
                                     arg_tys,
                                     arg_names.as_deref(),
+                                    self.file.call_has_trailing_lambda.contains(&call.0),
                                 )?;
                                 let context_count =
                                     signature.context_count.min(signature.params.len());
@@ -19245,6 +19525,7 @@ impl<'a> Checker<'a> {
                                         &sig.param_names[ctx_count..],
                                         sig.required.saturating_sub(ctx_count),
                                         sig.param_defaults.get(ctx_count..).unwrap_or_default(),
+                                        self.file.call_has_trailing_lambda.contains(&call.0),
                                     ) {
                                         Ok(slots) => Some(slots),
                                         Err(error) => {
@@ -19349,6 +19630,7 @@ impl<'a> Checker<'a> {
                                 &sig.param_names,
                                 sig.required,
                                 &sig.param_defaults,
+                                self.file.call_has_trailing_lambda.contains(&call.0),
                             ) {
                                 Ok(slots) => slots,
                                 Err(error) => {
@@ -19664,6 +19946,7 @@ impl<'a> Checker<'a> {
                                     args,
                                     partial,
                                     arg_names.as_deref(),
+                                    self.file.call_has_trailing_lambda.contains(&call.0),
                                 )?;
                                 self.plan_generic_member(
                                     receiver,
@@ -19699,8 +19982,14 @@ impl<'a> Checker<'a> {
                                 &fname,
                                 args,
                                 this_member_partial.as_deref().unwrap_or_default(),
-                                arg_names.as_deref(),
                                 &explicit_type_args,
+                                CallArgumentShape {
+                                    names: arg_names.as_deref(),
+                                    trailing_lambda: self
+                                        .file
+                                        .call_has_trailing_lambda
+                                        .contains(&call.0),
+                                },
                             )
                         })
                 } else {
@@ -20094,7 +20383,12 @@ impl<'a> Checker<'a> {
                         // lowering fills a simple-literal default, or skips the file — never miscompiles).
                         if arg_names.is_some() {
                             if let Some(param_list) = self.primary_ctor_param_list(&fname) {
-                                match map_param_list_args(args, arg_names.as_deref(), &param_list) {
+                                match map_param_list_args(
+                                    args,
+                                    arg_names.as_deref(),
+                                    &param_list,
+                                    self.file.call_has_trailing_lambda.contains(&call.0),
+                                ) {
                                     Ok(slots) => {
                                         let inferred = self.expect_source_constructor_args(
                                             call,
@@ -20403,7 +20697,12 @@ impl<'a> Checker<'a> {
                         );
                         let mapped_slots = if let Some(names) = arg_names.as_deref() {
                             let value_sig = call_sig_without_context(&fi.call_sig, ctx_count);
-                            match map_call_sig_args(args, Some(names), &value_sig) {
+                            match map_call_sig_args(
+                                args,
+                                Some(names),
+                                &value_sig,
+                                self.file.call_has_trailing_lambda.contains(&call.0),
+                            ) {
                                 Ok(slots) => Some(slots),
                                 Err(error) => {
                                     self.report_call_arg_mapping_error(call, args, error);
@@ -20500,7 +20799,12 @@ impl<'a> Checker<'a> {
                             let mapped_slots = if !cs.vararg {
                                 if let Some(names) = arg_names.as_deref() {
                                     let value_sig = call_sig_without_context(cs, ctx_count);
-                                    match map_call_sig_args(args, Some(names), &value_sig) {
+                                    match map_call_sig_args(
+                                        args,
+                                        Some(names),
+                                        &value_sig,
+                                        self.file.call_has_trailing_lambda.contains(&call.0),
+                                    ) {
                                         Ok(slots) => Some(slots),
                                         Err(error) => {
                                             self.report_call_arg_mapping_error(call, args, error);
@@ -20660,7 +20964,12 @@ impl<'a> Checker<'a> {
                             }
                         }
                     } else if let Some(names) = &arg_names {
-                        match map_call_sig_args(args, Some(names), cs) {
+                        match map_call_sig_args(
+                            args,
+                            Some(names),
+                            cs,
+                            self.file.call_has_trailing_lambda.contains(&call.0),
+                        ) {
                             Ok(slots) => {
                                 for (i, slot) in slots.iter().enumerate() {
                                     if let Some(a) = slot {
@@ -20676,6 +20985,25 @@ impl<'a> Checker<'a> {
                                         );
                                     }
                                 }
+                                self.resolved_call_arg_slots.insert(call, slots);
+                            }
+                            Err(CallArgMappingError::TooManyArguments { .. }) => {
+                                let source_display = self.module_source_display(&fi, ret_ty);
+                                self.report_function_arity(
+                                    call,
+                                    DiagnosticFunction {
+                                        name: &fname,
+                                        params,
+                                        param_names: &cs.param_names,
+                                        param_defaults: &cs.param_defaults,
+                                        required: cs.required,
+                                        vararg: cs.vararg,
+                                        context_count: ctx_count,
+                                        ret: ret_ty,
+                                        source_display,
+                                    },
+                                    args,
+                                );
                             }
                             Err(error) => self.report_call_arg_mapping_error(call, args, error),
                         }
@@ -20694,7 +21022,7 @@ impl<'a> Checker<'a> {
                         {
                             *last = Some(name.clone());
                         }
-                        match map_call_sig_args(args, Some(&synth), cs) {
+                        match map_call_sig_args(args, Some(&synth), cs, false) {
                             Ok(slots) => {
                                 for (i, slot) in slots.iter().enumerate() {
                                     if let Some(a) = slot {
@@ -20710,6 +21038,7 @@ impl<'a> Checker<'a> {
                                         );
                                     }
                                 }
+                                self.resolved_call_arg_slots.insert(call, slots);
                             }
                             Err(error) => self.report_call_arg_mapping_error(call, args, error),
                         }
@@ -20771,7 +21100,7 @@ impl<'a> Checker<'a> {
                         .filter(|ns| ns.iter().any(Option::is_some))
                     {
                         Some(names) => {
-                            let pnames: Vec<Vec<String>> = crate::libraries::FunctionSet {
+                            let overloads: Vec<_> = crate::libraries::FunctionSet {
                                 overloads: self
                                     .resolver()
                                     .resolve_symbol(
@@ -20784,22 +21113,84 @@ impl<'a> Checker<'a> {
                                     .unwrap_or_default(),
                             }
                             .into_top_level_with_param_names()
-                            .map(|o| o.call_sig.param_names)
                             .collect();
-                            match pnames.as_slice() {
-                                [pn] => match map_call_args(args, Some(names), pn, pn.len(), &[]) {
-                                    Ok(slots) if slots.iter().all(Option::is_some) => {
-                                        let sa: Vec<ExprId> =
-                                            slots.iter().copied().flatten().collect();
-                                        let at = sa
-                                            .iter()
-                                            .map(|a| self.expr_types[a.0 as usize])
-                                            .collect();
-                                        (sa, at, Some(slots))
+                            let trailing_lambda =
+                                self.file.call_has_trailing_lambda.contains(&call.0);
+                            let mut mapped = Vec::new();
+                            let mut mapping_errors = Vec::new();
+                            for overload in overloads {
+                                match map_call_sig_args(
+                                    args,
+                                    Some(names),
+                                    &overload.call_sig,
+                                    trailing_lambda,
+                                ) {
+                                    Ok(slots) => {
+                                        let score =
+                                            self.call_slot_score(&overload.callable.params, &slots);
+                                        mapped.push((score, slots, overload));
                                     }
-                                    _ => (args.to_vec(), arg_tys.clone(), None),
-                                },
-                                _ => (args.to_vec(), arg_tys.clone(), None),
+                                    Err(error) => mapping_errors.push((error, overload)),
+                                }
+                            }
+                            if !mapped.is_empty()
+                                && mapped.iter().all(|(score, _, _)| score.is_none())
+                            {
+                                if mapped.len() == 1 {
+                                    let (_, slots, candidate) = mapped.pop().unwrap();
+                                    for (parameter, argument) in
+                                        candidate.callable.params.iter().zip(slots.iter())
+                                    {
+                                        if let Some(argument) = argument {
+                                            self.expect_assignable(
+                                                *parameter,
+                                                self.expr_types[argument.0 as usize],
+                                                self.span(*argument),
+                                                "argument",
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    self.diags.error(
+                                        self.span(call),
+                                        "none of the following candidates is applicable:"
+                                            .to_string(),
+                                    );
+                                }
+                                return Ty::Error;
+                            }
+                            mapped.retain(|(score, _, _)| score.is_some());
+                            mapped.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
+                            if let Some((_, slots, _)) = mapped.into_iter().next() {
+                                let sel_args: Vec<ExprId> =
+                                    slots.iter().copied().flatten().collect();
+                                let selected_types = sel_args
+                                    .iter()
+                                    .map(|argument| self.expr_types[argument.0 as usize])
+                                    .collect();
+                                (sel_args, selected_types, Some(slots))
+                            } else if let Some((error, candidate)) =
+                                mapping_errors.into_iter().next()
+                            {
+                                self.report_callable_arg_mapping_error(
+                                    call,
+                                    args,
+                                    DiagnosticFunction {
+                                        name: &fname,
+                                        params: &candidate.callable.params,
+                                        param_names: &candidate.call_sig.param_names,
+                                        param_defaults: &candidate.call_sig.param_defaults,
+                                        required: candidate.call_sig.required,
+                                        vararg: candidate.call_sig.vararg,
+                                        context_count: 0,
+                                        ret: candidate.callable.ret,
+                                        source_display: None,
+                                    },
+                                    error,
+                                );
+                                return Ty::Error;
+                            } else {
+                                (args.to_vec(), arg_tys.clone(), None)
                             }
                         }
                         None => (args.to_vec(), arg_tys.clone(), None),
@@ -22523,6 +22914,33 @@ fun box(): String {
                     Ty::String,
                     "(Ljava/lang/String;I)Ljava/lang/String;",
                 ),
+                "knownPair" => (
+                    crate::libraries::FnKind::TopLevel,
+                    None,
+                    "test/TopKt",
+                    "knownPair",
+                    vec![Ty::Int, Ty::Int],
+                    Ty::Int,
+                    "(II)I",
+                ),
+                "mixExt" | "test/mixExt" => (
+                    crate::libraries::FnKind::Extension,
+                    Some(Ty::String),
+                    "test/TextKt",
+                    "mixExt",
+                    vec![Ty::String, Ty::Int, Ty::Int],
+                    Ty::Int,
+                    "(Ljava/lang/String;II)I",
+                ),
+                "typedExt" | "test/typedExt" => (
+                    crate::libraries::FnKind::Extension,
+                    Some(Ty::String),
+                    "test/TextKt",
+                    "typedExt",
+                    vec![Ty::String, Ty::String, Ty::Int],
+                    Ty::Int,
+                    "(Ljava/lang/String;Ljava/lang/String;I)I",
+                ),
                 "Foo" => (
                     crate::libraries::FnKind::TopLevel,
                     None,
@@ -22576,7 +22994,7 @@ fun box(): String {
                 info.callable.suspend = true;
             }
             info.call_sig = CallSig {
-                param_names: if name == "knownTop" {
+                param_names: if matches!(name, "knownTop" | "knownPair" | "mixExt" | "typedExt") {
                     vec!["a".to_string(), "b".to_string()]
                 } else if name == "getValue" {
                     vec!["thisRef".to_string(), "property".to_string()]
@@ -22596,7 +23014,7 @@ fun box(): String {
                     Vec::new()
                 },
                 required: match name {
-                    "knownTop" | "getValue" => 2,
+                    "knownTop" | "knownPair" | "mixExt" | "typedExt" | "getValue" => 2,
                     _ => 1,
                 },
                 ..Default::default()
@@ -22821,7 +23239,7 @@ fun box(): String {
                     )],
                 };
             }
-            if recv != Ty::String || !matches!(name, "known" | "choose" | "tie") {
+            if recv != Ty::String || !matches!(name, "known" | "typedKnown" | "choose" | "tie") {
                 return crate::libraries::FunctionSet::default();
             }
             let member = |params: Vec<Ty>, descriptor: &'static str, defaults: Vec<bool>| {
@@ -22855,6 +23273,11 @@ fun box(): String {
                     vec![Ty::Int, Ty::Int],
                     "(II)Ljava/lang/String;",
                     vec![false, true],
+                )],
+                "typedKnown" => vec![member(
+                    vec![Ty::String, Ty::Int],
+                    "(Ljava/lang/String;I)Ljava/lang/String;",
+                    vec![false, false],
                 )],
                 "choose" => vec![
                     member(vec![Ty::Boolean], "(Z)Ljava/lang/String;", vec![false]),
@@ -23304,6 +23727,123 @@ fun box(): String {
             panic!("checker must record overloaded classpath member calls for lowering");
         };
         assert_eq!(selected.member.params, vec![Ty::Int]);
+    }
+
+    #[test]
+    fn classpath_named_calls_report_invalid_mixing_without_positional_fallback() {
+        let source = "import test.mixExt\n\
+            fun top(): Int = knownPair(b = 2, 1)\n\
+            fun member(): String = \"\".known(b = 2, 1)\n\
+            fun extension(): Int = \"\".mixExt(b = 2, 1)";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols =
+            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let expected = "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.";
+        let matching = diagnostics
+            .diags
+            .iter()
+            .filter(|diagnostic| diagnostic.msg == expected)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matching.len(),
+            3,
+            "expected one canonical error per call, got: {:?}",
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
+        );
+        for diagnostic in matching {
+            assert_eq!(
+                &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
+                "1"
+            );
+        }
+    }
+
+    #[test]
+    fn classpath_named_calls_report_mapped_type_errors_without_positional_fallback() {
+        let source = "import test.typedExt\n\
+            fun top(): String = knownTop(b = \"x\", a = 1)\n\
+            fun member(): String = \"\".typedKnown(b = \"x\", a = 1)\n\
+            fun extension(): Int = \"\".typedExt(b = \"x\", a = 1)";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols =
+            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let type_errors = diagnostics
+            .diags
+            .iter()
+            .filter(|diagnostic| diagnostic.msg.starts_with("argument type mismatch:"))
+            .count();
+        assert_eq!(
+            type_errors,
+            4,
+            "top-level and member calls should reject both wrong bindings: {:?}",
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            diagnostics
+                .diags
+                .iter()
+                .any(|diagnostic| diagnostic.msg
+                    == "none of the following candidates is applicable:"),
+            "the imported extension must also reject its mapped types: {:?}",
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn classpath_named_calls_render_aligned_excess_as_callable_arity_errors() {
+        let source = "import test.mixExt\n\
+            fun top(): Int = knownPair(a = 1, 2, 3)\n\
+            fun member(): String = \"\".known(a = 1, 2, 3)\n\
+            fun extension(): Int = \"\".mixExt(a = 1, 2, 3)";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols =
+            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let expected = [
+            "too many arguments for 'fun knownPair(a: Int, b: Int): Int'.",
+            "too many arguments for 'fun known(a: Int, b: Int = ...): String'.",
+            "too many arguments for 'fun mixExt(a: Int, b: Int): Int'.",
+        ];
+        for message in expected {
+            let diagnostic = diagnostics
+                .diags
+                .iter()
+                .find(|diagnostic| diagnostic.msg == message)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "missing {message:?}; got {:?}",
+                        diagnostics
+                            .diags
+                            .iter()
+                            .map(|diagnostic| &diagnostic.msg)
+                            .collect::<Vec<_>>()
+                    )
+                });
+            assert_eq!(
+                &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
+                "3"
+            );
+        }
     }
 
     #[test]
@@ -24435,6 +24975,8 @@ fun box(): String {
         ok("fun f(a: Int, b: Int): Int = a - b\nfun g(): Int = f(b = 2, a = 5)");
         ok("fun f(a: Int, b: Int = 10): Int = a + b\nfun g(): Int = f(a = 1)");
         ok("class C { fun m(a: Int, b: Int): Int = a - b }\nfun g(): Int = C().m(b = 2, a = 5)");
+        ok("fun f(a: Int, b: Int, c: Int): Int = a + b + c\n\
+             fun g(): Int = f(a = 1, 2, 3)");
         // Rejected: unknown parameter name.
         err_contains(
             "fun f(a: Int): Int = a\nfun g(): Int = f(z = 1)",
@@ -24443,6 +24985,14 @@ fun box(): String {
         err_contains(
             "fun f(a: Int): Int = a\nfun g(): Int = f(a = 1, a = 2)",
             "argument already passed for this parameter.",
+        );
+        err_contains(
+            "fun f(a: Int, b: Int): Int = a + b\nfun g(): Int = f(b = 2, 1)",
+            "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.",
+        );
+        err_contains(
+            "fun f(a: Int, b: Int): Int = a + b\nfun g(): Int = f(a = 1, 2, 3)",
+            "too many arguments",
         );
     }
 

@@ -55,6 +55,40 @@ fn named_args_to_classpath_top_level_fn_reorder_and_run() {
 }
 
 #[test]
+fn positional_arguments_after_in_order_named_argument_run_for_classpath_function() {
+    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
+        eprintln!("skipping: set JAVA_HOME");
+        return;
+    };
+    let Some(stdlib_path) = common::stdlib_jar() else {
+        eprintln!("skipping: no kotlin-stdlib jar");
+        return;
+    };
+    let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
+    let Some(libout) = common::compile_lib(
+        "mixed_named_positional_args",
+        "package lib\nfun join(a: String, b: String, suffix: String = \"!\"): String = a + b + suffix\n",
+    ) else {
+        return;
+    };
+
+    let main_src = "import lib.join\n\
+        fun box(): String {\n\
+        \x20   val r = join(a = \"O\", \"K\")\n\
+        \x20   return if (r == \"OK!\") \"OK\" else \"fail:\" + r\n\
+        }\n";
+    let cp = vec![libout.clone(), stdlib_path.clone()];
+    let classes = common::compile_in_process(main_src, "Main", &cp, Some(&jdk_modules))
+        .expect("krusty(main) failed to compile ordered mixed classpath arguments");
+
+    let Some(out) = common::run_box(&classes, "MainKt", &[libout.clone(), stdlib_path]) else {
+        eprintln!("skipping: box runner unavailable");
+        return;
+    };
+    assert_eq!(out.trim(), "OK", "box() returned {out:?}");
+}
+
+#[test]
 fn classpath_top_level_named_args_preserve_source_eval_order() {
     let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
         eprintln!("skipping: set JAVA_HOME");

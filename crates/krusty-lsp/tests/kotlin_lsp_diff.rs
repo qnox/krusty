@@ -844,6 +844,11 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
              fun duplicateNamedArgument(): String = namedPair(left = 1, left = 2, right = \"ok\")\n",
         ),
         (
+            "MixedNamedPositionalArgument.kt",
+            "fun orderedPair(left: Int, right: Int): Int = left + right\n\
+             fun mixedNamedPositionalArgument(): Int = orderedPair(right = 2, 1)\n",
+        ),
+        (
             "ValReassignment.kt",
             "fun reassignValue(): Int {\n\
              \u{20}\u{20}val value = 1\n\

@@ -246,6 +246,26 @@ mod tests {
     }
 
     #[test]
+    fn source_set_preserves_mixed_argument_diagnostic_and_positional_argument_span() {
+        let source = "fun pair(a: Int, b: Int): Int = a + b\n\
+                      fun invalid(): Int = pair(b = 2, 1)";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let diagnostic = analysis.files[0]
+            .diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.msg
+                    == "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters."
+            })
+            .expect("mixed named/positional diagnostic");
+        let positional = source.rfind('1').expect("positional argument") as u32;
+        assert_eq!(
+            diagnostic.span,
+            krusty::diag::Span::new(positional, positional + 1)
+        );
+    }
+
+    #[test]
     fn empty_source_set_is_valid_after_last_document_closes() {
         let analysis = analyze_standalone_source_set(&[]);
         assert!(analysis.files.is_empty());

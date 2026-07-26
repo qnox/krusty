@@ -9465,21 +9465,89 @@ impl<'a> Lower<'a> {
         }))
     }
 
-    /// Lower a call's arguments, filling omitted trailing parameters from their **constant-literal**
-    /// defaults (`fun f(x: Int = 5)` called `f()`). A non-literal default (one referencing other
-    /// params or `this`) needs the `$default` synthetic method krusty doesn't emit yet → `None`.
-    /// Lower a (possibly named / defaulted) call's arguments into parameter-slot order. Returns
-    /// `(args, prelude)` where `prelude` is a list of temp-declaration statements that MUST run before the
-    /// call — non-empty only for a REORDERED named call with side-effecting arguments, whose Kotlin
-    /// source-order evaluation is realized by spilling each argument to a temp in source order and loading
+    /// Map each source-order argument to its physical parameter slot. Prefer the checker's authoritative
+    /// slot record; the fallback is for lowering-only paths that do not retain one. The fallback implements
+    /// Kotlin's mixed-argument rule: a positional after named arguments binds at the same source ordinal
+    /// only while the preceding labels remain in parameter order. A syntactic trailing lambda always binds
+    /// the final parameter. The returned vector is parallel to `args` and remains compile-local.
+    fn call_argument_parameter_slots(
+        &self,
+        call: AstExprId,
+        args: &[AstExprId],
+        parameter_count: usize,
+        parameter_offset: usize,
+        find_named: impl Fn(&str) -> Option<usize>,
+    ) -> Option<Vec<usize>> {
+        if let Some(slots) = self.info.resolved_call_arg_slots.get(&call) {
+            let base = if slots.len() == parameter_count {
+                0
+            } else if slots.len() + parameter_offset == parameter_count {
+                parameter_offset
+            } else {
+                return None;
+            };
+            return args
+                .iter()
+                .map(|argument| {
+                    slots
+                        .iter()
+                        .position(|slot| *slot == Some(*argument))
+                        .map(|slot| base + slot)
+                })
+                .collect();
+        }
+
+        let names = self.afile.call_arg_names.get(&call.0);
+        let trailing_lambda = self.afile.call_has_trailing_lambda.contains(&call.0);
+        let mut mapped = Vec::with_capacity(args.len());
+        let mut next_positional = parameter_offset;
+        let mut seen_named = false;
+        let mut named_order_matches = true;
+        for (argument, _) in args.iter().enumerate() {
+            let slot = match names
+                .and_then(|names| names.get(argument))
+                .and_then(Option::as_ref)
+            {
+                Some(name) => {
+                    seen_named = true;
+                    let slot = find_named(name)?;
+                    named_order_matches &= slot == parameter_offset + argument;
+                    slot
+                }
+                None if seen_named => {
+                    if trailing_lambda && argument + 1 == args.len() {
+                        parameter_count.checked_sub(1)?
+                    } else if named_order_matches {
+                        parameter_offset + argument
+                    } else {
+                        return None;
+                    }
+                }
+                None if trailing_lambda && argument + 1 == args.len() => {
+                    parameter_count.checked_sub(1)?
+                }
+                None => {
+                    let slot = next_positional;
+                    next_positional += 1;
+                    slot
+                }
+            };
+            if slot < parameter_offset || slot >= parameter_count || mapped.contains(&slot) {
+                return None;
+            }
+            mapped.push(slot);
+        }
+        Some(mapped)
+    }
+
     /// Slot-map a constructor call for the `<init>$default` synthetic: place each argument in its slot
     /// (positional / named), fill each OMITTED slot with a zero placeholder, and report the omitted
     /// indices — so the caller emits `<init>(args…, mask, DefaultConstructorMarker)` (kotlinc's shape for
     /// a call that omits a default). Unlike [`lower_args_defaulted`], which inlines only CONST-literal
     /// defaults and bails on a non-const one (`= emptyList()`/`= generate()`), this defers the default to
-    /// the synthetic. `None` if: arity exceeds params, a named arg is unknown/duplicate, a positional
-    /// follows a named one, the args reorder (source-order spill not modeled here), an omitted slot has
-    /// no default, or NOTHING is omitted (a full call — the ordinary path handles it byte-for-byte).
+    /// the synthetic. `None` if: arity exceeds params, argument slots are invalid, the args reorder
+    /// (source-order spill not modeled here), an omitted slot has no default, or NOTHING is omitted (a
+    /// full call — the ordinary path handles it byte-for-byte).
     fn lower_ctor_default_slots(
         &mut self,
         call: AstExprId,
@@ -9491,36 +9559,14 @@ impl<'a> Lower<'a> {
         if args.len() > n {
             return None;
         }
-        let names = self
-            .afile
-            .call_arg_names
-            .get(&call.0)
-            .cloned()
-            .unwrap_or_default();
         let mut slot: Vec<Option<AstExprId>> = vec![None; n];
-        let mut arg_slot: Vec<usize> = Vec::with_capacity(args.len());
-        let mut pos = 0;
-        let mut seen_named = false;
-        for (i, &arg) in args.iter().enumerate() {
-            match names.get(i).and_then(|o| o.as_ref()) {
-                None => {
-                    if seen_named || pos >= n {
-                        return None;
-                    }
-                    slot[pos] = Some(arg);
-                    arg_slot.push(pos);
-                    pos += 1;
-                }
-                Some(nm) => {
-                    seen_named = true;
-                    let idx = param_meta.iter().position(|(name, _)| name == nm)?;
-                    if idx >= n || slot[idx].is_some() {
-                        return None;
-                    }
-                    slot[idx] = Some(arg);
-                    arg_slot.push(idx);
-                }
-            }
+        let arg_slot = self.call_argument_parameter_slots(call, args, n, 0, |name| {
+            param_meta
+                .iter()
+                .position(|(parameter, _)| parameter == name)
+        })?;
+        for (&arg, &parameter) in args.iter().zip(&arg_slot) {
+            slot[parameter] = Some(arg);
         }
         if arg_slot.windows(2).any(|w| w[0] > w[1]) {
             return None;
@@ -9577,64 +9623,19 @@ impl<'a> Lower<'a> {
         // Place each argument into its parameter slot: a positional arg fills the next free position;
         // a named arg (`x = …`) fills its named parameter. Unfilled slots take constant-literal
         // defaults. (Arguments are evaluated in slot order — fine for the side-effect-free common case.)
-        let names = self
-            .afile
-            .call_arg_names
-            .get(&call.0)
-            .cloned()
-            .unwrap_or_default();
         let mut slot: Vec<Option<AstExprId>> = vec![None; n];
-        let mut pos = 0;
         // The slot each SOURCE-order argument lands in. Kotlin evaluates arguments in source order; this
         // helper lowers them in slot order, so a named-argument call that REORDERS evaluation
         // (`f(b = …, a = …)`) would run side effects out of order. Detect a non-monotonic placement and,
         // if any reordered argument may have side effects, skip (proper source-order temp-spilling isn't
         // modeled yet) — pure reordered arguments (const/name reads) are order-independent and proceed.
-        let mut arg_slot: Vec<usize> = Vec::with_capacity(args.len());
-        let mut seen_named = false;
-        for (i, &arg) in args.iter().enumerate() {
-            match names.get(i).and_then(|o| o.as_ref()) {
-                None => {
-                    if seen_named {
-                        // A TRAILING LAMBDA is the one positional argument allowed after named args — it
-                        // fills the LAST parameter. Only the final argument may be such.
-                        if i == args.len() - 1 && n > 0 && slot[n - 1].is_none() {
-                            slot[n - 1] = Some(arg);
-                            arg_slot.push(n - 1);
-                        } else {
-                            return None;
-                        }
-                    } else if i == args.len() - 1
-                        && n > 0
-                        && slot[n - 1].is_none()
-                        && self.afile.call_has_trailing_lambda.contains(&call.0)
-                    {
-                        // A SYNTACTIC trailing lambda always binds to the LAST parameter; any preceding
-                        // parameter left without a positional argument takes its default. So `host("x") {}`
-                        // on `host(a, modifier = d, builder)` fills `builder` (not `modifier`) and defaults
-                        // `modifier`. Without this, the lambda lands in the next free slot (`modifier`) and
-                        // the required `builder` is left unfilled → lowering bails.
-                        slot[n - 1] = Some(arg);
-                        arg_slot.push(n - 1);
-                    } else {
-                        if pos >= n {
-                            return None;
-                        }
-                        slot[pos] = Some(arg);
-                        arg_slot.push(pos);
-                        pos += 1;
-                    }
-                }
-                Some(nm) => {
-                    seen_named = true;
-                    let idx = param_meta.iter().position(|(name, _)| name == nm)?;
-                    if idx >= n || slot[idx].is_some() {
-                        return None;
-                    }
-                    slot[idx] = Some(arg);
-                    arg_slot.push(idx);
-                }
-            }
+        let arg_slot = self.call_argument_parameter_slots(call, args, n, 0, |name| {
+            param_meta
+                .iter()
+                .position(|(parameter, _)| parameter == name)
+        })?;
+        for (&arg, &parameter) in args.iter().zip(&arg_slot) {
+            slot[parameter] = Some(arg);
         }
         let reordered = arg_slot.windows(2).any(|w| w[0] > w[1]);
         // Whether the reordering moves a SIDE-EFFECTING argument out of source order. A pure argument
@@ -9732,38 +9733,14 @@ impl<'a> Lower<'a> {
         if !crate::ir::toplevel_default_stub_safe(&self.ir, fid) {
             return None;
         }
-        // Map each source argument onto its parameter slot (label → named position; unlabelled → next
-        // free positional). `arg_slot[i]` is the slot source-argument `i` lands in.
-        let names = self.afile.call_arg_names.get(&call.0).cloned();
         let mut slot: Vec<Option<AstExprId>> = vec![None; n];
-        let mut arg_slot: Vec<usize> = Vec::with_capacity(args.len());
-        let mut pos = 0usize;
-        for (i, &arg) in args.iter().enumerate() {
-            match names
-                .as_ref()
-                .and_then(|ns| ns.get(i))
-                .and_then(|o| o.as_ref())
-            {
-                None => {
-                    while pos < n && slot[pos].is_some() {
-                        pos += 1;
-                    }
-                    if pos >= n {
-                        return None;
-                    }
-                    slot[pos] = Some(arg);
-                    arg_slot.push(pos);
-                    pos += 1;
-                }
-                Some(nm) => {
-                    let idx = param_meta.iter().position(|(name, _)| name == nm)?;
-                    if slot[idx].is_some() {
-                        return None;
-                    }
-                    slot[idx] = Some(arg);
-                    arg_slot.push(idx);
-                }
-            }
+        let arg_slot = self.call_argument_parameter_slots(call, args, n, 0, |name| {
+            param_meta
+                .iter()
+                .position(|(parameter, _)| parameter == name)
+        })?;
+        for (&arg, &parameter) in args.iter().zip(&arg_slot) {
+            slot[parameter] = Some(arg);
         }
         // The trailing `vararg` slot is filled with an EMPTY array (not via `$default`); only the
         // OMITTED case is modeled here — a provided vararg element would need array collection (a later
@@ -9850,63 +9827,16 @@ impl<'a> Lower<'a> {
             return Some(self.coerce_to_static(emitted, target.ret, target.physical_ret));
         }
 
-        let names = self
-            .afile
-            .call_arg_names
-            .get(&call.0)
-            .cloned()
-            .unwrap_or_default();
         let mut slot: Vec<Option<AstExprId>> = vec![None; n];
-        let mut arg_slot: Vec<usize> = Vec::with_capacity(args.len());
-        let mut pos = ctx_n;
-        let mut seen_named = false;
-        for (i, &arg) in args.iter().enumerate() {
-            match names.get(i).and_then(|o| o.as_ref()) {
-                None => {
-                    if seen_named {
-                        if i == args.len() - 1
-                            && n > ctx_n
-                            && slot[n - 1].is_none()
-                            && self.afile.call_has_trailing_lambda.contains(&call.0)
-                        {
-                            slot[n - 1] = Some(arg);
-                            arg_slot.push(n - 1);
-                        } else {
-                            return None;
-                        }
-                    } else if i == args.len() - 1
-                        && n > ctx_n
-                        && slot[n - 1].is_none()
-                        && self.afile.call_has_trailing_lambda.contains(&call.0)
-                    {
-                        slot[n - 1] = Some(arg);
-                        arg_slot.push(n - 1);
-                    } else {
-                        while pos < n && slot[pos].is_some() {
-                            pos += 1;
-                        }
-                        if pos >= n {
-                            return None;
-                        }
-                        slot[pos] = Some(arg);
-                        arg_slot.push(pos);
-                        pos += 1;
-                    }
-                }
-                Some(nm) => {
-                    seen_named = true;
-                    let idx = target
-                        .call_sig
-                        .param_names
-                        .iter()
-                        .position(|name| name == nm)?;
-                    if idx < ctx_n || idx >= n || slot[idx].is_some() {
-                        return None;
-                    }
-                    slot[idx] = Some(arg);
-                    arg_slot.push(idx);
-                }
-            }
+        let arg_slot = self.call_argument_parameter_slots(call, args, n, ctx_n, |name| {
+            target
+                .call_sig
+                .param_names
+                .iter()
+                .position(|parameter| parameter == name)
+        })?;
+        for (&arg, &parameter) in args.iter().zip(&arg_slot) {
+            slot[parameter] = Some(arg);
         }
 
         let mut slot_temp: Vec<Option<u32>> = vec![None; n];
@@ -9980,32 +9910,11 @@ impl<'a> Lower<'a> {
         if param_names.len() != n || args.len() != n {
             return None;
         }
-        // Map each source argument onto its parameter slot (a label names a parameter; an unlabelled arg
-        // fills the next free position). `arg_slot[i]` is the slot source-argument `i` lands in.
-        let names = self.afile.call_arg_names.get(&call.0)?;
-        let mut slot: Vec<Option<AstExprId>> = vec![None; n];
-        let mut arg_slot: Vec<usize> = Vec::with_capacity(n);
-        let mut pos = 0usize;
-        for (i, &arg) in args.iter().enumerate() {
-            match names.get(i).and_then(|o| o.as_ref()) {
-                None => {
-                    if pos >= n || slot[pos].is_some() {
-                        return None;
-                    }
-                    slot[pos] = Some(arg);
-                    arg_slot.push(pos);
-                    pos += 1;
-                }
-                Some(nm) => {
-                    let idx = param_names.iter().position(|p| p == nm)?;
-                    if slot[idx].is_some() {
-                        return None;
-                    }
-                    slot[idx] = Some(arg);
-                    arg_slot.push(idx);
-                }
-            }
-        }
+        let arg_slot = self.call_argument_parameter_slots(call, args, n, 0, |argument| {
+            param_names
+                .iter()
+                .position(|parameter| parameter == argument)
+        })?;
         // Receiver first (a `z.test(…)` where `z` has side effects evaluates `z` before the arguments).
         let recv_v = self.expr(receiver)?;
         let recv_tmp = self.fresh_value();
@@ -10050,32 +9959,12 @@ impl<'a> Lower<'a> {
         if names.len() != n {
             return None;
         }
-        // Map each source argument onto a LOGICAL slot in `1..n` (slot 0 is the receiver).
-        let arg_names = self.afile.call_arg_names.get(&call.0)?;
-        let mut slot_filled = vec![false; n];
-        slot_filled[0] = true;
-        let mut arg_slot: Vec<usize> = Vec::with_capacity(args.len());
-        let mut pos = 1usize;
-        for (i, _) in args.iter().enumerate() {
-            match arg_names.get(i).and_then(|o| o.as_ref()) {
-                None => {
-                    if pos >= n || slot_filled[pos] {
-                        return None;
-                    }
-                    slot_filled[pos] = true;
-                    arg_slot.push(pos);
-                    pos += 1;
-                }
-                Some(nm) => {
-                    let idx = names.iter().position(|p| p == nm).filter(|&x| x >= 1)?;
-                    if slot_filled[idx] {
-                        return None;
-                    }
-                    slot_filled[idx] = true;
-                    arg_slot.push(idx);
-                }
-            }
-        }
+        let arg_slot = self.call_argument_parameter_slots(call, args, n, 1, |argument| {
+            names
+                .iter()
+                .position(|parameter| parameter == argument)
+                .filter(|&slot| slot >= 1)
+        })?;
         let recv_v = self.lower_ext_receiver(receiver, &params[0], &params[0])?;
         let recv_tmp = self.fresh_value();
         let recv_decl = self.emit_variable(recv_tmp, params[0], Some(recv_v));
@@ -13569,25 +13458,12 @@ impl<'a> Lower<'a> {
         if names.len() != n || args.len() >= n {
             return None;
         }
-        let arg_names = self.afile.call_arg_names.get(&call.0).cloned();
         let mut slot: Vec<Option<u32>> = vec![None; n];
-        let mut pos = 0usize;
-        for (ai, arg) in args.iter().enumerate() {
-            let nm = arg_names
-                .as_ref()
-                .and_then(|v| v.get(ai).cloned().flatten());
-            let p = match nm {
-                Some(s) => names.iter().position(|f| *f == s)?,
-                None => {
-                    let p = pos;
-                    pos += 1;
-                    p
-                }
-            };
-            if p >= n || slot[p].is_some() {
-                return None;
-            }
-            slot[p] = Some(self.lower_arg(*arg, &params[p])?);
+        let arg_slots = self.call_argument_parameter_slots(call, args, n, 0, |argument| {
+            names.iter().position(|parameter| parameter == argument)
+        })?;
+        for (&argument, &parameter) in args.iter().zip(&arg_slots) {
+            slot[parameter] = Some(self.lower_arg(argument, &params[parameter])?);
         }
         let recv = self.emit_get_value(this_v);
         let mut a: Vec<Option<u32>> = Vec::with_capacity(n);

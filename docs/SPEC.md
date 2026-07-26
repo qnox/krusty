@@ -1292,6 +1292,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (const/name args, order-independent) keeps the byte-identical slot-order lowering (no prelude). Applies to
   top-level function and constructor calls. Test: `tests/named_arg_source_order_e2e.rs`.
 
+- **Positional arguments may follow named arguments only while source and parameter order still
+  match.** Kotlin accepts `f(a = 1, 2, 3)` for parameters `(a, b, c)`: each later positional argument
+  binds to the parameter at the same source ordinal. It rejects `f(b = 2, 1)` because the first label
+  reordered the arguments. If order still matches but the source ordinal exceeds the parameter list
+  (`f(a = 1, 2, 3)` for `(a, b)`), the error remains the ordinary `too many arguments` diagnostic. A
+  syntactic trailing lambda remains the exception and binds the final parameter even after reordered
+  names. `map_call_args` records the authoritative parameter-slot vector,
+  and lowerers consume that vector (with a compile-local fallback for lowering-only paths), so
+  constructors, members, extensions, local functions, top-level functions, context-parameter calls, and
+  cross-file calls do not independently reinterpret the syntax. Tests:
+  `tests/diagnostics_match_kotlinc.rs`, `tests/named_arg_member_e2e.rs`,
+  `tests/context_parameters_e2e.rs`, `tests/named_args_classpath_e2e.rs`, and
+  `tests/trailing_lambda_named_args_e2e.rs`.
+  A structurally mapped classpath call that fails mapped type checking or overload selection is terminal;
+  it is never retried by pairing raw source-order types positionally.
+
 - **Named arguments on a same-file MEMBER method / EXTENSION function (`z.test(b = …, a = …)`,
   `"x".ext(b = …, a = …)`).** The checker's member named-arg gate accepts any member with recorded
   parameter names (not only one with defaults). The lowerer reorders at the call site: `lower_named_member_call`
@@ -1573,7 +1589,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   An unknown named argument reads `no parameter with name 'unknown' found.` and points at the
   argument name; the LSP publishes that exact name range with the official sentence-cased message.
   A repeated named argument reads `argument already passed for this parameter.` and points at the
-  repeated label rather than the first occurrence.
+  repeated label rather than the first occurrence. Invalid reordered mixing reads
+  `mixing named and positional arguments is not allowed unless the order of the arguments matches the
+  order of the parameters.` and points at the positional argument expression, including the same UTF-16
+  range in the LSP.
   Unresolved member reads and calls use the same `unresolved reference` form as bare names. Verified
   by the differential `diagnostics_match_kotlinc` tests, which compile the snippets with both
   compilers, report all mismatches in one run, cover cross-file generic signatures, and assert the

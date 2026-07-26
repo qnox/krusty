@@ -818,16 +818,26 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ Top-level function calls accept named arguments (`f(b = 2, a = 5)`). The parser records a
   per-call `name =` label table on `File` (side-table keyed by the call's `ExprId`, no `Expr::Call`
   churn); `Signature` gains `param_names`. A shared `map_call_args` reorders source-order arguments
-  onto positional parameter slots, validating unknown/duplicate names, positional-after-named, arity,
-  and missing required parameters. Named args combine with omitted defaults.
+  onto positional parameter slots, validating unknown/duplicate names, Kotlin's ordered
+  named/positional mixing rule, arity, and missing required parameters. A positional argument may follow
+  a named one only while every preceding argument still matches its declaration-order slot
+  (`f(a = 1, 2)` is valid; `f(b = 2, 1)` is not); a syntactic trailing lambda remains the final-parameter
+  exception. Named args combine with omitted defaults.
 - ✅ Evaluation order preserved: supplied arguments are spilled to fresh locals in *source* order,
   then loaded (or a default emitted) in *parameter* order — so a reordered call like
   `f(b = sideEffect(), a = sideEffect())` still evaluates `b` before `a` (verified on the JVM).
-- ✅ Correctness guard: named arguments on anything other than a top-level function (methods,
-  constructors, builtins) are rejected, since krusty doesn't reorder those — the labels would
-  otherwise be silently ignored and miscompile.
+- ✅ The checker-owned slot vector is also the lowering authority for named and mixed calls across
+  top-level, local, constructor, member, extension, context-parameter, and cross-file paths. Lowering-only
+  fallbacks use the same ordered-mixing rule and remain compile-local; no AST or slot state is retained by
+  the LSP session.
+- ✅ Correctness guard: a named call is accepted only when the selected callable exposes authoritative
+  parameter names. Structural mapping failures (unknown/duplicate labels or invalid named/positional
+  mixing) are reported and never retried as a positional call; lowerers either consume the checker-owned
+  slots or decline the file. Once a named call maps structurally, mapped type failures and overload
+  ambiguity are likewise terminal—raw source-order types are never retried positionally.
 - ✅ TDD: `tests/named_args_e2e.rs` (in-order / reordered / named+default / source-order eval, on the
-  JVM) + a `named_arguments` checker unit test (accept + the two rejections). Gated by the full
+  JVM) + checker units covering acceptance, structural mapping errors, classpath fallback rejection, and
+  excess arity. Gated by the full
   10,009-case original Kotlin `codegen/box` suite: **173 → 174 OK / 0 FAIL**.
 
 ## Phase 63 — kotlin.test assertions + latent-miscompile guards  ✅

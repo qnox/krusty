@@ -86,6 +86,23 @@ fn context_local_function_maps_reordered_named_arguments() {
 }
 
 #[test]
+fn context_functions_map_positional_arguments_after_in_order_named_argument() {
+    const SRC: &str = "class C\n\
+        context(c: C) fun top(a: String, b: String, suffix: String = \"!\"): String = a + b + suffix\n\
+        fun box(): String {\n\
+        \x20 context(c: C) fun local(a: String, b: String): String = a + b\n\
+        \x20 return with(C()) {\n\
+        \x20   if (top(a = \"O\", \"K\") == \"OK!\" && local(a = \"O\", \"K\") == \"OK\") \"OK\" else \"FAIL\"\n\
+        \x20 }\n\
+        }\n";
+    assert_eq!(
+        common::front_end_diagnostics(SRC, &[], None),
+        Vec::<String>::new()
+    );
+    assert_eq!(run(SRC).expect("context mixed arguments"), "OK");
+}
+
+#[test]
 fn context_top_level_function_maps_named_argument_past_default() {
     const SRC: &str = "class C\n\
         context(c: C) fun choose(a: Int = 7, b: String): String = b\n\

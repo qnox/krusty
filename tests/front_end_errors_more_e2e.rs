@@ -214,6 +214,20 @@ fn duplicate_named_argument() {
 }
 
 #[test]
+fn out_of_order_positional_argument_after_named_argument() {
+    let d = diags("fun f(a: Int, b: Int): Int = a + b\nfun box(): Int = f(b = 2, 1)");
+    assert_rejected(
+        &d,
+        "out-of-order positional argument after a named argument",
+    );
+    assert!(
+        d.iter().any(|message| message
+            == "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters."),
+        "expected canonical mixed-argument diagnostic: {d:?}"
+    );
+}
+
+#[test]
 fn return_without_a_value_from_non_unit() {
     let d = diags("fun f(): Int { return }\nfun box(): Int = 0");
     assert_rejected(&d, "value-less return from a non-Unit function");

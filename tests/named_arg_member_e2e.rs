@@ -75,3 +75,46 @@ fn member_named_args_in_order_still_work() {
 fun box(): String = if (Z().test(a = \"O\", b = \"K\") == \"OK\") \"OK\" else \"FAIL\"\n";
     assert_eq!(run(SRC).expect("in-order named args"), "OK");
 }
+
+#[test]
+fn positional_arguments_after_in_order_named_argument_run_for_constructor() {
+    const SRC: &str = "class C(val a: String, val b: String, val c: String = \"!\")\n\
+fun box(): String {\n\
+    val value = C(a = \"O\", \"K\")\n\
+    return if (value.a + value.b + value.c == \"OK!\") \"OK\" else \"FAIL\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("mixed constructor arguments"), "OK");
+}
+
+#[test]
+fn positional_arguments_after_in_order_named_argument_run_for_member() {
+    const SRC: &str = "class C {\n\
+    fun call(a: String, b: String, c: String): String = a + b + c\n\
+}\n\
+fun box(): String = if (C().call(a = \"O\", \"K\", \"!\") == \"OK!\") \"OK\" else \"FAIL\"\n";
+    assert_eq!(run(SRC).expect("mixed member arguments"), "OK");
+}
+
+#[test]
+fn positional_arguments_after_in_order_named_argument_run_for_top_level_function() {
+    const SRC: &str = "fun call(a: String, b: String, c: String): String = a + b + c\n\
+fun box(): String = if (call(a = \"O\", \"K\", \"!\") == \"OK!\") \"OK\" else \"FAIL\"\n";
+    assert_eq!(run(SRC).expect("mixed top-level arguments"), "OK");
+}
+
+#[test]
+fn positional_arguments_after_in_order_named_argument_run_for_extension_function() {
+    const SRC: &str =
+        "fun String.call(a: String, b: String, c: String): String = this + a + b + c\n\
+fun box(): String = if (\"\".call(a = \"O\", \"K\", \"!\") == \"OK!\") \"OK\" else \"FAIL\"\n";
+    assert_eq!(run(SRC).expect("mixed extension arguments"), "OK");
+}
+
+#[test]
+fn positional_arguments_after_in_order_named_argument_run_for_local_function() {
+    const SRC: &str = "fun box(): String {\n\
+    fun call(a: String, b: String, c: String): String = a + b + c\n\
+    return if (call(a = \"O\", \"K\", \"!\") == \"OK!\") \"OK\" else \"FAIL\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("mixed local arguments"), "OK");
+}

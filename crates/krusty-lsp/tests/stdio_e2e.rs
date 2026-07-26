@@ -224,6 +224,46 @@ fn stdio_server_reports_official_duplicate_named_argument_diagnostic() {
 }
 
 #[test]
+fn stdio_server_reports_official_mixed_argument_diagnostic_with_utf16_range() {
+    let messages = [
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": "file:///mixed.kt",
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "fun pair(a: Int, b: Int): Int = a + b\n\
+                             fun use(): Int = /*😀*/ pair(b = 2, 1)"
+                }
+            }
+        }),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": null}),
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    ];
+    let output = run_server(&[], &messages);
+    let diagnostics = output
+        .iter()
+        .find(|message| message["method"] == "textDocument/publishDiagnostics")
+        .and_then(|message| message["params"]["diagnostics"].as_array())
+        .expect("published diagnostics");
+    assert_eq!(
+        diagnostics,
+        &[json!({
+            "range": {
+                "start": {"line": 1, "character": 36},
+                "end": {"line": 1, "character": 37}
+            },
+            "severity": 1,
+            "source": "Kotlin",
+            "message": "Mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters."
+        })]
+    );
+}
+
+#[test]
 fn stdio_server_applies_configured_language_features() {
     let source = "\
 data class Entry(val first: String, val second: String)
