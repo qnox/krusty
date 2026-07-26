@@ -80,3 +80,21 @@ fn exact_type_argument_still_resolves() {
         }\n";
     assert_eq!(run("bb1_exact", LIB, MAIN).expect("exact ctor arg"), "OK");
 }
+
+#[test]
+fn null_argument_selects_most_specific_classpath_constructor() {
+    const LIB: &str = "package lib\n\
+        open class Item\n\
+        class StoredItem : Item()\n\
+        class Record {\n\
+        \x20 val tag: String\n\
+        \x20 constructor(item: Any, note: Any?) { tag = \"broad\" }\n\
+        \x20 constructor(item: Item, note: String?) { tag = \"specific\" }\n\
+        }\n";
+    const MAIN: &str = "import lib.Record\nimport lib.StoredItem\n\
+        fun box(): String = Record(StoredItem(), null).tag\n";
+    assert_eq!(
+        run("bb1_null_overload", LIB, MAIN).expect("nullable constructor overload"),
+        "specific"
+    );
+}
