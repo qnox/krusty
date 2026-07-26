@@ -208,6 +208,127 @@ pub(crate) fn ty_subst_all(sigs: &[Ty], binds: &GSigBinds) -> Vec<Ty> {
     sigs.iter().map(|s| ty_subst(*s, binds)).collect()
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ClasspathSamSignature {
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+}
+
+/// The logical SAM signature of `target`, specialized with the interface type arguments carried by
+/// the use-site type (`Consumer<String>` → `(String) -> Unit`). The physical descriptor remains on
+/// [`LibraryMember`]; this shape is solely for source target typing and applicability.
+pub(crate) fn classpath_sam_signature(
+    lib: &dyn SemanticPlatform,
+    target: Ty,
+) -> Option<ClasspathSamSignature> {
+    let target = target.non_null();
+    let internal = target.obj_internal()?;
+    let ty = lib.resolve_type_name(internal)?;
+    let sam = ty.sam_method.as_ref()?;
+    let Some(gsig) = sam.generic_sig.as_ref() else {
+        return Some(ClasspathSamSignature {
+            params: sam.params.clone(),
+            ret: sam.ret,
+        });
+    };
+
+    let mut binds = GSigBinds::new();
+    for (formal, actual) in ty.type_params.iter().zip(target.type_args()) {
+        binds.insert(formal.clone(), *actual);
+    }
+    if let Some(receiver) = gsig.receiver {
+        unify_ty(receiver, target, &mut binds);
+    }
+    Some(ClasspathSamSignature {
+        params: ty_subst_all(&gsig.params, &binds),
+        ret: ty_subst(gsig.ret, &binds),
+    })
+}
+
+fn collect_binding_evidence(sig: Ty, actual: Ty, out: &mut Vec<(String, Ty)>) {
+    match sig {
+        Ty::TyParam(name, _) => out.push((name.to_string(), actual)),
+        Ty::Fun(sig_fun) => {
+            let Ty::Fun(actual_fun) = actual else {
+                return;
+            };
+            let value_params: &[Ty] = match sig_fun.params.last() {
+                Some(Ty::Obj(name, args))
+                    if crate::types::same(*name, crate::types::wk::continuation())
+                        && !args.is_empty() =>
+                {
+                    collect_binding_evidence(args[0], actual_fun.ret, out);
+                    &sig_fun.params[..sig_fun.params.len() - 1]
+                }
+                _ => &sig_fun.params,
+            };
+            for (&param, &argument) in value_params.iter().zip(actual_fun.params.iter()) {
+                collect_binding_evidence(param, argument, out);
+            }
+            collect_binding_evidence(sig_fun.ret, actual_fun.ret, out);
+        }
+        Ty::Obj(_, sig_args) => {
+            if let Ty::Obj(_, actual_args) = actual {
+                for (&param, &argument) in sig_args.iter().zip(actual_args.iter()) {
+                    collect_binding_evidence(param, argument, out);
+                }
+            }
+        }
+        Ty::Nullable(inner) => collect_binding_evidence(*inner, actual.non_null(), out),
+        _ => {}
+    }
+}
+
+/// Companion/static parameters with only SAM-lambda slots specialized from the member's generic
+/// signature. Ordinary arguments retain their established erased/bounded parameters: specializing
+/// those with first-write-wins bindings would wrongly narrow `<T> f(T, T)` instead of inferring a
+/// common supertype.
+pub(crate) fn specialized_sam_member_params(
+    member: &LibraryMember,
+    args: &[Ty],
+    lambda_literals: &[bool],
+) -> Vec<Ty> {
+    let Some(gsig) = member
+        .generic_sig
+        .as_ref()
+        .filter(|sig| sig.params.len() == member.params.len())
+    else {
+        return member.params.clone();
+    };
+    let mut evidence = Vec::new();
+    for (index, (&param, &arg)) in gsig.params.iter().zip(args).enumerate() {
+        if lambda_literals.get(index) != Some(&true) {
+            collect_binding_evidence(param, arg, &mut evidence);
+        }
+    }
+    let mut grouped: std::collections::HashMap<String, Vec<Ty>> = std::collections::HashMap::new();
+    for (name, actual) in evidence {
+        grouped.entry(name).or_default().push(actual);
+    }
+    let binds = grouped
+        .into_iter()
+        .map(|(name, evidence)| {
+            let first = evidence[0];
+            let inferred = if evidence.iter().all(|actual| *actual == first) {
+                first
+            } else {
+                // Kotlin infers a common supertype from heterogeneous evidence. Erasing conflicts to
+                // `Any` is conservative for target typing and prevents a narrow first occurrence from
+                // producing a SAM that Java can later invoke with a broader value.
+                Ty::obj("kotlin/Any")
+            };
+            (name, inferred)
+        })
+        .collect::<GSigBinds>();
+    let mut params = member.params.clone();
+    for (index, param) in params.iter_mut().enumerate() {
+        if lambda_literals.get(index) == Some(&true) {
+            *param = ty_subst(gsig.params[index], &binds);
+        }
+    }
+    params
+}
+
 fn seeded_gsig_binds(gsig: &GenericSig, type_args: &[Ty]) -> GSigBinds {
     gsig.formals
         .iter()
@@ -315,6 +436,30 @@ pub(crate) fn arg_fits(p: &Ty, a: &Ty) -> bool {
             || crate::types::same(*n, crate::types::wk::java_object()))
         || matches!((p.fun_arity(), a.fun_arity()), (Some(pn), Some(an)) if pn == an)
         || matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
+}
+
+fn classpath_sam_arg_matches(lib: &dyn SemanticPlatform, param: Ty, arg: Ty) -> bool {
+    let Some(sam) = classpath_sam_signature(lib, param) else {
+        return false;
+    };
+    // Target typing probes a parameter-less lambda whose implicit `it` is unused with `Error`: it can
+    // denote either a zero-input lambda or a one-input lambda whose implicit parameter is unused. It
+    // cannot denote a multi-input lambda, whose parameters must be written explicitly.
+    if arg == Ty::Error {
+        return sam.params.len() <= 1;
+    }
+    let Some(arity) = arg.fun_arity() else {
+        return false;
+    };
+    if sam.params.len() != usize::from(arity) {
+        return false;
+    }
+    let Some(arg_ret) = arg.fun_ret() else {
+        return false;
+    };
+    sam.ret == Ty::Unit
+        || matches!(arg_ret, Ty::Error | Ty::Nothing)
+        || platform_arg_assignable(lib, &sam.ret, &arg_ret)
 }
 
 fn arg_fits_platform(lib: &dyn SemanticPlatform, param: &Ty, arg: &Ty) -> bool {
@@ -558,21 +703,34 @@ fn best_companion_overload<'a>(
     name: &str,
     args: &[Ty],
     integer_literals: &[bool],
+    lambda_literals: &[bool],
 ) -> Option<&'a LibraryMember> {
     debug_assert!(integer_literals.is_empty() || integer_literals.len() == args.len());
     let adapts = |p: &Ty, a: &Ty, i: usize| {
         integer_literal_adapts(*p, *a, integer_literals.get(i).copied().unwrap_or(false))
     };
-    let fits = |param: &Ty, arg: &Ty| arg_fits_source(lib, src, param, arg);
+    let fits = |position: usize, param: &Ty, arg: &Ty| {
+        if lambda_literals.get(position) == Some(&true) {
+            if param.fun_arity().is_some() {
+                arg_fits_source(lib, src, param, arg)
+            } else {
+                classpath_sam_arg_matches(lib, *param, *arg)
+            }
+        } else {
+            arg_fits_source(lib, src, param, arg)
+        }
+    };
+    let logical =
+        |member: &LibraryMember| specialized_sam_member_params(member, args, lambda_literals);
     let named = candidates.filter(|member| member.name == name);
-    if let Some(exact) = named.clone().find(|member| member.params == args) {
+    if let Some(exact) = named.clone().find(|member| logical(member) == args) {
         return Some(exact);
     }
     match integer_literal_overload(
-        named.clone().map(|member| (member.params.clone(), member)),
+        named.clone().map(|member| (logical(member), member)),
         args,
         integer_literals,
-        |_, param, arg| fits(param, arg),
+        |position, param, arg| fits(position, param, arg),
         |position, left, right| {
             parameter_at_least_as_specific(
                 lib,
@@ -588,8 +746,10 @@ fn best_companion_overload<'a>(
     }
     match unique_most_specific(
         named.clone().filter_map(|member| {
-            fixed_parameter_shape(&member.params, args, |_, param, arg| fits(param, arg))
-                .map(|shape| (shape, member))
+            fixed_parameter_shape(&logical(member), args, |position, param, arg| {
+                fits(position, param, arg)
+            })
+            .map(|shape| (shape, member))
         }),
         |_, left, right| resolution_subtype(lib, src, left, right),
     ) {
@@ -599,8 +759,8 @@ fn best_companion_overload<'a>(
     }
     match unique_most_specific(
         named.clone().filter_map(|member| {
-            omitted_parameter_shape(&member.params, args, |i, param, arg| {
-                fits(param, arg) || adapts(param, arg, i)
+            omitted_parameter_shape(&logical(member), args, |i, param, arg| {
+                fits(i, param, arg) || adapts(param, arg, i)
             })
             .map(|shape| (shape, member))
         }),
@@ -612,8 +772,8 @@ fn best_companion_overload<'a>(
     }
     match unique_most_specific(
         named.filter_map(|member| {
-            vararg_parameter_shape(&member.params, args, |i, param, arg| {
-                fits(param, arg) || adapts(param, arg, i)
+            vararg_parameter_shape(&logical(member), args, |i, param, arg| {
+                fits(i, param, arg) || adapts(param, arg, i)
             })
             .map(|shape| (shape, member))
         }),
@@ -1021,7 +1181,27 @@ impl<'a> SymbolResolver<'a> {
         integer_literals: &[bool],
         type_args: &[Ty],
     ) -> Option<Symbol> {
+        self.resolve_symbol_with_literal_and_lambda_args(
+            recv,
+            name,
+            args,
+            integer_literals,
+            &[],
+            type_args,
+        )
+    }
+
+    pub fn resolve_symbol_with_literal_and_lambda_args(
+        &self,
+        recv: SymRecv,
+        name: &str,
+        args: &[Ty],
+        integer_literals: &[bool],
+        lambda_literals: &[bool],
+        type_args: &[Ty],
+    ) -> Option<Symbol> {
         debug_assert!(integer_literals.is_empty() || integer_literals.len() == args.len());
+        debug_assert!(lambda_literals.is_empty() || lambda_literals.len() == args.len());
         match recv {
             SymRecv::Value(ty) => {
                 // Resolve every facet the name supports on this receiver; a name can support several (a
@@ -1138,11 +1318,12 @@ impl<'a> SymbolResolver<'a> {
                     extension_property_getter: None,
                 })))
             }
-            SymRecv::Type(internal) => self.resolve_symbol_with_literal_args(
+            SymRecv::Type(internal) => self.resolve_symbol_with_literal_and_lambda_args(
                 SymRecv::TypeName(crate::types::type_name(internal)),
                 name,
                 args,
                 integer_literals,
+                lambda_literals,
                 type_args,
             ),
             SymRecv::TypeName(internal) => {
@@ -1167,6 +1348,7 @@ impl<'a> SymbolResolver<'a> {
                                 name,
                                 args,
                                 integer_literals,
+                                lambda_literals,
                             )
                             .map(Symbol::Companion)
                         })
@@ -2038,12 +2220,22 @@ fn resolve_companion_name(
     name: &str,
     args: &[Ty],
     integer_literals: &[bool],
+    lambda_literals: &[bool],
 ) -> Option<LibraryMember> {
     let t = lib.resolve_type_name(internal)?;
     if !t.is_public {
         return None;
     }
-    best_companion_overload(lib, src, t.companion.iter(), name, args, integer_literals).cloned()
+    best_companion_overload(
+        lib,
+        src,
+        t.companion.iter(),
+        name,
+        args,
+        integer_literals,
+        lambda_literals,
+    )
+    .cloned()
 }
 
 /// Resolve an instance member `recv.name(args)` — the receiver's static type must be public, but the
@@ -3089,6 +3281,40 @@ mod tests {
     }
 
     #[test]
+    fn nested_generic_conflicts_erase_only_the_later_sam_slot() {
+        let parameter = Ty::ty_param("T", Ty::obj("kotlin/Any"));
+        let generic_values = Ty::obj_args("fixture/Duo", &[parameter, parameter]);
+        let generic_sink = Ty::obj_args("fixture/Sink", &[parameter]);
+        let mut member = LibraryMember::new(
+            "use".to_string(),
+            vec![Ty::obj("fixture/Duo"), Ty::obj("fixture/Sink")],
+            Ty::Unit,
+            "(Lfixture/Duo;Lfixture/Sink;)V".to_string(),
+        );
+        member.generic_sig = Some(GenericSig {
+            formals: vec!["T".to_string()],
+            receiver: None,
+            params: vec![generic_values, generic_sink],
+            ret: Ty::Unit,
+        });
+
+        let params = specialized_sam_member_params(
+            &member,
+            &[
+                Ty::obj_args("fixture/Duo", &[Ty::String, Ty::obj("kotlin/Any")]),
+                Ty::Error,
+            ],
+            &[false, true],
+        );
+
+        assert_eq!(params[0], Ty::obj("fixture/Duo"));
+        assert_eq!(
+            params[1],
+            Ty::obj_args("fixture/Sink", &[Ty::obj("kotlin/Any")])
+        );
+    }
+
+    #[test]
     fn receiver_mro_walks_supertypes() {
         let src = FakeSource {
             name: "unused",
@@ -3171,6 +3397,7 @@ mod tests {
             "make",
             &[Ty::obj("demo/Leaf")],
             &[],
+            &[],
         )
         .expect("the most specific source supertype should be selected");
         assert_eq!(selected.params, vec![Ty::obj("demo/Mid")]);
@@ -3183,6 +3410,7 @@ mod tests {
             [&left, &right].into_iter(),
             "make",
             &[Ty::obj("demo/Leaf"), Ty::obj("demo/Leaf")],
+            &[],
             &[],
         )
         .is_none());
@@ -3217,6 +3445,7 @@ mod tests {
             "make",
             &[Ty::obj("demo/Leaf")],
             &[],
+            &[],
         )
         .expect("the defaulted source-supertype overload should resolve");
         assert_eq!(selected.params[0], Ty::obj("demo/Mid"));
@@ -3229,6 +3458,7 @@ mod tests {
             [&vararg_broad, &vararg_specific].into_iter(),
             "make",
             &[Ty::obj("demo/Leaf")],
+            &[],
             &[],
         )
         .expect("the vararg source-supertype overload should resolve");

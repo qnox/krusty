@@ -311,8 +311,9 @@ pub enum IrExpr {
     /// A lambda literal — emitted as `invokedynamic` + `LambdaMetafactory`. `impl_fn` is the
     /// synthesized static method holding the body; `captures` are the free-variable values bound into
     /// the call site (empty = non-capturing). `sam` is `None` for a plain Kotlin lambda (target
-    /// `kotlin/jvm/functions/Function{arity}.invoke`), or `Some((interface, method))` for a SAM
-    /// conversion to a user functional interface (`Pred { … }` → `Pred.test`).
+    /// `kotlin/jvm/functions/Function{arity}.invoke`), or
+    /// `Some((interface, method, descriptor))` for a SAM conversion. A classpath SAM carries its
+    /// existing physical method descriptor; a same-module SAM leaves it absent for backend derivation.
     /// `inline_body` is the lambda's *value-producing* body form (no synthetic `return`), emitted
     /// directly when the lambda is inlined into a stdlib `inline fun` splice — so a user `return` in the
     /// lambda becomes a real return from the *enclosing* method (correct non-local return). `None` for a
@@ -321,7 +322,7 @@ pub enum IrExpr {
         impl_fn: u32,
         arity: u8,
         captures: Vec<ExprId>,
-        sam: Option<(String, String)>,
+        sam: Option<(String, String, Option<String>)>,
         inline_body: Option<ExprId>,
     },
     /// The `kotlin.Unit` singleton value (`IrGetObjectValue` of `Unit`). On the JVM, `getstatic

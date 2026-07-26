@@ -607,6 +607,7 @@ impl JvmLibraries {
             let (params, ret) = parse_method_desc(&m.descriptor);
             let mut member = LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
             member.signature = m.signature.clone();
+            member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
             sam = Some(member);
         }
         sam

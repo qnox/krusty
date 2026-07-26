@@ -8305,14 +8305,16 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &[Ty],
         integer_literals: &[bool],
+        lambda_literals: &[bool],
     ) -> Option<crate::libraries::LibraryMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol_with_literal_args(
+            .resolve_symbol_with_literal_and_lambda_args(
                 SymRecv::Type(internal),
                 name,
                 args,
                 integer_literals,
+                lambda_literals,
                 &[],
             )
             .and_then(Symbol::companion)
@@ -10854,6 +10856,68 @@ impl<'a> Checker<'a> {
 
     fn arg_tys(&mut self, args: &[ExprId]) -> Vec<Ty> {
         args.iter().map(|&a| self.expr(a)).collect()
+    }
+
+    fn companion_arg_tys(&mut self, internal: &str, name: &str, args: &[ExprId]) -> Vec<Ty> {
+        let lambda_literals = self.lambda_literal_args(args);
+        let integer_literals = self.integer_literal_args(args);
+        // Select with non-lambda arguments already typed, but lambda bodies still untouched. A literal
+        // with explicit parameters (or implicit `it`) carries its syntactic arity; an unused implicit
+        // parameter is `Error`, allowing the selected SAM to determine whether it has zero or one input.
+        let mut provisional = args
+            .iter()
+            .map(|&arg| match self.file.expr(arg) {
+                Expr::Lambda { params, body } if !params.is_empty() => {
+                    Ty::fun(vec![Ty::Error; params.len()], Ty::Error)
+                }
+                Expr::Lambda { body, .. } if self.file.expr_uses_name(*body, "it") => {
+                    Ty::fun(vec![Ty::Error], Ty::Error)
+                }
+                Expr::Lambda { .. } => Ty::Error,
+                _ => self.expr(arg),
+            })
+            .collect::<Vec<_>>();
+        let lambda_params = self
+            .resolve_companion_with_literal_args(
+                internal,
+                name,
+                &provisional,
+                &integer_literals,
+                &lambda_literals,
+            )
+            .map(|candidate| {
+                crate::symbol_resolver::specialized_sam_member_params(
+                    &candidate,
+                    &provisional,
+                    &lambda_literals,
+                )
+                .into_iter()
+                .map(|param| {
+                    crate::symbol_resolver::classpath_sam_signature(&*self.syms.libraries, param)
+                        .map(|sam| sam.params)
+                })
+                .collect::<Vec<_>>()
+            });
+        for (index, &arg) in args.iter().enumerate() {
+            if lambda_literals[index] {
+                if let Some(params) = lambda_params
+                    .as_ref()
+                    .and_then(|all| all.get(index))
+                    .and_then(Option::as_deref)
+                {
+                    provisional[index] = self.check_lambda_with_types(arg, params);
+                    continue;
+                }
+                provisional[index] = self.expr(arg);
+            }
+        }
+        provisional
+    }
+
+    fn lambda_literal_args(&self, args: &[ExprId]) -> Vec<bool> {
+        args.iter()
+            .map(|&arg| matches!(self.file.expr(arg), Expr::Lambda { .. }))
+            .collect()
     }
 
     fn is_integer_literal_arg(&self, expr: ExprId) -> bool {
@@ -16266,7 +16330,13 @@ impl<'a> Checker<'a> {
                 // of that package (compiled to `a/b/<File>Kt`). Resolve it by name among the classpath
                 // top-level overloads and confirm the owning facade sits in the receiver's package.
                 if let Some(root) = self.dotted_root(receiver) {
-                    if !self.value_root_shadows_classifier(&root) {
+                    if !self.value_root_shadows_classifier(&root)
+                        // A known classifier receiver belongs to the companion/static paths below,
+                        // not to a package-qualified top-level call. In particular, do not eagerly
+                        // type its lambda arguments here: a Java SAM parameter supplies their target
+                        // types only once the static callable is selected.
+                        && self.classpath_type_receiver_internal(receiver).is_none()
+                    {
                         if let Some(pkg) = qualified_path(self.file, receiver) {
                             let arg_tys = self.arg_tys(args);
                             let targs: Vec<Ty> = self
@@ -16680,13 +16750,15 @@ impl<'a> Checker<'a> {
                     if let Some(fq) = qualified_path(self.file, receiver) {
                         let leftmost = fq.split('/').next().unwrap_or("");
                         if self.lookup(leftmost).is_none() && self.resolved_type(&fq).is_some() {
-                            let arg_tys = self.arg_tys(args);
+                            let arg_tys = self.companion_arg_tys(&fq, &name, args);
                             let integer_literals = self.integer_literal_args(args);
+                            let lambda_literals = self.lambda_literal_args(args);
                             if let Some(m) = self.resolve_companion_with_literal_args(
                                 &fq,
                                 &name,
                                 &arg_tys,
                                 &integer_literals,
+                                &lambda_literals,
                             ) {
                                 self.set(receiver, Ty::obj(&fq));
                                 let ret = m.ret;
@@ -16840,13 +16912,15 @@ impl<'a> Checker<'a> {
                             .cloned()
                             .or_else(|| self.imported_type_internal(&cls));
                         if let Some(internal) = receiver_class {
-                            let arg_tys = self.arg_tys(args);
+                            let arg_tys = self.companion_arg_tys(&internal, &name, args);
                             let integer_literals = self.integer_literal_args(args);
+                            let lambda_literals = self.lambda_literal_args(args);
                             let companion = self.resolve_companion_with_literal_args(
                                 &internal,
                                 &name,
                                 &arg_tys,
                                 &integer_literals,
+                                &lambda_literals,
                             );
                             return match companion {
                                 Some(m) => {
