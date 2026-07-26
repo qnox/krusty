@@ -198,6 +198,16 @@ pub struct MemberExtFunSig {
     type_param_bounds: Vec<(String, TypeRef)>,
 }
 
+impl MemberExtFunSig {
+    pub(crate) fn receiver_ty(&self) -> Ty {
+        self.receiver_ty
+    }
+
+    pub(crate) fn signature(&self) -> &Signature {
+        &self.signature
+    }
+}
+
 struct AppliedMemberExtFunSig {
     name: String,
     receiver: Ty,
@@ -5819,6 +5829,19 @@ pub enum ResolvedCall {
         interface: bool,
         vararg: bool,
     },
+    /// A class-body extension emitted as an instance method with a leading receiver parameter.
+    ModuleMemberExtension {
+        owner: TypeName,
+        extension_receiver: Ty,
+        physical_receiver: Ty,
+        name: String,
+        params: Vec<Ty>,
+        physical_params: Vec<Ty>,
+        ret: Ty,
+        physical_ret: Ty,
+        interface: bool,
+        vararg: bool,
+    },
     /// A same-module extension operator selected by the checker for a source expression.
     ModuleExtension {
         receiver: Ty,
@@ -5843,7 +5866,10 @@ pub enum ResolvedCall {
 
 impl ResolvedCall {
     fn is_extension(&self) -> bool {
-        matches!(self, Self::Extension(_) | Self::ModuleExtension { .. })
+        matches!(
+            self,
+            Self::Extension(_) | Self::ModuleExtension { .. } | Self::ModuleMemberExtension { .. }
+        )
     }
 
     fn owner(&self) -> Option<TypeName> {
@@ -5853,7 +5879,9 @@ impl ResolvedCall {
             | Self::Extension(callable)
             | Self::LambdaReturnMember(callable) => Some(callable.owner_type()),
             Self::Companion(member) => member.owner,
-            Self::ModuleMember { owner, .. } => Some(*owner),
+            Self::ModuleMember { owner, .. } | Self::ModuleMemberExtension { owner, .. } => {
+                Some(*owner)
+            }
             Self::ModuleExtension { owner, .. } => *owner,
             Self::ModuleTopLevel(_) | Self::LocalFunction(_) => None,
         }
@@ -6058,6 +6086,7 @@ impl TypeInfo {
                 ResolvedCall::Member(_)
                     | ResolvedCall::Companion(_)
                     | ResolvedCall::ModuleMember { .. }
+                    | ResolvedCall::ModuleMemberExtension { .. }
                     | ResolvedCall::LambdaReturnMember(_)
             )
         )
@@ -7771,7 +7800,11 @@ struct ImplicitPropertyWriteResolution {
 struct MemberExtensionFunctionCandidate {
     priority: MemberExtensionPriority,
     score: (usize, std::cmp::Reverse<usize>, bool),
+    physical_receiver: Ty,
+    params: Vec<Ty>,
+    physical_params: Vec<Ty>,
     ret: Ty,
+    physical_ret: Ty,
     call_sig: crate::libraries::CallSig,
     visibility: Visibility,
     owner: TypeName,
@@ -11727,24 +11760,95 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Like [`Self::arg_tys`], but type each LAMBDA argument against the extension `name`'s block
-    /// parameter (bound by `receiver`), so `it` gets the real element/receiver type instead of the erased
-    /// `Any` — the same binding the plain member-call path applies. A non-lambda argument types normally
-    /// (once). Used where an extension call's arguments are typed OUTSIDE that path (e.g. the safe-call
-    /// `?.` arm, which passes `receiver.non_null()`).
-    fn ext_arg_tys(&mut self, receiver: Ty, name: &str, args: &[ExprId]) -> Vec<Ty> {
+    /// Type safe-call lambda arguments from the selected receiver callable.
+    fn ext_arg_tys(&mut self, call: ExprId, receiver: Ty, name: &str, args: &[ExprId]) -> Vec<Ty> {
         let partial: Vec<Option<Ty>> = args
             .iter()
             .map(|&x| (!matches!(self.file.expr(x), Expr::Lambda { .. })).then(|| self.expr(x)))
             .collect();
-        let pts = self
-            .extension_lambda_shape(receiver, name, &partial)
-            .and_then(|shape| shape.param_types);
+        let arg_names = self.file.call_arg_names.get(&call.0).cloned();
+        let explicit_type_args = self
+            .file
+            .call_type_args
+            .get(&call.0)
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|argument| self.resolve_ty(argument))
+            .collect::<Vec<_>>();
+        let members =
+            crate::module_symbols::ModuleSymbols::new(self.syms).instance_members(receiver, name);
+        let method_sig =
+            self.best_module_member_candidate(&members, args, &partial, arg_names.as_deref());
+        let generic_member = self.plan_generic_member(
+            receiver,
+            None,
+            name,
+            None,
+            Some(&partial),
+            arg_names.as_deref(),
+        );
+        let member_extension_plan = method_sig.is_none().then(|| {
+            self.member_extension_lambda_param_types(
+                receiver,
+                name,
+                args,
+                &partial,
+                arg_names.as_deref(),
+                &explicit_type_args,
+            )
+        });
+        let member_extension_plan = member_extension_plan.flatten();
+        let member_shape = method_sig.as_ref().map(|member| {
+            let param_types = generic_member
+                .as_ref()
+                .map(|(_, _, param_types)| param_types.clone())
+                .unwrap_or_else(|| member.call_sig.lambda_param_types.clone());
+            crate::symbol_resolver::LambdaCallShape {
+                param_types: param_types
+                    .iter()
+                    .any(|types| !types.is_empty())
+                    .then_some(param_types),
+                receivers: member
+                    .call_sig
+                    .lambda_receivers
+                    .iter()
+                    .any(Option::is_some)
+                    .then(|| member.call_sig.lambda_receivers.clone()),
+                materialized: None,
+            }
+        });
+        let member_extension_shape =
+            member_extension_plan.map(|plan| crate::symbol_resolver::LambdaCallShape {
+                param_types: Some(plan.param_types),
+                receivers: plan
+                    .receivers
+                    .iter()
+                    .any(Option::is_some)
+                    .then_some(plan.receivers),
+                materialized: None,
+            });
+        let shape = member_shape
+            .or(member_extension_shape)
+            .or_else(|| self.extension_lambda_shape(receiver, name, &partial));
+        let pts = shape.as_ref().and_then(|shape| shape.param_types.as_ref());
+        let receivers = shape.as_ref().and_then(|shape| shape.receivers.as_ref());
         args.iter()
             .enumerate()
-            .map(|(i, &x)| match pts.as_ref().and_then(|p| p.get(i)) {
+            .map(|(i, &x)| match pts.and_then(|p| p.get(i)) {
                 Some(pt) if !pt.is_empty() && matches!(self.file.expr(x), Expr::Lambda { .. }) => {
-                    self.check_lambda_with_types(x, pt)
+                    if let Some(lambda_receiver) =
+                        receivers.and_then(|items| items.get(i)).copied().flatten()
+                    {
+                        self.check_lambda_with_receiver_labeled(
+                            x,
+                            lambda_receiver,
+                            pt.get(1..).unwrap_or_default(),
+                            Some(name),
+                        )
+                    } else {
+                        self.check_lambda_with_types(x, pt)
+                    }
                 }
                 _ => partial[i].unwrap_or_else(|| self.expr(x)),
             })
@@ -12533,7 +12637,7 @@ impl<'a> Checker<'a> {
                             // call), dropping to the naive `arg_tys` fallback below that re-typed the lambda's
                             // `it` as `Any`. `recv` restores parity with the non-safe call path.
                             let recv = rt.non_null();
-                            let arg_tys = self.ext_arg_tys(recv, &name, a);
+                            let arg_tys = self.ext_arg_tys(e, recv, &name, a);
                             let inline_arg_supported = !a
                                 .iter()
                                 .any(|x| matches!(self.file.expr(*x), Expr::CallableRef { .. }));
@@ -12546,6 +12650,10 @@ impl<'a> Checker<'a> {
                                 {
                                     let ret = m.ret;
                                     self.resolved_calls.insert(e, ResolvedCall::Member(m));
+                                    ret
+                                } else if let Some(ret) = self.check_member_extension_function_call(
+                                    e, recv, &name, a, &arg_tys,
+                                ) {
                                     ret
                                 } else {
                                     // A stdlib extension reached by `?.` on a `String` — resolve AND RECORD it
@@ -12567,11 +12675,46 @@ impl<'a> Checker<'a> {
                                 // A MODULE (user) class member only; a classpath / inherited-classpath
                                 // member falls through to the classpath selectors below (which pick by
                                 // argument fit and record the call for emit).
-                                crate::module_symbols::ModuleSymbols::new(self.syms)
-                                    .instance_members(recv, &name)
-                                    .into_iter()
-                                    .next()
-                                    .map(|m| m.ret)
+                                let arg_names = self.file.call_arg_names.get(&e.0).cloned();
+                                let full_arg_tys =
+                                    arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
+                                let module_members =
+                                    crate::module_symbols::ModuleSymbols::new(self.syms)
+                                        .instance_members(recv, &name);
+                                let applicable_module_member =
+                                    module_members.iter().any(|member| {
+                                        self.module_member_candidate_score(
+                                            member,
+                                            a,
+                                            &full_arg_tys,
+                                            arg_names.as_deref(),
+                                        )
+                                        .is_some()
+                                    });
+                                let explicit_type_args = self
+                                    .file
+                                    .call_type_args
+                                    .get(&e.0)
+                                    .cloned()
+                                    .unwrap_or_default()
+                                    .iter()
+                                    .map(|argument| self.resolve_ty(argument))
+                                    .collect::<Vec<_>>();
+                                let applicable_member_extension = self
+                                    .member_extension_function(
+                                        recv,
+                                        &name,
+                                        a,
+                                        &arg_tys,
+                                        arg_names.as_deref(),
+                                        &explicit_type_args,
+                                    )
+                                    .is_ok_and(|candidate| candidate.is_some());
+                                (applicable_module_member || !applicable_member_extension)
+                                    .then(|| {
+                                        self.check_module_member_call(e, recv, &name, a, &arg_tys)
+                                    })
+                                    .flatten()
                                     .or_else(|| {
                                         self.resolve_instance_name(internal, &name, &arg_tys).map(
                                             |m| {
@@ -12589,6 +12732,11 @@ impl<'a> Checker<'a> {
                                                 );
                                                 ret
                                             },
+                                        )
+                                    })
+                                    .or_else(|| {
+                                        self.check_member_extension_function_call(
+                                            e, recv, &name, a, &arg_tys,
                                         )
                                     })
                                     // A stdlib/classpath EXTENSION reached by `?.` (`c?.takeIf { … }`):
@@ -12610,7 +12758,23 @@ impl<'a> Checker<'a> {
                                     })
                                     .unwrap_or(Ty::Error)
                             } else {
-                                Ty::Error
+                                self.check_member_extension_function_call(
+                                    e, recv, &name, a, &arg_tys,
+                                )
+                                .or_else(|| {
+                                    inline_arg_supported
+                                        .then(|| {
+                                            self.record_library_extension_call(
+                                                Some(e),
+                                                &name,
+                                                recv,
+                                                &arg_tys,
+                                                &[],
+                                            )
+                                        })
+                                        .flatten()
+                                })
+                                .unwrap_or(Ty::Error)
                             }
                         }
                     }
@@ -16127,7 +16291,11 @@ impl<'a> Checker<'a> {
             candidates.push(MemberExtensionFunctionCandidate {
                 priority: shape.priority,
                 score: instantiated.score,
+                physical_receiver: shape.function.receiver_ty,
+                params: instantiated.logical_params,
+                physical_params: shape.function.signature.params.clone(),
                 ret: instantiated.ret,
+                physical_ret: shape.function.signature.ret,
                 call_sig: instantiated.call_sig,
                 visibility: shape.function.signature.visibility,
                 owner: shape.owner,
@@ -16190,6 +16358,25 @@ impl<'a> Checker<'a> {
                         self.resolved_call_arg_slots.insert(call, slots);
                     }
                 }
+                let interface = self
+                    .syms
+                    .class_by_type_name(candidate.owner)
+                    .is_some_and(|class| class.is_interface);
+                self.resolved_calls.insert(
+                    call,
+                    ResolvedCall::ModuleMemberExtension {
+                        owner: candidate.owner,
+                        extension_receiver,
+                        physical_receiver: candidate.physical_receiver,
+                        name: name.to_string(),
+                        params: candidate.params.clone(),
+                        physical_params: candidate.physical_params.clone(),
+                        ret: candidate.ret,
+                        physical_ret: candidate.physical_ret,
+                        interface,
+                        vararg: candidate.call_sig.vararg,
+                    },
+                );
                 Some(candidate.ret)
             }
             Ok(None) => None,

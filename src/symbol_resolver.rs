@@ -172,7 +172,11 @@ pub(crate) fn unify_ty(sig: Ty, actual: Ty, binds: &mut GSigBinds) {
                 for (a, p) in value_params.iter().zip(afsig.params.iter()) {
                     unify_ty(*a, *p, binds);
                 }
-                unify_ty(fsig.ret, afsig.ret, binds);
+                if let Ty::Nullable(inner) = fsig.ret {
+                    unify_ty(*inner, afsig.ret.non_null(), binds);
+                } else {
+                    unify_ty(fsig.ret, afsig.ret, binds);
+                }
             }
         }
         Ty::Obj(_, args) => {
@@ -182,6 +186,9 @@ pub(crate) fn unify_ty(sig: Ty, actual: Ty, binds: &mut GSigBinds) {
                     unify_ty(*a, *t, binds);
                 }
             }
+        }
+        Ty::Nullable(inner) if matches!(*inner, Ty::Fun(_)) => {
+            unify_ty(*inner, actual.non_null(), binds);
         }
         _ => {}
     }
@@ -432,7 +439,7 @@ fn bind_defaulted_ext_ret_slots(
 
 /// If `sig` is a function type, the substituted types of its lambda parameters. Empty for anything else.
 pub(crate) fn function_input_types(sig: Ty, binds: &GSigBinds) -> Vec<Ty> {
-    match sig {
+    match sig.non_null() {
         Ty::Fun(fsig) => ty_subst_all(&fsig.params, binds),
         _ => Vec::new(),
     }
@@ -3321,6 +3328,30 @@ mod tests {
         let mut explicit = GSigBinds::from([("T".to_string(), Ty::Int)]);
         unify_ty(parameter, Ty::Null, &mut explicit);
         assert_eq!(explicit.get("T"), Some(&Ty::Int));
+    }
+
+    #[test]
+    fn nullable_function_result_binds_its_non_null_type_parameter() {
+        let parameter = Ty::fun(
+            vec![Ty::String],
+            Ty::nullable(Ty::ty_param("R", Ty::obj("kotlin/Any"))),
+        );
+        let argument = Ty::fun(vec![Ty::String], Ty::nullable(Ty::Int));
+        let mut bindings = GSigBinds::new();
+
+        unify_ty(parameter, argument, &mut bindings);
+
+        assert_eq!(bindings.get("R"), Some(&Ty::Int));
+    }
+
+    #[test]
+    fn nullable_function_preserves_lambda_parameter_types() {
+        let function = Ty::nullable(Ty::fun(vec![Ty::String], Ty::String));
+
+        assert_eq!(
+            function_input_types(function, &GSigBinds::new()),
+            vec![Ty::String]
+        );
     }
 
     struct FakeSource {
