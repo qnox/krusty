@@ -996,10 +996,16 @@ pub struct MetaFn {
 
 impl MetaFn {
     pub fn member_call_sig(&self) -> CallSig {
-        CallSig::metadata_member(
+        CallSig::metadata_top_level(
             self.value_params.len(),
             self.value_params.iter().map(|p| p.name.clone()).collect(),
             self.value_params.iter().map(|p| p.has_default).collect(),
+            self.value_params
+                .iter()
+                .map(|p| p.recv_fun_receiver.map(Ty::obj_name))
+                .collect(),
+            self.value_params.iter().map(|p| p.recv_fun).collect(),
+            self.value_params.iter().map(|p| p.materialized).collect(),
             self.last_param_vararg(),
         )
     }

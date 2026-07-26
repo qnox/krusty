@@ -440,12 +440,11 @@ impl JvmLibraries {
         let Ty::Obj(start, start_args) = recv else {
             return None;
         };
-        if start_args.is_empty() {
-            return None; // no type arguments to propagate — the erased return is already correct
-        }
         // Walk the generic hierarchy carrying each class's type arguments, substituting them through
-        // each `extends`/`implements` edge. Stop at the first class declaring `name`; substitute that
-        // member's generic return under the bindings reached there.
+        // each `extends`/`implements` edge. A non-generic subclass may introduce concrete arguments on
+        // its supertype edge, so an empty argument list at the starting class does not end the walk.
+        // Stop at the first class declaring `name`; substitute that member's generic return under the
+        // bindings reached there.
         let mut seen = std::collections::HashSet::new();
         let mut q = std::collections::VecDeque::new();
         q.push_back((
@@ -486,7 +485,10 @@ impl JvmLibraries {
             if let Some(supers) = supers {
                 for sup in supers {
                     if let Ty::Obj(sup_internal, sup_args) = sup {
-                        let sup_targs = ty_subst_all(sup_args, &binds);
+                        let sup_targs = ty_subst_all(sup_args, &binds)
+                            .into_iter()
+                            .map(canonicalize_jvm_collections)
+                            .collect();
                         q.push_back((
                             super::jvm_class_map::to_jvm_type_name(sup_internal),
                             sup_targs,
@@ -565,9 +567,6 @@ impl JvmLibraries {
         let Ty::Obj(start, start_args) = receiver else {
             return std::collections::HashMap::new();
         };
-        if start_args.is_empty() {
-            return std::collections::HashMap::new();
-        }
         let target = super::jvm_class_map::to_jvm_type_name(target_internal);
         let mut seen = std::collections::HashSet::new();
         let mut q = std::collections::VecDeque::new();
@@ -592,7 +591,10 @@ impl JvmLibraries {
             if let Some(supers) = supers {
                 for sup in supers {
                     if let Ty::Obj(sup_internal, sup_args) = sup {
-                        let sup_targs = ty_subst_all(sup_args, &binds);
+                        let sup_targs = ty_subst_all(sup_args, &binds)
+                            .into_iter()
+                            .map(canonicalize_jvm_collections)
+                            .collect();
                         q.push_back((
                             super::jvm_class_map::to_jvm_type_name(sup_internal),
                             sup_targs,
@@ -855,7 +857,13 @@ impl JvmLibraries {
                 member.signature = m.signature.clone();
                 // The member's parsed generic signature — carries type-variable binding facts so a caller can
                 // infer a generic return from the receiver's type arguments (`Repo<Config>.load(): Config`).
-                member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
+                member.generic_sig = self.callable_generic_sig(
+                    internal_name,
+                    &m.name,
+                    &m.descriptor,
+                    m.signature.as_deref(),
+                    false,
+                );
                 member.suspend = self.cp.is_suspend_method_name(internal_name, &m.name);
                 let value_arity = if member.suspend && !member.params.is_empty() {
                     member.params.len() - 1
@@ -900,7 +908,6 @@ impl JvmLibraries {
                 if m.name == "<init>" {
                     // Parse the ctor's generic signature so the resolver can infer a construction's type
                     // arguments (`Pair(1, 2)` → `<Int, Int>`) without spelling backend signature strings.
-                    member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
                     constructors.push(member);
                 } else if m.is_static() {
                     // A Kotlin companion member compiles to a JVM static on the class.
@@ -1325,6 +1332,40 @@ fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
         params,
         ret,
     })
+}
+
+/// Specialize a class member's generic signature with the type arguments carried by the queried
+/// receiver. Method type parameters shadow equally named class parameters and therefore stay symbolic.
+fn specialize_member_gsig(
+    mut signature: GenericSig,
+    receiver: Ty,
+    class_bindings: &std::collections::HashMap<String, Ty>,
+) -> GenericSig {
+    let mut bindings = class_bindings.clone();
+    // Seed method formals with themselves so the general substitution helper does not erase an
+    // unbound method parameter to `Any` while replacing the enclosing class's parameters.
+    for formal in &signature.formals {
+        bindings.insert(formal.clone(), Ty::ty_param(formal, Ty::obj("kotlin/Any")));
+    }
+    for bounds in &mut signature.formal_bounds {
+        *bounds = ty_subst_all(bounds, &bindings);
+    }
+    for (formal, bounds) in signature.formals.iter().zip(&signature.formal_bounds) {
+        bindings.insert(
+            formal.clone(),
+            Ty::ty_param(
+                formal,
+                bounds
+                    .first()
+                    .copied()
+                    .unwrap_or_else(|| Ty::obj("kotlin/Any")),
+            ),
+        );
+    }
+    signature.params = ty_subst_all(&signature.params, &bindings);
+    signature.ret = ty_subst(signature.ret, &bindings);
+    signature.receiver = Some(receiver);
+    signature
 }
 
 /// A member's return type recovered from its generic signature ONLY when it is fully CONCRETE (carries
@@ -2184,7 +2225,6 @@ impl SymbolSource for JvmLibraries {
                             m.descriptor,
                             m.signature
                         );
-                        let generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
                         // A `suspend fun` member's physical method appends a `Continuation` parameter
                         // and erases its return to `Object`; present the LOGICAL signature (drop the
                         // continuation, recover the real return from the `Continuation<T>` type
@@ -2208,6 +2248,10 @@ impl SymbolSource for JvmLibraries {
                         // mangled members (`copy` → `copy-<hash>`), and by the source/JVM name for
                         // ordinary members.
                         let meta_name = m.physical_name.as_deref().unwrap_or(&m.name);
+                        let class_bindings = self.receiver_type_bindings_name(receiver, cn);
+                        let generic_sig = m.generic_sig.clone().map(|signature| {
+                            specialize_member_gsig(signature, receiver, &class_bindings)
+                        });
                         let member_facts =
                             self.cp
                                 .metadata_member_call_facts_name(cn, meta_name, params.len());

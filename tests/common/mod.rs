@@ -417,7 +417,6 @@ pub fn backend_rejects_in_process(
 ) -> Option<bool> {
     use krusty::diag::DiagSink;
     use krusty::frontend::{check_file, collect_signatures_with_cp};
-    use krusty::jvm::names::file_class_name;
 
     let mut diags = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(src);
@@ -456,15 +455,17 @@ pub fn backend_rejects_in_process(
     if diags.has_errors() {
         return None;
     }
-    let facade = file_class_name(stem, file.package.as_deref());
-    let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
-    let Some(mut ir) = krusty::ir_lower::lower_file(file, &info, &syms, &runtime) else {
-        return Some(true);
-    };
-    if krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms).is_err() {
-        return Some(true);
-    }
-    Some(krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None).is_none())
+    let backend = krusty::jvm::JvmBackend::new(cp);
+    let outputs = krusty::compiler::emit_checked(
+        &files,
+        &[stem.to_string()],
+        &[Some(info)],
+        &syms,
+        &backend,
+        "main",
+        &mut diags,
+    );
+    Some(diags.has_errors() && outputs.is_empty())
 }
 
 /// Lower Kotlin `src` to backend-agnostic IR (`lex → parse → check → collect → ir_lower`), stopping
@@ -1324,6 +1325,32 @@ pub fn run_box_against(tag: &str, lib_src: &str, main: &str) -> Option<String> {
     let libout = compile_lib(tag, lib_src)?;
     let stdlib = stdlib_jar()?;
     compile_and_run_box(main, "Main", &[libout, stdlib], jdk_modules().as_deref())
+}
+
+/// Strict [`run_box_against`] counterpart: skip only when the external Kotlin/JDK setup is absent;
+/// once the library was built and the runtime is provisioned, require krusty to compile and execute
+/// `box()` successfully.
+#[allow(dead_code)]
+pub fn expect_box_ok_against(tag: &str, lib_src: &str, main: &str) {
+    expect_box_ok_files_against(tag, lib_src, &[("Main", main)]);
+}
+
+/// Multi-file form of [`expect_box_ok_against`].
+#[allow(dead_code)]
+pub fn expect_box_ok_files_against(tag: &str, lib_src: &str, sources: &[(&str, &str)]) {
+    let Some(libout) = compile_lib(tag, lib_src) else {
+        return;
+    };
+    let Some(stdlib) = stdlib_jar() else {
+        return;
+    };
+    let Some(jdk) = jdk_modules() else {
+        return;
+    };
+    let Some(output) = compile_and_run_box_files(sources, &[libout, stdlib], Some(&jdk)) else {
+        panic!("{tag}: compile/run returned None");
+    };
+    assert_eq!(output, "OK", "{tag}");
 }
 
 /// [`run_box_against`] with `kotlin-reflect` on the classpath.

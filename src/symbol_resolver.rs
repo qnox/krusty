@@ -1081,6 +1081,33 @@ impl Symbol {
 }
 
 impl<'a> SymbolResolver<'a> {
+    /// Select from member candidates whose logical parameter types are already aligned to SOURCE
+    /// argument order. Named/default/trailing-lambda target typing performs that syntax-specific
+    /// alignment, then delegates specificity and postponed-lambda handling to the same kernel as the
+    /// final member-call selector.
+    pub(crate) fn select_mapped_member_overload(
+        &self,
+        candidates: &[(FunctionInfo, Vec<Ty>)],
+        args: &[Ty],
+        integer_literals: &[bool],
+        lambda_literals: &[bool],
+    ) -> Option<FunctionInfo> {
+        let candidates = candidates
+            .iter()
+            .map(|(candidate, params)| (candidate, params.clone()))
+            .collect::<Vec<_>>();
+        match best_by_args(
+            self.lib,
+            &candidates,
+            args,
+            integer_literals,
+            lambda_literals,
+        ) {
+            CandidateSelection::Selected(candidate) => Some(candidate.clone()),
+            CandidateSelection::None | CandidateSelection::Ambiguous => None,
+        }
+    }
+
     pub fn new(lib: &'a dyn SemanticPlatform) -> Self {
         SymbolResolver {
             lib,
@@ -3349,9 +3376,10 @@ fn best_by_args<'a>(
         integer_literal_adapts(*p, *a, integer_literals.get(i).copied().unwrap_or(false))
     };
     let function_like_fits = |p: &Ty, a: &Ty| {
-        p.fun_arity()
-            .zip(lib.function_like_arity(*a))
-            .is_some_and(|(param, arg)| usize::from(param) == arg)
+        a.fun_arity().is_none()
+            && p.fun_arity()
+                .zip(lib.function_like_arity(*a))
+                .is_some_and(|(param, arg)| usize::from(param) == arg)
     };
     // The DEFAULT-omitting passes accept a reference SUBTYPE / value-class-underlying argument (a
     // `joinToString(separator: CharSequence = …)` call with a `String`), matching the assignability the
@@ -3401,15 +3429,76 @@ fn best_by_args<'a>(
         CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
         CandidateSelection::None => {}
     }
-    if lambda_literals.iter().any(|literal| *literal) {
+    let postponed_lambda = |position: usize| {
+        args.get(position).is_some_and(|argument| {
+            argument == &Ty::Error
+                || argument
+                    .fun_ret()
+                    .is_some_and(|ret| matches!(ret, Ty::Error))
+        })
+    };
+    let more_specific = |position: usize, left: Ty, right: Ty| {
+        postponed_lambda(position) || parameter_at_least_as_specific(lib, left, right, false)
+    };
+    match unique_most_specific(
+        cands.iter().filter_map(|(candidate, params)| {
+            fixed_parameter_shape(params, args, |position, param, arg| {
+                erased_fits(position, param, arg)
+            })
+            .map(|shape| (shape, *candidate))
+        }),
+        more_specific,
+    ) {
+        CandidateSelection::Selected(candidate) => return CandidateSelection::Selected(candidate),
+        CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
+        CandidateSelection::None => {}
+    }
+    match unique_most_specific(
+        cands.iter().filter_map(|(candidate, params)| {
+            if params.len() > args.len()
+                && (candidate.call_sig.required == 0 || candidate.call_sig.required <= args.len())
+                && params[..args.len()]
+                    .iter()
+                    .zip(args)
+                    .enumerate()
+                    .all(|(i, (param, arg))| fits(i, param, arg) || adapts(param, arg, i))
+            {
+                Some((params.clone(), *candidate))
+            } else {
+                None
+            }
+        }),
+        more_specific,
+    ) {
+        CandidateSelection::Selected(candidate) => return CandidateSelection::Selected(candidate),
+        CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
+        CandidateSelection::None => {}
+    }
+    // Trailing-lambda call omitting leading defaulted params: the last arg fills the LAST value
+    // parameter. Compare the source-aligned parameter shapes so specificity is driven by the supplied
+    // prefix while the postponed lambda remains neutral.
+    if matches!(args.last(), Some(Ty::Fun(_))) {
         match unique_most_specific(
             cands.iter().filter_map(|(candidate, params)| {
-                fixed_parameter_shape(params, args, |position, param, arg| {
-                    erased_fits(position, param, arg)
-                })
-                .map(|shape| (shape, *candidate))
+                let last = params.len().checked_sub(1)?;
+                let prefix = args.len() - 1;
+                if prefix > last
+                    || !fits(last, &params[last], args.last().unwrap())
+                    || (!((prefix..last).all(|i| candidate.call_sig.param_has_default(i))
+                        || candidate.call_sig.required <= prefix))
+                    || !params[..prefix.min(params.len())]
+                        .iter()
+                        .zip(&args[..prefix])
+                        .enumerate()
+                        .all(|(i, (param, arg))| fits(i, param, arg) || adapts(param, arg, i))
+                {
+                    return None;
+                }
+                let mut shape = params[..prefix].to_vec();
+                shape.push(params[last]);
+                Some((shape, *candidate))
             }),
-            |_, left, right| parameter_at_least_as_specific(lib, left, right, false),
+            more_specific,
         ) {
             CandidateSelection::Selected(candidate) => {
                 return CandidateSelection::Selected(candidate);
@@ -3418,80 +3507,20 @@ fn best_by_args<'a>(
             CandidateSelection::None => {}
         }
     }
-    cands
-        .iter()
-        .find(|(_, lp)| {
-            lp.len() == args.len()
-                && lp
-                    .iter()
-                    .zip(args)
-                    .enumerate()
-                    .all(|(i, (p, a))| erased_fits(i, p, a))
-        })
-        .or_else(|| {
-            cands.iter().find(|(o, lp)| {
-                lp.len() > args.len()
-                    && (o.call_sig.required == 0 || o.call_sig.required <= args.len())
-                    && lp[..args.len()]
-                        .iter()
-                        .zip(args)
-                        .enumerate()
-                        .all(|(i, (p, a))| fits(i, p, a) || adapts(p, a, i))
-            })
-        })
-        .or_else(|| {
-            // Trailing-lambda call omitting leading defaulted params: the last arg (a lambda) fills the LAST
-            // value param, the leading args a prefix, and every omitted MIDDLE param must be defaulted.
-            if !matches!(args.last(), Some(Ty::Fun(_))) {
+    // A `vararg` candidate SPREAD over the trailing arguments. Tried last, so a candidate applicable
+    // without spreading still wins (`trimEnd(predicate)` and passing a packed array through as-is).
+    unique_most_specific(
+        cands.iter().filter_map(|(candidate, params)| {
+            if !candidate.call_sig.vararg {
                 return None;
             }
-            cands.iter().find(|(o, lp)| {
-                let Some(last) = lp.len().checked_sub(1) else {
-                    return false;
-                };
-                let prefix = args.len() - 1;
-                prefix <= last
-                    && fits(last, &lp[last], args.last().unwrap())
-                    && ((prefix..last).all(|i| o.call_sig.param_has_default(i))
-                        || o.call_sig.required <= prefix)
-                    && lp[..prefix.min(lp.len())]
-                        .iter()
-                        .zip(&args[..prefix])
-                        .enumerate()
-                        .all(|(i, (p, a))| fits(i, p, a) || adapts(p, a, i))
+            vararg_parameter_shape(params, args, |i, param, arg| {
+                fits(i, param, arg) || adapts(param, arg, i)
             })
-        })
-        .or_else(|| {
-            // A `vararg` candidate SPREAD over the trailing arguments. Its last logical parameter is the
-            // PACKED ARRAY, so `"a.b.".trimEnd('.')` matches one `Char` against `CharArray` and every pass
-            // above rejects it — leaving the call unresolved and the argument reported as
-            // "inferred type is Char but CharArray was expected" on code that is perfectly well typed.
-            // Tried LAST, so a candidate applicable without spreading still wins (`trimEnd(predicate)` for
-            // a lambda argument, and `f(charArray)` passing the array through as-is).
-            cands.iter().find(|(o, lp)| {
-                if !o.call_sig.vararg {
-                    return false;
-                }
-                let Some(fixed) = lp.len().checked_sub(1) else {
-                    return false;
-                };
-                let Some(elem) = lp[fixed].array_elem() else {
-                    return false;
-                };
-                args.len() >= fixed
-                    && lp[..fixed]
-                        .iter()
-                        .zip(args)
-                        .enumerate()
-                        .all(|(i, (p, a))| fits(i, p, a) || adapts(p, a, i))
-                    && args[fixed..].iter().enumerate().all(|(i, a)| {
-                        let position = fixed + i;
-                        fits(position, &elem, a) || adapts(&elem, a, position)
-                    })
-            })
-        })
-        .map(|(o, _)| *o)
-        .map_or(CandidateSelection::None, CandidateSelection::Selected)
+            .map(|shape| (shape, *candidate))
+        }),
+        more_specific,
+    )
 }
 
 /// A lambda argument (`Ty::Fun`) matches a function-typed parameter of the same arity. The parameter may
@@ -3831,6 +3860,45 @@ mod tests {
             },
         );
         assert!(matches!(ambiguous, CandidateSelection::Ambiguous));
+    }
+
+    #[test]
+    fn concrete_lambda_return_rejects_same_arity_mismatch() {
+        let source = FakeSource {
+            name: "unused",
+            receiver: None,
+            info: top_level_nullable_string_info(),
+        };
+        let int_transform = Ty::fun(vec![Ty::Int], Ty::Int);
+        let string_transform = Ty::fun(vec![Ty::Int], Ty::String);
+        let candidate = |name: &str, transform: Ty| {
+            FunctionInfo::plain(
+                FnKind::TopLevel,
+                None,
+                LibraryCallable::library(
+                    "fixture/Calls",
+                    name,
+                    vec![transform],
+                    Ty::Unit,
+                    Ty::Unit,
+                    "(Lkotlin/jvm/functions/Function1;)V",
+                ),
+            )
+        };
+        let int_candidate = candidate("chooseInt", int_transform);
+        let string_candidate = candidate("chooseString", string_transform);
+        let candidates = [
+            (&int_candidate, vec![int_transform]),
+            (&string_candidate, vec![string_transform]),
+        ];
+        let postponed = Ty::fun(vec![Ty::Error], Ty::String);
+
+        let selected = best_by_args(&source, &candidates, &[postponed], &[], &[true]);
+
+        let CandidateSelection::Selected(selected) = selected else {
+            panic!("the matching concrete lambda return must select one overload");
+        };
+        assert_eq!(selected.callable.name, "chooseString");
     }
 
     #[test]

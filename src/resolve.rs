@@ -8593,33 +8593,25 @@ impl<'a> Checker<'a> {
             })
     }
 
-    /// Lambda call-shape facts for a receiver-less top-level call, aligned to the PARTIAL argument list
-    /// (a generic HOF binds lambda parameter types from the already-typed non-lambda args).
-    fn top_level_lambda_shape(
+    /// Derive lambda target types from one callable family after the caller has aligned source arguments
+    /// to parameter slots. This is shared by top-level and member HOFs: both bind a generic signature
+    /// from the receiver/non-lambda arguments, then fall back to metadata's erased lambda facts.
+    fn callable_lambda_shape(
         &self,
-        name: &str,
+        overloads: Vec<crate::libraries::FunctionInfo>,
+        receiver: Option<Ty>,
         arg_tys: &[Option<Ty>],
+        argument_indices: impl Fn(&crate::libraries::FunctionInfo) -> Option<Vec<usize>>,
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
-        let fs = crate::libraries::FunctionSet {
-            overloads: self
-                .resolver()
-                .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
-                .map(crate::symbol_resolver::Symbol::overloads)
-                .unwrap_or_default(),
-        };
-        let has_exact = fs.has_top_level_arity(arg_tys.len());
         let mut candidate_shapes: [Vec<crate::symbol_resolver::LambdaCallShape>; 2] =
             [Vec::new(), Vec::new()];
-        for o in fs.top_level() {
-            if has_exact && o.callable.params.len() != arg_tys.len() {
-                continue;
-            }
-            let Some(argument_map) = crate::symbol_resolver::trailing_default_arg_indices(
-                o.callable.params.len(),
-                arg_tys,
-            ) else {
+        for o in overloads {
+            let Some(argument_map) = argument_indices(&o) else {
                 continue;
             };
+            if argument_map.len() != arg_tys.len() {
+                continue;
+            }
             let partially_applicable =
                 argument_map
                     .iter()
@@ -8641,37 +8633,42 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let mut shape = crate::symbol_resolver::LambdaCallShape::default();
+            let mut specialized_inputs = None;
             if let Some(gsig) = o.generic_sig.as_ref() {
-                if !(has_exact && gsig.params.len() != arg_tys.len()) {
-                    if let Some(map) = crate::symbol_resolver::trailing_default_arg_indices(
-                        gsig.params.len(),
-                        arg_tys,
-                    ) {
-                        let mut binds = std::collections::HashMap::new();
-                        for (ai, at) in arg_tys.iter().enumerate() {
-                            if let (Some(t), Some(ps)) = (at, gsig.params.get(map[ai])) {
-                                crate::symbol_resolver::unify_ty(*ps, *t, &mut binds);
-                            }
-                        }
-                        let out: Vec<Vec<Ty>> = map
-                            .iter()
-                            .map(|&pi| {
-                                gsig.params
-                                    .get(pi)
-                                    .map(|ps| {
-                                        crate::symbol_resolver::function_input_types(*ps, &binds)
-                                    })
-                                    .unwrap_or_default()
-                            })
-                            .collect();
-                        if out
-                            .iter()
-                            .zip(arg_tys)
-                            .any(|(parameters, actual)| actual.is_none() && !parameters.is_empty())
-                        {
-                            shape.param_types = Some(out);
+                if argument_map
+                    .iter()
+                    .all(|parameter| *parameter < gsig.params.len())
+                {
+                    let mut binds = std::collections::HashMap::new();
+                    if let (Some(actual), Some(declared)) = (receiver, gsig.receiver) {
+                        crate::symbol_resolver::unify_ty(declared, actual, &mut binds);
+                    }
+                    for (source, actual) in arg_tys.iter().enumerate() {
+                        if let Some(actual) = actual {
+                            crate::symbol_resolver::unify_ty(
+                                gsig.params[argument_map[source]],
+                                *actual,
+                                &mut binds,
+                            );
                         }
                     }
+                    let out: Vec<Vec<Ty>> = argument_map
+                        .iter()
+                        .map(|&parameter| {
+                            crate::symbol_resolver::function_input_types(
+                                gsig.params[parameter],
+                                &binds,
+                            )
+                        })
+                        .collect();
+                    if out
+                        .iter()
+                        .zip(arg_tys)
+                        .any(|(parameters, actual)| actual.is_none() && !parameters.is_empty())
+                    {
+                        shape.param_types = Some(out.clone());
+                    }
+                    specialized_inputs = Some(out);
                 }
             }
             if shape.param_types.is_none() {
@@ -8699,12 +8696,36 @@ impl<'a> Checker<'a> {
             shape.receivers = Some(
                 argument_map
                     .iter()
-                    .map(|&parameter| {
-                        o.call_sig
+                    .enumerate()
+                    .map(|(source, &parameter)| {
+                        let explicit = o
+                            .call_sig
                             .lambda_receivers
                             .get(parameter)
                             .copied()
-                            .flatten()
+                            .flatten();
+                        if explicit.is_some()
+                            || !o
+                                .call_sig
+                                .lambda_receiver_params
+                                .get(parameter)
+                                .copied()
+                                .unwrap_or(false)
+                        {
+                            return explicit;
+                        }
+                        let context_count = o
+                            .call_sig
+                            .lambda_context_counts
+                            .get(parameter)
+                            .copied()
+                            .unwrap_or_default();
+                        specialized_inputs
+                            .as_ref()
+                            .or(shape.param_types.as_ref())
+                            .and_then(|inputs| inputs.get(source))
+                            .and_then(|inputs| inputs.get(context_count))
+                            .copied()
                     })
                     .collect(),
             );
@@ -8763,6 +8784,146 @@ impl<'a> Checker<'a> {
         candidate_shapes[0].first().cloned()
     }
 
+    /// Lambda call-shape facts for a receiver-less top-level call, aligned to the PARTIAL argument list
+    /// (a generic HOF binds lambda parameter types from the already-typed non-lambda args).
+    fn top_level_lambda_shape(
+        &self,
+        name: &str,
+        arg_tys: &[Option<Ty>],
+    ) -> Option<crate::symbol_resolver::LambdaCallShape> {
+        let fs = crate::libraries::FunctionSet {
+            overloads: self
+                .resolver()
+                .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
+                .map(crate::symbol_resolver::Symbol::overloads)
+                .unwrap_or_default(),
+        };
+        let has_exact = fs.has_top_level_arity(arg_tys.len());
+        self.callable_lambda_shape(
+            fs.top_level().cloned().collect(),
+            None,
+            arg_tys,
+            |overload| {
+                if has_exact && overload.callable.params.len() != arg_tys.len() {
+                    return None;
+                }
+                crate::symbol_resolver::trailing_default_arg_indices(
+                    overload.callable.params.len(),
+                    arg_tys,
+                )
+            },
+        )
+    }
+
+    /// Lambda call-shape facts for an ordinary classpath member HOF. The overload family comes from the
+    /// same federated receiver query used by final call resolution, while the source argument mapping
+    /// preserves named/default/trailing-lambda slots.
+    fn member_lambda_shape(
+        &self,
+        call: ExprId,
+        receiver: Ty,
+        name: &str,
+        args: &[ExprId],
+        arg_tys: &[Option<Ty>],
+    ) -> Option<crate::symbol_resolver::LambdaCallShape> {
+        let overloads = self
+            .resolver()
+            .resolve_symbol(
+                crate::symbol_resolver::SymRecv::Value(receiver),
+                name,
+                &[],
+                &[],
+            )
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|overload| {
+                overload.kind == crate::libraries::FnKind::Member
+                    && matches!(overload.callable.origin, Origin::Library)
+            })
+            .collect::<Vec<_>>();
+        let arg_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let argument_indices = |overload: &crate::libraries::FunctionInfo| {
+            call_argument_parameter_indices(args, arg_names, trailing_lambda, &overload.call_sig)
+        };
+        let applicable = overloads
+            .iter()
+            .filter_map(|overload| {
+                let indices = argument_indices(overload)?;
+                indices
+                    .iter()
+                    .zip(arg_tys)
+                    .all(|(&parameter, actual)| {
+                        actual.is_none_or(|actual| {
+                            overload
+                                .callable
+                                .params
+                                .get(parameter)
+                                .is_some_and(|expected| {
+                                    arg_assignable_simple(*expected, actual)
+                                        || crate::assignable::is_assignable(
+                                            &crate::assignable::TyCtx::new(),
+                                            self,
+                                            actual,
+                                            *expected,
+                                        )
+                                })
+                        })
+                    })
+                    .then(|| (overload.clone(), indices))
+            })
+            .collect::<Vec<_>>();
+        let selected = match applicable.as_slice() {
+            [] => return None,
+            [(only, _)] => only.clone(),
+            _ => {
+                let provisional = args
+                    .iter()
+                    .zip(arg_tys)
+                    .map(|(&argument, actual)| {
+                        actual.unwrap_or_else(|| match self.file.expr(argument) {
+                            Expr::Lambda { params, body } if !params.is_empty() => {
+                                Ty::fun(vec![Ty::Error; params.len()], Ty::Error)
+                            }
+                            Expr::Lambda { body, .. } if self.file.expr_uses_name(*body, "it") => {
+                                Ty::fun(vec![Ty::Error], Ty::Error)
+                            }
+                            Expr::Lambda { .. } => Ty::fun(Vec::new(), Ty::Error),
+                            _ => Ty::Error,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let integer_literals = self.integer_literal_args(args);
+                let lambda_literals = self.lambda_literal_args(args);
+                let mapped = applicable
+                    .iter()
+                    .map(|(candidate, indices)| {
+                        (
+                            candidate.clone(),
+                            indices
+                                .iter()
+                                .filter_map(|&parameter| {
+                                    candidate.callable.params.get(parameter).copied()
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .filter(|(_, params)| params.len() == args.len())
+                    .collect::<Vec<_>>();
+                self.resolver().select_mapped_member_overload(
+                    &mapped,
+                    &provisional,
+                    &integer_literals,
+                    &lambda_literals,
+                )?
+            }
+        };
+        self.callable_lambda_shape(vec![selected], Some(receiver), arg_tys, argument_indices)
+    }
+
+    /// Lambda parameter types for an extension call before lambda bodies are typed — binds the selected
+    /// extension's generic signature from the receiver plus already-typed non-lambda args.
     fn extension_lambda_shape(
         &self,
         receiver: Ty,
@@ -10090,6 +10251,16 @@ impl<'a> Checker<'a> {
         self.lexical_value_declares(name)
             || self.syms.props.contains_key(name)
             || self.syms.prop_facades.contains_key(name)
+            || self.implicit_receiver_types().into_iter().any(|receiver| {
+                receiver
+                    .obj_internal()
+                    .and_then(|internal| self.lookup_prop_with_owner_name(internal, name))
+                    .is_some()
+                    || self.resolve_property_member(receiver, name).is_some()
+                    || self
+                        .member_extension_property(receiver, name)
+                        .is_ok_and(|property| property.is_some())
+            })
     }
     fn register_local_fun(&mut self, name: &str, stmt_id: StmtId, sig: Signature) {
         if let Some(frame) = self.local_funs.last_mut() {
@@ -18351,7 +18522,40 @@ impl<'a> Checker<'a> {
                 // shadows the type/import in value position (`private val logger = logger {}; logger.info()`
                 // — `logger` is the KLogger value, not the imported `logger` symbol), so skip the static
                 // path and let the receiver resolve as that property value below.
+                let mut classpath_object_value = None;
                 if let Expr::Name(cls) = self.file.expr(receiver).clone() {
+                    if !self.value_root_shadows_classifier(&cls) {
+                        let object_internal = self
+                            .imports
+                            .get(&cls)
+                            .cloned()
+                            .or_else(|| self.imported_type_internal(&cls))
+                            .filter(|internal| {
+                                self.syms.class_by_internal(internal).is_none()
+                                    && self
+                                        .syms
+                                        .libraries
+                                        .resolve_type(internal)
+                                        .is_some_and(|ty| ty.is_object())
+                            });
+                        if let Some(internal) = object_internal {
+                            // A Kotlin `object` is a value receiver, even though its imported name
+                            // is also a classifier. Route it through ordinary member resolution
+                            // before a Java/companion static probe can target-type lambda arguments.
+                            self.set(receiver, Ty::obj(&internal));
+                            self.expr_lowers.insert(
+                                receiver,
+                                ExprLowering::ObjectValue {
+                                    internal: type_name(&internal),
+                                },
+                            );
+                            classpath_object_value = Some(type_name(&internal));
+                        }
+                    }
+                }
+                if let (None, Expr::Name(cls)) =
+                    (classpath_object_value, self.file.expr(receiver).clone())
+                {
                     if !self.value_root_shadows_classifier(&cls) {
                         let is_object = self.syms.objects.contains(&cls);
                         // Ordinary object members precede synthesized static fallbacks.
@@ -18542,41 +18746,6 @@ impl<'a> Checker<'a> {
                                             ret
                                         }
                                         None => {
-                                            // A classpath `object` INSTANCE member (`Ids.generate()`,
-                                            // `L.logger { }`): not a companion/static — dispatch on the
-                                            // object singleton. Type the receiver as the object's own
-                                            // type and record the singleton read so LOWERING emits
-                                            // `getstatic <internal>.INSTANCE; invokevirtual`.
-                                            let is_object = self
-                                                .resolved_type(&internal)
-                                                .is_some_and(|t| t.is_object());
-                                            if is_object {
-                                                if let Some(m) = self
-                                                    .resolve_instance_member_with_literal_and_lambda_args(
-                                                        Ty::obj(&internal),
-                                                        &name,
-                                                        &arg_tys,
-                                                        &integer_literals,
-                                                        &lambda_literals,
-                                                    )
-                                                {
-                                                    crate::trace_compiler!(
-                                                        "resolve",
-                                                        "classpath object instance member {cls}.{name} on {internal}"
-                                                    );
-                                                    self.set(receiver, Ty::obj(&internal));
-                                                    self.expr_lowers.insert(
-                                                        receiver,
-                                                        ExprLowering::ObjectValue {
-                                                            internal: type_name(&internal),
-                                                        },
-                                                    );
-                                                    let ret = m.ret;
-                                                    self.resolved_calls
-                                                        .insert(call, ResolvedCall::Member(m));
-                                                    return ret;
-                                                }
-                                            }
                                             self.diags.error(span, format!("unresolved Java static '{cls}.{name}' for given argument types"));
                                             Ty::Error
                                         }
@@ -18586,7 +18755,9 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                let rt = self.expr(receiver);
+                let rt = classpath_object_value
+                    .map(Ty::obj_name)
+                    .unwrap_or_else(|| self.expr(receiver));
                 // For a class method with function-type parameters, type lambda arguments against the
                 // method's `lambda_param_types` (so `it` resolves), mirroring the free-function path.
                 // A MODULE (user-declared) class method only: a classpath receiver leaves this `None` so
@@ -18602,10 +18773,11 @@ impl<'a> Checker<'a> {
                         }
                     })
                     .collect::<Vec<_>>();
+                let module_members = crate::module_symbols::ModuleSymbols::new(self.syms)
+                    .instance_members(rt, &name);
                 let method_sig: Option<crate::libraries::LibraryMember> = self
                     .best_module_member_candidate(
-                        &crate::module_symbols::ModuleSymbols::new(self.syms)
-                            .instance_members(rt, &name),
+                        &module_members,
                         args,
                         &generic_member_partial,
                         arg_names.as_deref(),
@@ -18633,6 +18805,12 @@ impl<'a> Checker<'a> {
                         self.file.call_has_trailing_lambda.contains(&call.0),
                     )
                 });
+                let classpath_member_lambda_shape = method_sig
+                    .is_none()
+                    .then(|| {
+                        self.member_lambda_shape(call, rt, &name, args, &generic_member_partial)
+                    })
+                    .flatten();
                 crate::trace_compiler!(
                     "resolve",
                     "MCALL name={name} rt={rt:?} nargs={} generic_member={}",
@@ -18645,6 +18823,7 @@ impl<'a> Checker<'a> {
                 // rather than the erased `Any`. Type the non-lambda arguments first (the accumulator in
                 // `fold(0) { acc, x -> }` binds `R`); lambda positions are `None` until resolved.
                 let ext_lambda_partial: Option<Vec<Option<Ty>>> = if method_sig.is_none()
+                    && classpath_member_lambda_shape.is_none()
                     && rt != Ty::Error
                     && args
                         .iter()
@@ -18866,6 +19045,44 @@ impl<'a> Checker<'a> {
                             if let Some(ref pts) = classpath_sam_pts {
                                 if let Some(pt) = pts.get(i).and_then(Option::as_deref) {
                                     return c.check_lambda_with_types(a, pt);
+                                }
+                            }
+                            if let Some(shape) = classpath_member_lambda_shape.as_ref() {
+                                if let Some(pt) = shape
+                                    .param_types
+                                    .as_ref()
+                                    .and_then(|parameters| parameters.get(i))
+                                    .filter(|parameters| !parameters.is_empty())
+                                {
+                                    if matches!(c.file.expr(a), Expr::Lambda { .. }) {
+                                        let receiver = shape
+                                            .receivers
+                                            .as_ref()
+                                            .and_then(|receivers| receivers.get(i))
+                                            .copied()
+                                            .flatten();
+                                        let context_count = shape
+                                            .context_counts
+                                            .as_ref()
+                                            .and_then(|counts| counts.get(i))
+                                            .copied()
+                                            .unwrap_or_default()
+                                            .min(pt.len());
+                                        let contexts = &pt[..context_count];
+                                        let value_start =
+                                            context_count + usize::from(receiver.is_some());
+                                        let values = pt.get(value_start..).unwrap_or_default();
+                                        if !contexts.is_empty() || receiver.is_some() {
+                                            return c.check_lambda_with_implicit_receivers_labeled(
+                                                a,
+                                                contexts,
+                                                receiver,
+                                                values,
+                                                call_fn_name.as_deref(),
+                                            );
+                                        }
+                                        return c.check_lambda_with_types(a, pt);
+                                    }
                                 }
                             }
                             if let Some(ref pts) = ext_lambda_pts {
