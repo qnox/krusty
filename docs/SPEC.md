@@ -1067,6 +1067,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   was flattened with `/` and never matched the real nested internal, leaving the outer name unresolved
   (test: `::classpath_nested_type_static_member_via_outer_name`).
 
+- **Aliased imports (`import a.b.Member as Alias`).** The parser records `(alias, real-simple-name)`
+  in `File::import_aliases` and still pushes the full target to `File::imports`; a post-parse pass
+  (`rewrite_import_aliases`) substitutes `Alias → Member` at every bare-name USE, after which ordinary
+  import resolution handles it uniformly — static methods, top-level functions, and types. The alias's
+  real name is the last path segment, so a backtick-escaped keyword member (`Filters.\`in\` as
+  filterIn`) resolves too. An alias whose name is ALSO bound in the file (a local/param, or a
+  top-level/member declaration that would shadow the import) is left untouched — renaming its uses
+  could bind them to the wrong symbol, so the name stays unresolved and the file cleanly skips rather
+  than miscompiling. Tests: `static_member_import_e2e::aliased_java_static_method_import_resolves`,
+  `::import_alias_is_shadowed_by_a_local_of_the_same_name`.
+
 - **Unqualified sibling nested-class construction (`Inner()` inside `class Outer { class Inner }`).** Kotlin
   scopes a nested class unqualified within its enclosing class body. When a `Name`-callee call is otherwise
   unresolved and the enclosing class (`this_ty`) has a nested class whose internal is `Outer$Inner`, the

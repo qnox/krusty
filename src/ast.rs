@@ -871,6 +871,12 @@ pub struct File {
     pub package: Option<String>,
     /// Fully-qualified import names (e.g. `util.Calc`), used to resolve Java/JDK references.
     pub imports: Vec<String>,
+    /// Aliased imports `import a.b.Member as Alias` → `(alias, real-simple-name)`. The full path is also
+    /// pushed to [`imports`] (so the target is resolvable); the parser records the rename here and a
+    /// post-parse pass ([`rewrite_import_aliases`]) substitutes `alias → real` at every bare-name use,
+    /// UNLESS the file also binds `alias` (a local/param/decl that would shadow it) — then it is left
+    /// alone (unresolved → the file cleanly skips, never a miscompile).
+    pub import_aliases: Vec<(String, String)>,
     pub decls: Vec<DeclId>,
     /// Top-level declarations carrying the `expect` modifier (multiplatform headers). A matched
     /// `actual` in the same compiled source set replaces them (see `strip_matched_expects`); an

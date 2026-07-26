@@ -45,7 +45,89 @@ pub fn parse_with_features(
     rewrite_anon_captures(&mut p.file);
     fill_class_decl_lines(&mut p.file, src);
     expand_fun_type_aliases(&mut p.file);
+    rewrite_import_aliases(&mut p.file);
     p.file
+}
+
+/// Substitute each aliased import (`import a.b.Member as Alias`) back to its real member name at every
+/// bare-name USE (`Alias(...)`, `Alias` value read → `Member`). The full target path is already in
+/// `file.imports`, so once the use site names the real member, ordinary import resolution handles it —
+/// covering static methods, static fields, top-level functions, and types uniformly.
+///
+/// An alias whose name is also BOUND in the file (a local/param, or a top-level/member declaration —
+/// any of which would shadow the import) is left untouched: renaming its uses could bind them to the
+/// wrong symbol, so we skip it and let the name stay unresolved (the file cleanly skips, never a
+/// miscompile). Names introduced only as the alias itself are safe to rename.
+fn rewrite_import_aliases(file: &mut File) {
+    if file.import_aliases.is_empty() {
+        return;
+    }
+    // Every identifier the file BINDS: declaration names, function/constructor parameters, lambda
+    // parameters, and statement locals. A flat arena scan — no recursion.
+    let mut bound: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for &d in &file.decls {
+        match file.decl(d) {
+            Decl::Fun(f) => {
+                bound.insert(f.name.clone());
+                bound.extend(f.params.iter().map(|p| p.name.clone()));
+            }
+            Decl::Class(c) => {
+                bound.insert(c.name.clone());
+                bound.extend(c.props.iter().map(|p| p.name.clone()));
+                bound.extend(c.body_props.iter().map(|p| p.name.clone()));
+                for m in &c.methods {
+                    bound.insert(m.name.clone());
+                    bound.extend(m.params.iter().map(|p| p.name.clone()));
+                }
+            }
+            Decl::Property(p) => {
+                bound.insert(p.name.clone());
+            }
+        }
+    }
+    for s in &file.stmt_arena {
+        match s {
+            Stmt::Local { name, .. }
+            | Stmt::LocalLateinit { name, .. }
+            | Stmt::LocalDelegate { name, .. } => {
+                bound.insert(name.clone());
+            }
+            Stmt::Destructure { entries, .. } => {
+                bound.extend(entries.iter().map(|(n, _)| n.clone()));
+            }
+            _ => {}
+        }
+    }
+    for e in &file.expr_arena {
+        if let Expr::Lambda { params, .. } = e {
+            bound.extend(params.iter().cloned());
+        }
+    }
+
+    // Renames that survive the shadow check: alias → real.
+    let renames: std::collections::HashMap<&str, &str> = file
+        .import_aliases
+        .iter()
+        .filter(|(alias, _)| !bound.contains(alias.as_str()))
+        .map(|(alias, real)| (alias.as_str(), real.as_str()))
+        .collect();
+    if renames.is_empty() {
+        return;
+    }
+    let updates: Vec<(usize, String)> = file
+        .expr_arena
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| match e {
+            Expr::Name(n) => renames.get(n.as_str()).map(|real| (i, real.to_string())),
+            _ => None,
+        })
+        .collect();
+    for (i, real) in updates {
+        if let Expr::Name(n) = &mut file.expr_arena[i] {
+            *n = real;
+        }
+    }
 }
 
 /// Fill each `ClassDecl::decl_line` with the 1-based source line of its `span.lo`. kotlinc maps the
@@ -1320,10 +1402,24 @@ impl<'a> Parser<'a> {
                         self.bump(); // '*'
                         fq.push_str(".*");
                     }
+                    // `import a.b.Member as Alias` — capture the rename so a post-parse pass can
+                    // substitute the alias back to the real member at use sites (`as` is a soft keyword).
+                    if self.at(TokenKind::Ident) && self.text() == "as" {
+                        self.bump(); // 'as'
+                        if self.at(TokenKind::Ident) {
+                            let alias = self.text().to_string();
+                            self.bump();
+                            if let Some(real) = fq.rsplit('.').next() {
+                                if !real.is_empty() && real != alias {
+                                    self.file.import_aliases.push((alias, real.to_string()));
+                                }
+                            }
+                        }
+                    }
                     if !fq.is_empty() {
                         self.file.imports.push(fq);
                     }
-                    // tolerate trailing tokens (e.g. `as alias`) to end of line
+                    // tolerate any remaining trailing tokens to end of line
                     while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
                         self.bump();
                     }

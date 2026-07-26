@@ -29,6 +29,36 @@ fn classpath_varargs_static_qualified_and_via_import() {
 }
 
 #[test]
+fn aliased_java_static_method_import_resolves() {
+    // `import a.b.member as alias` — the alias must resolve to the imported member. The parser
+    // previously discarded the `as alias`, leaving every use of the alias unresolved.
+    const SRC: &str = "import java.lang.Integer.parseInt as pi\n\
+        fun box(): String {\n\
+        \x20 val n = pi(\"42\") + pi(\"8\")\n\
+        \x20 return if (n == 50) \"OK\" else \"FAIL:$n\"\n\
+        }\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(SRC, "Main").expect("aliased static import"),
+        "OK"
+    );
+}
+
+#[test]
+fn import_alias_is_shadowed_by_a_local_of_the_same_name() {
+    // A local binding named like the alias shadows it (Kotlin). The alias rewrite must leave the name
+    // alone so the local — not the imported member — is read.
+    const SRC: &str = "import java.lang.Integer.parseInt as v\n\
+        fun box(): String {\n\
+        \x20 val v = 7\n\
+        \x20 return if (v == 7) \"OK\" else \"FAIL:$v\"\n\
+        }\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(SRC, "Main").expect("alias shadowed by local"),
+        "OK"
+    );
+}
+
+#[test]
 fn classpath_object_jvmfield_and_java_static_field_read() {
     const SRC: &str = "fun box(): String {\n\
         \x20 val cs = Charsets.UTF_8\n\
