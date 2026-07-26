@@ -1251,49 +1251,48 @@ pub(crate) fn signature_formals(sig: &str) -> Vec<String> {
     parse_formals(sig).0
 }
 
-fn parse_formals(s: &str) -> (Vec<String>, &str) {
+fn parse_formals(s: &str) -> (Vec<String>, Vec<Vec<Ty>>, &str) {
     let Some(rest) = s.strip_prefix('<') else {
-        return (Vec::new(), s);
+        return (Vec::new(), Vec::new(), s);
     };
-    let mut depth = 1;
-    let bytes = rest.as_bytes();
-    let mut i = 0;
-    let mut at_name_start = true;
+    let original = s;
+    let mut rest = rest;
     let mut formals = Vec::new();
-    while i < bytes.len() && depth > 0 {
-        match bytes[i] {
-            b'<' => {
-                depth += 1;
-                at_name_start = false;
-            }
-            b'>' => {
-                depth -= 1;
-            }
-            b':' => {
-                at_name_start = false;
-            }
-            _ if depth == 1 && at_name_start => {
-                let start = i;
-                while i < bytes.len() && bytes[i] != b':' {
-                    i += 1;
-                }
-                formals.push(rest[start..i].to_string());
-                at_name_start = false;
-                continue;
-            }
-            b';' if depth == 1 => {
-                at_name_start = true;
-            }
-            _ => {}
+    let mut formal_bounds = Vec::new();
+    while !rest.starts_with('>') {
+        let Some(colon) = rest.find(':') else {
+            return (Vec::new(), Vec::new(), original);
+        };
+        if colon == 0 {
+            return (Vec::new(), Vec::new(), original);
         }
-        i += 1;
+        formals.push(rest[..colon].to_string());
+        rest = &rest[colon + 1..];
+        let mut bounds = Vec::new();
+        // An empty class bound is encoded by a second `:`; each following `:` introduces an
+        // interface bound. `parse_gsig` consumes exactly one field-type signature.
+        if !rest.starts_with(':') {
+            let Some((bound, tail)) = parse_gsig(rest) else {
+                return (Vec::new(), Vec::new(), original);
+            };
+            bounds.push(bound);
+            rest = tail;
+        }
+        while let Some(tail) = rest.strip_prefix(':') {
+            let Some((bound, after)) = parse_gsig(tail) else {
+                return (Vec::new(), Vec::new(), original);
+            };
+            bounds.push(bound);
+            rest = after;
+        }
+        formal_bounds.push(bounds);
     }
-    (formals, &rest[i..])
+    (formals, formal_bounds, &rest[1..])
 }
 
 /// Parse a JVM method generic signature `<formals>(params)ret`.
 fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
-    let (formals, s) = parse_formals(sig);
+    let (formals, formal_bounds, s) = parse_formals(sig);
     let inner = s.strip_prefix('(')?;
     let close = inner.find(')')?;
     let mut params_s = &inner[..close];
@@ -1308,6 +1307,7 @@ fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
     // method has no receiver parameter and a static none either, so the receiver is not modeled here.
     Some(GenericSig {
         formals,
+        formal_bounds,
         receiver: None,
         params,
         ret,
@@ -1570,7 +1570,7 @@ fn builtin_library_type(
 /// Collection<E>]`). The supertypes carry their own type arguments (in terms of this class's formals),
 /// which is what lets a type argument propagate up the hierarchy (`List<Int>` → `Collection<Int>`).
 fn parse_class_gsig(sig: &str) -> Option<(Vec<String>, Vec<Ty>)> {
-    let (formals, mut s) = parse_formals(sig);
+    let (formals, _, mut s) = parse_formals(sig);
     let mut supers = Vec::new();
     while !s.is_empty() {
         let (g, rest) = parse_gsig(s)?;
@@ -3062,7 +3062,7 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
 
 #[cfg(test)]
 mod tests {
-    use super::{desc_to_ty, parse_method_desc};
+    use super::{desc_to_ty, parse_method_desc, parse_method_gsig};
     use crate::libraries::SemanticPlatform;
     use crate::types::type_name;
     use crate::types::Ty;
@@ -3128,6 +3128,23 @@ mod tests {
                 "accepted malformed descriptor {invalid}"
             );
         }
+    }
+
+    #[test]
+    fn method_generic_signature_retains_interformal_bounds() {
+        let signature = parse_method_gsig(
+            "<T:Ljava/lang/Object;R:Ljava/lang/Object;C::Ljava/util/Collection<-TR;>;>\
+             ([TT;TC;Lkotlin/jvm/functions/Function1<-TT;+TR;>;)TC;",
+        )
+        .expect("generic signature");
+        assert_eq!(signature.formals, ["T", "R", "C"]);
+        assert_eq!(
+            signature.formal_bounds[2],
+            [Ty::obj_args(
+                "java/util/Collection",
+                &[Ty::ty_param("R", Ty::obj("kotlin/Any"))],
+            )]
+        );
     }
 
     #[test]

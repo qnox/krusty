@@ -99,6 +99,13 @@ impl Signature {
             self.param_defaults.clone(),
             self.lambda_param_types.clone(),
             self.lambda_recv.clone(),
+            self.params
+                .iter()
+                .map(|parameter| match parameter {
+                    Ty::Fun(function) => function.context_count,
+                    _ => 0,
+                })
+                .collect(),
             self.required,
             self.vararg,
         )
@@ -4012,6 +4019,11 @@ fn call_sig_without_context(sig: &CallSig, context_count: usize) -> CallSig {
             .get(start..)
             .unwrap_or_default()
             .to_vec(),
+        lambda_context_counts: sig
+            .lambda_context_counts
+            .get(start..)
+            .unwrap_or_default()
+            .to_vec(),
         lambda_materialized: sig
             .lambda_materialized
             .get(start..)
@@ -5590,13 +5602,19 @@ fn definitely_non_null_binding(binding: Ty) -> Ty {
 
 fn source_type_display(ty: &TypeRef) -> String {
     let mut display = if ty.name == "<fun>" {
-        let (receiver, params) = if ty.fun_has_receiver && !ty.fun_params.is_empty() {
+        let context_count = usize::from(ty.fun_context_count).min(ty.fun_params.len());
+        let contexts = ty.fun_params[..context_count]
+            .iter()
+            .map(source_type_display)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (receiver, params) = if ty.fun_has_receiver && ty.fun_params.len() > context_count {
             (
-                Some(source_type_display(&ty.fun_params[0])),
-                &ty.fun_params[1..],
+                Some(source_type_display(&ty.fun_params[context_count])),
+                &ty.fun_params[context_count + 1..],
             )
         } else {
-            (None, ty.fun_params.as_slice())
+            (None, &ty.fun_params[context_count..])
         };
         let params = params
             .iter()
@@ -5609,9 +5627,14 @@ fn source_type_display(ty: &TypeRef) -> String {
             .map(source_type_display)
             .unwrap_or_else(|| "Unit".to_string());
         let suspend = if ty.fun_suspend { "suspend " } else { "" };
+        let context = if contexts.is_empty() {
+            String::new()
+        } else {
+            format!("context({contexts}) ")
+        };
         match receiver {
-            Some(receiver) => format!("{suspend}{receiver}.({params}) -> {ret}"),
-            None => format!("{suspend}({params}) -> {ret}"),
+            Some(receiver) => format!("{suspend}{context}{receiver}.({params}) -> {ret}"),
+            None => format!("{suspend}{context}({params}) -> {ret}"),
         }
     } else {
         let mut name = ty.name.replace('/', ".");
@@ -5799,9 +5822,9 @@ pub(crate) fn typeref_leaf(r: &TypeRef, recurse: &mut dyn FnMut(&TypeRef) -> Ty)
         let params: Vec<Ty> = r.fun_params.iter().map(&mut *recurse).collect();
         let ret = r.arg.as_ref().map(|a| recurse(a)).unwrap_or(Ty::Unit);
         return Some(if r.fun_suspend {
-            Ty::fun_suspend(params, ret)
+            Ty::fun_suspend_context(params, ret, usize::from(r.fun_context_count))
         } else {
-            Ty::fun(params, ret)
+            Ty::fun_context(params, ret, usize::from(r.fun_context_count))
         });
     }
     if let Some(t) = Ty::from_name(&r.name) {
@@ -8520,76 +8543,159 @@ impl<'a> Checker<'a> {
                 .unwrap_or_default(),
         };
         let has_exact = fs.has_top_level_arity(arg_tys.len());
-        let mut shape = crate::symbol_resolver::LambdaCallShape::default();
+        let mut candidate_shapes: [Vec<crate::symbol_resolver::LambdaCallShape>; 2] =
+            [Vec::new(), Vec::new()];
         for o in fs.top_level() {
-            if shape.param_types.is_none() {
-                if let Some(gsig) = o.generic_sig.as_ref() {
-                    if !(has_exact && gsig.params.len() != arg_tys.len()) {
-                        if let Some(map) = crate::symbol_resolver::trailing_default_arg_indices(
-                            gsig.params.len(),
-                            arg_tys,
-                        ) {
-                            let mut binds = std::collections::HashMap::new();
-                            for (ai, at) in arg_tys.iter().enumerate() {
-                                if let (Some(t), Some(ps)) = (at, gsig.params.get(map[ai])) {
-                                    crate::symbol_resolver::unify_ty(*ps, *t, &mut binds);
-                                }
-                            }
-                            let out: Vec<Vec<Ty>> = map
-                                .iter()
-                                .map(|&pi| {
-                                    gsig.params
-                                        .get(pi)
-                                        .map(|ps| {
-                                            crate::symbol_resolver::function_input_types(
-                                                *ps, &binds,
-                                            )
-                                        })
-                                        .unwrap_or_default()
-                                })
-                                .collect();
-                            if out
-                                .iter()
-                                .zip(arg_tys)
-                                .any(|(v, at)| at.is_none() && !v.is_empty())
-                            {
-                                shape.param_types = Some(out);
+            if has_exact && o.callable.params.len() != arg_tys.len() {
+                continue;
+            }
+            let Some(argument_map) = crate::symbol_resolver::trailing_default_arg_indices(
+                o.callable.params.len(),
+                arg_tys,
+            ) else {
+                continue;
+            };
+            let partially_applicable =
+                argument_map
+                    .iter()
+                    .zip(arg_tys)
+                    .all(|(&parameter, actual)| {
+                        actual.is_none_or(|actual| {
+                            o.callable.params.get(parameter).is_some_and(|expected| {
+                                arg_assignable_simple(*expected, actual)
+                                    || crate::assignable::is_assignable(
+                                        &crate::assignable::TyCtx::new(),
+                                        self,
+                                        actual,
+                                        *expected,
+                                    )
+                            })
+                        })
+                    });
+            if !partially_applicable {
+                continue;
+            }
+            let mut shape = crate::symbol_resolver::LambdaCallShape::default();
+            if let Some(gsig) = o.generic_sig.as_ref() {
+                if !(has_exact && gsig.params.len() != arg_tys.len()) {
+                    if let Some(map) = crate::symbol_resolver::trailing_default_arg_indices(
+                        gsig.params.len(),
+                        arg_tys,
+                    ) {
+                        let mut binds = std::collections::HashMap::new();
+                        for (ai, at) in arg_tys.iter().enumerate() {
+                            if let (Some(t), Some(ps)) = (at, gsig.params.get(map[ai])) {
+                                crate::symbol_resolver::unify_ty(*ps, *t, &mut binds);
                             }
                         }
-                    }
-                }
-            }
-            if shape.receivers.is_none() {
-                let recvs = &o.call_sig.lambda_receivers;
-                if !(has_exact && recvs.len() != arg_tys.len()) {
-                    if let Some(map) =
-                        crate::symbol_resolver::trailing_default_arg_indices(recvs.len(), arg_tys)
-                    {
-                        let out: Vec<Option<Ty>> = map
+                        let out: Vec<Vec<Ty>> = map
                             .iter()
-                            .map(|&pi| recvs.get(pi).cloned().flatten())
+                            .map(|&pi| {
+                                gsig.params
+                                    .get(pi)
+                                    .map(|ps| {
+                                        crate::symbol_resolver::function_input_types(*ps, &binds)
+                                    })
+                                    .unwrap_or_default()
+                            })
                             .collect();
-                        if out.iter().any(Option::is_some) {
-                            shape.receivers = Some(out);
+                        if out
+                            .iter()
+                            .zip(arg_tys)
+                            .any(|(parameters, actual)| actual.is_none() && !parameters.is_empty())
+                        {
+                            shape.param_types = Some(out);
                         }
                     }
                 }
             }
-            if shape.materialized.is_none() {
-                let m = &o.call_sig.lambda_materialized;
-                if m.len() == arg_tys.len() && m.iter().any(|b| *b) {
-                    shape.materialized = Some(m.clone());
+            if shape.param_types.is_none() {
+                let out = argument_map
+                    .iter()
+                    .map(|&parameter| {
+                        o.call_sig
+                            .lambda_param_types
+                            .get(parameter)
+                            .cloned()
+                            .unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>();
+                if out
+                    .iter()
+                    .zip(arg_tys)
+                    .any(|(parameters, actual)| actual.is_none() && !parameters.is_empty())
+                {
+                    shape.param_types = Some(out);
                 }
             }
+            // All remaining facts come from THIS candidate, including explicit "no receiver/context".
+            // Combining a source candidate's context count with a classpath candidate's legacy
+            // ExtensionFunctionType marker creates two implicit copies of the same physical parameter.
+            shape.receivers = Some(
+                argument_map
+                    .iter()
+                    .map(|&parameter| {
+                        o.call_sig
+                            .lambda_receivers
+                            .get(parameter)
+                            .copied()
+                            .flatten()
+                    })
+                    .collect(),
+            );
+            shape.context_counts = Some(
+                argument_map
+                    .iter()
+                    .map(|&parameter| {
+                        o.call_sig
+                            .lambda_context_counts
+                            .get(parameter)
+                            .copied()
+                            .unwrap_or_default()
+                    })
+                    .collect(),
+            );
+            shape.materialized = Some(
+                argument_map
+                    .iter()
+                    .map(|&parameter| {
+                        o.call_sig
+                            .lambda_materialized
+                            .get(parameter)
+                            .copied()
+                            .unwrap_or(false)
+                    })
+                    .collect(),
+            );
             if shape.param_types.is_some()
-                && shape.receivers.is_some()
-                && shape.materialized.is_some()
+                || shape
+                    .receivers
+                    .as_ref()
+                    .is_some_and(|items| items.iter().any(Option::is_some))
+                || shape
+                    .context_counts
+                    .as_ref()
+                    .is_some_and(|items| items.iter().any(|count| *count > 0))
             {
-                break;
+                let priority = usize::from(matches!(o.callable.origin, Origin::Module { .. }));
+                if !candidate_shapes[priority].contains(&shape) {
+                    candidate_shapes[priority].push(shape);
+                }
             }
         }
-        (shape.param_types.is_some() || shape.receivers.is_some() || shape.materialized.is_some())
-            .then_some(shape)
+        if !candidate_shapes[1].is_empty() {
+            // Source declarations outrank duplicate classpath encodings. Equally visible source
+            // overloads that imply different shapes need full overload resolution; iteration order
+            // must not target-type them.
+            return match candidate_shapes[1].as_slice() {
+                [shape] => Some(shape.clone()),
+                _ => None,
+            };
+        }
+        // The classpath index can expose irrelevant same-name physical methods alongside the source
+        // declaration represented by Kotlin metadata. Preserve its deterministic provider precedence,
+        // while taking the complete shape from one candidate (never field-wise mixing candidates).
+        candidate_shapes[0].first().cloned()
     }
 
     fn extension_lambda_shape(
@@ -8684,6 +8790,7 @@ impl<'a> Checker<'a> {
                 return Some(crate::symbol_resolver::LambdaCallShape {
                     param_types: Some(param_types),
                     receivers,
+                    context_counts: None,
                     materialized: None,
                 });
             }
@@ -11925,6 +12032,67 @@ impl<'a> Checker<'a> {
         args.iter().map(|&a| self.expr(a)).collect()
     }
 
+    /// Whether an already-typed argument call may be revisited under an outer generic constraint.
+    /// Explicit type arguments are final (`factory<Any>()` must stay `Any`); an unqualified library
+    /// generic call whose result still carries erased arguments is postponable.
+    fn postponable_generic_call(&self, expression: ExprId, actual: Ty) -> bool {
+        let Expr::Call { callee, .. } = self.file.expr(expression) else {
+            return false;
+        };
+        if self
+            .file
+            .call_type_args
+            .get(&expression.0)
+            .is_some_and(|arguments| !arguments.is_empty())
+        {
+            return false;
+        }
+        let Expr::Name(name) = self.file.expr(*callee) else {
+            return false;
+        };
+        !self.lexical_value_declares(name)
+            && !self.module_declares(name)
+            && !actual.type_args().is_empty()
+            && actual
+                .type_args()
+                .iter()
+                .any(|argument| argument.is_erased_top())
+    }
+
+    /// Revisit postponed nested generic calls after an extension's other arguments have established
+    /// constraints between its formals. Kept out of the recursive expression-checking frame: real-world
+    /// source expressions can be deeply nested, so the temporary expectation vector must live only for
+    /// this operation rather than enlarging every recursive frame.
+    fn retarget_postponable_extension_arguments(
+        &mut self,
+        receiver: Ty,
+        name: &str,
+        arguments: &[ExprId],
+        argument_types: &mut [Ty],
+        integer_literals: &[bool],
+        type_arguments: &[Ty],
+    ) {
+        let expectations = self.resolver().extension_argument_expectations(
+            receiver,
+            name,
+            argument_types,
+            integer_literals,
+            type_arguments,
+        );
+        for (index, expected_argument) in expectations.into_iter().enumerate() {
+            let Some(expected_argument) = expected_argument else {
+                continue;
+            };
+            let Some((&argument, actual)) = arguments.get(index).zip(argument_types.get_mut(index))
+            else {
+                continue;
+            };
+            if self.postponable_generic_call(argument, *actual) {
+                *actual = self.expr_expected(argument, expected_argument);
+            }
+        }
+    }
+
     fn lambda_probe_ty(&self, arg: ExprId) -> Option<Ty> {
         match self.file.expr(arg) {
             Expr::Lambda { params, .. } if !params.is_empty() => {
@@ -12108,6 +12276,7 @@ impl<'a> Checker<'a> {
                     .iter()
                     .any(Option::is_some)
                     .then_some(plan.receivers),
+                context_counts: None,
                 materialized: None,
             });
         let shape = member_extension_shape
@@ -15636,6 +15805,20 @@ impl<'a> Checker<'a> {
         value_types: &[Ty],
         label: Option<&str>,
     ) -> Ty {
+        self.check_lambda_with_implicit_receivers_labeled(e, &[], Some(recv), value_types, label)
+    }
+
+    /// Type-check a lambda whose function type carries leading context receivers and, optionally, an
+    /// extension receiver. All of those are physical `FunctionN` parameters but implicit receivers in
+    /// the body; only `value_types` bind source lambda parameters/`it`.
+    fn check_lambda_with_implicit_receivers_labeled(
+        &mut self,
+        e: ExprId,
+        context_types: &[Ty],
+        extension_receiver: Option<Ty>,
+        value_types: &[Ty],
+        label: Option<&str>,
+    ) -> Ty {
         if self.allow_lambda_mutation {
             self.mark_inline_lambda(e);
         }
@@ -15647,15 +15830,32 @@ impl<'a> Checker<'a> {
             } else {
                 vec![]
             };
-            self.mark_receiver_lambda(e, recv);
+            if let Some(receiver) = extension_receiver {
+                self.mark_receiver_lambda(e, receiver);
+            }
             let prev_this = self.this_ty;
-            self.this_ty = Some(recv);
-            let pushed = label.map(|l| self.this_labels.push((l.to_string(), recv, false)));
+            let labels_depth = self.this_labels.len();
+            let mut implicit_types = context_types.to_vec();
+            implicit_types.extend(extension_receiver);
+            if let Some((&current, outer)) = implicit_types.split_last() {
+                for (index, receiver) in outer.iter().enumerate() {
+                    self.this_labels
+                        .push((format!("$context{index}"), *receiver, false));
+                }
+                self.this_ty = Some(current);
+                if let Some(label) = label {
+                    self.this_labels.push((label.to_string(), current, false));
+                }
+            }
             self.push_scope();
-            if let Ty::Obj(internal, _) = recv {
-                if let Some(cs) = self.syms.class_by_type_name(internal) {
-                    for (n, t, is_var) in cs.props.clone() {
-                        self.declare(&n, t, is_var);
+            for receiver in implicit_types.iter().rev() {
+                if let Ty::Obj(internal, _) = receiver {
+                    if let Some(cs) = self.syms.class_by_type_name(*internal) {
+                        for (n, t, is_var) in cs.props.clone() {
+                            if self.lookup(&n).is_none() {
+                                self.declare(&n, t, is_var);
+                            }
+                        }
                     }
                 }
             }
@@ -15667,13 +15867,12 @@ impl<'a> Checker<'a> {
             let bret = self.expr(body);
             self.field_ty = saved_field;
             self.pop_scope();
-            if pushed.is_some() {
-                self.this_labels.pop();
-            }
+            self.this_labels.truncate(labels_depth);
             self.this_ty = prev_this;
-            let mut pts = vec![recv];
+            let mut pts = context_types.to_vec();
+            pts.extend(extension_receiver);
             pts.extend_from_slice(value_types);
-            let ty = Ty::fun(pts, bret);
+            let ty = Ty::fun_context(pts, bret, context_types.len());
             return self.set(e, ty);
         }
         self.expr(e)
@@ -18573,7 +18772,7 @@ impl<'a> Checker<'a> {
                             .collect::<Vec<_>>()
                             .iter()
                             .any(|o| o.flags.inline.can_inline()));
-                let arg_tys: Vec<Ty> = self.with_lambda_mutation(allow_lambda_mutation, |c| {
+                let mut arg_tys: Vec<Ty> = self.with_lambda_mutation(allow_lambda_mutation, |c| {
                     args.iter()
                         .enumerate()
                         .map(|(i, &a)| {
@@ -18904,7 +19103,21 @@ impl<'a> Checker<'a> {
                     self.resolved_call_type_args
                         .insert(call, call_targs.clone());
                 }
-                // Member extensions precede imported and top-level extensions.
+                // Kotlin postpones an unbound nested generic call until the other arguments constrain
+                // the outer callable. From a bound such as `C : Container<R>`, a typed transform can
+                // establish `R`, then target-type an implicit `factory()` destination as its concrete
+                // `C<R>`. This is constraint-driven; no callable or collection name is recognized.
+                self.retarget_postponable_extension_arguments(
+                    rt,
+                    &name,
+                    args,
+                    &mut arg_tys,
+                    &integer_literals,
+                    &call_targs,
+                );
+                // A member extension has an explicit extension receiver (`receiver`/`rt`) and an
+                // implicit dispatch receiver supplied by the enclosing class/object scope. Kotlin
+                // considers it before imported/top-level extensions, after real members of `rt`.
                 if let Some(ret) =
                     self.check_member_extension_function_call(call, rt, &name, args, &arg_tys)
                 {
@@ -19719,6 +19932,9 @@ impl<'a> Checker<'a> {
                 let toplevel_lambda_recvs: Option<Vec<Option<Ty>>> = toplevel_lambda_shape
                     .as_ref()
                     .and_then(|shape| shape.receivers.clone());
+                let toplevel_lambda_context_counts: Option<Vec<usize>> = toplevel_lambda_shape
+                    .as_ref()
+                    .and_then(|shape| shape.context_counts.clone());
                 // Per-param `crossinline`/`noinline`: such a lambda argument is MATERIALIZED (a real
                 // closure, e.g. the `Continuation(ctx){…}` factory's `resumeWith`), so a mutable local it
                 // captures must be `Ref`-boxed — DON'T treat it as an inline splice.
@@ -19989,6 +20205,11 @@ impl<'a> Checker<'a> {
                             .and_then(|r| r.get(i))
                             .copied()
                             .flatten();
+                        let context_count_i = toplevel_lambda_context_counts
+                            .as_ref()
+                            .and_then(|counts| counts.get(i))
+                            .copied()
+                            .unwrap_or_default();
                         if let Some(ref pts) = toplevel_lambda_pts {
                             if matches!(self.file.expr(a), Expr::Lambda { .. })
                                 && i < pts.len()
@@ -20008,11 +20229,17 @@ impl<'a> Checker<'a> {
                                 return self.with_lambda_mutation(
                                     toplevel_inline && !materialized,
                                     |c| {
-                                        if let Some(recv) = recv_i {
-                                            c.check_lambda_with_receiver_labeled(
+                                        let context_count = context_count_i.min(pts[i].len());
+                                        let contexts = &pts[i][..context_count];
+                                        let value_start =
+                                            context_count + usize::from(recv_i.is_some());
+                                        let values = pts[i].get(value_start..).unwrap_or_default();
+                                        if !contexts.is_empty() || recv_i.is_some() {
+                                            c.check_lambda_with_implicit_receivers_labeled(
                                                 a,
-                                                recv,
-                                                &pts[i][1..],
+                                                contexts,
+                                                recv_i,
+                                                values,
                                                 call_fn_name.as_deref(),
                                             )
                                         } else {
@@ -20098,16 +20325,28 @@ impl<'a> Checker<'a> {
                             {
                                 let pt =
                                     sig.lambda_param_types.get(pi).cloned().unwrap_or_default();
-                                // A RECEIVER function-type param (`Recv.(A) -> R`): bind `pt[0]` as the
-                                // lambda's implicit `this`; the rest are its value params.
+                                let expected_function = match sig.params[pi] {
+                                    Ty::Fun(function) => function,
+                                    _ => unreachable!(),
+                                };
+                                let context_count = expected_function.context_count.min(pt.len());
+                                let context_types = &pt[..context_count];
+                                let has_receiver =
+                                    sig.lambda_recv.get(pi).copied().unwrap_or(false);
+                                let receiver = has_receiver
+                                    .then(|| pt.get(context_count).copied())
+                                    .flatten();
+                                let value_start = context_count + usize::from(receiver.is_some());
+                                let value_types = pt.get(value_start..).unwrap_or_default();
+                                // Context and extension receivers are implicit in the lambda body;
+                                // only the remaining function parameters bind source parameters/`it`.
                                 return self.with_lambda_mutation(sig.is_inline, |c| {
-                                    if sig.lambda_recv.get(pi).copied().unwrap_or(false)
-                                        && !pt.is_empty()
-                                    {
-                                        c.check_lambda_with_receiver_labeled(
+                                    if !context_types.is_empty() || receiver.is_some() {
+                                        c.check_lambda_with_implicit_receivers_labeled(
                                             a,
-                                            pt[0],
-                                            &pt[1..],
+                                            context_types,
+                                            receiver,
+                                            value_types,
                                             call_fn_name.as_deref(),
                                         )
                                     } else {
@@ -20926,17 +21165,26 @@ impl<'a> Checker<'a> {
                         None => (args.to_vec(), arg_tys.clone(), None),
                     };
                     let integer_literals = self.integer_literal_args(&sel_args);
-                    if let Some(c) = self
-                        .resolver()
-                        .resolve_symbol_with_literal_args(
-                            crate::symbol_resolver::SymRecv::TopLevel,
+                    let resolved = match expected {
+                        Some(expected) => self.resolver().resolve_top_level_with_expected(
                             &fname,
                             &arg_tys,
                             &integer_literals,
                             &call_targs,
-                        )
-                        .and_then(crate::symbol_resolver::Symbol::top_level_call)
-                    {
+                            expected,
+                        ),
+                        None => self
+                            .resolver()
+                            .resolve_symbol_with_literal_args(
+                                crate::symbol_resolver::SymRecv::TopLevel,
+                                &fname,
+                                &arg_tys,
+                                &integer_literals,
+                                &call_targs,
+                            )
+                            .and_then(crate::symbol_resolver::Symbol::top_level_call),
+                    };
+                    if let Some(c) = resolved {
                         // Record the resolved callable so the lowerer emits it without re-resolving
                         // (see [`TypeInfo::resolved_top_level`]).
                         self.resolved_calls

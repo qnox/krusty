@@ -411,10 +411,14 @@ pub struct TypeRef {
     /// For function types `(A, B) -> R`: the parameter types. Empty for non-function types.
     /// When non-empty, `name` is `"<fun>"` and `arg` holds the return type.
     pub fun_params: Vec<TypeRef>,
-    /// For a receiver function type `Recv.(A) -> R`: `true`, and `fun_params[0]` is the receiver
-    /// `Recv`. The receiver folds in as the first `FunctionN` parameter (matching Kotlin's lowering),
-    /// but the front end keeps this marker so a lambda passed to such a param binds `fun_params[0]`
-    /// as the implicit `this` receiver (member access, and an arity-short `f()` supplies it).
+    /// Number of leading entries in `fun_params` that are context receivers. They are physical
+    /// `FunctionN` parameters, but a lambda literal binds them as implicit receivers rather than
+    /// explicit parameters (so `context(C) () -> R` accepts `{ memberOfC }`, not `{ c -> ... }`).
+    pub fun_context_count: u16,
+    /// For a receiver function type `Recv.(A) -> R`: `true`, and
+    /// `fun_params[fun_context_count]` is `Recv`. The receiver folds into the physical `FunctionN`
+    /// parameters after any context receivers, but this marker makes a lambda bind it as implicit
+    /// `this` rather than as a source value parameter.
     pub fun_has_receiver: bool,
     /// For a `suspend` function type `suspend (A) -> R`: `true`. Lowers to `Function{n+1}` with a
     /// trailing `kotlin/coroutines/Continuation` parameter and an `Object`-erased result (kotlinc's

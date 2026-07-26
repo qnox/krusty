@@ -357,6 +357,8 @@ pub fn intern_tys(ts: &[Ty]) -> &'static [Ty] {
 pub struct FnSig {
     pub params: Vec<Ty>,
     pub ret: Ty,
+    /// Number of leading physical parameters supplied as implicit context receivers to a lambda body.
+    pub context_count: usize,
     /// A `suspend` function type (`suspend (A) -> R`).
     pub suspend: bool,
 }
@@ -751,6 +753,17 @@ impl Ty {
         Ty::Fun(intern_fnsig(FnSig {
             params,
             ret,
+            context_count: 0,
+            suspend: false,
+        }))
+    }
+
+    /// A context function type. Context receivers remain leading physical `FunctionN` parameters.
+    pub fn fun_context(params: Vec<Ty>, ret: Ty, context_count: usize) -> Ty {
+        Ty::Fun(intern_fnsig(FnSig {
+            context_count: context_count.min(params.len()),
+            params,
+            ret,
             suspend: false,
         }))
     }
@@ -758,6 +771,17 @@ impl Ty {
     /// A `suspend` function type `suspend (params) -> ret`.
     pub fn fun_suspend(params: Vec<Ty>, ret: Ty) -> Ty {
         Ty::Fun(intern_fnsig(FnSig {
+            params,
+            ret,
+            context_count: 0,
+            suspend: true,
+        }))
+    }
+
+    /// A suspend context function type.
+    pub fn fun_suspend_context(params: Vec<Ty>, ret: Ty, context_count: usize) -> Ty {
+        Ty::Fun(intern_fnsig(FnSig {
+            context_count: context_count.min(params.len()),
             params,
             ret,
             suspend: true,

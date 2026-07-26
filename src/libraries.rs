@@ -18,6 +18,10 @@ use std::collections::HashMap;
 #[derive(Clone, Debug)]
 pub struct GenericSig {
     pub formals: Vec<String>,
+    /// Upper bounds for each formal, parallel to [`Self::formals`]. An empty entry is an implicit
+    /// `Any?` bound. Bounds retain constraints between formals (`C : MutableCollection<in R>`) so
+    /// call-site inference can target-type postponed arguments without recognizing library names.
+    pub formal_bounds: Vec<Vec<Ty>>,
     /// The dispatch/extension receiver's type (member self-type or extension receiver), if any.
     pub receiver: Option<Ty>,
     pub params: Vec<Ty>,
@@ -443,6 +447,9 @@ pub struct CallSig {
     /// Per logical param: whether it is a receiver function type, even when metadata cannot name a
     /// concrete receiver class because the receiver is a type parameter (`T.() -> R`).
     pub lambda_receiver_params: Vec<bool>,
+    /// Per logical param: number of leading function parameters that are implicit context receivers.
+    /// These remain physical `FunctionN` parameters but do not bind source lambda parameters/`it`.
+    pub lambda_context_counts: Vec<usize>,
     /// Per logical param: whether it is `crossinline`/`noinline` — its lambda argument is MATERIALIZED
     /// (a real `FunctionN`/nested class) rather than inline-spliced, so a mutable local it captures must
     /// be `Ref`-boxed like an ordinary closure. Parallel to the params; all-false for a non-inline fn.
@@ -485,6 +492,7 @@ impl CallSig {
         param_defaults: Vec<bool>,
         lambda_param_types: Vec<Vec<Ty>>,
         lambda_recv: Vec<bool>,
+        lambda_context_counts: Vec<usize>,
         required: usize,
         vararg: bool,
     ) -> Self {
@@ -493,7 +501,13 @@ impl CallSig {
             .enumerate()
             .map(|(i, has_recv)| {
                 if *has_recv {
-                    lambda_param_types.get(i).and_then(|v| v.first()).copied()
+                    lambda_param_types
+                        .get(i)
+                        .and_then(|parameters| {
+                            parameters
+                                .get(lambda_context_counts.get(i).copied().unwrap_or_default())
+                        })
+                        .copied()
                 } else {
                     None
                 }
@@ -505,6 +519,7 @@ impl CallSig {
             lambda_param_types,
             lambda_receivers,
             lambda_receiver_params: lambda_recv,
+            lambda_context_counts,
             required,
             vararg,
             ..Default::default()

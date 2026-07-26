@@ -1264,6 +1264,23 @@ pub fn expect_box_ok_with_stdlib(src: &str, stem: &str) {
     assert_eq!(out, "OK", "{stem}");
 }
 
+/// Assert that a multi-file source set is accepted by the shared frontend with stdlib/JDK symbols.
+#[allow(dead_code)]
+pub fn expect_front_end_ok_files_with_stdlib(sources: &[&str], stem: &str) {
+    let Some(stdlib) = stdlib_jar() else {
+        return;
+    };
+    let Some(jdk) = jdk_modules() else {
+        return;
+    };
+    let diagnostics =
+        front_end_diagnostics_files(sources, std::slice::from_ref(&stdlib), Some(&jdk));
+    assert!(
+        diagnostics.is_empty(),
+        "{stem}: unexpected diagnostics: {diagnostics:?}"
+    );
+}
+
 /// Compile Kotlin `lib_src` with the REAL kotlinc into a fresh classpath dir (tagged by `tag` +
 /// process id), returning the output dir for a `-classpath`. `None` (→ skip the test) when the kotlinc
 /// toolchain / stdlib isn't provisioned. The single shared "build a dependency jar" helper — classpath

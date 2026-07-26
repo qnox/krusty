@@ -7691,17 +7691,17 @@ impl<'a> Lower<'a> {
             return None;
         }
         let arity = sig.params.len();
-        // A RECEIVER lambda passed to a `Recv.(value…) -> R` user parameter: its FIRST `sig.params` entry
-        // is the receiver (the closure method's leading parameter), bound as the implicit `this` so a bare
-        // member/extension call inside dispatches against it. The user's EXPLICIT params are the remaining
-        // (value) parameters. `None` for an ordinary lambda.
+        // Context and extension receivers are leading physical closure parameters, but implicit receivers
+        // in the source lambda. Bind all of them as `this` slots (nearest last) and exclude them from the
+        // source value-parameter arity.
         let lambda_info = lambda_info(self.info, e);
         let recv_ty = lambda_info.receiver;
-        let value_arity = if recv_ty.is_some() {
-            arity.saturating_sub(1)
-        } else {
-            arity
-        };
+        let context_count = sig.context_count.min(arity);
+        let receiver_count =
+            usize::from(recv_ty.is_some()).min(arity.saturating_sub(context_count));
+        let implicit_count = context_count + receiver_count;
+        let has_implicit_receiver = implicit_count > 0;
+        let value_arity = arity.saturating_sub(implicit_count);
         // A `Nothing`-returning lambda whose body is an unconditional NON-LOCAL `return` (`f { return … }`)
         // is handled by the diverging path below: it only ever splices (the impl method is marked
         // inline-only and not emitted), so its `return` becomes the enclosing fn's return, and the splicer
@@ -7731,7 +7731,7 @@ impl<'a> Lower<'a> {
         let deep = true;
         let mut captures: Vec<(String, u32, Ty)> = Vec::new();
         for (name, v, ty) in self.scope.iter().rev() {
-            if recv_ty.is_some() && name == "this" {
+            if has_implicit_receiver && name == "this" {
                 continue;
             }
             let used = if deep {
@@ -7758,10 +7758,10 @@ impl<'a> Lower<'a> {
         // a method of the enclosing class) resolves in both. Previously the `deep`/InlineSplice gate cleared
         // `cur_class` for a spliced lambda, so such a call bailed ("this construct is not yet supported").
         let captures_this = self.cur_class.is_some()
-            && recv_ty.is_none()
+            && !has_implicit_receiver
             && self.lambda_uses_enclosing_this(body, &bind_names, deep);
         let captures_outer_this = !captures_this
-            && recv_ty.is_none()
+            && !has_implicit_receiver
             && self.cur_class.is_some()
             && self.lookup("this$0").is_some()
             && self.lambda_uses_outer_this_param(body, &bind_names, deep);
@@ -7773,7 +7773,7 @@ impl<'a> Lower<'a> {
             captures.insert(0, ("this".to_string(), v, tty));
         }
         let recv_lambda_captures_outer = self.cur_class.is_some()
-            && recv_ty.is_some()
+            && has_implicit_receiver
             && self.lambda_uses_enclosing_this(body, &bind_names, deep);
         if recv_lambda_captures_outer
             && self.cur_class.is_some_and(|cc| {
@@ -7803,16 +7803,17 @@ impl<'a> Lower<'a> {
             let v = self.fresh_value();
             self.scope.push((name.clone(), v, *ty));
         }
-        // For a receiver lambda, the FIRST closure parameter is the receiver — bind it as `this` (and the
-        // value parameters are `sig.params[1..]`). `cur_class` is already cleared (the guard above bails
-        // on a lambda inside a class method), so bare member/extension calls route through implicit-`this`.
-        let value_params: &[Ty] = if let Some(rty) = recv_ty {
+        // Context receivers come first, followed by an optional extension receiver. Push them in physical
+        // order so the reverse scope walk observes Kotlin's nearest implicit receiver first.
+        for &context_ty in &sig.params[..context_count] {
             let v = self.fresh_value();
-            self.scope.push(("this".to_string(), v, rty));
-            &sig.params[1..]
-        } else {
-            &sig.params
-        };
+            self.scope.push(("this".to_string(), v, context_ty));
+        }
+        if let (1, Some(receiver_ty)) = (receiver_count, recv_ty) {
+            let v = self.fresh_value();
+            self.scope.push(("this".to_string(), v, receiver_ty));
+        }
+        let value_params = &sig.params[implicit_count..];
         // A lambda parameter is a `FunctionN` generic position, so a reference-underlying value-class
         // parameter (`Result<T>`) arrives BOXED. The value-class pass handles the resulting unbox at a
         // member/extension call (`it.getOrThrow()`) via `IrFile::lambda_own_params_from`; the lowerer stays
@@ -8197,6 +8198,26 @@ impl<'a> Lower<'a> {
         if self.cur_class.is_some() {
             return None;
         }
+        // Scope bindings may intentionally repeat `this` for context and extension receivers. JVM fields,
+        // however, share one namespace and duplicate name+descriptor pairs make the generated class
+        // invalid. Keep source bindings unchanged while giving every repeated storage slot a stable,
+        // index-derived field name; all reads/writes below address fields by index.
+        let param_field_names: Vec<String> = bind_names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                if bind_names
+                    .iter()
+                    .filter(|candidate| *candidate == name)
+                    .count()
+                    > 1
+                {
+                    format!("$param${index}")
+                } else {
+                    name.clone()
+                }
+            })
+            .collect();
         // Captured free variables: enclosing locals/parameters the body reads but the lambda doesn't
         // bind as one of its own parameters.
         let mut captures: Vec<(String, u32, Ty)> = Vec::new();
@@ -8254,7 +8275,7 @@ impl<'a> Lower<'a> {
         // Own parameters become fields after the captures — set by `create(value.., completion)` (NOT
         // the constructor / creation site). `param_field_base` is their first field index.
         let param_field_base = n_cap;
-        for (name, ty) in bind_names.iter().zip(params.iter()) {
+        for (name, ty) in param_field_names.iter().zip(params.iter()) {
             fields.push((name.clone(), ty_to_ir(*ty)));
         }
         // A suspending lambda's state-machine fields go after the captures/params. The coroutine pass
@@ -12474,22 +12495,19 @@ impl<'a> Lower<'a> {
                     body,
                 } = self.afile.expr(arg).clone()
                 {
-                    // A RECEIVER suspend lambda (`suspend R.() -> T`, the coroutine-builder idiom):
-                    // the checker marked the receiver, and the checked type folds it in as
-                    // `params[0]` — bind it as the implicit `this` so a bare member access in the
-                    // body dispatches on the receiver, exactly like a non-suspend receiver lambda.
-                    let bind_names = if lambda_info(self.info, arg).receiver.is_some()
-                        && lparams.len() < params.len()
-                    {
-                        // The receiver occupies params[0]; explicit (or implicit-`it`) names bind
-                        // the remaining VALUE parameters.
-                        let mut v = vec!["this".to_string()];
-                        v.extend(ast::lambda_params_or_implicit(&lparams, params.len() - 1)?);
-                        v
-                    } else {
-                        // Bind names: explicit, or the implicit single `it`, or none (arity 0).
-                        ast::lambda_params_or_implicit(&lparams, params.len())?
-                    };
+                    // Context and extension receivers are leading physical suspend-lambda parameters,
+                    // but implicit `this` receivers in source. Only the remaining value parameters bind
+                    // explicit names or `it`.
+                    let context_count = s.context_count.min(params.len());
+                    let receiver_count =
+                        usize::from(lambda_info(self.info, arg).receiver.is_some())
+                            .min(params.len().saturating_sub(context_count));
+                    let implicit_count = context_count + receiver_count;
+                    let mut bind_names = vec!["this".to_string(); implicit_count];
+                    bind_names.extend(ast::lambda_params_or_implicit(
+                        &lparams,
+                        params.len().saturating_sub(implicit_count),
+                    )?);
                     // Parameter `Ty`s come from the checked lambda type; absent metadata falls back to `Any`.
                     let ty_params: Vec<Ty> = self
                         .info
@@ -12989,18 +13007,37 @@ impl<'a> Lower<'a> {
         None
     }
 
-    fn lower_outer_implicit_member_read(&mut self, name: &str, e: AstExprId) -> Option<u32> {
-        for (value, ty) in self.implicit_receivers().into_iter().skip(1) {
+    /// Lower a bare member read against the ordered implicit-receiver stack. The checker searches the
+    /// nearest receiver first; lowering must preserve that order when context and extension receivers
+    /// expose the same property name.
+    fn lower_implicit_member_read(&mut self, name: &str, e: AstExprId) -> Option<u32> {
+        // A checker-selected flow-narrowed receiver needs the dedicated fallback below to insert its
+        // `checkcast`; resolving the getter here against the narrowed owner while loading the declared
+        // receiver would produce unverifiable bytecode.
+        if self.info.narrowed_this_member.contains_key(&e) {
+            return None;
+        }
+        let receivers = self.implicit_receivers();
+        // With only the ordinary dispatch receiver, retain the dedicated fallback's same-class direct
+        // field access (matching kotlinc bytecode and avoiding a recursive getter call). This helper is
+        // needed to order competing implicit receivers.
+        if receivers.len() <= 1 {
+            return None;
+        }
+        for (value, ty) in receivers {
             let recv = self.emit_get_value(value);
             if let Some(internal) = ty.obj_internal() {
-                if let Some((class, index, field_ty)) = self.resolve_field_name(internal, name) {
-                    let read = self.emit_get_field(recv, class, index);
-                    return Some(self.coerce_generic_read(read, e, field_ty));
-                }
                 if let Some((class, index, _, _)) =
                     self.resolve_method_name(internal, &property_getter_name(name))
                 {
                     return Some(self.emit_method_call(class, index, recv, vec![]));
+                }
+                // A source property's backing field is private. An outer implicit receiver (including
+                // a context receiver) is accessed from the lambda/caller class, so prefer its public
+                // getter and use a direct field only when no accessor exists.
+                if let Some((class, index, field_ty)) = self.resolve_field_name(internal, name) {
+                    let read = self.emit_get_field(recv, class, index);
+                    return Some(self.coerce_generic_read(read, e, field_ty));
                 }
             }
             if let Some(read) = self.lower_member_read_on(recv, ty, name, e) {
@@ -16817,8 +16854,19 @@ impl<'a> Lower<'a> {
                     },
                 ) = (splice, arg_expr)
                 {
-                    // A single-parameter lambda may name its parameter implicitly as `it`.
-                    let params = ast::lambda_params_or_implicit(&params, fnsig.params.len())?;
+                    // Context and extension receivers are physical FunctionN parameters but bind as
+                    // implicit `this` receivers in the lambda body. Only the remaining value parameters
+                    // may be named explicitly (or implicitly as `it`).
+                    let context_count = fnsig.context_count.min(fnsig.params.len());
+                    let receiver_count = usize::from(f.params[i].ty.fun_has_receiver)
+                        .min(fnsig.params.len().saturating_sub(context_count));
+                    let value_arity = fnsig
+                        .params
+                        .len()
+                        .saturating_sub(context_count + receiver_count);
+                    let value_params = ast::lambda_params_or_implicit(&params, value_arity)?;
+                    let mut params = vec!["this".to_string(); context_count + receiver_count];
+                    params.extend(value_params);
                     // A bare `return` (non-local) or a `return@other` in the lambda body isn't modeled —
                     // bail. A `return@<thisInlineFn>` IS modeled (a local return from the spliced lambda,
                     // handled by the `inline_lambda_ret` frame set up at the invoke site), so it's allowed.
@@ -18446,7 +18494,7 @@ impl<'a> Lower<'a> {
                     self.ir.external_static_instance(&owner, &cty, field)
                 } else if let Some(read) = self.lower_member_extension_receiver_read(&n, e) {
                     read
-                } else if let Some(read) = self.lower_outer_implicit_member_read(&n, e) {
+                } else if let Some(read) = self.lower_implicit_member_read(&n, e) {
                     read
                 } else {
                     // Unqualified member of the enclosing class: a backing field (`this.<field>`), or a

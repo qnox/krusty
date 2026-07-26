@@ -156,20 +156,38 @@ fn kotlin_canonical_ty(internal: &str) -> Option<crate::types::Ty> {
     })
 }
 
-/// Parse a `TypeParameter` message → `(id, name string-id)`. Proto: `id`=1, `name`=2 (string-table id).
-fn parse_type_param(body: &[u8]) -> Option<(u64, u64)> {
+/// One `TypeParameter`: id/name plus inline upper-bound `Type` messages. `upper_bound_id` entries point
+/// into a containing type table and are intentionally omitted until that table is modeled; ordinary
+/// function bounds, including constraints between sibling formals, are emitted inline.
+struct ParsedTypeParam {
+    id: u64,
+    name_id: u64,
+    upper_bound_bodies: Vec<Vec<u8>>,
+}
+
+/// Parse a `TypeParameter` message. Proto: `id`=1, `name`=2, repeated `upper_bound`=5.
+fn parse_type_param(body: &[u8]) -> Option<ParsedTypeParam> {
     let mut pb = Pb { b: body, i: 0 };
     let mut id = None;
     let mut name = None;
+    let mut upper_bound_bodies = Vec::new();
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
             (1, 0) => id = Some(pb.varint()?),
             (2, 0) => name = Some(pb.varint()?),
+            (5, 2) => {
+                let n = pb.varint()? as usize;
+                upper_bound_bodies.push(pb.bytes(n)?.to_vec());
+            }
             (_, w) => pb.skip(w)?,
         }
     }
-    Some((id?, name?))
+    Some(ParsedTypeParam {
+        id: id?,
+        name_id: name?,
+        upper_bound_bodies,
+    })
 }
 
 /// Decode the `@Metadata` `d1` string array to raw protobuf bytes. Modern metadata (since Kotlin 1.4)
@@ -623,7 +641,7 @@ struct ParsedFunction {
     value_params: Vec<ParsedValueParam>,
     /// The function's own `type_parameter` table (field 4): `(id, name string-id)` — for resolving a
     /// `Type.type_parameter` reference in a parameter/return type to its name.
-    type_params: Vec<(u64, u64)>,
+    type_params: Vec<ParsedTypeParam>,
     /// Raw `Function.return_type` (field 3) `Type` body, for the metadata generic signature.
     return_body: Option<Vec<u8>>,
     /// Raw `Function.receiver_type` (field 5) `Type` body (extensions only), for the metadata gsig.
@@ -652,7 +670,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
     let mut has_receiver = false;
     let mut ret_nullable = false;
     let mut value_params: Vec<ParsedValueParam> = Vec::new();
-    let mut type_params: Vec<(u64, u64)> = Vec::new();
+    let mut type_params: Vec<ParsedTypeParam> = Vec::new();
     let mut return_body: Option<Vec<u8>> = None;
     let mut receiver_body: Option<Vec<u8>> = None;
     let mut annotation_bodies: Vec<Vec<u8>> = Vec::new();
@@ -860,11 +878,22 @@ fn build_generic_sig(
     let class_tparams = class_receiver.map(|(_, tps)| tps).unwrap_or(&[]);
     let mut tparams: HashMap<u64, String> = class_tparams.iter().cloned().collect();
     let mut formals: Vec<String> = class_tparams.iter().map(|(_, n)| n.clone()).collect();
-    for (id, name_id) in &pf.type_params {
-        if let Some(name) = resolve_string(records, d2, *name_id as usize) {
-            tparams.insert(*id, name.clone());
+    let mut function_parameters = Vec::new();
+    for parameter in &pf.type_params {
+        if let Some(name) = resolve_string(records, d2, parameter.name_id as usize) {
+            tparams.insert(parameter.id, name.clone());
             formals.push(name);
+            function_parameters.push(parameter);
         }
+    }
+    let mut formal_bounds = vec![Vec::new(); class_tparams.len()];
+    for parameter in function_parameters {
+        let bounds = parameter
+            .upper_bound_bodies
+            .iter()
+            .filter_map(|body| parse_type_gsig(body, records, d2, &tparams))
+            .collect();
+        formal_bounds.push(bounds);
     }
     let receiver = if let Some(rb) = &pf.receiver_body {
         // An EXTENSION: its `receiver_type` is the receiver gsig node (`T`, `Ch`, `List<T>`, …).
@@ -904,6 +933,7 @@ fn build_generic_sig(
         .unwrap_or_else(|| Ty::obj("kotlin/Any"));
     Some(GenericSig {
         formals,
+        formal_bounds,
         receiver,
         params,
         ret,
