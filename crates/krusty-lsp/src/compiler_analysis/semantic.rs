@@ -7,7 +7,7 @@ use std::{
 
 use krusty::ast::{
     BinOp, ClassDecl, ClassKind, Decl, Expr, ExprId, File, FunBody, FunDecl, Param, PropDecl,
-    PropParam, Stmt, StmtId, TypeRef,
+    PropParam, Stmt, StmtId, TypeRef, UnOp,
 };
 use krusty::diag::{DiagSink, Span};
 use krusty::frontend::{
@@ -130,6 +130,7 @@ struct SemanticClassifier<'a> {
     lambda_hover_types: HashMap<ExprId, Vec<String>>,
     token_by_span: HashMap<(u32, u32), usize>,
     statement_scopes: HashMap<(u32, u32), Span>,
+    statement_inc_dec_spans: HashSet<(u32, u32)>,
     callees: HashMap<ExprId, ExprId>,
     highlight_symbols: &'a HighlightSymbols,
     definition_symbols: &'a DefinitionSymbols,
@@ -427,6 +428,35 @@ impl<'a> SemanticClassifier<'a> {
                 ((statement.lo, statement.hi), scope)
             })
             .collect();
+        let statement_inc_dec_spans = file
+            .stmt_arena
+            .iter()
+            .enumerate()
+            .filter_map(|(index, statement)| {
+                let owns_inc_dec = match statement {
+                    Stmt::IncDec { .. } => true,
+                    Stmt::AssignMember { value, .. } | Stmt::AssignIndex { value, .. } => {
+                        matches!(
+                            file.expr(*value),
+                            Expr::Call { callee, args }
+                                if args.is_empty()
+                                    && matches!(
+                                        file.expr(*callee),
+                                        Expr::Member { name, .. }
+                                            if matches!(name.as_str(), "inc" | "dec")
+                                    )
+                        )
+                    }
+                    _ => false,
+                };
+                if owns_inc_dec {
+                    let span = file.stmt_spans[index];
+                    Some((span.lo, span.hi))
+                } else {
+                    None
+                }
+            })
+            .collect();
         let callees = file
             .expr_arena
             .iter()
@@ -459,6 +489,7 @@ impl<'a> SemanticClassifier<'a> {
             lambda_hover_types: HashMap::new(),
             token_by_span,
             statement_scopes,
+            statement_inc_dec_spans,
             callees,
             highlight_symbols,
             definition_symbols,
@@ -1176,6 +1207,7 @@ impl<'a> SemanticClassifier<'a> {
                 let modifiers =
                     self.value_modifiers(name, span.lo) | HighlightModifiers::MODIFICATION;
                 self.mark_named_in(span, name, HighlightKind::Variable, modifiers, false);
+                self.mark_statement_inc_dec_operator(statement_id, span, statement);
             }
             Stmt::AssignMember { name, value, .. } => {
                 self.mark_named_in(
@@ -1283,13 +1315,29 @@ impl<'a> SemanticClassifier<'a> {
     }
 
     fn mark_compound_assignment_operator(&mut self, statement: StmtId, value: ExprId) {
-        let Expr::Binary { op, lhs, rhs } = self.file.expr(value) else {
-            return;
-        };
-        let expression_span = self.file.expr_spans[value.0 as usize];
-        let lhs_span = self.file.expr_spans[lhs.0 as usize];
-        if expression_span.lo == lhs_span.lo && expression_span.hi == lhs_span.hi {
-            self.mark_binary_operator(value, *op, *lhs, *rhs, Some(statement));
+        match self.file.expr(value) {
+            Expr::Binary { op, lhs, rhs } => {
+                let expression_span = self.file.expr_spans[value.0 as usize];
+                let lhs_span = self.file.expr_spans[lhs.0 as usize];
+                if expression_span.lo == lhs_span.lo && expression_span.hi == lhs_span.hi {
+                    self.mark_binary_operator(value, *op, *lhs, *rhs, Some(statement));
+                }
+            }
+            Expr::Call { callee, args } if args.is_empty() => {
+                // Kotlin LSP omits the operator token for index-storage increments.
+                if !matches!(self.file.stmt(statement), Stmt::AssignMember { .. }) {
+                    return;
+                }
+                let Expr::Member { name, .. } = self.file.expr(*callee) else {
+                    return;
+                };
+                if !matches!(name.as_str(), "inc" | "dec") {
+                    return;
+                }
+                let span = self.file.expr_spans[value.0 as usize];
+                self.mark_operator_in(span.lo, span.hi, self.call_operator_modifiers(value));
+            }
+            _ => {}
         }
     }
 
@@ -1339,7 +1387,9 @@ impl<'a> SemanticClassifier<'a> {
             modifiers = match target {
                 CompoundAssignmentTarget::Member { .. } => 0,
                 CompoundAssignmentTarget::SourceExtension { .. } => HighlightModifiers::STATIC,
-                CompoundAssignmentTarget::LibraryExtension => HighlightModifiers::DEFAULT_LIBRARY,
+                CompoundAssignmentTarget::LibraryExtension(_) => {
+                    HighlightModifiers::DEFAULT_LIBRARY
+                }
             };
         } else if let Some(name) = op.arith_operator_name() {
             if self
@@ -1364,6 +1414,123 @@ impl<'a> SemanticClassifier<'a> {
             }
         }
         self.mark_index(index, HighlightKind::Operator, modifiers);
+    }
+
+    fn mark_statement_inc_dec_operator(
+        &mut self,
+        statement_id: StmtId,
+        span: Span,
+        statement: &Stmt,
+    ) {
+        let Stmt::IncDec { dec, .. } = statement else {
+            return;
+        };
+        let name = if *dec { "dec" } else { "inc" };
+        let modifiers = self.statement_operator_modifiers(statement_id, name);
+        self.mark_operator_in(span.lo, span.hi, modifiers);
+    }
+
+    fn mark_unary_operator(&mut self, expression: ExprId, op: UnOp, operand: ExprId) {
+        let name = op.operator_name();
+        let span = self.file.expr_spans[expression.0 as usize];
+        let operand_span = self.file.expr_spans[operand.0 as usize];
+        self.mark_operator_in(
+            span.lo,
+            operand_span.lo,
+            self.expression_operator_modifiers(expression, name),
+        );
+    }
+
+    fn mark_expression_inc_dec_operator(
+        &mut self,
+        expression: ExprId,
+        target: ExprId,
+        dec: bool,
+        prefix: bool,
+    ) {
+        let name = if dec { "dec" } else { "inc" };
+        let span = self.file.expr_spans[expression.0 as usize];
+        // The statement owns normalized statement-position increments.
+        if self.statement_inc_dec_spans.contains(&(span.lo, span.hi)) {
+            return;
+        }
+        let target_span = self.file.expr_spans[target.0 as usize];
+        let (lo, hi) = if prefix {
+            (span.lo, target_span.lo)
+        } else {
+            (target_span.hi, span.hi)
+        };
+        self.mark_operator_in(lo, hi, self.expression_operator_modifiers(expression, name));
+    }
+
+    fn mark_operator_in(&mut self, lo: u32, hi: u32, modifiers: u16) {
+        if let Some(index) = self.tokens.iter().position(|token| {
+            token.kind == FrontendNameTokenKind::Operator
+                && token.span.lo >= lo
+                && token.span.hi <= hi
+        }) {
+            self.mark_index(index, HighlightKind::Operator, modifiers);
+        }
+    }
+
+    fn expression_operator_modifiers(&self, expression: ExprId, name: &str) -> u16 {
+        let Some(types) = self.type_info else {
+            return HighlightModifiers::DEFAULT_LIBRARY;
+        };
+        if types.resolved_operator_call(expression, name).is_none() {
+            return HighlightModifiers::DEFAULT_LIBRARY;
+        }
+        let mut modifiers = 0;
+        if types.resolved_operator_call_is_extension(expression, name) {
+            modifiers |= HighlightModifiers::STATIC;
+        }
+        if types
+            .resolved_operator_call_owner(expression, name)
+            .is_some_and(|owner| default_library_member_owner(self.symbols, owner))
+        {
+            modifiers |= HighlightModifiers::DEFAULT_LIBRARY;
+        }
+        modifiers
+    }
+
+    fn statement_operator_modifiers(&self, statement: StmtId, name: &str) -> u16 {
+        let Some(types) = self.type_info else {
+            return HighlightModifiers::DEFAULT_LIBRARY;
+        };
+        if types.resolved_stmt_operator_call(statement, name).is_none() {
+            return HighlightModifiers::DEFAULT_LIBRARY;
+        }
+        let mut modifiers = 0;
+        if types.resolved_stmt_operator_call_is_extension(statement, name) {
+            modifiers |= HighlightModifiers::STATIC;
+        }
+        if types
+            .resolved_stmt_operator_call_owner(statement, name)
+            .is_some_and(|owner| default_library_member_owner(self.symbols, owner))
+        {
+            modifiers |= HighlightModifiers::DEFAULT_LIBRARY;
+        }
+        modifiers
+    }
+
+    fn call_operator_modifiers(&self, call: ExprId) -> u16 {
+        let Some(types) = self.type_info else {
+            return HighlightModifiers::DEFAULT_LIBRARY;
+        };
+        let mut modifiers = 0;
+        if types.resolved_call_is_extension(call) {
+            modifiers |= HighlightModifiers::STATIC;
+        }
+        if types
+            .resolved_call_owner(call)
+            .is_some_and(|owner| default_library_member_owner(self.symbols, owner))
+        {
+            modifiers |= HighlightModifiers::DEFAULT_LIBRARY;
+        }
+        if !types.resolved_call_is_member(call) && !types.resolved_call_is_extension(call) {
+            modifiers |= HighlightModifiers::DEFAULT_LIBRARY;
+        }
+        modifiers
     }
 
     fn mark_lambda(&mut self, id: ExprId, params: &[String], body: ExprId) {
@@ -1467,7 +1634,9 @@ impl<'a> SemanticClassifier<'a> {
                     }
                 }
                 if name == "this" {
-                    if self.has_expression_label_before(span) {
+                    if self.has_expression_label_before(span)
+                        || !self.enclosing_classes(span.lo).is_empty()
+                    {
                         self.mark_exact(span, HighlightKind::Class, 0);
                     }
                     return;
@@ -1477,7 +1646,7 @@ impl<'a> SemanticClassifier<'a> {
                 }
                 let (kind, modifiers) = if let Some(&call) = self.callees.get(&id) {
                     if self.is_constructor_call(call, name) {
-                        self.type_token(name, span.lo)
+                        (HighlightKind::Method, 0)
                     } else {
                         let scoped = self.binding_at_kind(name, span.lo, true);
                         (
@@ -1547,6 +1716,12 @@ impl<'a> SemanticClassifier<'a> {
                     self.mark_binary_operator(id, *op, *lhs, *rhs, None);
                 }
             }
+            Expr::Unary { op, operand } => self.mark_unary_operator(id, *op, *operand),
+            Expr::IncDec {
+                target,
+                dec,
+                prefix,
+            } => self.mark_expression_inc_dec_operator(id, *target, *dec, *prefix),
             Expr::Member { receiver, name } => {
                 let call = self.callees.get(&id).copied();
                 let highlight = self.member_highlight(id, *receiver, name, call);
@@ -1698,17 +1873,7 @@ impl<'a> SemanticClassifier<'a> {
 
     fn contextual_class_owner(&self, name: &str, at: u32) -> Option<String> {
         if !name.contains('.') {
-            let mut enclosing = self
-                .file
-                .decls
-                .iter()
-                .filter_map(|&declaration| match self.file.decl(declaration) {
-                    Decl::Class(class) if class.span.lo <= at && at <= class.span.hi => Some(class),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            enclosing.sort_unstable_by_key(|class| class.span.hi.saturating_sub(class.span.lo));
-            for class in enclosing {
+            for class in self.enclosing_classes(at) {
                 let nested = format!("{}.{}", class.name, name);
                 if let Some(owner) = self.definition_symbols.class_owner(self.file, &nested) {
                     return Some(owner);
@@ -1716,6 +1881,20 @@ impl<'a> SemanticClassifier<'a> {
             }
         }
         self.definition_symbols.class_owner(self.file, name)
+    }
+
+    fn enclosing_classes(&self, at: u32) -> Vec<&ClassDecl> {
+        let mut classes = self
+            .file
+            .decls
+            .iter()
+            .filter_map(|&declaration| match self.file.decl(declaration) {
+                Decl::Class(class) if class.span.lo <= at && at <= class.span.hi => Some(class),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        classes.sort_unstable_by_key(|class| class.span.hi.saturating_sub(class.span.lo));
+        classes
     }
 
     fn name_definition(&self, name: &str, at: u32, expression: ExprId) -> Option<DefinitionTarget> {

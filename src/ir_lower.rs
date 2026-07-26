@@ -1683,11 +1683,10 @@ pub fn lower_file_at_reporting(
         }
     }
 
-    // Pass 1b: register top-level functions and extension functions. An `inline fun` is not emitted
-    // as a standalone method — it is expanded at each call site (pass 2 skips it too).
+    // Pass 1b: register callable top-level and extension functions.
     for &d in &file.decls {
         if let Decl::Fun(f) = file.decl(d) {
-            if f.is_inline {
+            if f.is_inline && !f.has_callable_inline_extension_body() {
                 continue;
             }
             if let Some(recv_ref) = &f.receiver {
@@ -1980,7 +1979,7 @@ pub fn lower_file_at_reporting(
     // Pass 2: lower bodies.
     for &d in &file.decls {
         match file.decl(d) {
-            Decl::Fun(f) if f.is_inline => {} // inline functions are expanded at call sites, not emitted
+            Decl::Fun(f) if f.is_inline && !f.has_callable_inline_extension_body() => {}
             Decl::Fun(f) => {
                 lo.set_bail("deep:fun");
                 lo.scope.clear();
@@ -4818,6 +4817,12 @@ struct RecordedImplicitPropertyWrite {
     classpath_setter: Option<crate::libraries::LibraryCallable>,
 }
 
+#[derive(Clone, Copy)]
+enum IncDecSite {
+    Statement(ast::StmtId),
+    Expression(AstExprId),
+}
+
 pub(crate) struct Lower<'a> {
     afile: &'a ast::File,
     file_index: u32,
@@ -5487,56 +5492,10 @@ impl<'a> Lower<'a> {
         })
     }
 
-    /// Build a call to a user `inc`/`dec` MEMBER operator on a variable (`x.inc()`), given the
-    /// variable's IR slot and type — used to desugar an overloaded `x++`/`x--` to `x = x.inc()`.
-    /// `None` when the type has no such member operator (numeric, or an extension operator).
-    fn lower_member_inc_dec(&mut self, var_slot: u32, ty: Ty, dec: bool) -> Option<ExprId> {
-        if ty.is_numeric_or_char() {
-            return None;
-        }
-        // A value class's `inc`/`dec` is realized by the value_classes pass over its unboxed form —
-        // a plain member call here would VerifyError. Bail (the file skips) — value-class logic stays
-        // in value_classes.rs (rule 4).
-        if self.value_class_underlying(ty).is_some() {
-            return None;
-        }
-        let op = if dec { "dec" } else { "inc" };
-        // Member operator on the (non-null) receiver type.
-        if let Some(internal) = ty.obj_internal().map(|s| s.to_string()) {
-            if let Some((class, index, _, _)) = self.resolve_method(&internal, op) {
-                let recv = self.emit_get_value(var_slot);
-                return Some(self.emit_method_call(class, index, recv, vec![]));
-            }
-        }
-        // Top-level extension operator (`operator fun T?.inc()`) — a reference receiver, or a
-        // nullable PRIMITIVE (`Int?.inc`, keyed under its boxed wrapper, where the variable slot
-        // already holds the boxed form).
-        if ty.erased_recv().is_reference() {
-            if let Some(fid) = self.unique_ext_fun_id_by_arity(ty, op, 0) {
-                let recv = self.emit_get_value(var_slot);
-                let call = self.emit_local_call(fid, vec![recv]);
-                // The extension may return the NON-null form (`operator fun Int?.inc(): Int`) while
-                // the variable keeps the nullable (boxed) representation — box the result back.
-                let ret = self.ir.functions[fid as usize].ret;
-                let slot = ty_to_ir(ty);
-                if ret != slot {
-                    return Some(self.emit_type_op(IrTypeOp::ImplicitCoercion, call, slot));
-                }
-                return Some(call);
-            }
-        }
-        None
-    }
-
-    /// `name++`/`name--` on a TOP-LEVEL `var`: read (computed `getX()` / `getstatic` / another
-    /// file's facade getter), add ±1 (kotlinc ADDS a −1 constant for a decrement, never subtracts),
-    /// write back (computed `setX(v)` / `putstatic` / facade setter). kotlinc's shapes: a POSTFIX
-    /// spills the original value to a temp (the expression value when `as_value`); a PREFIX stores
-    /// and then RE-READS (the statement position discards that re-read with a `pop` — kotlinc emits
-    /// the dead read too). Built-in numeric scalars only — a user `inc`/`dec` operator type bails
-    /// (the file skips).
+    /// Lower an increment or decrement of a top-level variable.
     fn lower_toplevel_incdec(
         &mut self,
+        site: IncDecSite,
         name: &str,
         dec: bool,
         prefix: bool,
@@ -5570,7 +5529,6 @@ impl<'a> Lower<'a> {
             (None, None, Some((_, gty))) => gty,
             (None, None, None) => return None,
         };
-        let step = self.incdec_step_const(ty, dec)?;
         let read = |me: &mut Self| {
             if let Some((gfid, _)) = computed_get {
                 me.emit_local_call(gfid, vec![])
@@ -5599,7 +5557,7 @@ impl<'a> Lower<'a> {
         };
         let cur = read(self);
         if prefix {
-            let nv = self.scalar_update_value(cur, ty, IrBinOp::Add, step);
+            let nv = self.lower_incdec_updated_value(site, cur, ty, dec)?;
             let store = write(self, nv);
             let back = read(self);
             return Some(self.emit_block(vec![store], Some(back)));
@@ -5607,7 +5565,7 @@ impl<'a> Lower<'a> {
         let tmp = self.fresh_value();
         let var = self.emit_variable(tmp, ty_to_ir(ty), Some(cur));
         let old = self.emit_get_value(tmp);
-        let nv = self.scalar_update_value(old, ty, IrBinOp::Add, step);
+        let nv = self.lower_incdec_updated_value(site, old, ty, dec)?;
         let store = write(self, nv);
         let value = as_value.then(|| self.emit_get_value(tmp));
         Some(self.emit_block(vec![var, store], value))
@@ -5786,13 +5744,12 @@ impl<'a> Lower<'a> {
                 vec![],
             )
         };
-        let one = self.scalar_one_const(target.property_ty)?;
-        let operation = if decrement {
-            IrBinOp::Sub
-        } else {
-            IrBinOp::Add
-        };
-        let updated = self.scalar_update_value(current, target.property_ty, operation, one);
+        let updated = self.lower_incdec_updated_value(
+            IncDecSite::Statement(stmt),
+            current,
+            target.property_ty,
+            decrement,
+        )?;
         let receiver = self.emit_get_value(target.receiver_value);
         if let Some(setter) = target.classpath_setter {
             return Some(self.emit_classpath_property_set(receiver, setter, updated));
@@ -5873,6 +5830,42 @@ impl<'a> Lower<'a> {
             self.implicit_coercion(sum, ty)
         } else {
             sum
+        }
+    }
+
+    /// Produce the updated value for a built-in or checked `inc`/`dec` call.
+    fn lower_incdec_updated_value(
+        &mut self,
+        site: IncDecSite,
+        current: u32,
+        ty: Ty,
+        decrement: bool,
+    ) -> Option<u32> {
+        if ty.is_numeric_or_char() {
+            let step = self.incdec_step_const(ty, decrement)?;
+            return Some(self.scalar_update_value(current, ty, IrBinOp::Add, step));
+        }
+        if self.value_class_underlying(ty).is_some() {
+            return None;
+        }
+        let name = if decrement { "dec" } else { "inc" };
+        let (call, ret) = match site {
+            IncDecSite::Statement(statement) => {
+                self.lower_stmt_op_call(statement, current, ty, name, &[])?
+            }
+            IncDecSite::Expression(expression) => {
+                self.lower_op_call(current, ty, name, &[], expression)?
+            }
+        };
+        Some(self.coerce_operator_result_to_storage(call, ret, ty))
+    }
+
+    /// Apply assignment conversion from an operator result to its storage slot.
+    fn coerce_operator_result_to_storage(&mut self, value: u32, result: Ty, storage: Ty) -> u32 {
+        if result == storage {
+            value
+        } else {
+            self.emit_type_op(IrTypeOp::ImplicitCoercion, value, ty_to_ir(storage))
         }
     }
 
@@ -9935,6 +9928,7 @@ impl<'a> Lower<'a> {
         self.info.ty(receiver)
     }
 
+    /// Return an extension only when receiver, name, and arity identify one declaration.
     fn unique_ext_fun_id_by_arity(&self, receiver: Ty, name: &str, arity: usize) -> Option<u32> {
         let mut matches = self
             .syms
@@ -11499,29 +11493,68 @@ impl<'a> Lower<'a> {
                 name: target,
                 params: selected_params,
                 ret: selected_ret,
+                owner,
             } => {
                 if target != name || receiver.erased_recv() != recv_ty.erased_recv() {
                     return None;
                 }
-                let fid = *self.ext_fun_id_by_sig.get(&(
+                if let Some(&fid) = self.ext_fun_id_by_sig.get(&(
                     receiver.erased_recv(),
                     target.to_string(),
                     selected_params.clone(),
-                ))?;
-                let params = self.ir.functions[fid as usize].params.clone();
-                let ret = self.ir.functions[fid as usize].ret;
-                if ret != selected_ret
-                    || params.len() != args.len() + 1
-                    || params.get(1..) != Some(selected_params.as_slice())
-                {
+                )) {
+                    let params = self.ir.functions[fid as usize].params.clone();
+                    let ret = self.ir.functions[fid as usize].ret;
+                    if ret != selected_ret
+                        || params.len() != args.len() + 1
+                        || params.get(1..) != Some(selected_params.as_slice())
+                    {
+                        return None;
+                    }
+                    let mut lowered = vec![recv_v];
+                    for (argument, parameter) in args.iter().zip(&params[1..]) {
+                        lowered.push(self.lower_arg(*argument, parameter)?);
+                    }
+                    let call = self.emit_local_call(fid, lowered);
+                    return Some((call, ret));
+                }
+                let owner = owner?;
+                if selected_params.len() != args.len() {
                     return None;
                 }
-                let mut a = vec![recv_v];
-                for (k, &arg) in args.iter().enumerate() {
-                    a.push(self.lower_arg(arg, &params[k + 1])?);
+                let receiver_value = self.coerce_to_static(recv_v, recv_ty, receiver);
+                let mut lowered = vec![receiver_value];
+                for (argument, parameter) in args.iter().zip(&selected_params) {
+                    lowered.push(self.lower_arg(*argument, &ty_to_ir(*parameter))?);
                 }
-                let call = self.emit_local_call(fid, a);
-                Some((call, ret))
+                let mut physical_params = Vec::with_capacity(selected_params.len() + 1);
+                physical_params.push(receiver);
+                physical_params.extend(selected_params.iter().copied());
+                let descriptor = self
+                    .runtime
+                    .method_descriptor(&physical_params, selected_ret)?;
+                let call =
+                    self.emit_static_call(owner, target, descriptor, InlineKind::None, lowered);
+                Some((call, selected_ret))
+            }
+            ResolvedCall::Extension(callable) => {
+                if callable.name != name || callable.params.len() != args.len() + 1 {
+                    return None;
+                }
+                let selected_ret = callable.ret;
+                let receiver_param = callable.params[0];
+                let receiver =
+                    if self.has_scalar_value_repr(recv_ty) && receiver_param.is_reference() {
+                        self.coerce_to_static(recv_v, recv_ty, receiver_param)
+                    } else {
+                        recv_v
+                    };
+                let mut lowered = vec![receiver];
+                for (argument, parameter) in args.iter().zip(&callable.params[1..]) {
+                    lowered.push(self.lower_arg(*argument, &ty_to_ir(*parameter))?);
+                }
+                let call = self.emit_library_static_call(callable, lowered, false);
+                Some((call, selected_ret))
             }
             _ => None,
         }
@@ -14303,12 +14336,11 @@ impl<'a> Lower<'a> {
                     vec![a],
                 ))
             }
-            CompoundAssignmentTarget::LibraryExtension => {
-                let c = self.info.synthetic_ext(lhs, aname).cloned()?;
+            CompoundAssignmentTarget::LibraryExtension(c) => {
                 if c.params.len() == 2 {
                     let r = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
                     let a = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
-                    return Some(self.emit_library_static_call(c, vec![r, a], false));
+                    return Some(self.emit_library_static_call(*c, vec![r, a], false));
                 }
                 None
             }
@@ -14333,7 +14365,7 @@ impl<'a> Lower<'a> {
             | Stmt::AssignMember { value, .. }
             | Stmt::AssignIndex { value, .. } = self.afile.stmt(s).clone()
             {
-                return self.lower_plus_assign(value, *target);
+                return self.lower_plus_assign(value, target.clone());
             }
         }
         match self.afile.stmt(s).clone() {
@@ -14731,9 +14763,11 @@ impl<'a> Lower<'a> {
                                 lambda_param_types: Vec::new(),
                                 lambda_recv: Vec::new(),
                                 is_inline: false,
+                                is_operator: false,
+                                is_override: false,
+                                visibility: crate::types::Visibility::Public,
                                 is_final: true,
                                 is_suspend: false,
-                                visibility: crate::types::Visibility::Public,
                                 context_count: 0,
                                 source_decl: None,
                                 source_file: None,
@@ -14910,21 +14944,18 @@ impl<'a> Lower<'a> {
                     }
                 }
             }
-            // `name++` / `name--` on a local numeric variable → `name = name ± 1`. (In statement
-            // position the pre/post distinction is irrelevant — the value isn't observed.) A built-in
-            // numeric primitive only; a `var` field/property or a user `operator inc`/`dec` bails.
+            // `name++` / `name--` in statement position.
             Stmt::IncDec { name, dec, prefix } => {
                 // A boxed mutable-capture local: `x++`/`x--` reads/writes through its `Ref` holder.
                 if let Some(elem) = self.boxed_elem.get(&name).cloned() {
                     let (holder, _) = self.lookup(&name)?;
-                    let one = self.scalar_one_const(elem)?;
-                    let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
                     let hv = self.emit_get_value(holder);
                     let cur = self.ir.add_expr(IrExpr::RefGet {
                         holder: hv,
                         elem: ty_to_ir(elem),
                     });
-                    let nv = self.scalar_update_value(cur, elem, op, one);
+                    let nv =
+                        self.lower_incdec_updated_value(IncDecSite::Statement(s), cur, elem, dec)?;
                     let hv2 = self.emit_get_value(holder);
                     return Some(self.ir.add_expr(IrExpr::RefSet {
                         holder: hv2,
@@ -14959,13 +14990,17 @@ impl<'a> Lower<'a> {
                         if !self.toplevel_incdec_unshadowed(&name) {
                             return None;
                         }
-                        return self.lower_toplevel_incdec(&name, dec, prefix, false);
+                        return self.lower_toplevel_incdec(
+                            IncDecSite::Statement(s),
+                            &name,
+                            dec,
+                            prefix,
+                            false,
+                        );
                     };
                     if !is_var {
                         return None;
                     }
-                    let one_c = self.scalar_one_const(fty)?;
-                    let op = if dec { IrBinOp::Sub } else { IrBinOp::Add };
                     // A field of *this* class is read/written directly; an inherited one (or an external
                     // `this`), or a CUSTOM-accessor property, goes through its getter/setter accessors.
                     let own = self.cur_class.as_ref().and_then(|c| {
@@ -14987,7 +15022,12 @@ impl<'a> Lower<'a> {
                             self.resolve_method(&internal, &property_getter_name(&name))?;
                         self.emit_method_call(gclass, gindex, recv, vec![])
                     };
-                    let nv = self.scalar_update_value(cur_val, fty, op, one_c);
+                    let nv = self.lower_incdec_updated_value(
+                        IncDecSite::Statement(s),
+                        cur_val,
+                        fty,
+                        dec,
+                    )?;
                     let recv2 = self.emit_get_value(this_v);
                     return Some(if let Some((class, idx)) = own {
                         self.emit_set_field(recv2, class, idx, nv)
@@ -14999,7 +15039,15 @@ impl<'a> Lower<'a> {
                 }
                 let (v, ty) = self.lookup(&name)?;
                 // A user `inc`/`dec` operator on a non-numeric variable → `x = x.inc()`.
-                if let Some(call) = self.lower_member_inc_dec(v, ty, dec) {
+                if !ty.is_numeric_or_char() {
+                    if self.value_class_underlying(ty).is_some() {
+                        return None;
+                    }
+                    let operator_name = if dec { "dec" } else { "inc" };
+                    let receiver = self.emit_get_value(v);
+                    let (call, ret) =
+                        self.lower_stmt_op_call(s, receiver, ty, operator_name, &[])?;
+                    let call = self.coerce_operator_result_to_storage(call, ret, ty);
                     return Some(self.emit_set_value(v, call));
                 }
                 let one = self.scalar_one_const(ty)?;
@@ -18943,14 +18991,58 @@ impl<'a> Lower<'a> {
                 dec,
                 prefix,
             } => {
-                // `var++`/`++var` as a value. Only a simple local/captured variable; anything else bails.
-                // No temp slot: the update is `i = i ± 1`; the value is the new `i` (prefix) or, for a
-                // postfix, the new `i` minus the step (the old value) — valid for every numeric type.
+                // `var++`/`++var` as a value.
                 let Expr::Name(name) = self.afile.expr(target).clone() else {
                     return None;
                 };
                 // A boxed mutable-capture local: `var++`/`++var` as a value, through its `Ref` holder.
                 if let Some(elem) = self.boxed_elem.get(&name).cloned() {
+                    if !elem.is_numeric_or_char() {
+                        let (holder, _) = self.lookup(&name)?;
+                        let elem_ir = ty_to_ir(elem);
+                        let holder_value = self.emit_get_value(holder);
+                        let current = self.ir.add_expr(IrExpr::RefGet {
+                            holder: holder_value,
+                            elem: elem_ir,
+                        });
+                        if prefix {
+                            let updated = self.lower_incdec_updated_value(
+                                IncDecSite::Expression(e),
+                                current,
+                                elem,
+                                dec,
+                            )?;
+                            let holder_value = self.emit_get_value(holder);
+                            let set = self.ir.add_expr(IrExpr::RefSet {
+                                holder: holder_value,
+                                elem: elem_ir,
+                                value: updated,
+                            });
+                            let holder_value = self.emit_get_value(holder);
+                            let value = self.ir.add_expr(IrExpr::RefGet {
+                                holder: holder_value,
+                                elem: elem_ir,
+                            });
+                            return Some(self.emit_block(vec![set], Some(value)));
+                        }
+                        let old_value = self.fresh_value();
+                        let old = self.emit_variable(old_value, elem_ir, Some(current));
+                        let receiver = self.emit_get_value(old_value);
+                        let updated = self.lower_incdec_updated_value(
+                            IncDecSite::Expression(e),
+                            receiver,
+                            elem,
+                            dec,
+                        )?;
+                        let holder_value = self.emit_get_value(holder);
+                        let set = self.ir.add_expr(IrExpr::RefSet {
+                            holder: holder_value,
+                            elem: elem_ir,
+                            value: updated,
+                        });
+                        let value = self.emit_get_value(old_value);
+                        return Some(self.emit_block(vec![old, set], Some(value)));
+                    }
                     let one_c = self.scalar_one_const(elem)?;
                     let (holder, _) = self.lookup(&name)?;
                     let elem_ir = ty_to_ir(elem);
@@ -18987,14 +19079,27 @@ impl<'a> Lower<'a> {
                     if !self.toplevel_incdec_unshadowed(&name) {
                         return None;
                     }
-                    return self.lower_toplevel_incdec(&name, dec, prefix, true);
+                    return self.lower_toplevel_incdec(
+                        IncDecSite::Expression(e),
+                        &name,
+                        dec,
+                        prefix,
+                        true,
+                    );
                 }
                 let (v, ty) = self.lookup(&name)?;
                 // A user `inc`/`dec` operator on a non-numeric variable → `x = x.inc()` yielding the
                 // new value (prefix) or the captured old value (postfix).
                 if !ty.is_numeric_or_char() {
+                    if self.value_class_underlying(ty).is_some() {
+                        return None;
+                    }
+                    let operator_name = if dec { "dec" } else { "inc" };
                     if prefix {
-                        let call = self.lower_member_inc_dec(v, ty, dec)?;
+                        let receiver = self.emit_get_value(v);
+                        let (call, ret) =
+                            self.lower_op_call(receiver, ty, operator_name, &[], e)?;
+                        let call = self.coerce_operator_result_to_storage(call, ret, ty);
                         let set = self.emit_set_value(v, call);
                         let value = self.emit_get_value(v);
                         return Some(self.emit_block(vec![set], Some(value)));
@@ -19003,7 +19108,9 @@ impl<'a> Lower<'a> {
                     let tmp = self.fresh_value();
                     let old = self.emit_get_value(v);
                     let var_decl = self.emit_variable(tmp, ty_to_ir(ty), Some(old));
-                    let call = self.lower_member_inc_dec(v, ty, dec)?;
+                    let receiver = self.emit_get_value(v);
+                    let (call, ret) = self.lower_op_call(receiver, ty, operator_name, &[], e)?;
+                    let call = self.coerce_operator_result_to_storage(call, ret, ty);
                     let set = self.emit_set_value(v, call);
                     let value = self.emit_get_value(tmp);
                     return Some(self.emit_block(vec![var_decl, set], Some(value)));
@@ -19244,7 +19351,21 @@ impl<'a> Lower<'a> {
             }
             Expr::Unary { op, operand } => {
                 use crate::ast::UnOp;
-                let v = self.expr(operand)?;
+                let operator_name = op.operator_name();
+                let operand_ty = self.info.ty(operand);
+                let mut v = self.expr(operand)?;
+                if self.info.resolved_operator_call(e, operator_name).is_some() {
+                    return self
+                        .lower_op_call(v, operand_ty, operator_name, &[], e)
+                        .map(|(call, _)| call);
+                }
+                let builtin_ty = operand_ty
+                    .unboxed_primitive()
+                    .or_else(|| self.syms.libraries.boxed_primitive(operand_ty))
+                    .unwrap_or(operand_ty);
+                if builtin_ty != operand_ty {
+                    v = self.emit_type_op(IrTypeOp::ImplicitCoercion, v, ty_to_ir(builtin_ty));
+                }
                 match op {
                     // `-x` → `0 - x` (zero typed to match); `!x` → `x == false`.
                     UnOp::Neg => {
@@ -19260,7 +19381,7 @@ impl<'a> Lower<'a> {
                         }
                         // `-x` → `0 - x` with the zero typed to the operand so both Sub operands
                         // share one numeric type (Byte/Short/Char negate in the `int` category).
-                        let zero = match self.info.ty(operand) {
+                        let zero = match builtin_ty {
                             Ty::Long => self.emit_const(IrConst::Long(0)),
                             Ty::Double => self.emit_const(IrConst::Double(0.0)),
                             Ty::Float => self.emit_const(IrConst::Float(0.0)),
@@ -19275,7 +19396,7 @@ impl<'a> Lower<'a> {
                     // Unary `+` is identity on numerics — emit the operand unchanged. A non-numeric
                     // operand (a user `unaryPlus` operator) isn't modeled → skip the file.
                     UnOp::Plus => {
-                        if !self.info.ty(operand).is_numeric() {
+                        if !builtin_ty.is_numeric() {
                             return None;
                         }
                         v
