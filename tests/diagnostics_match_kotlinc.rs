@@ -82,6 +82,7 @@ fn errors_match_kotlinc_in_text_and_location() {
         "fun f(a: Int = 0, b: String): String = b\nfun g(): String = f(a = 1)",
         "fun f(`a`: Int = 0, b: String): String = b\nfun g(): String = f(`a` = 1)",
         "fun f(a: Int, b: String): String = b\nfun g(): String = f(a = 1, c = 2, b = \"ok\")",
+        "fun f(a: Int, b: String): String = b\nfun g(): String = f(a = 1, a = 2, b = \"ok\")",
         "fun f(a: Int = 0, b: String, vararg x: Int): Int = 0\nfun g(): Int = f()",
         "fun g(): Int {\nfun f(x: Int): Int = x\nreturn f()\n}",
         "fun g(): Int {\nfun f(x: Int): Int = x\nreturn f(1, 2)\n}",

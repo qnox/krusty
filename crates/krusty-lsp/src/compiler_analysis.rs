@@ -229,6 +229,23 @@ mod tests {
     }
 
     #[test]
+    fn source_set_preserves_duplicate_named_argument_diagnostic_and_second_name_span() {
+        let source = "fun pair(a: Int, b: String): String = b\n\
+                      fun invalid(): String = pair(a = 1, a = 2, b = \"ok\")";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let diagnostic = analysis.files[0]
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.msg == "argument already passed for this parameter.")
+            .expect("duplicate named-argument diagnostic");
+        let duplicate = source.rfind("a = 2").expect("duplicate named argument") as u32;
+        assert_eq!(
+            diagnostic.span,
+            krusty::diag::Span::new(duplicate, duplicate + 1)
+        );
+    }
+
+    #[test]
     fn empty_source_set_is_valid_after_last_document_closes() {
         let analysis = analyze_standalone_source_set(&[]);
         assert!(analysis.files.is_empty());

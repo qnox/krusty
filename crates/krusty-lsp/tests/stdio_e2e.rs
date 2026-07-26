@@ -184,6 +184,46 @@ fn stdio_server_reports_official_unknown_named_argument_diagnostic() {
 }
 
 #[test]
+fn stdio_server_reports_official_duplicate_named_argument_diagnostic() {
+    let messages = [
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": "file:///duplicate.kt",
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "fun pair(a: Int, b: String): String = b\n\
+                             fun use(): String = pair(a = 1, a = 2, b = \"ok\")"
+                }
+            }
+        }),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": null}),
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    ];
+    let output = run_server(&[], &messages);
+    let diagnostics = output
+        .iter()
+        .find(|message| message["method"] == "textDocument/publishDiagnostics")
+        .and_then(|message| message["params"]["diagnostics"].as_array())
+        .expect("published diagnostics");
+    assert_eq!(
+        diagnostics,
+        &[json!({
+            "range": {
+                "start": {"line": 1, "character": 32},
+                "end": {"line": 1, "character": 33}
+            },
+            "severity": 1,
+            "source": "Kotlin",
+            "message": "Argument already passed for this parameter."
+        })]
+    );
+}
+
+#[test]
 fn stdio_server_applies_configured_language_features() {
     let source = "\
 data class Entry(val first: String, val second: String)

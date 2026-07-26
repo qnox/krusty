@@ -1572,6 +1572,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   otherwise inapplicable candidate set starts with `none of the following candidates is applicable:`.
   An unknown named argument reads `no parameter with name 'unknown' found.` and points at the
   argument name; the LSP publishes that exact name range with the official sentence-cased message.
+  A repeated named argument reads `argument already passed for this parameter.` and points at the
+  repeated label rather than the first occurrence.
   Unresolved member reads and calls use the same `unresolved reference` form as bare names. Verified
   by the differential `diagnostics_match_kotlinc` tests, which compile the snippets with both
   compilers, report all mismatches in one run, cover cross-file generic signatures, and assert the
