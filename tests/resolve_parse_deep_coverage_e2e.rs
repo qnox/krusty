@@ -369,6 +369,13 @@ fun box(): String {\n\
         20,\n\
     )\n\
     if (xs.size != 2) return \"f2\"\n\
+    val category = when (r) {\n\
+        5,\n\
+        6,\n\
+            -> \"expected\"\n\
+        else -> \"other\"\n\
+    }\n\
+    if (category != \"expected\") return \"f3\"\n\
     return \"OK\"\n\
 }\n";
     let Some(out) = run(SRC, "TrailComma") else {
