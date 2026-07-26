@@ -187,6 +187,71 @@ pub(crate) fn unify_ty(sig: Ty, actual: Ty, binds: &mut GSigBinds) {
     }
 }
 
+pub(crate) fn inference_actual(actual: Ty) -> Ty {
+    if actual == Ty::Null {
+        Ty::nullable(Ty::Nothing)
+    } else {
+        actual
+    }
+}
+
+pub(crate) fn merge_inferred_ty(current: Option<Ty>, actual: Ty) -> Ty {
+    let actual = inference_actual(actual);
+    let Some(current) = current else {
+        return actual;
+    };
+    if actual == Ty::Nothing {
+        current
+    } else if current == Ty::Nothing {
+        actual
+    } else if current == actual {
+        current
+    } else if matches!(actual, Ty::Nullable(inner) if *inner == Ty::Nothing) {
+        Ty::nullable(current)
+    } else if matches!(current, Ty::Nullable(inner) if *inner == Ty::Nothing) {
+        Ty::nullable(actual)
+    } else if current.non_null() == actual.non_null() {
+        Ty::nullable(current.non_null())
+    } else {
+        let any = Ty::obj("kotlin/Any");
+        if current.is_nullable() || actual.is_nullable() {
+            Ty::nullable(any)
+        } else {
+            any
+        }
+    }
+}
+
+fn unify_inferred_ty(sig: Ty, actual: Ty, binds: &mut GSigBinds) {
+    match sig {
+        Ty::TyParam(name, _) => match binds.entry(name.to_string()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(inference_actual(actual));
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.insert(merge_inferred_ty(Some(*entry.get()), actual));
+            }
+        },
+        Ty::Fun(signature) => {
+            if let Ty::Fun(actual) = actual {
+                for (parameter, actual) in signature.params.iter().zip(actual.params.iter()) {
+                    unify_inferred_ty(*parameter, *actual, binds);
+                }
+                unify_inferred_ty(signature.ret, actual.ret, binds);
+            }
+        }
+        Ty::Obj(_, arguments) => {
+            if let Ty::Obj(_, actual_arguments) = actual {
+                for (argument, actual) in arguments.iter().zip(actual_arguments.iter()) {
+                    unify_inferred_ty(*argument, *actual, binds);
+                }
+            }
+        }
+        Ty::Nullable(inner) => unify_inferred_ty(*inner, actual.non_null(), binds),
+        _ => {}
+    }
+}
+
 /// Realize a signature `Ty` under the current bindings — a bound type variable substitutes to its
 /// binding, an unbound one erases to `Any`; a class substitutes its carried type arguments in place.
 pub(crate) fn ty_subst(sig: Ty, binds: &GSigBinds) -> Ty {
@@ -1298,18 +1363,30 @@ impl<'a> SymbolResolver<'a> {
                     let fixed = gsig.params.len() - 1;
                     for (i, ps) in gsig.params.iter().take(fixed).enumerate() {
                         if let Some(a) = args.get(i) {
-                            unify_ty(*ps, *a, &mut binds);
+                            if type_args.is_empty() {
+                                unify_inferred_ty(*ps, *a, &mut binds);
+                            } else {
+                                unify_ty(*ps, *a, &mut binds);
+                            }
                         }
                     }
                     if let Some(inner) = gsig.params[fixed].array_elem() {
                         for a in &args[fixed..] {
-                            unify_ty(inner, *a, &mut binds);
+                            if type_args.is_empty() {
+                                unify_inferred_ty(inner, *a, &mut binds);
+                            } else {
+                                unify_ty(inner, *a, &mut binds);
+                            }
                         }
                         vararg_elem = Some(ty_subst(inner, &binds));
                     }
                 } else {
                     for (ps, a) in gsig.params.iter().zip(args) {
-                        unify_ty(*ps, *a, &mut binds);
+                        if type_args.is_empty() {
+                            unify_inferred_ty(*ps, *a, &mut binds);
+                        } else {
+                            unify_ty(*ps, *a, &mut binds);
+                        }
                     }
                 }
                 ty_subst(gsig.ret, &binds)
@@ -2950,6 +3027,20 @@ mod tests {
     use crate::libraries::{CallSig, FunctionSet, LibraryCallable, Origin, TypeKind};
     use crate::symbol_source::SymbolSource;
     use crate::types::type_name;
+
+    #[test]
+    fn inferred_generic_binding_joins_null_with_the_non_null_element_type() {
+        let parameter = Ty::ty_param("T", Ty::obj("kotlin/Any"));
+        let mut inferred = GSigBinds::new();
+        unify_inferred_ty(parameter, Ty::Int, &mut inferred);
+        unify_inferred_ty(parameter, Ty::Null, &mut inferred);
+        unify_inferred_ty(parameter, Ty::Int, &mut inferred);
+        assert_eq!(inferred.get("T"), Some(&Ty::nullable(Ty::Int)));
+
+        let mut explicit = GSigBinds::from([("T".to_string(), Ty::Int)]);
+        unify_ty(parameter, Ty::Null, &mut explicit);
+        assert_eq!(explicit.get("T"), Some(&Ty::Int));
+    }
 
     struct FakeSource {
         name: &'static str,

@@ -127,11 +127,6 @@ pub trait TargetRuntime {
         None
     }
 
-    /// Platform accessor used for built-in enum properties such as `ordinal` and `name`.
-    fn enum_member_accessor(&self, _name: &str) -> Option<PlatformAccessor> {
-        None
-    }
-
     /// Platform static field for an object singleton value.
     fn object_instance_field(&self, _internal: &str) -> Option<PlatformField> {
         None

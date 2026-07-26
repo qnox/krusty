@@ -1626,6 +1626,7 @@ mod tests {
         let declared = TypeRef {
             name: "left.Box".to_string(),
             nullable: false,
+            definitely_non_null: false,
             arg: None,
             targs: vec![function.params[0].ty.clone()],
             span: Span::new(0, 0),

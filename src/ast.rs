@@ -389,6 +389,8 @@ pub struct TypeRef {
     pub name: String,
     /// Trailing `?` — a nullable type (e.g. `String?`).
     pub nullable: bool,
+    /// A trailing `& Any` on a type parameter (`T & Any`), which removes substituted nullability.
+    pub definitely_non_null: bool,
     /// The first generic type argument, captured for `Array<T>` (element) and function types
     /// (the return type). General class type arguments live in `targs`.
     pub arg: Option<Box<TypeRef>>,

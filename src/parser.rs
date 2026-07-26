@@ -175,6 +175,7 @@ fn erase_type_params(t: &TypeRef, tps: &std::collections::HashSet<String>) -> Ty
         return TypeRef {
             name: "Any".to_string(),
             nullable: t.nullable,
+            definitely_non_null: t.definitely_non_null,
             arg: None,
             targs: Vec::new(),
             span: t.span,
@@ -248,6 +249,7 @@ fn simple_type_ref(name: &str, span: crate::diag::Span) -> TypeRef {
     TypeRef {
         name: name.to_string(),
         nullable: false,
+        definitely_non_null: false,
         arg: None,
         targs: Vec::new(),
         span,
@@ -1875,6 +1877,7 @@ impl<'a> Parser<'a> {
                 let recv = TypeRef {
                     name: first,
                     nullable,
+                    definitely_non_null: false,
                     arg: recv_arg,
                     targs: vec![],
                     span,
@@ -2680,6 +2683,7 @@ impl<'a> Parser<'a> {
                 self.ident_or_error("extension function name"),
             )
         } else {
+            let first_span = self.tok().span;
             let first_name = if self.at(TokenKind::Ident) {
                 let n = self.text().to_string();
                 self.bump();
@@ -2690,7 +2694,7 @@ impl<'a> Parser<'a> {
             };
             if self.at(TokenKind::Dot) || self.at(TokenKind::Lt) || self.at(TokenKind::Question) {
                 // `fun RecvType<...>?.name(...)` — extension function.
-                let span = self.tok().span;
+                let span = first_span;
                 let mut recv_nullable = false;
                 // Type arguments on the receiver (`fun Array<String>.f()`, `fun List<T>.g()`). Erased
                 // in JVM descriptors EXCEPT an `Array` element, which forms the array descriptor
@@ -2736,6 +2740,7 @@ impl<'a> Parser<'a> {
                 let recv_ty = TypeRef {
                     name: recv_name,
                     nullable: recv_nullable,
+                    definitely_non_null: false,
                     arg: recv_arg,
                     targs: vec![],
                     span,
@@ -3464,6 +3469,7 @@ impl<'a> Parser<'a> {
                         ifaces.push(TypeRef {
                             name: crate::types::FUNCTION_N_INTERNAL[arity].to_string(),
                             nullable: false,
+                            definitely_non_null: false,
                             arg: None,
                             targs,
                             span: sup_span,
@@ -3550,6 +3556,7 @@ impl<'a> Parser<'a> {
                     ifaces.push(TypeRef {
                         name: effective.clone(),
                         nullable: false,
+                        definitely_non_null: false,
                         arg: None,
                         targs,
                         span: sup_span,
@@ -4105,14 +4112,32 @@ impl<'a> Parser<'a> {
     /// Parse a type, folding a trailing definitely-non-null intersection `T & Any` (the only legal
     /// intersection in Kotlin source) into the left operand with `nullable = false`. `T & Any` erases
     /// identically to `T`; its only observable effect is that a value of it is non-null, which the
-    /// `as` cast enforces at runtime (a null assertion). The `& Any` right operand is parsed and
-    /// discarded — `Any` is the only permitted right side.
+    /// `as` cast enforces at runtime (a null assertion). The checker verifies that the left side denotes
+    /// a type parameter; the parser validates and consumes the required bare `Any` right side.
     fn parse_type(&mut self) -> TypeRef {
         let mut ty = self.parse_type_atom();
         while self.at(TokenKind::Amp) {
             self.bump(); // '&'
-            let _any = self.parse_type_atom();
+            let any = self.parse_type_atom();
+            let valid_lhs = !ty.nullable
+                && !ty.definitely_non_null
+                && ty.arg.is_none()
+                && ty.targs.is_empty()
+                && ty.fun_params.is_empty();
+            let valid_rhs = any.name == "Any"
+                && !any.nullable
+                && !any.definitely_non_null
+                && any.arg.is_none()
+                && any.targs.is_empty()
+                && any.fun_params.is_empty();
+            if !valid_lhs || !valid_rhs {
+                self.diags.error(
+                    if valid_lhs { any.span } else { ty.span },
+                    "a definitely non-null type must have the form 'T & Any'",
+                );
+            }
             ty.nullable = false;
+            ty.definitely_non_null = true;
         }
         ty
     }
@@ -4227,6 +4252,7 @@ impl<'a> Parser<'a> {
                 TypeRef {
                     name: "<fun>".to_string(),
                     nullable,
+                    definitely_non_null: false,
                     arg: Some(Box::new(ret)),
                     targs: Vec::new(),
                     span,
@@ -4250,6 +4276,7 @@ impl<'a> Parser<'a> {
                 TypeRef {
                     name: "<error>".to_string(),
                     nullable: false,
+                    definitely_non_null: false,
                     arg: None,
                     targs: Vec::new(),
                     span,
@@ -4283,6 +4310,7 @@ impl<'a> Parser<'a> {
                 let any_nullable = || TypeRef {
                     name: "Any".to_string(),
                     nullable: true,
+                    definitely_non_null: false,
                     arg: None,
                     targs: Vec::new(),
                     span,
@@ -4331,6 +4359,7 @@ impl<'a> Parser<'a> {
             let base = TypeRef {
                 name,
                 nullable,
+                definitely_non_null: false,
                 arg,
                 targs,
                 span,
@@ -4378,6 +4407,7 @@ impl<'a> Parser<'a> {
                 return TypeRef {
                     name: "<fun>".to_string(),
                     nullable: fnull,
+                    definitely_non_null: false,
                     arg: Some(Box::new(ret)),
                     targs: Vec::new(),
                     span,
@@ -4396,6 +4426,7 @@ impl<'a> Parser<'a> {
                 return TypeRef {
                     name: "<error>".to_string(),
                     nullable: false,
+                    definitely_non_null: false,
                     arg: None,
                     targs: Vec::new(),
                     span,
@@ -4410,6 +4441,7 @@ impl<'a> Parser<'a> {
             TypeRef {
                 name: "<error>".to_string(),
                 nullable: false,
+                definitely_non_null: false,
                 arg: None,
                 targs: Vec::new(),
                 span,
@@ -4451,6 +4483,7 @@ impl<'a> Parser<'a> {
                 args.push(TypeRef {
                     name: "Any".to_string(),
                     nullable: true,
+                    definitely_non_null: false,
                     arg: None,
                     targs: Vec::new(),
                     span,
@@ -4548,11 +4581,8 @@ impl<'a> Parser<'a> {
                             .to_string(),
                     );
                 }
-                // Record an upper bound so a value class's underlying type parameter can take its bound's
-                // type/nullability (`value class S<T: String>` → `String`; `<T: String?>`/`<T: Any?>` →
-                // null-capable). A NON-NULL `Any` bound carries nothing useful (the erasure is already
-                // `Object`); a NULLABLE `Any?` bound DOES (it makes the value class null-capable).
-                if !tname.is_empty() && (bound.name != "Any" || bound.nullable) {
+                // Retain explicit bounds independently of erasure.
+                if !tname.is_empty() {
                     bounds.push((tname.clone(), bound));
                 }
             }
@@ -7501,6 +7531,7 @@ fn vararg_array_typeref(elem: TypeRef) -> TypeRef {
         TypeRef {
             name: format!("{}Array", elem.name),
             nullable: false,
+            definitely_non_null: false,
             arg: None,
             targs: Vec::new(),
             span,
@@ -7512,6 +7543,7 @@ fn vararg_array_typeref(elem: TypeRef) -> TypeRef {
         TypeRef {
             name: "Array".to_string(),
             nullable: false,
+            definitely_non_null: false,
             arg: Some(Box::new(elem)),
             targs: Vec::new(),
             span,

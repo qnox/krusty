@@ -19,6 +19,7 @@ pub enum NameTokenKind {
     Import,
     At,
     Dot,
+    Operator,
     Newline,
 }
 
@@ -34,9 +35,9 @@ impl NameToken {
     }
 }
 
-/// Lex only the tokens needed by name-based analysis (identifiers plus namespace/annotation
-/// separators). This follows the exact ordinary lexer path, including templates and backtick names,
-/// while avoiding a second full-token allocation for editor symbol indexing.
+/// Lex only the tokens needed by semantic analysis (identifiers, namespace/annotation separators,
+/// and operator spellings). This follows the exact ordinary lexer path, including templates and
+/// backtick names, while avoiding a second full-token allocation for editor symbol indexing.
 pub fn lex_name_tokens(src: &str, diags: &mut DiagSink) -> Vec<NameToken> {
     lexer(src, diags).run_names()
 }
@@ -83,6 +84,31 @@ impl<'a> Lexer<'a> {
                 TokenKind::KwImport => Some(NameTokenKind::Import),
                 TokenKind::At => Some(NameTokenKind::At),
                 TokenKind::Dot => Some(NameTokenKind::Dot),
+                TokenKind::Plus
+                | TokenKind::Minus
+                | TokenKind::Star
+                | TokenKind::Slash
+                | TokenKind::Percent
+                | TokenKind::EqEq
+                | TokenKind::NotEq
+                | TokenKind::RefEq
+                | TokenKind::RefNe
+                | TokenKind::Lt
+                | TokenKind::LtEq
+                | TokenKind::Gt
+                | TokenKind::GtEq
+                | TokenKind::AndAnd
+                | TokenKind::OrOr
+                | TokenKind::Not
+                | TokenKind::DotDot
+                | TokenKind::DotDotLt
+                | TokenKind::PlusPlus
+                | TokenKind::MinusMinus
+                | TokenKind::PlusEq
+                | TokenKind::MinusEq
+                | TokenKind::StarEq
+                | TokenKind::SlashEq
+                | TokenKind::PercentEq => Some(NameTokenKind::Operator),
                 TokenKind::Newline => Some(NameTokenKind::Newline),
                 _ => None,
             };
@@ -840,6 +866,20 @@ mod tests {
         );
         assert!(!diagnostics.has_errors());
         assert!(tokens.len() < lex("fun greet(name: String) = 1", &mut diagnostics).len());
+    }
+
+    #[test]
+    fn name_lexer_retains_compound_assignment_operators_for_editor_highlighting() {
+        let source = "a += b; c -= d; e *= f; g /= h; i %= j";
+        let mut diagnostics = DiagSink::new();
+        let operators = lex_name_tokens(source, &mut diagnostics)
+            .into_iter()
+            .filter(|token| token.kind == NameTokenKind::Operator)
+            .map(|token| token.text(source))
+            .collect::<Vec<_>>();
+
+        assert_eq!(operators, ["+=", "-=", "*=", "/=", "%="]);
+        assert!(!diagnostics.has_errors());
     }
 
     #[test]

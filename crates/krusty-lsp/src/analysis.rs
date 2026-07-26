@@ -3215,6 +3215,38 @@ mod tests {
     }
 
     #[test]
+    fn zero_arity_nested_lambda_captures_outer_implicit_it_hover() {
+        let source = "fun invoke(block: () -> Int): Int = block()\n\
+                      fun capture(value: Int): Int {\n\
+                          val outer: (Int) -> Int = { invoke { it } }\n\
+                          return outer(value)\n\
+                      }";
+        let index = analyze_for_lsp(&[source]).remove(0).hover;
+        let inner_it = source.rfind("it").unwrap() as u32 + 1;
+        let hover = index
+            .get(inner_it)
+            .expect("captured outer implicit `it` hover");
+
+        assert_eq!(hover.value, "it: Int");
+    }
+
+    #[test]
+    fn zero_value_parameter_receiver_lambda_captures_outer_implicit_it_hover() {
+        let source = "class Scope\n\
+                      fun capture(value: Int): Int {\n\
+                          val outer: (Int) -> Int = { with(Scope()) { it } }\n\
+                          return outer(value)\n\
+                      }";
+        let index = analyze_for_lsp(&[source]).remove(0).hover;
+        let inner_it = source.rfind("it").unwrap() as u32 + 1;
+        let hover = index
+            .get(inner_it)
+            .expect("receiver lambda captures outer implicit `it`");
+
+        assert_eq!(hover.value, "it: Int");
+    }
+
+    #[test]
     fn hover_renders_inferred_nested_types_as_source_names() {
         let source = "class Outer { class Inner }\n\
                       fun use(): Int { val nested = Outer.Inner(); return nested.hashCode() }";
@@ -3759,6 +3791,177 @@ mod tests {
         assert!(tokens.contains(&(1, 17, 7, 7, 5))); // `var` property parameter: parameter + readonly
         assert!(tokens.contains(&(3, 7, 7, 9, 128))); // mutable property assignment
         assert!(tokens.contains(&(4, 13, 3, 10, 4))); // enum entry reference: readonly
+    }
+
+    #[test]
+    fn semantic_tokens_skip_control_flow_labels_and_mark_compound_assignment() {
+        let source = concat!(
+            "fun sumPositive(values: IntArray): Int {\n",
+            "var result = 0\n",
+            "outer@ for (value in values) {\n",
+            "if (value < 0) continue@outer\n",
+            "if (value == 0) break@outer\n",
+            "result += value\n",
+            "}\n",
+            "return result\n",
+            "}\n",
+        );
+        let analysis = analyze_standalone_source_set(&[source]);
+        let index =
+            SemanticTokenIndex::from_file_analysis(source, &analysis.files[0], &analysis.symbols);
+        let tokens = decoded_tokens(&index);
+
+        assert!(
+            !tokens
+                .iter()
+                .any(|&(line, start, length, _, _)| (line, start, length) == (3, 24, 5)),
+            "control-flow labels are not semantic symbols: {tokens:?}"
+        );
+        assert!(
+            !tokens
+                .iter()
+                .any(|&(line, start, length, _, _)| (line, start, length) == (4, 22, 5)),
+            "control-flow labels are not semantic symbols: {tokens:?}"
+        );
+        assert!(
+            tokens.contains(&(5, 7, 2, 21, 512)),
+            "builtin compound assignment is an operator: {tokens:?}"
+        );
+
+        let return_source = "fun pick(n: Int): Int = n.let { if (it > 0) return@let it; return 0 }";
+        let return_analysis = analyze_standalone_source_set(&[return_source]);
+        let return_index = SemanticTokenIndex::from_file_analysis(
+            return_source,
+            &return_analysis.files[0],
+            &return_analysis.symbols,
+        );
+        let return_tokens = decoded_tokens(&return_index);
+        let label_start = return_source.find("@let").unwrap() as u32;
+        let first_it = return_source.find("(it").unwrap() as u32 + 1;
+        let returned_it = return_source.find("@let it").unwrap() as u32 + 5;
+        assert!(
+            return_tokens.contains(&(0, label_start, 4, 12, 0)),
+            "labeled returns target a function at the full `@label` span: {return_tokens:?}"
+        );
+        assert!(
+            return_tokens.contains(&(0, first_it, 2, 7, 4))
+                && return_tokens.contains(&(0, returned_it, 2, 7, 4)),
+            "implicit lambda it is a readonly parameter: {return_tokens:?}"
+        );
+
+        let receiver_source = concat!(
+            "interface Base { fun value(): Int = 1 }\n",
+            "class Outer : Base {\n",
+            "override fun value(): Int = super<Base>@Outer.value()\n",
+            "fun self(): Outer = noreturn@ this\n",
+            "}\n",
+        );
+        let receiver_analysis = analyze_standalone_source_set(&[receiver_source]);
+        let receiver_index = SemanticTokenIndex::from_file_analysis(
+            receiver_source,
+            &receiver_analysis.files[0],
+            &receiver_analysis.symbols,
+        );
+        let receiver_tokens = decoded_tokens(&receiver_index);
+        let receiver_line = receiver_source.lines().nth(2).unwrap();
+        let super_start = receiver_line.find("super").unwrap() as u32;
+        let base_start = receiver_line.find("<Base>").unwrap() as u32 + 1;
+        let receiver_label = receiver_line.find("@Outer").unwrap() as u32;
+        let this_start = receiver_source
+            .lines()
+            .nth(3)
+            .unwrap()
+            .find("this")
+            .unwrap() as u32;
+        assert!(
+            receiver_tokens.contains(&(2, super_start, 5, 3, 32))
+                && receiver_tokens.contains(&(2, base_start, 4, 3, 32))
+                && receiver_tokens.contains(&(2, receiver_label, 6, 1, 0))
+                && receiver_tokens.contains(&(3, this_start, 4, 1, 0)),
+            "receiver labels use exact class/interface spans: {receiver_tokens:?}"
+        );
+    }
+
+    #[test]
+    fn semantic_tokens_mark_user_compound_assignment_as_user_operator() {
+        let source = concat!(
+            "class Accumulator {\n",
+            "operator fun plusAssign(value: Int) {}\n",
+            "}\n",
+            "operator fun Accumulator.minusAssign(value: Int) {}\n",
+            "fun use(acc: Accumulator) {\n",
+            "acc += 1\n",
+            "acc -= 1\n",
+            "}\n",
+        );
+        let analysis = analyze_standalone_source_set(&[source]);
+        let index =
+            SemanticTokenIndex::from_file_analysis(source, &analysis.files[0], &analysis.symbols);
+        let tokens = decoded_tokens(&index);
+
+        assert!(
+            tokens.contains(&(5, 4, 2, 21, 0)),
+            "member plusAssign is a user operator: {tokens:?}"
+        );
+        assert!(
+            tokens.contains(&(6, 4, 2, 21, 8)),
+            "extension minusAssign is a static user operator: {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn semantic_tokens_match_official_advanced_symbol_classification() {
+        let source = concat!(
+            "package tokenparity\n",
+            "@Deprecated(\"old\") data class Record(val value: Int)\n",
+            "interface Named { fun name(): String }\n",
+            "object Registry { var current: Record? = null }\n",
+            "enum class State { READY }\n",
+            "typealias Alias = Record\n",
+            "operator fun Record.plus(other: Record): Record = this\n",
+            "fun use(input: Alias): Int {\n",
+            "Registry.current = input\n",
+            "return State.READY.ordinal + input.value\n",
+            "}\n",
+        );
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(
+            std::rc::Rc::new(krusty::toolchain::stdlib_classpath()),
+        ));
+        let analysis = crate::compiler_analysis::analyze_source_set(&[source], platform);
+        let index =
+            SemanticTokenIndex::from_file_analysis(source, &analysis.files[0], &analysis.symbols);
+        let tokens = decoded_tokens(&index);
+
+        assert!(tokens.contains(&(1, 1, 10, 13, 0))); // annotation application: method
+        assert!(tokens.contains(&(2, 10, 5, 3, 33))); // interface declaration: abstract
+        assert!(tokens.contains(&(2, 22, 4, 13, 33))); // bodyless interface method: abstract
+        assert!(tokens.contains(&(5, 10, 5, 4, 17))); // deprecated alias declaration
+        assert!(tokens.contains(&(5, 18, 6, 4, 16))); // deprecated alias target
+        assert!(tokens.contains(&(6, 13, 6, 4, 16))); // extension receiver type
+        assert!(tokens.contains(&(7, 15, 5, 4, 16))); // alias use inherits target kind/modifiers
+        assert!(!tokens
+            .iter()
+            .any(|&(line, start, _, _, _)| { line == 6 && start == 50 })); // `this` is not a semantic name token
+        assert!(tokens.contains(&(9, 19, 7, 9, 516)), "tokens: {tokens:?}"); // inherited enum property
+        assert!(tokens.contains(&(9, 27, 1, 21, 512))); // builtin operator
+    }
+
+    #[test]
+    fn semantic_tokens_follow_type_alias_chains() {
+        let source = concat!(
+            "@Deprecated(\"old\") data class Record(val value: Int)\n",
+            "typealias Alias = Record\n",
+            "typealias Alias2 = Alias\n",
+            "fun use(input: Alias2): Int = input.value\n",
+        );
+        let analysis = analyze_standalone_source_set(&[source]);
+        let index =
+            SemanticTokenIndex::from_file_analysis(source, &analysis.files[0], &analysis.symbols);
+        let tokens = decoded_tokens(&index);
+
+        assert!(tokens.contains(&(2, 10, 6, 4, 17)));
+        assert!(tokens.contains(&(2, 19, 5, 4, 16)));
+        assert!(tokens.contains(&(3, 15, 6, 4, 16)));
     }
 
     #[test]

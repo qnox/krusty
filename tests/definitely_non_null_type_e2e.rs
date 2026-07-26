@@ -6,6 +6,14 @@ fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")
 }
 
+fn diagnostics(src: &str) -> Vec<String> {
+    let Some(stdlib) = common::stdlib_jar() else {
+        return vec!["<skip: no stdlib>".to_string()];
+    };
+    let jdk = common::jdk_modules();
+    common::front_end_diagnostics(src, &[stdlib], jdk.as_deref())
+}
+
 #[test]
 fn dnn_property_type() {
     // A generic data class whose property is `T & Any` — non-null even when T is nullable.
@@ -25,4 +33,352 @@ fn dnn_function_return_and_param() {
         \x20 return firstNonNull<String?>(\"OK\")\n\
         }\n";
     assert_eq!(run(SRC).expect("dnn param/return"), "OK");
+}
+
+#[test]
+fn nullable_arguments_infer_source_function_type_parameters() {
+    const SRC: &str = "fun <T> id(x: T): T = x\n\
+        fun <T> take(vararg x: T): Int = x.size\n\
+        fun <T> choose(a: T, b: T): T = a\n\
+        fun expected(): String? = choose(null, null)\n\
+        fun box(): String {\n\
+        \x20 if (id(null) != null) return \"id\"\n\
+        \x20 if (id(null).hashCode() != 0) return \"hash\"\n\
+        \x20 if (expected().hashCode() != 0) return \"expected\"\n\
+        \x20 return if (take(null) == 1) \"OK\" else \"vararg\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("nullable source generic calls"), "OK");
+}
+
+#[test]
+fn bounded_generic_vararg_before_trailing_lambda_is_packed() {
+    const SRC: &str =
+        "fun <T : Comparable<T>> collect(vararg values: T, block: Array<T>.() -> Unit) {}\n\
+        fun box(): String {\n\
+        \x20 collect(42, 43) { }\n\
+        \x20 return \"OK\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("non-last generic vararg"), "OK");
+
+    let errors = diagnostics(
+        "fun <T : Any> collect(vararg values: T, block: Array<T>.() -> Unit) {}\n\
+         fun bad() { collect(42, null) { } }\n",
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|message| message.contains("argument type mismatch")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn dnn_constructor_parameter_uses_explicit_type_argument() {
+    let diagnostics =
+        diagnostics("data class Some<T>(val data: T & Any)\nfun f() { Some<String?>(1) }");
+    if diagnostics
+        .iter()
+        .any(|message| message == "<skip: no stdlib>")
+    {
+        return;
+    }
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("argument type mismatch")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn inferred_constructor_type_argument_respects_upper_bound() {
+    let diagnostics = diagnostics("class C<T : Number>(val value: T)\nfun f() { C(\"bad\") }");
+    if diagnostics
+        .iter()
+        .any(|message| message == "<skip: no stdlib>")
+    {
+        return;
+    }
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("argument type mismatch")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn source_function_type_arguments_respect_dnn_and_upper_bounds() {
+    for source in [
+        "fun <T> requireValue(value: T & Any) = value\nfun f() { requireValue<String?>(null) }",
+        "fun <T> requireValue(value: T & Any) = value\nfun f() { requireValue(null) }",
+        "data class Some<T>(val data: T & Any)\nfun f() { Some(null) }",
+        "data class Some<T>(val data: T & Any)\nfun f() { Some(data = null) }",
+        "data class Some<T>(val data: T & Any)\nfun f() { Some<String?>(data = null) }",
+        "fun <T : Number> requireNumber(value: T) = value\nfun f() { requireNumber(\"bad\") }",
+        "fun <T> exact(value: T) = value\nfun f() { exact<String>(1) }",
+        "class NonNull<T : Any>(val value: T)\nfun f() { NonNull(null) }",
+    ] {
+        let diagnostics = diagnostics(source);
+        if diagnostics
+            .iter()
+            .any(|message| message == "<skip: no stdlib>")
+        {
+            continue;
+        }
+        assert!(
+            diagnostics.iter().any(|message| {
+                message.contains("argument type mismatch")
+                    || message.contains("null cannot be a value")
+                    || message.contains("cannot infer type for type parameter")
+            }),
+            "{source}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn intersection_requires_type_parameter_and_any_rhs() {
+    for source in [
+        "fun f(value: String & Any) = value",
+        "fun <T> f(value: T & String) = value",
+        "fun <T> f(value: T? & Any) = value",
+        "fun <T> f(value: T<String> & Any) = value",
+        "fun f(value: String & Int) = value",
+    ] {
+        let diagnostics = diagnostics(source);
+        if diagnostics
+            .iter()
+            .any(|message| message == "<skip: no stdlib>")
+        {
+            continue;
+        }
+        assert!(
+            diagnostics
+                .iter()
+                .any(|message| message.contains("definitely non-null")),
+            "{source}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn nullable_any_upper_bound_accepts_null() {
+    const SRC: &str = "fun <T : Any?> id(x: T): T = x\n\
+        fun <A : Any?, T : A> chainedId(x: T): T = x\n\
+        class C<T : Any?>(val x: T)\n\
+        fun box(): String {\n\
+        \x20 if (id(null) != null) return \"function\"\n\
+        \x20 if (id(null).hashCode() != 0) return \"function-hash\"\n\
+        \x20 if (chainedId(null).hashCode() != 0) return \"chained-hash\"\n\
+        \x20 if (C(null).x.hashCode() != 0) return \"constructor-hash\"\n\
+        \x20 if (C(x = null).x.hashCode() != 0) return \"named-constructor-hash\"\n\
+        \x20 if (C<String?>(x = null).x.hashCode() != 0) return \"named-explicit-hash\"\n\
+        \x20 return if (C(null).x == null) \"OK\" else \"constructor\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("nullable Any upper bounds"), "OK");
+}
+
+#[test]
+fn constructor_inference_merges_repeated_type_parameter_occurrences() {
+    const SRC: &str = "class PairBox<T>(val a: T, val b: T)\n\
+        fun box(): String {\n\
+        \x20 val pair = PairBox(\"x\", null)\n\
+        \x20 val named = PairBox(b = null, a = \"x\")\n\
+        \x20 return if (pair.a == \"x\" && pair.b == null && named.a == \"x\" && named.b == null) \"OK\" else \"fail\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("merged constructor inference"), "OK");
+}
+
+#[test]
+fn symbolic_getter_inference_keeps_merged_nullable_constructor_binding() {
+    let source = "class PairBox<T>(val a: T, val b: T)\n\
+        class Host {\n\
+        \x20 val String.pair get() = PairBox(\"x\", null)\n\
+        \x20 fun bad(): Int = \"\".pair.b.length\n\
+        }\n";
+    let diagnostics = diagnostics(source);
+    if diagnostics
+        .iter()
+        .any(|message| message == "<skip: no stdlib>")
+    {
+        return;
+    }
+    assert!(
+        diagnostics.iter().any(|message| {
+            message.contains("only safe")
+                || message.contains("nullable receiver")
+                || message.contains("unresolved reference")
+        }),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn constructor_inference_merges_bare_and_nested_type_parameter_occurrences() {
+    let source = "class Mixed<T>(val value: T, val xs: List<T>) {\n\
+        \x20 fun first(): T = xs[0]\n\
+        }\n\
+        class Host {\n\
+        \x20 val String.mixed get() = Mixed(\"x\", listOf(null))\n\
+        \x20 fun bad(): Int = \"\".mixed.first().length\n\
+        }\n";
+    let diagnostics = diagnostics(source);
+    if diagnostics
+        .iter()
+        .any(|message| message == "<skip: no stdlib>")
+    {
+        return;
+    }
+    assert!(
+        diagnostics.iter().any(|message| {
+            message.contains("only safe")
+                || message.contains("nullable receiver")
+                || message.contains("unresolved reference")
+        }),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn repeated_constructor_constraints_can_meet_at_semantic_upper_bound() {
+    let source = "class C<T : CharSequence>(val a: T, val b: T)\n\
+        fun f() = C(\"x\", StringBuilder(\"y\"))\n";
+    let diagnostics = diagnostics(source);
+    if diagnostics
+        .iter()
+        .any(|message| message == "<skip: no stdlib>")
+    {
+        return;
+    }
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn contravariant_constructor_function_input_does_not_widen_binding() {
+    let source = "class C<T : CharSequence>(val value: T, val consume: (T) -> Unit)\n\
+        fun f() = C(\"x\", { _: Any -> })\n";
+    let diagnostics = diagnostics(source);
+    if diagnostics
+        .iter()
+        .any(|message| message == "<skip: no stdlib>")
+    {
+        return;
+    }
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn contravariant_only_constructor_constraint_is_retained() {
+    let source = "class C<T>(val consume: (T) -> Unit)\n\
+        fun bad() {\n\
+        \x20 val consumeString: (String) -> Unit = { }\n\
+        \x20 val c = C(consumeString)\n\
+        \x20 c.consume(1)\n\
+        }\n";
+    let diagnostics = diagnostics(source);
+    if diagnostics
+        .iter()
+        .any(|message| message == "<skip: no stdlib>")
+    {
+        return;
+    }
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("type mismatch")),
+        "{diagnostics:?}"
+    );
+
+    const RUN_SRC: &str = "class C<T>(val consume: (T) -> Unit)\n\
+        fun box(): String {\n\
+        \x20 val consumeString: (String) -> Unit = { value -> if (value != \"OK\") throw RuntimeException(value) }\n\
+        \x20 val c = C(consumeString)\n\
+        \x20 c.consume(\"OK\")\n\
+        \x20 return \"OK\"\n\
+        }\n";
+    assert_eq!(
+        run(RUN_SRC).expect("contravariant-only constructor inference"),
+        "OK"
+    );
+}
+
+#[test]
+fn nullable_contravariant_only_function_property_is_substituted() {
+    let source = "class C<T>(val consume: ((T) -> Unit)?)\n\
+        fun bad() {\n\
+        \x20 val consumeString: (String) -> Unit = { }\n\
+        \x20 val c = C(consumeString)\n\
+        \x20 c.consume!!(1)\n\
+        }\n";
+    let diagnostics = diagnostics(source);
+    if diagnostics
+        .iter()
+        .any(|message| message == "<skip: no stdlib>")
+    {
+        return;
+    }
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("type mismatch")),
+        "{diagnostics:?}"
+    );
+
+    const RUN_SRC: &str = "class C<T>(val consume: ((T) -> Unit)?)\n\
+        fun box(): String {\n\
+        \x20 val consumeString: (String) -> Unit = { value -> if (value != \"OK\") throw RuntimeException(value) }\n\
+        \x20 val c = C(consumeString)\n\
+        \x20 c.consume!!(\"OK\")\n\
+        \x20 return \"OK\"\n\
+        }\n";
+    assert_eq!(
+        run(RUN_SRC).expect("nullable contravariant-only constructor inference"),
+        "OK"
+    );
+}
+
+#[test]
+fn non_null_top_level_extension_property_rejects_nullable_receiver() {
+    let source = "val String.first: Char get() = this[0]\nfun bad(s: String?): Char = s.first\n";
+    let diagnostics = diagnostics(source);
+    if diagnostics
+        .iter()
+        .any(|message| message == "<skip: no stdlib>")
+    {
+        return;
+    }
+    assert!(
+        diagnostics.iter().any(|message| {
+            message.contains("only safe")
+                || message.contains("nullable receiver")
+                || message.contains("unresolved reference")
+        }),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn inferred_nullable_constructor_type_is_retained_for_member_reads() {
+    for source in [
+        "class C<T : CharSequence?>(val x: T)\nfun f() { C(null).x.length }",
+        "class C<T : Int?>(val x: T)\nfun f() { C(null).x + 1 }",
+    ] {
+        let diagnostics = diagnostics(source);
+        if diagnostics
+            .iter()
+            .any(|message| message == "<skip: no stdlib>")
+        {
+            continue;
+        }
+        assert!(
+            diagnostics
+                .iter()
+                .any(|message| message.contains("only safe")
+                    || message.contains("nullable receiver")
+                    || message.contains("unresolved reference")
+                    || message.contains("operator cannot be applied")),
+            "{source}: {diagnostics:?}"
+        );
+    }
 }

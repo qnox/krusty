@@ -8451,19 +8451,6 @@ impl<'a> Emitter<'a> {
                 let recv = recv.unwrap();
                 self.emit_string_plus(recv, args[0], code);
             }
-            // `e.ordinal` / `e.name` on an enum value → `Enum.ordinal()I` / `Enum.name()String`.
-            "java/lang/Enum.ordinal" => {
-                self.emit_value(recv.unwrap(), code);
-                let m = self.cw.methodref("java/lang/Enum", "ordinal", "()I");
-                code.invokevirtual(m, 0, 1);
-            }
-            "java/lang/Enum.name" => {
-                self.emit_value(recv.unwrap(), code);
-                let m = self
-                    .cw
-                    .methodref("java/lang/Enum", "name", "()Ljava/lang/String;");
-                code.invokevirtual(m, 0, 1);
-            }
             // `s.length` → `String.length()`.
             "kotlin/String.length" => {
                 self.emit_value(recv.unwrap(), code);
@@ -10233,10 +10220,9 @@ fn intrinsic_ret(fq: &str) -> Ty {
     match fq {
         "kotlin/String.plus" | "kotlin/Any.toString" => Ty::String,
         "kotlin/Any.hashCode" => Ty::Int,
-        "kotlin/String.length" | "kotlin/Array.size" | "java/lang/Enum.ordinal" => Ty::Int,
+        "kotlin/String.length" | "kotlin/Array.size" => Ty::Int,
         "kotlin/String.get" => Ty::Char,
         "kotlin/Array.set" => Ty::Unit,
-        "java/lang/Enum.name" => Ty::String,
         f if f.ends_with(".hashCode") || f.ends_with(".compare") => Ty::Int,
         _ => Ty::Error,
     }

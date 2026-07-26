@@ -6,12 +6,13 @@ use std::{
 };
 
 use krusty::ast::{
-    ClassDecl, ClassKind, Decl, Expr, ExprId, File, FunBody, FunDecl, Param, PropDecl, PropParam,
-    Stmt, StmtId, TypeRef,
+    BinOp, ClassDecl, ClassKind, Decl, Expr, ExprId, File, FunBody, FunDecl, Param, PropDecl,
+    PropParam, Stmt, StmtId, TypeRef,
 };
 use krusty::diag::{DiagSink, Span};
 use krusty::frontend::{
-    lex_name_tokens, FrontendNameToken, FrontendNameTokenKind, FrontendSymbols, FrontendTypeInfo,
+    lex_name_tokens, CompoundAssignmentTarget, FrontendNameToken, FrontendNameTokenKind,
+    FrontendSymbols, FrontendTypeInfo,
 };
 use krusty::types::Ty;
 
@@ -214,6 +215,26 @@ impl HighlightSymbols {
                 }
             }
         }
+        let aliases = files
+            .iter()
+            .flat_map(|file| file.file.type_aliases.iter())
+            .map(|(alias, target)| (alias.as_str(), target.rsplit('.').next().unwrap_or(target)))
+            .collect::<HashMap<_, _>>();
+        for (&alias, &target) in &aliases {
+            let target = terminal_alias_target(target, &aliases);
+            let kind = target
+                .and_then(|target| metadata.class_kinds.get(target).copied())
+                .unwrap_or(HighlightKind::Class);
+            metadata.class_kinds.insert(alias.to_string(), kind);
+            if let Some(modifiers) = target
+                .and_then(|target| metadata.class_modifiers.get(target))
+                .copied()
+            {
+                metadata
+                    .class_modifiers
+                    .insert(alias.to_string(), modifiers);
+            }
+        }
         metadata
     }
 
@@ -229,9 +250,16 @@ impl HighlightSymbols {
                 ClassKind::Class => HighlightKind::Class,
             },
         );
+        let mut class_modifiers = 0;
+        if class.kind == ClassKind::Interface || class.modality.is_abstract() {
+            class_modifiers |= HighlightModifiers::ABSTRACT;
+        }
         if is_deprecated(&class.annotations) {
+            class_modifiers |= HighlightModifiers::DEPRECATED;
+        }
+        if class_modifiers != 0 {
             self.class_modifiers
-                .insert(class.name.clone(), HighlightModifiers::DEPRECATED);
+                .insert(class.name.clone(), class_modifiers);
         }
         for property in &class.props {
             self.members.insert(
@@ -451,7 +479,7 @@ impl<'a> SemanticClassifier<'a> {
         self.mark_namespaces_and_annotations();
         for &declaration in &self.file.decls {
             match self.file.decl(declaration) {
-                Decl::Fun(function) => self.mark_function(function, false, true),
+                Decl::Fun(function) => self.mark_function(function, false, true, false),
                 Decl::Class(class) => self.mark_class(class),
                 Decl::Property(property) => {
                     let (definition, type_definition) = self.mark_property(property, true);
@@ -472,6 +500,12 @@ impl<'a> SemanticClassifier<'a> {
         }
         for (index, statement) in self.file.stmt_arena.iter().enumerate() {
             self.mark_statement(StmtId(index as u32), statement, self.file.stmt_spans[index]);
+        }
+        // Lambda bodies precede their bindings in arena order.
+        for (index, expression) in self.file.expr_arena.iter().enumerate() {
+            if let Expr::Lambda { params, body } = expression {
+                self.mark_lambda(ExprId(index as u32), params, *body);
+            }
         }
         for (index, expression) in self.file.expr_arena.iter().enumerate() {
             self.mark_expression(ExprId(index as u32), expression);
@@ -551,13 +585,29 @@ impl<'a> SemanticClassifier<'a> {
                                 kind,
                                 modifiers | HighlightModifiers::DECLARATION,
                             );
+                            let mut target = index + 2;
+                            while self.tokens.get(target + 1).map(|token| token.kind)
+                                == Some(FrontendNameTokenKind::Dot)
+                                && self.tokens.get(target + 2).map(|token| token.kind)
+                                    == Some(FrontendNameTokenKind::Ident)
+                            {
+                                self.mark_index(target, HighlightKind::Namespace, 0);
+                                target += 2;
+                            }
+                            if self.tokens.get(target).map(|token| token.kind)
+                                == Some(FrontendNameTokenKind::Ident)
+                            {
+                                self.mark_index(target, kind, modifiers);
+                            }
                         }
                     }
                 }
                 FrontendNameTokenKind::Ident
-                    if index > 0 && self.tokens[index - 1].kind == FrontendNameTokenKind::At =>
+                    if index > 0
+                        && self.tokens[index - 1].kind == FrontendNameTokenKind::At
+                        && self.tokens[index - 1].span.hi == self.tokens[index].span.lo =>
                 {
-                    self.mark_index(index, HighlightKind::Decorator, 0);
+                    self.mark_index(index, HighlightKind::Method, 0);
                 }
                 _ => {}
             }
@@ -621,7 +671,7 @@ impl<'a> SemanticClassifier<'a> {
             .copied()
             .unwrap_or(HighlightKind::Class);
         let mut modifiers = HighlightModifiers::DECLARATION;
-        if class.modality.is_abstract() {
+        if class.modality.is_abstract() || class.kind == ClassKind::Interface {
             modifiers |= HighlightModifiers::ABSTRACT;
         }
         if is_deprecated(&class.annotations) {
@@ -642,7 +692,12 @@ impl<'a> SemanticClassifier<'a> {
             self.mark_type(supertype);
         }
         for method in &class.methods {
-            self.mark_function(method, true, false);
+            self.mark_function(
+                method,
+                true,
+                false,
+                class.kind == ClassKind::Interface && matches!(method.body, FunBody::None),
+            );
             self.add_member_function_binding(class.span, method, false);
         }
         let companion_scope = class
@@ -652,7 +707,7 @@ impl<'a> SemanticClassifier<'a> {
             .chain(class.companion_props.iter().map(|property| property.span))
             .reduce(|left, right| Span::new(left.lo.min(right.lo), left.hi.max(right.hi)));
         for method in &class.companion_methods {
-            self.mark_function(method, true, true);
+            self.mark_function(method, true, true, false);
             self.add_member_function_binding(companion_scope.unwrap_or(class.span), method, true);
         }
         for property in &class.body_props {
@@ -698,7 +753,7 @@ impl<'a> SemanticClassifier<'a> {
                     },
             );
             for method in &entry.methods {
-                self.mark_function(method, true, false);
+                self.mark_function(method, true, false, false);
             }
             for property in &entry.props {
                 let _ = self.mark_property(property, false);
@@ -706,7 +761,13 @@ impl<'a> SemanticClassifier<'a> {
         }
     }
 
-    fn mark_function(&mut self, function: &FunDecl, member: bool, static_member: bool) {
+    fn mark_function(
+        &mut self,
+        function: &FunDecl,
+        member: bool,
+        static_member: bool,
+        abstract_owner: bool,
+    ) {
         let kind = if function.is_operator {
             HighlightKind::Operator
         } else if member {
@@ -718,7 +779,7 @@ impl<'a> SemanticClassifier<'a> {
         if static_member {
             modifiers |= HighlightModifiers::STATIC;
         }
-        if function.is_abstract {
+        if (function.is_abstract && matches!(function.body, FunBody::None)) || abstract_owner {
             modifiers |= HighlightModifiers::ABSTRACT;
         }
         if function.is_suspend {
@@ -902,6 +963,13 @@ impl<'a> SemanticClassifier<'a> {
     }
 
     fn mark_statement(&mut self, statement_id: StmtId, statement: &Stmt, span: Span) {
+        match statement {
+            Stmt::Return(_, Some(label)) => self.mark_parsed_label(span, label, true),
+            Stmt::Break(Some(label)) | Stmt::Continue(Some(label)) => {
+                self.mark_parsed_label(span, label, false);
+            }
+            _ => {}
+        }
         match statement {
             Stmt::Local {
                 is_var,
@@ -1098,12 +1166,18 @@ impl<'a> SemanticClassifier<'a> {
                     }
                 }
             }
-            Stmt::Assign { name, .. } | Stmt::IncDec { name, .. } => {
+            Stmt::Assign { name, value } => {
+                let modifiers =
+                    self.value_modifiers(name, span.lo) | HighlightModifiers::MODIFICATION;
+                self.mark_named_in(span, name, HighlightKind::Variable, modifiers, false);
+                self.mark_compound_assignment_operator(statement_id, *value);
+            }
+            Stmt::IncDec { name, .. } => {
                 let modifiers =
                     self.value_modifiers(name, span.lo) | HighlightModifiers::MODIFICATION;
                 self.mark_named_in(span, name, HighlightKind::Variable, modifiers, false);
             }
-            Stmt::AssignMember { name, .. } => {
+            Stmt::AssignMember { name, value, .. } => {
                 self.mark_named_in(
                     span,
                     name,
@@ -1111,6 +1185,10 @@ impl<'a> SemanticClassifier<'a> {
                     HighlightModifiers::MODIFICATION,
                     true,
                 );
+                self.mark_compound_assignment_operator(statement_id, *value);
+            }
+            Stmt::AssignIndex { value, .. } => {
+                self.mark_compound_assignment_operator(statement_id, *value);
             }
             Stmt::For { name, .. } | Stmt::ForEach { name, .. } => {
                 let definition = self.mark_named_in_span(
@@ -1163,7 +1241,7 @@ impl<'a> SemanticClassifier<'a> {
                 }
             }
             Stmt::LocalFun(function) => {
-                self.mark_function(function, false, false);
+                self.mark_function(function, false, false, false);
                 let definition = self
                     .find_named(function.span, &function.name, None, None, false)
                     .map(|index| definition_name_span(self.source, self.tokens[index].span));
@@ -1204,10 +1282,199 @@ impl<'a> SemanticClassifier<'a> {
         }
     }
 
+    fn mark_compound_assignment_operator(&mut self, statement: StmtId, value: ExprId) {
+        let Expr::Binary { op, lhs, rhs } = self.file.expr(value) else {
+            return;
+        };
+        let expression_span = self.file.expr_spans[value.0 as usize];
+        let lhs_span = self.file.expr_spans[lhs.0 as usize];
+        if expression_span.lo == lhs_span.lo && expression_span.hi == lhs_span.hi {
+            self.mark_binary_operator(value, *op, *lhs, *rhs, Some(statement));
+        }
+    }
+
+    fn mark_binary_operator(
+        &mut self,
+        id: ExprId,
+        op: BinOp,
+        lhs: ExprId,
+        rhs: ExprId,
+        compound_statement: Option<StmtId>,
+    ) {
+        let (start, end) = if compound_statement.is_some() {
+            let span = self.file.expr_spans[id.0 as usize];
+            (span.lo, span.hi)
+        } else {
+            (
+                self.file.expr_spans[lhs.0 as usize].hi,
+                self.file.expr_spans[rhs.0 as usize].lo,
+            )
+        };
+        let operator_index = if compound_statement.is_some() {
+            let index = self.tokens.partition_point(|token| token.span.lo < start);
+            self.tokens
+                .get(index)
+                .filter(|token| {
+                    token.kind == FrontendNameTokenKind::Operator
+                        && token.span.lo == start
+                        && token.span.hi == end
+                })
+                .map(|_| index)
+        } else {
+            self.tokens.iter().position(|token| {
+                token.kind == FrontendNameTokenKind::Operator
+                    && token.span.lo >= start
+                    && token.span.hi <= end
+            })
+        };
+        let Some(index) = operator_index else {
+            return;
+        };
+        let mut modifiers = HighlightModifiers::DEFAULT_LIBRARY;
+        let in_place_target = compound_statement.and_then(|statement| {
+            self.type_info
+                .and_then(|types| types.compound_assignment_target(statement))
+        });
+        if let Some(target) = in_place_target {
+            modifiers = match target {
+                CompoundAssignmentTarget::Member { .. } => 0,
+                CompoundAssignmentTarget::SourceExtension { .. } => HighlightModifiers::STATIC,
+                CompoundAssignmentTarget::LibraryExtension => HighlightModifiers::DEFAULT_LIBRARY,
+            };
+        } else if let Some(name) = op.arith_operator_name() {
+            if self
+                .type_info
+                .is_some_and(|types| types.resolved_calls.contains_key(&id))
+            {
+                modifiers = self.function_reference_modifiers(id, name)
+                    & HighlightModifiers::DEFAULT_LIBRARY;
+            } else if let Some(Ty::Obj(owner, _)) = self
+                .type_info
+                .and_then(|types| types.expr_types.get(lhs.0 as usize))
+                .copied()
+                .map(Ty::non_null)
+            {
+                if self
+                    .symbols
+                    .class_by_type_name(owner)
+                    .is_some_and(|class| class.has_method(name))
+                {
+                    modifiers = 0;
+                }
+            }
+        }
+        self.mark_index(index, HighlightKind::Operator, modifiers);
+    }
+
+    fn mark_lambda(&mut self, id: ExprId, params: &[String], body: ExprId) {
+        let span = self.file.expr_spans[id.0 as usize];
+        let scope = self.file.expr_spans[body.0 as usize];
+        let implicit_parameter = if params.is_empty() {
+            self.type_info
+                .and_then(|types| types.expr_types.get(id.0 as usize))
+                .copied()
+                .and_then(Ty::fun_params)
+                .map(|parameters| {
+                    if self
+                        .type_info
+                        .is_some_and(|types| types.lambda_has_receiver(id))
+                    {
+                        parameters.get(1..).unwrap_or_default()
+                    } else {
+                        parameters
+                    }
+                })
+                .filter(|parameters| parameters.len() == 1)
+                .map(|parameters| parameters[0])
+        } else {
+            None
+        };
+        if let Some(ty) = implicit_parameter {
+            self.add_binding(
+                "it",
+                scope,
+                scope.lo,
+                HighlightKind::Parameter,
+                HighlightModifiers::READONLY,
+                None,
+            );
+            self.set_last_binding_type_definition(self.type_definition_target_for_ty(ty));
+            self.set_last_binding_hover(format!("it: {}", render_ty(ty)));
+        }
+        for (parameter_index, name) in params.iter().enumerate() {
+            let declared_type = self
+                .file
+                .lambda_param_types
+                .get(&id.0)
+                .and_then(|types| types.get(parameter_index))
+                .and_then(Option::as_ref)
+                .cloned();
+            let definition = self.mark_named_in_span(
+                span,
+                name,
+                HighlightKind::Parameter,
+                HighlightModifiers::DECLARATION | HighlightModifiers::READONLY,
+                false,
+            );
+            self.add_binding(
+                name,
+                scope,
+                scope.lo,
+                HighlightKind::Parameter,
+                HighlightModifiers::READONLY,
+                definition,
+            );
+            if let Some(ty) = declared_type {
+                let type_definition = self.type_definition_target_for_type_ref(
+                    &ty,
+                    definition.map_or(span.lo, |span| span.lo),
+                );
+                self.set_last_binding_type_definition(type_definition);
+                if let (Some(definition), Some(target)) = (definition, type_definition) {
+                    self.push_type_definition(definition, target);
+                }
+                let name = definition
+                    .map(|span| source_name(self.source, span, name))
+                    .unwrap_or(name);
+                self.set_last_binding_hover(format!("{name}: {}", render_type(&ty)));
+            } else if let Some(ty) = self
+                .lambda_hover_types
+                .get(&id)
+                .and_then(|types| types.get(parameter_index))
+                .cloned()
+            {
+                let name = definition
+                    .map(|span| source_name(self.source, span, name))
+                    .unwrap_or(name);
+                self.set_last_binding_hover(format!("{name}: {ty}"));
+            }
+        }
+        if let Some(types) = self.file.lambda_param_types.get(&id.0) {
+            for ty in types.iter().flatten() {
+                self.mark_type(ty);
+            }
+        }
+    }
+
     fn mark_expression(&mut self, id: ExprId, expression: &Expr) {
         let span = self.file.expr_spans[id.0 as usize];
         match expression {
             Expr::Name(name) => {
+                if let Some((receiver, label)) = name.rsplit_once('@') {
+                    if receiver == "this" || receiver.starts_with("super") {
+                        self.mark_receiver_label(span, receiver, label);
+                        return;
+                    }
+                }
+                if name == "this" {
+                    if self.has_expression_label_before(span) {
+                        self.mark_exact(span, HighlightKind::Class, 0);
+                    }
+                    return;
+                }
+                if name == "super" {
+                    return;
+                }
                 let (kind, modifiers) = if let Some(&call) = self.callees.get(&id) {
                     if self.is_constructor_call(call, name) {
                         self.type_token(name, span.lo)
@@ -1273,9 +1540,16 @@ impl<'a> SemanticClassifier<'a> {
                     self.push_hover(span, value);
                 }
             }
+            Expr::Binary { op, lhs, rhs } => {
+                let expression_span = self.file.expr_spans[id.0 as usize];
+                let lhs_span = self.file.expr_spans[lhs.0 as usize];
+                if expression_span.lo != lhs_span.lo || expression_span.hi != lhs_span.hi {
+                    self.mark_binary_operator(id, *op, *lhs, *rhs, None);
+                }
+            }
             Expr::Member { receiver, name } => {
                 let call = self.callees.get(&id).copied();
-                let highlight = self.member_highlight(*receiver, name, call);
+                let highlight = self.member_highlight(id, *receiver, name, call);
                 if let Some(source_span) =
                     self.mark_named_in_span(span, name, highlight.kind, highlight.modifiers, true)
                 {
@@ -1295,7 +1569,7 @@ impl<'a> SemanticClassifier<'a> {
                 args,
             } => {
                 let call = args.as_ref().map(|_| id);
-                let highlight = self.member_highlight(*receiver, name, call);
+                let highlight = self.member_highlight(id, *receiver, name, call);
                 if let Some(source_span) =
                     self.mark_named_in_span(span, name, highlight.kind, highlight.modifiers, true)
                 {
@@ -1311,7 +1585,7 @@ impl<'a> SemanticClassifier<'a> {
             }
             Expr::CallableRef { receiver, name } if name != "class" => {
                 let highlight = if let Some(receiver) = receiver {
-                    self.member_highlight(*receiver, name, None)
+                    self.member_highlight(id, *receiver, name, None)
                 } else {
                     let property = self
                         .type_info
@@ -1367,65 +1641,13 @@ impl<'a> SemanticClassifier<'a> {
                 }
             }
             Expr::Is { ty, .. } | Expr::As { ty, .. } => self.mark_type(ty),
-            Expr::Lambda { params, .. } => {
-                for (parameter_index, name) in params.iter().enumerate() {
-                    let declared_type = self
-                        .file
-                        .lambda_param_types
-                        .get(&id.0)
-                        .and_then(|types| types.get(parameter_index))
-                        .and_then(Option::as_ref)
-                        .cloned();
-                    let definition = self.mark_named_in_span(
-                        span,
-                        name,
-                        HighlightKind::Parameter,
-                        HighlightModifiers::DECLARATION | HighlightModifiers::READONLY,
-                        false,
-                    );
-                    let scope = match expression {
-                        Expr::Lambda { body, .. } => self.file.expr_spans[body.0 as usize],
-                        _ => unreachable!(),
-                    };
-                    self.add_binding(
-                        name,
-                        scope,
-                        scope.lo,
-                        HighlightKind::Parameter,
-                        HighlightModifiers::READONLY,
-                        definition,
-                    );
-                    if let Some(ty) = declared_type {
-                        let type_definition = self.type_definition_target_for_type_ref(
-                            &ty,
-                            definition.map_or(span.lo, |span| span.lo),
-                        );
-                        self.set_last_binding_type_definition(type_definition);
-                        if let (Some(definition), Some(target)) = (definition, type_definition) {
-                            self.push_type_definition(definition, target);
-                        }
-                        let name = definition
-                            .map(|span| source_name(self.source, span, name))
-                            .unwrap_or(name);
-                        self.set_last_binding_hover(format!("{name}: {}", render_type(&ty)));
-                    } else if let Some(ty) = self
-                        .lambda_hover_types
-                        .get(&id)
-                        .and_then(|types| types.get(parameter_index))
-                        .cloned()
-                    {
-                        let name = definition
-                            .map(|span| source_name(self.source, span, name))
-                            .unwrap_or(name);
-                        self.set_last_binding_hover(format!("{name}: {ty}"));
-                    }
-                }
-                if let Some(types) = self.file.lambda_param_types.get(&id.0) {
-                    for ty in types.iter().flatten() {
-                        self.mark_type(ty);
-                    }
-                }
+            Expr::Return {
+                label: Some(label), ..
+            } => self.mark_parsed_label(span, label, true),
+            Expr::Break { label: Some(label) } | Expr::Continue { label: Some(label) } => {
+                self.mark_parsed_label(span, label, false);
             }
+            Expr::Lambda { .. } => {}
             Expr::Try { catches, .. } => {
                 for catch in catches {
                     let definition = self.mark_named_before_span(
@@ -1916,6 +2138,7 @@ impl<'a> SemanticClassifier<'a> {
 
     fn member_highlight(
         &self,
+        expression: ExprId,
         receiver: ExprId,
         name: &str,
         call: Option<ExprId>,
@@ -1967,6 +2190,26 @@ impl<'a> SemanticClassifier<'a> {
                         },
                     };
                 }
+            }
+        }
+        if call.is_none() {
+            if let Some(member) = self
+                .type_info
+                .and_then(|types| types.resolved_member(expression))
+            {
+                let default_library = member
+                    .member
+                    .owner
+                    .is_some_and(|owner| default_library_member_owner(self.symbols, owner));
+                return MemberHighlight {
+                    kind: HighlightKind::Property,
+                    modifiers: HighlightModifiers::READONLY
+                        | if default_library {
+                            HighlightModifiers::DEFAULT_LIBRARY
+                        } else {
+                            0
+                        },
+                };
             }
         }
         if let Some(call) = call {
@@ -2048,7 +2291,7 @@ impl<'a> SemanticClassifier<'a> {
             if member
                 .member
                 .owner
-                .is_some_and(|owner| owner.starts_with("kotlin/"))
+                .is_some_and(|owner| default_library_member_owner(self.symbols, owner))
             {
                 modifiers |= HighlightModifiers::DEFAULT_LIBRARY;
             }
@@ -2378,11 +2621,88 @@ impl<'a> SemanticClassifier<'a> {
     }
 
     fn mark_index(&mut self, index: usize, kind: HighlightKind, modifiers: u16) {
+        self.mark_index_span(index, self.tokens[index].span, kind, modifiers);
+    }
+
+    fn mark_index_span(&mut self, index: usize, span: Span, kind: HighlightKind, modifiers: u16) {
         self.classified[index] = Some(HighlightOccurrence {
-            span: self.tokens[index].span,
+            span,
             kind,
             modifiers: HighlightModifiers::from_bits(modifiers),
         });
+    }
+
+    fn mark_parsed_label(&mut self, owner: Span, label: &str, return_label: bool) {
+        let Some(index) = self.parsed_label_index(owner, label) else {
+            return;
+        };
+        if return_label {
+            let span = Span::new(self.tokens[index - 1].span.lo, self.tokens[index].span.hi);
+            self.mark_index_span(index, span, HighlightKind::Function, 0);
+        } else {
+            self.classified[index] = None;
+        }
+    }
+
+    fn parsed_label_index(&self, owner: Span, label: &str) -> Option<usize> {
+        self.tokens.iter().enumerate().find_map(|(index, token)| {
+            let name = self.tokens.get(index + 1)?;
+            (token.kind == FrontendNameTokenKind::At
+                && token.span.lo >= owner.lo
+                && name.span.hi <= owner.hi
+                && token.span.hi == name.span.lo
+                && name.kind == FrontendNameTokenKind::Ident
+                && name.text(self.source) == label)
+                .then_some(index + 1)
+        })
+    }
+
+    fn mark_receiver_label(&mut self, receiver_span: Span, receiver: &str, label: &str) {
+        let owner = self.receiver_name_span(receiver_span.lo);
+        let supertype = receiver
+            .strip_prefix("super<")
+            .and_then(|receiver| receiver.strip_suffix('>'));
+        let (receiver_kind, receiver_modifiers) = if let Some(supertype) = supertype {
+            let (kind, modifiers) = self.type_token(supertype, receiver_span.lo);
+            self.mark_named_in_span(owner, supertype, kind, modifiers, false);
+            (kind, modifiers)
+        } else {
+            self.type_token(label, receiver_span.lo)
+        };
+        self.mark_exact(receiver_span, receiver_kind, receiver_modifiers);
+        if let Some(index) = self.parsed_label_index(owner, label) {
+            let (kind, modifiers) = self.type_token(label, self.tokens[index].span.lo);
+            let span = Span::new(self.tokens[index - 1].span.lo, self.tokens[index].span.hi);
+            self.mark_index_span(index, span, kind, modifiers);
+        }
+    }
+
+    fn has_expression_label_before(&self, span: Span) -> bool {
+        let Some(index) = self.tokens.iter().position(|token| token.span == span) else {
+            return false;
+        };
+        index >= 2
+            && self.tokens[index - 1].kind == FrontendNameTokenKind::At
+            && self.tokens[index - 2].kind == FrontendNameTokenKind::Ident
+            && self.tokens[index - 2].span.hi == self.tokens[index - 1].span.lo
+            && self.tokens[index - 1].span.hi < span.lo
+    }
+
+    fn receiver_name_span(&self, start: u32) -> Span {
+        let rest = &self.source[start as usize..];
+        let len = rest
+            .char_indices()
+            .find_map(|(offset, character)| {
+                (offset > 0
+                    && (character.is_whitespace()
+                        || matches!(
+                            character,
+                            '.' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
+                        )))
+                .then_some(offset)
+            })
+            .unwrap_or(rest.len());
+        Span::new(start, start + len as u32)
     }
 }
 
@@ -2394,6 +2714,24 @@ fn variable_modifier(is_var: bool) -> u16 {
     }
 }
 
+fn default_library_member_owner(symbols: &FrontendSymbols, owner: krusty::types::TypeName) -> bool {
+    symbols.libraries.is_default_library_owner(owner)
+}
+
+fn terminal_alias_target<'a>(
+    mut target: &'a str,
+    aliases: &HashMap<&'a str, &'a str>,
+) -> Option<&'a str> {
+    let mut seen = std::collections::HashSet::new();
+    while let Some(next) = aliases.get(target).copied() {
+        if !seen.insert(target) {
+            return None;
+        }
+        target = next;
+    }
+    Some(target)
+}
+
 fn is_deprecated(annotations: &[String]) -> bool {
     annotations
         .iter()
@@ -2402,7 +2740,7 @@ fn is_deprecated(annotations: &[String]) -> bool {
 
 fn function_modifiers(function: &FunDecl) -> u16 {
     let mut modifiers = 0;
-    if function.is_abstract {
+    if function.is_abstract && matches!(function.body, FunBody::None) {
         modifiers |= HighlightModifiers::ABSTRACT;
     }
     if function.is_suspend {
