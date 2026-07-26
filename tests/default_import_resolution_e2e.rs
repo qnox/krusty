@@ -51,6 +51,35 @@ fn explicit_import_makes_it_resolve() {
 }
 
 #[test]
+fn java_util_star_import_resolves_mapped_collection_types() {
+    const EXPLICIT: &str = "package first\n\
+    import java.util.*\n\
+    fun count(values: Collection<String>): Int = values.size\n\
+    fun first(values: List<String>): String = values[0]\n";
+    const DEFAULT: &str = "package second\n\
+    fun last(values: List<String>): String = values[values.size - 1]\n";
+    const MAIN: &str = "fun box(): String = \"OK\"\n";
+    for sources in [
+        [
+            ("Explicit.kt", EXPLICIT),
+            ("Default.kt", DEFAULT),
+            ("Main.kt", MAIN),
+        ],
+        [
+            ("Default.kt", DEFAULT),
+            ("Explicit.kt", EXPLICIT),
+            ("Main.kt", MAIN),
+        ],
+    ] {
+        assert_eq!(
+            common::compile_and_run_files_with_stdlib(&sources)
+                .expect("mapped collection imports resolve independently across files"),
+            "OK"
+        );
+    }
+}
+
+#[test]
 fn ambiguous_star_imports_are_rejected_like_kotlinc() {
     // kotlinc rejects a bare `Date` when TWO star-imports both supply it (`java.util.*` AND
     // `java.sql.*`): the name is ambiguous. krusty must also leave it unresolved (a compile error),

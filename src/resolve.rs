@@ -80,6 +80,20 @@ pub fn adapted_ref_arity(vararg: bool, required: usize, param_count: usize) -> u
     }
 }
 
+fn canonical_import_builtin(
+    simple: &str,
+    resolved: TypeName,
+    platform: &dyn SemanticPlatform,
+) -> TypeName {
+    platform
+        .builtin_type_internal(simple)
+        .map(|internal| type_name(&internal))
+        // Canonicalize only the raw platform spelling. Comparing both value forms would also
+        // collapse distinct Kotlin mapped types such as MutableList and List.
+        .filter(|&builtin| platform.library_value_form_name(builtin) == resolved)
+        .unwrap_or(resolved)
+}
+
 impl Signature {
     pub fn requires_all_args(&self) -> bool {
         !self.vararg && self.params.len() == self.required
@@ -2144,6 +2158,11 @@ pub fn collect_signatures_with_cp(
                         })
                     });
                 if let Some(full) = full {
+                    // A Java spelling explicitly imported in one file and the corresponding Kotlin
+                    // built-in spelling used in another are one source classifier. Normalize through
+                    // the platform's existing built-in/value-form seams before the source-set-wide
+                    // consistency merge (`java.util.List` and `kotlin.collections.List`, for example).
+                    let full = canonical_import_builtin(&name, full, &*libraries);
                     match from_import.get(&name) {
                         None => {
                             from_import.insert(name, Some(full));
@@ -20659,6 +20678,25 @@ mod tests {
     use crate::features::LangFeatures;
     use crate::lexer::lex;
     use crate::parser::{parse, parse_with_features};
+
+    #[test]
+    fn import_builtin_canonicalization_only_rewrites_raw_platform_spelling() {
+        let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(vec![]));
+        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(classpath);
+
+        assert_eq!(
+            canonical_import_builtin("List", type_name("java/util/List"), &platform),
+            type_name("kotlin/collections/List")
+        );
+        assert_eq!(
+            canonical_import_builtin(
+                "List",
+                type_name("kotlin/collections/MutableList"),
+                &platform
+            ),
+            type_name("kotlin/collections/MutableList")
+        );
+    }
 
     fn check(src: &str) -> (Vec<String>, Option<TypeInfo>) {
         let mut d = DiagSink::new();
