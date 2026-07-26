@@ -56,6 +56,8 @@ pub struct Signature {
     /// True for a `suspend fun`. Flows to `FnFlags.suspend` so the resolver reports suspend-ness
     /// uniformly for same-file and classpath callees; the coroutine pass keys off it.
     pub is_suspend: bool,
+    /// Kotlin source visibility for this exact overload.
+    pub visibility: Visibility,
     /// Number of leading context parameters in `params`. Ordinary functions leave this at 0.
     pub context_count: usize,
     /// Source declaration id for a top-level function in the current compilation, when this signature
@@ -274,9 +276,6 @@ pub struct ClassSig {
     /// outside the declaring class. Only body properties are recorded; primary-constructor properties
     /// default to `public`.
     pub prop_visibility: HashMap<String, Visibility>,
-    /// Visibility of each MEMBER function that is not `public`, keyed by name — the function analogue of
-    /// [`Self::prop_visibility`], read by the same access check for a member call.
-    pub fn_visibility: HashMap<String, Visibility>,
 }
 
 /// The symbolic declaration shape of a generic member method.
@@ -409,6 +408,54 @@ fn positional_score(params: &[Ty], arg_tys: &[Ty]) -> Option<usize> {
     Some(sc)
 }
 
+fn positional_candidate_score(
+    params: &[Ty],
+    vararg: bool,
+    required: usize,
+    defaults: &[bool],
+    arg_tys: &[Ty],
+) -> Option<(usize, std::cmp::Reverse<usize>, bool)> {
+    let has_default = |index| defaults.get(index).copied().unwrap_or(index >= required);
+    if vararg {
+        let Some((array, fixed)) = params.split_last() else {
+            return arg_tys
+                .is_empty()
+                .then_some((0, std::cmp::Reverse(0), false));
+        };
+        if arg_tys.len() < fixed.len()
+            && (arg_tys.len()..fixed.len()).any(|index| !has_default(index))
+        {
+            return None;
+        }
+        let fixed_provided = arg_tys.len().min(fixed.len());
+        let mut type_score =
+            positional_score(&fixed[..fixed_provided], &arg_tys[..fixed_provided])?;
+        let element = array.array_elem().unwrap_or(Ty::Error);
+        for actual in &arg_tys[fixed_provided..] {
+            if !arg_assignable_simple(element, *actual) {
+                return None;
+            }
+            type_score += if element == *actual { 2 } else { 1 };
+        }
+        return Some((
+            type_score,
+            std::cmp::Reverse(fixed.len().saturating_sub(fixed_provided)),
+            false,
+        ));
+    }
+    if arg_tys.len() > params.len()
+        || (arg_tys.len() < params.len()
+            && (arg_tys.len()..params.len()).any(|index| !has_default(index)))
+    {
+        return None;
+    }
+    Some((
+        positional_score(&params[..arg_tys.len()], arg_tys)?,
+        std::cmp::Reverse(params.len().saturating_sub(arg_tys.len())),
+        true,
+    ))
+}
+
 /// Soundness guard shared by `pick_overload` and `pick_member_overloads`: krusty erases generics, so a
 /// generic value reads as `kotlin/Any`. An erased-`Any` ARGUMENT at a position where the candidates'
 /// parameter types DIFFER defeats selection — kotlinc selects on the precise type krusty no longer has —
@@ -440,17 +487,19 @@ fn pick_member_overloads(
     if members.len() <= 1 || named || distinct.len() <= 1 {
         return members;
     }
-    let arity_ok = |m: &crate::libraries::LibraryMember| {
-        if m.call_sig.vararg {
-            arg_tys.len() + 1 >= m.params.len()
-        } else {
-            arg_tys.len() == m.params.len()
-                || (arg_tys.len() < m.params.len()
-                    && m.call_sig.can_map_omitted_args(m.params.len()))
-        }
+    let score = |member: &crate::libraries::LibraryMember| {
+        positional_candidate_score(
+            &member.params,
+            member.call_sig.vararg,
+            member.call_sig.required,
+            &member.call_sig.param_defaults,
+            arg_tys,
+        )
     };
-    let viable: Vec<&crate::libraries::LibraryMember> =
-        members.iter().filter(|m| arity_ok(m)).collect();
+    let viable: Vec<&crate::libraries::LibraryMember> = members
+        .iter()
+        .filter(|member| score(member).is_some())
+        .collect();
     if viable.is_empty() {
         return members; // keep the original list so the arity diagnostic names the call shape
     }
@@ -478,16 +527,9 @@ fn pick_member_overloads(
     if erased_arg_defeats_selection(arg_tys, viable.iter().map(|m| m.params.as_slice())) {
         return Vec::new();
     }
-    let score = |m: &crate::libraries::LibraryMember| -> Option<usize> {
-        if m.params.len() != arg_tys.len() {
-            return Some(1); // omitted-arg/vararg candidate: viable but never beats an exact fit
-        }
-        // +2 baseline: any exact-arity assignable fit outranks every omitted-arg/vararg candidate.
-        positional_score(&m.params, arg_tys).map(|sc| sc + 2)
-    };
-    let scored: Vec<(usize, &crate::libraries::LibraryMember)> = viable
+    let scored: Vec<(_, &crate::libraries::LibraryMember)> = viable
         .iter()
-        .filter_map(|&m| score(m).map(|sc| (sc, m)))
+        .filter_map(|&member| score(member).map(|score| (score, member)))
         .collect();
     let Some(&(best, _)) = scored.iter().max_by_key(|&&(sc, _)| sc) else {
         return members; // nothing assignable: keep the list for the ordinary type-error diagnostics
@@ -524,41 +566,14 @@ fn module_member_candidate_applicable(
         });
     }
 
-    if member.call_sig.vararg {
-        let Some((vararg, fixed)) = member.params.split_last() else {
-            return arg_tys.is_empty();
-        };
-        if arg_tys.len() < fixed.len()
-            && (arg_tys.len()..fixed.len()).any(|index| !member.call_sig.param_has_default(index))
-        {
-            return false;
-        }
-        let fixed_provided = arg_tys.len().min(fixed.len());
-        if fixed[..fixed_provided]
-            .iter()
-            .zip(&arg_tys[..fixed_provided])
-            .any(|(parameter, actual)| !arg_assignable_simple(*parameter, *actual))
-        {
-            return false;
-        }
-        let element = vararg.array_elem().unwrap_or(Ty::Error);
-        return arg_tys[fixed_provided..]
-            .iter()
-            .all(|actual| arg_assignable_simple(element, *actual));
-    }
-
-    if arg_tys.len() > member.params.len()
-        || (arg_tys.len() < member.params.len()
-            && (arg_tys.len()..member.params.len())
-                .any(|index| !member.call_sig.param_has_default(index)))
-    {
-        return false;
-    }
-    member
-        .params
-        .iter()
-        .zip(arg_tys)
-        .all(|(parameter, actual)| arg_assignable_simple(*parameter, *actual))
+    positional_candidate_score(
+        &member.params,
+        member.call_sig.vararg,
+        member.call_sig.required,
+        &member.call_sig.param_defaults,
+        arg_tys,
+    )
+    .is_some()
 }
 
 fn local_function_candidate_score(
@@ -607,61 +622,13 @@ fn local_function_candidate_score(
         }
         return Some((type_score, std::cmp::Reverse(omitted), !signature.vararg));
     }
-    if signature.vararg {
-        let Some((vararg, fixed)) = params.split_last() else {
-            return arg_tys
-                .is_empty()
-                .then_some((0, std::cmp::Reverse(0), false));
-        };
-        if arg_tys.len() < fixed.len()
-            && (arg_tys.len()..fixed.len())
-                .any(|index| !defaults.get(index).copied().unwrap_or(false))
-        {
-            return None;
-        }
-        let fixed_provided = arg_tys.len().min(fixed.len());
-        let mut type_score = 0;
-        for (parameter, actual) in fixed[..fixed_provided]
-            .iter()
-            .zip(&arg_tys[..fixed_provided])
-        {
-            if !arg_assignable_simple(*parameter, *actual) {
-                return None;
-            }
-            type_score += if parameter == actual { 2 } else { 1 };
-        }
-        let element = vararg.array_elem().unwrap_or(Ty::Error);
-        for actual in &arg_tys[fixed_provided..] {
-            if !arg_assignable_simple(element, *actual) {
-                return None;
-            }
-            type_score += if element == *actual { 2 } else { 1 };
-        }
-        return Some((
-            type_score,
-            std::cmp::Reverse(fixed.len().saturating_sub(fixed_provided)),
-            false,
-        ));
-    }
-    if arg_tys.len() > params.len()
-        || (arg_tys.len() < params.len()
-            && (arg_tys.len()..params.len())
-                .any(|index| !defaults.get(index).copied().unwrap_or(false)))
-    {
-        return None;
-    }
-    let mut type_score = 0;
-    for (parameter, actual) in params.iter().zip(arg_tys) {
-        if !arg_assignable_simple(*parameter, *actual) {
-            return None;
-        }
-        type_score += if parameter == actual { 2 } else { 1 };
-    }
-    Some((
-        type_score,
-        std::cmp::Reverse(params.len().saturating_sub(arg_tys.len())),
-        true,
-    ))
+    positional_candidate_score(
+        params,
+        signature.vararg,
+        signature.required.saturating_sub(context_count),
+        defaults,
+        arg_tys,
+    )
 }
 
 /// Simple type name → JVM internal name, split into a SHARED read-only base (the library/classpath
@@ -2254,6 +2221,7 @@ pub fn collect_signatures_with_cp(
                         is_inline: f.is_inline,
                         is_final: f.is_final,
                         is_suspend: f.is_suspend,
+                        visibility: f.visibility,
                         context_count: f.context_count,
                         source_decl: Some(d),
                         source_file: Some(i as u32),
@@ -2918,6 +2886,7 @@ pub fn collect_signatures_with_cp(
                                     is_inline: false,
                                     is_final: true,
                                     is_suspend: false,
+                                    visibility: Visibility::Public,
                                     context_count: 0,
                                     source_decl: None,
                                     source_file: None,
@@ -2942,6 +2911,7 @@ pub fn collect_signatures_with_cp(
                                 is_inline: false,
                                 is_final: true,
                                 is_suspend: false,
+                                visibility: Visibility::Public,
                                 context_count: 0,
                                 source_decl: None,
                                 source_file: None,
@@ -3105,6 +3075,7 @@ pub fn collect_signatures_with_cp(
                                 is_inline: false,
                                 is_final: true,
                                 is_suspend: false,
+                                visibility: Visibility::Public,
                                 context_count: 0,
                                 source_decl: None,
                                 source_file: None,
@@ -3236,13 +3207,6 @@ pub fn collect_signatures_with_cp(
                         .filter(|bp| bp.receiver.is_none() && bp.visibility != Visibility::Public)
                         .map(|bp| (bp.name.clone(), bp.visibility))
                         .collect();
-                    // Non-public member-function visibility (the function analogue of `prop_visibility`).
-                    let fn_visibility: HashMap<String, Visibility> = c
-                        .methods
-                        .iter()
-                        .filter(|m| m.visibility != Visibility::Public)
-                        .map(|m| (m.name.clone(), m.visibility))
-                        .collect();
                     let comp_internal = format!("{internal}$Companion");
                     let has_companion_supertypes =
                         !companion_interfaces.is_empty() || companion_super_internal.is_some();
@@ -3321,7 +3285,6 @@ pub fn collect_signatures_with_cp(
                             generic_props,
                             generic_function_props,
                             prop_visibility,
-                            fn_visibility,
                             value_field,
                             generic_methods,
                         },
@@ -3381,7 +3344,6 @@ pub fn collect_signatures_with_cp(
                                 value_field: None,
                                 generic_methods: HashMap::new(),
                                 prop_visibility: HashMap::new(),
-                                fn_visibility: HashMap::new(),
                             },
                         );
                     }
@@ -5378,6 +5340,7 @@ fn member_signature(
         is_inline: false,
         is_final: m.is_final,
         is_suspend: m.is_suspend,
+        visibility: m.visibility,
         context_count: 0,
         source_decl: None,
         source_file: None,
@@ -15100,33 +15063,20 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// The EFFECTIVE visibility of member `name` on `receiver` and the class that declares it, walking
-    /// the base-class chain. Stops at the FIRST class that declares `name` (a subclass member shadows a
-    /// same-named base one), so an inherited `private` on a superclass is checked against that
-    /// superclass — not silently allowed because the receiver's own map lacks it. `is_fn` selects the
-    /// function vs property table. `None` when no class in the chain declares it (a builtin/absent member).
-    fn effective_member_visibility(
+    fn effective_property_visibility(
         &self,
         receiver: TypeName,
         name: &str,
-        is_fn: bool,
     ) -> Option<(Visibility, TypeName)> {
         let mut cur = Some(receiver);
         while let Some(internal) = cur {
             let cs = self.syms.class_by_type_name(internal)?;
-            let declares = if is_fn {
-                cs.methods.contains_key(name)
-            } else {
-                cs.prop(name).is_some()
-            };
-            if declares {
-                let vis = if is_fn {
-                    cs.fn_visibility.get(name)
-                } else {
-                    cs.prop_visibility.get(name)
-                }
-                .copied()
-                .unwrap_or(Visibility::Public);
+            if cs.prop(name).is_some() {
+                let vis = cs
+                    .prop_visibility
+                    .get(name)
+                    .copied()
+                    .unwrap_or(Visibility::Public);
                 return Some((vis, internal));
             }
             cur = cs.super_internal_name();
@@ -15266,8 +15216,7 @@ impl<'a> Checker<'a> {
         if let Ty::Obj(internal, _) = rt {
             let internal_name = internal;
             if let Some((owner, ty, _)) = self.lookup_prop_with_owner_name(internal_name, name) {
-                if let Some((vis, owner)) =
-                    self.effective_member_visibility(internal_name, name, false)
+                if let Some((vis, owner)) = self.effective_property_visibility(internal_name, name)
                 {
                     if vis != Visibility::Public {
                         self.reject_if_inaccessible(vis, name, owner, span);
@@ -15755,18 +15704,23 @@ impl<'a> Checker<'a> {
                 .iter()
                 .any(|other| member.owner == other.owner && member.params != other.params)
         });
-        let no_applicable_sibling = has_sibling_overloads
-            && !all_members
-                .iter()
-                .any(|member| module_member_candidate_applicable(member, args, arg_tys, arg_names));
-        let members = pick_member_overloads(all_members, arg_tys, arg_names.is_some());
-        if has_sibling_overloads && no_applicable_sibling {
+        let applicable_members = all_members
+            .iter()
+            .filter(|member| module_member_candidate_applicable(member, args, arg_tys, arg_names))
+            .cloned()
+            .collect::<Vec<_>>();
+        if has_sibling_overloads && applicable_members.is_empty() {
             self.diags.error(
                 self.call_callee_name_span(call),
                 "none of the following candidates is applicable:".to_string(),
             );
             return Some(Ty::Error);
         }
+        let members = if applicable_members.is_empty() {
+            pick_member_overloads(all_members, arg_tys, arg_names.is_some())
+        } else {
+            pick_member_overloads(applicable_members, arg_tys, false)
+        };
         // The first Member overload is the most-derived override (for dispatch/return). For an
         // OMITTED-argument call, the default may be declared on a SUPERTYPE (an interface method's default
         // isn't redeclared on the override) — prefer an overload that records defaults so the omitted args
@@ -15853,11 +15807,7 @@ impl<'a> Checker<'a> {
         } else {
             // A `vararg` member (`fun f(vararg s: T)`) accepts trailing `T` args packed into the array
             // param — element-type them, don't match the array positionally.
-            let vararg = self
-                .syms
-                .method_of_name(internal_name, name)
-                .is_some_and(|s| s.vararg);
-            self.expect_call_args(&params, vararg, args, arg_tys);
+            self.expect_call_args(&params, cs.vararg, args, arg_tys);
         }
         // A generic higher-order member: the result is the method's `<R>` inferred from the lambda body
         // (`box.map { it.length }` → `Int`), not the erased `Object`.
@@ -15883,11 +15833,20 @@ impl<'a> Checker<'a> {
             self.inferred_member_ret(rt, name, &params)
                 .unwrap_or(fi.ret)
         };
+        let owner = fi.owner.unwrap_or(internal_name);
+        if fi.visibility != Visibility::Public {
+            self.reject_if_inaccessible(
+                fi.visibility,
+                name,
+                owner,
+                self.call_callee_name_span(call),
+            );
+        }
         self.resolved_calls.insert(
             call,
             ResolvedCall::ModuleMember {
                 receiver: rt,
-                owner: fi.owner.unwrap_or(internal_name),
+                owner,
                 name: name.to_string(),
                 params: params.clone(),
                 physical_ret: fi.ret,
@@ -16492,6 +16451,43 @@ impl<'a> Checker<'a> {
                 // path and let the receiver resolve as that property value below.
                 if let Expr::Name(cls) = self.file.expr(receiver).clone() {
                     if !self.value_root_shadows_classifier(&cls) {
+                        let is_object = self.syms.objects.contains(&cls);
+                        // Ordinary object members precede synthesized static fallbacks.
+                        if is_object {
+                            let arg_tys = self.arg_tys(args);
+                            let internal = self
+                                .syms
+                                .classes
+                                .get(&cls)
+                                .map(ClassSig::internal_name)
+                                .unwrap_or_else(|| type_name(&class_internal(self.file, &cls)));
+                            let receiver_ty = Ty::obj_name(internal);
+                            let arg_names = self.file.call_arg_names.get(&call.0).cloned();
+                            let applicable = crate::module_symbols::ModuleSymbols::new(self.syms)
+                                .instance_members(receiver_ty, &name)
+                                .iter()
+                                .any(|member| {
+                                    module_member_candidate_applicable(
+                                        member,
+                                        args,
+                                        &arg_tys,
+                                        arg_names.as_deref(),
+                                    )
+                                });
+                            if applicable {
+                                if let Some(ret) = self.check_module_member_call(
+                                    call,
+                                    receiver_ty,
+                                    &name,
+                                    args,
+                                    &arg_tys,
+                                ) {
+                                    self.expr_lowers
+                                        .insert(call, ExprLowering::ObjectMemberCall { internal });
+                                    return ret;
+                                }
+                            }
+                        }
                         // `ClassName.fn(args)` — a companion (static) method call.
                         if let Some(sig) = self
                             .syms
@@ -16541,8 +16537,7 @@ impl<'a> Checker<'a> {
                             }
                             return sig.ret;
                         }
-                        // `Object.member(args)` — a singleton member call.
-                        if self.syms.objects.contains(&cls) {
+                        if is_object {
                             let arg_tys = self.arg_tys(args);
                             let internal = self
                                 .syms
@@ -16550,37 +16545,18 @@ impl<'a> Checker<'a> {
                                 .get(&cls)
                                 .map(ClassSig::internal_name)
                                 .unwrap_or_else(|| type_name(&class_internal(self.file, &cls)));
-                            return match self
-                                .syms
-                                .classes
-                                .get(&cls)
-                                .and_then(|c| c.method_matching(&name, &arg_tys))
-                                .cloned()
-                            {
-                                Some(sig) => {
-                                    // Default arguments on object/companion methods aren't filled by the
-                                    // emitter yet, so the call must supply exactly the declared params.
-                                    if sig.params.len() != arg_tys.len() {
-                                        self.diags.error(
-                                            span,
-                                            format!(
-                                                "method '{cls}.{name}' expects {} args, got {}",
-                                                sig.params.len(),
-                                                arg_tys.len()
-                                            ),
-                                        );
-                                    }
-                                    self.expect_call_args(&sig.params, false, args, &arg_tys);
-                                    self.expr_lowers
-                                        .insert(call, ExprLowering::ObjectMemberCall { internal });
-                                    sig.ret
-                                }
-                                None => {
-                                    self.diags
-                                        .error(span, format!("unresolved reference '{name}'."));
-                                    Ty::Error
-                                }
-                            };
+                            if let Some(ret) = self.check_module_member_call(
+                                call,
+                                Ty::obj_name(internal),
+                                &name,
+                                args,
+                                &arg_tys,
+                            ) {
+                                return ret;
+                            }
+                            self.diags
+                                .error(span, format!("unresolved reference '{name}'."));
+                            return Ty::Error;
                         }
                         // An explicit import maps the name directly; otherwise resolve through the
                         // import levels (same-package — including the ROOT package for a classpath
@@ -17055,16 +17031,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // Instance method call on a class value: `p.method(args)` (own or inherited).
-                if let Ty::Obj(internal_name, _) = rt {
-                    // A non-public member FUNCTION may be inaccessible from this site — kotlinc rejects it;
-                    // surface the same diagnostic rather than silently compiling an illegal call.
-                    if let Some((vis, owner)) =
-                        self.effective_member_visibility(internal_name, &name, true)
-                    {
-                        if vis != Visibility::Public {
-                            self.reject_if_inaccessible(vis, &name, owner, span);
-                        }
-                    }
+                if matches!(rt, Ty::Obj(..)) {
                     if let Some(ret) =
                         self.check_module_member_call(call, rt, &name, args, &arg_tys)
                     {
@@ -20455,6 +20422,7 @@ impl<'a> Checker<'a> {
             is_inline: false,
             is_final: false,
             is_suspend: f.is_suspend,
+            visibility: f.visibility,
             context_count: f.context_count,
             source_decl: None,
             source_file: None,
@@ -22709,6 +22677,15 @@ fun box(): String {
             "it is private in 'C'",
         );
         ok("class C {\n  private fun secret(): Int = 1\n  fun via(o: C): Int = o.secret()\n}");
+        ok(
+            "class C { private fun choose(value: Int) = value; fun choose(value: String) = value }\n\
+             fun box(): String = C().choose(\"OK\")",
+        );
+        err_contains(
+            "class C { private fun choose(value: Int) = value; fun choose(value: String) = value }\n\
+             fun box(): Int = C().choose(1)",
+            "it is private in 'C'",
+        );
     }
 
     #[test]
