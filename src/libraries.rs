@@ -114,6 +114,11 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
             .unwrap_or(internal)
     }
 
+    /// Convert a platform classifier name to the identity used by source resolution.
+    fn canonical_source_type_name(&self, internal: TypeName) -> TypeName {
+        internal
+    }
+
     /// Whether a library owner belongs to the platform's default Kotlin library surface.
     fn is_default_library_owner(&self, _internal: TypeName) -> bool {
         false

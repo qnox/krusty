@@ -1989,6 +1989,33 @@ fn class_internal(file: &File, name: &str) -> String {
     }
 }
 
+fn expand_type_aliases(class_names: &mut ClassNames, aliases: &HashMap<String, String>) {
+    for _ in 0..8 {
+        let mut changed = false;
+        for (alias, target) in aliases {
+            if class_names.contains_key(alias) {
+                continue;
+            }
+            if let Some(internal) = class_names.get(target) {
+                class_names.insert_name(alias.clone(), internal);
+                changed = true;
+            } else if Ty::from_name(target).is_some() {
+                class_names.insert(alias.clone(), format!("__ty/{target}"));
+                changed = true;
+            } else if target.contains('/') {
+                class_names.insert(alias.clone(), target);
+                changed = true;
+            } else if target.contains('.') {
+                class_names.insert(alias.clone(), target.replace('.', "/"));
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
 /// Stage C: collect top-level function + class signatures across all files. Two passes so that a
 /// class type can be referenced before its declaration (and across files).
 /// Convenience wrapper — uses an empty classpath (no stdlib type scanning).
@@ -2038,13 +2065,14 @@ pub fn collect_signatures_with_cp(
     // import-driven name resolution (there is no global simple-name index): a bare name binds ONLY to a
     // default-import / imported / same-package class, verified to exist via `resolve_type`. Runs BEFORE
     // alias expansion so a user `typealias A = Foo` (Foo a classpath type) finds `Foo` already resolved.
-    // A name imported INCONSISTENTLY across files (different full internals) is left unresolved (ambiguous).
-    {
-        let mut from_import: HashMap<String, Option<TypeName>> = HashMap::new();
+    let imports_by_file = {
+        let mut consensus: HashMap<String, Option<TypeName>> = HashMap::new();
+        let mut imports_by_file = Vec::with_capacity(files.len());
         for file in files {
             let imap = import_map(file);
             let wilds = import_wildcards(file, platform_default_imports);
             let levels = import_levels(file, platform_default_imports);
+            let mut file_imports = HashMap::new();
             // Candidate simple names: every type referenced in the file (so a WILDCARD import can supply
             // it) plus the explicit-import names themselves.
             let mut names = std::collections::HashSet::new();
@@ -2090,25 +2118,27 @@ pub fn collect_signatures_with_cp(
                             }
                         })
                     });
-                if let Some(full) = full {
-                    match from_import.get(&name) {
-                        None => {
-                            from_import.insert(name, Some(full));
-                        }
-                        Some(Some(prev)) if *prev != full => {
-                            from_import.insert(name, None); // conflicting resolutions → leave unresolved
-                        }
-                        _ => {}
+                let full = full.map(|full| libraries.canonical_source_type_name(full));
+                match consensus.get_mut(&name) {
+                    Some(previous) if *previous != full => *previous = None,
+                    Some(_) => {}
+                    None => {
+                        consensus.insert(name.clone(), full);
                     }
                 }
+                if let Some(full) = full {
+                    file_imports.insert(name, full);
+                }
             }
+            imports_by_file.push(file_imports);
         }
-        for (simple, full) in from_import {
+        for (simple, full) in consensus {
             if let Some(full) = full {
                 class_names.insert_name(simple, full);
             }
         }
-    }
+        imports_by_file
+    };
 
     // Expand the input files' USER type aliases into class_names (classpath aliases already resolved
     // through the import pass, via `resolve_type`'s alias redirect).
@@ -2122,34 +2152,18 @@ pub fn collect_signatures_with_cp(
             alias_map.insert(alias.clone(), target.clone());
         }
     }
-    for _ in 0..8 {
-        let mut changed = false;
-        for (alias, target) in &alias_map {
-            if class_names.contains_key(alias.as_str()) {
-                continue;
+    expand_type_aliases(&mut class_names, &alias_map);
+    let file_class_names: Vec<ClassNames> = imports_by_file
+        .into_iter()
+        .map(|imports| {
+            let mut names = class_names.clone();
+            for (simple, full) in imports {
+                names.insert_name(simple, full);
             }
-            if let Some(internal) = class_names.get(target.as_str()) {
-                class_names.insert_name(alias.clone(), internal);
-                changed = true;
-            } else if Ty::from_name(target).is_some() {
-                class_names.insert(alias.clone(), format!("__ty/{target}"));
-                changed = true;
-            } else if target.contains('/') {
-                // Already a JVM internal name (e.g. a classpath `TypeAliasesKt` alias whose
-                // expanded type was read straight from `@Metadata` as `kotlin/Exception` →
-                // `java/lang/Exception`).
-                class_names.insert(alias.clone(), target.clone());
-                changed = true;
-            } else if target.contains('.') {
-                // Fully-qualified class name (e.g. java.lang.Exception) → JVM internal name.
-                class_names.insert(alias.clone(), target.replace('.', "/"));
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
+            expand_type_aliases(&mut names, &alias_map);
+            names
+        })
+        .collect();
 
     let ty_of_ref = |r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut DiagSink| {
         ty_of_ref_with(r, classes, tparams, diags)
@@ -2160,6 +2174,7 @@ pub fn collect_signatures_with_cp(
     let mut fun_rets: HashMap<String, Ty> = HashMap::new();
     for (i, file) in files.iter().enumerate() {
         diags.set_file(i as u32);
+        let class_names = &file_class_names[i];
         for &d in &file.decls {
             if let Decl::Fun(f) = file.decl(d) {
                 if f.receiver.is_none() {
@@ -2168,7 +2183,7 @@ pub fn collect_signatures_with_cp(
                             TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &|n| {
                                 class_names.get(n)
                             });
-                        fun_rets.insert(f.name.clone(), ty_of_ref(r, &class_names, &tp, diags));
+                        fun_rets.insert(f.name.clone(), ty_of_ref(r, class_names, &tp, diags));
                     }
                 }
             }
@@ -2195,6 +2210,7 @@ pub fn collect_signatures_with_cp(
         std::collections::HashSet::new();
     for (i, file) in files.iter().enumerate() {
         diags.set_file(i as u32);
+        let class_names = file_class_names[i].clone();
         for &d in &file.decls {
             match file.decl(d) {
                 Decl::Fun(f) => {
