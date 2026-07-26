@@ -28,14 +28,26 @@ fn parse_type_gsig(
     d2: &[String],
     tparams: &HashMap<u64, String>,
 ) -> Option<Ty> {
+    parse_type_gsig_node(body, records, d2, tparams, false)
+}
+
+fn parse_type_gsig_node(
+    body: &[u8],
+    records: &[Rec],
+    d2: &[String],
+    tparams: &HashMap<u64, String>,
+    nested: bool,
+) -> Option<Ty> {
     let mut pb = Pb { b: body, i: 0 };
     let mut class_id = None;
     let mut tp_id = None;
     let mut tpn_id = None;
+    let mut nullable = false;
     let mut args: Vec<Ty> = Vec::new();
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
+            (3, 0) => nullable = pb.varint()? != 0,
             (6, 0) => class_id = Some(pb.varint()?),
             (8, 0) => tp_id = Some(pb.varint()?),
             (9, 0) => tpn_id = Some(pb.varint()?),
@@ -51,7 +63,7 @@ fn parse_type_gsig(
                         (2, 2) => {
                             let tn = ap.varint()? as usize;
                             let tb = ap.bytes(tn)?;
-                            arg = parse_type_gsig(tb, records, d2, tparams);
+                            arg = parse_type_gsig_node(tb, records, d2, tparams, true);
                         }
                         (_, w) => ap.skip(w)?,
                     }
@@ -61,20 +73,23 @@ fn parse_type_gsig(
             (_, w) => pb.skip(w)?,
         }
     }
-    if let Some(id) = class_id {
+    let ty = if let Some(id) = class_id {
         let internal = resolve_class_name(records, d2, id as usize)?;
-        return Some(gsig_from_kotlin_class(&internal, args));
-    }
-    if let Some(id) = tp_id {
-        return tparams
+        gsig_from_kotlin_class(&internal, args)
+    } else if let Some(id) = tp_id {
+        tparams
             .get(&id)
-            .map(|n| Ty::ty_param(n, Ty::obj("kotlin/Any")));
-    }
-    if let Some(id) = tpn_id {
-        return resolve_string(records, d2, id as usize)
-            .map(|s| Ty::ty_param(&s, Ty::obj("kotlin/Any")));
-    }
-    None
+            .map(|n| Ty::ty_param(n, Ty::obj("kotlin/Any")))?
+    } else if let Some(id) = tpn_id {
+        resolve_string(records, d2, id as usize).map(|s| Ty::ty_param(&s, Ty::obj("kotlin/Any")))?
+    } else {
+        return None;
+    };
+    Some(if nested && nullable && matches!(ty, Ty::TyParam(..)) {
+        Ty::nullable(ty)
+    } else {
+        ty
+    })
 }
 
 /// A `@Metadata` class name + decoded type args → a signature [`Ty`]: a `kotlin/FunctionN` becomes a
@@ -2360,8 +2375,25 @@ fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<
 
 #[cfg(test)]
 mod module_reader_tests {
-    use super::read_kotlin_module;
+    use super::{parse_type_gsig, parse_type_gsig_node, read_kotlin_module};
     use crate::metadata::module::build_kotlin_module;
+    use crate::types::Ty;
+    use std::collections::HashMap;
+
+    #[test]
+    fn nested_generic_signature_preserves_nullable_type_parameters() {
+        let type_parameter = [0x40, 0x00, 0x18, 0x01];
+        let parameters = HashMap::from([(0, "T".to_string())]);
+
+        assert_eq!(
+            parse_type_gsig_node(&type_parameter, &[], &[], &parameters, true),
+            Some(Ty::nullable(Ty::ty_param("T", Ty::obj("kotlin/Any"))))
+        );
+        assert_eq!(
+            parse_type_gsig(&type_parameter, &[], &[], &parameters),
+            Some(Ty::ty_param("T", Ty::obj("kotlin/Any")))
+        );
+    }
 
     #[test]
     fn round_trips_package_facades() {
