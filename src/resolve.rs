@@ -22247,6 +22247,32 @@ mod tests {
     }
 
     #[test]
+    fn elvis_uses_the_non_null_left_operand_type() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "class StoredItem\n\
+             fun pick(value: Any) {\n\
+                 val item = value as? StoredItem ?: StoredItem()\n\
+             }",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+
+        let elvis = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| {
+                matches!(expression, Expr::Elvis { .. }).then_some(ExprId(index as u32))
+            })
+            .expect("elvis expression");
+        assert_eq!(info.ty(elvis), Ty::obj("StoredItem"));
+    }
+
+    #[test]
     fn super_calls_record_the_exact_source_overload() {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(
