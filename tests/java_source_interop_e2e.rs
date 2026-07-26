@@ -225,14 +225,142 @@ fun box(): String = Derived().foo("OK")
     );
 }
 
+#[test]
+fn nullable_value_reaches_unannotated_java_parameters() {
+    run_mixed(
+        &[
+            (
+                "PlatformBase.java",
+                r#"
+public class PlatformBase {
+    public String normalize(String value) {
+        return value == null ? "OK" : value;
+    }
+    public static String normalizeStatic(String value) {
+        return value == null ? "OK" : value;
+    }
+}
+"#,
+            ),
+            (
+                "PlatformContainer.java",
+                r#"
+public class PlatformContainer {
+    public static class Value {
+        private final String value;
+
+        public Value(String value) {
+            this.value = value;
+        }
+
+        public String normalize() {
+            return value == null ? "OK" : value;
+        }
+    }
+}
+"#,
+            ),
+        ],
+        r#"
+class PlatformDerived : PlatformBase() {
+    fun normalizeNullable(value: String?): String {
+        val inherited = super.normalize(value)
+        val direct = PlatformBase.normalizeStatic(value)
+        val literal = PlatformBase.normalizeStatic(null)
+        val constructed = PlatformContainer.Value(value).normalize()
+        return if (inherited == "OK" && direct == "OK" && literal == "OK" && constructed == "OK") "OK" else "fail"
+    }
+}
+
+fun box(): String = PlatformDerived().normalizeNullable(null)
+"#,
+    );
+}
+
+#[test]
+fn java_parameter_annotations_control_nullable_arguments() {
+    let java = [
+        (
+            "NotNull.java",
+            r#"
+package org.jetbrains.annotations;
+import java.lang.annotation.*;
+@Target(ElementType.PARAMETER)
+@Retention(RetentionPolicy.CLASS)
+public @interface NotNull {}
+"#,
+        ),
+        (
+            "Nullable.java",
+            r#"
+package org.jetbrains.annotations;
+import java.lang.annotation.*;
+@Target(ElementType.PARAMETER)
+@Retention(RetentionPolicy.CLASS)
+public @interface Nullable {}
+"#,
+        ),
+        (
+            "PlatformApi.java",
+            r#"
+import org.jetbrains.annotations.*;
+public class PlatformApi {
+    public static void required(@NotNull String value) {}
+    public static void optional(@Nullable String value) {}
+}
+"#,
+        ),
+    ];
+    let Some(diagnostics) = mixed_diagnostics(
+        &java,
+        r#"
+fun call(value: String?) {
+    PlatformApi.optional(value)
+    PlatformApi.required(value)
+}
+"#,
+    ) else {
+        return;
+    };
+
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("PlatformApi.required")),
+        "{diagnostics:?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.contains("PlatformApi.optional")),
+        "{diagnostics:?}"
+    );
+}
+
+fn compile_java(java: &[(&str, &str)]) -> Option<common::JavacOutput> {
+    let sources = java
+        .iter()
+        .map(|(name, source)| (name.to_string(), source.to_string()))
+        .collect::<Vec<_>>();
+    common::javac_compile(&sources, &[])
+}
+
+fn mixed_diagnostics(java: &[(&str, &str)], kotlin: &str) -> Option<Vec<String>> {
+    let (javadir, _) = compile_java(java)?;
+    let jdk = common::jdk_modules()?;
+    let mut classpath = common::classpath_jars_for(kotlin);
+    classpath.push(javadir.clone());
+    let diagnostics = common::front_end_diagnostics(kotlin, &classpath, Some(jdk.as_path()));
+    if let Some(root) = javadir.parent() {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    Some(diagnostics)
+}
+
 /// Compile the Java sources with javac, then the Kotlin source with krusty against the javac output
 /// dir on the classpath, and run `box()` with both class sets in one loader. Asserts "OK".
 fn run_mixed(java: &[(&str, &str)], kotlin: &str) {
-    let java_owned: Vec<(String, String)> = java
-        .iter()
-        .map(|(n, s)| (n.to_string(), s.to_string()))
-        .collect();
-    let Some((javadir, java_classes)) = common::javac_compile(&java_owned, &[]) else {
+    let Some((javadir, java_classes)) = compile_java(java) else {
         eprintln!("skipping: JDK unavailable");
         return;
     };

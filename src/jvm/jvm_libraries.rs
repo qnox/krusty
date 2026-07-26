@@ -6,7 +6,7 @@
 use super::classpath::{
     kotlin_name_to_ty, kotlin_type_name_to_ty, metadata_return_info, Classpath,
 };
-use super::classreader::{ConstVal, FieldSig};
+use super::classreader::{ConstVal, FieldSig, JavaNullability};
 use super::jvm_class_map::to_kotlin_internal;
 use super::metadata;
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
@@ -800,6 +800,7 @@ impl JvmLibraries {
             let mut constructors = Vec::new();
             let mut members = Vec::new();
             let mut companion = Vec::new();
+            let is_java = !ci.meta.is_present();
             // `Map.put` returns the PREVIOUS value (`V?`, null for a fresh key) — Kotlin enhances this Java
             // method's nullability. It applies to ANY `Map` subtype (`HashMap`, `TreeMap`, …), since a call
             // resolves the member on the concrete class, not on `Map` itself.
@@ -844,8 +845,19 @@ impl JvmLibraries {
                 let Some((params, ret)) = parse_method_desc(&m.descriptor) else {
                     continue;
                 };
+                let platform_nullable_params = params
+                    .iter()
+                    .enumerate()
+                    .map(|(index, parameter)| {
+                        is_java
+                            && parameter.is_reference()
+                            && m.parameter_nullability.get(index).copied().flatten()
+                                != Some(JavaNullability::NotNull)
+                    })
+                    .collect::<Vec<_>>();
                 let mut member =
                     LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
+                member.call_sig.platform_nullable_params = platform_nullable_params.clone();
                 member.visibility = if m.is_public() {
                     Visibility::Public
                 } else {
@@ -892,9 +904,11 @@ impl JvmLibraries {
                 } else if m.is_static() {
                     // A Kotlin companion member compiles to a JVM static on the class.
                     member.call_sig = member_call_sig(&member, &m.name);
+                    member.call_sig.platform_nullable_params = platform_nullable_params;
                     companion.push(member);
                 } else {
                     member.call_sig = member_call_sig(&member, &m.name);
+                    member.call_sig.platform_nullable_params = platform_nullable_params;
                     members.push(member);
                 }
             }
@@ -2254,7 +2268,10 @@ impl SymbolSource for JvmLibraries {
                             );
                             recovered.unwrap_or(m.ret)
                         };
-                        let call_sig = member_facts.call_sig;
+                        let mut call_sig = member_facts.call_sig;
+                        call_sig
+                            .platform_nullable_params
+                            .clone_from(&m.call_sig.platform_nullable_params);
                         // A generic-return builtin member (`Map.get(K): V?`) resolves to the erased
                         // classpath method (`java/util/Map.get` → `Object`), which carries no Kotlin
                         // nullability. Recover the source `V?` from the builtin `@Metadata`. Applied

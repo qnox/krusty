@@ -5,7 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use krusty::jvm::classreader::parse_class;
+use krusty::jvm::classreader::{parse_class, JavaNullability};
 
 use super::common;
 
@@ -68,6 +68,83 @@ fn reads_real_javac_class() {
     assert!(info.method("<init>", "()V").is_some());
 
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn reads_java_parameter_nullability_annotations() {
+    let Some((dir, _)) = common::javac_compile(
+        &[
+            (
+                "NotNull.java".to_string(),
+                "package org.jetbrains.annotations;\n\
+                 import java.lang.annotation.*;\n\
+                 @Target(ElementType.PARAMETER) @Retention(RetentionPolicy.CLASS)\n\
+                 public @interface NotNull {}"
+                    .to_string(),
+            ),
+            (
+                "Nullable.java".to_string(),
+                "package org.jetbrains.annotations;\n\
+                 import java.lang.annotation.*;\n\
+                 @Target(ElementType.PARAMETER) @Retention(RetentionPolicy.CLASS)\n\
+                 public @interface Nullable {}"
+                    .to_string(),
+            ),
+            (
+                "PlatformApi.java".to_string(),
+                "import org.jetbrains.annotations.*;\n\
+                 public class PlatformApi {\n\
+                   public void accept(@NotNull String required, @Nullable String optional,\n\
+                                      String flexible) {}\n\
+                 }"
+                .to_string(),
+            ),
+            (
+                "PlatformOuter.java".to_string(),
+                "import org.jetbrains.annotations.NotNull;\n\
+                 public class PlatformOuter {\n\
+                   public class Value {\n\
+                     public Value(@NotNull String required) {}\n\
+                   }\n\
+                 }"
+                .to_string(),
+            ),
+        ],
+        &[],
+    ) else {
+        eprintln!("skipping: javac unavailable");
+        return;
+    };
+    let bytes = fs::read(dir.join("PlatformApi.class")).unwrap();
+    let info = parse_class(&bytes).expect("parse PlatformApi.class");
+    let method = info
+        .method(
+            "accept",
+            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+        )
+        .expect("accept");
+    assert_eq!(
+        method.parameter_nullability,
+        vec![
+            Some(JavaNullability::NotNull),
+            Some(JavaNullability::Nullable),
+            None
+        ]
+    );
+
+    let bytes = fs::read(dir.join("PlatformOuter$Value.class")).unwrap();
+    let info = parse_class(&bytes).expect("parse PlatformOuter$Value.class");
+    let constructor = info
+        .method("<init>", "(LPlatformOuter;Ljava/lang/String;)V")
+        .expect("inner constructor");
+    assert_eq!(
+        constructor.parameter_nullability,
+        vec![None, Some(JavaNullability::NotNull)]
+    );
+
+    if let Some(root) = dir.parent() {
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 #[test]

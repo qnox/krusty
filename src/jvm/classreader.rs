@@ -13,6 +13,12 @@ pub const ACC_PROTECTED: u16 = 0x0004;
 pub const ACC_STATIC: u16 = 0x0008;
 pub const ACC_BRIDGE: u16 = 0x0040;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JavaNullability {
+    NotNull,
+    Nullable,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MethodSig {
     pub access: u16,
@@ -22,6 +28,8 @@ pub struct MethodSig {
     /// `<T:Ljava/lang/Object;>([TT;)Ljava/util/List<TT;>;`. Carries the type parameters and how the
     /// parameter/return types use them — what the erased `descriptor` drops. `None` if non-generic.
     pub signature: Option<String>,
+    /// JVM reference-parameter nullability in descriptor order.
+    pub parameter_nullability: Vec<Option<JavaNullability>>,
 }
 
 impl MethodSig {
@@ -70,6 +78,21 @@ pub enum ConstVal {
     Float(f32),
     Double(f64),
     Str(String),
+}
+
+struct RawMember {
+    access: u16,
+    name: String,
+    descriptor: String,
+    attributes: MemberAttributes,
+}
+
+#[derive(Default)]
+struct MemberAttributes {
+    signature: Option<String>,
+    const_value: Option<ConstVal>,
+    parameter_nullability: Vec<Option<JavaNullability>>,
+    parameter_access: Vec<u16>,
 }
 
 #[derive(Clone, Debug)]
@@ -386,41 +409,47 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         interfaces.push(class_name(r.u2()?));
     }
 
-    let read_members = |r: &mut Reader| -> Result<
-        Vec<(u16, String, String, Option<String>, Option<ConstVal>)>,
-        ReadError,
-    > {
+    let read_members = |r: &mut Reader| -> Result<Vec<RawMember>, ReadError> {
         let n = r.u2()?;
         let mut v = Vec::new();
         for _ in 0..n {
             let access = r.u2()?;
             let name = utf8(r.u2()?);
-            let desc = utf8(r.u2()?);
-            let (sig, cval) = read_member_signature(r, &cp)?;
-            v.push((access, name, desc, sig, cval));
+            let descriptor = utf8(r.u2()?);
+            let mut attributes = read_member_attributes(r, &cp)?;
+            align_parameter_nullability(
+                &descriptor,
+                &mut attributes.parameter_nullability,
+                &attributes.parameter_access,
+            );
+            v.push(RawMember {
+                access,
+                name,
+                descriptor,
+                attributes,
+            });
         }
         Ok(v)
     };
 
     let fields = read_members(&mut r)?
         .into_iter()
-        .map(
-            |(access, name, descriptor, signature, const_value)| FieldSig {
-                access,
-                name,
-                descriptor,
-                const_value,
-                signature,
-            },
-        )
+        .map(|member| FieldSig {
+            access: member.access,
+            name: member.name,
+            descriptor: member.descriptor,
+            const_value: member.attributes.const_value,
+            signature: member.attributes.signature,
+        })
         .collect();
     let methods: Vec<MethodSig> = read_members(&mut r)?
         .into_iter()
-        .map(|(access, name, descriptor, signature, _)| MethodSig {
-            access,
-            name,
-            descriptor,
-            signature,
+        .map(|member| MethodSig {
+            access: member.access,
+            name: member.name,
+            descriptor: member.descriptor,
+            signature: member.attributes.signature,
+            parameter_nullability: member.attributes.parameter_nullability,
         })
         .collect();
 
@@ -639,15 +668,9 @@ fn skip_attributes(r: &mut Reader) -> Result<(), ReadError> {
     Ok(())
 }
 
-/// Read a field/method's attributes, returning its generic `Signature` attribute string and (for a
-/// field) its `ConstantValue` if present (and skipping the rest). Same wire shape as [`skip_attributes`].
-fn read_member_signature(
-    r: &mut Reader,
-    cp: &[C],
-) -> Result<(Option<String>, Option<ConstVal>), ReadError> {
+fn read_member_attributes(r: &mut Reader, cp: &[C]) -> Result<MemberAttributes, ReadError> {
     let n = r.u2()?;
-    let mut signature = None;
-    let mut const_value = None;
+    let mut attributes = MemberAttributes::default();
     for _ in 0..n {
         let ni = r.u2()?;
         let len = r.u4()? as usize;
@@ -655,12 +678,12 @@ fn read_member_signature(
             Some(C::Utf8(s)) if s == "Signature" && len == 2 => {
                 let si = r.u2()?;
                 if let Some(C::Utf8(s)) = cp.get(si as usize) {
-                    signature = Some(s.clone());
+                    attributes.signature = Some(s.clone());
                 }
             }
             Some(C::Utf8(s)) if s == "ConstantValue" && len == 2 => {
                 let ci = r.u2()? as usize;
-                const_value = match cp.get(ci) {
+                attributes.const_value = match cp.get(ci) {
                     Some(C::Integer(v)) => Some(ConstVal::Int(*v)),
                     Some(C::Long(v)) => Some(ConstVal::Long(*v)),
                     Some(C::Float(bits)) => Some(ConstVal::Float(f32::from_bits(*bits))),
@@ -672,12 +695,93 @@ fn read_member_signature(
                     _ => None,
                 };
             }
+            Some(C::Utf8(s)) if s == "MethodParameters" => {
+                let mut body = Reader {
+                    b: r.take(len)?,
+                    i: 0,
+                };
+                let parameter_count = body.u1()? as usize;
+                attributes.parameter_access.reserve(parameter_count);
+                for _ in 0..parameter_count {
+                    body.u2()?;
+                    attributes.parameter_access.push(body.u2()?);
+                }
+            }
+            Some(C::Utf8(s))
+                if s == "RuntimeVisibleParameterAnnotations"
+                    || s == "RuntimeInvisibleParameterAnnotations" =>
+            {
+                let body = r.take(len)?;
+                read_parameter_nullability(body, cp, &mut attributes.parameter_nullability)?;
+            }
             _ => {
                 r.take(len)?;
             }
         }
     }
-    Ok((signature, const_value))
+    Ok(attributes)
+}
+
+fn align_parameter_nullability(
+    descriptor: &str,
+    nullability: &mut Vec<Option<JavaNullability>>,
+    parameter_access: &[u16],
+) {
+    const SYNTHETIC_OR_MANDATED: u16 = 0x1000 | 0x8000;
+
+    let Some((parameters, _)) = crate::jvm::names::parse_method_descriptor(descriptor) else {
+        return;
+    };
+    if nullability.is_empty() || nullability.len() == parameters.len() {
+        return;
+    }
+
+    let source_parameters = parameter_access
+        .iter()
+        .enumerate()
+        .filter_map(|(index, access)| (access & SYNTHETIC_OR_MANDATED == 0).then_some(index))
+        .collect::<Vec<_>>();
+    if parameter_access.len() == parameters.len() && source_parameters.len() == nullability.len() {
+        let source_nullability = std::mem::take(nullability);
+        nullability.resize(parameters.len(), None);
+        for (index, value) in source_parameters.into_iter().zip(source_nullability) {
+            nullability[index] = value;
+        }
+    }
+}
+
+fn read_parameter_nullability(
+    body: &[u8],
+    cp: &[C],
+    out: &mut Vec<Option<JavaNullability>>,
+) -> Result<(), ReadError> {
+    let utf8 = |index: u16| match cp.get(index as usize) {
+        Some(C::Utf8(value)) => value.as_str(),
+        _ => "",
+    };
+    let mut r = Reader { b: body, i: 0 };
+    let parameter_count = r.u1()? as usize;
+    out.resize(out.len().max(parameter_count), None);
+    for slot in out.iter_mut().take(parameter_count) {
+        let annotation_count = r.u2()?;
+        for _ in 0..annotation_count {
+            let annotation = utf8(r.u2()?);
+            let nullability = match annotation {
+                "Lorg/jetbrains/annotations/NotNull;" => Some(JavaNullability::NotNull),
+                "Lorg/jetbrains/annotations/Nullable;" => Some(JavaNullability::Nullable),
+                _ => None,
+            };
+            let pair_count = r.u2()?;
+            for _ in 0..pair_count {
+                r.u2()?;
+                skip_element_value_extract_string_array(&mut r, cp, false)?;
+            }
+            if let Some(nullable) = nullability {
+                *slot = Some(nullable);
+            }
+        }
+    }
+    Ok(())
 }
 
 struct Reader<'a> {
@@ -762,6 +866,7 @@ mod tests {
             name: "call".to_string(),
             descriptor: descriptor.to_string(),
             signature: None,
+            parameter_nullability: Vec::new(),
         };
         let concrete = method("(Ljava/lang/String;I)Ljava/lang/String;");
         let return_bridge = method("(Ljava/lang/String;I)Ljava/lang/Object;");

@@ -4023,6 +4023,11 @@ fn call_sig_without_context(sig: &CallSig, context_count: usize) -> CallSig {
             .get(start..)
             .unwrap_or_default()
             .to_vec(),
+        platform_nullable_params: sig
+            .platform_nullable_params
+            .get(start..)
+            .unwrap_or_default()
+            .to_vec(),
         required: sig.required.saturating_sub(context_count),
         vararg: sig.vararg,
     }
@@ -18194,7 +18199,13 @@ impl<'a> Checker<'a> {
                                 "classpath nested constructor {qualified} -> {internal}"
                             );
                             if let ResolvedConstructor::Plain { member, .. } = target {
-                                self.expect_call_args(&member.params, false, args, &arg_tys);
+                                let params =
+                                    crate::symbol_resolver::apply_platform_parameter_nullability(
+                                        member.params.clone(),
+                                        &member.call_sig.platform_nullable_params,
+                                        &arg_tys,
+                                    );
+                                self.expect_call_args(&params, false, args, &arg_tys);
                             }
                             return Ty::obj_name(internal);
                         }
