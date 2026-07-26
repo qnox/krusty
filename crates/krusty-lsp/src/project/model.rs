@@ -67,7 +67,8 @@ pub struct Module {
     pub source_roots: Vec<SourceRoot>,
     /// Resolved compile classpath: jars and class directories, in build-tool order.
     pub classpath: Vec<PathBuf>,
-    pub output_dir: Option<PathBuf>,
+    /// Paths produced by this compilation unit, in build-tool order.
+    pub output_paths: Vec<PathBuf>,
     pub depends_on: Vec<ModuleId>,
     /// BSP `associates`: outputs whose `internal` declarations this module may see.
     pub friend_paths: Vec<PathBuf>,
@@ -141,7 +142,7 @@ impl ProjectModel {
     }
 
     /// Classpath handed to the compiler for `module`: its own classpath, its friend paths, and the
-    /// output of everything it depends on. Deduplicated, first occurrence wins.
+    /// outputs of everything it depends on. Deduplicated, first occurrence wins.
     pub fn compile_classpath(&self, module: &Module) -> Vec<PathBuf> {
         let mut entries: Vec<PathBuf> = Vec::new();
         let push = |entry: &Path, entries: &mut Vec<PathBuf>| {
@@ -155,12 +156,16 @@ impl ProjectModel {
         for entry in &module.friend_paths {
             push(entry, &mut entries);
         }
-        for dependency in &module.depends_on {
-            if let Some(output) = self
-                .module(dependency)
-                .and_then(|m| m.output_dir.as_deref())
-            {
-                push(output, &mut entries);
+        // Gradle and Maven report class directories here, so fill gaps in their dependency
+        // classpaths. BSP's generic outputPaths may instead be a containing build directory or an
+        // artifact; its jvmCompileClasspath response is already authoritative.
+        if self.kind != ProviderKind::Bsp {
+            for dependency in &module.depends_on {
+                if let Some(dependency) = self.module(dependency) {
+                    for output in &dependency.output_paths {
+                        push(output, &mut entries);
+                    }
+                }
             }
         }
         entries
@@ -174,12 +179,15 @@ mod tests {
     fn model() -> ProjectModel {
         let mut core = Module::new(ModuleId::new(":core", "main"), "/p/core");
         core.source_roots = vec![SourceRoot::source("/p/core/src/main/kotlin")];
-        core.output_dir = Some(PathBuf::from("/p/core/build/classes/kotlin/main"));
+        core.output_paths = vec![
+            PathBuf::from("/p/core/build/classes/java/main"),
+            PathBuf::from("/p/core/build/classes/kotlin/main"),
+        ];
         core.classpath = vec![PathBuf::from("/m2/kotlin-stdlib.jar")];
 
         let mut app = Module::new(ModuleId::new(":app", "main"), "/p/app");
         app.source_roots = vec![SourceRoot::source("/p/app/src/main/kotlin")];
-        app.output_dir = Some(PathBuf::from("/p/app/build/classes/kotlin/main"));
+        app.output_paths = vec![PathBuf::from("/p/app/build/classes/kotlin/main")];
         app.classpath = vec![PathBuf::from("/m2/kotlin-stdlib.jar")];
         app.depends_on = vec![ModuleId::new(":core", "main")];
 
@@ -199,6 +207,7 @@ mod tests {
             model.compile_classpath(app),
             vec![
                 PathBuf::from("/m2/kotlin-stdlib.jar"),
+                PathBuf::from("/p/core/build/classes/java/main"),
                 PathBuf::from("/p/core/build/classes/kotlin/main"),
             ]
         );

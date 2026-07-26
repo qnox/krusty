@@ -1,6 +1,6 @@
 //! Content-guarded project-model refresh with last-good retention.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use krusty::features::LangFeatures;
 
@@ -117,12 +117,15 @@ impl ProjectSync {
     /// The compiler worker analyses all open documents as one source set against a single
     /// classpath, so this is what the whole session is configured with. It is a superset of any one
     /// module's classpath, which keeps cross-module references resolving at the cost of admitting a
-    /// few symbols a stricter per-module view would reject.
+    /// few symbols a stricter per-module view would reject. For build-tool models, declared module
+    /// outputs precede other entries: current classes must shadow a published copy of the same class
+    /// even when another module happened to list that artifact first. An explicit classpath keeps the
+    /// exact order supplied by the user.
     pub fn project_classpath(&self) -> Vec<PathBuf> {
         let Some(model) = self.model.as_ref() else {
             return Vec::new();
         };
-        let mut union: Vec<PathBuf> = Vec::new();
+        let mut union = Vec::new();
         for module in &model.modules {
             for entry in model.compile_classpath(module) {
                 if !union.contains(&entry) {
@@ -130,7 +133,39 @@ impl ProjectSync {
                 }
             }
         }
-        union
+        if model.kind == ProviderKind::Explicit {
+            return union;
+        }
+
+        let declared_outputs: Vec<&Path> = model
+            .modules
+            .iter()
+            .flat_map(|module| {
+                module
+                    .output_paths
+                    .iter()
+                    .chain(&module.friend_paths)
+                    .map(PathBuf::as_path)
+            })
+            .collect();
+        let canonical_outputs: Vec<PathBuf> = declared_outputs
+            .iter()
+            .filter_map(|output| std::fs::canonicalize(output).ok())
+            .collect();
+        let is_output = |entry: &Path| {
+            declared_outputs
+                .iter()
+                .any(|output| entry == *output || entry.starts_with(output))
+                || std::fs::canonicalize(entry).is_ok_and(|entry| {
+                    canonical_outputs
+                        .iter()
+                        .any(|output| entry == *output || entry.starts_with(output))
+                })
+        };
+        let (mut outputs, others): (Vec<_>, Vec<_>) =
+            union.into_iter().partition(|entry| is_output(entry));
+        outputs.extend(others);
+        outputs
     }
 
     /// The `jvmTarget` the project reports, used to pick a matching JDK.
@@ -231,6 +266,16 @@ mod tests {
         ProjectModel::new("/p", ProviderKind::Gradle).with_modules(vec![module])
     }
 
+    fn synced_project_classpath(model: ProjectModel) -> Vec<PathBuf> {
+        let mut sync =
+            ProjectSync::new(Box::new(ScriptedProvider::new(Vec::new(), vec![Ok(model)])));
+        assert_eq!(
+            sync.refresh(&FakeRunner::default()),
+            RefreshOutcome::Updated
+        );
+        sync.project_classpath()
+    }
+
     #[test]
     fn an_unchanged_fingerprint_does_not_run_the_build_tool_again() {
         let tree = TempTree::new("sync-unchanged");
@@ -291,6 +336,103 @@ mod tests {
         let features = sync.project_language_features();
         assert!(features.has("NameBasedDestructuring"));
         assert!(features.has("AnotherFeature"));
+    }
+
+    #[test]
+    fn project_classpath_prefers_declared_gradle_outputs_even_outside_the_root() {
+        let mut first = Module::new(ModuleId::new(":first", "main"), "/workspace/first");
+        first.classpath = vec![
+            PathBuf::from("/cache/published.jar"),
+            PathBuf::from("/workspace/lib/checked-in.jar"),
+            PathBuf::from("/workspace/app/build/generated/resources.jar"),
+            PathBuf::from("/cache/support.jar"),
+        ];
+        let mut second = Module::new(ModuleId::new(":second", "main"), "/workspace/second");
+        second.output_paths = vec![PathBuf::from("/composite/second/build/classes")];
+        second.classpath = vec![
+            PathBuf::from("/composite/second/build/classes"),
+            PathBuf::from("/cache/published.jar"),
+        ];
+        let model =
+            ProjectModel::new("/workspace", ProviderKind::Gradle).with_modules(vec![first, second]);
+
+        assert_eq!(
+            synced_project_classpath(model),
+            vec![
+                PathBuf::from("/composite/second/build/classes"),
+                PathBuf::from("/cache/published.jar"),
+                PathBuf::from("/workspace/lib/checked-in.jar"),
+                PathBuf::from("/workspace/app/build/generated/resources.jar"),
+                PathBuf::from("/cache/support.jar"),
+            ]
+        );
+    }
+
+    #[test]
+    fn project_classpath_prefers_declared_bsp_outputs() {
+        let mut dependency = Module::new(ModuleId::new(":dependency", "main"), "/workspace");
+        dependency.output_paths = vec![PathBuf::from("/generated")];
+        let mut consumer = Module::new(ModuleId::new(":consumer", "main"), "/workspace");
+        consumer.classpath = vec![
+            PathBuf::from("/cache/published.jar"),
+            PathBuf::from("/generated/classes"),
+        ];
+        let model = ProjectModel::new("/workspace", ProviderKind::Bsp)
+            .with_modules(vec![consumer, dependency]);
+
+        assert_eq!(
+            synced_project_classpath(model),
+            vec![
+                PathBuf::from("/generated/classes"),
+                PathBuf::from("/cache/published.jar"),
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_classpath_preserves_the_users_order() {
+        let mut module = Module::new(ModuleId::new(":explicit", "main"), "/workspace");
+        module.classpath = vec![
+            PathBuf::from("/cache/selected.jar"),
+            PathBuf::from("/workspace/build/classes"),
+        ];
+        module.output_paths = vec![PathBuf::from("/workspace/build/classes")];
+        let model =
+            ProjectModel::new("/workspace", ProviderKind::Explicit).with_modules(vec![module]);
+
+        assert_eq!(
+            synced_project_classpath(model),
+            vec![
+                PathBuf::from("/cache/selected.jar"),
+                PathBuf::from("/workspace/build/classes"),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_classpath_matches_a_declared_output_through_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tree = TempTree::new("sync-output-symlink");
+        let workspace = tree.path("workspace");
+        let output = tree.path("composite/classes");
+        let linked_output = workspace.join("linked-classes");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&output).unwrap();
+        symlink(&output, &linked_output).unwrap();
+
+        let mut dependency = Module::new(ModuleId::new(":dependency", "main"), &workspace);
+        dependency.output_paths = vec![output];
+        let mut consumer = Module::new(ModuleId::new(":consumer", "main"), &workspace);
+        consumer.classpath = vec![PathBuf::from("/cache/published.jar"), linked_output.clone()];
+        let model = ProjectModel::new(&workspace, ProviderKind::Gradle)
+            .with_modules(vec![consumer, dependency]);
+
+        assert_eq!(
+            synced_project_classpath(model),
+            vec![linked_output, PathBuf::from("/cache/published.jar")]
+        );
     }
 
     #[test]

@@ -408,7 +408,7 @@ fn module_of(project: &GradleProject, source_set: &GradleSourceSet) -> Module {
         })
         .collect();
     module.classpath = source_set.classpath.iter().map(PathBuf::from).collect();
-    module.output_dir = source_set.output.first().map(PathBuf::from);
+    module.output_paths = source_set.output.iter().map(PathBuf::from).collect();
     module.jvm_target = project.jvm_target.clone();
     module.kotlinc_args = merged_kotlinc_args(&project.kotlinc_args, &source_set.kotlinc_args);
     module.depends_on = project
@@ -460,7 +460,7 @@ fn kmp_module_of(project: &GradleProject, compilation: &KotlinCompilation) -> Mo
         })
         .collect();
     module.classpath = compilation.classpath.iter().map(PathBuf::from).collect();
-    module.output_dir = compilation.output.first().map(PathBuf::from);
+    module.output_paths = compilation.output.iter().map(PathBuf::from).collect();
     module.friend_paths = compilation.associates.iter().map(PathBuf::from).collect();
     module.jvm_target = compilation
         .jvm_target
@@ -498,7 +498,7 @@ fn android_module_of(project: &GradleProject, variant: &AndroidVariant) -> Modul
         })
         .collect();
     module.classpath = variant.classpath.iter().map(PathBuf::from).collect();
-    module.output_dir = variant.output.first().map(PathBuf::from);
+    module.output_paths = variant.output.iter().map(PathBuf::from).collect();
     module.jvm_target = project.jvm_target.clone();
     module.kotlinc_args = merged_kotlinc_args(&project.kotlinc_args, &variant.kotlinc_args);
     module.depends_on = project
@@ -578,7 +578,7 @@ mod tests {
     use crate::project::testing::TempTree;
 
     fn recorded_output() -> String {
-        let core = r#"{"path":":core","name":"core","projectDir":"/p/core","javaHome":"/jdk21","jvmTarget":"21","kotlincArgs":["-Xcontext-parameters"],"sourceSets":[{"name":"main","roots":["/p/core/src/main/kotlin"],"classpath":["/m2/kotlin-stdlib.jar"],"output":["/p/core/build/classes/kotlin/main"],"kotlincArgs":["-Xname-based-destructuring=complete"]}],"projectDeps":[]}"#;
+        let core = r#"{"path":":core","name":"core","projectDir":"/p/core","javaHome":"/jdk21","jvmTarget":"21","kotlincArgs":["-Xcontext-parameters"],"sourceSets":[{"name":"main","roots":["/p/core/src/main/kotlin"],"classpath":["/m2/kotlin-stdlib.jar"],"output":["/p/core/build/classes/java/main","/p/core/build/classes/kotlin/main"],"kotlincArgs":["-Xname-based-destructuring=complete"]}],"projectDeps":[]}"#;
         let app = r#"{"path":":app","name":"app","projectDir":"/p/app","javaHome":"/jdk21","jvmTarget":"21","kotlincArgs":[],"sourceSets":[{"name":"main","roots":["/p/app/src/main/kotlin"],"classpath":["/m2/kotlin-stdlib.jar"],"output":["/p/app/build/classes/kotlin/main"]},{"name":"test","roots":["/p/app/src/test/kotlin"],"classpath":["/m2/junit.jar"],"output":["/p/app/build/classes/kotlin/test"]}],"projectDeps":[":core"]}"#;
         format!("Configuring project\n{SENTINEL}{core}\n{SENTINEL}{app}\nBUILD SUCCESSFUL\n")
     }
@@ -660,6 +660,13 @@ Execution failed for task ':app:krustyModel'.
 
         let core = model.module(&ModuleId::new(":core", "main")).unwrap();
         assert_eq!(core.classpath, vec![PathBuf::from("/m2/kotlin-stdlib.jar")]);
+        assert_eq!(
+            core.output_paths,
+            vec![
+                PathBuf::from("/p/core/build/classes/java/main"),
+                PathBuf::from("/p/core/build/classes/kotlin/main"),
+            ]
+        );
         assert_eq!(core.jvm_target.as_deref(), Some("21"));
         assert_eq!(
             core.kotlinc_args,
@@ -675,6 +682,7 @@ Execution failed for task ':app:krustyModel'.
             model.compile_classpath(app),
             vec![
                 PathBuf::from("/m2/kotlin-stdlib.jar"),
+                PathBuf::from("/p/core/build/classes/java/main"),
                 PathBuf::from("/p/core/build/classes/kotlin/main"),
             ]
         );
@@ -728,8 +736,8 @@ Execution failed for task ':app:krustyModel'.
         assert_eq!(main.source_roots.len(), 2);
         assert_eq!(main.jvm_target.as_deref(), Some("17"));
         assert_eq!(
-            main.output_dir,
-            Some(PathBuf::from("/p/shared/build/classes/kotlin/jvm/main"))
+            main.output_paths,
+            vec![PathBuf::from("/p/shared/build/classes/kotlin/jvm/main")]
         );
         assert_eq!(
             main.kotlinc_args,
