@@ -12497,11 +12497,7 @@ impl<'a> Checker<'a> {
                 .all(|(&expected, &actual)| constructor_argument_matches(self, expected, actual))
     }
 
-    /// Whether `internal` is a SAM interface krusty can soundly convert a lambda to: a user
-    /// `fun interface` that is NON-generic and whose methods involve no value class. (A generic SAM
-    /// erases its method to `Object` — the `LambdaMetafactory` descriptor `lower_lambda_sam` emits
-    /// wouldn't match; a value-class method has a mangled name / boxing the path doesn't model; a
-    /// library/Kotlin function interface is handled separately at the `Foo { … }` call site.)
+    /// Whether `internal` is a user SAM interface whose method needs no value-class adaptation.
     fn simple_fun_interface_name(&self, internal: TypeName) -> bool {
         let Some(c) = self.syms.class_by_type_name(internal) else {
             return false;
@@ -12516,10 +12512,47 @@ impl<'a> Checker<'a> {
             })
     }
 
-    /// The SAM parameter types of a simple fun interface, used to type a converted lambda.
-    fn fun_interface_sam_params_name(&self, internal: TypeName) -> Option<Vec<Ty>> {
-        let c = self.syms.class_by_type_name(internal)?;
-        Some(c.single_method()?.params.clone())
+    fn fun_interface_sam_params(&self, target: Ty) -> Option<Vec<Ty>> {
+        let c = self.syms.class_by_type_name(target.obj_internal()?)?;
+        let erased = c.single_method()?.params.clone();
+        let (method_name, signatures) = c.methods.iter().next()?;
+        let [signature] = signatures.as_slice() else {
+            return Some(erased);
+        };
+        let Some(method) = c.generic_methods.get(method_name).and_then(|methods| {
+            methods
+                .iter()
+                .find(|method| method.params == signature.params)
+        }) else {
+            return Some(erased);
+        };
+        let bindings = c.type_parameter_bindings(target);
+        Some(crate::symbol_resolver::ty_subst_all(
+            &method.param_shapes,
+            &bindings,
+        ))
+    }
+
+    fn specialized_sam_lambda_param_types(
+        &self,
+        sig: &Signature,
+        parameter: usize,
+        actuals: &[(usize, Ty)],
+    ) -> Option<Vec<Ty>> {
+        let generic_sig = sig.generic_sig.as_ref()?;
+        let bindings =
+            crate::symbol_resolver::infer_generic_bindings(generic_sig, actuals.iter().copied());
+        if !crate::symbol_resolver::generic_bindings_satisfy_bounds(
+            generic_sig,
+            &bindings,
+            |actual, bound| self.receiver_is_assignable(actual, bound),
+        ) {
+            return None;
+        }
+        self.fun_interface_sam_params(crate::symbol_resolver::ty_subst(
+            *generic_sig.params.get(parameter)?,
+            &bindings,
+        ))
     }
 
     fn report_function_arity(
@@ -21318,6 +21351,14 @@ impl<'a> Checker<'a> {
                 // name is unambiguous (one overload). An overloaded call's lambda `it` falls back to the
                 // erased type — a minor precision loss, not a miscompile.
                 let known_sig = self.syms.single_fun(&fname);
+                let known_argument_parameters = known_sig.as_ref().and_then(|sig| {
+                    call_argument_parameter_indices(
+                        args,
+                        arg_names.as_deref(),
+                        self.file.call_has_trailing_lambda.contains(&call.0),
+                        &sig.call_sig(),
+                    )
+                });
                 // An array init constructor `IntArray(n) { i -> … }` / `Array(n) { i -> … }` types its
                 // lambda's parameter (the index) as `Int`.
                 let array_init_lambda = (Ty::primitive_array_element(&fname).is_some()
@@ -21713,11 +21754,10 @@ impl<'a> Checker<'a> {
                             // defaults: `ef("m") { … }` on `ef(msg, chk = null, action)` puts the
                             // lambda in `action`, not `chk`). Without this the lambda pre-types
                             // against the WRONG parameter's function shape (arity mismatch).
-                            let pi = arg_names
+                            let pi = known_argument_parameters
                                 .as_ref()
-                                .and_then(|ns| ns.get(i))
-                                .and_then(|n| n.as_ref())
-                                .and_then(|n| sig.param_names.iter().position(|p| p == n))
+                                .and_then(|parameters| parameters.get(i))
+                                .copied()
                                 .unwrap_or_else(|| {
                                     if self.file.call_has_trailing_lambda.contains(&call.0)
                                         && i + 1 == args.len()
@@ -21773,10 +21813,29 @@ impl<'a> Checker<'a> {
                             {
                                 if let Some(internal) = sig.params[pi].obj_internal() {
                                     if self.simple_fun_interface_name(internal) {
-                                        if let Some(sp) =
-                                            self.fun_interface_sam_params_name(internal)
+                                        let actuals = known_argument_parameters
+                                            .as_ref()
+                                            .zip(toplevel_partial.as_ref())
+                                            .map(|(parameters, partial)| {
+                                                parameters
+                                                    .iter()
+                                                    .copied()
+                                                    .zip(partial.iter().copied())
+                                                    .filter_map(|(parameter, actual)| {
+                                                        actual.map(|actual| (parameter, actual))
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                            })
+                                            .unwrap_or_default();
+                                        if let Some(params) = self
+                                            .specialized_sam_lambda_param_types(sig, pi, &actuals)
                                         {
-                                            return self.check_lambda_with_types(a, &sp);
+                                            return self.check_lambda_with_types(a, &params);
+                                        }
+                                        if let Some(params) =
+                                            self.fun_interface_sam_params(sig.params[pi])
+                                        {
+                                            return self.check_lambda_with_types(a, &params);
                                         }
                                     }
                                 }
