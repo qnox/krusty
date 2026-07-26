@@ -31,6 +31,17 @@ fun box(): String { val c = C(IA(), IB()); return if (c.a() + c.b() == \"ab\") \
     );
 }
 
+#[test]
+fn delegation_forwards_same_name_overloads() {
+    const SRC: &str = "interface A { fun foo(value: String): String }\n\
+interface B { fun foo(value: Any): Any }\n\
+class IA : A { override fun foo(value: String) = \"O\" }\n\
+class IB : B { override fun foo(value: Any): Any = \"K\" }\n\
+class C(val a: A, val b: B) : A by a, B by b\n\
+fun box(): String { val c = C(IA(), IB()); return c.foo(\"\") + c.foo(1) }\n";
+    assert_eq!(run(SRC).expect("delegated overloads compile + run"), "OK");
+}
+
 /// Delegation to an interface that EXTENDS another interface (`Second : First`, `C : Second by s`):
 /// the forwarders must cover `First`'s inherited methods too, not just `Second`'s own — otherwise the
 /// inherited method stays abstract (an `AbstractMethodError`).

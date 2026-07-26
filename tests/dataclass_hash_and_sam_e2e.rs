@@ -25,6 +25,17 @@ fn data_class_float_field_hashcode() {
 }
 
 #[test]
+fn data_class_keeps_declared_equals() {
+    run_ok(
+        "DataEquals",
+        "data class A(val x: Int) {\n\
+         override fun equals(other: Any?): Boolean = false\n\
+         }\n\
+         fun box(): String { val a = A(0); return if (a == a) \"fail\" else \"OK\" }\n",
+    );
+}
+
+#[test]
 fn lambda_to_void_sam() {
     run_ok(
         "SamVoid",

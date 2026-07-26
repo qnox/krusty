@@ -8358,11 +8358,23 @@ impl<'a> Lower<'a> {
         body: u32,
         force_override: bool,
     ) -> Option<u32> {
-        if self
+        let existing = self
             .class_info(internal)
-            .map_or(false, |ci| ci.methods.contains_key(name))
-        {
-            return None; // a user-defined override exists — don't synthesize over it
+            .and_then(|ci| ci.methods.get(name))
+            .cloned()
+            .unwrap_or_default();
+        let duplicate = existing.iter().any(|(_, fid, _)| {
+            let current = &self.ir.functions[*fid as usize].params;
+            match (
+                self.runtime.method_descriptor(current, Ty::Unit),
+                self.runtime.method_descriptor(&params, Ty::Unit),
+            ) {
+                (Some(current), Some(candidate)) => current == candidate,
+                _ => current == &params,
+            }
+        });
+        if duplicate {
+            return None;
         }
         // Don't synthesize over a member a superclass provides. For a `data class` member
         // (`force_override`), only a *final* base member blocks generation — an `open` override IS
