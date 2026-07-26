@@ -11252,6 +11252,15 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Whether subject and condition values can be compared with Kotlin equality.
+    fn when_values_comparable(&self, subject: Ty, condition: Ty) -> bool {
+        let subject = subject.non_null();
+        let condition = condition.non_null();
+        subject == condition
+            || Ty::promote(subject, condition).is_some()
+            || self.when_objs_comparable(subject, condition)
+    }
+
     fn lookup_prop_name(&self, internal: TypeName, name: &str) -> Option<(Ty, bool)> {
         self.lookup_prop_with_owner_name(internal, name)
             .map(|(_, ty, is_var)| (ty, is_var))
@@ -14097,9 +14106,7 @@ impl<'a> Checker<'a> {
                                 if ct != Ty::Null
                                     && st != Ty::Error
                                     && ct != Ty::Error
-                                    && st != ct
-                                    && Ty::promote(st, ct).is_none()
-                                    && !self.when_objs_comparable(st, ct) =>
+                                    && !self.when_values_comparable(st, ct) =>
                             {
                                 self.diags.error(self.span(cnd), format!("when condition type '{}' is not comparable to subject '{}'", ct.name(), st.name()));
                             }
