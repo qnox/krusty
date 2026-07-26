@@ -5965,6 +5965,77 @@ impl<'a> Lower<'a> {
         self.emit_external_static_field(field.owner, field.name, field.descriptor)
     }
 
+    fn lower_cross_file_module_member_call(
+        &mut self,
+        recv: u32,
+        target: &ResolvedCall,
+        args: &[AstExprId],
+        call_expr: AstExprId,
+    ) -> Option<u32> {
+        let ResolvedCall::ModuleMember {
+            owner,
+            name,
+            params,
+            physical_ret,
+            ret,
+            interface,
+            vararg,
+            ..
+        } = target
+        else {
+            return None;
+        };
+        if !interface {
+            if let Some(slots) = self.info.resolved_call_arg_slots.get(&call_expr).cloned() {
+                if slots.iter().any(Option::is_none) {
+                    let (slot_args, prelude) =
+                        self.lower_call_slot_args_source_order(args, &slots, params, true)?;
+                    let mut lowered = vec![recv];
+                    lowered.extend(slot_args);
+                    let mask: i32 = slots
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, slot)| slot.is_none())
+                        .map(|(index, _)| 1i32 << index)
+                        .sum();
+                    self.append_default_mask_marker(&mut lowered, mask);
+                    let mut default_params = vec![Ty::obj_name(*owner)];
+                    default_params.extend(params.iter().map(|&ty| self.vc_erase_ty(ty)));
+                    default_params.push(Ty::Int);
+                    default_params.push(Ty::obj("java/lang/Object"));
+                    let descriptor = self
+                        .runtime
+                        .method_descriptor(&default_params, ty_to_ir(*physical_ret))?;
+                    let call = self.emit_static_call(
+                        owner.render(),
+                        format!("{name}$default"),
+                        descriptor,
+                        InlineKind::None,
+                        lowered,
+                    );
+                    let call = self.coerce_to_static(call, *ret, *physical_ret);
+                    return Some(self.wrap_arg_prelude(call, prelude));
+                }
+            }
+        }
+        let (provided, prelude) =
+            self.lower_selected_module_member_args(call_expr, args, params, *vararg)?;
+        let lowered = provided.into_iter().collect::<Option<Vec<_>>>()?;
+        let call = self.emit_call(
+            Callee::Virtual {
+                owner: *owner,
+                name: name.to_string(),
+                descriptor: String::new(),
+                params: Some((tys_to_ir(params), ty_to_ir(*physical_ret))),
+                interface: *interface,
+            },
+            Some(recv),
+            lowered,
+        );
+        let call = self.coerce_to_static(call, *ret, *physical_ret);
+        Some(self.wrap_arg_prelude(call, prelude))
+    }
+
     /// Lower a bare-name call to a classpath `object` member imported unqualified (`import Obj.m; m(args)`,
     /// recorded by the checker as [`ExprLowering::ObjectMemberCall`]). Reads the singleton
     /// (`getstatic Obj.INSTANCE`) as the dispatch receiver and invokes the member — the same shape a
@@ -5980,11 +6051,14 @@ impl<'a> Lower<'a> {
         // invoke the recorded member on it. The classpath path below needs a library type.
         if let Some(ci) = self.class_info_name(internal) {
             let cid = ci.id;
-            let (class_id, index, fid, ret) = self.resolve_method_name(internal, name)?;
-            let params = self.ir.functions[fid as usize].params.clone();
-            if params.len() != args.len() {
-                return None;
-            }
+            let selected = self
+                .info
+                .resolved_calls
+                .get(&call_expr)
+                .cloned()
+                .filter(
+                    |target| matches!(target, ResolvedCall::ModuleMember { name: target, .. } if target == name),
+                );
             let recv = if self.ir.classes[cid as usize].is_object {
                 self.emit_static_instance(cid, cid, "INSTANCE")
             } else if self.ir.classes[cid as usize].is_companion {
@@ -5997,12 +6071,39 @@ impl<'a> Lower<'a> {
             } else {
                 return None;
             };
-            let mut a: Vec<Option<u32>> = Vec::with_capacity(args.len());
-            for (&arg, pt) in args.iter().zip(&params) {
-                a.push(Some(self.lower_arg(arg, pt)?));
+            if let Some(
+                target @ ResolvedCall::ModuleMember {
+                    owner,
+                    params,
+                    vararg,
+                    ..
+                },
+            ) = selected.as_ref()
+            {
+                if let Some((class_id, index, _fid, ret)) =
+                    self.link_local_method(&owner.render(), name, params)
+                {
+                    let (lowered, prelude) =
+                        self.lower_selected_module_member_args(call_expr, args, params, *vararg)?;
+                    let call = self.emit_method_call(class_id, index, recv, lowered);
+                    let call = self.coerce_generic_read(call, call_expr, ret);
+                    return Some(self.wrap_arg_prelude(call, prelude));
+                }
+                return self.lower_cross_file_module_member_call(recv, target, args, call_expr);
             }
-            let mc = self.emit_method_call(class_id, index, recv, a);
-            return Some(self.coerce_generic_read(mc, call_expr, ret));
+            let (class_id, index, fid, ret) = self
+                .resolve_method_by_arity(internal, name, args.len())
+                .or_else(|| self.resolve_method_name(internal, name))?;
+            let params = self.ir.functions[fid as usize].params.clone();
+            if params.len() != args.len() {
+                return None;
+            }
+            let mut lowered = Vec::with_capacity(args.len());
+            for (&arg, param) in args.iter().zip(&params) {
+                lowered.push(Some(self.lower_arg(arg, param)?));
+            }
+            let call = self.emit_method_call(class_id, index, recv, lowered);
+            return Some(self.coerce_generic_read(call, call_expr, ret));
         }
         let internal_name = internal.render();
         // A SIBLING-file (same-module, different-file) object: not in THIS file's IR (the same-file path
@@ -6010,6 +6111,28 @@ impl<'a> Lower<'a> {
         // external `getstatic <internal>.INSTANCE` and invoke the member cross-file (`invokevirtual`),
         // the same shape a cross-file instance call uses.
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.info.ty(*a)).collect();
+        let module_target = self
+            .info
+            .resolved_calls
+            .get(&call_expr)
+            .cloned()
+            .filter(
+                |target| matches!(target, ResolvedCall::ModuleMember { name: target, .. } if target == name),
+            );
+        if self
+            .syms
+            .class_by_internal(&internal_name)
+            .is_some_and(|class| class.is_object)
+        {
+            if let Some(target) = module_target.as_ref() {
+                let recv = self.emit_external_static_field(
+                    internal_name.clone(),
+                    "INSTANCE",
+                    format!("L{internal_name};"),
+                );
+                return self.lower_cross_file_module_member_call(recv, target, args, call_expr);
+            }
+        }
         let sib_sig = self
             .syms
             .class_by_internal(&internal_name)
@@ -14507,6 +14630,7 @@ impl<'a> Lower<'a> {
                                 is_inline: false,
                                 is_final: true,
                                 is_suspend: false,
+                                visibility: crate::types::Visibility::Public,
                                 context_count: 0,
                                 source_decl: None,
                                 source_file: None,
@@ -20982,27 +21106,27 @@ impl<'a> Lower<'a> {
                         }
                     }
                     let rt = self.recv_ty(receiver);
-                    if let Some(ResolvedCall::ModuleMember {
-                        owner,
-                        name: target,
-                        params,
-                        physical_ret,
-                        ret,
-                        interface,
-                        vararg,
-                        ..
-                    }) = self.info.resolved_calls.get(&e).cloned()
+                    let module_target = self.info.resolved_calls.get(&e).cloned();
+                    if let Some(
+                        resolved @ ResolvedCall::ModuleMember {
+                            owner,
+                            name: target,
+                            params,
+                            vararg,
+                            ..
+                        },
+                    ) = module_target.as_ref()
                     {
-                        if target != name {
+                        if *target != name {
                             return None;
                         }
                         let recv = self.expr(receiver)?;
-                        let owner = owner.render();
+                        let owner_name = owner.render();
                         if let Some((class, index, _fid, mret)) =
-                            self.link_local_method(&owner, &target, &params)
+                            self.link_local_method(&owner_name, target, params)
                         {
                             let (provided, prelude) =
-                                self.lower_selected_module_member_args(e, &args, &params, vararg)?;
+                                self.lower_selected_module_member_args(e, &args, params, *vararg)?;
                             let call = self.emit_method_call(class, index, recv, provided);
                             // A generic higher-order member erases its `<R>` return to `Object`; the
                             // checker records the concrete result (`box.map { it.length }` → `Int`), so
@@ -21010,68 +21134,7 @@ impl<'a> Lower<'a> {
                             let call = self.coerce_generic_read(call, e, mret);
                             self.wrap_arg_prelude(call, prelude)
                         } else {
-                            // A cross-file member call with OMITTED defaults (a sibling-file data class's
-                            // `w.copy(field = v)`) dispatches to the static `<owner>.<name>$default(recv,
-                            // <params…>, mask, marker)`: provided args in slot order (a zero placeholder for
-                            // each omitted one), then the mask + null marker. The physical descriptor erases
-                            // value-class fields to their underlying (kotlinc's synthetic); the return is
-                            // the owner class. Same-file goes through the index `MethodCall` path above. An
-                            // INTERFACE owner's `$default` is a STATIC INTERFACE method (needs an
-                            // `InterfaceMethodref`, which `emit_static_call` can't express) — left to skip.
-                            if !interface {
-                                if let Some(slots) =
-                                    self.info.resolved_call_arg_slots.get(&e).cloned()
-                                {
-                                    if slots.iter().any(Option::is_none) {
-                                        let (slot_args, prelude) = self
-                                            .lower_call_slot_args_source_order(
-                                                &args, &slots, &params, true,
-                                            )?;
-                                        let mut a = vec![recv];
-                                        a.extend(slot_args);
-                                        let mask: i32 = slots
-                                            .iter()
-                                            .enumerate()
-                                            .filter(|(_, s)| s.is_none())
-                                            .map(|(i, _)| 1i32 << i)
-                                            .sum();
-                                        self.append_default_mask_marker(&mut a, mask);
-                                        let owner_ty = Ty::obj(&owner);
-                                        let mut dparams = vec![owner_ty];
-                                        dparams.extend(params.iter().map(|&t| self.vc_erase_ty(t)));
-                                        dparams.push(Ty::Int);
-                                        dparams.push(Ty::obj("java/lang/Object"));
-                                        let desc = self
-                                            .runtime
-                                            .method_descriptor(&dparams, ty_to_ir(physical_ret))?;
-                                        let call = self.emit_static_call(
-                                            owner.clone(),
-                                            format!("{target}$default"),
-                                            desc,
-                                            InlineKind::None,
-                                            a,
-                                        );
-                                        let call = self.coerce_to_static(call, ret, physical_ret);
-                                        return Some(self.wrap_arg_prelude(call, prelude));
-                                    }
-                                }
-                            }
-                            let (provided, prelude) =
-                                self.lower_selected_module_member_args(e, &args, &params, vararg)?;
-                            let a: Vec<u32> = provided.into_iter().collect::<Option<_>>()?;
-                            let call = self.emit_call(
-                                Callee::Virtual {
-                                    owner: type_name(&owner),
-                                    name: target,
-                                    descriptor: String::new(),
-                                    params: Some((tys_to_ir(&params), ty_to_ir(physical_ret))),
-                                    interface,
-                                },
-                                Some(recv),
-                                a,
-                            );
-                            let call = self.coerce_to_static(call, ret, physical_ret);
-                            self.wrap_arg_prelude(call, prelude)
+                            self.lower_cross_file_module_member_call(recv, resolved, &args, e)?
                         }
                     } else if matches!(name.as_str(), "toString" | "hashCode") && args.is_empty() {
                         // `x.toString()`/`x.hashCode()` → the `kotlin/Any` virtual (dispatches to any
