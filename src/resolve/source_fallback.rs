@@ -166,6 +166,17 @@ fn merge_type(mut primary: LibraryType, fallback: LibraryType) -> LibraryType {
 }
 
 impl SymbolSource for SourceFallbackPlatform {
+    fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
+        if ty
+            .obj_internal()
+            .is_some_and(|internal| self.symbols.class_by_type_name(internal).is_some())
+        {
+            self.source().direct_supertypes(ty)
+        } else {
+            self.platform.direct_supertypes(ty)
+        }
+    }
+
     fn member_overloads(&self, recv: Ty, name: &str) -> FunctionSet {
         merge_functions(
             self.platform.member_overloads(recv, name),
@@ -336,16 +347,11 @@ impl SemanticPlatform for SourceFallbackPlatform {
         self.platform.builtin_type_internal(simple_name)
     }
 
-    fn is_collection_interface(&self, internal: &str) -> bool {
-        self.platform.is_collection_interface(internal)
-    }
-
-    fn is_collection_interface_name(&self, internal: TypeName) -> bool {
-        self.platform.is_collection_interface_name(internal)
-    }
-
-    fn collection_property_accessor(&self, property: &str) -> Option<String> {
-        self.platform.collection_property_accessor(property)
+    fn mapped_interface_members(
+        &self,
+        supertype: Ty,
+    ) -> Vec<crate::libraries::MappedInterfaceMember> {
+        self.platform.mapped_interface_members(supertype)
     }
 
     fn signature_formal_names(&self, signature: &str) -> Vec<String> {

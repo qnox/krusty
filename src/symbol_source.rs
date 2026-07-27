@@ -69,6 +69,16 @@ pub trait SymbolSource {
         self.resolve_type(&internal.render()).map(std::rc::Rc::new)
     }
 
+    /// Direct supertypes with type arguments substituted from `ty`.
+    fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
+        let Some(internal) = ty.obj_internal() else {
+            return Vec::new();
+        };
+        self.resolve_type_name(internal)
+            .map(|shape| shape.supertypes.iter_ids().map(Ty::obj_name).collect())
+            .unwrap_or_default()
+    }
+
     /// Whether `internal` names a `@JvmInline value`/inline class — the value-class-ness attribute of the
     /// class SYMBOL, queried by name. THE authority the value-class pass and resolver consult, rather than
     /// a side "value-class set". Derived from the symbol's `value_underlying` shape.
@@ -162,6 +172,17 @@ impl SymbolSource for CompositeSource<'_> {
         self.children
             .iter()
             .find_map(|c| c.resolve_type_name(internal))
+    }
+
+    fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
+        let Some(internal) = ty.obj_internal() else {
+            return Vec::new();
+        };
+        self.children
+            .iter()
+            .find(|child| child.resolve_type_name(internal).is_some())
+            .map(|child| child.direct_supertypes(ty))
+            .unwrap_or_default()
     }
 
     fn resolve_symbols(&self, fqn: &str) -> ResolvedSymbols {

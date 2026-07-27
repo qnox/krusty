@@ -2244,3 +2244,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   is gated on a `Unit` LOGICAL return so a value-carrying tail `return <suspend call>` keeps its
   forwarding; the `Unit`-local split is unconditional (the bind's value is always the singleton).
   `tests/suspend_unit_tail_conditional_e2e.rs`.
+
+- **For-loop destructuring and mapped interfaces.** Destructuring resolves `componentN`
+  member extensions through the ordinary implicit-receiver rules. Extension matching walks the
+  federated source hierarchy and preserves applied type arguments, including source classes that
+  implement classpath interfaces. Platform-provided member mappings generate forwarding bridges
+  for Kotlin properties and methods with different physical names, such as `Map.keys` and
+  `CharSequence.get`. Tests: `tests/for_destructuring_components_e2e.rs`,
+  `tests/collection_special_member_stub_e2e.rs`.

@@ -1,8 +1,4 @@
-//! A class implementing a mapped `kotlin.collections` interface must provide the `java.util` method the
-//! interface declares for a Kotlin PROPERTY member — `Collection.size` → `size()`, `Map.keys` → `keySet()`,
-//! `Map.entries` → `entrySet()`. kotlinc emits each as a synthetic bridge forwarding to the Kotlin getter
-//! (`getSize`/`getKeys`); without it the `java.util` abstract stays unimplemented and a call through the
-//! interface reference throws `AbstractMethodError` (`java/util/Map.size()I is abstract`).
+//! JVM bridges for Kotlin collection properties.
 use super::common;
 
 fn run(src: &str) -> Option<String> {
@@ -13,8 +9,6 @@ fn run(src: &str) -> Option<String> {
 
 #[test]
 fn collection_size_reachable_through_interface() {
-    // `c.size` dispatched through the `Collection` reference resolves `java.util.Collection.size()`, which
-    // must be the bridge forwarding to `getSize()` — not left abstract.
     const SRC: &str = "class C : Collection<String> {\n\
         \x20   override val size: Int get() = 3\n\
         \x20   override fun isEmpty(): Boolean = false\n\
@@ -30,4 +24,23 @@ fn collection_size_reachable_through_interface() {
         run(SRC).expect("Collection.size bridge compiles + runs"),
         "OK"
     );
+}
+
+#[test]
+fn map_keys_bridge_uses_interface_return_type() {
+    const SRC: &str = "class M(private val data: Map<String, Int>) : Map<String, Int> {\n\
+    override val entries: Set<Map.Entry<String, Int>> get() = data.entries\n\
+    override val keys: HashSet<String> get() = HashSet(data.keys)\n\
+    override val size: Int get() = data.size\n\
+    override val values: Collection<Int> get() = data.values\n\
+    override fun containsKey(key: String): Boolean = data.containsKey(key)\n\
+    override fun containsValue(value: Int): Boolean = data.containsValue(value)\n\
+    override fun get(key: String): Int? = data[key]\n\
+    override fun isEmpty(): Boolean = data.isEmpty()\n\
+}\n\
+fun box(): String {\n\
+    val value: Map<String, Int> = M(mapOf(\"a\" to 1))\n\
+    return if (value.keys.single() == \"a\") \"OK\" else \"fail\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("Map.keys bridge"), "OK");
 }

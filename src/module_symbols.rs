@@ -512,6 +512,20 @@ fn source_property(
 }
 
 impl SymbolSource for ModuleSymbols<'_> {
+    fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
+        let Some(internal) = ty.obj_internal() else {
+            return Vec::new();
+        };
+        let Some(class) = self.class_by_type_name(internal) else {
+            return Vec::new();
+        };
+        self.syms
+            .applied_source_parents(class, class.type_parameter_bindings(ty))
+            .into_iter()
+            .map(|(_, applied)| applied)
+            .collect()
+    }
+
     fn resolve_symbols(&self, fqn: &str) -> crate::libraries::ResolvedSymbols {
         (*self.resolve_symbols_name(type_name(fqn))).clone()
     }

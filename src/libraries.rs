@@ -199,22 +199,9 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         None
     }
 
-    /// Whether a supertype (given by its front-end internal name) is a collection interface whose
-    /// element-access members a concrete class must bridge to. This is a semantic declaration fact
-    /// recovered from the library source; a backend later decides how to emit the bridge.
-    fn is_collection_interface(&self, _supertype_internal: &str) -> bool {
-        false
-    }
-
-    fn is_collection_interface_name(&self, supertype_internal: TypeName) -> bool {
-        self.is_collection_interface(&supertype_internal.render())
-    }
-
-    /// The accessor name a collection interface expects for a Kotlin collection PROPERTY
-    /// (`size` → `size`, `keys` → `keySet`). Kept semantic here because source checking/lowering must
-    /// identify the required member; descriptor construction stays in the backend ABI.
-    fn collection_property_accessor(&self, _property: &str) -> Option<String> {
-        None
+    /// Source-to-physical member mappings required by an applied platform interface.
+    fn mapped_interface_members(&self, _supertype: Ty) -> Vec<MappedInterfaceMember> {
+        Vec::new()
     }
 
     /// The reified type-parameter formal NAMES a compiled generic signature declares, in order. The
@@ -231,6 +218,15 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     fn iterable_element_type_name(&self, _internal: TypeName) -> Option<Ty> {
         None
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct MappedInterfaceMember {
+    pub source_name: String,
+    pub physical_name: String,
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+    pub is_property: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
