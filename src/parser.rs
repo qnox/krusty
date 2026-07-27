@@ -180,6 +180,7 @@ fn erase_type_params(t: &TypeRef, tps: &std::collections::HashSet<String>) -> Ty
             targs: Vec::new(),
             span: t.span,
             fun_params: Vec::new(),
+            fun_context_count: 0,
             fun_has_receiver: false,
             fun_suspend: false,
         };
@@ -254,6 +255,7 @@ fn simple_type_ref(name: &str, span: crate::diag::Span) -> TypeRef {
         targs: Vec::new(),
         span,
         fun_params: Vec::new(),
+        fun_context_count: 0,
         fun_has_receiver: false,
         fun_suspend: false,
     }
@@ -1871,6 +1873,7 @@ impl<'a> Parser<'a> {
                     targs: recv_targs,
                     span,
                     fun_params: vec![],
+                    fun_context_count: 0,
                     fun_has_receiver: false,
                     fun_suspend: false,
                 };
@@ -2724,6 +2727,7 @@ impl<'a> Parser<'a> {
                     targs: recv_targs,
                     span,
                     fun_params: vec![],
+                    fun_context_count: 0,
                     fun_has_receiver: false,
                     fun_suspend: false,
                 };
@@ -3453,6 +3457,7 @@ impl<'a> Parser<'a> {
                             targs,
                             span: sup_span,
                             fun_params: Vec::new(),
+                            fun_context_count: 0,
                             fun_has_receiver: false,
                             fun_suspend: false,
                         });
@@ -3540,6 +3545,7 @@ impl<'a> Parser<'a> {
                         targs,
                         span: sup_span,
                         fun_params: Vec::new(),
+                        fun_context_count: 0,
                         fun_has_receiver: false,
                         fun_suspend: false,
                     });
@@ -4206,6 +4212,7 @@ impl<'a> Parser<'a> {
         // Function type: `(A, B) -> R` — starts with `(`.
         if self.at(TokenKind::LParen) {
             self.bump(); // '('
+            let fun_context_count = context_types.len() as u32;
             let mut fun_params = std::mem::take(&mut context_types);
             while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
                 // Skip optional parameter name prefix `name: Type` — consume up to a colon if present.
@@ -4236,6 +4243,7 @@ impl<'a> Parser<'a> {
                     targs: Vec::new(),
                     span,
                     fun_params,
+                    fun_context_count,
                     fun_has_receiver: false,
                     fun_suspend,
                 }
@@ -4260,6 +4268,7 @@ impl<'a> Parser<'a> {
                     targs: Vec::new(),
                     span,
                     fun_params: Vec::new(),
+                    fun_context_count: 0,
                     fun_has_receiver: false,
                     fun_suspend: false,
                 }
@@ -4294,6 +4303,7 @@ impl<'a> Parser<'a> {
                     targs: Vec::new(),
                     span,
                     fun_params: Vec::new(),
+                    fun_context_count: 0,
                     fun_has_receiver: false,
                     fun_suspend: false,
                 };
@@ -4343,6 +4353,7 @@ impl<'a> Parser<'a> {
                 targs,
                 span,
                 fun_params: Vec::new(),
+                fun_context_count: 0,
                 fun_has_receiver: false,
                 fun_suspend: false,
             };
@@ -4359,9 +4370,7 @@ impl<'a> Parser<'a> {
             {
                 self.bump(); // '.'
                 self.bump(); // '('
-                             // Any leading `context(…)` receivers fold in AHEAD of the extension receiver, so
-                             // `context(O) K.(A) -> R` becomes the plain `(O, K, A) -> R` (matching how context
-                             // parameters lower). `context_types` is empty for an ordinary extension function type.
+                let fun_context_count = context_types.len() as u32;
                 let mut fun_params = std::mem::take(&mut context_types);
                 fun_params.push(base);
                 while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
@@ -4391,6 +4400,7 @@ impl<'a> Parser<'a> {
                     targs: Vec::new(),
                     span,
                     fun_params,
+                    fun_context_count,
                     fun_has_receiver: true,
                     fun_suspend,
                 };
@@ -4410,6 +4420,7 @@ impl<'a> Parser<'a> {
                     targs: Vec::new(),
                     span,
                     fun_params: Vec::new(),
+                    fun_context_count: 0,
                     fun_has_receiver: false,
                     fun_suspend: false,
                 };
@@ -4425,6 +4436,7 @@ impl<'a> Parser<'a> {
                 targs: Vec::new(),
                 span,
                 fun_params: Vec::new(),
+                fun_context_count: 0,
                 fun_has_receiver: false,
                 fun_suspend: false,
             }
@@ -4467,6 +4479,7 @@ impl<'a> Parser<'a> {
                     targs: Vec::new(),
                     span,
                     fun_params: Vec::new(),
+                    fun_context_count: 0,
                     fun_has_receiver: false,
                     fun_suspend: false,
                 });
@@ -7612,6 +7625,7 @@ fn vararg_array_typeref(elem: TypeRef) -> TypeRef {
             targs: Vec::new(),
             span,
             fun_params: Vec::new(),
+            fun_context_count: 0,
             fun_has_receiver: false,
             fun_suspend: false,
         }
@@ -7624,6 +7638,7 @@ fn vararg_array_typeref(elem: TypeRef) -> TypeRef {
             targs: Vec::new(),
             span,
             fun_params: Vec::new(),
+            fun_context_count: 0,
             fun_has_receiver: false,
             fun_suspend: false,
         }
