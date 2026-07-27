@@ -6627,12 +6627,9 @@ pub struct TypeInfo {
     /// the checker resolves through imports (`var res: Result<T>? = null`) keeps its (value-)class type
     /// instead of collapsing to the initializer's type. Absent for an inferred (no-annotation) local.
     pub local_decl_types: HashMap<StmtId, Ty>,
-    /// Call `ExprId` → its explicit type arguments RESOLVED to `Ty` (`getFor<Prov>` → `[Prov]`). The
-    /// checker resolves them (imports/classpath types resolve here, not in the lowerer's local
-    /// `ty_ref`); the lowerer pairs them with a `<reified T>` classpath extension's type-parameter names
-    /// to drive the bytecode splicer's reified specialization. Recorded only where an explicit `<…>` is
-    /// present on a call.
-    pub resolved_call_type_args: HashMap<ExprId, Vec<Ty>>,
+    /// Call `ExprId` → resolved type arguments. These may come from explicit syntax or inference and
+    /// are positional over the callee's type parameters.
+    pub resolved_call_type_args: HashMap<ExprId, Vec<Option<Ty>>>,
     /// A bare-member read (`Expr::Name`) or unqualified call that resolved against a FLOW-NARROWED
     /// implicit receiver (`if (this is B) … a …`, where `a`/`m()` is a member of `B` but not of the
     /// declared receiver). Maps the read/call `ExprId` to the narrowed receiver's internal name so the
@@ -8956,7 +8953,7 @@ struct Checker<'a> {
     super_ctor_params: HashMap<String, Vec<Ty>>,
     stmt_lowers: HashMap<StmtId, StmtLowering>,
     local_decl_types: HashMap<StmtId, Ty>,
-    resolved_call_type_args: HashMap<ExprId, Vec<Ty>>,
+    resolved_call_type_args: HashMap<ExprId, Vec<Option<Ty>>>,
     narrowed_this_member: HashMap<ExprId, TypeName>,
     /// Calls resolved during checking, keyed by the `Expr::Call` `ExprId` (moved into
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
@@ -10125,7 +10122,7 @@ impl<'a> Checker<'a> {
         Some(out)
     }
     fn module_top_level_return(
-        &self,
+        &mut self,
         call: ExprId,
         selected: &crate::libraries::FunctionInfo,
         arg_tys: &[Ty],
@@ -10139,7 +10136,9 @@ impl<'a> Checker<'a> {
             ret_ty = inferred;
         }
         if let Some((source_file, function)) = self.source_function_file_and_decl(selected) {
-            if let Some(r) = self.user_generic_return(source_file, function, arg_tys, expected) {
+            if let Some(r) =
+                self.user_generic_return(call, source_file, function, arg_tys, expected)
+            {
                 ret_ty = r;
             }
             if let Some(r) = self.explicit_generic_return(call, function) {
@@ -14286,7 +14285,8 @@ impl<'a> Checker<'a> {
                             let type_args = self.resolved_explicit_type_args(e);
                             let arg_tys = self.ext_arg_tys(e, recv, &name, a, &type_args);
                             if !type_args.is_empty() {
-                                self.resolved_call_type_args.insert(e, type_args.clone());
+                                self.resolved_call_type_args
+                                    .insert(e, type_args.iter().copied().map(Some).collect());
                             }
                             if let ("toString", []) = (name.as_str(), arg_tys.as_slice()) {
                                 Ty::String
@@ -16270,7 +16270,8 @@ impl<'a> Checker<'a> {
     /// the lambda parameter types and therefore runs before). `None` when no matching user inline
     /// generic function, or its return type isn't a (now-bound) type parameter.
     fn user_generic_return(
-        &self,
+        &mut self,
+        call: ExprId,
         source_file: &File,
         f: &FunDecl,
         arg_tys: &[Ty],
@@ -16329,13 +16330,51 @@ impl<'a> Checker<'a> {
         } else {
             None
         };
+        // Bounded non-inline returns need an erased-return coercion that is not modeled here.
         let ret_tp = ret_tp.filter(|r| {
-            declared_tparam_semantic_bound(r, &f.type_params, &f.type_param_bounds, &|name| {
-                self.syms.class_names.get(name)
-            })
-            .is_none_or(Ty::is_nullable)
+            f.is_inline()
+                || declared_tparam_semantic_bound(
+                    r,
+                    &f.type_params,
+                    &f.type_param_bounds,
+                    &|name| self.syms.class_names.get(name),
+                )
+                .is_none_or(Ty::is_nullable)
         });
-        let bound = ret_tp.as_deref().and_then(|r| binds.get(r).copied())?;
+        let bound = match ret_tp.as_deref().and_then(|r| binds.get(r).copied()) {
+            Some(bound) => bound,
+            None => {
+                let r = ret_tp.as_deref()?;
+                let expected = expected.filter(|_| f.is_inline())?;
+                let binding = if f
+                    .ret
+                    .as_ref()
+                    .is_some_and(|ret| ret.nullable() || ret.definitely_non_null())
+                {
+                    expected.non_null()
+                } else {
+                    expected
+                };
+                let satisfies_bound = declared_tparam_semantic_bound(
+                    r,
+                    &f.type_params,
+                    &f.type_param_bounds,
+                    &|name| self.syms.class_names.get(name),
+                )
+                .is_none_or(|declared| {
+                    crate::assignable::is_assignable(
+                        &crate::assignable::TyCtx::new(),
+                        self,
+                        binding,
+                        declared,
+                    )
+                });
+                if !satisfies_bound {
+                    return None;
+                }
+                binding
+            }
+        };
         // A NON-inline generic call crosses the JVM erasure boundary (return is physically `Object`),
         // so recovering a concrete return here is only sound when the binding is UNAMBIGUOUS. krusty has
         // no constraint solver / least-upper-bound, so decline (stay erased → the use site's members
@@ -16390,6 +16429,27 @@ impl<'a> Checker<'a> {
             // BOXED wrapper behind the erased `Object` return; the lowerer's erased-return coercion
             // (`has_scalar_value_repr(st) && phys.is_erased_top()`) unboxes the call result once, so
             // every use sees the real scalar.
+        }
+        if !f.reified_type_params.is_empty() {
+            let targs: Vec<Option<Ty>> = f
+                .type_params
+                .iter()
+                .map(|tp| {
+                    if Some(tp.as_str()) == ret_tp.as_deref() {
+                        Some(bound)
+                    } else {
+                        binds.get(tp.as_str()).copied()
+                    }
+                })
+                .collect();
+            if f.reified_type_params.iter().all(|parameter| {
+                f.type_params
+                    .iter()
+                    .position(|candidate| candidate == parameter)
+                    .is_some_and(|index| targs[index].is_some())
+            }) {
+                self.resolved_call_type_args.insert(call, targs);
+            }
         }
         // Apply expected-type widening after validating argument constraints.
         let bound = if matches!(bound, Ty::Nullable(inner) if *inner == Ty::Nothing)
@@ -20416,7 +20476,7 @@ impl<'a> Checker<'a> {
                 // classpath extension's spliced body (imports/classpath types resolve here, not there).
                 if !call_targs.is_empty() {
                     self.resolved_call_type_args
-                        .insert(call, call_targs.clone());
+                        .insert(call, call_targs.iter().copied().map(Some).collect());
                 }
                 self.retarget_postponable_extension_arguments(
                     rt,
