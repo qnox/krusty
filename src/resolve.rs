@@ -15563,19 +15563,25 @@ impl<'a> Checker<'a> {
 
     fn iterator_protocol_target(&self, iterable_ty: Ty) -> Option<IteratorProtocolTarget> {
         let internal = iterable_ty.obj_internal()?;
-        let iterator = if let Some(member) = self.resolve_instance_name(internal, "iterator", &[]) {
-            IteratorDispatchTarget::Member {
-                owner_fallback: internal,
-                member: Box::new(member),
-            }
-        } else {
-            IteratorDispatchTarget::Extension(Box::new(self.library_extension_callable(
-                "iterator",
-                iterable_ty,
-                &[],
-                &[],
-            )?))
-        };
+        // Resolve against the full receiver, not just its erased internal name: a classpath
+        // `List<Node>` member specializes `iterator()` to `Iterator<Node>`, which supplies the loop
+        // variable type. The erased-name query would return `Iterator<Any>`.
+        let iterator =
+            if let Some(resolved) = self.resolve_instance_member(iterable_ty, "iterator", &[]) {
+                let mut member = resolved.member;
+                member.ret = resolved.ret;
+                IteratorDispatchTarget::Member {
+                    owner_fallback: internal,
+                    member: Box::new(member),
+                }
+            } else {
+                IteratorDispatchTarget::Extension(Box::new(self.library_extension_callable(
+                    "iterator",
+                    iterable_ty,
+                    &[],
+                    &[],
+                )?))
+            };
         let iter_ty = iterator.ret();
         let iter_internal = iter_ty.obj_internal()?;
         let has_next = self.resolve_instance_name(iter_internal, "hasNext", &[])?;

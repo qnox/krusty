@@ -75,3 +75,39 @@ fn typed_element_binds_primitive() {
         "OK"
     );
 }
+
+#[test]
+fn classpath_property_keeps_custom_collection_element() {
+    const LIBRARY: &str = r#"
+package fixture
+
+interface Branch {
+    val marker: String
+    val dependencies: List<Branch>
+}
+
+class Node(
+    override val marker: String,
+    override val dependencies: List<Branch>,
+) : Branch
+
+object Samples {
+    fun root(): Branch = Node("fallback", listOf(Node("OK", emptyList())))
+}
+"#;
+    const MAIN: &str = r#"
+import fixture.Branch
+import fixture.Samples
+
+fun firstDependencyMarker(branch: Branch): String {
+    for (dependency in branch.dependencies) {
+        return dependency.marker
+    }
+    return branch.marker
+}
+
+fun box(): String = firstDependencyMarker(Samples.root())
+"#;
+
+    common::expect_box_ok_against("classpath_custom_property_element", LIBRARY, MAIN);
+}
