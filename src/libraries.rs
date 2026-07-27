@@ -215,6 +215,25 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         None
     }
 
+    /// Whether `supertype_internal` is the mapped `CharSequence` interface (`kotlin.CharSequence`
+    /// ↔ `java.lang.CharSequence`) — the same java-mapping family as the collection interfaces.
+    fn is_charsequence_interface_name(&self, _supertype_internal: TypeName) -> bool {
+        false
+    }
+
+    /// The accessor name `CharSequence` expects for a Kotlin property (`length` → `length()`),
+    /// mirroring [`Self::collection_property_accessor`]: without the stub the JVM interface
+    /// method stays abstract and dispatch throws `AbstractMethodError`.
+    fn charsequence_property_accessor(&self, _property: &str) -> Option<String> {
+        None
+    }
+
+    /// The JVM stub `CharSequence` expects for a Kotlin METHOD override — `(name, params, ret)`,
+    /// `get(Int): Char` → `charAt(I)C`. The signature discriminates same-name overloads.
+    fn charsequence_method_accessor(&self, _method: &str) -> Option<(String, Vec<Ty>, Ty)> {
+        None
+    }
+
     /// The reified type-parameter formal NAMES a compiled generic signature declares, in order. The
     /// source parses its own metadata/signature format; consumers bind names without parsing backend text.
     fn signature_formal_names(&self, _signature: &str) -> Vec<String> {

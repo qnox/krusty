@@ -2424,17 +2424,32 @@ pub fn lower_file_at_reporting(
                 // stays unimplemented and a call through the interface throws `AbstractMethodError`. The
                 // interface members are on the classpath (empty `props`), so scan the class's OWN overrides.
                 let internal_name = existing_type_name(&internal)?;
-                if !c.is_interface()
-                    && lo
-                        .syms
-                        .supertype_internal_names_from(internal_name)
-                        .iter()
-                        .any(|&s| lo.syms.libraries.is_collection_interface_name(s))
-                {
+                let supers_for_stubs = lo.syms.supertype_internal_names_from(internal_name);
+                let collection_super = supers_for_stubs
+                    .iter()
+                    .any(|&s| lo.syms.libraries.is_collection_interface_name(s));
+                // `CharSequence` is the same java-mapping family: its `length` PROPERTY override
+                // must also provide the JVM `length()` method, or interface dispatch throws
+                // `AbstractMethodError`.
+                let charseq_super = supers_for_stubs
+                    .iter()
+                    .any(|&s| lo.syms.libraries.is_charsequence_interface_name(s));
+                if !c.is_interface() && (collection_super || charseq_super) {
                     let cid = lo.class_info(&internal)?.id;
                     for p in &c.body_props {
-                        let Some(stub) = lo.syms.libraries.collection_property_accessor(&p.name)
-                        else {
+                        let stub = if collection_super {
+                            lo.syms.libraries.collection_property_accessor(&p.name)
+                        } else {
+                            None
+                        }
+                        .or_else(|| {
+                            if charseq_super {
+                                lo.syms.libraries.charsequence_property_accessor(&p.name)
+                            } else {
+                                None
+                            }
+                        });
+                        let Some(stub) = stub else {
                             continue;
                         };
                         let stub = stub.as_str();
@@ -2461,6 +2476,49 @@ pub fn lower_file_at_reporting(
                             box_ret: None,
                             unbox_params: Vec::new(),
                         });
+                    }
+                    // The METHOD twin: `CharSequence.get(Int): Char` must also exist under its JVM
+                    // name `charAt(I)C` — a plain forward, same shape as the property stubs. The
+                    // contract's signature selects the right overload (`get(String)` is unrelated).
+                    if charseq_super {
+                        for m in &c.methods {
+                            let Some((stub, contract_params, contract_ret)) =
+                                lo.syms.libraries.charsequence_method_accessor(&m.name)
+                            else {
+                                continue;
+                            };
+                            let want_params = tys_to_ir(&contract_params);
+                            let want_ret = ty_to_ir(contract_ret);
+                            let has_contract_impl = lo
+                                .class_info(&internal)
+                                .and_then(|ci| ci.methods.get(&m.name).cloned())
+                                .into_iter()
+                                .flatten()
+                                .any(|(_, fid, _)| {
+                                    lo.ir.functions[fid as usize].params == want_params
+                                        && lo.ir.functions[fid as usize].ret == want_ret
+                                });
+                            if !has_contract_impl {
+                                continue;
+                            }
+                            let already = lo.ir.classes[cid as usize]
+                                .bridges
+                                .iter()
+                                .any(|b| b.name == stub && b.erased_params == want_params);
+                            if already {
+                                continue;
+                            }
+                            lo.ir.classes[cid as usize].bridges.push(crate::ir::Bridge {
+                                name: stub,
+                                erased_params: want_params.clone(),
+                                erased_ret: want_ret,
+                                concrete_params: want_params,
+                                concrete_ret: want_ret,
+                                target_name: Some(m.name.clone()),
+                                box_ret: None,
+                                unbox_params: Vec::new(),
+                            });
+                        }
                     }
                 }
                 // Interface bridges: for each implemented-interface method, if the class's actual
@@ -7589,6 +7647,44 @@ impl<'a> Lower<'a> {
                     vec![],
                 );
                 Some((c, ret))
+            }
+            DestructureComponentTarget::MemberExtension {
+                owner,
+                physical_receiver,
+                name,
+                ret,
+                physical_ret,
+                interface,
+            } => {
+                // Invoke the enclosing class's member-extension `componentN` on the implicit
+                // dispatch receiver, with the destructured value as the extension (first) param.
+                let dispatch = self.member_extension_dispatch_value(owner)?;
+                let recv = self.emit_type_op(
+                    IrTypeOp::ImplicitCoercion,
+                    recv,
+                    ty_to_ir(physical_receiver),
+                );
+                let method_params = vec![physical_receiver];
+                let call = if let Some((class, index, _, linked_ret)) =
+                    self.link_local_method(&owner.render(), &name, &method_params)
+                {
+                    let c = self.emit_method_call(class, index, dispatch, vec![Some(recv)]);
+                    self.coerce_to_static(c, ret, linked_ret)
+                } else {
+                    let c = self.emit_call(
+                        Callee::Virtual {
+                            owner,
+                            name: name.clone(),
+                            descriptor: String::new(),
+                            params: Some((tys_to_ir(&method_params), ty_to_ir(physical_ret))),
+                            interface,
+                        },
+                        Some(dispatch),
+                        vec![recv],
+                    );
+                    self.coerce_to_static(c, ret, physical_ret)
+                };
+                Some((call, ret))
             }
             DestructureComponentTarget::IndexedGet(m) => {
                 let physical_ret = m.member.physical_ret;

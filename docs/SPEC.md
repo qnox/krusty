@@ -2226,3 +2226,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   is gated on a `Unit` LOGICAL return so a value-carrying tail `return <suspend call>` keeps its
   forwarding; the `Unit`-local split is unconditional (the bind's value is always the singleton).
   `tests/suspend_unit_tail_conditional_e2e.rs`.
+
+- **For-loop destructuring and mapped-interface stubs (three fixes, one cluster).** (a) A
+  `componentN` declared as a MEMBER EXTENSION of an enclosing class
+  (`class M { operator fun C.component1() = … }`) now resolves in destructuring — a new
+  `DestructureComponentTarget::MemberExtension` rides the ordinary member-extension implicit-
+  receiver machinery and lowers as a virtual call on the dispatch receiver with the destructured
+  value as the extension parameter. (b) The extension-receiver supertype closure (`ReceiverMro`)
+  now walks the FEDERATED source (module over classpath, threaded via `ExtCtx::mro_src`) instead
+  of the platform alone — a MODULE class's classpath supertypes (`class Wrap<T> : Iterable<T>`)
+  were invisible, so every classpath extension on the interface (`xs.withIndex()`) was dropped as
+  "not in recv MRO". (c) `CharSequence` implementors get the mapped-interface stubs kotlinc's
+  built-in java-mapping requires, same mechanism as the collection stubs: the `length` PROPERTY
+  override also emits `length()I`, and the `get(Int): Char` METHOD override also emits
+  `charAt(I)C` — the stub contract carries the full signature so an unrelated same-name overload
+  (`fun get(foo: String)`) is never bridged. Corpus: `multiDecl/*MemberExtensions*`,
+  `forIn*WithIndex/*`, `forInCharSequenceWithMultipleGetFunctions.kt` — box conformance
+  3028 → 3050, FAIL: 0, no OK-set regressions. `tests/for_destructuring_components_e2e.rs`.

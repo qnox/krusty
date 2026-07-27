@@ -6082,6 +6082,18 @@ pub enum DestructureComponentTarget {
         ret: Ty,
         interface: bool,
     },
+    /// A `componentN` declared as a MEMBER EXTENSION of an enclosing class in scope
+    /// (`class M { operator fun C.component1() = … }`, destructured inside `M`'s members) —
+    /// invoked on the implicit dispatch receiver with the destructured value as the extension
+    /// (first) parameter.
+    MemberExtension {
+        owner: TypeName,
+        physical_receiver: Ty,
+        name: String,
+        ret: Ty,
+        physical_ret: Ty,
+        interface: bool,
+    },
     IndexedGet(crate::symbol_resolver::ResolvedMember),
 }
 
@@ -6118,7 +6130,8 @@ impl DestructureComponentTarget {
             Self::ModuleMember { ret, .. }
             | Self::CrossFileModuleMember { ret, .. }
             | Self::ModuleExtension { ret, .. }
-            | Self::ModulePropertyGetter { ret, .. } => *ret,
+            | Self::ModulePropertyGetter { ret, .. }
+            | Self::MemberExtension { ret, .. } => *ret,
             Self::LibraryMember(m) | Self::IndexedGet(m) => m.ret,
             Self::LibraryExtension(c) => c.ret,
         }
@@ -15459,6 +15472,36 @@ impl<'a> Checker<'a> {
                     .map(DestructureComponentTarget::LibraryExtension)
             })
             .or_else(|| self.module_extension_target(recv, name, params))
+            .or_else(|| self.member_extension_component_target(recv, name))
+    }
+
+    /// A `componentN` declared as a MEMBER EXTENSION of an enclosing class in scope
+    /// (`class M { operator fun C.component1() = … }`) — resolved through the same implicit-
+    /// receiver machinery ordinary member-extension calls use.
+    fn member_extension_component_target(
+        &self,
+        recv: Ty,
+        name: &str,
+    ) -> Option<DestructureComponentTarget> {
+        let candidate = self
+            .member_extension_function(recv, name, &[], &[], None, &[])
+            .ok()
+            .flatten()?;
+        if !candidate.params.is_empty() {
+            return None;
+        }
+        let interface = self
+            .syms
+            .class_by_type_name(candidate.owner)
+            .is_some_and(|class| class.is_interface);
+        Some(DestructureComponentTarget::MemberExtension {
+            owner: candidate.owner,
+            physical_receiver: candidate.physical_receiver,
+            name: name.to_string(),
+            ret: candidate.ret,
+            physical_ret: candidate.physical_ret,
+            interface,
+        })
     }
 
     fn destructure_indexed_get_target(&self, recv: Ty) -> Option<DestructureComponentTarget> {

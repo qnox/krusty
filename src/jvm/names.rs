@@ -41,6 +41,28 @@ pub fn collection_property_stub_name(prop: &str) -> Option<&'static str> {
     }
 }
 
+/// The JVM method a `CharSequence` implementor must provide for a Kotlin PROPERTY override
+/// (`length` → `length()I`), kotlinc's built-in java-mapping (JavaToKotlinClassMap family).
+pub fn charsequence_property_stub_name(prop: &str) -> Option<&'static str> {
+    match prop {
+        "length" => Some("length"),
+        _ => None,
+    }
+}
+
+/// The JVM method a `CharSequence` implementor must provide for a Kotlin METHOD override —
+/// `(jvm name, params, ret)`: `get(Int): Char` → `charAt(I)C`. The signature is part of the
+/// contract so an unrelated same-name overload (`get(String)`) is never bridged.
+pub fn charsequence_method_stub(
+    method: &str,
+) -> Option<(&'static str, &'static [crate::types::Ty], crate::types::Ty)> {
+    use crate::types::Ty;
+    match method {
+        "get" => Some(("charAt", &[Ty::Int], Ty::Char)),
+        _ => None,
+    }
+}
+
 pub use crate::names::property_setter_name;
 
 /// Physical JVM name for a mapped Kotlin virtual member.

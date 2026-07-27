@@ -1267,6 +1267,7 @@ impl<'a> SymbolResolver<'a> {
                     FnKind::Extension,
                     ExtCtx {
                         allow_must_inline: true,
+                        mro_src: Some(&self.src),
                         fn_scope: self.fn_scope,
                     },
                 )
@@ -2628,6 +2629,7 @@ fn select_instance_info(
         FnKind::Member,
         ExtCtx {
             allow_must_inline: false,
+            mro_src: None,
             fn_scope: None,
         },
     )
@@ -2804,6 +2806,11 @@ fn fn_in_scope(o: &FunctionInfo, fn_scope: Option<&[TypeName]>) -> bool {
 struct ExtCtx<'a> {
     allow_must_inline: bool,
     fn_scope: Option<&'a [TypeName]>,
+    /// The FEDERATED source (module over classpath) for the receiver's supertype closure — a
+    /// MODULE-class receiver's supertypes (`class Wrap<T> : Iterable<T>`) live outside the
+    /// platform view, and without them every classpath extension on the interface is dropped as
+    /// "not in recv MRO". `None` falls back to the platform.
+    mro_src: Option<&'a dyn crate::symbol_source::SymbolSource>,
 }
 
 #[derive(Clone, Copy)]
@@ -2959,8 +2966,11 @@ fn select_overload(
     // Candidates as `(overload, logical value params)`, grouped by receiver rank. An extension admits only
     // public overloads unless the caller is the bytecode inliner (which splices non-public `@InlineOnly`).
     // The receiver's supertype closure is BFS-walked once here and probed per candidate below.
-    let recv_mro =
-        (kind == FnKind::Extension && !overloads.is_empty()).then(|| ReceiverMro::new(lib, recv));
+    let mro_src: &dyn crate::symbol_source::SymbolSource = ext
+        .mro_src
+        .unwrap_or(lib as &dyn crate::symbol_source::SymbolSource);
+    let recv_mro = (kind == FnKind::Extension && !overloads.is_empty())
+        .then(|| ReceiverMro::new(mro_src, recv));
     let mut by_rank: std::collections::BTreeMap<u32, Vec<(&FunctionInfo, Vec<Ty>)>> =
         std::collections::BTreeMap::new();
     for o in overloads.iter().copied().filter(|&o| {
@@ -2975,7 +2985,10 @@ fn select_overload(
         // one) still holds. A candidate whose declared receiver is NOT in the receiver's supertype closure
         // does not apply — drop it. Members and lambda-return (`u32::MAX`) keep their provider rank.
         let rank = if kind == FnKind::Extension {
-            match o.receiver.and_then(|dr| recv_mro.as_ref()?.rank(lib, dr)) {
+            match o
+                .receiver
+                .and_then(|dr| recv_mro.as_ref()?.rank(mro_src, dr))
+            {
                 Some(r) => r,
                 None => {
                     crate::trace_compiler!(

@@ -2575,6 +2575,20 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         crate::jvm::names::collection_property_stub_name(property).map(str::to_string)
     }
 
+    fn is_charsequence_interface_name(&self, supertype_internal: TypeName) -> bool {
+        supertype_internal.matches("kotlin/CharSequence")
+            || supertype_internal.matches("java/lang/CharSequence")
+    }
+
+    fn charsequence_property_accessor(&self, property: &str) -> Option<String> {
+        crate::jvm::names::charsequence_property_stub_name(property).map(str::to_string)
+    }
+
+    fn charsequence_method_accessor(&self, method: &str) -> Option<(String, Vec<Ty>, Ty)> {
+        crate::jvm::names::charsequence_method_stub(method)
+            .map(|(n, ps, r)| (n.to_string(), ps.to_vec(), r))
+    }
+
     fn signature_formal_names(&self, signature: &str) -> Vec<String> {
         signature_formals(signature)
     }
