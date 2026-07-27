@@ -17704,6 +17704,41 @@ impl<'a> Checker<'a> {
             .map(|(_, member)| member)
     }
 
+    fn has_applicable_instance_member(
+        &self,
+        call: ExprId,
+        receiver: Ty,
+        name: &str,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+    ) -> bool {
+        let arg_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
+        let partial_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
+        self.resolver()
+            .resolve_symbol(
+                crate::symbol_resolver::SymRecv::Value(receiver),
+                name,
+                &[],
+                &[],
+            )
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|candidate| candidate.kind == crate::libraries::FnKind::Member)
+            .any(|candidate| {
+                let mut member = candidate.member_with_return(candidate.callable.ret);
+                member.call_sig = candidate.call_sig.clone();
+                self.module_member_candidate_score(
+                    &member,
+                    args,
+                    &partial_arg_tys,
+                    arg_names,
+                    self.file.call_has_trailing_lambda.contains(&call.0),
+                )
+                .is_some()
+            })
+    }
+
     fn check_module_member_call(
         &mut self,
         call: ExprId,
@@ -20929,6 +20964,21 @@ impl<'a> Checker<'a> {
                             self.this_ty,
                             self.module_declares(&fname)
                         );
+                    }
+                    // A receiver lambda adds a nearer implicit receiver without discarding an outer
+                    // extension receiver. Before trying ordinary members on that OUTER receiver, let the
+                    // nearer receiver act as the dispatch receiver of a member extension on it. Otherwise
+                    // an inapplicable same-named outer member (`fun select(scope: Scope)`) reports its
+                    // missing argument before the applicable `Scope.fun Token.select()` is considered.
+                    for recv in self.implicit_receiver_types().into_iter().skip(1) {
+                        if !self.has_applicable_instance_member(call, recv, &fname, args, &arg_tys)
+                        {
+                            if let Some(ret) = self.check_member_extension_function_call(
+                                call, recv, &fname, args, &arg_tys,
+                            ) {
+                                return ret;
+                            }
+                        }
                     }
                     for recv in self.implicit_receiver_types().into_iter().skip(1) {
                         if let Some(ret) =
