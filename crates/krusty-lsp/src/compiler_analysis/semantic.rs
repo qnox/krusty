@@ -194,11 +194,11 @@ impl HighlightSymbols {
                 .map(|(name, class)| {
                     let kind = if symbols.enums.contains_key(name) {
                         HighlightKind::Enum
-                    } else if class.is_annotation {
+                    } else if class.is_annotation() {
                         HighlightKind::Decorator
-                    } else if class.is_interface {
+                    } else if class.is_interface() {
                         HighlightKind::Interface
-                    } else if class.is_object {
+                    } else if class.is_object() {
                         HighlightKind::Type
                     } else {
                         HighlightKind::Class
@@ -289,7 +289,7 @@ impl HighlightSymbols {
             self.members.insert(
                 (class.name.clone(), function.name.clone()),
                 MemberHighlight {
-                    kind: if function.is_operator {
+                    kind: if function.is_operator() {
                         HighlightKind::Operator
                     } else {
                         HighlightKind::Method
@@ -799,7 +799,7 @@ impl<'a> SemanticClassifier<'a> {
         static_member: bool,
         abstract_owner: bool,
     ) {
-        let kind = if function.is_operator {
+        let kind = if function.is_operator() {
             HighlightKind::Operator
         } else if member {
             HighlightKind::Method
@@ -810,10 +810,10 @@ impl<'a> SemanticClassifier<'a> {
         if static_member {
             modifiers |= HighlightModifiers::STATIC;
         }
-        if (function.is_abstract && matches!(function.body, FunBody::None)) || abstract_owner {
+        if (function.is_abstract() && matches!(function.body, FunBody::None)) || abstract_owner {
             modifiers |= HighlightModifiers::ABSTRACT;
         }
-        if function.is_suspend {
+        if function.is_suspend() {
             modifiers |= HighlightModifiers::ASYNC;
         }
         if is_deprecated(&function.annotations) {
@@ -1277,7 +1277,7 @@ impl<'a> SemanticClassifier<'a> {
                 let definition = self
                     .find_named(function.span, &function.name, None, None, false)
                     .map(|index| definition_name_span(self.source, self.tokens[index].span));
-                let kind = if function.is_operator {
+                let kind = if function.is_operator() {
                     HighlightKind::Operator
                 } else {
                     HighlightKind::Function
@@ -2679,7 +2679,7 @@ impl<'a> SemanticClassifier<'a> {
         function: &FunDecl,
         static_member: bool,
     ) {
-        let kind = if function.is_operator {
+        let kind = if function.is_operator() {
             HighlightKind::Operator
         } else {
             HighlightKind::Method
@@ -2689,10 +2689,10 @@ impl<'a> SemanticClassifier<'a> {
         } else {
             0
         };
-        if function.is_abstract {
+        if function.is_abstract() {
             modifiers |= HighlightModifiers::ABSTRACT;
         }
-        if function.is_suspend {
+        if function.is_suspend() {
             modifiers |= HighlightModifiers::ASYNC;
         }
         if is_deprecated(&function.annotations) {
@@ -2931,10 +2931,10 @@ fn is_deprecated(annotations: &[String]) -> bool {
 
 fn function_modifiers(function: &FunDecl) -> u16 {
     let mut modifiers = 0;
-    if function.is_abstract && matches!(function.body, FunBody::None) {
+    if function.is_abstract() && matches!(function.body, FunBody::None) {
         modifiers |= HighlightModifiers::ABSTRACT;
     }
-    if function.is_suspend {
+    if function.is_suspend() {
         modifiers |= HighlightModifiers::ASYNC;
     }
     if is_deprecated(&function.annotations) {

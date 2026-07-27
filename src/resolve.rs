@@ -23,12 +23,69 @@ pub(crate) use source_fallback::SourceFallbackPlatform;
 
 pub type ResolvedMember = crate::symbol_resolver::ResolvedMember;
 
+/// Bit-packed boolean flags for a [`Signature`], collapsing `vararg`/`is_inline`/`is_operator`/
+/// `is_override`/`is_final`/`is_suspend` into one byte. Read through the `Signature` accessors of the
+/// same names; `vararg` is also mutated through `set_vararg`; built with the `with_*` chain. Headroom
+/// for two more flags.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SigFlags(u8);
+
+impl SigFlags {
+    const VARARG: u8 = 1 << 0;
+    const IS_INLINE: u8 = 1 << 1;
+    const IS_OPERATOR: u8 = 1 << 2;
+    const IS_OVERRIDE: u8 = 1 << 3;
+    const IS_FINAL: u8 = 1 << 4;
+    const IS_SUSPEND: u8 = 1 << 5;
+
+    #[inline]
+    const fn with(mut self, mask: u8, on: bool) -> Self {
+        if on {
+            self.0 |= mask;
+        } else {
+            self.0 &= !mask;
+        }
+        self
+    }
+    #[inline]
+    const fn has(self, mask: u8) -> bool {
+        self.0 & mask != 0
+    }
+
+    #[inline]
+    pub const fn with_vararg(self, on: bool) -> Self {
+        self.with(Self::VARARG, on)
+    }
+    #[inline]
+    pub const fn with_is_inline(self, on: bool) -> Self {
+        self.with(Self::IS_INLINE, on)
+    }
+    #[inline]
+    pub const fn with_is_operator(self, on: bool) -> Self {
+        self.with(Self::IS_OPERATOR, on)
+    }
+    #[inline]
+    pub const fn with_is_override(self, on: bool) -> Self {
+        self.with(Self::IS_OVERRIDE, on)
+    }
+    #[inline]
+    pub const fn with_is_final(self, on: bool) -> Self {
+        self.with(Self::IS_FINAL, on)
+    }
+    #[inline]
+    pub const fn with_is_suspend(self, on: bool) -> Self {
+        self.with(Self::IS_SUSPEND, on)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Signature {
     pub params: Vec<Ty>,
     pub ret: Ty,
-    /// True if the last parameter is `vararg` (its `Ty` is the array type; callers pack trailing args).
-    pub vararg: bool,
+    /// Bit-packed `vararg`/`is_inline`/`is_operator`/`is_override`/`is_final`/`is_suspend` (read via the
+    /// accessors below; `vararg` set via `set_vararg`). `vararg` — the last parameter is `vararg`.
+    /// `is_final` — a `final` member a subclass cannot override. `is_suspend` — a `suspend fun`.
+    pub flags: SigFlags,
     /// Minimum number of arguments a caller must supply — params beyond this have default values
     /// that the caller fills in. Equals `params.len()` when there are no defaults.
     pub required: usize,
@@ -51,21 +108,8 @@ pub struct Signature {
     /// implicit `this` receiver (so a bare member/extension call inside resolves against it). Parallel
     /// to `params`; empty = none are receivers.
     pub lambda_recv: Vec<bool>,
-    /// True for an `inline fun` — the lowerer expands its body at each call site (so a lambda
-    /// argument may capture a mutable local), instead of forming a closure.
-    pub is_inline: bool,
-    /// Whether the source declaration has the `operator` modifier.
-    pub is_operator: bool,
-    /// Whether the source declaration has the `override` modifier.
-    pub is_override: bool,
     /// Source visibility.
     pub visibility: Visibility,
-    /// True for a `final` member (a non-`open` member, or an explicit `final override`). A subclass —
-    /// including a `data class` synthesizing `equals`/`hashCode`/`toString` — cannot override it.
-    pub is_final: bool,
-    /// True for a `suspend fun`. Flows to `FnFlags.suspend` so the resolver reports suspend-ness
-    /// uniformly for same-file and classpath callees; the coroutine pass keys off it.
-    pub is_suspend: bool,
     /// Number of leading context parameters in `params`. Ordinary functions leave this at 0.
     pub context_count: usize,
     /// Source declaration id for a top-level function in the current compilation. Member, local, and
@@ -89,8 +133,45 @@ pub fn adapted_ref_arity(vararg: bool, required: usize, param_count: usize) -> u
 }
 
 impl Signature {
+    #[inline]
+    pub fn vararg(&self) -> bool {
+        self.flags.has(SigFlags::VARARG)
+    }
+    #[inline]
+    pub fn is_inline(&self) -> bool {
+        self.flags.has(SigFlags::IS_INLINE)
+    }
+    #[inline]
+    pub fn is_operator(&self) -> bool {
+        self.flags.has(SigFlags::IS_OPERATOR)
+    }
+    #[inline]
+    pub fn is_override(&self) -> bool {
+        self.flags.has(SigFlags::IS_OVERRIDE)
+    }
+    #[inline]
+    pub fn is_final(&self) -> bool {
+        self.flags.has(SigFlags::IS_FINAL)
+    }
+    #[inline]
+    pub fn is_suspend(&self) -> bool {
+        self.flags.has(SigFlags::IS_SUSPEND)
+    }
+    #[inline]
+    pub fn set_vararg(&mut self, on: bool) {
+        self.flags = self.flags.with_vararg(on);
+    }
+    #[inline]
+    pub fn set_is_operator(&mut self, on: bool) {
+        self.flags = self.flags.with_is_operator(on);
+    }
+    #[inline]
+    pub fn set_is_inline(&mut self, on: bool) {
+        self.flags = self.flags.with_is_inline(on);
+    }
+
     pub fn requires_all_args(&self) -> bool {
-        !self.vararg && self.params.len() == self.required
+        !self.vararg() && self.params.len() == self.required
     }
 
     pub fn single_param(&self) -> Option<Ty> {
@@ -111,7 +192,7 @@ impl Signature {
                 })
                 .collect(),
             self.required,
-            self.vararg,
+            self.vararg(),
         )
     }
 }
@@ -229,6 +310,72 @@ struct AppliedMemberExtFunSig {
     is_operator: bool,
 }
 
+/// Bit-packed boolean modifiers for a [`ClassSig`]. The eight per-class flags below each cost a full
+/// byte as a separate `bool` field (plus struct padding); collapsed into one `u8` they save several
+/// bytes per sig, and the compiler builds a few thousand. Built with the `with_*` chain from
+/// [`ClassFlags::default`]; read through the `ClassSig::is_*` / `has_*` accessors. All eight bits are
+/// in use — a ninth flag needs a wider field.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClassFlags(u8);
+
+impl ClassFlags {
+    const INTERFACE: u8 = 1 << 0;
+    const OBJECT: u8 = 1 << 1;
+    const ABSTRACT: u8 = 1 << 2;
+    const FUN_INTERFACE: u8 = 1 << 3;
+    const SEALED: u8 = 1 << 4;
+    const FINAL: u8 = 1 << 5;
+    const HAS_ABSTRACT_MEMBERS: u8 = 1 << 6;
+    const ANNOTATION: u8 = 1 << 7;
+
+    #[inline]
+    const fn with(mut self, mask: u8, on: bool) -> Self {
+        if on {
+            self.0 |= mask;
+        } else {
+            self.0 &= !mask;
+        }
+        self
+    }
+    #[inline]
+    const fn has(self, mask: u8) -> bool {
+        self.0 & mask != 0
+    }
+
+    #[inline]
+    pub const fn with_interface(self, on: bool) -> Self {
+        self.with(Self::INTERFACE, on)
+    }
+    #[inline]
+    pub const fn with_object(self, on: bool) -> Self {
+        self.with(Self::OBJECT, on)
+    }
+    #[inline]
+    pub const fn with_abstract(self, on: bool) -> Self {
+        self.with(Self::ABSTRACT, on)
+    }
+    #[inline]
+    pub const fn with_fun_interface(self, on: bool) -> Self {
+        self.with(Self::FUN_INTERFACE, on)
+    }
+    #[inline]
+    pub const fn with_sealed(self, on: bool) -> Self {
+        self.with(Self::SEALED, on)
+    }
+    #[inline]
+    pub const fn with_final(self, on: bool) -> Self {
+        self.with(Self::FINAL, on)
+    }
+    #[inline]
+    pub const fn with_has_abstract_members(self, on: bool) -> Self {
+        self.with(Self::HAS_ABSTRACT_MEMBERS, on)
+    }
+    #[inline]
+    pub const fn with_annotation(self, on: bool) -> Self {
+        self.with(Self::ANNOTATION, on)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DeclaredPropertySig {
     pub ty: Ty,
@@ -258,21 +405,10 @@ pub struct ClassSig {
     /// declaration is only reachable from the file that declares it.
     pub ctor_param_names: Vec<(String, bool)>,
     pub methods: MethodMap,
-    /// True if this is an `interface` (calls dispatch via `invokeinterface`).
-    pub is_interface: bool,
-    /// True if declared `object` (a singleton).
-    pub is_object: bool,
-    /// True if declared `abstract` (or `sealed`, which is abstract) — cannot be instantiated directly.
-    pub is_abstract: bool,
-    /// True if declared `fun interface` — a single-abstract-method interface eligible for SAM
-    /// conversion (a lambda may be passed where this type is expected).
-    pub is_fun_interface: bool,
-    /// True if declared `sealed` — all subclasses are known in this module, enabling exhaustive
-    /// `when` without an `else`.
-    pub is_sealed: bool,
-    /// True when the declaration cannot be subclassed.
-    pub is_final: bool,
-    pub has_abstract_members: bool,
+    /// Bit-packed class modifiers (`interface`, `object`, `abstract`, `fun interface`, `sealed`,
+    /// `final`, `has_abstract_members`, `annotation`). Read via the `is_*`/`has_*` accessors; the
+    /// `annotation` bit lives here too (its doc stays at the former field position below).
+    pub flags: ClassFlags,
     /// `Some(outer_internal)` for an `inner class` — it captures the enclosing instance (a `this$0`
     /// field of the outer type); constructed as `outerInstance.Inner(...)`.
     pub inner_of: Option<TypeName>,
@@ -300,8 +436,6 @@ pub struct ClassSig {
     /// source). Empty when the class has no base arguments. The lowerer emits `super(args)` against
     /// these instead of re-resolving the constructor itself.
     pub super_ctor_params: Vec<Ty>,
-    /// `annotation class` — emitted as an interface; instantiation builds a synthetic impl class.
-    pub is_annotation: bool,
     /// Each primary-constructor parameter's default, captured FILE-INDEPENDENTLY (see
     /// [`CtorDefaultValue`]) so a different file can fill it without dereferencing a cross-file `ExprId`.
     /// `None` = required (or an unmodeled default → treated as required → skip).
@@ -379,6 +513,59 @@ fn module_member_lambda_params(
 }
 
 impl ClassSig {
+    /// True if this is an `interface` (calls dispatch via `invokeinterface`).
+    #[inline]
+    pub fn is_interface(&self) -> bool {
+        self.flags.has(ClassFlags::INTERFACE)
+    }
+    /// True if declared `object` (a singleton).
+    #[inline]
+    pub fn is_object(&self) -> bool {
+        self.flags.has(ClassFlags::OBJECT)
+    }
+    /// True if declared `abstract` (or `sealed`, which is abstract) — cannot be instantiated directly.
+    #[inline]
+    pub fn is_abstract(&self) -> bool {
+        self.flags.has(ClassFlags::ABSTRACT)
+    }
+    /// True if declared `fun interface` — a single-abstract-method interface eligible for SAM conversion.
+    #[inline]
+    pub fn is_fun_interface(&self) -> bool {
+        self.flags.has(ClassFlags::FUN_INTERFACE)
+    }
+    /// True if declared `sealed` — all subclasses are known in this module.
+    #[inline]
+    pub fn is_sealed(&self) -> bool {
+        self.flags.has(ClassFlags::SEALED)
+    }
+    /// True when the declaration cannot be subclassed.
+    #[inline]
+    pub fn is_final(&self) -> bool {
+        self.flags.has(ClassFlags::FINAL)
+    }
+    /// True when the type declares one or more abstract members.
+    #[inline]
+    pub fn has_abstract_members(&self) -> bool {
+        self.flags.has(ClassFlags::HAS_ABSTRACT_MEMBERS)
+    }
+    /// True for an `annotation class` — emitted as an interface; instantiation builds a synthetic impl.
+    #[inline]
+    pub fn is_annotation(&self) -> bool {
+        self.flags.has(ClassFlags::ANNOTATION)
+    }
+    #[inline]
+    pub fn set_is_abstract(&mut self, on: bool) {
+        self.flags = self.flags.with_abstract(on);
+    }
+    #[inline]
+    pub fn set_is_sealed(&mut self, on: bool) {
+        self.flags = self.flags.with_sealed(on);
+    }
+    #[inline]
+    pub fn set_is_final(&mut self, on: bool) {
+        self.flags = self.flags.with_final(on);
+    }
+
     pub(crate) fn type_parameter_bindings(&self, applied: Ty) -> HashMap<String, Ty> {
         let mut bindings = self
             .tparam_names
@@ -673,7 +860,7 @@ fn local_function_candidate_score(
         .get(context_count..)
         .unwrap_or_default();
     if let Some(arg_names) = arg_names {
-        if signature.vararg {
+        if signature.vararg() {
             return None;
         }
         let Ok(slots) = map_call_args(
@@ -700,11 +887,11 @@ fn local_function_candidate_score(
             }
             type_score += if parameter == actual { 2 } else { 1 };
         }
-        return Some((type_score, std::cmp::Reverse(omitted), !signature.vararg));
+        return Some((type_score, std::cmp::Reverse(omitted), !signature.vararg()));
     }
     positional_candidate_score(
         params,
-        signature.vararg,
+        signature.vararg(),
         signature.required.saturating_sub(context_count),
         defaults,
         arg_tys,
@@ -1241,8 +1428,8 @@ impl SymbolTable {
                 // An override has the same JVM parameter signature as its parent. Keep the
                 // most-derived declaration while retaining inherited overloads.
                 if let Some(&derived) = seen_params.get(&signature.params) {
-                    if signatures[derived].is_override && signature.is_operator {
-                        signatures[derived].is_operator = true;
+                    if signatures[derived].is_override() && signature.is_operator() {
+                        signatures[derived].set_is_operator(true);
                     }
                 } else {
                     let index = signatures.len();
@@ -1282,7 +1469,7 @@ impl SymbolTable {
         };
         if let Some(sigs) = c.methods.get(name) {
             // The flag is only trustworthy when the name has a sole overload.
-            return matches!(sigs.as_slice(), [one] if one.vararg);
+            return matches!(sigs.as_slice(), [one] if one.vararg());
         }
         c.super_internal
             .is_some_and(|s| self.method_is_vararg_name(s, name))
@@ -1413,7 +1600,7 @@ impl SymbolTable {
                                 ty_of_ref(parameter, &self.class_names, &tparams, &mut scratch)
                             })
                             .collect::<Vec<_>>();
-                        if signature.signature.vararg {
+                        if signature.signature.vararg() {
                             if let Some(last) = params.last_mut() {
                                 *last = Ty::array(*last);
                             }
@@ -1423,8 +1610,8 @@ impl SymbolTable {
                             receiver,
                             params,
                             visibility: signature.signature.visibility,
-                            is_final: signature.signature.is_final,
-                            is_operator: signature.signature.is_operator,
+                            is_final: signature.signature.is_final(),
+                            is_operator: signature.signature.is_operator(),
                         });
                     }
                 }
@@ -1794,7 +1981,7 @@ pub fn pick_overload(sigs: &[Signature], arg_tys: &[Ty]) -> Option<usize> {
         return Some(0);
     }
     let arity_ok = |s: &Signature| {
-        if s.vararg {
+        if s.vararg() {
             arg_tys.len() + 1 >= s.params.len()
         } else {
             arg_tys.len() >= s.required && arg_tys.len() <= s.params.len()
@@ -2619,7 +2806,13 @@ pub fn collect_signatures_with_cp(
                     let sig = Signature {
                         params,
                         ret,
-                        vararg,
+                        flags: SigFlags::default()
+                            .with_vararg(vararg)
+                            .with_is_inline(f.is_inline())
+                            .with_is_operator(f.is_operator())
+                            .with_is_override(f.is_override())
+                            .with_is_final(f.is_final())
+                            .with_is_suspend(f.is_suspend()),
                         required,
                         param_defaults: f.params.iter().map(|p| p.default.is_some()).collect(),
                         param_default_values: f
@@ -2633,13 +2826,8 @@ pub fn collect_signatures_with_cp(
                             .collect(),
                         param_names: f.params.iter().map(|p| p.name.clone()).collect(),
                         lambda_param_types,
-                        lambda_recv: f.params.iter().map(|p| p.ty.fun_has_receiver).collect(),
-                        is_inline: f.is_inline,
-                        is_operator: f.is_operator,
-                        is_override: f.is_override,
+                        lambda_recv: f.params.iter().map(|p| p.ty.fun_has_receiver()).collect(),
                         visibility: f.visibility,
-                        is_final: f.is_final,
-                        is_suspend: f.is_suspend,
                         context_count: f.context_count,
                         source_decl: Some(d),
                         source_file: Some(i as u32),
@@ -2706,7 +2894,7 @@ pub fn collect_signatures_with_cp(
                                     | "inc"
                                     | "dec"
                             );
-                        if recv_ref.nullable
+                        if recv_ref.nullable()
                             && recv_ty.is_reference()
                             && is_operator
                             && !module_declared_recv
@@ -3370,19 +3558,20 @@ pub fn collect_signatures_with_cp(
                                 vec![Signature {
                                     params: vec![],
                                     ret: *ty,
-                                    vararg: false,
+                                    flags: SigFlags::default()
+                                        .with_vararg(false)
+                                        .with_is_inline(false)
+                                        .with_is_operator(false)
+                                        .with_is_override(false)
+                                        .with_is_final(true)
+                                        .with_is_suspend(false),
                                     required: 0,
                                     param_defaults: Vec::new(),
                                     param_default_values: Vec::new(),
                                     param_names: Vec::new(),
                                     lambda_param_types: Vec::new(),
                                     lambda_recv: Vec::new(),
-                                    is_inline: false,
-                                    is_operator: true,
-                                    is_override: false,
                                     visibility: Visibility::Public,
-                                    is_final: true,
-                                    is_suspend: false,
                                     context_count: 0,
                                     source_decl: None,
                                     source_file: None,
@@ -3397,19 +3586,14 @@ pub fn collect_signatures_with_cp(
                             vec![Signature {
                                 params: props.iter().map(|(_, t, _)| *t).collect(),
                                 ret: self_ty,
-                                vararg: false,
+                                flags: SigFlags::default(),
                                 required: 0,
                                 param_defaults: vec![true; props.len()],
                                 param_default_values: Vec::new(),
                                 param_names: props.iter().map(|(n, _, _)| n.clone()).collect(),
                                 lambda_param_types: Vec::new(),
                                 lambda_recv: Vec::new(),
-                                is_inline: false,
-                                is_operator: false,
-                                is_override: false,
                                 visibility: Visibility::Public,
-                                is_final: true,
-                                is_suspend: false,
                                 context_count: 0,
                                 source_decl: None,
                                 source_file: None,
@@ -3563,19 +3747,20 @@ pub fn collect_signatures_with_cp(
                                     "kotlinx/serialization/KSerializer",
                                     &[Ty::obj(&internal)],
                                 ),
-                                vararg: false,
+                                flags: SigFlags::default()
+                                    .with_vararg(false)
+                                    .with_is_inline(false)
+                                    .with_is_operator(false)
+                                    .with_is_override(false)
+                                    .with_is_final(true)
+                                    .with_is_suspend(false),
                                 required: n_tp,
                                 param_defaults: vec![],
                                 param_default_values: Vec::new(),
                                 param_names: vec![],
                                 lambda_param_types: vec![],
                                 lambda_recv: vec![],
-                                is_inline: false,
-                                is_operator: false,
-                                is_override: false,
                                 visibility: Visibility::Public,
-                                is_final: true,
-                                is_suspend: false,
                                 context_count: 0,
                                 source_decl: None,
                                 source_file: None,
@@ -3629,13 +3814,13 @@ pub fn collect_signatures_with_cp(
                             .collect()
                     };
                     let tparam_index = |r: &TypeRef| -> Option<(usize, bool)> {
-                        if r.nullable || !r.targs.is_empty() || r.arg.is_some() {
+                        if r.nullable() || !r.targs.is_empty() || r.arg.is_some() {
                             return None;
                         }
                         tparam_names
                             .iter()
                             .position(|t| *t == r.name)
-                            .map(|index| (index, r.definitely_non_null))
+                            .map(|index| (index, r.definitely_non_null()))
                     };
                     let mut generic_props: HashMap<String, (usize, bool)> = HashMap::new();
                     for p in c.props.iter().filter(|p| p.is_property) {
@@ -3730,19 +3915,23 @@ pub fn collect_signatures_with_cp(
                                             &symbolic_ctp,
                                             diags,
                                         ),
-                                        parameter.ty.definitely_non_null,
+                                        parameter.ty.definitely_non_null(),
                                     )
                                 })
                                 .collect(),
                             methods,
-                            is_interface: c.is_interface(),
-                            is_object: c.is_object(),
-                            is_abstract: c.is_abstract(),
-                            is_fun_interface: c.is_fun_interface,
-                            is_sealed: c.is_sealed(),
-                            is_final: c.is_final(),
-                            has_abstract_members: c.methods.iter().any(|method| method.is_abstract)
-                                || c.body_props.iter().any(|property| property.is_abstract),
+                            flags: ClassFlags::default()
+                                .with_interface(c.is_interface())
+                                .with_object(c.is_object())
+                                .with_abstract(c.is_abstract())
+                                .with_fun_interface(c.is_fun_interface)
+                                .with_sealed(c.is_sealed())
+                                .with_final(c.is_final())
+                                .with_has_abstract_members(
+                                    c.methods.iter().any(|method| method.is_abstract())
+                                        || c.body_props.iter().any(|property| property.is_abstract),
+                                )
+                                .with_annotation(c.is_annotation()),
                             inner_of: inner_of_ref,
                             static_methods,
                             companion_fun_names,
@@ -3771,7 +3960,6 @@ pub fn collect_signatures_with_cp(
                                 })
                                 .collect(),
                             super_ctor_params: Vec::new(),
-                            is_annotation: c.is_annotation(),
                             ctor_param_names,
                             ctor_defaults,
                             secondary_ctors,
@@ -3813,13 +4001,7 @@ pub fn collect_signatures_with_cp(
                                     .into_iter()
                                     .map(|(n, sig)| (n, vec![sig]))
                                     .collect(),
-                                is_interface: false,
-                                is_object: false,
-                                is_abstract: false,
-                                is_fun_interface: false,
-                                is_sealed: false,
-                                is_final: true,
-                                has_abstract_members: false,
+                                flags: ClassFlags::default().with_final(true),
                                 inner_of: None,
                                 static_methods: HashMap::new(),
                                 companion_fun_names: std::collections::HashSet::new(),
@@ -3830,7 +4012,6 @@ pub fn collect_signatures_with_cp(
                                 super_internal: companion_super_internal_ref,
                                 super_type_args: Vec::new(),
                                 super_ctor_params: Vec::new(),
-                                is_annotation: false,
                                 ctor_param_names: Vec::new(),
                                 ctor_defaults: Vec::new(),
                                 secondary_ctors: Vec::new(),
@@ -3871,14 +4052,14 @@ pub fn collect_signatures_with_cp(
                         let receiver_type_parameter = (recv_ref.arg.is_none()
                             && recv_ref.targs.is_empty()
                             && recv_ref.fun_params.is_empty()
-                            && !recv_ref.definitely_non_null)
-                            .then(|| {
-                                p.type_params
-                                    .iter()
-                                    .position(|parameter| parameter == &recv_ref.name)
-                            })
-                            .flatten();
-                        let accepts_nullable_receiver = recv_ref.nullable
+                            && !recv_ref.definitely_non_null())
+                        .then(|| {
+                            p.type_params
+                                .iter()
+                                .position(|parameter| parameter == &recv_ref.name)
+                        })
+                        .flatten();
+                        let accepts_nullable_receiver = recv_ref.nullable()
                             || receiver_type_parameter.is_some_and(|index| {
                                 declared_tparam_semantic_bound(
                                     &p.type_params[index],
@@ -5623,7 +5804,7 @@ impl TParams {
                         // The bound is itself a (non-nullable, un-parameterized) type parameter of this
                         // declaration — hop to it and keep chasing.
                         Some(tb)
-                            if !tb.nullable
+                            if !tb.nullable()
                                 && names.iter().any(|m| m == &tb.name)
                                 && seen.insert(cur) =>
                         {
@@ -5670,7 +5851,7 @@ impl TParams {
             let bound = bounds
                 .iter()
                 .find_map(|(owner, bound)| (owner == current).then_some(bound))?;
-            if bound.nullable
+            if bound.nullable()
                 || bound.arg.is_some()
                 || !bound.targs.is_empty()
                 || !bound.fun_params.is_empty()
@@ -5868,7 +6049,7 @@ fn tparam_bound_erasure(b: Option<&TypeRef>, resolve: &dyn Fn(&str) -> Option<Ty
     let Some(b) = b else { return any };
     // A nullable / generic-instantiated bound name still resolves by its head: `<T: Comparable<T>>`
     // erases to `Comparable` (type args drop on erasure). A nullable bound keeps `Any` (conservative).
-    if b.nullable {
+    if b.nullable() {
         return any;
     }
     if let Some(prim) = Ty::from_name(&b.name) {
@@ -5895,7 +6076,7 @@ fn tparam_bound_semantic(b: &TypeRef, resolve: &dyn Fn(&str) -> Option<TypeName>
             .map(Ty::obj_name)
             .unwrap_or_else(|| Ty::obj("kotlin/Any"))
     };
-    if b.nullable {
+    if b.nullable() {
         Ty::nullable(base)
     } else {
         base
@@ -5915,8 +6096,8 @@ fn declared_tparam_semantic_bound(
         let bound = bounds
             .iter()
             .find_map(|(parameter, bound)| (parameter == current).then_some(bound))?;
-        if !bound.nullable
-            && !bound.definitely_non_null
+        if !bound.nullable()
+            && !bound.definitely_non_null()
             && bound.arg.is_none()
             && bound.targs.is_empty()
             && bound.fun_params.is_empty()
@@ -5948,7 +6129,7 @@ fn source_type_display(ty: &TypeRef) -> String {
             .map(source_type_display)
             .collect::<Vec<_>>()
             .join(", ");
-        let (receiver, params) = if ty.fun_has_receiver && ty.fun_params.len() > context_count {
+        let (receiver, params) = if ty.fun_has_receiver() && ty.fun_params.len() > context_count {
             (
                 Some(source_type_display(&ty.fun_params[context_count])),
                 &ty.fun_params[context_count + 1..],
@@ -5966,7 +6147,7 @@ fn source_type_display(ty: &TypeRef) -> String {
             .as_deref()
             .map(source_type_display)
             .unwrap_or_else(|| "Unit".to_string());
-        let suspend = if ty.fun_suspend { "suspend " } else { "" };
+        let suspend = if ty.fun_suspend() { "suspend " } else { "" };
         let context = if contexts.is_empty() {
             String::new()
         } else {
@@ -5995,7 +6176,7 @@ fn source_type_display(ty: &TypeRef) -> String {
         }
         name
     };
-    if ty.nullable {
+    if ty.nullable() {
         display.push('?');
     }
     display
@@ -6079,7 +6260,11 @@ fn source_function_display(file: &File, function: &FunDecl, resolved_ret: Ty) ->
                 .map(|parameter| source_type_display(&parameter.ty))
         })
         .unwrap_or_else(|| resolved_ret.name());
-    let suspend = if function.is_suspend { "suspend " } else { "" };
+    let suspend = if function.is_suspend() {
+        "suspend "
+    } else {
+        ""
+    };
     let generics = if type_params.is_empty() {
         String::new()
     } else {
@@ -6132,19 +6317,20 @@ fn member_signature(
     Signature {
         params,
         ret,
-        vararg: m.params.last().is_some_and(|p| p.is_vararg),
+        flags: SigFlags::default()
+            .with_vararg(m.params.last().is_some_and(|p| p.is_vararg))
+            .with_is_inline(m.is_inline())
+            .with_is_operator(m.is_operator())
+            .with_is_override(m.is_override())
+            .with_is_final(m.is_final())
+            .with_is_suspend(m.is_suspend()),
         required: m.params.iter().take_while(|p| p.default.is_none()).count(),
         param_defaults: m.params.iter().map(|p| p.default.is_some()).collect(),
         param_default_values: Vec::new(),
         param_names: m.params.iter().map(|p| p.name.clone()).collect(),
         lambda_param_types,
-        lambda_recv: m.params.iter().map(|p| p.ty.fun_has_receiver).collect(),
-        is_inline: m.is_inline,
-        is_operator: m.is_operator,
-        is_override: m.is_override,
+        lambda_recv: m.params.iter().map(|p| p.ty.fun_has_receiver()).collect(),
         visibility: m.visibility,
-        is_final: m.is_final,
-        is_suspend: m.is_suspend,
         context_count: 0,
         source_decl: None,
         source_file: Some(source_file),
@@ -6166,8 +6352,8 @@ pub(crate) fn typeref_leaf(r: &TypeRef, recurse: &mut dyn FnMut(&TypeRef) -> Ty)
             params,
             ret,
             r.fun_context_count as usize,
-            r.fun_has_receiver,
-            r.fun_suspend,
+            r.fun_has_receiver(),
+            r.fun_suspend(),
         ));
     }
     if let Some(t) = Ty::from_name(&r.name) {
@@ -6204,7 +6390,7 @@ fn ty_of_ref_with(
     tparams: &TParams,
     diags: &mut DiagSink,
 ) -> Ty {
-    if r.definitely_non_null && !tparams.contains(&r.name) {
+    if r.definitely_non_null() && !tparams.contains(&r.name) {
         diags.error(
             r.span,
             "a definitely non-null type must use a type parameter on the left of '& Any'",
@@ -6264,7 +6450,7 @@ fn ty_of_ref_with(
         diags.error(r.span, format!("unresolved reference '{}'.", r.name));
         Ty::Error
     };
-    if r.nullable && base != Ty::Error {
+    if r.nullable() && base != Ty::Error {
         return Ty::nullable(base);
     }
     base
@@ -7527,7 +7713,7 @@ fn check_file_at_impl(
                 // final class: "modifier 'abstract' is not applicable inside a final class".
                 if !cl.is_abstract() && !cl.is_interface() && !cl.is_enum() {
                     for m in &cl.methods {
-                        if m.is_abstract {
+                        if m.is_abstract() {
                             c.diags.error(
                                 m.span,
                                 format!(
@@ -7541,13 +7727,13 @@ fn check_file_at_impl(
                 // `abstract` modifier consistency (illegal in any class kind): an abstract member has no
                 // body, and cannot also be `final` (kotlinc rejects each).
                 for m in &cl.methods {
-                    if m.is_abstract && !matches!(m.body, FunBody::None) {
+                    if m.is_abstract() && !matches!(m.body, FunBody::None) {
                         c.diags.error(
                             m.span,
                             format!("abstract member '{}' cannot have a body", m.name),
                         );
                     }
-                    if m.is_abstract && m.is_final {
+                    if m.is_abstract() && m.is_final() {
                         c.diags.error(
                             m.span,
                             format!("member '{}' cannot be both 'abstract' and 'final'", m.name),
@@ -7721,7 +7907,7 @@ fn check_file_at_impl(
                                     *name == m.name && signature.params.len() == m.params.len()
                                 })
                             };
-                            if m.is_override && !is_any_member(m) && !overrides_super {
+                            if m.is_override() && !is_any_member(m) && !overrides_super {
                                 c.diags
                                     .error(m.span, format!("'{}' overrides nothing", m.name));
                             }
@@ -9633,7 +9819,7 @@ impl<'a> Checker<'a> {
                 .syms
                 .operator_method_matching_with_owner_name(internal, name, arg_tys)
             {
-                if sig.is_operator {
+                if sig.is_operator() {
                     if !self.member_accessible(sig.visibility, owner) {
                         self.reject_if_inaccessible(sig.visibility, name, owner, span);
                         return Some((
@@ -9645,13 +9831,13 @@ impl<'a> Checker<'a> {
                                 params: sig.params.clone(),
                                 physical_ret: sig.ret,
                                 ret: sig.ret,
-                                inline: InlineKind::from_flags(sig.is_inline, false),
+                                inline: InlineKind::from_flags(sig.is_inline(), false),
                                 interface: self
                                     .syms
                                     .class_by_type_name(owner)
-                                    .is_some_and(|class| class.is_interface),
-                                vararg: sig.vararg,
-                                suspend: sig.is_suspend,
+                                    .is_some_and(|class| class.is_interface()),
+                                vararg: sig.vararg(),
+                                suspend: sig.is_suspend(),
                             },
                         ));
                     }
@@ -9659,7 +9845,7 @@ impl<'a> Checker<'a> {
                     let interface = self
                         .syms
                         .class_by_type_name(owner)
-                        .is_some_and(|c| c.is_interface);
+                        .is_some_and(|c| c.is_interface());
                     return Some((
                         sig.ret,
                         ResolvedCall::ModuleMember {
@@ -9669,10 +9855,10 @@ impl<'a> Checker<'a> {
                             params: sig.params.clone(),
                             physical_ret: sig.ret,
                             ret: sig.ret,
-                            inline: InlineKind::from_flags(sig.is_inline, false),
+                            inline: InlineKind::from_flags(sig.is_inline(), false),
                             interface,
-                            vararg: sig.vararg,
-                            suspend: sig.is_suspend,
+                            vararg: sig.vararg(),
+                            suspend: sig.is_suspend(),
                         },
                     ));
                 }
@@ -9688,8 +9874,8 @@ impl<'a> Checker<'a> {
                     .ext_fun_overloads(receiver, name)
                     .iter()
                     .filter(|s| {
-                        s.is_operator
-                            && !s.vararg
+                        s.is_operator()
+                            && !s.vararg()
                             && !(s.visibility.is_private()
                                 && s.source_file != Some(self.file_index))
                     })
@@ -10234,7 +10420,7 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let mut actual = self.expr_types[argument.0 as usize];
-            if declared.nullable {
+            if declared.nullable() {
                 actual = actual.non_null();
             }
             let merged = crate::symbol_resolver::merge_inferred_ty(
@@ -10253,7 +10439,7 @@ impl<'a> Checker<'a> {
             }
             let required_dnn = mapped.iter().any(|&(parameter, _)| {
                 function.params.get(parameter).is_some_and(|parameter| {
-                    parameter.ty.name == *name && parameter.ty.definitely_non_null
+                    parameter.ty.name == *name && parameter.ty.definitely_non_null()
                 })
             });
             if required_dnn {
@@ -10321,9 +10507,9 @@ impl<'a> Checker<'a> {
             let Some(mut expected) = bindings.get(&declared.name).copied() else {
                 continue;
             };
-            if declared.definitely_non_null {
+            if declared.definitely_non_null() {
                 expected = definitely_non_null_binding(expected);
-            } else if declared.nullable {
+            } else if declared.nullable() {
                 expected = Ty::nullable(expected);
             }
             expectations.insert(argument, expected);
@@ -10407,7 +10593,7 @@ impl<'a> Checker<'a> {
         else {
             return false;
         };
-        if signature.is_operator {
+        if signature.is_operator() {
             return false;
         }
         let Some((function, owner_name)) =
@@ -10601,14 +10787,18 @@ impl<'a> Checker<'a> {
             for interface in class.interfaces.iter() {
                 collect(syms, interface, seen, properties);
             }
-            properties.extend(class.declared_props.iter().filter_map(|(name, property)| {
-                property.context_params.is_empty().then(|| ScopedProperty {
-                    name: name.clone(),
-                    ty: property.ty,
-                    is_var: property.setter_name.is_some(),
-                    owner,
-                })
-            }));
+            properties.extend(
+                class
+                    .declared_props
+                    .iter()
+                    .filter(|(_, property)| property.context_params.is_empty())
+                    .map(|(name, property)| ScopedProperty {
+                        name: name.clone(),
+                        ty: property.ty,
+                        is_var: property.setter_name.is_some(),
+                        owner,
+                    }),
+            );
         }
 
         let mut properties = Vec::new();
@@ -11066,7 +11256,7 @@ impl<'a> Checker<'a> {
         } else {
             Ty::Error
         };
-        if r.nullable && base != Ty::Error {
+        if r.nullable() && base != Ty::Error {
             return Ty::nullable(base);
         }
         base
@@ -11204,7 +11394,7 @@ impl<'a> Checker<'a> {
         // (`sealed_subclasses`), so `when (d) { is D.A -> …; is D.B -> … }` over a classpath sealed `D`
         // is proven exhaustive (an expression) the same way a same-module one is.
         let subs: Vec<TypeName> = match self.syms.class_by_type_name(internal) {
-            Some(cs) if cs.is_sealed => self.syms.subclass_names_of(internal),
+            Some(cs) if cs.is_sealed() => self.syms.subclass_names_of(internal),
             Some(_) => return false,
             None => self
                 .resolved_type_name(internal)
@@ -11413,10 +11603,14 @@ impl<'a> Checker<'a> {
                 params,
                 ret,
                 r.fun_context_count as usize,
-                r.fun_has_receiver,
-                r.fun_suspend,
+                r.fun_has_receiver(),
+                r.fun_suspend(),
             );
-            return if r.nullable { Ty::nullable(base) } else { base };
+            return if r.nullable() {
+                Ty::nullable(base)
+            } else {
+                base
+            };
         }
         let base = if let Some(t) = Ty::from_name(&r.name) {
             t
@@ -11448,7 +11642,7 @@ impl<'a> Checker<'a> {
         } else {
             Ty::Error
         };
-        if r.nullable && base != Ty::Error {
+        if r.nullable() && base != Ty::Error {
             Ty::nullable(base)
         } else {
             base
@@ -11476,7 +11670,7 @@ impl<'a> Checker<'a> {
         if !matches!(self.file.expr(operand), Expr::Name(n) if n == "this") {
             return None;
         }
-        if ty.nullable {
+        if ty.nullable() {
             return None;
         }
         let tt = self.resolve_ty_no_diag(&ty);
@@ -11531,7 +11725,7 @@ impl<'a> Checker<'a> {
         }
         let tt = self.resolve_ty_no_diag(&ty);
         // `is T?` accepts null, so its narrowing remains nullable.
-        if ty.nullable {
+        if ty.nullable() {
             (tt != Ty::Error).then_some((n, tt))
         } else if tt.is_reference() {
             Some((n, tt))
@@ -11654,7 +11848,7 @@ impl<'a> Checker<'a> {
         }
         // A `reified` type parameter is only allowed on an `inline` function (kotlinc rejects it
         // otherwise — reification needs the body inlined at the call site).
-        if !f.reified_type_params.is_empty() && !f.is_inline {
+        if !f.reified_type_params.is_empty() && !f.is_inline() {
             self.diags.error(
                 f.span,
                 "'reified' type parameter is only allowed on an 'inline' function".to_string(),
@@ -11672,7 +11866,7 @@ impl<'a> Checker<'a> {
         // inline function may be invoked on a mutable capture (it ends up inlined into the caller),
         // so permit mutation while checking the body.
         let prev_allow = self.allow_lambda_mutation;
-        if f.is_inline {
+        if f.is_inline() {
             self.allow_lambda_mutation = true;
         }
         // Extension function: look up in ext_funs table; set this_ty to the receiver type.
@@ -12137,7 +12331,7 @@ impl<'a> Checker<'a> {
         // A generic fun interface is allowed: its method erases to `Object`, which the SAM descriptor
         // (built from the erased interface method) and the erased lambda parameter types both match. A
         // value-class method is still excluded (mangled name / boxing not modeled).
-        c.is_fun_interface
+        c.is_fun_interface()
             && c.methods.values().flatten().all(|sig| {
                 !self.ty_is_value_class(sig.ret)
                     && sig.params.iter().all(|p| !self.ty_is_value_class(*p))
@@ -13117,7 +13311,7 @@ impl<'a> Checker<'a> {
         // VARARG COLLECTION: `::of` where `of`'s last parameter is a `vararg` (and the leading fixed
         // parameters have no defaults) adapted to a function type with MORE parameters than fixed — the
         // extra expected parameters are collected into the vararg array. `fixed` = m-1 leading parameters.
-        if sig.vararg && !sig.is_suspend {
+        if sig.vararg() && !sig.is_suspend() {
             let fixed = m - 1;
             let coerce_unit = exp.ret == Ty::Unit && sig.ret != Ty::Unit;
             let fixed_ok = (0..fixed).all(|i| !call_sig.param_has_default(i))
@@ -13149,7 +13343,7 @@ impl<'a> Checker<'a> {
         }
         // Only the vararg-collection shape is modeled for an object-member target; the `$default`/drop
         // shapes below are top-level-only.
-        if object_internal.is_some() || sig.is_suspend || n > m {
+        if object_internal.is_some() || sig.is_suspend() || n > m {
             return None;
         }
         // The retained prefix parameters must match; the return matches EXACTLY or coerces to `Unit`
@@ -13167,7 +13361,7 @@ impl<'a> Checker<'a> {
         // function's single trailing `vararg` (filled with an empty array). A `vararg` as the ONLY dropped
         // parameter (`vararg_tail`) is a plain call; a vararg preceded by dropped defaults routes through
         // `$default` with an empty array for the vararg slot.
-        let vararg_tail = sig.vararg && n == m - 1;
+        let vararg_tail = sig.vararg() && n == m - 1;
         if n < m
             && !vararg_tail
             && !(n..m).all(|k| call_sig.param_has_default(k) || (call_sig.vararg && k + 1 == m))
@@ -13182,7 +13376,7 @@ impl<'a> Checker<'a> {
                 adapted_params: exp.params.clone(),
                 ret: exp.ret,
                 vararg_tail,
-                target_vararg: sig.vararg,
+                target_vararg: sig.vararg(),
                 coerce_unit,
             },
         );
@@ -13335,7 +13529,7 @@ impl<'a> Checker<'a> {
                             let interface = self
                                 .syms
                                 .class_by_type_name(owner)
-                                .is_some_and(|c| c.is_interface);
+                                .is_some_and(|c| c.is_interface());
                             self.resolved_calls.insert(
                                 e,
                                 ResolvedCall::ModuleMember {
@@ -13345,10 +13539,10 @@ impl<'a> Checker<'a> {
                                     params: sig.params.clone(),
                                     physical_ret: sig.ret,
                                     ret: sig.ret,
-                                    inline: InlineKind::from_flags(sig.is_inline, false),
+                                    inline: InlineKind::from_flags(sig.is_inline(), false),
                                     interface,
-                                    vararg: sig.vararg,
-                                    suspend: sig.is_suspend,
+                                    vararg: sig.vararg(),
+                                    suspend: sig.is_suspend(),
                                 },
                             );
                             return self.set(e, sig.ret);
@@ -13521,7 +13715,7 @@ impl<'a> Checker<'a> {
                 // A nullable target is allowed only for a REFERENCE type (`x is A?` lowers to
                 // `x == null || x is A`); a nullable primitive (`x is Int?`) would mix box/unbox
                 // semantics krusty doesn't model here, so it stays rejected.
-                let bad_nullable = ty.nullable && !tt.is_reference();
+                let bad_nullable = ty.nullable() && !tt.is_reference();
                 if !tt_known || bad_nullable || (!ot.is_reference() && ot != Ty::Error) {
                     self.diags.error(
                         self.span(e),
@@ -13978,7 +14172,7 @@ impl<'a> Checker<'a> {
                                         self.resolve_instance_name(internal, &name, &arg_tys).map(
                                             |m| {
                                                 let ret = m.ret;
-                                                let suspend = m.suspend;
+                                                let suspend = m.suspend();
                                                 self.resolved_calls.insert(
                                                     e,
                                                     ResolvedCall::Member(
@@ -14610,7 +14804,7 @@ impl<'a> Checker<'a> {
                             if self
                                 .syms
                                 .class_by_internal(&nested)
-                                .is_some_and(|nc| nc.is_object)
+                                .is_some_and(|nc| nc.is_object())
                             {
                                 self.expr_lowers.insert(
                                     e,
@@ -15012,7 +15206,7 @@ impl<'a> Checker<'a> {
                     // Constructor reference `::ClassName` → `Fun(ctor_params, ClassName)`.
                     if !self.syms.objects.contains(&name) {
                         if let Some(cls) = self.syms.classes.get(&name).cloned() {
-                            if !cls.is_annotation {
+                            if !cls.is_annotation() {
                                 return self.set(
                                     e,
                                     Ty::fun(cls.ctor_params.clone(), Ty::obj(&cls.internal())),
@@ -15121,7 +15315,7 @@ impl<'a> Checker<'a> {
                                     }
                                 }
                                 if let Some(member) = self.resolve_instance_ref(recv_ty, &name) {
-                                    if !member.suspend && member.ret != Ty::Nothing {
+                                    if !member.suspend() && member.ret != Ty::Nothing {
                                         let mut params = vec![recv_ty];
                                         params.extend(member.params.iter().copied());
                                         self.expr_lowers.insert(
@@ -15202,7 +15396,7 @@ impl<'a> Checker<'a> {
                             // Expose the minimum-arity prefix; the lowerer's synthesized adapter fills the
                             // omitted parameters via the target's `$default` stub.
                             let min_arity =
-                                adapted_ref_arity(sig.vararg, sig.required, sig.params.len());
+                                adapted_ref_arity(sig.vararg(), sig.required, sig.params.len());
                             if min_arity < sig.params.len() && sig.params.len() <= 31 {
                                 let adapted: Vec<Ty> = sig.params[..min_arity].to_vec();
                                 return self.set(e, Ty::fun(adapted, sig.ret));
@@ -15233,7 +15427,7 @@ impl<'a> Checker<'a> {
                         // expose the minimum-arity prefix; the lowerer synthesizes an adapter that fills
                         // the omitted default/vararg parameters via the extension's `$default` stub.
                         let min_arity =
-                            adapted_ref_arity(sig.vararg, sig.required, sig.params.len());
+                            adapted_ref_arity(sig.vararg(), sig.required, sig.params.len());
                         if min_arity < sig.params.len() && sig.params.len() <= 31 {
                             let adapted: Vec<Ty> = sig.params[..min_arity].to_vec();
                             return self.set(e, Ty::fun(adapted, sig.ret));
@@ -15261,7 +15455,7 @@ impl<'a> Checker<'a> {
                             }
                         }
                         if let Some(m) = self.resolve_instance_ref(rty, &name) {
-                            if !m.suspend && m.ret != Ty::Nothing {
+                            if !m.suspend() && m.ret != Ty::Nothing {
                                 self.bound_member_refs.insert(e, m.clone());
                                 return self.set(e, Ty::fun(m.params.clone(), m.ret));
                             }
@@ -15771,7 +15965,7 @@ impl<'a> Checker<'a> {
             .syms
             .ext_fun_overloads(rt, name)
             .iter()
-            .find(|s| !s.vararg && s.params.len() == arg_tys.len())
+            .find(|s| !s.vararg() && s.params.len() == arg_tys.len())
             .cloned()
         {
             self.mark_source_call(
@@ -15859,7 +16053,7 @@ impl<'a> Checker<'a> {
         // miscompile it. A SAME-MODULE `@JvmInline value class` binding IS recoverable: the value
         // crosses the erased boundary BOXED, and the declared-VC function-type machinery already
         // types the lambda parameter as the value class with a boxed slot + per-read unboxing.
-        if !f.is_inline
+        if !f.is_inline()
             && binds
                 .values()
                 .any(|t| self.syms.libraries.value_underlying(*t).is_some() || t.is_unsigned())
@@ -15968,7 +16162,7 @@ impl<'a> Checker<'a> {
         // simply don't resolve, and the file skips instead of miscompiling) whenever the inference could
         // disagree with the value actually returned. An `inline` function is spliced with no erasure
         // boundary, so its binding flows directly and keeps the pre-existing behaviour.
-        if !f.is_inline {
+        if !f.is_inline() {
             let r = ret_tp.as_deref()?;
             // The return type parameter was bound to two different types across binding sites (a
             // plain-value arg and a lambda return, or two lambda returns `(Int) -> T` / `(String) -> T`)
@@ -15991,7 +16185,7 @@ impl<'a> Checker<'a> {
             let mut witness: Option<Ty> = None;
             for (i, p) in f.params.iter().enumerate() {
                 if p.ty.fun_params.is_empty() && p.ty.name == r {
-                    if p.ty.nullable {
+                    if p.ty.nullable() {
                         return None;
                     }
                     // Diverging arguments do not constrain inference.
@@ -16026,10 +16220,10 @@ impl<'a> Checker<'a> {
             bound
         };
         if let Some(return_ref) = &f.ret {
-            if return_ref.definitely_non_null {
+            if return_ref.definitely_non_null() {
                 return Some(bound.non_null());
             }
-            if return_ref.nullable {
+            if return_ref.nullable() {
                 return Some(Ty::nullable(bound));
             }
         }
@@ -16055,9 +16249,9 @@ impl<'a> Checker<'a> {
         // in `user_generic_return`.
         let arg = targs.get(idx)?;
         let t = self.resolve_ty_no_diag(arg);
-        let t = if ret.definitely_non_null {
+        let t = if ret.definitely_non_null() {
             t.non_null()
-        } else if ret.nullable || arg.nullable {
+        } else if ret.nullable() || arg.nullable() {
             Ty::nullable(t)
         } else {
             t
@@ -16158,9 +16352,10 @@ impl<'a> Checker<'a> {
     ) {
         if let Some(mut member) = self.resolve_instance_name(receiver_internal, name, args) {
             let owner = member.owner_type_or(receiver_internal);
-            member.is_interface = self
-                .resolved_type_name(owner)
-                .is_some_and(|ty| ty.is_interface());
+            member.set_is_interface(
+                self.resolved_type_name(owner)
+                    .is_some_and(|ty| ty.is_interface()),
+            );
             self.synthetic_member_calls
                 .insert((anchor, name.to_string()), member);
         }
@@ -16334,7 +16529,7 @@ impl<'a> Checker<'a> {
             name: name.to_string(),
             params: method.params.clone(),
             ret: method.ret,
-            interface: sig.is_interface,
+            interface: sig.is_interface(),
         })
     }
 
@@ -16348,7 +16543,7 @@ impl<'a> Checker<'a> {
             .syms
             .ext_fun_overloads(recv, name)
             .iter()
-            .find(|sig| !sig.vararg && sig.params.as_slice() == params)?;
+            .find(|sig| !sig.vararg() && sig.params.as_slice() == params)?;
         Some(DestructureComponentTarget::ModuleExtension {
             receiver: recv,
             name: name.to_string(),
@@ -16417,7 +16612,7 @@ impl<'a> Checker<'a> {
         let interface = self
             .syms
             .class_by_type_name(candidate.owner)
-            .is_some_and(|class| class.is_interface);
+            .is_some_and(|class| class.is_interface());
         Ok(Some(DestructureComponentTarget::MemberExtension(Box::new(
             candidate.resolved_call(recv, name, interface),
         ))))
@@ -16440,7 +16635,7 @@ impl<'a> Checker<'a> {
         ) -> Option<(TypeName, Ty, bool)> {
             let c = syms.class_by_type_name(internal)?;
             if let Some((ty, _)) = c.prop(property) {
-                return Some((internal, ty, c.is_interface));
+                return Some((internal, ty, c.is_interface()));
             }
             find(syms, c.super_internal?, property)
         }
@@ -17011,8 +17206,8 @@ impl<'a> Checker<'a> {
         // throw at `new`). Only fires on a genuine construction call here — a `super(…)` delegation
         // and an `object : I {}` literal reach the backend by other paths, not `ctor_result`.
         if let Some(cls) = self.syms.class_by_type_name(internal) {
-            if cls.is_interface || cls.is_abstract {
-                let kind = if cls.is_interface {
+            if cls.is_interface() || cls.is_abstract() {
+                let kind = if cls.is_interface() {
                     "an interface"
                 } else {
                     "an abstract class"
@@ -17359,13 +17554,13 @@ impl<'a> Checker<'a> {
                             crate::symbol_resolver::ty_subst(*parameter, &class_bindings)
                         })
                         .collect::<Vec<_>>();
-                    if function.signature.vararg {
+                    if function.signature.vararg() {
                         if let Some(last) = declared_params.last_mut() {
                             *last = Ty::array(*last);
                         }
                     }
-                    let is_operator = function.signature.is_operator
-                        || (function.signature.is_override
+                    let is_operator = function.signature.is_operator()
+                        || (function.signature.is_override()
                             && inherited_extensions.iter().any(|inherited| {
                                 inherited.name == name
                                     && inherited.receiver == declared_receiver
@@ -17425,7 +17620,7 @@ impl<'a> Checker<'a> {
             return None;
         }
         let call_sig = function.signature.call_sig();
-        let argument_parameters = if function.signature.vararg && arg_names.is_none() {
+        let argument_parameters = if function.signature.vararg() && arg_names.is_none() {
             let last = function.params.len().checked_sub(1)?;
             args.iter()
                 .enumerate()
@@ -17470,7 +17665,7 @@ impl<'a> Checker<'a> {
             let Some(reference) = function.params.get(parameter) else {
                 continue;
             };
-            let actual = if function.signature.vararg
+            let actual = if function.signature.vararg()
                 && parameter + 1 == function.params.len()
                 && self.file.is_spread_arg(args[source])
             {
@@ -17500,7 +17695,7 @@ impl<'a> Checker<'a> {
             })
             .collect::<Vec<_>>();
         let mut applicability_params = logical_params.clone();
-        if function.signature.vararg {
+        if function.signature.vararg() {
             let last = applicability_params.last_mut()?;
             *last = Ty::array(*last);
         }
@@ -17730,7 +17925,7 @@ impl<'a> Checker<'a> {
                 let interface = self
                     .syms
                     .class_by_type_name(candidate.owner)
-                    .is_some_and(|class| class.is_interface);
+                    .is_some_and(|class| class.is_interface());
                 self.resolved_calls.insert(
                     call,
                     candidate.resolved_call(extension_receiver, name, interface),
@@ -18072,7 +18267,7 @@ impl<'a> Checker<'a> {
             let interface = self
                 .syms
                 .class_by_type_name(fi.callable.owner)
-                .is_some_and(|c| c.is_interface);
+                .is_some_and(|c| c.is_interface());
             self.resolved_calls.insert(
                 call,
                 ResolvedCall::ModuleMember {
@@ -18594,9 +18789,9 @@ impl<'a> Checker<'a> {
                 physical_ret: fi.ret,
                 ret,
                 inline: fi.inline,
-                interface: fi.is_interface,
+                interface: fi.is_interface(),
                 vararg: cs.vararg,
-                suspend: fi.suspend,
+                suspend: fi.suspend(),
             },
         );
         if let Some(slots) = mapped_slots {
@@ -19312,10 +19507,10 @@ impl<'a> Checker<'a> {
                                         params: sig.params.clone(),
                                         physical_ret: sig.ret,
                                         ret: sig.ret,
-                                        inline: InlineKind::from_flags(sig.is_inline, false),
+                                        inline: InlineKind::from_flags(sig.is_inline(), false),
                                         interface: false,
-                                        vararg: sig.vararg,
-                                        suspend: sig.is_suspend,
+                                        vararg: sig.vararg(),
+                                        suspend: sig.is_suspend(),
                                     },
                                 );
                             }
@@ -20216,7 +20411,7 @@ impl<'a> Checker<'a> {
                                         // which this path doesn't model — leave it unresolved (skip).
                                         Decl::Fun(fd)
                                             if fd.name == name
-                                                && fd.is_inline
+                                                && fd.is_inline()
                                                 && fd.receiver.as_ref().is_some_and(|r| {
                                                     fd.type_params.iter().any(|tp| tp == &r.name)
                                                 }) =>
@@ -20313,7 +20508,7 @@ impl<'a> Checker<'a> {
                         // A `@JvmStatic suspend fun` keeps its physical `Continuation` param here (the
                         // companion path doesn't strip/CPS it), so leave it unresolved rather than
                         // miscompile the calling convention.
-                        .filter(|m| !m.suspend)
+                        .filter(|m| !m.suspend())
                     {
                         self.expect_call_args(&m.params, m.call_sig.vararg, args, &arg_tys);
                         // Record the resolved static member so the lowerer emits it without
@@ -20338,7 +20533,7 @@ impl<'a> Checker<'a> {
                     let expected_receiver = self.resolve_ty(receiver_ref);
                     if !self.receiver_is_assignable(rt, expected_receiver)
                         || signature.context_count != 0
-                        || signature.vararg
+                        || signature.vararg()
                     {
                         continue;
                     }
@@ -20604,7 +20799,7 @@ impl<'a> Checker<'a> {
                         if let Some(sources) = self.resolve_context_args(ctx_types) {
                             let value_count = sig.params.len() - ctx_count;
                             let required_end =
-                                sig.params.len().saturating_sub(usize::from(sig.vararg));
+                                sig.params.len().saturating_sub(usize::from(sig.vararg()));
                             let missing_required = arg_names.is_none()
                                 && args.len() < value_count
                                 && (ctx_count + args.len()..required_end).any(|i| {
@@ -20612,7 +20807,7 @@ impl<'a> Checker<'a> {
                                         .get(i)
                                         .map_or(i < sig.required, |has_default| !*has_default)
                                 });
-                            if (!sig.vararg && args.len() > value_count) || missing_required {
+                            if (!sig.vararg() && args.len() > value_count) || missing_required {
                                 self.arg_tys(args);
                                 let source_display = match self.file.stmt(stmt_id) {
                                     Stmt::LocalFun(function) => {
@@ -20628,7 +20823,7 @@ impl<'a> Checker<'a> {
                                         param_names: &sig.param_names,
                                         param_defaults: &sig.param_defaults,
                                         required: sig.required,
-                                        vararg: sig.vararg,
+                                        vararg: sig.vararg(),
                                         context_count: ctx_count,
                                         ret: sig.ret,
                                         source_display,
@@ -20637,7 +20832,7 @@ impl<'a> Checker<'a> {
                                 );
                                 return sig.ret;
                             }
-                            let mapped_slots = if !sig.vararg {
+                            let mapped_slots = if !sig.vararg() {
                                 if let Some(names) = arg_names.as_deref() {
                                     match map_call_args(
                                         args,
@@ -20715,7 +20910,7 @@ impl<'a> Checker<'a> {
                                 }
                             } else {
                                 for (i, a) in args.iter().enumerate() {
-                                    let p = if sig.vararg && i >= value_count.saturating_sub(1) {
+                                    let p = if sig.vararg() && i >= value_count.saturating_sub(1) {
                                         sig.params[sig.params.len() - 1]
                                             .array_elem()
                                             .unwrap_or(Ty::Error)
@@ -20749,7 +20944,7 @@ impl<'a> Checker<'a> {
                             return sig.ret;
                         }
                     }
-                    if ctx_count == 0 && !sig.vararg {
+                    if ctx_count == 0 && !sig.vararg() {
                         if let Some(names) = arg_names.as_deref() {
                             let slots = match map_call_args(
                                 args,
@@ -20857,7 +21052,7 @@ impl<'a> Checker<'a> {
                                 param_names: &sig.param_names,
                                 param_defaults: &sig.param_defaults,
                                 required: sig.required,
-                                vararg: sig.vararg,
+                                vararg: sig.vararg(),
                                 context_count: ctx_count,
                                 ret: sig.ret,
                                 source_display,
@@ -20925,7 +21120,7 @@ impl<'a> Checker<'a> {
                 // SAM conversion `Pred { lambda }`: type the lambda from the SAM method parameters.
                 if let (Some(lambda), true) = (one_lambda_arg, unshadowed_name) {
                     if let Some(cls) = self.syms.classes.get(&fname).cloned() {
-                        if let Some(sig) = cls.single_method().filter(|_| cls.is_interface) {
+                        if let Some(sig) = cls.single_method().filter(|_| cls.is_interface()) {
                             let pts = sig.params.clone();
                             self.check_lambda_with_types(lambda, &pts);
                             return self.set(call, Ty::obj(&cls.internal()));
@@ -21168,7 +21363,7 @@ impl<'a> Checker<'a> {
                         .iter()
                         .find_map(|&d| match self.file.decl(d) {
                             Decl::Class(c) if c.name == fname => {
-                                Some(c.props.iter().map(|p| p.ty.fun_has_receiver).collect())
+                                Some(c.props.iter().map(|p| p.ty.fun_has_receiver()).collect())
                             }
                             _ => None,
                         })
@@ -21387,7 +21582,7 @@ impl<'a> Checker<'a> {
                                 };
                                 let has_receiver =
                                     sig.lambda_recv.get(pi).copied().unwrap_or(false);
-                                return self.with_lambda_mutation(sig.is_inline, |c| {
+                                return self.with_lambda_mutation(sig.is_inline(), |c| {
                                     c.check_lambda_with_function_type_labeled(
                                         a,
                                         expected_function,
@@ -21414,7 +21609,7 @@ impl<'a> Checker<'a> {
                             }
                             if !self.file.is_spread_arg(a) {
                                 if let Some(&parameter) = sig.params.get(pi) {
-                                    let expected = if sig.vararg && pi + 1 == sig.params.len() {
+                                    let expected = if sig.vararg() && pi + 1 == sig.params.len() {
                                         parameter.array_elem().unwrap_or(Ty::Error)
                                     } else {
                                         parameter
@@ -21594,7 +21789,7 @@ impl<'a> Checker<'a> {
                         //   - an omitted parameter whose TYPE is a value class, where the stub's
                         //     descriptor and its stackmap disagree about the erased underlying type.
                         // A value class being CONSTRUCTED is fine — that is `constructor-impl$default`.
-                        let realizable_via_stub = !cls.is_annotation && !cls.is_interface;
+                        let realizable_via_stub = !cls.is_annotation() && !cls.is_interface();
                         let ok_arity = got <= ctor_params.len()
                             && (got..ctor_params.len()).all(|i| {
                                 let inline_fillable = cls
@@ -22417,7 +22612,7 @@ impl<'a> Checker<'a> {
                     if let Some(ct) = self.classpath_companion_ty(&fname) {
                         let has_invoke = self
                             .resolve_instance_member(ct, CALLABLE_INVOKE_OPERATOR, &arg_tys)
-                            .is_some_and(|m| !m.member.suspend);
+                            .is_some_and(|m| !m.member.suspend());
                         if has_invoke {
                             // Type the callee name as the companion instance so lowering reads it as the
                             // `getstatic Type.Companion` receiver; `record_invoke` selects the operator.
@@ -22450,7 +22645,7 @@ impl<'a> Checker<'a> {
                                     m.physical_ret,
                                     m.descriptor.clone(),
                                 );
-                                callable.suspend = m.suspend;
+                                callable.suspend = m.suspend();
                                 let ret = m.ret;
                                 let vararg = m
                                     .call_sig
@@ -23548,19 +23743,20 @@ impl<'a> Checker<'a> {
         let sig = Signature {
             params: params.clone(),
             ret: ret_ty,
-            vararg: f.params.last().map_or(false, |p| p.is_vararg),
+            flags: SigFlags::default()
+                .with_vararg(f.params.last().map_or(false, |p| p.is_vararg))
+                .with_is_inline(false)
+                .with_is_operator(f.is_operator())
+                .with_is_override(f.is_override())
+                .with_is_final(false)
+                .with_is_suspend(f.is_suspend()),
             required: params.len(),
             param_defaults: f.params.iter().map(|p| p.default.is_some()).collect(),
             param_default_values: Vec::new(),
             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
             lambda_param_types: Vec::new(),
             lambda_recv: Vec::new(),
-            is_inline: false,
-            is_operator: f.is_operator,
-            is_override: f.is_override,
             visibility: f.visibility,
-            is_final: false,
-            is_suspend: f.is_suspend,
             context_count: f.context_count,
             source_decl: None,
             source_file: None,
@@ -24164,14 +24360,12 @@ fun box(): String {
                         physical_name: None,
                         params: vec![Ty::obj("Config"), second],
                         ret: Ty::String,
-                        ret_nullable: false,
                         physical_ret: Ty::String,
                         descriptor: descriptor.to_string(),
                         signature: None,
                         generic_sig: None,
-                        is_interface: false,
+                        flags: crate::libraries::LmFlags::default(),
                         inline: crate::libraries::InlineKind::None,
-                        suspend: false,
                         visibility: crate::types::Visibility::Public,
                         call_sig: CallSig::default(),
                     };
@@ -24557,14 +24751,14 @@ fun box(): String {
             .expect("checker must record the synthetic lock member target");
         assert_eq!(lock.name, "lock");
         assert_eq!(lock.params, vec![Ty::obj("kotlin/Any")]);
-        assert!(lock.suspend);
+        assert!(lock.suspend());
 
         let unlock = info
             .synthetic_member_call(call, "unlock")
             .expect("checker must record the synthetic unlock member target");
         assert_eq!(unlock.name, "unlock");
         assert_eq!(unlock.params, vec![Ty::obj("kotlin/Any")]);
-        assert!(!unlock.suspend);
+        assert!(!unlock.suspend());
     }
 
     #[test]

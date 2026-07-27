@@ -26,6 +26,45 @@ pub struct GenericSig {
     pub ret: Ty,
 }
 
+/// Bit-packed boolean flags for a [`LibraryMember`], collapsing `ret_nullable`/`is_interface`/
+/// `suspend` into one byte. Read through the `LibraryMember` accessors of the same names; mutated
+/// through the matching `set_*` methods; built with the `with_*` chain. Headroom for five more flags.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LmFlags(u8);
+
+impl LmFlags {
+    const RET_NULLABLE: u8 = 1 << 0;
+    const IS_INTERFACE: u8 = 1 << 1;
+    const SUSPEND: u8 = 1 << 2;
+
+    #[inline]
+    const fn with(mut self, mask: u8, on: bool) -> Self {
+        if on {
+            self.0 |= mask;
+        } else {
+            self.0 &= !mask;
+        }
+        self
+    }
+    #[inline]
+    const fn has(self, mask: u8) -> bool {
+        self.0 & mask != 0
+    }
+
+    #[inline]
+    pub const fn with_ret_nullable(self, on: bool) -> Self {
+        self.with(Self::RET_NULLABLE, on)
+    }
+    #[inline]
+    pub const fn with_is_interface(self, on: bool) -> Self {
+        self.with(Self::IS_INTERFACE, on)
+    }
+    #[inline]
+    pub const fn with_suspend(self, on: bool) -> Self {
+        self.with(Self::SUSPEND, on)
+    }
+}
+
 /// One member (constructor, member function/property accessor, or companion member) of a library
 /// type, in Kotlin terms. `descriptor` is an opaque backend token (a JVM method descriptor) the
 /// matching emitter consumes verbatim — the front end matches on `params`/`ret`, never parsing it.
@@ -39,9 +78,6 @@ pub struct LibraryMember {
     pub physical_name: Option<String>,
     pub params: Vec<Ty>,
     pub ret: Ty,
-    /// Kotlin metadata return nullability (`T?`). Descriptors erase this, but resolution needs it so
-    /// nullable generic/member returns remain boxed/reference-like until a use site demands unboxing.
-    pub ret_nullable: bool,
     pub physical_ret: Ty,
     pub descriptor: String,
     pub signature: Option<String>,
@@ -49,12 +85,14 @@ pub struct LibraryMember {
     /// facts (a constructor's `(TA;TB;)V`) without making consumers parse backend signature strings.
     /// Used to infer a construction's type arguments against the enclosing type's [`LibraryType::type_params`].
     pub generic_sig: Option<GenericSig>,
-    pub is_interface: bool,
+    /// Bit-packed `ret_nullable`/`is_interface`/`suspend` (read via the accessors below; set via `set_*`).
+    /// `ret_nullable` — Kotlin metadata return nullability (`T?`); descriptors erase this, but resolution
+    /// needs it so nullable generic/member returns stay boxed/reference-like until a use site demands
+    /// unboxing. `suspend` — the member is a `suspend fun`; a call site inside a suspend body must thread
+    /// a `Continuation` into the emitted invoke (its CPS descriptor rebuilt by the coroutine pass) and
+    /// treat the Object-erased result as `ret`.
+    pub flags: LmFlags,
     pub inline: InlineKind,
-    /// The member is a `suspend fun` — a call site inside a suspend body must thread a `Continuation`
-    /// into the emitted invoke (its CPS descriptor rebuilt by the coroutine pass) and treat the
-    /// Object-erased result as `ret`.
-    pub suspend: bool,
     /// The member's Kotlin visibility, from its bytecode access flags/`@Metadata`. A `Protected` member
     /// is surfaced (not dropped) so a subclass can reach an inherited classpath member; the emit is
     /// identical to a public one. `Public` by default.
@@ -243,17 +281,40 @@ impl LibraryMember {
             physical_name: None,
             params,
             ret,
-            ret_nullable: false,
             physical_ret: ret,
             descriptor,
             signature: None,
             generic_sig: None,
-            is_interface: false,
+            flags: LmFlags::default(),
             inline: InlineKind::None,
-            suspend: false,
             visibility: Visibility::Public,
             call_sig: CallSig::default(),
         }
+    }
+
+    #[inline]
+    pub fn ret_nullable(&self) -> bool {
+        self.flags.has(LmFlags::RET_NULLABLE)
+    }
+    #[inline]
+    pub fn is_interface(&self) -> bool {
+        self.flags.has(LmFlags::IS_INTERFACE)
+    }
+    #[inline]
+    pub fn suspend(&self) -> bool {
+        self.flags.has(LmFlags::SUSPEND)
+    }
+    #[inline]
+    pub fn set_ret_nullable(&mut self, on: bool) {
+        self.flags = self.flags.with_ret_nullable(on);
+    }
+    #[inline]
+    pub fn set_is_interface(&mut self, on: bool) {
+        self.flags = self.flags.with_is_interface(on);
+    }
+    #[inline]
+    pub fn set_suspend(&mut self, on: bool) {
+        self.flags = self.flags.with_suspend(on);
     }
 
     pub fn owner_name(&self) -> Option<String> {
@@ -725,7 +786,7 @@ impl FunctionInfo {
         member.signature = self.callable.signature.clone();
         member.generic_sig = self.generic_sig.clone();
         member.inline = self.flags.inline;
-        member.suspend = self.flags.suspend;
+        member.set_suspend(self.flags.suspend);
         // Keep source call shape coupled to the selected overload.
         member.call_sig = self.call_sig.clone();
         member

@@ -900,12 +900,12 @@ impl BuiltinsFile {
 /// type-variable rule), so the caller prefers the most-specific overload (`plusAssign(element: T)` binds
 /// the `Object` descriptor, `plusAssign(elements: Iterable)` the `Iterable` one).
 fn meta_callable_aligns(f: &super::metadata::MetaFn, desc_params: &[Ty]) -> Option<(usize, usize)> {
-    let off = f.is_extension as usize;
+    let off = f.is_extension() as usize;
     let end = off + f.value_params.len();
     if end > desc_params.len() {
         return None;
     }
-    let receiver_ok = !f.is_extension
+    let receiver_ok = !f.is_extension()
         || match f.receiver_class {
             Some(rc) => meta_param_compat(Some(rc), &desc_params[0]),
             None => desc_params[0].is_reference(),
@@ -1272,7 +1272,7 @@ impl Classpath {
             suspend_names.extend(
                 super::metadata::class_functions(ci)
                     .iter()
-                    .filter(|f| f.is_suspend)
+                    .filter(|f| f.is_suspend())
                     .map(|f| f.kotlin_name.clone()),
             );
             // A multifile FACADE has no function/property metadata of its own — its `d1` lists the
@@ -1292,7 +1292,7 @@ impl Classpath {
                     suspend_names.extend(
                         super::metadata::class_functions(&pci)
                             .iter()
-                            .filter(|f| f.is_suspend)
+                            .filter(|f| f.is_suspend())
                             .map(|f| f.kotlin_name.clone()),
                     );
                 }
@@ -1302,7 +1302,7 @@ impl Classpath {
             fn_segments
                 .iter()
                 .flat_map(|s| s.iter())
-                .filter(|f| f.is_suspend)
+                .filter(|f| f.is_suspend())
                 .map(|f| f.kotlin_name.clone()),
         );
         // Hash-sorted by-JVM-name lookup over the flat segment concatenation: no name copies, and
@@ -1409,7 +1409,7 @@ impl Classpath {
             });
         };
         let names = c.value_params.iter().map(|p| p.name.clone()).collect();
-        let defaults = c.value_params.iter().map(|p| p.has_default).collect();
+        let defaults = c.value_params.iter().map(|p| p.has_default()).collect();
         let vararg = c.last_param_vararg();
         MetadataCallFacts {
             kept_params: Some(end),
@@ -1424,12 +1424,12 @@ impl Classpath {
                         .iter()
                         .map(|p| p.recv_fun_receiver.map(Ty::obj_name))
                         .collect(),
-                    c.value_params.iter().map(|p| p.recv_fun).collect(),
-                    c.value_params.iter().map(|p| p.materialized).collect(),
+                    c.value_params.iter().map(|p| p.recv_fun()).collect(),
+                    c.value_params.iter().map(|p| p.materialized()).collect(),
                     vararg,
                 )
             },
-            ret: metadata_return_info(c.ret_class, c.ret_nullable),
+            ret: metadata_return_info(c.ret_class, c.ret_nullable()),
         }
     }
 
@@ -1455,7 +1455,7 @@ impl Classpath {
         MetadataCallFacts {
             kept_params: None,
             call_sig: f.member_call_sig(),
-            ret: metadata_return_info(f.ret_class, f.ret_nullable),
+            ret: metadata_return_info(f.ret_class, f.ret_nullable()),
         }
     }
 
@@ -1668,16 +1668,16 @@ impl Classpath {
                         physical_name: None,
                         params: m.params.iter().map(BuiltinType::ty).collect(),
                         ret,
-                        // The declared return nullability from the `.kotlin_builtins` `Type.nullable`
-                        // flag (`Map.get(K): V?`) — the JVM descriptor erases it.
-                        ret_nullable: m.ret_nullable,
                         physical_ret,
                         descriptor,
                         signature: None,
                         generic_sig: None,
-                        is_interface: is_iface,
+                        // `ret_nullable` — the declared return nullability from the `.kotlin_builtins`
+                        // `Type.nullable` flag (`Map.get(K): V?`); the JVM descriptor erases it.
+                        flags: crate::libraries::LmFlags::default()
+                            .with_ret_nullable(m.ret_nullable)
+                            .with_is_interface(is_iface),
                         inline: crate::libraries::InlineKind::None,
-                        suspend: false,
                         // Builtin (`.kotlin_builtins`) members are all public API.
                         visibility: crate::libraries::Visibility::Public,
                         // Builtin members carry no source parameter-name metadata.
@@ -2079,7 +2079,7 @@ impl Classpath {
         desc_params: &[Ty],
     ) -> bool {
         self.meta_functions_name(internal).iter().any(|f| {
-            if !f.is_inline || f.jvm_name != name {
+            if !f.is_inline() || f.jvm_name != name {
                 return false;
             }
             if f.jvm_desc == Some(descriptor) {
@@ -2088,7 +2088,7 @@ impl Classpath {
             if f.jvm_desc.is_some() {
                 return false;
             }
-            let off = f.is_extension as usize;
+            let off = f.is_extension() as usize;
             let end = off + f.value_params.len();
             end == desc_params.len()
                 && f.value_params
@@ -2975,7 +2975,7 @@ fn collect_class_bytes(bytes: &[u8], names: &mut NameTree, all: &mut HashMap<Nam
         .iter()
         .chain(super::metadata::class_functions(&ci).iter())
     {
-        if mf.is_extension {
+        if mf.is_extension() {
             ext_names.insert(mf.jvm_name.clone());
         } else {
             toplevel_names.insert(mf.jvm_name.clone());

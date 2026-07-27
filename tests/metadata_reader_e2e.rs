@@ -43,8 +43,8 @@ fn result_companion_success_is_public_inline_in_metadata() {
         .iter()
         .find(|f| f.kotlin_name == "success")
         .expect("Companion.success in metadata");
-    assert!(success.is_public, "success must be public in metadata");
-    assert!(success.is_inline, "success must be inline");
+    assert!(success.is_public(), "success must be public in metadata");
+    assert!(success.is_inline(), "success must be inline");
     assert_eq!(success.jvm_name, "success");
     assert_eq!(
         success.jvm_desc,
@@ -67,8 +67,8 @@ fn resultkt_get_or_throw_is_public_inline_extension_in_metadata() {
         .iter()
         .find(|f| f.kotlin_name == "getOrThrow")
         .expect("getOrThrow in ResultKt metadata");
-    assert!(g.is_public, "getOrThrow must be public in metadata");
-    assert!(g.is_inline, "getOrThrow must be inline");
+    assert!(g.is_public(), "getOrThrow must be public in metadata");
+    assert!(g.is_inline(), "getOrThrow must be inline");
     assert_eq!(
         g.receiver_class,
         Some(type_name("kotlin/Result")),
