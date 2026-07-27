@@ -898,6 +898,21 @@ fn setup_runner(java_home: &str, _work: &Path) -> PathBuf {
     runner_dir
 }
 
+fn conformance_report(scanned: usize, passed: usize) -> String {
+    let pct = if scanned == 0 {
+        0.0
+    } else {
+        100.0 * passed as f64 / scanned as f64
+    };
+    format!("{pct:.1} {passed} {scanned}\n")
+}
+
+#[test]
+fn conformance_report_has_stable_machine_format() {
+    assert_eq!(conformance_report(7352, 3064), "41.7 3064 7352\n");
+    assert_eq!(conformance_report(0, 0), "0.0 0 0\n");
+}
+
 #[test]
 fn kotlin_codegen_box_conformance() {
     let box_dir = discover_box_dir();
@@ -1281,6 +1296,10 @@ fn kotlin_codegen_box_conformance() {
             };
             eprintln!("  {tag} {}", file.display());
         }
+    }
+    if let Some(path) = env("KRUSTY_CONFORMANCE_REPORT") {
+        fs::write(&path, conformance_report(files.len(), passed))
+            .unwrap_or_else(|err| panic!("failed to write conformance report: {err}"));
     }
     assert!(
         failures.is_empty(),

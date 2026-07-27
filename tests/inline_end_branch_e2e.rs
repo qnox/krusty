@@ -2,7 +2,7 @@
 //! end" target a `goto L_end` carries when `L_end` is past the last instruction — must splice. This
 //! happens for `x?.let { … }` (a safecall whose else-arm `aconst_null` is the body's last instruction)
 //! nested inside another inline lambda, e.g. `buildList { x?.let { add(…) } }` — the exact query-param
-//! builder the generated httpclient models emit. `disassemble` rejected the end-of-body branch target
+//! builder generated client models emit. `disassemble` rejected the end-of-body branch target
 //! (no instruction sits at `code.len()`), so the whole splice failed and the file was dropped.
 use super::common;
 

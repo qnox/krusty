@@ -8,8 +8,8 @@
 
 <!-- Conformance badge = share of the Kotlin `codegen/box` suite whose `box()` returns "OK" on
      krusty-emitted bytecode. The master build recomputes it and writes the badge JSON to a Gist
-     (no repo commit) — see .github/workflows/conformance.yml. The gist id is wired via the
-     CONFORMANCE_GIST_ID repo variable; updates need the GIST_TOKEN secret (PAT, `gist` scope). -->
+     (no repo commit) — see the `release` job in .github/workflows/ci.yml. The gist id is wired via
+     the CONFORMANCE_GIST_ID repo variable; updates need the GIST_TOKEN secret (PAT, `gist` scope). -->
 
 **krusty** is a memory-conscious **Kotlin → JVM bytecode compiler** written in Rust. Its frontend
 builds a module-wide source and symbol view. Its backend lowers one checked file per call while
