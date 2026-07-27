@@ -75,6 +75,17 @@ pub struct KotlinMetadata {
     pub d2: Vec<String>,
 }
 
+fn is_continuation_class(class: &crate::ir::IrClass) -> bool {
+    class.superclass_matches("kotlin/coroutines/jvm/internal/ContinuationImpl")
+        || class.superclass_matches("kotlin/coroutines/jvm/internal/RestrictedContinuationImpl")
+}
+
+fn is_coroutine_state_machine(class: &crate::ir::IrClass) -> bool {
+    is_continuation_class(class)
+        || class.superclass_matches("kotlin/coroutines/jvm/internal/SuspendLambda")
+        || class.superclass_matches("kotlin/coroutines/jvm/internal/RestrictedSuspendLambda")
+}
+
 /// Per-file emission configuration passed explicitly down the emit callgraph and stamped onto every
 /// `ClassWriter` (via [`new_writer`]) so synthetic serializer/companion/DefaultImpls classes inherit
 /// it too. The `Default` (v52, no `SourceFile`) keeps [`emit_all`]'s output byte-identical to before —
@@ -249,6 +260,15 @@ fn build_class_metadata(
         EQUALS_FN_FLAGS, FN_IS_SUSPEND, HASHCODE_TOSTRING_FN_FLAGS, OBJECT_CTOR_FLAGS,
         SEALED_CTOR_FLAGS,
     };
+    if is_coroutine_state_machine(c) {
+        return Some(KotlinMetadata {
+            k: 3,
+            mv: vec![2, 4, 0],
+            xi: 48,
+            d1: vec![],
+            d2: vec![],
+        });
+    }
     if c.is_companion
         || c.is_annotation
         || c.enum_entry_of.is_some()
@@ -2341,7 +2361,11 @@ fn emit_class(
     // signature (`List<String>` → `Ljava/util/List<Ljava/lang/String;>;`). `None` when no param needs it.
     // Computed once here: the pool seeder interns it and the `<init>` emission attaches it.
     let ctor_signature: Option<String> = class_ctor_generic_sig(ir, c, &fq_name);
-    if opts.emit_class_metadata && build_class_metadata(ir, c, opts).is_some() {
+    let is_continuation = is_continuation_class(c);
+    if !is_coroutine_state_machine(c)
+        && opts.emit_class_metadata
+        && build_class_metadata(ir, c, opts).is_some()
+    {
         seed_plain_class_pool(
             ir,
             c,
@@ -2358,10 +2382,7 @@ fn emit_class(
         .methods
         .iter()
         .any(|&fid| ir.functions[fid as usize].body.is_none());
-    // A synthesized `$fn$1` continuation class is PACKAGE-PRIVATE in kotlinc (`0x0030` FINAL|SUPER) —
-    // it is only touched by its own file's classes. Detected by its superclass; everything about its
-    // member access follows kotlinc's continuation layout below.
-    let is_continuation = c.superclass_matches("kotlin/coroutines/jvm/internal/ContinuationImpl");
+    // A synthesized continuation class is package-private in kotlinc.
     let mut access = if is_continuation {
         0x0020 // SUPER (package-private)
     } else {
