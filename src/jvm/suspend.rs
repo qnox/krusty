@@ -168,6 +168,11 @@ pub fn lower_suspend(
                 }
             }
         }
+        let suspension_lines = if let (Some(b), None) = (body, forward) {
+            capture_suspension_lines(ir, b, &suspend_set)
+        } else {
+            std::collections::HashMap::new()
+        };
         // Normalize `return { stmts…; value }` into `stmts…; return value`. An elvis / safe-call subject
         // that suspends lowers to a value-position `Block` binding a temp (`{ val t = susp()…; when{…} }`);
         // hoisting can't see into a value block, so the suspension would hide there and the flattener bail.
@@ -287,6 +292,7 @@ pub fn lower_suspend(
                 fid,
                 body.unwrap(),
                 unit_ret,
+                &suspension_lines,
                 continuation_metadata,
             ) {
                 return false;
@@ -1419,6 +1425,7 @@ fn build_state_machine(
     fid: u32,
     b: ExprId,
     unit_ret: bool,
+    suspension_lines: &std::collections::HashMap<ExprId, (u32, u32)>,
     continuation_metadata: &mut ContinuationMetadataMap,
 ) -> bool {
     // Normalize a block-valued initializer (`val a = (x ?: foo())`, `a?.b ?: foo()` — elvis / safe-call
@@ -1822,43 +1829,20 @@ fn build_state_machine(
                 state_indices.push(state_idx as i32);
             }
         }
-        let body_stmts: Vec<ExprId> = match &ir.exprs[b as usize] {
-            IrExpr::Block { stmts, .. } => stmts.clone(),
-            _ => Vec::new(),
-        };
-        let call_line = |call: ExprId| -> Option<i32> {
-            ir.expr_lines
+        let line_of = |call: ExprId| -> (i32, i32) {
+            if let Some(&(line, resume_line)) = suspension_lines.get(&call) {
+                return (line as i32, resume_line as i32);
+            }
+            let line = ir
+                .expr_lines
                 .get(&call)
-                .map(|&ln| ln as i32)
-                .or_else(|| {
-                    body_stmts
-                        .iter()
-                        .find(|&&st| expr_contains(ir, st, call))
-                        .and_then(|&st| nearest_line(ir, st))
-                        .map(|ln| ln as i32)
-                })
-                .or_else(|| ir.fn_decl_lines.get(&fid).map(|&ln| ln as i32))
+                .or_else(|| ir.fn_decl_lines.get(&fid))
+                .copied()
+                .unwrap_or_default() as i32;
+            (line, line)
         };
-        let l: Vec<i32> = resume_calls
-            .iter()
-            .filter_map(|&call| call_line(call))
-            .collect();
-        let nl: Vec<i32> = resume_calls
-            .iter()
-            .filter_map(|&call| {
-                let lline = call_line(call)?;
-                let holder = body_stmts
-                    .iter()
-                    .position(|&st| expr_contains(ir, st, call));
-                Some(
-                    holder
-                        .and_then(|i| body_stmts.get(i + 1))
-                        .and_then(|next| ir.expr_lines.get(next))
-                        .map(|&ln| ln as i32)
-                        .unwrap_or(lline),
-                )
-            })
-            .collect();
+        let l: Vec<i32> = resume_calls.iter().map(|&call| line_of(call).0).collect();
+        let nl: Vec<i32> = resume_calls.iter().map(|&call| line_of(call).1).collect();
         let metadata = ContinuationMetadata {
             l,
             nl,
@@ -3802,19 +3786,37 @@ fn nearest_line(ir: &IrFile, root: ExprId) -> Option<u32> {
     best
 }
 
-fn expr_contains(ir: &IrFile, root: ExprId, needle: ExprId) -> bool {
-    let mut stack = vec![root];
-    let mut seen: HashSet<u32> = HashSet::new();
-    while let Some(cur) = stack.pop() {
-        if cur == needle {
-            return true;
+fn capture_suspension_lines(
+    ir: &IrFile,
+    body: ExprId,
+    suspend_set: &HashSet<u32>,
+) -> std::collections::HashMap<ExprId, (u32, u32)> {
+    let items: Vec<ExprId> = match &ir.exprs[body as usize] {
+        IrExpr::Block { stmts, value } => {
+            stmts.iter().copied().chain(value.iter().copied()).collect()
         }
-        if !seen.insert(cur) {
+        _ => vec![body],
+    };
+    let lines: Vec<Option<u32>> = items.iter().map(|&item| nearest_line(ir, item)).collect();
+    let mut result = std::collections::HashMap::new();
+    for (index, &item) in items.iter().enumerate() {
+        let Some(line) = lines[index] else {
             continue;
+        };
+        let resume_line = lines
+            .iter()
+            .skip(index + 1)
+            .flatten()
+            .copied()
+            .next()
+            .unwrap_or(line);
+        let mut calls = HashSet::new();
+        collect_suspend_calls(ir, item, suspend_set, &mut calls);
+        for call in calls {
+            result.entry(call).or_insert((line, resume_line));
         }
-        for_each_child(&ir.exprs, cur, &mut |c| stack.push(c));
     }
-    false
+    result
 }
 
 fn collect_slot_names(ir: &IrFile, e: ExprId, out: &mut std::collections::HashMap<u32, String>) {
