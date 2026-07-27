@@ -1055,6 +1055,9 @@ pub struct File {
     /// 1-based source line of each expression's start (parallel to `expr_spans`; 0 = unknown).
     /// Filled by the parser post-pass for the `LineNumberTable`.
     pub expr_lines: Vec<u32>,
+    /// 1-based source line of each expression's syntactic anchor. Member access and calls use the
+    /// selector name; other expressions use their start. Parallel to `expr_spans`.
+    pub expr_source_lines: Vec<u32>,
     /// 1-based source line of each statement's start (parallel to `stmt_spans`; 0 = unknown).
     pub stmt_lines: Vec<u32>,
     /// Per-`Expr::Call` argument names: keyed by the call's `ExprId`, parallel to its `args`

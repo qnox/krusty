@@ -81,6 +81,39 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
             }
         })
         .collect();
+    file.expr_source_lines = file
+        .expr_arena
+        .iter()
+        .enumerate()
+        .map(|(index, expr)| {
+            let member_name_span = |index: usize, name: &str| {
+                file.exact_member_name_spans
+                    .get(&(index as u32))
+                    .copied()
+                    .unwrap_or_else(|| {
+                        let span = file.expr_spans[index];
+                        Span::new(span.hi.saturating_sub(name.len() as u32), span.hi)
+                    })
+            };
+            let anchor = match expr {
+                Expr::Call { callee, .. } => match &file.expr_arena[callee.0 as usize] {
+                    Expr::Member { name, .. } | Expr::SafeCall { name, .. } => {
+                        member_name_span(callee.0 as usize, name)
+                    }
+                    _ => file.expr_spans[callee.0 as usize],
+                },
+                Expr::Member { name, .. } | Expr::SafeCall { name, .. } => {
+                    member_name_span(index, name)
+                }
+                _ => file.expr_spans[index],
+            };
+            if anchor.lo == 0 && anchor.hi == 0 {
+                0
+            } else {
+                line_at(anchor.lo)
+            }
+        })
+        .collect();
     file.stmt_lines = file
         .stmt_spans
         .iter()
