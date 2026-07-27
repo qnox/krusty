@@ -1016,7 +1016,7 @@ fn bind_declared_type_ref(
     bindings: &mut HashMap<String, GenericBinding>,
     matcher: &krusty::frontend::SourceConstructorMatcher<'_>,
 ) {
-    let actual = if declared.nullable {
+    let actual = if declared.nullable() {
         match actual {
             Ty::Nullable(inner) => *inner,
             Ty::Null => return,
@@ -1611,7 +1611,7 @@ mod tests {
 
         bindings.clear();
         let mut nullable_parameter = function.params[0].ty.clone();
-        nullable_parameter.nullable = true;
+        nullable_parameter.set_nullable(true);
         bind_declared_type_ref(
             &nullable_parameter,
             signature.params[0],
@@ -1625,15 +1625,12 @@ mod tests {
         bindings.clear();
         let declared = TypeRef {
             name: "left.Box".to_string(),
-            nullable: false,
-            definitely_non_null: false,
+            flags: krusty::ast::TrFlags::default(),
             arg: None,
             targs: vec![function.params[0].ty.clone()],
             span: Span::new(0, 0),
             fun_params: Vec::new(),
             fun_context_count: 0,
-            fun_has_receiver: false,
-            fun_suspend: false,
         };
         let semantic = Ty::obj_args("left/Box", &[Ty::obj("kotlin/Any")]);
 

@@ -269,7 +269,7 @@ fn build_class_metadata(
     };
     // A `data class` also carries kotlinc's synthesized `componentN`/`copy`/`equals`/`hashCode`/
     // `toString` — derivable from the primary-ctor properties alone, so allowed alongside accessors.
-    if c.is_value && (c.fields.len() != 1 || !c.fields[0].is_final) {
+    if c.is_value && (c.fields.len() != 1 || !c.fields[0].is_final()) {
         return None; // multi-field / `var` value classes are a shape not computed yet
     }
     // A value class's compiler-synthesized members (the static `-impl` family + their instance
@@ -334,7 +334,7 @@ fn build_class_metadata(
         .map(|(i, f)| PropMeta {
             name: f.name.clone(),
             ty: f.ty,
-            is_var: !f.is_final,
+            is_var: !f.is_final(),
             // Only a BODY property (past the ctor params) carries a compile-time constant; a ctor
             // parameter's default is the PARAMETER's, not the property's. A body property's
             // initializer is not on `IrField::default` either — it lives in the class `init_body`.
@@ -346,12 +346,12 @@ fn build_class_metadata(
                     .and_then(|(_, tp)| c.type_params.iter().position(|t| t == tp))
                     .map(|i| i as u32)
             }),
-            has_constant: f.is_final
+            has_constant: f.is_final()
                 && i >= c.ctor_param_count as usize
                 && const_fields.contains(&(i as u32)),
             getter: (!ir.private_props.contains(&(c.fq_name(), f.name.clone())))
                 .then(|| (format!("get{}", cap(&f.name)), format!("(){}", desc(f.ty)))),
-            setter: (!f.is_final)
+            setter: (!f.is_final())
                 .then(|| (format!("set{}", cap(&f.name)), format!("({})V", desc(f.ty)))),
         })
         .collect();
@@ -380,7 +380,12 @@ fn build_class_metadata(
                         })
                         .map(|index| index as u32)
                 });
-                (field.name.clone(), field.ty, field.has_default, type_param)
+                (
+                    field.name.clone(),
+                    field.ty,
+                    field.has_default(),
+                    type_param,
+                )
             })
             .collect()
     } else {
@@ -720,7 +725,7 @@ fn seed_plain_class_pool(
             format!("(){}", desc(f.ty)),
             0,
         ));
-        if !f.is_final {
+        if !f.is_final() {
             let kind = if is_nonnull_ref(&f.name, f.ty) { 2 } else { 1 };
             accessors.push((
                 format!("set{}", cap(&f.name)),
@@ -750,7 +755,7 @@ fn seed_plain_class_pool(
     for f in &c.fields {
         let g = field_sig_of(f);
         accessor_sigs.push(g.as_ref().map(|s| format!("(){s}"))); // getter → `()<sig>`
-        if !f.is_final {
+        if !f.is_final() {
             accessor_sigs.push(g.as_ref().map(|s| format!("({s})V"))); // setter → `(<sig>)V`
         }
     }
@@ -997,7 +1002,7 @@ fn attach_synth_debug_tables(
             Some((0, pline)),
             &this_only,
         );
-        if !f.is_final {
+        if !f.is_final() {
             let s = format!("set{}", cap(&f.name));
             let pd = desc(f.ty);
             // The setter's value param is always slot 1 (`this`=0): guard = `aload_1`(1) + the
@@ -1198,7 +1203,7 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
             Some(a),
             &[],
         );
-        if !f.is_final {
+        if !f.is_final() {
             cw.set_method_nullability(
                 &format!("set{}", cap(&f.name)),
                 &format!("({})V", desc(f.ty)),
@@ -2361,7 +2366,7 @@ fn emit_class(
         // `ACC_PRIVATE` (the default — Kotlin backing fields are private, reached via accessors); a
         // non-private field → `ACC_PUBLIC` (read/written cross-class, e.g. a coroutine continuation's
         // `result`/`label`).
-        let private = field.is_private;
+        let private = field.is_private();
         let acc = if is_continuation {
             // kotlinc's continuation field layout: everything package-private; `result` is SYNTHETIC,
             // the captured receiver `this$0` is FINAL|SYNTHETIC; `label` and the `L$N` spills are plain.
@@ -2371,7 +2376,7 @@ fn emit_class(
                 _ => 0x0000,
             }
         } else {
-            (if private { 0x0002 } else { 0x0001 }) | if field.is_final { 0x0010 } else { 0 }
+            (if private { 0x0002 } else { 0x0001 }) | if field.is_final() { 0x0010 } else { 0 }
         };
         // A field typed by a bare type parameter (`val a: A`) carries a `Signature` (`TA;`); a
         // PARAMETERIZED concrete type (`val xs: List<String>`) carries its full generic signature. Both
@@ -3017,7 +3022,7 @@ fn emit_enum_entry_subclass(
 
     // Entry-body PROPERTIES are private backing fields (read via synthesized getters, like kotlinc).
     for field in c.fields.iter() {
-        let acc = 0x0002 | if field.is_final { 0x0010 } else { 0 };
+        let acc = 0x0002 | if field.is_final() { 0x0010 } else { 0 };
         cw.add_field(acc, &field.name, &ir_type_desc(&field.ty));
     }
 
@@ -4689,7 +4694,7 @@ fn emit_enum_class(
     // accessors — for both the primary-constructor fields and body member-property fields
     // (`enum class E { A; val x = … }`), initialized in the constructor via `init_body`.
     let enum_field_acc = |f: &IrField| {
-        (if f.is_private { 0x0002 } else { 0x0001 }) | if f.is_final { 0x0010 } else { 0 }
+        (if f.is_private() { 0x0002 } else { 0x0001 }) | if f.is_final() { 0x0010 } else { 0 }
     };
     for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
         cw.add_field(enum_field_acc(f), &f.name, &type_descriptor(*t));
@@ -7363,7 +7368,7 @@ impl<'a> Emitter<'a> {
                 let fty = c.fields[*index as usize].ty.clone();
                 let jt = ir_ty_to_jvm(&fty);
                 let owner = c.fq_name();
-                let is_lateinit = c.fields[*index as usize].is_lateinit;
+                let is_lateinit = c.fields[*index as usize].is_lateinit();
                 self.emit_value(*receiver, code);
                 let fref = self.cw.fieldref(&owner, &name, &type_descriptor(jt));
                 code.getfield(fref, slot_words(jt) as i32);

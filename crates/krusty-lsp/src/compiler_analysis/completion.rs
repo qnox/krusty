@@ -927,7 +927,7 @@ fn function_symbol(
             Some(format!("({params}){package}").as_str()),
             rendered_result.as_deref(),
         ),
-        kind: if function.is_operator {
+        kind: if function.is_operator() {
             CompletionKind::Operator
         } else if matches!(context, FunctionContext::Member) {
             CompletionKind::Method

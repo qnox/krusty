@@ -14,11 +14,12 @@ use crate::frontend::{
     DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, FrontendSymbols,
     FrontendTypeInfo, InlineCall, InvokeKind, IteratorDispatchTarget, LambdaCapture, LambdaInfo,
     ReceiverFnValueOrigin, ReceiverLambda, ResolvedCall, ResolvedConstructor,
-    ResolvedLocalFunctionCall, ResolvedMember, ResolvedModuleTopLevelCall, Signature, StmtLowering,
+    ResolvedLocalFunctionCall, ResolvedMember, ResolvedModuleTopLevelCall, SigFlags, Signature,
+    StmtLowering,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
-    IrEnumEntry, IrExpr, IrField, IrFile, IrFunction, IrTypeOp,
+    IrEnumEntry, IrExpr, IrField, IrFile, IrFunction, IrTypeOp, IrfFlags,
 };
 use crate::libraries::{InlineKind, SemanticPlatform};
 use crate::names::{property_getter_name, property_setter_name};
@@ -318,7 +319,7 @@ pub fn lower_file_at_reporting(
         .decls
         .iter()
         .filter_map(|&d| match file.decl(d) {
-            Decl::Fun(f) if f.is_suspend => Some(f.name.clone()),
+            Decl::Fun(f) if f.is_suspend() => Some(f.name.clone()),
             _ => None,
         })
         .collect();
@@ -332,7 +333,7 @@ pub fn lower_file_at_reporting(
         .flat_map(|c| {
             c.methods
                 .iter()
-                .filter(|m| m.is_suspend)
+                .filter(|m| m.is_suspend())
                 .map(|m| m.name.clone())
         })
         .collect();
@@ -341,7 +342,7 @@ pub fn lower_file_at_reporting(
         // instance method; a member suspension point is skipped by the pass.)
         for &d in &file.decls {
             if let Decl::Fun(f) = file.decl(d) {
-                if f.is_suspend && f.receiver.is_some() {
+                if f.is_suspend() && f.receiver.is_some() {
                     return None;
                 }
             }
@@ -353,14 +354,16 @@ pub fn lower_file_at_reporting(
         for &d in &file.decls {
             match file.decl(d) {
                 Decl::Fun(f) => match &f.body {
-                    FunBody::Expr(e) | FunBody::Block(e) => bodies.push((*e, f.is_suspend)),
+                    FunBody::Expr(e) | FunBody::Block(e) => bodies.push((*e, f.is_suspend())),
                     FunBody::None => {}
                 },
                 Decl::Property(p) => bodies.extend(p.init.map(|e| (e, false))),
                 Decl::Class(c) => {
                     for m in &c.methods {
                         match &m.body {
-                            FunBody::Expr(e) | FunBody::Block(e) => bodies.push((*e, m.is_suspend)),
+                            FunBody::Expr(e) | FunBody::Block(e) => {
+                                bodies.push((*e, m.is_suspend()))
+                            }
                             FunBody::None => {}
                         }
                     }
@@ -419,7 +422,7 @@ pub fn lower_file_at_reporting(
         let suspend_member_needs_bridge = file.decls.iter().any(|&d| {
             matches!(file.decl(d), Decl::Class(c)
                 if (!c.supertypes.is_empty() || c.base_class.is_some())
-                    && c.methods.iter().any(|m| m.is_suspend)
+                    && c.methods.iter().any(|m| m.is_suspend())
                     && (!c.type_params.is_empty()
                         || c.supertypes.iter().any(|s| {
                             !s.targs.is_empty()
@@ -523,7 +526,7 @@ pub fn lower_file_at_reporting(
                             .unwrap_or_else(|| info.ty(p.init.unwrap()));
                     // A declared `T?` keeps its nullability — the resolver's ClassSig type is the
                     // stored value type, which does not carry it.
-                    let ty = if p.ty.as_ref().is_some_and(|r| r.nullable) {
+                    let ty = if p.ty.as_ref().is_some_and(|r| r.nullable()) {
                         mark_nullable(ty)
                     } else {
                         ty
@@ -797,7 +800,7 @@ pub fn lower_file_at_reporting(
                         _ => ir,
                     };
                     // Preserve declared field nullability in IR.
-                    let ir = if c.props.iter().any(|p| p.name == *n && p.ty.nullable) {
+                    let ir = if c.props.iter().any(|p| p.name == *n && p.ty.nullable()) {
                         mark_nullable(ir)
                     } else {
                         ir
@@ -807,13 +810,17 @@ pub fn lower_file_at_reporting(
                         ty: ir,
                         type_param: field_type_params[i].clone(),
                         default,
-                        has_default: c.props.iter().any(|p| &p.name == n && p.default.is_some()),
                         // `field_finals` covers up to the `x$delegate` fields; the trailing
                         // interface-delegation fields (`$$delegate_N`/`$$delegate_e<j>`) default to
                         // non-final, matching the prior `field_final.get(i).unwrap_or(false)`.
-                        is_final: field_finals.get(i).copied().unwrap_or(false),
-                        is_private: true, // user backing fields are all private (default)
-                        is_lateinit: lateinit_names.contains(n.as_str()),
+                        // `is_private` — user backing fields are all private (default).
+                        flags: IrfFlags::default()
+                            .with_has_default(
+                                c.props.iter().any(|p| &p.name == n && p.default.is_some()),
+                            )
+                            .with_is_final(field_finals.get(i).copied().unwrap_or(false))
+                            .with_is_private(true)
+                            .with_is_lateinit(lateinit_names.contains(n.as_str())),
                     }
                 })
                 .collect();
@@ -827,7 +834,10 @@ pub fn lower_file_at_reporting(
                     .iter()
                     .map(|(n, tr)| {
                         let bt = ty_to_ir(ty_of(file, tr, &*syms.libraries));
-                        (n.clone(), if tr.nullable { mark_nullable(bt) } else { bt })
+                        (
+                            n.clone(),
+                            if tr.nullable() { mark_nullable(bt) } else { bt },
+                        )
                     })
                     .collect(),
                 type_params: c.type_params.clone(),
@@ -851,11 +861,11 @@ pub fn lower_file_at_reporting(
                         let t = ty_to_ir(stored_value_ty(
                             class_sig.ctor_params.get(i).copied().unwrap_or(Ty::Error),
                         ));
-                        let t = if p.ty.nullable { mark_nullable(t) } else { t };
+                        let t = if p.ty.nullable() { mark_nullable(t) } else { t };
                         // A non-null reference param gets an `Intrinsics.checkNotNullParameter` guard at
                         // `<init>` entry (kotlinc does); primitives, nullable, and class type-params skip it.
                         let is_type_param = c.type_params.contains(&p.ty.name);
-                        let check = if !p.ty.nullable
+                        let check = if !p.ty.nullable()
                             && !is_type_param
                             && ty_of(file, &p.ty, &*syms.libraries).is_reference()
                         {
@@ -970,7 +980,7 @@ pub fn lower_file_at_reporting(
                     let receiver = if m
                         .receiver
                         .as_ref()
-                        .is_some_and(|reference| reference.nullable)
+                        .is_some_and(|reference| reference.nullable())
                     {
                         mark_nullable(ty_to_ir(receiver))
                     } else {
@@ -982,7 +992,7 @@ pub fn lower_file_at_reporting(
                 let class_nonnull_tps: std::collections::HashSet<String> = c
                     .type_param_bounds
                     .iter()
-                    .filter(|(_, tr)| !tr.nullable)
+                    .filter(|(_, tr)| !tr.nullable())
                     .map(|(n, _)| n.clone())
                     .collect();
                 let mut param_checks =
@@ -994,7 +1004,7 @@ pub fn lower_file_at_reporting(
                 // AST return type (`fun f(): T?`) — same as a top-level function. A nullable value-class
                 // return (`Ucn?`) must stay the boxed `X`, not erase to the unboxed underlying.
                 let ret_ir = ty_to_ir(ret);
-                let ret_ir = if m.ret.as_ref().is_some_and(|r| r.nullable) {
+                let ret_ir = if m.ret.as_ref().is_some_and(|r| r.nullable()) {
                     mark_nullable(ret_ir)
                 } else {
                     ret_ir
@@ -1011,17 +1021,17 @@ pub fn lower_file_at_reporting(
                 // Record the declared nullability of each parameter for `@Metadata`/annotations (see
                 // `IrFile::fn_param_declared_nullable`) — kept off `IrFunction::params` so the mangle
                 // is untouched. Only when at least one parameter is nullable (else the non-null default).
-                if m.params.iter().any(|p| p.ty.nullable)
+                if m.params.iter().any(|p| p.ty.nullable())
                     || m.receiver
                         .as_ref()
-                        .is_some_and(|receiver| receiver.nullable)
+                        .is_some_and(|receiver| receiver.nullable())
                 {
                     let mut nullable =
                         Vec::with_capacity(m.params.len() + usize::from(m.receiver.is_some()));
                     if let Some(receiver) = m.receiver.as_ref() {
-                        nullable.push(receiver.nullable);
+                        nullable.push(receiver.nullable());
                     }
-                    nullable.extend(m.params.iter().map(|parameter| parameter.ty.nullable));
+                    nullable.extend(m.params.iter().map(|parameter| parameter.ty.nullable()));
                     lo.ir.fn_param_declared_nullable.insert(fid, nullable);
                 }
                 // A `private` method is NON-VIRTUAL: a call to it (even the unqualified `foo()` inside a
@@ -1034,7 +1044,7 @@ pub fn lower_file_at_reporting(
                 // An `open`/`override` member is overridable — kotlinc's member modality stays OPEN
                 // (no `ACC_FINAL`) even when nothing in this module extends the class: a separately
                 // compiled module (or javac in a mixed build) may override it.
-                if m.is_open {
+                if m.is_open() {
                     lo.ir.open_methods.insert(fid);
                 }
                 // Mark defaults in pass 1; pass 2 overwrites the marker with lowered expressions.
@@ -1146,7 +1156,7 @@ pub fn lower_file_at_reporting(
                     }
                 }
                 // Tag a `suspend` member method for the coroutine pass (same as a top-level suspend fun).
-                if m.is_suspend {
+                if m.is_suspend() {
                     lo.ir.suspend_funs.push(fid);
                 }
                 // A generic member method gets the same JVM `Signature` as a generic top-level function.
@@ -1247,7 +1257,7 @@ pub fn lower_file_at_reporting(
                             if r.name != "Any" && r.name != "kotlin/Any" {
                                 if let Some(rt) = lo.classpath_ty_ref(r) {
                                     ty = rt;
-                                    ir_ty = if r.nullable {
+                                    ir_ty = if r.nullable() {
                                         mark_nullable(ty_to_ir(rt))
                                     } else {
                                         ty_to_ir(rt)
@@ -1766,7 +1776,7 @@ pub fn lower_file_at_reporting(
     // Pass 1b: register callable top-level and extension functions.
     for &d in &file.decls {
         if let Decl::Fun(f) = file.decl(d) {
-            if f.is_inline && !f.has_callable_inline_extension_body() {
+            if f.is_inline() && !f.has_callable_inline_extension_body() {
                 continue;
             }
             if let Some(recv_ref) = &f.receiver {
@@ -1799,7 +1809,7 @@ pub fn lower_file_at_reporting(
                     .iter()
                     .find(|s| s.params == want)
                     .or_else(|| syms.ext_fun_overloads(recv_ty, &f.name).first())?;
-                let recv_param = if recv_ref.nullable {
+                let recv_param = if recv_ref.nullable() {
                     mark_nullable(ty_to_ir(recv_ty))
                 } else {
                     ty_to_ir(recv_ty)
@@ -1836,7 +1846,7 @@ pub fn lower_file_at_reporting(
                     .enumerate()
                     .map(|(i, t)| {
                         let ir = stored_value_ty(*t);
-                        if f.params.get(i).is_some_and(|p| p.ty.nullable) {
+                        if f.params.get(i).is_some_and(|p| p.ty.nullable()) {
                             mark_nullable(ir)
                         } else {
                             ir
@@ -1844,7 +1854,7 @@ pub fn lower_file_at_reporting(
                     })
                     .collect();
                 let ret = ty_to_ir(sig.ret);
-                let ret = if f.ret.as_ref().is_some_and(|r| r.nullable) {
+                let ret = if f.ret.as_ref().is_some_and(|r| r.nullable()) {
                     mark_nullable(ret)
                 } else {
                     ret
@@ -1876,7 +1886,7 @@ pub fn lower_file_at_reporting(
                 // Tag a `suspend fun` for the coroutine pass (`jvm::suspend`), which owns the whole
                 // transform (CPS signature now; state machine later) — ir_lower keeps the plain form,
                 // mirroring how value classes are lowered plain here and transformed in a later pass.
-                if f.is_suspend {
+                if f.is_suspend() {
                     lo.ir.suspend_funs.push(id);
                 }
             }
@@ -2060,7 +2070,7 @@ pub fn lower_file_at_reporting(
     // Pass 2: lower bodies.
     for &d in &file.decls {
         match file.decl(d) {
-            Decl::Fun(f) if f.is_inline && !f.has_callable_inline_extension_body() => {}
+            Decl::Fun(f) if f.is_inline() && !f.has_callable_inline_extension_body() => {}
             Decl::Fun(f) => {
                 lo.set_bail("deep:fun");
                 lo.scope.clear();
@@ -2068,7 +2078,7 @@ pub fn lower_file_at_reporting(
                 lo.next_value = 0;
                 lo.cur_class = None;
                 lo.cur_fn_name = f.name.clone();
-                lo.cur_fn_suspend = f.is_suspend;
+                lo.cur_fn_suspend = f.is_suspend();
                 // `as T` erasure is wired for TOP-LEVEL function type parameters only (the dominant
                 // bucket). A class/method/inline type-parameter cast finds no match here and falls
                 // through to `ty_ref`, which returns `None` for a bare `T` → the file safely bails
@@ -2179,7 +2189,7 @@ pub fn lower_file_at_reporting(
                 // `while(true)` loop (param reassignment + `continue`) so deep recursion doesn't overflow.
                 // An EXTENSION/infix `tailrec` (receiver) isn't transformed here — skip the file rather
                 // than emit stack-overflowing recursion.
-                if f.is_tailrec {
+                if f.is_tailrec() {
                     if f.receiver.is_some() {
                         return None;
                     }
@@ -2232,7 +2242,7 @@ pub fn lower_file_at_reporting(
                                 // A suspend override needing an erasure bridge can't be modeled (the
                                 // coroutine pass rewrites the concrete method to CPS afterwards but never
                                 // fixes up the bridge) — skip the file rather than emit a broken bridge.
-                                if m.is_suspend {
+                                if m.is_suspend() {
                                     return None;
                                 }
                                 // Generic/covariant override → synthesize an `ACC_BRIDGE` method with
@@ -2519,7 +2529,7 @@ pub fn lower_file_at_reporting(
                         let is_iface = lo
                             .syms
                             .class_by_type_name(sup)
-                            .is_some_and(|c| c.is_interface)
+                            .is_some_and(|c| c.is_interface())
                             || lo
                                 .syms
                                 .libraries
@@ -2557,73 +2567,68 @@ pub fn lower_file_at_reporting(
                                 (owner == itf).then(|| applied.type_args().to_vec())
                             })
                             .unwrap_or_default();
-                        let obligations: Vec<(String, Vec<Ty>, Ty, Option<bool>, Option<Vec<Ty>>)> =
-                            if lo.contains_class_name(itf) {
-                                lo.collect_iface_methods(itf)
-                                    .into_iter()
-                                    .map(|(owner, name, fid)| {
-                                        let function = &lo.ir.functions[fid as usize];
+                        type BridgeObligation =
+                            (String, Vec<Ty>, Ty, Option<bool>, Option<Vec<Ty>>);
+                        let obligations: Vec<BridgeObligation> = if lo.contains_class_name(itf) {
+                            lo.collect_iface_methods(itf)
+                                .into_iter()
+                                .map(|(owner, name, fid)| {
+                                    let function = &lo.ir.functions[fid as usize];
+                                    (
+                                        name,
+                                        function
+                                            .params
+                                            .iter()
+                                            .copied()
+                                            .map(bridge_erasure)
+                                            .collect(),
+                                        bridge_erasure(function.ret),
+                                        Some(lo.iface_method_is_default(owner, fid)),
+                                        None,
+                                    )
+                                })
+                                .collect()
+                        } else if let Some(interface) = lo.syms.libraries.resolve_type_name(itf) {
+                            interface
+                                .members
+                                .iter()
+                                .map(|member| {
+                                    (
+                                        member.name.clone(),
+                                        member.params.iter().copied().map(bridge_erasure).collect(),
+                                        bridge_erasure(member.ret),
+                                        None,
+                                        member
+                                            .generic_sig
+                                            .as_ref()
+                                            .map(|signature| signature.params.clone()),
+                                    )
+                                })
+                                .collect()
+                        } else if let Some(interface) = lo.syms.class_by_type_name(itf) {
+                            interface
+                                .methods
+                                .iter()
+                                .flat_map(|(name, signatures)| {
+                                    signatures.iter().map(move |signature| {
                                         (
-                                            name,
-                                            function
+                                            name.clone(),
+                                            signature
                                                 .params
                                                 .iter()
                                                 .copied()
                                                 .map(bridge_erasure)
                                                 .collect(),
-                                            bridge_erasure(function.ret),
-                                            Some(lo.iface_method_is_default(owner, fid)),
+                                            bridge_erasure(signature.ret),
+                                            None,
                                             None,
                                         )
                                     })
-                                    .collect()
-                            } else if let Some(interface) = lo.syms.libraries.resolve_type_name(itf)
-                            {
-                                interface
-                                    .members
-                                    .iter()
-                                    .map(|member| {
-                                        (
-                                            member.name.clone(),
-                                            member
-                                                .params
-                                                .iter()
-                                                .copied()
-                                                .map(bridge_erasure)
-                                                .collect(),
-                                            bridge_erasure(member.ret),
-                                            None,
-                                            member
-                                                .generic_sig
-                                                .as_ref()
-                                                .map(|signature| signature.params.clone()),
-                                        )
-                                    })
-                                    .collect()
-                            } else if let Some(interface) = lo.syms.class_by_type_name(itf) {
-                                interface
-                                    .methods
-                                    .iter()
-                                    .flat_map(|(name, signatures)| {
-                                        signatures.iter().map(move |signature| {
-                                            (
-                                                name.clone(),
-                                                signature
-                                                    .params
-                                                    .iter()
-                                                    .copied()
-                                                    .map(bridge_erasure)
-                                                    .collect(),
-                                                bridge_erasure(signature.ret),
-                                                None,
-                                                None,
-                                            )
-                                        })
-                                    })
-                                    .collect()
-                            } else {
-                                Vec::new()
-                            };
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
                         for (name, erased_params, erased_ret, default, logical_params) in
                             obligations
                         {
@@ -2753,7 +2758,7 @@ pub fn lower_file_at_reporting(
                 for (mi, m) in c.methods.iter().enumerate() {
                     // A `tailrec` MEMBER method isn't loop-transformed (only top-level functions are) —
                     // skip the file rather than emit stack-overflowing recursion.
-                    if m.is_tailrec && !matches!(m.body, FunBody::None) {
+                    if m.is_tailrec() && !matches!(m.body, FunBody::None) {
                         return None;
                     }
                     let method_index = c.methods[..mi]
@@ -2789,7 +2794,7 @@ pub fn lower_file_at_reporting(
                     lo.next_value = 0;
                     lo.cur_class = Some(type_name(&internal));
                     lo.cur_fn_name = m.name.clone();
-                    lo.cur_fn_suspend = m.is_suspend;
+                    lo.cur_fn_suspend = m.is_suspend();
                     lo.lambda_seq = 0;
                     // This method's own type params (`fun <R> m()`) plus the class's (`class C<T>`) are
                     // the `as T` cast targets in scope. The method's go FIRST so a same-named method
@@ -3068,7 +3073,7 @@ pub fn lower_file_at_reporting(
                         // A `tailrec` companion method isn't loop-transformed (only top-level functions
                         // are) — skip the file rather than emit stack-overflowing recursion (mirrors the
                         // instance-method guard).
-                        if m.is_tailrec {
+                        if m.is_tailrec() {
                             return None;
                         }
                         let overload_idx = c.companion_methods[..cmi]
@@ -3943,9 +3948,8 @@ pub fn lower_file_at_reporting(
                             fields: prop_fields
                                 .iter()
                                 .zip(eprops.iter())
-                                .map(|((n, t), p)| IrField {
-                                    is_final: !p.is_var,
-                                    ..IrField::new(n.clone(), ty_to_ir(*t))
+                                .map(|((n, t), p)| {
+                                    IrField::new(n.clone(), ty_to_ir(*t)).with_is_final(!p.is_var)
                                 })
                                 .collect(),
                             ctor_param_count: 0,
@@ -4383,7 +4387,7 @@ fn collect_tparams(
             let bound = bound_ref
                 .map(|tr| ty_to_ir(ty_of(file, tr, plat)))
                 .unwrap_or(Ty::nullable(Ty::obj("kotlin/Any")));
-            let non_null = non_null.contains(name) || bound_ref.is_some_and(|tr| !tr.nullable);
+            let non_null = non_null.contains(name) || bound_ref.is_some_and(|tr| !tr.nullable());
             (name.clone(), bound, non_null)
         })
         .collect()
@@ -4906,7 +4910,7 @@ fn body_prop_ir_ty(
     plat: &dyn SemanticPlatform,
 ) -> Ty {
     let ir = ty_to_ir(body_prop_ty(file, info, p, plat));
-    if p.ty.as_ref().is_some_and(|r| r.nullable) {
+    if p.ty.as_ref().is_some_and(|r| r.nullable()) {
         mark_nullable(ir)
     } else {
         ir
@@ -5289,7 +5293,7 @@ impl<'a> Lower<'a> {
         args: Vec<u32>,
     ) -> u32 {
         let owner = member.owner_type_or(owner_fallback);
-        let interface = member.is_interface || self.library_type_is_interface(owner);
+        let interface = member.is_interface() || self.library_type_is_interface(owner);
         // kotlinc pushes the receiver BEFORE evaluating arguments; an argument that suspends forces
         // the pushed receiver into a continuation spill slot (an unnamed temp local in its
         // bytecode). Mirror it with a temp in the spill scope: `val tmp = recv; tmp.m(<arg>)`.
@@ -5847,7 +5851,7 @@ impl<'a> Lower<'a> {
     fn source_property_interface(&self, owner: TypeName) -> bool {
         self.syms
             .class_by_type_name(owner)
-            .is_some_and(|class| class.is_interface)
+            .is_some_and(|class| class.is_interface())
     }
 
     fn emit_source_property_get(
@@ -6293,7 +6297,7 @@ impl<'a> Lower<'a> {
             }
         }
         let class = self.syms.class_by_type_name(owner)?;
-        if class.is_object {
+        if class.is_object() {
             if let Some(info) = self.class_info_name(owner) {
                 return Some(self.emit_static_instance(info.id, info.id, "INSTANCE"));
             }
@@ -6468,7 +6472,7 @@ impl<'a> Lower<'a> {
         if self
             .syms
             .class_by_internal(&internal_name)
-            .is_some_and(|class| class.is_object)
+            .is_some_and(|class| class.is_object())
         {
             if let Some(target) = module_target.as_ref() {
                 let recv = self.emit_external_static_field(
@@ -6482,13 +6486,13 @@ impl<'a> Lower<'a> {
         let sib_sig = self
             .syms
             .class_by_internal(&internal_name)
-            .filter(|cs| cs.is_object)
+            .filter(|cs| cs.is_object())
             .and_then(|cs| cs.method_matching(name, &arg_tys).cloned());
         // A value-class return/parameter mangles the method NAME and/or erases the JVM descriptor, so
         // the `Virtual` (Ty-carrying) descriptor built from the LOGICAL types would mismatch the emitted
         // method — leave those (and suspend, whose CPS shape differs) to the existing paths.
         let sib_ok = sib_sig.as_ref().is_some_and(|s| {
-            !s.is_suspend
+            !s.is_suspend()
                 && !std::iter::once(&s.ret).chain(s.params.iter()).any(|t| {
                     t.obj_internal().is_some_and(|n| {
                         self.syms
@@ -6538,7 +6542,7 @@ impl<'a> Lower<'a> {
             // leave them to the existing paths.
             let comp_ok = comp_sig.as_ref().is_some_and(|s| {
                 s.params.len() == args.len()
-                    && !s.is_suspend
+                    && !s.is_suspend()
                     && !std::iter::once(&s.ret).chain(s.params.iter()).any(|t| {
                         t.obj_internal().is_some_and(|n| {
                             self.syms
@@ -6948,7 +6952,7 @@ impl<'a> Lower<'a> {
             let is_iface = self
                 .syms
                 .class_by_type_name(delegate_internal)
-                .map(|c| c.is_interface)
+                .map(|c| c.is_interface())
                 .unwrap_or(false);
             self.emit_virtual_call(
                 gv_owner,
@@ -7164,11 +7168,11 @@ impl<'a> Lower<'a> {
             if let Some(cs) = self.syms.class_by_internal(internal) {
                 // An annotation (an interface + synthetic impl) or inner class (needs an outer
                 // instance) isn't constructed via a plain cross-file `new`; bail (skip, not miscompile).
-                if cs.is_annotation || cs.inner_of.is_some() {
+                if cs.is_annotation() || cs.inner_of.is_some() {
                     return None;
                 }
                 // Snapshot the sig's ctor shape before any `&mut self` lowering call (drops the borrow).
-                let is_interface = cs.is_interface;
+                let is_interface = cs.is_interface();
                 let is_value = cs.value_field.is_some();
                 // A GENERIC value class (`value class Z<T>(val v: T)`) has an `Object`-approximated
                 // underlying krusty does not model soundly across a file boundary (the value flows boxed);
@@ -8213,11 +8217,11 @@ impl<'a> Lower<'a> {
             .iter()
             .flat_map(|&d| -> Vec<String> {
                 match self.afile.decl(d) {
-                    ast::Decl::Fun(f) if f.is_suspend => vec![f.name.clone()],
+                    ast::Decl::Fun(f) if f.is_suspend() => vec![f.name.clone()],
                     ast::Decl::Class(c) => c
                         .methods
                         .iter()
-                        .filter(|m| m.is_suspend)
+                        .filter(|m| m.is_suspend())
                         .map(|m| m.name.clone())
                         .collect(),
                     _ => Vec::new(),
@@ -8243,7 +8247,7 @@ impl<'a> Lower<'a> {
                 self.syms
                     .class_by_type_name(internal)
                     .map(|c| c.methods_named(name))
-                    .is_some_and(|sigs| sigs.iter().any(|s| s.is_suspend))
+                    .is_some_and(|sigs| sigs.iter().any(|s| s.is_suspend()))
             };
             // The checker's `Invoke` lowering carries suspend-ness reliably (the receiver's static
             // type may be `Error` at the call site): a suspend function VALUE, or a suspend `invoke`
@@ -8293,7 +8297,7 @@ impl<'a> Lower<'a> {
             if self
                 .info
                 .resolved_member(call)
-                .is_some_and(|m| m.member.suspend)
+                .is_some_and(|m| m.member.suspend())
                 || self
                     .info
                     .resolved_extension(call)
@@ -8448,10 +8452,10 @@ impl<'a> Lower<'a> {
         let ir_fields: Vec<IrField> = fields
             .into_iter()
             .enumerate()
-            .map(|(i, (name, ty))| IrField {
-                is_final: i < (n_cap + arity as u32) as usize,
-                is_private: false,
-                ..IrField::new(name, ty)
+            .map(|(i, (name, ty))| {
+                IrField::new(name, ty)
+                    .with_is_final(i < (n_cap + arity as u32) as usize)
+                    .with_is_private(false)
             })
             .collect();
         let class = IrClass {
@@ -8769,7 +8773,7 @@ impl<'a> Lower<'a> {
             let blocks = if force_override {
                 self.syms
                     .method_of_name(s, name)
-                    .map_or(false, |sig| sig.is_final)
+                    .map_or(false, |sig| sig.is_final())
             } else {
                 self.resolve_method_name(s, name).is_some()
             };
@@ -9078,7 +9082,7 @@ impl<'a> Lower<'a> {
                     let is_class = s
                         .syms
                         .class_by_internal(&cls.render())
-                        .map(|c| !c.is_interface)
+                        .map(|c| !c.is_interface())
                         .unwrap_or_else(|| {
                             s.syms
                                 .libraries
@@ -10674,7 +10678,7 @@ impl<'a> Lower<'a> {
                 .iter()
                 .filter(|method| method.name == name)
                 .nth(overload_index)
-                .is_none_or(|method| method.is_override)
+                .is_none_or(|method| method.is_override())
         })
     }
 
@@ -10848,12 +10852,11 @@ impl<'a> Lower<'a> {
                 let changes_signature = params != erased_params || *ret != erased_ret;
                 let return_admitted =
                     self.bridge_return_admits(erased_ret, *ret, allow_fake_override);
-                let admitted = (generic_override || fake_override)
+                (generic_override || fake_override)
                     && return_admitted
                     && changes_signature
                     && (owner != internal
-                        || self.method_is_override_or_synthesized(owner, name, *fid));
-                admitted
+                        || self.method_is_override_or_synthesized(owner, name, *fid))
             });
             if let Some((fid, _, _)) =
                 unique_match(&candidates, |(_, params, _)| params == erased_params)
@@ -10923,7 +10926,7 @@ impl<'a> Lower<'a> {
             while let Some(cid) = cur {
                 let cls = &self.ir.classes[cid as usize];
                 if let Some(idx) = cls.fields.iter().position(|f| f.name == *name) {
-                    field = Some((cls.fields[idx].ty, !cls.fields[idx].is_final));
+                    field = Some((cls.fields[idx].ty, !cls.fields[idx].is_final()));
                     break;
                 }
                 cur = cls
@@ -11432,7 +11435,7 @@ impl<'a> Lower<'a> {
         params: &[Ty],
         ret: Ty,
     ) -> Option<u32> {
-        if member.suspend
+        if member.suspend()
             || ret == Ty::Nothing
             || params.len() != member.params.len().saturating_add(1)
         {
@@ -11798,7 +11801,7 @@ impl<'a> Lower<'a> {
             if m.name != name {
                 return None;
             }
-            if m.suspend {
+            if m.suspend() {
                 return None;
             }
             let owner = m.owner?;
@@ -12644,7 +12647,7 @@ impl<'a> Lower<'a> {
         // cond: it.hasNext()
         let it_g = self.emit_get_value(it_v);
         let hasnext_ret = hasnext_m.ret;
-        let hasnext_suspend = hasnext_m.suspend;
+        let hasnext_suspend = hasnext_m.suspend();
         let cond = self.emit_library_member_call(
             it_g,
             iter_internal,
@@ -12657,7 +12660,7 @@ impl<'a> Lower<'a> {
         // x = (elem) it.next()  — unbox a primitive element, checkcast a specific reference.
         let it_g2 = self.emit_get_value(it_v);
         let next_ret = next_m.ret;
-        let next_suspend = next_m.suspend;
+        let next_suspend = next_m.suspend();
         let next_call = self.emit_library_member_call(
             it_g2,
             iter_internal,
@@ -12797,7 +12800,7 @@ impl<'a> Lower<'a> {
         self.syms.class_by_internal(internal).is_some_and(|c| {
             // Generic fun interfaces allowed (erased SAM descriptor); value-class methods excluded —
             // see the matching note in `resolve::simple_fun_interface`.
-            c.is_fun_interface
+            c.is_fun_interface()
         })
     }
 
@@ -13447,7 +13450,7 @@ impl<'a> Lower<'a> {
                 if self
                     .syms
                     .class_by_type_name(owner)
-                    .is_some_and(|class| class.is_interface)
+                    .is_some_and(|class| class.is_interface())
                 {
                     let (class, index, _, _) =
                         self.resolve_method_name(owner, &property_getter_name(name))?;
@@ -13564,7 +13567,7 @@ impl<'a> Lower<'a> {
                     .and_then(|cs| {
                         cs.props
                             .iter()
-                            .find_map(|(n, t, _)| (n == name).then_some((i, *t, cs.is_interface)))
+                            .find_map(|(n, t, _)| (n == name).then_some((i, *t, cs.is_interface())))
                     })
                 {
                     return Some(self.emit_call(
@@ -14500,7 +14503,7 @@ impl<'a> Lower<'a> {
 
     fn classpath_ty_ref(&self, r: &ast::TypeRef) -> Option<Ty> {
         let nn = ast::TypeRef {
-            nullable: false,
+            flags: r.flags.with_nullable(false),
             ..r.clone()
         };
         self.ty_ref(&nn)
@@ -14579,7 +14582,7 @@ impl<'a> Lower<'a> {
                 return self.ty_ref(&s);
             }
         }
-        if r.nullable {
+        if r.nullable() {
             return None;
         }
         // `Unit` as a type is the reference class `kotlin/Unit` (a cast target / checkcast operand),
@@ -14595,7 +14598,7 @@ impl<'a> Lower<'a> {
             let params = vec![Ty::obj("kotlin/Any"); r.fun_params.len()];
             // Keep the `suspend` marker: a `suspend (A) -> B` erases to the arity+1 `FunctionN`
             // (trailing `Continuation`), so dropping it would `checkcast` the wrong interface.
-            return Some(if r.fun_suspend {
+            return Some(if r.fun_suspend() {
                 Ty::fun_suspend(params, Ty::obj("kotlin/Any"))
             } else {
                 Ty::fun(params, Ty::obj("kotlin/Any"))
@@ -15400,7 +15403,7 @@ impl<'a> Lower<'a> {
                     // Nullable builtin non-reference values (`Int?`, `Unit?`, `Nothing?`) use the shared
                     // source `Nullable(T)` form; the JVM backend maps that to a reference slot.
                     Some(r)
-                        if r.nullable
+                        if r.nullable()
                             && Ty::from_name(&r.name).is_some_and(|t| !t.is_reference())
                             && !self.contains_class(&class_internal(self.afile, &r.name)) =>
                     {
@@ -15447,7 +15450,7 @@ impl<'a> Lower<'a> {
                     // non-null `Obj(W)` (deliberate for plain locals), so re-apply the declared `?` here
                     // where the boxed-vs-scalar `Ref` choice depends on it.
                     let cell_kty = match ty.as_ref() {
-                        Some(r) if r.nullable && !kty.is_nullable() && kty.is_reference() => {
+                        Some(r) if r.nullable() && !kty.is_nullable() && kty.is_reference() => {
                             Ty::nullable(kty)
                         }
                         _ => kty,
@@ -15502,13 +15505,13 @@ impl<'a> Lower<'a> {
                 // where `zap(): ZN2?` would otherwise type `x` non-null and the JVM value-class pass would
                 // treat a boxed `ZN2?` as unboxed.
                 let nullable = match ty.as_ref() {
-                    Some(r) => r.nullable,
+                    Some(r) => r.nullable(),
                     None => {
                         if let ast::Expr::Call { callee, .. } = self.afile.expr(init) {
                             match self.afile.expr(*callee) {
                                 // A free-function call (`val x = zap()` where `zap(): T?`).
                                 ast::Expr::Name(n) => self.afile.decls.iter().any(|&d| matches!(self.afile.decl(d),
-                                    ast::Decl::Fun(f) if &f.name == n && f.ret.as_ref().is_some_and(|rr| rr.nullable))),
+                                    ast::Decl::Fun(f) if &f.name == n && f.ret.as_ref().is_some_and(|rr| rr.nullable()))),
                                 // A method call (`val x = t.foo()` where `foo(): T?`): resolve the method on the
                                 // receiver's class and read its (nullability-carrying) IR return type — a nullable
                                 // value-class return (`X?`) is a boxed `X`, so the local must stay boxed, not unbox.
@@ -15566,19 +15569,20 @@ impl<'a> Lower<'a> {
                             Signature {
                                 params: params.clone(),
                                 ret: *ret,
-                                vararg: false,
+                                flags: SigFlags::default()
+                                    .with_vararg(false)
+                                    .with_is_inline(false)
+                                    .with_is_operator(false)
+                                    .with_is_override(false)
+                                    .with_is_final(true)
+                                    .with_is_suspend(false),
                                 required: params.len(),
                                 param_defaults: Vec::new(),
                                 param_default_values: Vec::new(),
                                 param_names: Vec::new(),
                                 lambda_param_types: Vec::new(),
                                 lambda_recv: Vec::new(),
-                                is_inline: false,
-                                is_operator: false,
-                                is_override: false,
                                 visibility: crate::types::Visibility::Public,
-                                is_final: true,
-                                is_suspend: false,
                                 context_count: 0,
                                 source_decl: None,
                                 source_file: None,
@@ -16147,7 +16151,7 @@ impl<'a> Lower<'a> {
                 .info
                 .resolved_module_top_level(e)
                 .is_some_and(|c| c.suspend)
-            || self.info.resolved_companion(e).is_some_and(|m| m.suspend);
+            || self.info.resolved_companion(e).is_some_and(|m| m.suspend());
         if call_suspends {
             return true;
         }
@@ -16300,11 +16304,11 @@ impl<'a> Lower<'a> {
             lock_owner,
             lock_m.name.clone(),
             lock_m.descriptor.clone(),
-            lock_m.is_interface,
+            lock_m.is_interface(),
             m1,
             vec![null1],
         );
-        if lock_m.suspend {
+        if lock_m.suspend() {
             self.ir
                 .suspend_calls
                 .insert(lock_call, ty_to_ir(lock_m.ret));
@@ -16360,7 +16364,7 @@ impl<'a> Lower<'a> {
             unlock_owner,
             unlock_m.name.clone(),
             unlock_m.descriptor.clone(),
-            unlock_m.is_interface,
+            unlock_m.is_interface(),
             m2,
             vec![null2],
         );
@@ -16411,7 +16415,7 @@ impl<'a> Lower<'a> {
         // cond: it.hasNext()
         let it_g = self.emit_get_value(it_v);
         let hasnext_ret = hasnext_m.ret;
-        let hasnext_suspend = hasnext_m.suspend;
+        let hasnext_suspend = hasnext_m.suspend();
         let cond = self.emit_library_member_call(
             it_g,
             iter_internal,
@@ -16424,7 +16428,7 @@ impl<'a> Lower<'a> {
         // body: e = (elem) it.next(); acc.add/addAll(<inlined lambda body>)
         let it_g2 = self.emit_get_value(it_v);
         let next_ret = next_m.ret;
-        let next_suspend = next_m.suspend;
+        let next_suspend = next_m.suspend();
         let next_call = self.emit_library_member_call(
             it_g2,
             iter_internal,
@@ -16696,7 +16700,7 @@ impl<'a> Lower<'a> {
                     .filter(|cs| cs.value_field.is_none())
                     .and_then(|cs| {
                         cs.props.iter().find_map(|(n, t, v)| {
-                            (n.as_str() == name).then_some((*i, *t, *v, cs.is_interface))
+                            (n.as_str() == name).then_some((*i, *t, *v, cs.is_interface()))
                         })
                     })
                 {
@@ -16892,7 +16896,7 @@ impl<'a> Lower<'a> {
         for frame in self.reified_subst.iter().rev() {
             if let Some(bound) = frame.get(&tr.name) {
                 let mut out = bound.clone();
-                out.nullable = out.nullable || tr.nullable;
+                out.set_nullable(out.nullable() || tr.nullable());
                 return out;
             }
         }
@@ -16959,7 +16963,7 @@ impl<'a> Lower<'a> {
                 })?
                 .clone()
         };
-        if !f.is_inline {
+        if !f.is_inline() {
             return None;
         }
         if member.is_none() && f.receiver.is_some() != recv.is_some() {
@@ -17331,7 +17335,7 @@ impl<'a> Lower<'a> {
                 ) = (splice, arg_expr)
                 {
                     let context_count = fnsig.context_count.min(fnsig.params.len());
-                    let receiver_count = usize::from(f.params[i].ty.fun_has_receiver)
+                    let receiver_count = usize::from(f.params[i].ty.fun_has_receiver())
                         .min(fnsig.params.len().saturating_sub(context_count));
                     let value_arity = fnsig
                         .params
@@ -17640,11 +17644,12 @@ impl<'a> Lower<'a> {
                         .map(|n| n.render())
                         .unwrap_or_else(|| "kotlin/Any".to_string())
                 });
+                let is_interface = member.is_interface();
                 let call = self.emit_virtual_call(
                     owner,
                     member.name,
                     member.descriptor,
-                    member.is_interface,
+                    is_interface,
                     recv,
                     a,
                 );
@@ -18839,7 +18844,7 @@ impl<'a> Lower<'a> {
                 // and not a local — read its singleton via `getstatic <internal>.INSTANCE`.
                 if self.lookup(&n).is_none() {
                     if let Some(cls) = self.syms.classes.get(&n) {
-                        if cls.is_object {
+                        if cls.is_object() {
                             let internal = cls.internal();
                             return Some(self.emit_external_static_field(
                                 internal.clone(),
@@ -19744,11 +19749,11 @@ impl<'a> Lower<'a> {
                 // A nullable reference target (`x is A?`): `null` IS an `A?`, but plain `instanceof`
                 // yields false for null. Lower to `x == null || x is A` (and the De Morgan dual for
                 // `x !is A?` → `x != null && x !is A`), binding the operand to a temp so it runs once.
-                if ty.nullable {
+                if ty.nullable() {
                     // `ty_ref` returns `None` for any nullable type; resolve the non-null base — a
                     // reference, OR a boxable primitive (`x is Int?` → `x == null || x instanceof Integer`).
                     let mut base_ref = ty.clone();
-                    base_ref.nullable = false;
+                    base_ref.set_nullable(false);
                     // A non-reference base resolves to a primitive whose wrapper the `instanceof` tests
                     // (`x is Int?` → `x == null || x instanceof Integer`). Float/Double are now allowed: a
                     // smart-cast of them reaches the IEEE-correct numeric `==` conform. Unsigned stays
@@ -19808,7 +19813,7 @@ impl<'a> Lower<'a> {
                 // A reference target, or a primitive (`x is Int` → `instanceof` the boxed wrapper, which
                 // the backend resolves from the primitive type_operand).
                 let target = self.ty_ref(&ty).or_else(|| {
-                    if ty.nullable {
+                    if ty.nullable() {
                         None
                     } else {
                         // `x is Int`/`x is Double` → `instanceof` the boxed wrapper. Float/Double are
@@ -20130,7 +20135,7 @@ impl<'a> Lower<'a> {
                 if self.info.ty(operand) == Ty::Unit {
                     let eff = self.expr(operand)?;
                     let non_null_ref = ast::TypeRef {
-                        nullable: false,
+                        flags: ty.flags.with_nullable(false),
                         ..ty.clone()
                     };
                     let value = if !nullable {
@@ -20226,7 +20231,7 @@ impl<'a> Lower<'a> {
                             Some(t)
                         } else {
                             let nn = ast::TypeRef {
-                                nullable: false,
+                                flags: ty.flags.with_nullable(false),
                                 ..ty.clone()
                             };
                             self.ty_ref(&nn).filter(|t| t.is_reference())
@@ -20247,7 +20252,7 @@ impl<'a> Lower<'a> {
                 if let Some((name, bound, non_null)) =
                     self.cur_tparams.iter().find(|(n, _, _)| *n == ty.name)
                 {
-                    let op = if *non_null && !ty.nullable {
+                    let op = if *non_null && !ty.nullable() {
                         IrTypeOp::CastNonNull
                     } else {
                         IrTypeOp::Cast
@@ -20260,7 +20265,7 @@ impl<'a> Lower<'a> {
                 // reference→primitive coercion below `checkcast`s the target wrapper (CCE on mismatch) and
                 // unboxes. A REFERENCE operand (a boxed type-parameter value in an inline body) already
                 // needs only the `checkcast`+unbox path below; a SAME-primitive cast is that identity.
-                if !ty.nullable
+                if !ty.nullable()
                     && self.has_scalar_value_repr(operand_repr)
                     && !operand_repr.is_reference()
                 {
@@ -20279,7 +20284,7 @@ impl<'a> Lower<'a> {
                 // `x as Int` (non-null primitive target) is an unbox: `checkcast Integer; intValue()`,
                 // emitted by the `ImplicitCoercion` reference→primitive path. `ty_ref` only yields
                 // reference types, so handle the primitive case before it.
-                if !ty.nullable {
+                if !ty.nullable() {
                     if let Some(prim) = Ty::from_name(&ty.name)
                         .filter(|t| self.has_scalar_value_repr(*t) && !t.is_unsigned())
                     {
@@ -20295,7 +20300,7 @@ impl<'a> Lower<'a> {
                 // the JVM cast target is the same class either way; only the null-throwing behaviour
                 // (selected below via `ty.nullable`) differs.
                 let non_null_ty = ast::TypeRef {
-                    nullable: false,
+                    flags: ty.flags.with_nullable(false),
                     ..ty.clone()
                 };
                 let target = self.ty_ref(&non_null_ty)?;
@@ -20303,14 +20308,14 @@ impl<'a> Lower<'a> {
                 // but the value-class pass needs the nullability to decide a `Str?` (`= String?`, unboxed)
                 // vs a non-null `Str` cast — a plain (non-VC) reference cast is unaffected (the emitter
                 // peels the `?` for `checkcast`). Nullability tracking is otherwise erased in `Ty`.
-                let type_operand = if ty.nullable {
+                let type_operand = if ty.nullable() {
                     ty_to_ir(Ty::nullable(target))
                 } else {
                     ty_to_ir(target)
                 };
                 // `as T` to a non-null reference type throws on `null` (kotlinc null-checks before the
                 // `checkcast`); `as T?` and primitive casts are a plain `checkcast`/coercion.
-                let op = if !ty.nullable && target.is_reference() {
+                let op = if !ty.nullable() && target.is_reference() {
                     IrTypeOp::CastNonNull
                 } else {
                     IrTypeOp::Cast
@@ -21130,8 +21135,9 @@ impl<'a> Lower<'a> {
                         // the constant as the narrow type; krusty doesn't track that logical-vs-erased
                         // element type yet, so bail (skip) rather than miscompile.
                         let narrow_targ = self.afile.call_type_args.get(&e.0).map_or(false, |ts| {
-                            ts.iter()
-                                .any(|r| !r.nullable && matches!(r.name.as_str(), "Short" | "Byte"))
+                            ts.iter().any(|r| {
+                                !r.nullable() && matches!(r.name.as_str(), "Short" | "Byte")
+                            })
                         });
                         if narrow_targ
                             && args
@@ -21418,7 +21424,7 @@ impl<'a> Lower<'a> {
                                         .iter()
                                         .filter(|p| p.is_property)
                                         .map(|p| {
-                                            if p.ty.nullable {
+                                            if p.ty.nullable() {
                                                 String::new()
                                             } else {
                                                 p.ty.name.clone()
@@ -22121,7 +22127,7 @@ impl<'a> Lower<'a> {
                         let recv_key = self.recv_ty(receiver).erased_recv();
                         let is_inline_ext = self.afile.decls.iter().any(|&d| {
                             matches!(self.afile.decl(d), Decl::Fun(f)
-                                if f.name == name && f.is_inline
+                                if f.name == name && f.is_inline()
                                 && f.receiver.as_ref().is_some_and(|r|
                                     f.type_params.iter().any(|tp| tp == &r.name)
                                     || ty_of(self.afile, r, &*self.syms.libraries).erased_recv() == recv_key))
@@ -24031,7 +24037,7 @@ fn type_param_bounds_ir(
     for tp in names {
         let bound = match bounds.iter().find(|(n, _)| n == tp) {
             None => any(),
-            Some((_, b)) if b.name == "Any" && !b.nullable => any(),
+            Some((_, b)) if b.name == "Any" && !b.nullable() => any(),
             // A primitive bound (`T : Int`) is specialized; its Signature bound is the boxed wrapper.
             Some((_, b))
                 if Ty::from_name(&b.name).is_some_and(|t| t.scalar_value_repr().is_some()) =>
@@ -24094,7 +24100,7 @@ fn field_ty_with_args(
             let nn = base.non_null();
             if nn.is_erased_top() && tr.targs.is_empty() && tr.arg.is_none() {
                 if let Some(internal) = resolve_class(&tr.name) {
-                    return if tr.nullable {
+                    return if tr.nullable() {
                         Ty::nullable(Ty::obj_name(internal))
                     } else {
                         Ty::obj_name(internal)
@@ -24104,7 +24110,7 @@ fn field_ty_with_args(
             nn
         }
     };
-    if tr.nullable {
+    if tr.nullable() {
         Ty::nullable(resolved)
     } else {
         resolved
@@ -24115,7 +24121,7 @@ fn ty_of(file: &ast::File, r: &ast::TypeRef, plat: &dyn SemanticPlatform) -> Ty 
     // Function type, builtin scalar, or primitive array — the leaf shared by every type resolver.
     if let Some(t) = typeref_leaf(r, &mut |x| ty_of(file, x, plat)) {
         // Nullable primitives/Unit are reference slots consistent with the checker.
-        if r.nullable {
+        if r.nullable() {
             return t.nullable_non_ref().unwrap_or(t);
         }
         return t;
@@ -24384,7 +24390,7 @@ fn param_checks_for(
                     && !class_nonnull_type_params.contains(&p.ty.name));
             // A value-class parameter is erased to its underlying type; the null-check applies to that
             // (a primitive underlying gets none — the param is a primitive local, not a reference).
-            if !p.ty.nullable && !nullable_type_param && ty.is_reference() {
+            if !p.ty.nullable() && !nullable_type_param && ty.is_reference() {
                 Some(p.name.clone())
             } else {
                 None

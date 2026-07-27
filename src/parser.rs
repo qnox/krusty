@@ -175,15 +175,14 @@ fn erase_type_params(t: &TypeRef, tps: &std::collections::HashSet<String>) -> Ty
     if tps.contains(&t.name) {
         return TypeRef {
             name: "Any".to_string(),
-            nullable: t.nullable,
-            definitely_non_null: t.definitely_non_null,
+            flags: TrFlags::default()
+                .with_nullable(t.nullable())
+                .with_definitely_non_null(t.definitely_non_null()),
             arg: None,
             targs: Vec::new(),
             span: t.span,
             fun_params: Vec::new(),
             fun_context_count: 0,
-            fun_has_receiver: false,
-            fun_suspend: false,
         };
     }
     TypeRef {
@@ -250,15 +249,14 @@ fn modality_from_modifiers(modifiers: &[String]) -> crate::ast::Modality {
 fn simple_type_ref(name: &str, span: crate::diag::Span) -> TypeRef {
     TypeRef {
         name: name.to_string(),
-        nullable: false,
-        definitely_non_null: false,
+        flags: TrFlags::default()
+            .with_nullable(false)
+            .with_definitely_non_null(false),
         arg: None,
         targs: Vec::new(),
         span,
         fun_params: Vec::new(),
         fun_context_count: 0,
-        fun_has_receiver: false,
-        fun_suspend: false,
     }
 }
 
@@ -595,7 +593,7 @@ fn rewrite_anon_captures(file: &mut File) {
                 // too, gated on the receiver-fn type so a same-named ordinary member call (`b.size()`
                 // with an enclosing `size: Int`) never over-captures.
                 if anon_body_uses(file, did, pn)
-                    || (pty.fun_has_receiver && anon_body_member_call_named(file, did, pn))
+                    || (pty.fun_has_receiver() && anon_body_member_call_named(file, did, pn))
                 {
                     // A captured type that mentions an enclosing type parameter (`x: (T) -> Unit`) is
                     // captured with the type parameter erased to `Any` — the synth-class field/ctor/use
@@ -910,10 +908,10 @@ fn expand_fun_type_aliases(file: &mut File) {
     fn substitute(tr: &mut TypeRef, params: &[String], args: &[TypeRef]) {
         if tr.fun_params.is_empty() && tr.name != "<fun>" && tr.targs.is_empty() {
             if let Some(k) = params.iter().position(|p| *p == tr.name) {
-                let nullable = tr.nullable;
+                let nullable = tr.nullable();
                 let span = tr.span;
                 *tr = args[k].clone();
-                tr.nullable |= nullable;
+                tr.set_nullable(tr.nullable() || nullable);
                 tr.span = span;
                 return; // a use-site type argument carries no alias type parameters of its own
             }
@@ -941,7 +939,7 @@ fn expand_fun_type_aliases(file: &mut File) {
                     for a in &mut tr.targs {
                         expand(a, aliases, depth + 1);
                     }
-                    let nullable = tr.nullable;
+                    let nullable = tr.nullable();
                     let span = tr.span;
                     let mut expanded = target.clone();
                     if !tparams.is_empty() {
@@ -950,7 +948,7 @@ fn expand_fun_type_aliases(file: &mut File) {
                     *tr = expanded;
                     // The use site's `?` survives (`Listener?` = nullable function type); the span
                     // stays the USE site so diagnostics point at the source that wrote it.
-                    tr.nullable |= nullable;
+                    tr.set_nullable(tr.nullable() || nullable);
                     tr.span = span;
                     // The expansion (or a substitution result) may itself be an alias reference
                     // (`typealias A<T> = B<T>` with `B` a fn-type alias) — re-expand the whole node;
@@ -1360,7 +1358,7 @@ impl<'a> Parser<'a> {
                         mods.iter().any(|m| m == "abstract"),
                     );
                     d.visibility = visibility_of(&mods);
-                    d.is_operator = mods.iter().any(|m| m == "operator");
+                    d.set_is_operator(mods.iter().any(|m| m == "operator"));
                     let id = self.file.add_decl(Decl::Fun(d));
                     self.file.decls.push(id);
                 }
@@ -1893,15 +1891,14 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::Dot, "'.'");
                 let recv = TypeRef {
                     name: first,
-                    nullable,
-                    definitely_non_null: false,
+                    flags: TrFlags::default()
+                        .with_nullable(nullable)
+                        .with_definitely_non_null(false),
                     arg: recv_arg,
                     targs: recv_targs,
                     span,
                     fun_params: vec![],
                     fun_context_count: 0,
-                    fun_has_receiver: false,
-                    fun_suspend: false,
                 };
                 (Some(recv), self.ident_or_error("property name"))
             } else {
@@ -2172,9 +2169,11 @@ impl<'a> Parser<'a> {
                         mods.iter().any(|m| m == "abstract"),
                     );
                     d.visibility = visibility_of(&mods);
-                    d.is_open = !d.is_final && mods.iter().any(|m| m == "open" || m == "override");
-                    d.is_override = mods.iter().any(|m| m == "override");
-                    d.is_operator = mods.iter().any(|m| m == "operator");
+                    d.set_is_open(
+                        !d.is_final() && mods.iter().any(|m| m == "open" || m == "override"),
+                    );
+                    d.set_is_override(mods.iter().any(|m| m == "override"));
+                    d.set_is_operator(mods.iter().any(|m| m == "operator"));
                     methods.push(d);
                 }
                 TokenKind::KwVal | TokenKind::KwVar => {
@@ -2402,10 +2401,11 @@ impl<'a> Parser<'a> {
                             emods.iter().any(|m| m == "abstract"),
                         );
                         f.visibility = visibility_of(&emods);
-                        f.is_open =
-                            !f.is_final && emods.iter().any(|m| m == "open" || m == "override");
-                        f.is_override = emods.iter().any(|m| m == "override");
-                        f.is_operator = emods.iter().any(|m| m == "operator");
+                        f.set_is_open(
+                            !f.is_final() && emods.iter().any(|m| m == "open" || m == "override"),
+                        );
+                        f.set_is_override(emods.iter().any(|m| m == "override"));
+                        f.set_is_operator(emods.iter().any(|m| m == "operator"));
                         methods.push(f);
                     }
                     // A body member property (`enum class C { A; val x = … }`): a field + accessor on
@@ -2644,15 +2644,8 @@ impl<'a> Parser<'a> {
                 non_null_type_params: Default::default(),
                 reified_type_params: Default::default(),
                 span: start,
-                is_inline: false,
-                is_final: false,
-                is_open: false,
-                is_override: false,
-                is_abstract: false,
+                flags: FdFlags::default(),
                 visibility: Visibility::Public,
-                is_suspend: false,
-                is_tailrec: false,
-                is_operator: false,
                 annotations,
                 decl_line: 0, // filled by the parser post-pass
                 body_close_line: 0,
@@ -2730,15 +2723,14 @@ impl<'a> Parser<'a> {
                 }
                 let recv_ty = TypeRef {
                     name: recv_name,
-                    nullable: recv_nullable,
-                    definitely_non_null: false,
+                    flags: TrFlags::default()
+                        .with_nullable(recv_nullable)
+                        .with_definitely_non_null(false),
                     arg: recv_arg,
                     targs: recv_targs,
                     span,
                     fun_params: vec![],
                     fun_context_count: 0,
-                    fun_has_receiver: false,
-                    fun_suspend: false,
                 };
                 (Some(recv_ty), fun_name)
             } else {
@@ -2789,15 +2781,13 @@ impl<'a> Parser<'a> {
             non_null_type_params,
             reified_type_params,
             span: Span::new(start.lo, end.hi),
-            is_inline,
-            is_final,
-            is_open: false,
-            is_override: false,
-            is_abstract,
+            flags: FdFlags::default()
+                .with_is_inline(is_inline)
+                .with_is_final(is_final)
+                .with_is_abstract(is_abstract)
+                .with_is_suspend(is_suspend)
+                .with_is_tailrec(is_tailrec),
             visibility: Visibility::Public,
-            is_suspend,
-            is_tailrec,
-            is_operator: false,
             annotations,
             decl_line: 0, // filled by the parser post-pass
             body_close_line: 0,
@@ -3163,10 +3153,11 @@ impl<'a> Parser<'a> {
                             mods.iter().any(|m| m == "abstract"),
                         );
                         f.visibility = visibility_of(&mods);
-                        f.is_open =
-                            !f.is_final && mods.iter().any(|m| m == "open" || m == "override");
-                        f.is_override = mods.iter().any(|m| m == "override");
-                        f.is_operator = mods.iter().any(|m| m == "operator");
+                        f.set_is_open(
+                            !f.is_final() && mods.iter().any(|m| m == "open" || m == "override"),
+                        );
+                        f.set_is_override(mods.iter().any(|m| m == "override"));
+                        f.set_is_operator(mods.iter().any(|m| m == "operator"));
                         methods.push(f);
                     }
                     TokenKind::KwVal | TokenKind::KwVar => {
@@ -3450,7 +3441,7 @@ impl<'a> Parser<'a> {
                 if self.at_function_type_supertype() {
                     let ft = self.parse_type();
                     let arity = ft.fun_params.len();
-                    if ft.fun_suspend || arity > 22 {
+                    if ft.fun_suspend() || arity > 22 {
                         // A `suspend` function type (a distinct `SuspendFunctionN` shape) and an arity
                         // beyond the stdlib's `Function0..22` (big-arity `FunctionN`) are not modeled.
                         self.diags.error(
@@ -3464,15 +3455,14 @@ impl<'a> Parser<'a> {
                         }
                         ifaces.push(TypeRef {
                             name: crate::types::FUNCTION_N_INTERNAL[arity].to_string(),
-                            nullable: false,
-                            definitely_non_null: false,
+                            flags: TrFlags::default()
+                                .with_nullable(false)
+                                .with_definitely_non_null(false),
                             arg: None,
                             targs,
                             span: sup_span,
                             fun_params: Vec::new(),
                             fun_context_count: 0,
-                            fun_has_receiver: false,
-                            fun_suspend: false,
                         });
                     }
                     if !self.eat(TokenKind::Comma) {
@@ -3498,7 +3488,7 @@ impl<'a> Parser<'a> {
                     Vec::new()
                 };
                 let has_primitive_targ = targs.iter().any(|ta| {
-                    !ta.nullable
+                    !ta.nullable()
                         && matches!(
                             ta.name.as_str(),
                             "Int"
@@ -3552,15 +3542,14 @@ impl<'a> Parser<'a> {
                 } else if !effective.is_empty() {
                     ifaces.push(TypeRef {
                         name: effective.clone(),
-                        nullable: false,
-                        definitely_non_null: false,
+                        flags: TrFlags::default()
+                            .with_nullable(false)
+                            .with_definitely_non_null(false),
                         arg: None,
                         targs,
                         span: sup_span,
                         fun_params: Vec::new(),
                         fun_context_count: 0,
-                        fun_has_receiver: false,
-                        fun_suspend: false,
                     });
                 }
                 // Class delegation: `: Iface by delegate`. A simple-name delegate (a `val` ctor-param
@@ -3659,8 +3648,8 @@ impl<'a> Parser<'a> {
                         // so it never saw `private` — a private interface method is non-virtual (called via
                         // `invokespecial`), so preserve the flag here.
                         f.visibility = visibility_of(&imods);
-                        f.is_override = imods.iter().any(|m| m == "override");
-                        f.is_operator = imods.iter().any(|m| m == "operator");
+                        f.set_is_override(imods.iter().any(|m| m == "override"));
+                        f.set_is_operator(imods.iter().any(|m| m == "operator"));
                         methods.push(f);
                     }
                     // Abstract interface property: `val`/`var x: T` (no initializer/getter).
@@ -3787,10 +3776,11 @@ impl<'a> Parser<'a> {
                             mods.iter().any(|m| m == "abstract"),
                         );
                         f.visibility = visibility_of(&mods);
-                        f.is_open =
-                            !f.is_final && mods.iter().any(|m| m == "open" || m == "override");
-                        f.is_override = mods.iter().any(|m| m == "override");
-                        f.is_operator = mods.iter().any(|m| m == "operator");
+                        f.set_is_open(
+                            !f.is_final() && mods.iter().any(|m| m == "open" || m == "override"),
+                        );
+                        f.set_is_override(mods.iter().any(|m| m == "override"));
+                        f.set_is_operator(mods.iter().any(|m| m == "operator"));
                         methods.push(f);
                     }
                     TokenKind::KwVal | TokenKind::KwVar => {
@@ -3943,10 +3933,11 @@ impl<'a> Parser<'a> {
                             mods.iter().any(|m| m == "abstract"),
                         );
                         f.visibility = visibility_of(&mods);
-                        f.is_open =
-                            !f.is_final && mods.iter().any(|m| m == "open" || m == "override");
-                        f.is_override = mods.iter().any(|m| m == "override");
-                        f.is_operator = mods.iter().any(|m| m == "operator");
+                        f.set_is_open(
+                            !f.is_final() && mods.iter().any(|m| m == "open" || m == "override"),
+                        );
+                        f.set_is_override(mods.iter().any(|m| m == "override"));
+                        f.set_is_operator(mods.iter().any(|m| m == "operator"));
                         methods.push(f);
                     }
                     TokenKind::KwVal | TokenKind::KwVar => {
@@ -4099,14 +4090,14 @@ impl<'a> Parser<'a> {
         while self.at(TokenKind::Amp) {
             self.bump(); // '&'
             let any = self.parse_type_atom();
-            let valid_lhs = !ty.nullable
-                && !ty.definitely_non_null
+            let valid_lhs = !ty.nullable()
+                && !ty.definitely_non_null()
                 && ty.arg.is_none()
                 && ty.targs.is_empty()
                 && ty.fun_params.is_empty();
             let valid_rhs = any.name == "Any"
-                && !any.nullable
-                && !any.definitely_non_null
+                && !any.nullable()
+                && !any.definitely_non_null()
                 && any.arg.is_none()
                 && any.targs.is_empty()
                 && any.fun_params.is_empty();
@@ -4116,8 +4107,8 @@ impl<'a> Parser<'a> {
                     "a definitely non-null type must have the form 'T & Any'",
                 );
             }
-            ty.nullable = false;
-            ty.definitely_non_null = true;
+            ty.set_nullable(false);
+            ty.set_definitely_non_null(true);
         }
         ty
     }
@@ -4232,15 +4223,15 @@ impl<'a> Parser<'a> {
                 let nullable = self.eat_type_nullable();
                 TypeRef {
                     name: "<fun>".to_string(),
-                    nullable,
-                    definitely_non_null: false,
+                    flags: TrFlags::default()
+                        .with_nullable(nullable)
+                        .with_definitely_non_null(false)
+                        .with_fun_suspend(fun_suspend),
                     arg: Some(Box::new(ret)),
                     targs: Vec::new(),
                     span,
                     fun_params,
                     fun_context_count,
-                    fun_has_receiver: false,
-                    fun_suspend,
                 }
             } else if fun_params.len() == 1 && !fun_suspend {
                 // A PARENTHESIZED type used for grouping (no `->` follows the `)`), most commonly to make
@@ -4249,7 +4240,7 @@ impl<'a> Parser<'a> {
                 // type — `(Int)`, `(String)?`.)
                 let mut inner = fun_params.into_iter().next().unwrap();
                 if self.eat_type_nullable() {
-                    inner.nullable = true;
+                    inner.set_nullable(true);
                 }
                 inner
             } else {
@@ -4257,15 +4248,14 @@ impl<'a> Parser<'a> {
                 self.diags.error(span, "expected '->' for function type");
                 TypeRef {
                     name: "<error>".to_string(),
-                    nullable: false,
-                    definitely_non_null: false,
+                    flags: TrFlags::default()
+                        .with_nullable(false)
+                        .with_definitely_non_null(false),
                     arg: None,
                     targs: Vec::new(),
                     span,
                     fun_params: Vec::new(),
                     fun_context_count: 0,
-                    fun_has_receiver: false,
-                    fun_suspend: false,
                 }
             }
         } else if self.at(TokenKind::Ident) {
@@ -4292,15 +4282,14 @@ impl<'a> Parser<'a> {
                 let in_projection = self.skip_variance(); // `out`/`in`
                 let any_nullable = || TypeRef {
                     name: "Any".to_string(),
-                    nullable: true,
-                    definitely_non_null: false,
+                    flags: TrFlags::default()
+                        .with_nullable(true)
+                        .with_definitely_non_null(false),
                     arg: None,
                     targs: Vec::new(),
                     span,
                     fun_params: Vec::new(),
                     fun_context_count: 0,
-                    fun_has_receiver: false,
-                    fun_suspend: false,
                 };
                 // `Array<*>` and `Array<in X>` (contravariant) READ as `Any?` — the element erases to
                 // Object so a value that is a WIDER array than `X` (`Array<in Array<String>> = x` holding
@@ -4342,15 +4331,14 @@ impl<'a> Parser<'a> {
             let nullable = self.eat_type_nullable(); // `T?`
             let base = TypeRef {
                 name,
-                nullable,
-                definitely_non_null: false,
+                flags: TrFlags::default()
+                    .with_nullable(nullable)
+                    .with_definitely_non_null(false),
                 arg,
                 targs,
                 span,
                 fun_params: Vec::new(),
                 fun_context_count: 0,
-                fun_has_receiver: false,
-                fun_suspend: false,
             };
             // Receiver (extension) function type `Recv.() -> R` ≡ `Function1<Recv, R>`, and
             // `Recv.(A) -> R` ≡ `Function2<Recv, A, R>`. The receiver folds in as the first function
@@ -4389,15 +4377,16 @@ impl<'a> Parser<'a> {
                 let fnull = self.eat_type_nullable();
                 return TypeRef {
                     name: "<fun>".to_string(),
-                    nullable: fnull,
-                    definitely_non_null: false,
+                    flags: TrFlags::default()
+                        .with_nullable(fnull)
+                        .with_definitely_non_null(false)
+                        .with_fun_has_receiver(true)
+                        .with_fun_suspend(fun_suspend),
                     arg: Some(Box::new(ret)),
                     targs: Vec::new(),
                     span,
                     fun_params,
                     fun_context_count,
-                    fun_has_receiver: true,
-                    fun_suspend,
                 };
             }
             // A `context(…)` receiver must precede a FUNCTION type; on a plain type it is invalid — reject
@@ -4409,15 +4398,14 @@ impl<'a> Parser<'a> {
                 );
                 return TypeRef {
                     name: "<error>".to_string(),
-                    nullable: false,
-                    definitely_non_null: false,
+                    flags: TrFlags::default()
+                        .with_nullable(false)
+                        .with_definitely_non_null(false),
                     arg: None,
                     targs: Vec::new(),
                     span,
                     fun_params: Vec::new(),
                     fun_context_count: 0,
-                    fun_has_receiver: false,
-                    fun_suspend: false,
                 };
             }
             base
@@ -4425,15 +4413,14 @@ impl<'a> Parser<'a> {
             self.diags.error(span, "expected a type");
             TypeRef {
                 name: "<error>".to_string(),
-                nullable: false,
-                definitely_non_null: false,
+                flags: TrFlags::default()
+                    .with_nullable(false)
+                    .with_definitely_non_null(false),
                 arg: None,
                 targs: Vec::new(),
                 span,
                 fun_params: Vec::new(),
                 fun_context_count: 0,
-                fun_has_receiver: false,
-                fun_suspend: false,
             }
         }
     }
@@ -4468,15 +4455,14 @@ impl<'a> Parser<'a> {
                 let span = self.tok().span;
                 args.push(TypeRef {
                     name: "Any".to_string(),
-                    nullable: true,
-                    definitely_non_null: false,
+                    flags: TrFlags::default()
+                        .with_nullable(true)
+                        .with_definitely_non_null(false),
                     arg: None,
                     targs: Vec::new(),
                     span,
                     fun_params: Vec::new(),
                     fun_context_count: 0,
-                    fun_has_receiver: false,
-                    fun_suspend: false,
                 });
             } else {
                 args.push(self.parse_type());
@@ -4554,14 +4540,14 @@ impl<'a> Parser<'a> {
             if self.eat(TokenKind::Colon) {
                 let bound = self.parse_type();
                 // `T: Any` → the type param can't be null (erased to Object but non-null).
-                if bound.name == "Any" && !bound.nullable && !tname.is_empty() {
+                if bound.name == "Any" && !bound.nullable() && !tname.is_empty() {
                     non_null.insert(tname.clone());
                 }
                 // A primitive upper bound (`T: Int`) is *specialized* by kotlinc (descriptor `(I)I`, not
                 // `(Object)Object`); the resolver specializes a FUNCTION param to an integral bound. A
                 // NON-specializable primitive bound (floating `Double`/`Float`, unsigned, value) is still
                 // rejected — krusty would otherwise miscompile the boxed/primitive `==` or unsigned path.
-                if !bound.nullable
+                if !bound.nullable()
                     && crate::types::Ty::from_name(&bound.name).is_some_and(|t| {
                         matches!(
                             t,
@@ -4864,7 +4850,7 @@ impl<'a> Parser<'a> {
     /// The default-value expression for a type (`var x: T` deferred init): `0`/`false`/`'\0'`/`null`.
     fn default_init_expr(&mut self, ty: &TypeRef, span: Span) -> ExprId {
         let e = match ty.name.as_str() {
-            _ if ty.nullable => Expr::NullLit,
+            _ if ty.nullable() => Expr::NullLit,
             "Int" | "Byte" | "Short" => Expr::IntLit(0),
             "Long" => Expr::LongLit(0),
             "Float" => Expr::FloatLit(0.0),
@@ -5131,7 +5117,7 @@ impl<'a> Parser<'a> {
                 // that the checker doesn't yet model, so keep rejecting it (skip, never miscompile).
                 let deferred = ty.is_some()
                     && !self.at(TokenKind::Eq)
-                    && (is_var || !ty.as_ref().unwrap().nullable);
+                    && (is_var || !ty.as_ref().unwrap().nullable());
                 let init_operator = (!deferred).then(|| {
                     let operator = self.tok().span;
                     self.expect(TokenKind::Eq, "'='");
@@ -7602,7 +7588,7 @@ type DestructureEntries = (Vec<(String, bool)>, Vec<Option<String>>);
 /// (`vararg xs: Int`) becomes the unboxed `IntArray`/`LongArray`/… ; any other element becomes the
 /// boxed `Array<elem>`. Matches how a `vararg` function parameter is arrayified.
 fn vararg_array_typeref(elem: TypeRef) -> TypeRef {
-    let prim = !elem.nullable
+    let prim = !elem.nullable()
         && matches!(
             elem.name.as_str(),
             "Int"
@@ -7620,28 +7606,26 @@ fn vararg_array_typeref(elem: TypeRef) -> TypeRef {
     if prim {
         TypeRef {
             name: format!("{}Array", elem.name),
-            nullable: false,
-            definitely_non_null: false,
+            flags: TrFlags::default()
+                .with_nullable(false)
+                .with_definitely_non_null(false),
             arg: None,
             targs: Vec::new(),
             span,
             fun_params: Vec::new(),
             fun_context_count: 0,
-            fun_has_receiver: false,
-            fun_suspend: false,
         }
     } else {
         TypeRef {
             name: "Array".to_string(),
-            nullable: false,
-            definitely_non_null: false,
+            flags: TrFlags::default()
+                .with_nullable(false)
+                .with_definitely_non_null(false),
             arg: Some(Box::new(elem)),
             targs: Vec::new(),
             span,
             fun_params: Vec::new(),
             fun_context_count: 0,
-            fun_has_receiver: false,
-            fun_suspend: false,
         }
     }
 }

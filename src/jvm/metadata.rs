@@ -1083,18 +1083,128 @@ fn build_property_generic_sig(
     })
 }
 
+/// Bit-packed boolean flags for a [`MetaValueParam`], collapsing its `has_default`/`materialized`/
+/// `vararg`/`recv_fun` bytes into one. Read through the `MetaValueParam` accessors of the same names;
+/// built with the `with_*` chain. Headroom for four more flags before the byte fills.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MvpFlags(u8);
+
+impl MvpFlags {
+    const HAS_DEFAULT: u8 = 1 << 0;
+    const MATERIALIZED: u8 = 1 << 1;
+    const VARARG: u8 = 1 << 2;
+    const RECV_FUN: u8 = 1 << 3;
+
+    #[inline]
+    const fn with(mut self, mask: u8, on: bool) -> Self {
+        if on {
+            self.0 |= mask;
+        } else {
+            self.0 &= !mask;
+        }
+        self
+    }
+    #[inline]
+    const fn has(self, mask: u8) -> bool {
+        self.0 & mask != 0
+    }
+
+    #[inline]
+    pub const fn with_has_default(self, on: bool) -> Self {
+        self.with(Self::HAS_DEFAULT, on)
+    }
+    #[inline]
+    pub const fn with_materialized(self, on: bool) -> Self {
+        self.with(Self::MATERIALIZED, on)
+    }
+    #[inline]
+    pub const fn with_vararg(self, on: bool) -> Self {
+        self.with(Self::VARARG, on)
+    }
+    #[inline]
+    pub const fn with_recv_fun(self, on: bool) -> Self {
+        self.with(Self::RECV_FUN, on)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct MetaValueParam {
     pub ty: Option<TypeName>,
     pub name: String,
-    pub has_default: bool,
-    pub materialized: bool,
-    /// `vararg elem: T`. Only `@Metadata` records this — the JVM descriptor shows just the packed
-    /// array, so `f(vararg c: Char)` and `f(c: CharArray)` are indistinguishable without it, and
-    /// overload resolution cannot know it may spread trailing arguments into the array.
-    pub vararg: bool,
-    pub recv_fun: bool,
+    /// Bit-packed `has_default`/`materialized`/`vararg`/`recv_fun` (read via the accessors below).
+    /// `vararg` — `vararg elem: T`. Only `@Metadata` records this: the JVM descriptor shows just the
+    /// packed array, so `f(vararg c: Char)` and `f(c: CharArray)` are indistinguishable without it,
+    /// and overload resolution cannot know it may spread trailing arguments into the array.
+    pub flags: MvpFlags,
     pub recv_fun_receiver: Option<TypeName>,
+}
+
+impl MetaValueParam {
+    #[inline]
+    pub fn has_default(&self) -> bool {
+        self.flags.has(MvpFlags::HAS_DEFAULT)
+    }
+    #[inline]
+    pub fn materialized(&self) -> bool {
+        self.flags.has(MvpFlags::MATERIALIZED)
+    }
+    #[inline]
+    pub fn vararg(&self) -> bool {
+        self.flags.has(MvpFlags::VARARG)
+    }
+    #[inline]
+    pub fn recv_fun(&self) -> bool {
+        self.flags.has(MvpFlags::RECV_FUN)
+    }
+}
+
+/// Bit-packed boolean flags for a [`MetaFn`], collapsing `is_public`/`is_inline`/`is_suspend`/
+/// `is_extension`/`ret_nullable` into one byte. Read through the `MetaFn` accessors of the same names;
+/// built with the `with_*` chain. Headroom for three more flags before the byte fills.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MfnFlags(u8);
+
+impl MfnFlags {
+    const IS_PUBLIC: u8 = 1 << 0;
+    const IS_INLINE: u8 = 1 << 1;
+    const IS_SUSPEND: u8 = 1 << 2;
+    const IS_EXTENSION: u8 = 1 << 3;
+    const RET_NULLABLE: u8 = 1 << 4;
+
+    #[inline]
+    const fn with(mut self, mask: u8, on: bool) -> Self {
+        if on {
+            self.0 |= mask;
+        } else {
+            self.0 &= !mask;
+        }
+        self
+    }
+    #[inline]
+    const fn has(self, mask: u8) -> bool {
+        self.0 & mask != 0
+    }
+
+    #[inline]
+    pub const fn with_is_public(self, on: bool) -> Self {
+        self.with(Self::IS_PUBLIC, on)
+    }
+    #[inline]
+    pub const fn with_is_inline(self, on: bool) -> Self {
+        self.with(Self::IS_INLINE, on)
+    }
+    #[inline]
+    pub const fn with_is_suspend(self, on: bool) -> Self {
+        self.with(Self::IS_SUSPEND, on)
+    }
+    #[inline]
+    pub const fn with_is_extension(self, on: bool) -> Self {
+        self.with(Self::IS_EXTENSION, on)
+    }
+    #[inline]
+    pub const fn with_ret_nullable(self, on: bool) -> Self {
+        self.with(Self::RET_NULLABLE, on)
+    }
 }
 
 /// A function decoded from a `Class`/`Package` `@Metadata` message — the *metadata-truth* signature
@@ -1109,22 +1219,18 @@ pub struct MetaFn {
     /// The JVM descriptor from the `method_signature` extension; `None` when metadata omits it (the
     /// caller may then fall back to a bytecode method of the same name, or compute it from proto types).
     pub jvm_desc: Option<&'static str>,
-    pub is_public: bool,
-    pub is_inline: bool,
-    pub is_suspend: bool,
+    /// Bit-packed `is_public`/`is_inline`/`is_suspend`/`is_extension`/`ret_nullable` (read via the
+    /// accessors below). `is_extension` — whether this is an EXTENSION (a receiver of any kind, class or
+    /// type parameter) vs a true top-level function; lets the classpath ext index avoid mis-indexing a
+    /// top-level generic as an extension on its first parameter's type. `ret_nullable` — whether the
+    /// Kotlin return type is nullable (`T?`, `Type.nullable`); the JVM descriptor/`Signature` erase this,
+    /// only `@Metadata` carries it, and it drives the elvis null-check for a nullable-returning scope fn.
+    pub flags: MfnFlags,
     /// Extension-receiver Kotlin class name (`kotlin/Result` for `Result.getOrThrow`), if any. `None` for a
     /// top-level fn AND for an extension on a type PARAMETER — use [`MetaFn::is_extension`] to disambiguate.
     pub receiver_class: Option<TypeName>,
-    /// Whether this is an EXTENSION (has a receiver of any kind — class or type parameter) vs a true
-    /// top-level function. Lets the classpath ext index avoid mis-indexing a top-level generic as an
-    /// extension on its first parameter's type.
-    pub is_extension: bool,
     /// The Kotlin return-type class name (`kotlin/UInt` for `UInt.coerceAtMost`), if it is a class type.
     pub ret_class: Option<TypeName>,
-    /// Whether the Kotlin return type is nullable (`T?`) — `Type.nullable`. The JVM descriptor/`Signature`
-    /// erase this; only `@Metadata` carries it. Drives the elvis null-check for a nullable-returning scope
-    /// fn (`takeIf`/`takeUnless` return `T?`).
-    pub ret_nullable: bool,
     /// SOURCE value parameters in declaration order. The LENGTH is the source arity: it excludes
     /// synthetic JVM descriptor params such as suspend `Continuation` or Compose `Composer`/masks.
     pub value_params: Vec<MetaValueParam>,
@@ -1135,25 +1241,46 @@ pub struct MetaFn {
 }
 
 impl MetaFn {
+    #[inline]
+    pub fn is_public(&self) -> bool {
+        self.flags.has(MfnFlags::IS_PUBLIC)
+    }
+    #[inline]
+    pub fn is_inline(&self) -> bool {
+        self.flags.has(MfnFlags::IS_INLINE)
+    }
+    #[inline]
+    pub fn is_suspend(&self) -> bool {
+        self.flags.has(MfnFlags::IS_SUSPEND)
+    }
+    #[inline]
+    pub fn is_extension(&self) -> bool {
+        self.flags.has(MfnFlags::IS_EXTENSION)
+    }
+    #[inline]
+    pub fn ret_nullable(&self) -> bool {
+        self.flags.has(MfnFlags::RET_NULLABLE)
+    }
+
     pub fn member_call_sig(&self) -> CallSig {
         CallSig::metadata_member(
             self.value_params.len(),
             self.value_params.iter().map(|p| p.name.clone()).collect(),
-            self.value_params.iter().map(|p| p.has_default).collect(),
+            self.value_params.iter().map(|p| p.has_default()).collect(),
             self.last_param_vararg(),
         )
     }
 
     /// Only the LAST value parameter can be `vararg` in Kotlin.
     pub fn last_param_vararg(&self) -> bool {
-        self.value_params.last().is_some_and(|p| p.vararg)
+        self.value_params.last().is_some_and(|p| p.vararg())
     }
 
     pub fn extension_call_sig(&self) -> CallSig {
         CallSig::metadata_extension(
             self.value_params.len() + 1,
             self.value_params.iter().map(|p| p.name.clone()).collect(),
-            self.value_params.iter().map(|p| p.has_default).collect(),
+            self.value_params.iter().map(|p| p.has_default()).collect(),
             self.last_param_vararg(),
         )
     }
@@ -1392,10 +1519,11 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64) -> Vec<MetaFn> {
                                 // Param names are plain string-table entries (like the JVM name/desc), not class names.
                                 name: resolve_string(records, d2, p.name_id as usize)
                                     .unwrap_or_default(),
-                                has_default: p.has_default,
-                                materialized: p.materialized,
-                                vararg: p.vararg_elem_body.is_some(),
-                                recv_fun,
+                                flags: MvpFlags::default()
+                                    .with_has_default(p.has_default)
+                                    .with_materialized(p.materialized)
+                                    .with_vararg(p.vararg_elem_body.is_some())
+                                    .with_recv_fun(recv_fun),
                                 recv_fun_receiver: if recv_fun {
                                     p.recv_fun
                                         .1
@@ -1416,13 +1544,14 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64) -> Vec<MetaFn> {
                         kotlin_name,
                         jvm_name,
                         jvm_desc: jvm_desc.map(|s| intern(&s)),
-                        is_public: pf.is_public,
-                        is_inline: pf.is_inline,
-                        is_suspend: pf.is_suspend,
+                        flags: MfnFlags::default()
+                            .with_is_public(pf.is_public)
+                            .with_is_inline(pf.is_inline)
+                            .with_is_suspend(pf.is_suspend)
+                            .with_is_extension(pf.has_receiver)
+                            .with_ret_nullable(pf.ret_nullable),
                         receiver_class: receiver_class.map(|s| type_name(&s)),
-                        is_extension: pf.has_receiver,
                         ret_class: ret_class.map(|s| type_name(&s)),
-                        ret_nullable: pf.ret_nullable,
                         value_params,
                         generic_sig,
                     });

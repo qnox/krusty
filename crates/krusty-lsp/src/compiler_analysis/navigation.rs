@@ -236,7 +236,7 @@ impl DefinitionSymbols {
                             definitions
                                 .class_types
                                 .insert(class_symbols.internal_name(), target);
-                            if class_symbols.is_object {
+                            if class_symbols.is_object() {
                                 definitions.object_owners.insert(owner.clone());
                             }
                             let mut parents = class_symbols
@@ -305,11 +305,11 @@ impl DefinitionSymbols {
                                             method: method_index as u32,
                                         }),
                                         target,
-                                        is_override: function.is_override,
+                                        is_override: function.is_override(),
                                         is_inheritable: function.visibility != Visibility::Private
                                             && (class.kind == ClassKind::Interface
-                                                || function.is_open
-                                                || function.is_abstract),
+                                                || function.is_open()
+                                                || function.is_abstract()),
                                     });
                             }
                         }
@@ -1435,7 +1435,7 @@ fn implementation_type(
     {
         return Some(ImplementationType {
             constructor: ImplementationTypeConstructor::MethodParameter(parameter as u32),
-            nullable: reference.nullable,
+            nullable: reference.nullable(),
             argument: None,
             arguments: Vec::new(),
             function_parameters: Vec::new(),
@@ -1449,7 +1449,7 @@ fn implementation_type(
         .position(|parameter| parameter == &reference.name)
     {
         let mut binding = current_bindings.get(parameter)?.clone();
-        binding.nullable |= reference.nullable;
+        binding.nullable |= reference.nullable();
         return Some(binding);
     }
     if !reference.fun_params.is_empty() || reference.name == "<fun>" {
@@ -1480,12 +1480,12 @@ fn implementation_type(
         };
         return Some(ImplementationType {
             constructor: ImplementationTypeConstructor::Function,
-            nullable: reference.nullable,
+            nullable: reference.nullable(),
             argument,
             arguments: Vec::new(),
             function_parameters,
-            function_has_receiver: reference.fun_has_receiver,
-            function_is_suspend: reference.fun_suspend,
+            function_has_receiver: reference.fun_has_receiver(),
+            function_is_suspend: reference.fun_suspend(),
         });
     }
     let named = if let Some(builtin) = Ty::from_name(&reference.name) {
@@ -1530,7 +1530,7 @@ fn implementation_type(
         .collect::<Option<Vec<_>>>()?;
     Some(ImplementationType {
         constructor: ImplementationTypeConstructor::Named(named),
-        nullable: reference.nullable,
+        nullable: reference.nullable(),
         argument,
         arguments,
         function_parameters: Vec::new(),
@@ -1600,23 +1600,31 @@ pub(crate) fn render_function_hover(
     source: &str,
 ) -> String {
     let visibility = render_visibility(function.visibility);
-    let modality = if function.is_override {
+    let modality = if function.is_override() {
         "override "
-    } else if function.is_abstract {
+    } else if function.is_abstract() {
         "abstract "
-    } else if function.is_open {
+    } else if function.is_open() {
         "open "
     } else {
         ""
     };
-    let tailrec = if function.is_tailrec { "tailrec " } else { "" };
-    let inline = if function.is_inline { "inline " } else { "" };
-    let operator = if function.is_operator {
+    let tailrec = if function.is_tailrec() {
+        "tailrec "
+    } else {
+        ""
+    };
+    let inline = if function.is_inline() { "inline " } else { "" };
+    let operator = if function.is_operator() {
         "operator "
     } else {
         ""
     };
-    let suspend = if function.is_suspend { "suspend " } else { "" };
+    let suspend = if function.is_suspend() {
+        "suspend "
+    } else {
+        ""
+    };
     let type_parameters = render_type_parameters(
         &function.type_params,
         &function.type_param_bounds,
