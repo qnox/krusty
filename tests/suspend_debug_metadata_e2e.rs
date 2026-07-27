@@ -347,6 +347,56 @@ fn continuation_metadata_uses_nested_branch_resume_line() {
 }
 
 #[test]
+fn continuation_metadata_uses_returned_expression_end_line() {
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(javap) = javap_path() else {
+        return;
+    };
+
+    let source = "package demo\n\
+        suspend fun leaf(value: Int): Int = value\n\
+        suspend fun choose(flag: Boolean): Int {\n\
+        \x20 return if (flag) {\n\
+        \x20\x20 leaf(1)\n\
+        \x20 } else {\n\
+        \x20\x20 leaf(2)\n\
+        \x20 }\n\
+        }\n";
+    let classes = common::compile_in_process_files(
+        &[("ReturnedExpression", source)],
+        &[stdlib, jdk.clone()],
+        Some(&jdk),
+    )
+    .expect("compile returned expression continuation");
+    let bytes = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == "demo/ReturnedExpressionKt$choose$1").then_some(bytes))
+        .expect("choose continuation");
+    let text = disassemble(
+        &javap,
+        bytes,
+        "ReturnedExpressionKt$choose$1.class",
+        "returned_expression",
+    );
+    let annotation = text
+        .rsplit_once("RuntimeVisibleAnnotations:")
+        .map(|(_, annotation)| annotation)
+        .expect("runtime-visible annotations");
+
+    for expected in ["l=[5,7]", "nl=[8,8]"] {
+        assert!(
+            annotation.contains(expected),
+            "missing {expected:?}:\n{text}"
+        );
+    }
+}
+
+#[test]
 fn continuation_metadata_keeps_names_with_each_scope_snapshot() {
     let Some(jdk) = common::jdk_modules() else {
         return;
