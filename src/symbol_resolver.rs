@@ -24,7 +24,7 @@ pub struct LambdaCallShape {
     pub materialized: Option<Vec<bool>>,
 }
 
-type GSigBinds = std::collections::HashMap<String, Ty>;
+pub(crate) type GSigBinds = std::collections::HashMap<String, Ty>;
 
 /// [`crate::assignable::TypeOracle`] over a federated [`SymbolSource`] (module ∪ classpath): the class
 /// hierarchy walk the one assignability relation needs. Kotlin-name supertypes, no JVM canonicalization —
@@ -258,6 +258,38 @@ fn unify_inferred_ty(sig: Ty, actual: Ty, binds: &mut GSigBinds) {
         Ty::Nullable(inner) => unify_inferred_ty(*inner, actual.non_null(), binds),
         _ => {}
     }
+}
+
+pub(crate) fn infer_generic_bindings(
+    generic_sig: &GenericSig,
+    actuals: impl IntoIterator<Item = (usize, Ty)>,
+) -> GSigBinds {
+    let mut binds = GSigBinds::new();
+    for (parameter, actual) in actuals {
+        if let Some(&shape) = generic_sig.params.get(parameter) {
+            unify_inferred_ty(shape, actual, &mut binds);
+        }
+    }
+    binds
+}
+
+pub(crate) fn generic_bindings_satisfy_bounds(
+    generic_sig: &GenericSig,
+    bindings: &GSigBinds,
+    mut admits: impl FnMut(Ty, Ty) -> bool,
+) -> bool {
+    generic_sig
+        .formals
+        .iter()
+        .zip(&generic_sig.formal_bounds)
+        .all(|(formal, bounds)| {
+            let Some(actual) = bindings.get(formal).copied() else {
+                return true;
+            };
+            bounds
+                .iter()
+                .all(|bound| admits(actual, ty_subst(*bound, bindings)))
+        })
 }
 
 /// A JVM method signature may reference owner type parameters without declaring them. Recover those
@@ -3373,25 +3405,16 @@ fn generic_bounds_admit(
     for (&parameter, &argument) in gsig.params.iter().zip(args) {
         unify_ty(parameter, argument, &mut binds);
     }
-    gsig.formals
-        .iter()
-        .zip(&gsig.formal_bounds)
-        .all(|(formal, bounds)| {
-            let Some(actual) = binds.get(formal).copied() else {
-                return true;
-            };
-            bounds.iter().all(|bound| {
-                let bound = ty_subst(*bound, &binds);
-                actual == bound
-                    || crate::assignable::is_assignable(
-                        &crate::assignable::TyCtx::new(),
-                        &SourceOracle(src),
-                        actual,
-                        bound,
-                    )
-                    || platform_arg_assignable(lib, &bound, &actual)
-            })
-        })
+    generic_bindings_satisfy_bounds(gsig, &binds, |actual, bound| {
+        actual == bound
+            || crate::assignable::is_assignable(
+                &crate::assignable::TyCtx::new(),
+                &SourceOracle(src),
+                actual,
+                bound,
+            )
+            || platform_arg_assignable(lib, &bound, &actual)
+    })
 }
 
 /// LOGICAL value parameters of an overload — what a call site's arguments are matched against, with the
