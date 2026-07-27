@@ -1100,6 +1100,7 @@ impl FnParamInfo {
 #[derive(Default)]
 pub struct IrFile {
     pub package: Option<String>,
+    pub source_line_count: u32,
     pub functions: Vec<IrFunction>,
     pub classes: Vec<IrClass>,
     /// Top-level properties — static fields on the facade, initialized in `<clinit>` in order.

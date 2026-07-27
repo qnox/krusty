@@ -182,6 +182,7 @@ pub fn lower_file_at_reporting(
         inline_lambda_ret: Vec::new(),
         fn_body_tail: None,
     };
+    lo.ir.source_line_count = file.source_line_count;
 
     // Pre-scan every `object`'s `const val`s so a read inlines the literal (like a top-level const),
     // removing the init-ordering hazard that would otherwise gate the object out. Only literal-valued
