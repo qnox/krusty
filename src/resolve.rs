@@ -6499,6 +6499,7 @@ pub struct ResolvedLocalFunctionCall {
     pub sig: Signature,
     pub provided_arg_count: usize,
     pub context_args: Vec<String>,
+    pub receiver: Option<ExprId>,
 }
 
 #[derive(Clone, Debug)]
@@ -6852,20 +6853,22 @@ pub enum ExprLowering {
     /// literal on a value expression (`x::class`, `this::class`) — lowers to `expr.getClass()`. krusty
     /// models the result as `java/lang/Class` (its identity makes `==` agree with kotlinc's `KClass`).
     ClassLiteral { unbound: Option<Ty> },
-    /// Member-syntax invoke of a RECEIVER-function-typed value in lexical scope: `b.f()` / `b?.f()`
-    /// where `f: Bar.() -> R` is a local/parameter and `Bar` has no member `f`. The receiver becomes
-    /// the function value's folded-first argument: lowering reads the local `name` and emits
-    /// `InvokeFunction(f, [recv, args…])`. `params` is the FULL folded parameter list (receiver
-    /// first), `ret` the function type's return.
+    /// Invocation of a receiver-function value selected after ordinary member resolution.
     ReceiverFnInvoke {
         name: String,
         params: Vec<Ty>,
         ret: Ty,
-        /// The function type is `suspend Bar.() -> R`: the invoke is a suspension point — lowering
-        /// records it in `suspend_calls` so the coroutine pass threads the continuation
-        /// (`Function{N+1}.invoke`) and parks on COROUTINE_SUSPENDED.
+        origin: ReceiverFnValueOrigin,
+        implicit_receiver: Option<Ty>,
         suspend: bool,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReceiverFnValueOrigin {
+    Local,
+    DispatchProperty(TypeName),
+    TopLevelProperty,
 }
 
 /// How a selected [`ExprLowering::Invoke`] is realized: the receiver is either a function value or an
@@ -6896,6 +6899,7 @@ pub struct LocalFunInfo {
     /// Enclosing locals captured by the lifted function, ordered by name. A capture with `shared_cell`
     /// true must observe the same mutable cell as the enclosing scope; otherwise it is passed by value.
     pub captures: Vec<LocalCapture>,
+    pub receiver: Option<Ty>,
 }
 
 #[derive(Clone, Debug)]
@@ -6985,10 +6989,19 @@ impl TypeInfo {
 struct Local {
     ty: Ty,
     is_var: bool,
+    origin: ReceiverFnValueOrigin,
     /// A flow-narrowed READ type for a `var` that was assigned a non-null value (`var x: Int?; x = 10`
     /// smart-casts subsequent reads to `Int`). Separate from the declared `ty`, which still governs
     /// what may be ASSIGNED (a later `x = null` stays legal). `None` = read as the declared type.
     narrowed: Option<Ty>,
+}
+
+#[derive(Clone)]
+struct ScopedProperty {
+    name: String,
+    ty: Ty,
+    is_var: bool,
+    owner: TypeName,
 }
 
 /// The packages in scope for an unqualified TOP-LEVEL / extension function call in `file`: the leveled
@@ -7474,26 +7487,22 @@ fn check_file_at_impl(
                     }
                 }
                 c.tparams = TParams::erased(&tparam_names);
-                // Member functions are checked with the class's properties (resolved in Stage C)
-                // visible as an implicit `this` scope.
-                let mut props = syms
-                    .classes
-                    .get(&cl.name)
-                    .map(|s| s.props.clone())
-                    .unwrap_or_default();
-                // An inner class's methods can read the enclosing instance's properties (via `this$0`);
-                // make the outer class's backing-field properties resolvable as implicit-`this` members.
-                if let Some(os) = cl.inner_of.as_deref().and_then(|outer| {
-                    syms.classes.get(outer).or_else(|| {
-                        existing_type_name(outer).and_then(|o| syms.class_by_type_name(o))
+                let current_owner = syms.classes.get(&cl.name).map(ClassSig::internal_name);
+                let mut props = cl
+                    .inner_of
+                    .as_deref()
+                    .and_then(|outer| {
+                        syms.classes
+                            .get(outer)
+                            .map(ClassSig::internal_name)
+                            .or_else(|| existing_type_name(outer))
                     })
-                }) {
-                    props.extend(os.props.clone());
+                    .map(|owner| c.scoped_properties(owner))
+                    .unwrap_or_default();
+                if let Some(owner) = current_owner {
+                    props.extend(c.scoped_properties(owner));
                 }
-                c.this_ty = syms
-                    .classes
-                    .get(&cl.name)
-                    .map(|s| Ty::obj_name(s.internal_name()));
+                c.this_ty = current_owner.map(Ty::obj_name);
                 // Push the enclosing-class labels for the duration of this class's member checks: the
                 // OUTER chain first (`this@Outer` for an `inner class`, resolved via `this$0`), then the
                 // class's own label (`this@C`) innermost. Walk `inner_of` outward.
@@ -7631,8 +7640,13 @@ fn check_file_at_impl(
                     let mut entry_props = props.clone();
                     if !entry.props.is_empty() {
                         c.push_scope();
-                        for (n, t, v) in &props {
-                            c.declare(n, *t, *v);
+                        for property in &props {
+                            c.declare_dispatch_property(
+                                &property.name,
+                                property.ty,
+                                property.is_var,
+                                property.owner,
+                            );
                         }
                         for bp in &entry.props {
                             let ty = match (&bp.ty, bp.init) {
@@ -7646,8 +7660,14 @@ fn check_file_at_impl(
                                 let sp = c.value_diagnostic_span(init, it);
                                 c.expect_assignable(declared, it, sp, "property initializer");
                             }
-                            c.declare(&bp.name, ty, bp.is_var);
-                            entry_props.push((bp.name.clone(), ty, bp.is_var));
+                            let owner = current_owner.expect("enum class must have a source owner");
+                            c.declare_dispatch_property(&bp.name, ty, bp.is_var, owner);
+                            entry_props.push(ScopedProperty {
+                                name: bp.name.clone(),
+                                ty,
+                                is_var: bp.is_var,
+                                owner,
+                            });
                         }
                         c.pop_scope();
                     }
@@ -7679,8 +7699,13 @@ fn check_file_at_impl(
                     .collect();
                 for sc in &cl.secondary_ctors {
                     c.push_scope();
-                    for (n, t, is_var) in &props {
-                        c.declare(n, *t, *is_var || sc_deferred_val.contains(n.as_str()));
+                    for property in &props {
+                        c.declare_dispatch_property(
+                            &property.name,
+                            property.ty,
+                            property.is_var || sc_deferred_val.contains(property.name.as_str()),
+                            property.owner,
+                        );
                     }
                     for p in &sc.params {
                         let ty = c.resolve_ty(&p.ty);
@@ -7767,8 +7792,13 @@ fn check_file_at_impl(
                     .map(|bp| bp.name.as_str())
                     .collect();
                 c.push_scope();
-                for (n, t, is_var) in &props {
-                    c.declare(n, *t, *is_var || deferred_val.contains(n.as_str()));
+                for property in &props {
+                    c.declare_dispatch_property(
+                        &property.name,
+                        property.ty,
+                        property.is_var || deferred_val.contains(property.name.as_str()),
+                        property.owner,
+                    );
                 }
                 for p in &cl.props {
                     let ty = c.resolve_ty(&p.ty);
@@ -7852,7 +7882,7 @@ fn check_file_at_impl(
                     let hidden_dispatch_bindings = if extension_receiver.is_some() {
                         let names = props
                             .iter()
-                            .map(|(name, _, _)| name.clone())
+                            .map(|property| property.name.clone())
                             .chain(cl.props.iter().map(|property| property.name.clone()))
                             .collect::<Vec<_>>();
                         let scope = c.scopes.last_mut().expect("class body scope");
@@ -8322,6 +8352,7 @@ struct MemberExtensionFunctionCandidate {
     ret: Ty,
     physical_ret: Ty,
     call_sig: crate::libraries::CallSig,
+    argument_parameters: Vec<(usize, usize)>,
     visibility: Visibility,
     owner: TypeName,
 }
@@ -9829,6 +9860,7 @@ impl<'a> Checker<'a> {
         sig: Signature,
         provided_arg_count: usize,
         context_args: Vec<String>,
+        receiver: Option<ExprId>,
     ) {
         self.resolved_calls.insert(
             call,
@@ -9837,6 +9869,7 @@ impl<'a> Checker<'a> {
                 sig,
                 provided_arg_count,
                 context_args,
+                receiver,
             })),
         );
     }
@@ -10386,15 +10419,140 @@ impl<'a> Checker<'a> {
         refs + calls
     }
     fn declare(&mut self, name: &str, ty: Ty, is_var: bool) {
+        self.declare_with_origin(name, ty, is_var, ReceiverFnValueOrigin::Local);
+    }
+
+    fn declare_dispatch_property(&mut self, name: &str, ty: Ty, is_var: bool, owner: TypeName) {
+        self.declare_with_origin(
+            name,
+            ty,
+            is_var,
+            ReceiverFnValueOrigin::DispatchProperty(owner),
+        );
+    }
+
+    fn declare_with_origin(
+        &mut self,
+        name: &str,
+        ty: Ty,
+        is_var: bool,
+        origin: ReceiverFnValueOrigin,
+    ) {
         self.scopes.last_mut().unwrap().insert(
             name.to_string(),
             Local {
                 ty,
                 is_var,
+                origin,
                 narrowed: None,
             },
         );
     }
+
+    fn scoped_properties(&self, owner: TypeName) -> Vec<ScopedProperty> {
+        fn collect(
+            syms: &SymbolTable,
+            owner: TypeName,
+            seen: &mut std::collections::HashSet<TypeName>,
+            properties: &mut Vec<ScopedProperty>,
+        ) {
+            if !seen.insert(owner) {
+                return;
+            }
+            let Some(class) = syms.class_by_type_name(owner) else {
+                return;
+            };
+            if let Some(parent) = class.super_internal_name() {
+                collect(syms, parent, seen, properties);
+            }
+            for interface in class.interfaces.iter() {
+                collect(syms, interface, seen, properties);
+            }
+            properties.extend(class.declared_props.iter().filter_map(|(name, property)| {
+                property.context_params.is_empty().then(|| ScopedProperty {
+                    name: name.clone(),
+                    ty: property.ty,
+                    is_var: property.setter_name.is_some(),
+                    owner,
+                })
+            }));
+        }
+
+        let mut properties = Vec::new();
+        collect(
+            self.syms,
+            owner,
+            &mut std::collections::HashSet::new(),
+            &mut properties,
+        );
+        properties
+    }
+
+    fn receiver_function_value(
+        &self,
+        name: &str,
+    ) -> Option<(&'static crate::types::FnSig, ReceiverFnValueOrigin)> {
+        if let Some(local) = self.lookup(name) {
+            return match local.narrowed.unwrap_or(local.ty) {
+                Ty::Fun(signature) if signature.has_receiver => Some((signature, local.origin)),
+                _ => None,
+            };
+        }
+        for receiver in self.implicit_receiver_types() {
+            let Some(owner) = receiver.obj_internal() else {
+                continue;
+            };
+            if let Some(property) = self
+                .scoped_properties(owner)
+                .into_iter()
+                .rev()
+                .find(|property| property.name == name)
+            {
+                return match property.ty {
+                    Ty::Fun(signature) if signature.has_receiver => Some((
+                        signature,
+                        ReceiverFnValueOrigin::DispatchProperty(property.owner),
+                    )),
+                    _ => None,
+                };
+            }
+        }
+        match self.syms.props.get(name).map(|(ty, _, _)| *ty) {
+            Some(Ty::Fun(signature)) if signature.has_receiver => {
+                Some((signature, ReceiverFnValueOrigin::TopLevelProperty))
+            }
+            _ => None,
+        }
+    }
+
+    fn receiver_function_parts(
+        signature: &'static crate::types::FnSig,
+    ) -> Option<(Ty, &'static [Ty])> {
+        if !signature.has_receiver || signature.context_count != 0 {
+            return None;
+        }
+        let (&receiver, params) = signature.params.split_first()?;
+        Some((receiver, params))
+    }
+
+    fn receiver_is_assignable(&self, actual: Ty, expected: Ty) -> bool {
+        crate::assignable::is_assignable(&crate::assignable::TyCtx::new(), self, actual, expected)
+    }
+
+    fn receiver_function_implicit_receiver(
+        &self,
+        expected: Ty,
+        value_parameter_count: usize,
+        actual_argument_count: usize,
+    ) -> Option<Ty> {
+        if value_parameter_count != actual_argument_count {
+            return None;
+        }
+        self.implicit_receiver_types()
+            .into_iter()
+            .find(|&actual| self.receiver_is_assignable(actual, expected))
+    }
+
     fn lookup(&self, name: &str) -> Option<&Local> {
         self.scopes.iter().rev().find_map(|s| s.get(name))
     }
@@ -11487,7 +11645,7 @@ impl<'a> Checker<'a> {
 
     /// Check an instance method: the class properties are visible (implicit `this`), then the
     /// method's own parameters shadow them.
-    fn check_method(&mut self, f: &FunDecl, props: &[(String, Ty, bool)]) {
+    fn check_method(&mut self, f: &FunDecl, props: &[ScopedProperty]) {
         self.fn_reassigned.clear();
         self.fn_closure_reassigned.clear();
         if let FunBody::Expr(b) | FunBody::Block(b) = &f.body {
@@ -11551,8 +11709,13 @@ impl<'a> Checker<'a> {
         self.push_local_funs();
         self.push_scope(); // implicit-this scope (properties)
         if f.receiver.is_none() {
-            for (n, t, is_var) in props {
-                self.declare(n, *t, *is_var);
+            for property in props {
+                self.declare_dispatch_property(
+                    &property.name,
+                    property.ty,
+                    property.is_var,
+                    property.owner,
+                );
             }
         }
         self.push_scope(); // parameter scope
@@ -13748,33 +13911,27 @@ impl<'a> Checker<'a> {
                 } else {
                     result
                 };
-                // A RECEIVER-function-typed value in scope reached by `?.` (`b?.f()` where
-                // `f: Bar.() -> R` is a local/parameter — `(x as? Bar)?.bar()`): no member or
-                // extension matched above; resolve `f` lexically with the NON-NULL receiver as the
-                // folded-first argument, mirroring the plain `b.f()` member-call path. A `suspend`
-                // value is a suspension point the lowerer records for the coroutine pass.
                 let result = if result == Ty::Error {
                     let arg_tys = args.as_deref().map_or_else(Vec::new, |a| self.arg_tys(a));
-                    self.lookup(&name)
-                        .and_then(|l| match l.narrowed.unwrap_or(l.ty) {
-                            Ty::Fun(sig) => Some(sig),
-                            _ => None,
-                        })
-                        .and_then(|sig| {
-                            let (&first, rest) = sig.params.split_first()?;
-                            (rest.len() == arg_tys.len()
-                                && arg_assignable_simple(first, rt.non_null()))
+                    self.receiver_function_value(&name)
+                        .and_then(|(signature, origin)| {
+                            let (expected_receiver, params) =
+                                Self::receiver_function_parts(signature)?;
+                            (params.len() == arg_tys.len()
+                                && self.receiver_is_assignable(rt.non_null(), expected_receiver))
                             .then(|| {
                                 self.expr_lowers.insert(
                                     e,
                                     ExprLowering::ReceiverFnInvoke {
                                         name: name.clone(),
-                                        params: sig.params.clone(),
-                                        ret: sig.ret,
-                                        suspend: sig.suspend,
+                                        params: signature.params.clone(),
+                                        ret: signature.ret,
+                                        origin,
+                                        implicit_receiver: None,
+                                        suspend: signature.suspend,
                                     },
                                 );
-                                sig.ret
+                                signature.ret
                             })
                         })
                         .unwrap_or(Ty::Error)
@@ -15310,14 +15467,14 @@ impl<'a> Checker<'a> {
 
     fn check_with_receiver_body(&mut self, recv: Ty, body: ExprId) -> Ty {
         self.push_scope();
-        // A user class receiver's own properties are visible unqualified inside the body; for builtin
-        // and library receivers (`String`, `StringBuilder`, …) a bare member resolves through the
-        // implicit-`this` member probe in the `Expr::Name`/call arms instead.
-        if let Ty::Obj(internal, _) = recv {
-            if let Some(cs) = self.syms.class_by_type_name(internal) {
-                for (n, t, is_var) in cs.props.clone() {
-                    self.declare(&n, t, is_var);
-                }
+        if let Some(internal) = recv.obj_internal() {
+            for property in self.scoped_properties(internal) {
+                self.declare_dispatch_property(
+                    &property.name,
+                    property.ty,
+                    property.is_var,
+                    property.owner,
+                );
             }
         }
         let bt = self.expr(body);
@@ -16312,12 +16469,15 @@ impl<'a> Checker<'a> {
             }
             self.push_scope();
             for receiver in implicit_types.iter().rev() {
-                if let Ty::Obj(internal, _) = receiver {
-                    if let Some(cs) = self.syms.class_by_type_name(*internal) {
-                        for (n, t, is_var) in cs.props.clone() {
-                            if self.lookup(&n).is_none() {
-                                self.declare(&n, t, is_var);
-                            }
+                if let Some(internal) = receiver.obj_internal() {
+                    for property in self.scoped_properties(internal) {
+                        if self.lookup(&property.name).is_none() {
+                            self.declare_dispatch_property(
+                                &property.name,
+                                property.ty,
+                                property.is_var,
+                                property.owner,
+                            );
                         }
                     }
                 }
@@ -17014,6 +17174,22 @@ impl<'a> Checker<'a> {
         shapes
     }
 
+    fn unit_coerced_lambda_type(&self, argument: ExprId, expected: Ty, actual: Ty) -> Option<Ty> {
+        if !matches!(self.file.expr(argument), Expr::Lambda { .. }) {
+            return None;
+        }
+        let (Ty::Fun(expected), Ty::Fun(actual)) = (expected, actual) else {
+            return None;
+        };
+        (expected.ret == Ty::Unit
+            && !matches!(actual.ret, Ty::Unit | Ty::Nothing | Ty::Error)
+            && expected.params == actual.params
+            && expected.context_count == actual.context_count
+            && expected.has_receiver == actual.has_receiver
+            && expected.suspend == actual.suspend)
+            .then_some(Ty::Fun(expected))
+    }
+
     fn instantiate_member_extension(
         &self,
         shape: &MemberExtensionFunctionShape,
@@ -17112,6 +17288,18 @@ impl<'a> Checker<'a> {
             let last = applicability_params.last_mut()?;
             *last = Ty::array(*last);
         }
+        let mut applicability_arg_tys = partial_arg_tys.to_vec();
+        for &(parameter, source) in &argument_parameters {
+            let (Some(&expected), Some(Some(actual))) = (
+                logical_params.get(parameter),
+                applicability_arg_tys.get(source).copied(),
+            ) else {
+                continue;
+            };
+            if let Some(coerced) = self.unit_coerced_lambda_type(args[source], expected, actual) {
+                applicability_arg_tys[source] = Some(coerced);
+            }
+        }
         let mut member = crate::libraries::LibraryMember::new(
             name.to_string(),
             applicability_params,
@@ -17119,8 +17307,13 @@ impl<'a> Checker<'a> {
             String::new(),
         );
         member.call_sig = call_sig.clone();
-        let score =
-            self.module_member_candidate_score(&member, args, partial_arg_tys, arg_names, false)?;
+        let score = self.module_member_candidate_score(
+            &member,
+            args,
+            &applicability_arg_tys,
+            arg_names,
+            false,
+        )?;
         let ret = function.ret.as_ref().map_or_else(
             || crate::symbol_resolver::ty_subst(function.signature.ret, &bindings),
             |reference| {
@@ -17243,6 +17436,7 @@ impl<'a> Checker<'a> {
                 ret: instantiated.ret,
                 physical_ret: shape.function.signature.ret,
                 call_sig: instantiated.call_sig,
+                argument_parameters: instantiated.argument_parameters,
                 visibility: shape.function.signature.visibility,
                 owner: shape.owner,
             });
@@ -17291,6 +17485,18 @@ impl<'a> Checker<'a> {
             &explicit_type_args,
         ) {
             Ok(Some(candidate)) => {
+                for &(parameter, source) in &candidate.argument_parameters {
+                    let (Some(&expected), Some(&actual)) =
+                        (candidate.params.get(parameter), arg_tys.get(source))
+                    else {
+                        continue;
+                    };
+                    if let Some(coerced) =
+                        self.unit_coerced_lambda_type(args[source], expected, actual)
+                    {
+                        self.set(args[source], coerced);
+                    }
+                }
                 if candidate.visibility != Visibility::Public {
                     self.reject_if_inaccessible(
                         candidate.visibility,
@@ -19911,32 +20117,85 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
-                // Member-syntax invoke of a RECEIVER-function-typed value in scope: `b.f()` where
-                // `f: Bar.() -> R` is a local/parameter and `Bar` has no member `f`. Kotlin then
-                // resolves `f` lexically; the receiver becomes the function value's folded-first
-                // argument. A `suspend Bar.() -> R` value is a suspension point — the lowerer
-                // records it so the coroutine pass threads the continuation.
-                if let Some(sig) =
-                    self.lookup(&name)
-                        .and_then(|l| match l.narrowed.unwrap_or(l.ty) {
-                            Ty::Fun(sig) => Some(sig),
-                            _ => None,
-                        })
-                {
-                    if let Some((&first, rest)) = sig.params.split_first() {
-                        if rest.len() == arg_tys.len() && arg_assignable_simple(first, rt) {
-                            let rest = rest.to_vec();
-                            self.expect_call_args(&rest, false, args, &arg_tys);
+                let local_extensions = self
+                    .lookup_local_fun_overloads(&name)
+                    .map(<[_]>::to_vec)
+                    .unwrap_or_default();
+                let mut applicable_local_extensions = Vec::new();
+                for (stmt_id, signature) in local_extensions {
+                    let Stmt::LocalFun(function) = self.file.stmt(stmt_id) else {
+                        continue;
+                    };
+                    let Some(receiver_ref) = function.receiver.as_ref() else {
+                        continue;
+                    };
+                    let expected_receiver = self.resolve_ty(receiver_ref);
+                    if !self.receiver_is_assignable(rt, expected_receiver)
+                        || signature.context_count != 0
+                        || signature.vararg
+                    {
+                        continue;
+                    }
+                    if let Some(score) = local_function_candidate_score(
+                        &signature,
+                        args,
+                        &arg_tys,
+                        arg_names.as_deref(),
+                    ) {
+                        applicable_local_extensions.push((score, stmt_id, signature));
+                    }
+                }
+                if !applicable_local_extensions.is_empty() {
+                    let best = applicable_local_extensions
+                        .iter()
+                        .map(|(score, _, _)| *score)
+                        .max();
+                    let mut selected = applicable_local_extensions
+                        .into_iter()
+                        .filter(|(score, _, _)| Some(*score) == best);
+                    match (selected.next(), selected.next()) {
+                        (Some((_, stmt_id, signature)), None) => {
+                            self.expect_call_args(&signature.params, false, args, &arg_tys);
+                            let ret = signature.ret;
+                            self.mark_local_function_call(
+                                call,
+                                stmt_id,
+                                signature,
+                                args.len(),
+                                Vec::new(),
+                                Some(receiver),
+                            );
+                            return ret;
+                        }
+                        _ => {
+                            self.diags.error(
+                                span,
+                                "none of the following candidates is applicable:".to_string(),
+                            );
+                            return Ty::Error;
+                        }
+                    }
+                }
+                if let Some((signature, origin)) = self.receiver_function_value(&name) {
+                    if let Some((expected_receiver, params)) =
+                        Self::receiver_function_parts(signature)
+                    {
+                        if params.len() == arg_tys.len()
+                            && self.receiver_is_assignable(rt, expected_receiver)
+                        {
+                            self.expect_call_args(params, false, args, &arg_tys);
                             self.expr_lowers.insert(
                                 call,
                                 ExprLowering::ReceiverFnInvoke {
                                     name: name.clone(),
-                                    params: sig.params.clone(),
-                                    ret: sig.ret,
-                                    suspend: sig.suspend,
+                                    params: signature.params.clone(),
+                                    ret: signature.ret,
+                                    origin,
+                                    implicit_receiver: None,
+                                    suspend: signature.suspend,
                                 },
                             );
-                            return sig.ret;
+                            return signature.ret;
                         }
                     }
                 }
@@ -19978,28 +20237,66 @@ impl<'a> Checker<'a> {
             }
             // free function call: name(args)
             Expr::Name(fname) => {
-                // Calling a local of function type (`val f: () -> String = …; f()`) or one carrying a
-                // member `operator fun invoke` — both go through the one invoke convention.
-                let local_value_ty = self.lookup(&fname).map(|local| local.ty);
-                if let Some(receiver_ty) = local_value_ty {
+                let local_value = self.lookup(&fname).map(|local| (local.ty, local.origin));
+                let local_value_ty = local_value.map(|(ty, _)| ty);
+                if let Some((receiver_ty, origin)) = local_value {
                     let arg_tys = self.arg_tys(args);
-                    if let Some(ret) =
-                        self.record_invoke(call, callee, receiver_ty, args, &arg_tys, span)
+                    if origin == ReceiverFnValueOrigin::Local {
+                        if let Some((signature, origin)) = self.receiver_function_value(&fname) {
+                            if let Some((expected_receiver, params)) =
+                                Self::receiver_function_parts(signature)
+                            {
+                                if let Some(implicit_receiver) = self
+                                    .receiver_function_implicit_receiver(
+                                        expected_receiver,
+                                        params.len(),
+                                        arg_tys.len(),
+                                    )
+                                {
+                                    self.expect_call_args(params, false, args, &arg_tys);
+                                    self.expr_lowers.insert(
+                                        call,
+                                        ExprLowering::ReceiverFnInvoke {
+                                            name: fname.clone(),
+                                            params: signature.params.clone(),
+                                            ret: signature.ret,
+                                            origin,
+                                            implicit_receiver: Some(implicit_receiver),
+                                            suspend: signature.suspend,
+                                        },
+                                    );
+                                    return signature.ret;
+                                }
+                            }
+                        }
+                    }
+                    if origin == ReceiverFnValueOrigin::Local
+                        || !matches!(receiver_ty, Ty::Fun(signature) if signature.has_receiver)
                     {
-                        return ret;
+                        if let Some(ret) =
+                            self.record_invoke(call, callee, receiver_ty, args, &arg_tys, span)
+                        {
+                            return ret;
+                        }
                     }
                 }
                 let local_overloads = self
                     .lookup_local_fun_overloads(&fname)
                     .map(<[_]>::to_vec)
                     .unwrap_or_default();
+                let receiver_function_value = local_value_ty
+                    .is_none()
+                    .then(|| self.receiver_function_value(&fname))
+                    .flatten();
                 let property_fun_ty = if local_value_ty.is_none() {
                     self.syms.props.get(&fname).map(|(ty, _, _)| *ty)
                 } else {
                     None
                 }
                 .filter(|ty| matches!(ty, Ty::Fun(_)));
-                let candidate_arg_tys = (property_fun_ty.is_some() || local_overloads.len() > 1)
+                let candidate_arg_tys = (property_fun_ty.is_some()
+                    || receiver_function_value.is_some()
+                    || local_overloads.len() > 1)
                     .then(|| self.arg_tys(args));
                 let applicable_local = candidate_arg_tys
                     .as_ref()
@@ -20026,11 +20323,41 @@ impl<'a> Checker<'a> {
                 // property bound to a function reference, `val x = ::foo`). Not a local (those are handled
                 // above) — read the property and `invoke` it; the backend reads the facade getter then
                 // calls `FunctionN.invoke`.
-                if let (Some(rt), Some(arg_tys)) = (property_fun_ty, candidate_arg_tys.as_ref()) {
+                if let Some(arg_tys) = candidate_arg_tys.as_ref() {
                     if applicable_local.is_empty() {
-                        if let Some(ret) = self.record_invoke(call, callee, rt, args, arg_tys, span)
-                        {
-                            return ret;
+                        if let Some((signature, origin)) = receiver_function_value {
+                            if let Some((expected_receiver, params)) =
+                                Self::receiver_function_parts(signature)
+                            {
+                                if let Some(implicit_receiver) = self
+                                    .receiver_function_implicit_receiver(
+                                        expected_receiver,
+                                        params.len(),
+                                        arg_tys.len(),
+                                    )
+                                {
+                                    self.expect_call_args(params, false, args, arg_tys);
+                                    self.expr_lowers.insert(
+                                        call,
+                                        ExprLowering::ReceiverFnInvoke {
+                                            name: fname.clone(),
+                                            params: signature.params.clone(),
+                                            ret: signature.ret,
+                                            origin,
+                                            implicit_receiver: Some(implicit_receiver),
+                                            suspend: signature.suspend,
+                                        },
+                                    );
+                                    return signature.ret;
+                                }
+                            }
+                        }
+                        if let Some(rt) = property_fun_ty {
+                            if let Some(ret) =
+                                self.record_invoke(call, callee, rt, args, arg_tys, span)
+                            {
+                                return ret;
+                            }
                         }
                     }
                 }
@@ -20211,6 +20538,7 @@ impl<'a> Checker<'a> {
                                 sig.clone(),
                                 args.len(),
                                 sources,
+                                None,
                             );
                             return sig.ret;
                         }
@@ -20280,6 +20608,7 @@ impl<'a> Checker<'a> {
                                 sig,
                                 args.len(),
                                 Vec::new(),
+                                None,
                             );
                             return ret;
                         }
@@ -20347,7 +20676,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                     let ret = sig.ret;
-                    self.mark_local_function_call(call, stmt_id, sig, args.len(), Vec::new());
+                    self.mark_local_function_call(call, stmt_id, sig, args.len(), Vec::new(), None);
                     return ret;
                 }
                 if let ("with", [receiver, lambda], false) =
@@ -21267,6 +21596,35 @@ impl<'a> Checker<'a> {
                 for rt in self.implicit_receiver_types() {
                     if let Some(ret) = self.this_member_call_ret(call, rt, &fname, &arg_tys, args) {
                         return ret;
+                    }
+                }
+                if let Some((signature, origin)) = self.receiver_function_value(&fname) {
+                    if matches!(origin, ReceiverFnValueOrigin::DispatchProperty(_)) {
+                        if let Some((expected_receiver, params)) =
+                            Self::receiver_function_parts(signature)
+                        {
+                            if let Some(implicit_receiver) = self
+                                .receiver_function_implicit_receiver(
+                                    expected_receiver,
+                                    params.len(),
+                                    arg_tys.len(),
+                                )
+                            {
+                                self.expect_call_args(params, false, args, &arg_tys);
+                                self.expr_lowers.insert(
+                                    call,
+                                    ExprLowering::ReceiverFnInvoke {
+                                        name: fname.clone(),
+                                        params: signature.params.clone(),
+                                        ret: signature.ret,
+                                        origin,
+                                        implicit_receiver: Some(implicit_receiver),
+                                        suspend: signature.suspend,
+                                    },
+                                );
+                                return signature.ret;
+                            }
+                        }
                     }
                 }
                 let shadowed_by_member = self.this_ty.is_some_and(|t| {
@@ -22942,6 +23300,10 @@ impl<'a> Checker<'a> {
                 }
             })
             .collect();
+        let receiver = f
+            .receiver
+            .as_ref()
+            .map(|receiver| self.resolve_ty(receiver));
 
         // Resolve return type: explicit annotation, else infer from expression body.
         let ret_ty = if let Some(r) = &f.ret {
@@ -22950,6 +23312,10 @@ impl<'a> Checker<'a> {
             match &f.body {
                 FunBody::Expr(e) => {
                     // Check expression in isolation to infer return type (before registering sig).
+                    let previous_this = self.this_ty;
+                    if receiver.is_some() {
+                        self.this_ty = receiver;
+                    }
                     self.push_local_funs();
                     self.push_scope();
                     for (p, &ty) in f.params.iter().zip(&params) {
@@ -22958,6 +23324,7 @@ impl<'a> Checker<'a> {
                     let inferred = self.expr(*e);
                     self.pop_scope();
                     self.pop_local_funs();
+                    self.this_ty = previous_this;
                     inferred
                 }
                 _ => Ty::Unit,
@@ -22996,11 +23363,16 @@ impl<'a> Checker<'a> {
                 mangled,
                 sig: sig.clone(),
                 captures,
+                receiver,
             })),
         );
 
         // Check the body (for a block body or when return type was already inferred above for expr).
         self.with_ret(ret_ty, |c| {
+            let previous_this = c.this_ty;
+            if receiver.is_some() {
+                c.this_ty = receiver;
+            }
             c.push_local_funs();
             c.push_scope();
             for (p, &ty) in f.params.iter().zip(&params) {
@@ -23019,6 +23391,7 @@ impl<'a> Checker<'a> {
             }
             c.pop_scope();
             c.pop_local_funs();
+            c.this_ty = previous_this;
         });
         for t in added_tparams {
             self.tparams.remove(&t);
