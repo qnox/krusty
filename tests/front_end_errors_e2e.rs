@@ -235,12 +235,19 @@ fn when_guard_form_used_as_expression_is_unit() {
 
 #[test]
 fn when_condition_not_comparable_to_subject() {
-    let d = diags("fun box(): Int { val x: Int = 1; return when (x) { \"s\" -> 1; else -> 0 } }");
-    assert_rejected(&d, "when condition not comparable to subject");
-    assert!(
-        d.iter().any(|m| m.contains("comparable")),
-        "expected 'comparable' in the message: {d:?}"
-    );
+    for source in [
+        "fun box(): Int { val x: Int = 1; return when (x) { \"s\" -> 1; else -> 0 } }",
+        "fun box(): Int { val x: Int? = 1; return when (x) { \"s\" -> 1; else -> 0 } }",
+    ] {
+        let diagnostics = diags(source);
+        assert_rejected(&diagnostics, "when condition not comparable to subject");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|message| message.contains("comparable")),
+            "expected 'comparable' in the message: {diagnostics:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
