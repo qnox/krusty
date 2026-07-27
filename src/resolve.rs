@@ -13159,9 +13159,6 @@ impl<'a> Checker<'a> {
                             // `it` as `Any`. `recv` restores parity with the non-safe call path.
                             let recv = rt.non_null();
                             let arg_tys = self.ext_arg_tys(e, recv, &name, a);
-                            let inline_arg_supported = !a
-                                .iter()
-                                .any(|x| matches!(self.file.expr(*x), Expr::CallableRef { .. }));
                             if let ("toString", []) = (name.as_str(), arg_tys.as_slice()) {
                                 Ty::String
                             } else if let ("hashCode", []) = (name.as_str(), arg_tys.as_slice()) {
@@ -13177,20 +13174,14 @@ impl<'a> Checker<'a> {
                                 ) {
                                     ret
                                 } else {
-                                    // A stdlib extension reached by `?.` on a `String` — resolve AND RECORD it
-                                    // (keyed by the safe-call `ExprId`) for the lowerer, admitting `@InlineOnly`.
-                                    inline_arg_supported
-                                        .then(|| {
-                                            self.record_library_extension_call(
-                                                Some(e),
-                                                &name,
-                                                rt.non_null(),
-                                                &arg_tys,
-                                                &[],
-                                            )
-                                        })
-                                        .flatten()
-                                        .unwrap_or(Ty::Error)
+                                    self.record_library_extension_call(
+                                        Some(e),
+                                        &name,
+                                        recv,
+                                        &arg_tys,
+                                        &[],
+                                    )
+                                    .unwrap_or(Ty::Error)
                                 }
                             } else if let Ty::Obj(internal, _) = recv {
                                 // A MODULE (user) class member only; a classpath / inherited-classpath
@@ -13266,17 +13257,13 @@ impl<'a> Checker<'a> {
                                     // lowerer's `lower_ext_call_on(e)` reads it instead of re-resolving. One
                                     // resolution admits `@InlineOnly` (`takeIf`) — no separate inline path.
                                     .or_else(|| {
-                                        inline_arg_supported
-                                            .then(|| {
-                                                self.record_library_extension_call(
-                                                    Some(e),
-                                                    &name,
-                                                    rt.non_null(),
-                                                    &arg_tys,
-                                                    &[],
-                                                )
-                                            })
-                                            .flatten()
+                                        self.record_library_extension_call(
+                                            Some(e),
+                                            &name,
+                                            recv,
+                                            &arg_tys,
+                                            &[],
+                                        )
                                     })
                                     .unwrap_or(Ty::Error)
                             } else {
@@ -13284,17 +13271,13 @@ impl<'a> Checker<'a> {
                                     e, recv, &name, a, &arg_tys,
                                 )
                                 .or_else(|| {
-                                    inline_arg_supported
-                                        .then(|| {
-                                            self.record_library_extension_call(
-                                                Some(e),
-                                                &name,
-                                                recv,
-                                                &arg_tys,
-                                                &[],
-                                            )
-                                        })
-                                        .flatten()
+                                    self.record_library_extension_call(
+                                        Some(e),
+                                        &name,
+                                        recv,
+                                        &arg_tys,
+                                        &[],
+                                    )
                                 })
                                 .unwrap_or(Ty::Error)
                             }

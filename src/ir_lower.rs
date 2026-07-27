@@ -20523,7 +20523,8 @@ impl<'a> Lower<'a> {
                             && !self.info.narrowed_this_member.contains_key(&e)
                             && self.lookup(&fname).is_none()
                             && !self.module_declares(&fname)
-                            && (self.info.resolved_member(e).is_some()
+                            && (self.info.resolved_module_member_signature(e).is_some()
+                                || self.info.resolved_member(e).is_some()
                                 || self.cur_class.as_ref().is_some_and(|cur| {
                                     self.resolve_method_name(*cur, &fname).is_some()
                                         || self
