@@ -10,12 +10,12 @@ use std::collections::HashMap;
 
 use crate::ast::{self, BinOp, Decl, Expr, ExprId as AstExprId, FunBody, Stmt, TemplatePart};
 use crate::frontend::{
-    qualified_path, typeref_leaf, ClassNames, CompoundAssignmentTarget, CtorDefaultValue,
-    DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, FrontendSymbols,
-    FrontendTypeInfo, InlineCall, InvokeKind, IteratorDispatchTarget, LambdaCapture, LambdaInfo,
-    ReceiverFnValueOrigin, ReceiverLambda, ResolvedCall, ResolvedConstructor,
-    ResolvedLocalFunctionCall, ResolvedMember, ResolvedModuleTopLevelCall, SigFlags, Signature,
-    StmtLowering,
+    classifier_over_default, qualified_path, typeref_leaf, ClassNames, CompoundAssignmentTarget,
+    CtorDefaultValue, DelegateGetValueTarget, DestructureComponentTarget, ExprLowering,
+    FrontendSymbols, FrontendTypeInfo, InlineCall, InvokeKind, IteratorDispatchTarget,
+    LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ReceiverLambda, ResolvedCall,
+    ResolvedConstructor, ResolvedLocalFunctionCall, ResolvedMember, ResolvedModuleTopLevelCall,
+    SigFlags, Signature, StmtLowering,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
@@ -14551,6 +14551,22 @@ impl<'a> Lower<'a> {
             || self.syms.libraries.resolve_type(internal).is_some()
     }
 
+    fn scoped_classifier_internal(&self, name: &str) -> Option<TypeName> {
+        self.resolve_qualified_nested(name)
+            .and_then(|internal| existing_type_name(&internal))
+            .or_else(|| {
+                self.syms
+                    .classes
+                    .get(name)
+                    .map(|class| class.internal_name())
+            })
+            .or_else(|| self.syms.class_names.get_class(name))
+    }
+
+    fn scoped_classifier_over_default(&self, name: &str) -> Option<TypeName> {
+        classifier_over_default(name, self.scoped_classifier_internal(name))
+    }
+
     /// Resolve a dotted nested type/qualifier (`Subject.User` → `lib/Subject$User`) — the
     /// lowerer's mirror of the checker's `resolve_qualified_nested`. The longest simple-name prefix that
     /// maps to a known internal names the outer type; remaining segments join with `$`. Existence is
@@ -14644,7 +14660,9 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        let t = if let Some(p) = Ty::from_name(&r.name) {
+        let t = if let Some(internal) = self.scoped_classifier_over_default(&r.name) {
+            Ty::obj_name(internal)
+        } else if let Some(p) = Ty::from_name(&r.name) {
             p
         } else if let Some(elem) = Ty::primitive_array_element(&r.name) {
             // `IntArray`/`CharArray`/… → the primitive array type (`int[]`/…), NOT a same-named classpath
@@ -15425,6 +15443,9 @@ impl<'a> Lower<'a> {
                 // type — otherwise the local is typed `Error` and e.g. `==` takes the wrong path.
                 // Resolve the declared type: a builtin, else a known file class (`A?` → reference
                 // `A`, not the `null` initializer's `Ty::Null`), else the checker's inferred type.
+                let shadowing_classifier = ty
+                    .as_ref()
+                    .and_then(|reference| self.scoped_classifier_over_default(&reference.name));
                 let kty = match ty.as_ref() {
                     // A declared function type (`val f: (C) -> Int`): use the annotation's `Ty::Fun`.
                     Some(r) if !r.fun_params.is_empty() || r.name == "<fun>" => {
@@ -15435,9 +15456,12 @@ impl<'a> Lower<'a> {
                     Some(r)
                         if r.nullable()
                             && Ty::from_name(&r.name).is_some_and(|t| !t.is_reference())
-                            && !self.contains_class(&class_internal(self.afile, &r.name)) =>
+                            && shadowing_classifier.is_none() =>
                     {
                         ty_of(self.afile, r, &*self.syms.libraries)
+                    }
+                    Some(_) if shadowing_classifier.is_some() => {
+                        Ty::obj_name(shadowing_classifier.unwrap())
                     }
                     Some(r) if Ty::from_name(&r.name).is_some() => Ty::from_name(&r.name).unwrap(),
                     Some(r) if self.contains_class(&class_internal(self.afile, &r.name)) => {
@@ -20235,10 +20259,14 @@ impl<'a> Lower<'a> {
                         Some(target) => target,
                         None => match self.cur_tparams.iter().find(|(n, _, _)| *n == ty.name) {
                             Some((name, bound, _)) => Ty::ty_param(name, *bound),
-                            None if ty.name != "Unit" => match Ty::from_name(&ty.name) {
-                                Some(p) if !p.is_reference() => p.nullable_boxed()?,
-                                _ => self.ty_ref(&ty)?,
-                            },
+                            None if ty.name != "Unit"
+                                && self.scoped_classifier_over_default(&ty.name).is_none() =>
+                            {
+                                match Ty::from_name(&ty.name) {
+                                    Some(p) if !p.is_reference() => p.nullable_boxed()?,
+                                    _ => self.ty_ref(&ty)?,
+                                }
+                            }
                             None => self.ty_ref(&ty)?,
                         },
                     };
@@ -20336,14 +20364,17 @@ impl<'a> Lower<'a> {
                     && self.has_scalar_value_repr(operand_repr)
                     && !operand_repr.is_reference()
                 {
-                    if let Some(tprim) =
-                        reified_target
-                            .or_else(|| Ty::from_name(&ty.name))
-                            .filter(|t| {
-                                self.has_scalar_value_repr(*t)
-                                    && !t.is_unsigned()
-                                    && *t != operand_repr
-                            })
+                    if let Some(tprim) = reified_target
+                        .or_else(|| {
+                            if self.scoped_classifier_over_default(&ty.name).is_none() {
+                                Ty::from_name(&ty.name)
+                            } else {
+                                None
+                            }
+                        })
+                        .filter(|t| {
+                            self.has_scalar_value_repr(*t) && !t.is_unsigned() && *t != operand_repr
+                        })
                     {
                         let any = ty_to_ir(Ty::obj("kotlin/Any"));
                         let boxed = self.emit_type_op(IrTypeOp::ImplicitCoercion, arg, any);
@@ -20359,7 +20390,13 @@ impl<'a> Lower<'a> {
                 // reference types, so handle the primitive case before it.
                 if !ty.nullable() {
                     if let Some(prim) = reified_target
-                        .or_else(|| Ty::from_name(&ty.name))
+                        .or_else(|| {
+                            if self.scoped_classifier_over_default(&ty.name).is_none() {
+                                Ty::from_name(&ty.name)
+                            } else {
+                                None
+                            }
+                        })
                         .filter(|t| self.has_scalar_value_repr(*t) && !t.is_unsigned())
                     {
                         return Some(self.emit_type_op(
@@ -24000,6 +24037,16 @@ fn supertype_parts_ty(
     file: &ast::File,
     class_names: &ClassNames,
 ) -> Option<Ty> {
+    if let Some(internal) = class_names.classifier_over_default(name) {
+        if arguments.is_empty() {
+            return Some(Ty::obj_name(internal));
+        }
+        let args: Vec<Ty> = arguments
+            .iter()
+            .map(|a| supertype_ty(a, file, class_names))
+            .collect::<Option<_>>()?;
+        return Some(Ty::obj_args_name(internal, &args));
+    }
     if let Some(t) = Ty::from_name(name) {
         return Some(t); // a builtin scalar / String / Any / Unit
     }
@@ -24192,6 +24239,18 @@ fn field_ty_with_args(
 }
 
 fn ty_of(file: &ast::File, r: &ast::TypeRef, plat: &dyn SemanticPlatform) -> Ty {
+    let source_classifier = file.decls.iter().find_map(|&declaration| {
+        matches!(file.decl(declaration), Decl::Class(class) if class.name == r.name)
+            .then(|| type_name(&class_internal(file, &r.name)))
+    });
+    if let Some(internal) = classifier_over_default(&r.name, source_classifier) {
+        return if r.targs.is_empty() {
+            Ty::obj_name(internal)
+        } else {
+            let args: Vec<Ty> = r.targs.iter().map(|arg| ty_of(file, arg, plat)).collect();
+            Ty::obj_args_name(internal, &args)
+        };
+    }
     // Function type, builtin scalar, or primitive array — the leaf shared by every type resolver.
     if let Some(t) = typeref_leaf(r, &mut |x| ty_of(file, x, plat)) {
         // Nullable primitives/Unit are reference slots consistent with the checker.
