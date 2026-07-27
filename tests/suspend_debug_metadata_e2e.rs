@@ -395,6 +395,55 @@ fn continuation_metadata_keeps_names_with_each_scope_snapshot() {
 }
 
 #[test]
+fn continuation_metadata_uses_later_value_branch_as_resume_line() {
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(javap) = javap_path() else {
+        return;
+    };
+
+    let source = "package demo\n\
+        suspend fun find(): String? = null\n\
+        suspend fun work(): String {\n\
+        \x20 val value =\n\
+        \x20\x20 find()\n\
+        \x20\x20\x20 ?: error(\"missing\")\n\
+        \x20 return value\n\
+        }\n";
+    let classes = common::compile_in_process_files(
+        &[("ValueBranchLine", source)],
+        &[stdlib, jdk.clone()],
+        Some(&jdk),
+    )
+    .expect("compile value-branch continuation");
+    let bytes = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == "demo/ValueBranchLineKt$work$1").then_some(bytes))
+        .expect("work continuation");
+    let text = disassemble(
+        &javap,
+        bytes,
+        "ValueBranchLineKt$work$1.class",
+        "value_branch_line",
+    );
+    let annotation = text
+        .rsplit_once("RuntimeVisibleAnnotations:")
+        .map(|(_, annotation)| annotation)
+        .expect("runtime-visible annotations");
+
+    for expected in ["l=[5]", "nl=[6]"] {
+        assert!(
+            annotation.contains(expected),
+            "missing {expected:?}:\n{text}"
+        );
+    }
+}
+
+#[test]
 fn continuation_uses_synthetic_kotlin_metadata() {
     let Some(stdlib) = common::stdlib_jar() else {
         return;
