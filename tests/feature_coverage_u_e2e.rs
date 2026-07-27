@@ -215,6 +215,20 @@ fun box(): String = Runner { \"OK\" }.run { \"OK\" }\n";
 }
 
 #[test]
+fn inline_member_does_not_expose_private_backing_field() {
+    let src = "private class Value {\n\
+    private val text = \"OK\"\n\
+    inline fun read(): String = text\n\
+}\n\
+private class Caller {\n\
+    private val value = Value()\n\
+    fun call(): String = value.read()\n\
+}\n\
+fun box(): String = Caller().call()\n";
+    common::expect_box_ok_with_stdlib(src, "InlineMemberPrivateField");
+}
+
+#[test]
 fn inline_member_lambdas_share_mutable_caller_state() {
     let library = "class Inline {\n\
     inline fun combine(first: (Int) -> Int, second: (Double) -> Double): Double {\n\

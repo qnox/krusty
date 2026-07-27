@@ -16,10 +16,11 @@ use crate::libraries::{
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LambdaCallShape {
     pub param_types: Option<Vec<Vec<Ty>>>,
     pub receivers: Option<Vec<Option<Ty>>>,
+    pub context_counts: Option<Vec<usize>>,
     pub materialized: Option<Vec<bool>>,
 }
 
@@ -267,7 +268,17 @@ pub(crate) fn ty_subst(sig: Ty, binds: &GSigBinds) -> Ty {
             .get(n)
             .copied()
             .unwrap_or_else(|| Ty::obj("kotlin/Any")),
-        Ty::Fun(fsig) => Ty::fun(ty_subst_all(&fsig.params, binds), ty_subst(fsig.ret, binds)),
+        Ty::Fun(fsig) => {
+            let params = ty_subst_all(&fsig.params, binds);
+            let ret = ty_subst(fsig.ret, binds);
+            Ty::fun_with_shape(
+                params,
+                ret,
+                fsig.context_count,
+                fsig.has_receiver,
+                fsig.suspend,
+            )
+        }
         Ty::Nullable(inner) => Ty::nullable(ty_subst(*inner, binds)),
         Ty::Obj(internal, args) if !args.is_empty() => {
             Ty::obj_args_name(internal, &ty_subst_all(args, binds))
@@ -363,10 +374,14 @@ fn bind_gsig_return(
     gsig: &GenericSig,
     type_args: &[Ty],
     actuals: impl IntoIterator<Item = (Ty, Ty)>,
+    expected: Option<Ty>,
 ) -> Ty {
     let mut binds = seeded_gsig_binds(gsig, type_args);
     for (ps, a) in actuals {
         unify_ty(ps, a, &mut binds);
+    }
+    if let Some(expected) = expected {
+        unify_ty(gsig.ret, expected, &mut binds);
     }
     ty_subst(gsig.ret, &binds)
 }
@@ -1226,6 +1241,77 @@ impl<'a> SymbolResolver<'a> {
         )
     }
 
+    /// Resolve a top-level call with expected-return-type inference.
+    pub(crate) fn resolve_top_level_with_expected(
+        &self,
+        name: &str,
+        args: &[Ty],
+        integer_literals: &[bool],
+        type_args: &[Ty],
+        expected: Ty,
+    ) -> Option<LibraryCallable> {
+        let fs = function_set_from_symbols(self.symbols_in_scope(name));
+        self.pick_top_level(name, &fs, args, integer_literals, type_args, Some(expected))
+    }
+
+    /// Infer expected argument types from the selected extension's generic bounds.
+    pub(crate) fn extension_argument_expectations(
+        &self,
+        receiver: Ty,
+        name: &str,
+        args: &[Ty],
+        integer_literals: &[bool],
+        type_args: &[Ty],
+    ) -> Vec<Option<Ty>> {
+        let lambda_literals = vec![false; args.len()];
+        let Some(overload) = select_overload(
+            self.lib,
+            receiver,
+            name,
+            CallArgs::new(args, integer_literals, &lambda_literals),
+            type_args,
+            FnKind::Extension,
+            ExtCtx {
+                allow_must_inline: true,
+                fn_scope: self.fn_scope,
+            },
+        ) else {
+            return Vec::new();
+        };
+        let Some(gsig) = overload.generic_sig.as_ref() else {
+            return Vec::new();
+        };
+        let mut binds = seeded_gsig_binds(gsig, type_args);
+        if let Some(recv_sig) = gsig.receiver {
+            unify_ty(recv_sig, receiver, &mut binds);
+        }
+        for (&parameter, &argument) in gsig.params.iter().zip(args) {
+            unify_ty(parameter, argument, &mut binds);
+        }
+        let expectations: Vec<Option<Ty>> = gsig
+            .params
+            .iter()
+            .zip(args)
+            .map(|(&parameter, &argument)| {
+                let Ty::TyParam(name, _) = parameter else {
+                    return None;
+                };
+                let formal = gsig
+                    .formals
+                    .iter()
+                    .position(|candidate| candidate == name)?;
+                gsig.formal_bounds
+                    .get(formal)
+                    .into_iter()
+                    .flatten()
+                    .find_map(|&bound| {
+                        refine_argument_from_bound(self.lib, argument, ty_subst(bound, &binds))
+                    })
+            })
+            .collect();
+        expectations
+    }
+
     pub fn resolve_symbol_with_literal_and_lambda_args(
         &self,
         recv: SymRecv,
@@ -1343,7 +1429,7 @@ impl<'a> SymbolResolver<'a> {
                 // callable (default/vararg-aware) ready to emit.
                 let fs = function_set_from_symbols(self.symbols_in_scope(name));
                 let top_level_call =
-                    self.pick_top_level(name, &fs, args, integer_literals, type_args);
+                    self.pick_top_level(name, &fs, args, integer_literals, type_args, None);
                 let overloads = fs.overloads;
                 if overloads.is_empty() && top_level_call.is_none() {
                     return None;
@@ -1415,6 +1501,7 @@ impl<'a> SymbolResolver<'a> {
         args: &[Ty],
         integer_literals: &[bool],
         type_args: &[Ty],
+        expected: Option<Ty>,
     ) -> Option<LibraryCallable> {
         let parsed: Vec<(&FunctionInfo, Vec<Ty>, Ty)> = fs
             .top_level()
@@ -1478,7 +1565,9 @@ impl<'a> SymbolResolver<'a> {
         };
 
         if pick.is_none() {
-            if let Some(c) = self.resolve_top_level_default_callable(name, args, type_args) {
+            if let Some(c) =
+                self.resolve_top_level_default_callable(name, args, type_args, expected)
+            {
                 crate::trace_compiler!(
                     "resolve",
                     "top-level {name} args={args:?} -> {}.{}{} default inline={:?}",
@@ -1491,7 +1580,8 @@ impl<'a> SymbolResolver<'a> {
             }
         }
 
-        if let Some(c) = self.resolve_top_level_inline_only_callable(fs, args, type_args) {
+        if let Some(c) = self.resolve_top_level_inline_only_callable(fs, args, type_args, expected)
+        {
             crate::trace_compiler!(
                 "resolve",
                 "top-level {name} args={args:?} -> {}.{}{} inline-only",
@@ -1554,6 +1644,9 @@ impl<'a> SymbolResolver<'a> {
                             unify_ty(*ps, *a, &mut binds);
                         }
                     }
+                }
+                if let Some(expected) = expected {
+                    unify_ty(gsig.ret, expected, &mut binds);
                 }
                 ty_subst(gsig.ret, &binds)
             })
@@ -1867,6 +1960,7 @@ impl<'a> SymbolResolver<'a> {
         name: &str,
         args: &[Ty],
         type_args: &[Ty],
+        expected: Option<Ty>,
     ) -> Option<LibraryCallable> {
         // Direct scope resolution, not `resolve_symbol(TopLevel)`: runs inside `pick_top_level` (see
         // `resolve_top_level_default_callable`) — routing back through `resolve_symbol` would recurse.
@@ -1913,6 +2007,7 @@ impl<'a> SymbolResolver<'a> {
                         mapping.iter().filter_map(|(param_i, arg_i)| {
                             gsig.params.get(*param_i).map(|ps| (*ps, args[*arg_i]))
                         }),
+                        expected,
                     )
                 })
                 .unwrap_or(c.ret);
@@ -1932,6 +2027,7 @@ impl<'a> SymbolResolver<'a> {
         fs: &FunctionSet,
         args: &[Ty],
         type_args: &[Ty],
+        expected: Option<Ty>,
     ) -> Option<LibraryCallable> {
         for o in fs.top_level() {
             let c = &o.callable;
@@ -1955,6 +2051,7 @@ impl<'a> SymbolResolver<'a> {
                         gsig,
                         type_args,
                         gsig.params.iter().copied().zip(args.iter().copied()),
+                        expected,
                     )
                 })
                 .unwrap_or(c.ret);
@@ -3100,6 +3197,28 @@ fn platform_arg_assignable(lib: &dyn SemanticPlatform, param: &Ty, arg: &Ty) -> 
         )
 }
 
+fn refine_argument_from_bound(lib: &dyn SemanticPlatform, argument: Ty, bound: Ty) -> Option<Ty> {
+    let (Ty::Obj(argument_name, argument_args), Ty::Obj(_, bound_args)) = (argument, bound) else {
+        return None;
+    };
+    if argument_args.is_empty()
+        || argument_args.len() != bound_args.len()
+        || !platform_arg_assignable(lib, &bound, &argument)
+    {
+        return None;
+    }
+    let mut refined = argument_args.to_vec();
+    let mut changed = false;
+    for (actual, constraint) in refined.iter_mut().zip(bound_args) {
+        // An erased bound provides no new inference evidence.
+        if actual.is_erased_top() && !constraint.is_erased_top() && !constraint.is_ty_param() {
+            *actual = *constraint;
+            changed = true;
+        }
+    }
+    changed.then(|| Ty::obj_args_name(argument_name, &refined))
+}
+
 /// Pick the best overload whose logical value parameters accept `args`, in Kotlin applicability order:
 /// exact, then `Any`-widened / function-arity, then a prefix under-application (omitted trailing params
 /// must be optional), then a trailing-lambda call that omits leading DEFAULTED params (`m.withLock { … }`).
@@ -3513,6 +3632,7 @@ mod tests {
         );
         member.generic_sig = Some(GenericSig {
             formals: vec!["T".to_string()],
+            formal_bounds: vec![Vec::new()],
             receiver: None,
             params: vec![generic_values, generic_sink],
             ret: Ty::Unit,
@@ -3857,6 +3977,7 @@ mod tests {
                 &[Ty::obj("demo/Leaf")],
                 &[],
                 &[],
+                None,
             )
             .expect("source subtype should fit top-level parameter");
         assert_eq!(call.params, vec![Ty::obj("demo/Mid")]);
@@ -3887,6 +4008,7 @@ mod tests {
                 &[Ty::obj("java/lang/String")],
                 &[],
                 &[],
+                None,
             )
             .expect("platform aliases should remain applicable");
         assert_eq!(call.params, vec![Ty::String]);
@@ -3917,6 +4039,7 @@ mod tests {
                 &[Ty::obj("demo/Leaf"), Ty::obj("demo/Leaf")],
                 &[],
                 &[],
+                None,
             )
             .expect("source subtypes should fit top-level varargs");
         assert_eq!(call.params, vec![Ty::array(Ty::obj("demo/Mid"))]);
@@ -3947,6 +4070,7 @@ mod tests {
                 &[Ty::Int, Ty::obj("demo/Leaf")],
                 &[true, false],
                 &[],
+                None,
             )
             .expect("integer adaptation should retain source-type specificity");
         assert_eq!(call.params, vec![Ty::Long, Ty::obj("demo/Mid")]);
@@ -3996,6 +4120,7 @@ mod tests {
             &[Ty::obj("demo/Leaf"), Ty::obj("demo/Leaf")],
             &[],
             &[],
+            None,
         );
         assert!(selected.is_none());
     }

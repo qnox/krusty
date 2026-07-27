@@ -357,6 +357,10 @@ pub fn intern_tys(ts: &[Ty]) -> &'static [Ty] {
 pub struct FnSig {
     pub params: Vec<Ty>,
     pub ret: Ty,
+    /// Leading parameters that bind as context receivers.
+    pub context_count: usize,
+    /// Whether the parameter after the context receivers binds as `this`.
+    pub has_receiver: bool,
     /// A `suspend` function type (`suspend (A) -> R`).
     pub suspend: bool,
 }
@@ -748,20 +752,38 @@ impl Ty {
 
     /// A function type `(params) -> ret`.
     pub fn fun(params: Vec<Ty>, ret: Ty) -> Ty {
+        Self::fun_with_shape(params, ret, 0, false, false)
+    }
+
+    pub fn fun_with_shape(
+        params: Vec<Ty>,
+        ret: Ty,
+        context_count: usize,
+        has_receiver: bool,
+        suspend: bool,
+    ) -> Ty {
         Ty::Fun(intern_fnsig(FnSig {
+            context_count: context_count.min(params.len()),
             params,
             ret,
-            suspend: false,
+            has_receiver,
+            suspend,
         }))
+    }
+
+    /// A context function type.
+    pub fn fun_context(params: Vec<Ty>, ret: Ty, context_count: usize) -> Ty {
+        Self::fun_with_shape(params, ret, context_count, false, false)
     }
 
     /// A `suspend` function type `suspend (params) -> ret`.
     pub fn fun_suspend(params: Vec<Ty>, ret: Ty) -> Ty {
-        Ty::Fun(intern_fnsig(FnSig {
-            params,
-            ret,
-            suspend: true,
-        }))
+        Self::fun_with_shape(params, ret, 0, false, true)
+    }
+
+    /// A suspend context function type.
+    pub fn fun_suspend_context(params: Vec<Ty>, ret: Ty, context_count: usize) -> Ty {
+        Self::fun_with_shape(params, ret, context_count, false, true)
     }
 
     /// Arity of a function type.
