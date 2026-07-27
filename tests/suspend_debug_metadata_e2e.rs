@@ -157,6 +157,48 @@ fn continuation_metadata_repeats_spills_for_each_suspension() {
 }
 
 #[test]
+fn continuation_metadata_preserves_elvis_subject_lines() {
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(javap) = javap_path() else {
+        return;
+    };
+
+    let source = "package demo\n\
+        suspend fun find(id: String): String? = id\n\
+        suspend fun work(id: String): String {\n\
+        \x20 val value = find(id) ?: return \"missing\"\n\
+        \x20 return value\n\
+        }\n";
+    let classes = common::compile_in_process_files(
+        &[("ElvisLine", source)],
+        &[stdlib, jdk.clone()],
+        Some(&jdk),
+    )
+    .expect("compile elvis continuation");
+    let bytes = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == "demo/ElvisLineKt$work$1").then_some(bytes))
+        .expect("work continuation");
+    let text = disassemble(&javap, bytes, "ElvisLineKt$work$1.class", "elvis_line");
+    let annotation = text
+        .rsplit_once("RuntimeVisibleAnnotations:")
+        .map(|(_, annotation)| annotation)
+        .expect("runtime-visible annotations");
+
+    for expected in ["l=[4]", "nl=[5]"] {
+        assert!(
+            annotation.contains(expected),
+            "missing {expected:?}:\n{text}"
+        );
+    }
+}
+
+#[test]
 fn continuation_uses_synthetic_kotlin_metadata() {
     let Some(stdlib) = common::stdlib_jar() else {
         return;
