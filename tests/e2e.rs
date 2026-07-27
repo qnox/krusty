@@ -390,6 +390,8 @@ mod finally_e2e;
 mod float_range_nan_e2e;
 #[path = "fn_typed_default_e2e.rs"]
 mod fn_typed_default_e2e;
+#[path = "for_destructuring_components_e2e.rs"]
+mod for_destructuring_components_e2e;
 #[path = "for_iterable_elvis_e2e.rs"]
 mod for_iterable_elvis_e2e;
 #[path = "for_typed_loop_var_e2e.rs"]

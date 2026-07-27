@@ -1218,7 +1218,7 @@ fn parse_gsig(s: &str) -> Option<(Ty, &str)> {
                 };
                 Some((node, after))
             } else {
-                Some((Ty::obj(internal), &s[semi + 1..]))
+                Some((kotlin_name_to_ty(internal), &s[semi + 1..]))
             }
         }
         c => {
@@ -1674,6 +1674,68 @@ fn class_implements_name(cp: &Classpath, internal: TypeName, target: TypeName) -
 }
 
 impl SymbolSource for JvmLibraries {
+    fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
+        let Some(internal) = ty.obj_internal() else {
+            return Vec::new();
+        };
+        let jvm_internal = crate::jvm::jvm_class_map::to_jvm_type_name(internal);
+        let mut applied = self
+            .cp
+            .find_name(jvm_internal)
+            .and_then(|class| {
+                let (formals, supers) = parse_class_gsig(class.signature.as_deref()?)?;
+                let bindings = formals
+                    .into_iter()
+                    .zip(
+                        ty.type_args()
+                            .iter()
+                            .copied()
+                            .chain(std::iter::repeat_with(|| Ty::obj("kotlin/Any"))),
+                    )
+                    .collect::<std::collections::HashMap<_, _>>();
+                Some(
+                    supers
+                        .into_iter()
+                        .map(|supertype| crate::symbol_resolver::ty_subst(supertype, &bindings))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .unwrap_or_else(|| {
+                self.cp
+                    .find_name(jvm_internal)
+                    .map(|class| {
+                        class
+                            .interfaces
+                            .iter_ids()
+                            .chain(class.super_class)
+                            .map(Ty::obj_name)
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+
+        if let Some(shape) = self.resolve_type_name(internal) {
+            for mapped in shape.supertypes.iter_ids() {
+                let args = applied
+                    .iter()
+                    .find(|supertype| {
+                        supertype.obj_internal().is_some_and(|name| {
+                            crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(
+                                name, mapped,
+                            )
+                        })
+                    })
+                    .map(|supertype| supertype.type_args().to_vec())
+                    .unwrap_or_default();
+                let mapped = Ty::obj_args_name(mapped, &args);
+                if !applied.contains(&mapped) {
+                    applied.push(mapped);
+                }
+            }
+        }
+        applied
+    }
+
     fn property_members(&self, recv: Ty, name: &str) -> PropertySet {
         // Member properties of the receiver's type + its supertypes, most-derived first (rung 0). Each
         // carries the REAL getter/setter from `@Metadata`'s `JvmPropertySignature`, so the caller emits the
@@ -1884,6 +1946,10 @@ impl SymbolSource for JvmLibraries {
         // JVM specifics (element-variant `sumOfInt`, value-class mangling) are the emitter's job.
         for facade in self.cp.package_facades_name(pkg) {
             let facade_rendered = facade.render();
+            let lambda_return_overload = self
+                .cp
+                .lambda_return_overloads(&facade_rendered)
+                .contains(&name);
             for mf in self.cp.meta_functions_name(facade).iter() {
                 if mf.kotlin_name != name || !mf.is_extension {
                     continue;
@@ -1914,6 +1980,10 @@ impl SymbolSource for JvmLibraries {
                     .map(|i| i.render())
                     .map(|i| i.rsplit('/').next().unwrap_or(&i).to_string())
                     .map(|s| format!("{}Of{s}", mf.jvm_name));
+                let lambda_return_mangled = lambda_return_overload
+                    .then_some(mf.ret_class)
+                    .flatten()
+                    .map(|ret| format!("{}{}", mf.kotlin_name, ret.segment()));
                 // The receiver's erased descriptor disambiguates same-named overloads on the facade
                 // (`maxOrNull([I)` vs `maxOrNull([D)`); the return descriptor disambiguates same-receiver
                 // overloads (`maxOrNull(Iterable)Double` vs `…Comparable`). A type-var return has no class,
@@ -1966,6 +2036,8 @@ impl SymbolSource for JvmLibraries {
                 let (jvm_name, descriptor, cand) = if let Some(d) = mf.jvm_desc {
                     (mf.jvm_name.clone(), d.to_string(), by_name(&mf.jvm_name))
                 } else if let Some(c) = by_name(&mf.jvm_name) {
+                    (c.name.clone(), c.descriptor.clone(), Some(c))
+                } else if let Some(c) = lambda_return_mangled.as_ref().and_then(|n| by_name(n)) {
                     (c.name.clone(), c.descriptor.clone(), Some(c))
                 } else if let Some(c) = elem_mangled.as_ref().and_then(|n| by_name(n)) {
                     (c.name.clone(), c.descriptor.clone(), Some(c))
@@ -2572,16 +2644,55 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         Some(crate::jvm::jvm_class_map::to_kotlin_internal(internal).to_string())
     }
 
-    fn is_collection_interface(&self, supertype_internal: &str) -> bool {
-        crate::jvm::jvm_class_map::to_jvm_internal(supertype_internal).starts_with("java/util/")
-    }
-
-    fn is_collection_interface_name(&self, supertype_internal: TypeName) -> bool {
-        crate::jvm::jvm_class_map::type_name_maps_to_jvm_collection_interface(supertype_internal)
-    }
-
-    fn collection_property_accessor(&self, property: &str) -> Option<String> {
-        crate::jvm::names::collection_property_stub_name(property).map(str::to_string)
+    fn mapped_interface_members(
+        &self,
+        supertype: Ty,
+    ) -> Vec<crate::libraries::MappedInterfaceMember> {
+        let Some(internal) = supertype.obj_internal() else {
+            return Vec::new();
+        };
+        let mut members = Vec::new();
+        let jvm_internal = crate::jvm::jvm_class_map::to_jvm_type_name(internal);
+        let collection_properties: &[&str] = if jvm_internal.matches("java/util/Map") {
+            &["size", "values", "keys", "entries"]
+        } else if jvm_internal.matches("java/util/Collection")
+            || jvm_internal.matches("java/util/List")
+            || jvm_internal.matches("java/util/Set")
+        {
+            &["size"]
+        } else {
+            &[]
+        };
+        for &property in collection_properties {
+            let Some((physical, ret)) = crate::jvm::names::collection_property_stub(property)
+            else {
+                continue;
+            };
+            members.push(crate::libraries::MappedInterfaceMember {
+                source_name: property.to_string(),
+                physical_name: physical.to_string(),
+                params: Vec::new(),
+                ret,
+                is_property: true,
+            });
+        }
+        if internal.matches("kotlin/CharSequence") || internal.matches("java/lang/CharSequence") {
+            members.push(crate::libraries::MappedInterfaceMember {
+                source_name: "length".to_string(),
+                physical_name: "length".to_string(),
+                params: Vec::new(),
+                ret: Ty::Int,
+                is_property: true,
+            });
+            members.push(crate::libraries::MappedInterfaceMember {
+                source_name: "get".to_string(),
+                physical_name: "charAt".to_string(),
+                params: vec![Ty::Int],
+                ret: Ty::Char,
+                is_property: false,
+            });
+        }
+        members
     }
 
     fn signature_formal_names(&self, signature: &str) -> Vec<String> {
@@ -3071,7 +3182,7 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
 
 #[cfg(test)]
 mod tests {
-    use super::{desc_to_ty, parse_method_desc, parse_method_gsig};
+    use super::{desc_to_ty, parse_class_gsig, parse_method_desc, parse_method_gsig};
     use crate::libraries::SemanticPlatform;
     use crate::types::type_name;
     use crate::types::Ty;
@@ -3153,6 +3264,17 @@ mod tests {
                 "java/util/Collection",
                 &[Ty::ty_param("R", Ty::obj("kotlin/Any"))],
             )]
+        );
+    }
+
+    #[test]
+    fn class_generic_signature_canonicalizes_unsigned_arguments() {
+        let (_, supertypes) =
+            parse_class_gsig("Ljava/lang/Object;Ljava/lang/Iterable<Lkotlin/UInt;>;")
+                .expect("class signature");
+        assert_eq!(
+            supertypes[1],
+            Ty::obj_args("java/lang/Iterable", &[Ty::UInt])
         );
     }
 

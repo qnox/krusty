@@ -1279,11 +1279,13 @@ impl<'a> SymbolResolver<'a> {
             FnKind::Extension,
             ExtCtx {
                 allow_must_inline: true,
+                mro_src: &self.src,
                 fn_scope: self.fn_scope,
             },
         ) else {
             return Vec::new();
         };
+        let receiver = self.extension_binding_receiver(receiver, &overload);
         let Some(gsig) = overload.generic_sig.as_ref() else {
             return Vec::new();
         };
@@ -1359,6 +1361,7 @@ impl<'a> SymbolResolver<'a> {
                     FnKind::Extension,
                     ExtCtx {
                         allow_must_inline: true,
+                        mro_src: &self.src,
                         fn_scope: self.fn_scope,
                     },
                 )
@@ -1691,7 +1694,8 @@ impl<'a> SymbolResolver<'a> {
         type_args: &[Ty],
         o: &FunctionInfo,
     ) -> Option<LibraryCallable> {
-        let vparams = logical_value_params(self.lib, o, receiver, type_args);
+        let binding_receiver = self.extension_binding_receiver(receiver, o);
+        let vparams = logical_value_params(self.lib, o, binding_receiver, type_args);
         // A `vararg` overload SPREAD over the trailing arguments is NOT a defaulted call — the caller
         // builds the packed array and the physical argument list still ends in it. Comparing raw arity
         // reads `"ab..!!".trimEnd('!', '.')` (2 arguments, 1 array parameter) as an omitted-default call
@@ -1720,7 +1724,7 @@ impl<'a> SymbolResolver<'a> {
             let ret_ty = o
                 .generic_sig
                 .as_ref()
-                .map(|gsig| bind_ext_ret(gsig, receiver, args, type_args))
+                .map(|gsig| bind_ext_ret(gsig, binding_receiver, args, type_args))
                 .unwrap_or(c.ret);
             let ret_class = o
                 .ret
@@ -1747,7 +1751,7 @@ impl<'a> SymbolResolver<'a> {
         let trailing_lambda = args.last().is_some_and(|a| matches!(a, Ty::Fun(_)));
         let ret_ty = o.ret.apply(bind_defaulted_ext_ret(
             o,
-            receiver,
+            binding_receiver,
             args,
             type_args,
             trailing_lambda,
@@ -1780,6 +1784,15 @@ impl<'a> SymbolResolver<'a> {
             return Some(callable);
         }
         None
+    }
+
+    fn extension_binding_receiver(&self, receiver: Ty, overload: &FunctionInfo) -> Ty {
+        overload
+            .receiver
+            .and_then(|declared| {
+                ReceiverMro::new(&self.src, receiver).binding_receiver(&self.src, declared)
+            })
+            .unwrap_or(receiver)
     }
 
     pub(crate) fn build_extension_callable_for_slots(
@@ -2768,6 +2781,7 @@ fn select_instance_info(
         FnKind::Member,
         ExtCtx {
             allow_must_inline: false,
+            mro_src: lib,
             fn_scope: None,
         },
     )
@@ -2826,32 +2840,35 @@ fn receiver_type_args_match(src: &dyn SymbolSource, decl_recv: Ty, recv: Ty) -> 
 /// is small (a handful of supertypes), so a `Vec` probe beats hashing.
 pub(crate) struct ReceiverMro {
     recv: Ty,
-    /// `(erased class, BFS rung)` in first-seen (breadth-first) order — each class's MINIMAL rung.
+    /// `(applied supertype, BFS rung)` in first-seen order.
     /// Empty for a receiver with no class-name key (an array): such a receiver ranks only by exact
     /// `Ty` equality or the universal `Any` fallback, exactly as the per-candidate BFS did.
-    ranks: Vec<(crate::types::TypeName, u32)>,
+    ranks: Vec<(Ty, u32)>,
 }
 
 impl ReceiverMro {
     pub(crate) fn new(src: &dyn SymbolSource, recv: Ty) -> ReceiverMro {
-        let mut ranks: Vec<(crate::types::TypeName, u32)> = Vec::new();
-        if let Some(start) = recv.erased_recv().kotlin_class_internal() {
-            let mut frontier = vec![start];
+        let mut ranks = Vec::new();
+        if let Some(internal) = recv.erased_recv().kotlin_class_internal() {
+            let root = if recv.non_null().obj_internal().is_some() {
+                recv.non_null()
+            } else {
+                Ty::obj_name(internal)
+            };
+            let mut frontier = vec![root];
+            let mut seen = std::collections::HashSet::new();
             let mut rung = 0u32;
             while !frontier.is_empty() {
                 let mut next = Vec::new();
-                for &ty in &frontier {
-                    if ranks.iter().any(|&(t, _)| t == ty) {
+                for ty in frontier {
+                    let Some(internal) = ty.kotlin_class_internal() else {
+                        continue;
+                    };
+                    if !seen.insert(internal) {
                         continue;
                     }
                     ranks.push((ty, rung));
-                    if let Some(shape) = src.resolve_type_name(ty) {
-                        for supertype in shape.supertypes.iter_ids() {
-                            if !ranks.iter().any(|&(t, _)| t == supertype) {
-                                next.push(supertype);
-                            }
-                        }
-                    }
+                    next.extend(src.direct_supertypes(ty));
                 }
                 frontier = next;
                 rung += 1;
@@ -2860,32 +2877,61 @@ impl ReceiverMro {
         ReceiverMro { recv, ranks }
     }
 
-    pub(crate) fn rank(&self, src: &dyn SymbolSource, decl_recv: Ty) -> Option<u32> {
+    /// Use the applied supertype unless its classpath signature erased every argument.
+    fn binding_receiver_for(&self, applied: Ty) -> Ty {
+        let applied_args = applied.type_args();
+        let recv_args = self.recv.type_args();
+        if !recv_args.is_empty()
+            && (applied_args.is_empty()
+                || (recv_args.len() == applied_args.len()
+                    && applied_args
+                        .iter()
+                        .all(|arg| arg.is_erased_top() || arg.is_ty_param())))
+        {
+            self.recv
+        } else {
+            applied
+        }
+    }
+
+    fn match_receiver(&self, src: &dyn SymbolSource, decl_recv: Ty) -> Option<(u32, Ty)> {
         // Same source type — rung 0. Plain `Ty` equality (interned, NO erasure): the exact receiver an
         // extension is declared on. This is the ONLY rank an ARRAY receiver (`IntArray.sum()`) can carry
         // besides the universal `Any` — an array has no class-name key in the closure, and its
         // element type must be matched exactly (an `IntArray` extension must not bind an `Array<String>`).
         if self.recv.non_null() == decl_recv.non_null() {
-            return Some(0);
-        }
-        // A concrete type argument on the declared receiver must match the actual receiver's — the
-        // `@JvmName` reduction families (`average`/`sum`) declare one overload per element (`averageOfByte`
-        // on `Iterable<Byte>`, `…OfDouble` on `Iterable<Double>`), all erasing to the same class, so the
-        // closure probe below would tie them and pick the first. `Iterable<Double>` binds a `List<Double>`
-        // receiver; `Iterable<Byte>` does not. A type-variable argument (`Iterable<T>.map`, projected to
-        // `Any`) matches anything, so generic extensions are untouched.
-        if !receiver_type_args_match(src, decl_recv, self.recv) {
-            return None;
+            return Some((0, self.recv));
         }
         let want = decl_recv.erased_recv().kotlin_class_internal();
         if let Some(want) = want {
-            if let Some(&(_, rung)) = self.ranks.iter().find(|&&(t, _)| t == want) {
-                return Some(rung);
+            if let Some(&(applied, rung)) = self.ranks.iter().find(|(applied, _)| {
+                if applied.kotlin_class_internal() != Some(want) {
+                    return false;
+                }
+                let binding_receiver = self.binding_receiver_for(*applied);
+                receiver_type_args_match(src, decl_recv, binding_receiver)
+            }) {
+                let binding_receiver = if decl_recv.is_ty_param() || decl_recv.is_erased_top() {
+                    self.recv
+                } else {
+                    self.binding_receiver_for(applied)
+                };
+                return Some((rung, binding_receiver));
             }
         }
         // A universal `Any`-receiver extension (`<T> T.let`) applies to every receiver — arrays included
         // — at lowest precedence.
-        (want.is_some_and(|n| n.matches("kotlin/Any"))).then_some(u32::MAX - 1)
+        want.is_some_and(|n| n.matches("kotlin/Any"))
+            .then_some((u32::MAX - 1, self.recv))
+    }
+
+    pub(crate) fn rank(&self, src: &dyn SymbolSource, decl_recv: Ty) -> Option<u32> {
+        self.match_receiver(src, decl_recv).map(|(rank, _)| rank)
+    }
+
+    fn binding_receiver(&self, src: &dyn SymbolSource, decl_recv: Ty) -> Option<Ty> {
+        self.match_receiver(src, decl_recv)
+            .map(|(_, applied)| applied)
     }
 }
 
@@ -2944,6 +2990,8 @@ fn fn_in_scope(o: &FunctionInfo, fn_scope: Option<&[TypeName]>) -> bool {
 struct ExtCtx<'a> {
     allow_must_inline: bool,
     fn_scope: Option<&'a [TypeName]>,
+    /// Source used to rank extension receivers through their supertype hierarchy.
+    mro_src: &'a dyn crate::symbol_source::SymbolSource,
 }
 
 #[derive(Clone, Copy)]
@@ -3099,8 +3147,9 @@ fn select_overload(
     // Candidates as `(overload, logical value params)`, grouped by receiver rank. An extension admits only
     // public overloads unless the caller is the bytecode inliner (which splices non-public `@InlineOnly`).
     // The receiver's supertype closure is BFS-walked once here and probed per candidate below.
-    let recv_mro =
-        (kind == FnKind::Extension && !overloads.is_empty()).then(|| ReceiverMro::new(lib, recv));
+    let mro_src = ext.mro_src;
+    let recv_mro = (kind == FnKind::Extension && !overloads.is_empty())
+        .then(|| ReceiverMro::new(mro_src, recv));
     let mut by_rank: std::collections::BTreeMap<u32, Vec<(&FunctionInfo, Vec<Ty>)>> =
         std::collections::BTreeMap::new();
     for o in overloads.iter().copied().filter(|&o| {
@@ -3114,9 +3163,12 @@ fn select_overload(
         // rung from the actual receiver so most-specific selection (a `List` extension over an `Iterable`
         // one) still holds. A candidate whose declared receiver is NOT in the receiver's supertype closure
         // does not apply — drop it. Members and lambda-return (`u32::MAX`) keep their provider rank.
-        let rank = if kind == FnKind::Extension {
-            match o.receiver.and_then(|dr| recv_mro.as_ref()?.rank(lib, dr)) {
-                Some(r) => r,
+        let (rank, binding_receiver) = if kind == FnKind::Extension {
+            match o
+                .receiver
+                .and_then(|dr| recv_mro.as_ref()?.match_receiver(mro_src, dr))
+            {
+                Some(found) => found,
                 None => {
                     crate::trace_compiler!(
                         "resolve",
@@ -3127,7 +3179,7 @@ fn select_overload(
                 }
             }
         } else {
-            o.receiver_rank
+            (o.receiver_rank, recv)
         };
         // A TyParam receiver erased to `Any` still has its REAL bound in the JVM descriptor's first
         // parameter (`Array<out T>.ifEmpty` → `[Ljava/lang/Object;`; `C.ifEmpty` where
@@ -3146,7 +3198,7 @@ fn select_overload(
             );
             continue;
         }
-        let lp = logical_value_params(lib, o, recv, type_args);
+        let lp = logical_value_params(lib, o, binding_receiver, type_args);
         let lp = specialized_sam_params(&lp, o.generic_sig.as_ref(), args, lambda_literals);
         let lp =
             apply_platform_parameter_nullability(lp, &o.call_sig.platform_nullable_params, args);

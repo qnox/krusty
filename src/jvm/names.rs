@@ -32,11 +32,16 @@ pub use crate::names::property_getter_name;
 /// forwards to the Kotlin getter, or the `java.util` abstract stays unimplemented. The READ direction of
 /// this same mapping lives in `Classpath::member` (the classpath member-name resolution).
 pub fn collection_property_stub_name(prop: &str) -> Option<&'static str> {
+    collection_property_stub(prop).map(|(name, _)| name)
+}
+
+pub fn collection_property_stub(prop: &str) -> Option<(&'static str, crate::types::Ty)> {
+    use crate::types::Ty;
     match prop {
-        "size" => Some("size"),
-        "values" => Some("values"),
-        "keys" => Some("keySet"),
-        "entries" => Some("entrySet"),
+        "size" => Some(("size", Ty::Int)),
+        "values" => Some(("values", Ty::obj("kotlin/collections/Collection"))),
+        "keys" => Some(("keySet", Ty::obj("kotlin/collections/Set"))),
+        "entries" => Some(("entrySet", Ty::obj("kotlin/collections/Set"))),
         _ => None,
     }
 }
