@@ -6549,6 +6549,11 @@ pub enum InlineCall {
 pub enum ExprLowering {
     /// A call or function reference resolved to a local function declaration.
     LocalFunction { stmt_id: StmtId },
+    /// A source-module function reference selected by the checker.
+    ModuleFunctionRef {
+        target: Box<crate::libraries::LibraryCallable>,
+        owner: Option<TypeName>,
+    },
     /// A classpath top-level function reference (`::foo`) resolved by the checker. Lowering reads the
     /// callable instead of resolving the reference again.
     ClasspathTopLevelFunctionRef(crate::libraries::LibraryCallable),
@@ -8925,6 +8930,120 @@ impl<'a> Checker<'a> {
         self.resolver()
             .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
             .and_then(Symbol::method_ref)
+    }
+    fn source_extension_ref(&mut self, expression: ExprId, recv: Ty, name: &str) -> Option<Ty> {
+        use crate::libraries::{FnKind, Origin};
+        use crate::symbol_resolver::{SymRecv, Symbol};
+
+        let mut candidates = self
+            .resolver()
+            .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
+            .map(Symbol::overloads)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|candidate| {
+                candidate.kind == FnKind::Extension
+                    && matches!(&candidate.callable.origin, Origin::Module { .. })
+                    && candidate.source_key.is_some()
+                    && candidate
+                        .call_sig
+                        .requires_all_args(candidate.callable.params.len().saturating_sub(1))
+                    && !candidate.flags.suspend
+                    && candidate.callable.ret != Ty::Nothing
+            })
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return None;
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        candidates.retain(|candidate| seen.insert(candidate.source_key));
+        let inaccessible = candidates.iter().any(|candidate| {
+            !matches!(
+                candidate.visibility,
+                Visibility::Public | Visibility::Internal
+            ) && candidate
+                .source_key
+                .is_none_or(|(file, _)| file != self.file_index)
+        });
+        candidates.retain(|candidate| {
+            matches!(
+                candidate.visibility,
+                Visibility::Public | Visibility::Internal
+            ) || candidate
+                .source_key
+                .is_some_and(|(file, _)| file == self.file_index)
+        });
+        if candidates.is_empty() {
+            if inaccessible {
+                self.diags.error(
+                    self.span(expression),
+                    format!("cannot access '{name}': it is private in its file"),
+                );
+                return Some(Ty::Error);
+            }
+            return None;
+        }
+
+        let context = crate::assignable::TyCtx::new();
+        let maximal = candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(index, candidate)| {
+                let declared = candidate.receiver?;
+                let dominated = candidates.iter().enumerate().any(|(other_index, other)| {
+                    if index == other_index {
+                        return false;
+                    }
+                    let Some(other_declared) = other.receiver else {
+                        return false;
+                    };
+                    other_declared != declared
+                        && crate::assignable::is_subtype(&context, self, other_declared, declared)
+                        && !crate::assignable::is_subtype(&context, self, declared, other_declared)
+                });
+                (!dominated).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let [selected] = maximal.as_slice() else {
+            self.diags.error(
+                self.span(expression),
+                format!("overload resolution ambiguity for callable reference '{name}'"),
+            );
+            return Some(Ty::Error);
+        };
+        let selected = &candidates[*selected];
+        let (source_file, source_decl) = selected.source_key?;
+        let facade = self
+            .syms
+            .fn_facades_by_decl
+            .get(&(source_file, source_decl))
+            .copied()
+            .or_else(|| match &selected.callable.origin {
+                Origin::Module { facade } if !facade.render().is_empty() => Some(*facade),
+                _ => None,
+            });
+        let owner = if source_file == self.file_index {
+            None
+        } else {
+            Some(facade?)
+        };
+        let mut target = selected.callable.clone();
+        if let Some(facade) = facade {
+            target.owner = facade;
+            target.origin = Origin::Module { facade };
+        }
+        let mut params = vec![recv];
+        params.extend(target.params.iter().skip(1).copied());
+        let ret = target.ret;
+        self.expr_lowers.insert(
+            expression,
+            ExprLowering::ModuleFunctionRef {
+                target: Box::new(target),
+                owner,
+            },
+        );
+        Some(Ty::fun(params, ret))
     }
     fn resolve_instance_name(
         &self,
@@ -14382,17 +14501,9 @@ impl<'a> Checker<'a> {
                                         return self.set(e, Ty::fun(params, sig.ret));
                                     }
                                 }
-                                // Unbound reference to a same-module EXTENSION function (`A::foo` where
-                                // `fun A.foo()` is top-level): the function type prepends the receiver to
-                                // the extension's own args — `(A, ext-args…) -> ext-ret`. (A member of
-                                // the same name, checked above, takes precedence.)
                                 let recv_ty = Ty::obj(&cls.internal());
-                                if let Some(sig) = self.syms.ext_fun(recv_ty, &name).cloned() {
-                                    if sig.requires_all_args() && sig.ret != Ty::Nothing {
-                                        let mut params = vec![recv_ty];
-                                        params.extend(sig.params.iter().copied());
-                                        return self.set(e, Ty::fun(params, sig.ret));
-                                    }
+                                if let Some(ty) = self.source_extension_ref(e, recv_ty, &name) {
+                                    return self.set(e, ty);
                                 }
                                 // unbound property reference `Type::prop` keeps property-reference APIs.
                                 if let Some(is_var) = cls
@@ -14432,6 +14543,9 @@ impl<'a> Checker<'a> {
                                         );
                                         return self.set(e, Ty::fun(params, member.ret));
                                     }
+                                }
+                                if let Some(ty) = self.source_extension_ref(e, recv_ty, &name) {
+                                    return self.set(e, ty);
                                 }
                                 if let Some((_, is_var)) = self.syms.ext_prop(recv_ty, &name) {
                                     if let Some(ty) = self.property_ref_ty(1, is_var) {
