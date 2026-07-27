@@ -15702,36 +15702,50 @@ impl<'a> Checker<'a> {
     /// declared supertype chain and resolve the member on each CLASSPATH supertype. Records the resolved
     /// member so the lowerer emits it directly. MUST run only after the module-member lookup fails, so a
     /// user override keeps precedence over the inherited classpath member.
+    fn source_classpath_super_member(
+        &self,
+        sub_ty: Ty,
+        name: &str,
+        arg_tys: &[Ty],
+        include_interfaces: bool,
+    ) -> Option<crate::symbol_resolver::ResolvedMember> {
+        self.syms
+            .applied_source_hierarchy(sub_ty)
+            .into_iter()
+            .filter(|(_, _, depth)| *depth > 0)
+            .filter(|(owner, _, _)| self.syms.class_by_type_name(*owner).is_none())
+            .filter(|(owner, _, _)| {
+                include_interfaces
+                    || self
+                        .resolved_type_name(*owner)
+                        .is_some_and(|ty| !ty.is_interface())
+            })
+            .filter_map(|(_, applied, depth)| {
+                self.resolve_instance_member(applied, name, arg_tys)
+                    .map(|member| (depth, member))
+            })
+            .min_by_key(|(depth, _)| *depth)
+            .map(|(_, member)| member)
+    }
+
     fn classpath_super_member_ret(
         &mut self,
         call: ExprId,
-        sub_internal: TypeName,
+        sub_ty: Ty,
         name: &str,
         arg_tys: &[Ty],
     ) -> Option<Ty> {
         // Not a user class — its own members already went through the library.
-        self.syms.class_by_type_name(sub_internal)?;
-        for sup in self.syms.supertype_internal_names_from(sub_internal) {
-            if self.syms.class_by_type_name(sup).is_some() {
-                continue; // a user supertype — already covered by the module-member walk
-            }
-            // Only inherit through a base CLASS chain, never an interface supertype: a concrete member
-            // reached via an interface (e.g. `Object.clone` seen through a `Cloneable` supertype) would
-            // emit an `invokevirtual` whose owner is an interface (`IncompatibleClassChangeError`).
-            // Interface default methods are resolved by the ordinary member paths, not here.
-            if self
-                .resolved_type_name(sup)
-                .is_none_or(|t| t.is_interface())
-            {
-                continue;
-            }
-            if let Some(m) = self.resolve_instance_member(Ty::obj_name(sup), name, arg_tys) {
-                let ret = m.ret;
-                self.resolved_calls.insert(call, ResolvedCall::Member(m));
-                return Some(ret);
-            }
-        }
-        None
+        self.syms.class_by_type_name(sub_ty.obj_internal()?)?;
+        // Only inherit through a base CLASS chain, never an interface supertype: a concrete member
+        // reached via an interface (e.g. `Object.clone` seen through a `Cloneable` supertype) would
+        // emit an `invokevirtual` whose owner is an interface (`IncompatibleClassChangeError`).
+        // Protocol-specific paths such as `for` may opt into interface dispatch explicitly.
+        let member = self.source_classpath_super_member(sub_ty, name, arg_tys, false)?;
+        let ret = member.ret;
+        self.resolved_calls
+            .insert(call, ResolvedCall::Member(member));
+        Some(ret)
     }
 
     fn this_member_call_ret(
@@ -15812,10 +15826,8 @@ impl<'a> Checker<'a> {
                 self.resolved_calls.insert(call, ResolvedCall::Member(m));
                 return Some(ret);
             }
-            if let Some(internal) = rt.obj_internal() {
-                if let Some(ret) = self.classpath_super_member_ret(call, internal, name, arg_tys) {
-                    return Some(ret);
-                }
+            if let Some(ret) = self.classpath_super_member_ret(call, rt, name, arg_tys) {
+                return Some(ret);
             }
         }
         // A member extension keeps both its extension and dispatch receivers in scope.
@@ -16301,22 +16313,24 @@ impl<'a> Checker<'a> {
         // Resolve against the full receiver, not just its erased internal name: a classpath
         // `List<Node>` member specializes `iterator()` to `Iterator<Node>`, which supplies the loop
         // variable type. The erased-name query would return `Iterator<Any>`.
-        let iterator =
-            if let Some(resolved) = self.resolve_instance_member(iterable_ty, "iterator", &[]) {
-                let mut member = resolved.member;
-                member.ret = resolved.ret;
-                IteratorDispatchTarget::Member {
-                    owner_fallback: internal,
-                    member: Box::new(member),
-                }
-            } else {
-                IteratorDispatchTarget::Extension(Box::new(self.library_extension_callable(
-                    "iterator",
-                    iterable_ty,
-                    &[],
-                    &[],
-                )?))
-            };
+        let iterator = if let Some(resolved) = self
+            .resolve_instance_member(iterable_ty, "iterator", &[])
+            .or_else(|| self.source_classpath_super_member(iterable_ty, "iterator", &[], true))
+        {
+            let mut member = resolved.member;
+            member.ret = resolved.ret;
+            IteratorDispatchTarget::Member {
+                owner_fallback: internal,
+                member: Box::new(member),
+            }
+        } else {
+            IteratorDispatchTarget::Extension(Box::new(self.library_extension_callable(
+                "iterator",
+                iterable_ty,
+                &[],
+                &[],
+            )?))
+        };
         let iter_ty = iterator.ret();
         let iter_internal = iter_ty.obj_internal()?;
         let has_next = self.resolve_instance_name(iter_internal, "hasNext", &[])?;
@@ -19953,12 +19967,8 @@ impl<'a> Checker<'a> {
                     // A user class that EXTENDS a classpath type inherits that supertype's members
                     // (`sub.inheritedMethod()`). Runs after the module-member lookup, so a user override
                     // wins.
-                    if let Some(internal) = rt.obj_internal() {
-                        if let Some(ret) =
-                            self.classpath_super_member_ret(call, internal, &name, &arg_tys)
-                        {
-                            return ret;
-                        }
+                    if let Some(ret) = self.classpath_super_member_ret(call, rt, &name, &arg_tys) {
+                        return ret;
                     }
                 }
                 // Builtin bitwise/shift operator methods on `Int`/`Long` (`a shl b`, `a and b`,
