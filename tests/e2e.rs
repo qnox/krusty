@@ -462,6 +462,8 @@ mod inline_e2e;
 mod inline_end_branch_e2e;
 #[path = "inline_lambda_value_return_e2e.rs"]
 mod inline_lambda_value_return_e2e;
+#[path = "inline_return_bound_context_e2e.rs"]
+mod inline_return_bound_context_e2e;
 #[path = "inline_splice_e2e.rs"]
 mod inline_splice_e2e;
 #[path = "inline_splice_ldc_wide_e2e.rs"]
@@ -732,6 +734,8 @@ mod reference_in_range_e2e;
 mod reference_range_expression_e2e;
 #[path = "reified_inline_check_e2e.rs"]
 mod reified_inline_check_e2e;
+#[path = "reified_inline_return_infer_e2e.rs"]
+mod reified_inline_return_infer_e2e;
 #[path = "reified_inline_splice_ldc_wide_e2e.rs"]
 mod reified_inline_splice_ldc_wide_e2e;
 #[path = "require_check_smartcast_e2e.rs"]

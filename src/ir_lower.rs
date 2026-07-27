@@ -5219,10 +5219,8 @@ pub(crate) struct Lower<'a> {
     /// uses DISTINCT call sites, so it is allowed. (kotlinc rejects only genuine recursion.)
     inline_active: Vec<u32>,
     inline_member_callsites: Vec<Option<TypeName>>,
-    /// Active reified type-parameter bindings while expanding a `<reified T>` inline fn: `T` → the
-    /// call's actual type argument. Consulted by `subst_type_ref` so `is T`/`as T`/`T::class` in the
-    /// inlined body specialize to the concrete type. A stack — nested reified inline calls compose.
-    reified_subst: Vec<std::collections::HashMap<String, ast::TypeRef>>,
+    /// Active reified type bindings. A stack allows nested inline expansions.
+    reified_subst: Vec<std::collections::HashMap<String, Ty>>,
     /// Active inline-fn return targets while expanding an `inline fun` whose body has `return`: each is
     /// `(result slot, end label, return type)`. A `return x` in the inlined body lowers to `result = x;
     /// break@end` (the body is wrapped in a `do { … } while(false)` labeled `end`), turning the function
@@ -6121,8 +6119,10 @@ impl<'a> Lower<'a> {
 
     /// The class-constant name for an UNBOUND class literal `T::class` (`ldc <name>.class`): the JVM
     /// internal of a reference type (`kotlin/String` → `java/lang/String`), or the array descriptor used
-    /// verbatim as a class constant (`Array<Any>::class` → `[Ljava/lang/Object;`).
+    /// verbatim as a class constant (`Array<Any>::class` → `[Ljava/lang/Object;`). Primitive literals use
+    /// the same boxed reference representation as ordinary `Int::class` literals.
     fn class_literal_ldc_internal(&self, ty: Ty) -> Option<String> {
+        let ty = ty.jvm_boxed_ref().unwrap_or(ty);
         let d = self.runtime.type_descriptor(ty)?;
         Some(
             match d.strip_prefix('L').and_then(|s| s.strip_suffix(';')) {
@@ -6150,13 +6150,12 @@ impl<'a> Lower<'a> {
         // constant (`Prov::class`) rather than the erased marker.
         if let Some(recv) = receiver {
             if let Expr::Name(n) = self.afile.expr(recv).clone() {
-                let sub = self
+                let ty = self
                     .reified_subst
                     .iter()
                     .rev()
-                    .find_map(|frame| frame.get(&n).cloned());
-                if let Some(sub) = sub {
-                    let ty = self.ty_ref(&sub)?;
+                    .find_map(|frame| frame.get(&n).copied());
+                if let Some(ty) = ty {
                     let internal = self.class_literal_ldc_internal(ty)?;
                     return Some(self.emit_class_const(internal));
                 }
@@ -13981,7 +13980,7 @@ impl<'a> Lower<'a> {
             return formals
                 .iter()
                 .zip(targs)
-                .map(|(name, ty)| (name.clone(), *ty))
+                .filter_map(|(name, ty)| ty.map(|ty| (name.clone(), ty)))
                 .collect();
         }
         // No EXPLICIT type arguments: a reified `T` that appears in the RECEIVER position
@@ -14610,14 +14609,8 @@ impl<'a> Lower<'a> {
     }
 
     fn ty_ref(&self, r: &ast::TypeRef) -> Option<Ty> {
-        // A reified type parameter (inside an expanded `<reified T>` inline body) resolves to the type
-        // bound at the call site — `Array<T>`, `val x: T`, a return `T`, etc. all specialize. The bound
-        // type is already concrete (built through `subst_type_ref`), so this recurses at most once.
-        if !self.reified_subst.is_empty() {
-            let s = self.subst_type_ref(r);
-            if s.name != r.name {
-                return self.ty_ref(&s);
-            }
+        if let Some(bound) = self.reified_ty(r) {
+            return (!bound.is_nullable()).then_some(bound);
         }
         if r.nullable() {
             return None;
@@ -16927,18 +16920,28 @@ impl<'a> Lower<'a> {
         Some(self.emit_external_call("kotlin/Array.set", Some(a), vec![i, v]))
     }
 
-    /// Substitute a reified type-parameter reference (`is T`/`as T`/`T::class` inside an expanded
-    /// `<reified T>` inline body) with the concrete type bound at the call site. Nullability is the
-    /// union of the reference's and the bound type's. Unchanged when no reified binding is active.
-    fn subst_type_ref(&self, tr: &ast::TypeRef) -> ast::TypeRef {
-        for frame in self.reified_subst.iter().rev() {
-            if let Some(bound) = frame.get(&tr.name) {
-                let mut out = bound.clone();
-                out.set_nullable(out.nullable() || tr.nullable());
-                return out;
-            }
+    fn reified_ty(&self, tr: &ast::TypeRef) -> Option<Ty> {
+        let bound = self
+            .reified_subst
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(&tr.name).copied())?;
+        Some(if tr.nullable() {
+            Ty::nullable(bound)
+        } else if tr.definitely_non_null() {
+            bound.non_null()
+        } else {
+            bound
+        })
+    }
+
+    fn resolve_reified_type_ref(&self, tr: &ast::TypeRef) -> Option<Ty> {
+        if let Some(bound) = self.reified_ty(tr) {
+            return Some(bound);
         }
-        tr.clone()
+        let local = ty_of(self.afile, tr, &*self.syms.libraries);
+        self.ty_ref(tr)
+            .or_else(|| (!local.is_erased_top()).then_some(local))
     }
 
     /// Expand a call to a user-defined `inline fun`: bind its value parameters to the (once-evaluated)
@@ -17250,16 +17253,23 @@ impl<'a> Lower<'a> {
         // inferred reified type) bails — the file skips, never miscompiles.
         let reif_depth = self.reified_subst.len();
         if !f.reified_type_params.is_empty() {
-            let targs = self.afile.call_type_args.get(&call_id);
+            let explicit = self.afile.call_type_args.get(&call_id);
+            let resolved = self.info.resolved_call_type_args.get(&AstExprId(call_id));
             let mut map = std::collections::HashMap::new();
             for (i, tp) in f.type_params.iter().enumerate() {
                 if f.reified_type_params.contains(tp) {
-                    let actual = match targs.and_then(|ts| ts.get(i)) {
-                        Some(a) => self.subst_type_ref(a),
-                        None => {
-                            self.inline_active.truncate(active_depth);
-                            return None;
-                        }
+                    let actual = resolved
+                        .and_then(|types| types.get(i))
+                        .copied()
+                        .flatten()
+                        .or_else(|| {
+                            explicit
+                                .and_then(|types| types.get(i))
+                                .and_then(|ty| self.resolve_reified_type_ref(ty))
+                        });
+                    let Some(actual) = actual else {
+                        self.inline_active.truncate(active_depth);
+                        return None;
                     };
                     map.insert(tp.clone(), actual);
                 }
@@ -19798,8 +19808,6 @@ impl<'a> Lower<'a> {
                 ty,
                 negated,
             } => {
-                // A reified type parameter (`x is T` in a `<reified T>` inline body) → the bound type.
-                let ty = self.subst_type_ref(&ty);
                 // A nullable reference target (`x is A?`): `null` IS an `A?`, but plain `instanceof`
                 // yields false for null. Lower to `x == null || x is A` (and the De Morgan dual for
                 // `x !is A?` → `x != null && x !is A`), binding the operand to a temp so it runs once.
@@ -20182,8 +20190,7 @@ impl<'a> Lower<'a> {
                 ty,
                 nullable,
             } => {
-                // A reified type parameter (`x as T` in a `<reified T>` inline body) → the bound type.
-                let ty = self.subst_type_ref(&ty);
+                let reified_target = self.reified_ty(&ty);
                 // A `Unit`-typed OPERAND (`println() as Any`, `foo() as Unit`, `foo() as? Int`): run it
                 // for effect, then its value is the `Unit.INSTANCE` singleton (a reference) — cast that.
                 if self.info.ty(operand) == Ty::Unit {
@@ -20221,17 +20228,19 @@ impl<'a> Lower<'a> {
                     // representation the non-null `as T` branch below uses — so the `instanceof`/`checkcast`
                     // run against the bound (`Object` for an unbounded `T`); `ty_ref` only yields concrete
                     // reference types, so the type-parameter case is resolved here first.
-                    let target = match self.cur_tparams.iter().find(|(n, _, _)| *n == ty.name) {
-                        Some((name, bound, _)) => Ty::ty_param(name, *bound),
-                        // A PRIMITIVE target (`x as? Int`) tests/keeps the boxed wrapper — `instanceof`/
-                        // `checkcast` run against `Integer` and the result is the nullable wrapper `Int?`.
-                        // `ty_ref` yields only reference targets, so resolve the primitive here. `Unit` is
-                        // a reference (`kotlin/Unit`), not a primitive — resolve it via `ty_ref`.
-                        None if ty.name != "Unit" => match Ty::from_name(&ty.name) {
-                            Some(p) if !p.is_reference() => p.nullable_boxed()?,
-                            _ => self.ty_ref(&ty)?,
+                    let target = match reified_target {
+                        Some(target) if self.has_scalar_value_repr(target) => {
+                            target.nullable_boxed()?
+                        }
+                        Some(target) => target,
+                        None => match self.cur_tparams.iter().find(|(n, _, _)| *n == ty.name) {
+                            Some((name, bound, _)) => Ty::ty_param(name, *bound),
+                            None if ty.name != "Unit" => match Ty::from_name(&ty.name) {
+                                Some(p) if !p.is_reference() => p.nullable_boxed()?,
+                                _ => self.ty_ref(&ty)?,
+                            },
+                            None => self.ty_ref(&ty)?,
                         },
-                        None => self.ty_ref(&ty)?,
                     };
                     let target_ir = ty_to_ir(target);
                     let mut v = self.expr(operand)?;
@@ -20270,7 +20279,8 @@ impl<'a> Lower<'a> {
                         .unwrap_or(self.info.ty(operand)),
                     _ => self.info.ty(operand),
                 };
-                let target_is_tparam = self.cur_tparams.iter().any(|(n, _, _)| *n == ty.name);
+                let target_is_tparam = reified_target.is_none()
+                    && self.cur_tparams.iter().any(|(n, _, _)| *n == ty.name);
                 if self.has_scalar_value_repr(operand_repr)
                     && !operand_repr.is_unsigned()
                     && !target_is_tparam
@@ -20303,8 +20313,11 @@ impl<'a> Lower<'a> {
                 // the cast target; the JVM backend erases it (checkcast to the bound, `Object` for an
                 // unbounded `T`). A non-null `T` (`<T : Any>`, `<T : Foo>`) null-checks like kotlinc
                 // (`CastNonNull`); a nullable target (`as T?`, or an unbounded `<T : Any?>`) does not.
-                if let Some((name, bound, non_null)) =
-                    self.cur_tparams.iter().find(|(n, _, _)| *n == ty.name)
+                if let Some((name, bound, non_null)) = self
+                    .cur_tparams
+                    .iter()
+                    .find(|(n, _, _)| *n == ty.name)
+                    .filter(|_| reified_target.is_none())
                 {
                     let op = if *non_null && !ty.nullable() {
                         IrTypeOp::CastNonNull
@@ -20323,9 +20336,15 @@ impl<'a> Lower<'a> {
                     && self.has_scalar_value_repr(operand_repr)
                     && !operand_repr.is_reference()
                 {
-                    if let Some(tprim) = Ty::from_name(&ty.name).filter(|t| {
-                        self.has_scalar_value_repr(*t) && !t.is_unsigned() && *t != operand_repr
-                    }) {
+                    if let Some(tprim) =
+                        reified_target
+                            .or_else(|| Ty::from_name(&ty.name))
+                            .filter(|t| {
+                                self.has_scalar_value_repr(*t)
+                                    && !t.is_unsigned()
+                                    && *t != operand_repr
+                            })
+                    {
                         let any = ty_to_ir(Ty::obj("kotlin/Any"));
                         let boxed = self.emit_type_op(IrTypeOp::ImplicitCoercion, arg, any);
                         return Some(self.emit_type_op(
@@ -20339,7 +20358,8 @@ impl<'a> Lower<'a> {
                 // emitted by the `ImplicitCoercion` reference→primitive path. `ty_ref` only yields
                 // reference types, so handle the primitive case before it.
                 if !ty.nullable() {
-                    if let Some(prim) = Ty::from_name(&ty.name)
+                    if let Some(prim) = reified_target
+                        .or_else(|| Ty::from_name(&ty.name))
                         .filter(|t| self.has_scalar_value_repr(*t) && !t.is_unsigned())
                     {
                         return Some(self.emit_type_op(
@@ -23049,7 +23069,7 @@ impl crate::synthetics::SyntheticIrBuilder for Lower<'_> {
             .get(&call.0)
             .and_then(|ts| ts.first())
             .cloned()?;
-        self.ty_ref(&self.subst_type_ref(&tr))
+        self.resolve_reified_type_ref(&tr)
     }
 
     fn synth_enum_static(

@@ -625,6 +625,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference (`checkcast` only) instead of unbox+re-box — the round-trip is not the identity on `null`
   (kt84727: `null as T` must survive, kotlinc keeps the reference)
   (`generic_hof_vc_binding_e2e::nullable_generic_return_keeps_null`).
+- **Return-only type parameters on `inline` functions use the expected type.** The inferred binding
+  must satisfy its declared bound and is passed to the inline expander for reified operations. For a
+  nullable return such as `T?`, inference removes the return nullability before binding `T`.
 - **A tail-call-forwarded suspend fn boxes its EARLY returns.** The tail-forward shape (no state machine,
   `$completion` threaded to the callee, callee's `Object` result `areturn`ed verbatim) also admits bodies
   with early exits (`if (n == 0) return true; return odd(n - 1)`); the CPS method returns `Object`, so the
