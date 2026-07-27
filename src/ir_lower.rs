@@ -15570,6 +15570,7 @@ impl<'a> Lower<'a> {
                             Signature {
                                 params: params.clone(),
                                 ret: *ret,
+                                generic_sig: None,
                                 flags: SigFlags::default()
                                     .with_vararg(false)
                                     .with_is_inline(false)

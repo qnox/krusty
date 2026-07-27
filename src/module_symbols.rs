@@ -187,6 +187,7 @@ impl<'a> ModuleSymbols<'a> {
             .map(|fi| crate::frontend::Signature {
                 params: fi.callable.params.clone(),
                 ret: fi.callable.ret,
+                generic_sig: fi.generic_sig.clone(),
                 flags: SigFlags::default()
                     .with_vararg(fi.call_sig.vararg)
                     .with_is_inline(fi.flags.inline.can_inline())
@@ -428,6 +429,7 @@ fn fn_info(
     };
     FunctionInfo {
         receiver_rank: rank,
+        generic_sig: sig.generic_sig.clone(),
         call_sig: sig.call_sig(),
         context_count: sig.context_count,
         source_key: sig
@@ -651,6 +653,7 @@ mod tests {
         Signature {
             params,
             ret,
+            generic_sig: None,
             flags: SigFlags::default()
                 .with_vararg(false)
                 .with_is_inline(false)
@@ -887,6 +890,45 @@ mod tests {
         // receiver prepended → params = [Point, Int]
         assert_eq!(o.callable.params, vec![recv, Ty::Int]);
         assert_eq!(o.receiver_rank, 0);
+    }
+
+    #[test]
+    fn extension_preserves_generic_signature() {
+        let mut symbols = FrontendSymbols::default();
+        let parameter = Ty::ty_param("T", Ty::obj("kotlin/Any"));
+        let receiver = Ty::obj_args("demo/Container", &[parameter]);
+        let generic_sig = crate::libraries::GenericSig {
+            formals: vec!["T".into()],
+            formal_bounds: vec![Vec::new()],
+            receiver: Some(receiver),
+            params: vec![Ty::fun(vec![parameter], parameter)],
+            ret: receiver,
+        };
+        let mut signature = sig(
+            vec![Ty::fun(vec![Ty::obj("kotlin/Any")], Ty::obj("kotlin/Any"))],
+            receiver,
+        );
+        signature.generic_sig = Some(generic_sig.clone());
+        symbols.ext_funs.insert(
+            (receiver.erased_recv(), "transform".into()),
+            vec![signature],
+        );
+
+        let functions = match ModuleSymbols::new(&symbols)
+            .resolve_symbols("transform")
+            .callables
+        {
+            crate::libraries::Callables::Functions(functions) => functions.overloads,
+            _ => Vec::new(),
+        };
+        let actual = functions[0]
+            .generic_sig
+            .as_ref()
+            .expect("generic signature");
+        assert_eq!(actual.formals, generic_sig.formals);
+        assert_eq!(actual.receiver, generic_sig.receiver);
+        assert_eq!(actual.params, generic_sig.params);
+        assert_eq!(actual.ret, generic_sig.ret);
     }
 
     #[test]
