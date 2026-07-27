@@ -19223,36 +19223,12 @@ impl<'a> Checker<'a> {
                 // shadows the type/import in value position (`private val logger = logger {}; logger.info()`
                 // — `logger` is the KLogger value, not the imported `logger` symbol), so skip the static
                 // path and let the receiver resolve as that property value below.
-                if let Expr::Name(cls) = self.file.expr(receiver).clone() {
-                    if !self.value_root_shadows_classifier(&cls) {
-                        let object_internal = self
-                            .imports
-                            .get(&cls)
-                            .cloned()
-                            .or_else(|| self.imported_type_internal(&cls))
-                            .filter(|internal| {
-                                self.syms.class_by_internal(internal).is_none()
-                                    && self
-                                        .syms
-                                        .libraries
-                                        .resolve_type(internal)
-                                        .is_some_and(|ty| ty.is_object())
-                            });
-                        if let Some(internal) = object_internal {
-                            // A Kotlin `object` is a value receiver, even though its imported name
-                            // is also a classifier. Route it through ordinary member resolution
-                            // before a Java/companion static probe can target-type lambda arguments.
-                            self.set(receiver, Ty::obj(&internal));
-                            self.expr_lowers.insert(
-                                receiver,
-                                ExprLowering::ObjectValue {
-                                    internal: type_name(&internal),
-                                },
-                            );
-                            classpath_object_value = Some(type_name(&internal));
-                        }
+                let classpath_object_value = match self.file.expr(receiver).clone() {
+                    Expr::Name(cls) if !self.value_root_shadows_classifier(&cls) => {
+                        self.classpath_object_value(&cls)
                     }
-                }
+                    _ => None,
+                };
                 if let (None, Expr::Name(cls)) =
                     (classpath_object_value, self.file.expr(receiver).clone())
                 {
