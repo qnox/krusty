@@ -542,6 +542,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   arguments into a fresh array (`newarray`/`anewarray` + per-element store) and passes it, like kotlinc.
   Spread (`*arr`) is not modeled. `for (x in arr)` over an array iterates by index
   (`i = 0; while (i < arr.size) { x = arr[i]; …; i++ }`, array and size hoisted).
+- **Classpath Java varargs (`T...`)**: the class reader carries `ACC_VARARGS` into `CallSig::vararg`.
+  The shared call-argument lowerer then packs trailing elements into the final array parameter for
+  both static and instance calls. An ordinary array parameter remains fixed-arity.
 - Range expressions as **values**: `a..b` and `a..<b` are the only true range *operators* (parsed at a
   precedence tighter than infix functions, looser than additive). `a..b` over `Int`/`Long`/`Char`
   constructs the matching stdlib range object via `new IntRange/LongRange/CharRange(II/JJ/CC)` (kotlinc's
@@ -576,6 +579,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   branch — an `if`/`when`/elvis or a **safe call** `c?.calc()` — is rejected (the file skips): a branch
   mid-`Vararg`-fill emits a StackMapTable frame inside the element-store sequence that the verifier
   rejects, so `is_branchy` treats those as non-spliceable (`ArrayOfRef` in `tests/feature_box_e2e.rs`).
+- **Enum reflection intrinsics** `enumValueOf<E>(name)` / `enumValues<E>()`: the checker requires an
+  enum type argument and types the result as `E` / `Array<E>`. The synthetic registry emits
+  `E.valueOf(name)` / `E.values()`, including through an expanded reified inline function.
 - **Primitive-array init constructor** `IntArray(n) { i -> elem }` (and `Long`/`Double`/`Float`/`Boolean`/
   `Char`/`Byte`/`Short`): kotlinc inlines the index lambda into a fill loop, which krusty reproduces by
   desugaring to `{ val n = <size>; val a = new T[n]; var i = 0; while (i < n) { a[i] = <body[it:=i]>; i++ }; a }`
@@ -1059,6 +1065,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `$`, existence verified through `resolve_type`) — mirrored in both `resolve_ty` (checker) and `ty_ref`
   (lowerer) so `is`/`as`/`when` targets and a nested-class constructor (`Subject.User("x")` → `new
   lib/Subject$User`) all resolve the same `Outer$Nested` internal. Test: `tests/classpath_object_nested_e2e.rs`.
+  Static access through `Outer.Nested.MEMBER` uses the same nested-name resolver in expression
+  position, producing `<pkg>/Outer$Nested` before resolving the field.
+
+- **Aliased imports (`import a.b.Member as Alias`).** The import map binds the alias directly to the
+  full target for types and values. Ordinary lexical resolution handles local shadowing; lowering uses
+  the resolved target member name.
 
 - **Unqualified sibling nested-class construction (`Inner()` inside `class Outer { class Inner }`).** Kotlin
   scopes a nested class unqualified within its enclosing class body. When a `Name`-callee call is otherwise
@@ -1502,6 +1514,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the function only *reads* is rejected (it could be reassigned in the enclosing scope after the call,
   making the by-value capture stale) — the checker records `local_fun_captures` as ordered `(name,
   type)` and the lowerer passes each captured value (or holder) at the call site.
+
+- **Anonymous-object capture** (`object : I { … }`): captured parameters, read-only locals, and
+  initialized immutable enclosing properties become synthetic constructor properties. Property
+  initializers and delegates see constructor properties and earlier backing properties, not later ones.
 
 - **Captured-`var` boxing rule** (precise): a captured `var` is boxed into a `Ref$XxxRef` iff it is
   *reassigned somewhere in the function* (`fn_reassigned`, scanned over the whole body including nested

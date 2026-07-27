@@ -503,17 +503,21 @@ fn rewrite_anon_captures(file: &mut File) {
             Decl::Class(c) => {
                 let class_tps: std::collections::HashSet<String> =
                     c.type_params.iter().cloned().collect();
+                let ctor_props: Vec<(String, TypeRef)> = c
+                    .props
+                    .iter()
+                    .filter(|p| p.is_property && !p.is_var)
+                    .map(|p| (p.name.clone(), p.ty.clone()))
+                    .collect();
                 // The enclosing class's IMMUTABLE properties are also capturable by an anonymous object
                 // in a method body (`class A(val x) { fun foo() = object { fun r() = x } }`): a `val`
                 // never changes, so capturing its value at the anon's construction is equivalent to
                 // reading `this@A.x` — resolved by appending `x` (which reads `this.x` at the call site)
                 // as an anon-constructor argument. A `var` is excluded (a later mutation wouldn't be
                 // observed by a by-value capture), as is a body property without an explicit type.
-                let class_props: Vec<(String, TypeRef)> = c
-                    .props
+                let class_props: Vec<(String, TypeRef)> = ctor_props
                     .iter()
-                    .filter(|p| p.is_property && !p.is_var)
-                    .map(|p| (p.name.clone(), p.ty.clone()))
+                    .cloned()
                     .chain(c.body_props.iter().filter_map(|p| {
                         // Only a plain immutable BACKING-field property is captured by value: a `var`
                         // (mutable), a custom-getter property (recomputes on each read, so a captured
@@ -539,6 +543,20 @@ fn rewrite_anon_captures(file: &mut File) {
                         let mut tps = class_tps.clone();
                         tps.extend(m.type_params.iter().cloned());
                         push_body(params, tps, root);
+                    }
+                }
+                // Initializers run in source order. Constructor properties and earlier immutable
+                // backing properties are initialized at each construction point; later properties are
+                // not. Feed that ordered environment through the same capture path as method bodies.
+                let mut initialized = ctor_props;
+                for p in &c.body_props {
+                    for &root in p.init.iter().chain(p.delegate.iter()) {
+                        push_body(initialized.clone(), class_tps.clone(), root);
+                    }
+                    let plain =
+                        !p.is_var && p.getter.is_none() && p.receiver.is_none() && p.init.is_some();
+                    if let Some(ty) = plain.then(|| p.ty.clone()).flatten() {
+                        initialized.push((p.name.clone(), ty));
                     }
                 }
             }
@@ -1300,10 +1318,21 @@ impl<'a> Parser<'a> {
                         self.bump(); // '*'
                         fq.push_str(".*");
                     }
+                    let mut alias = None;
+                    if self.at(TokenKind::Ident) && self.text() == "as" {
+                        self.bump(); // 'as'
+                        if self.at(TokenKind::Ident) {
+                            alias = Some(self.text().to_string());
+                            self.bump();
+                        }
+                    }
                     if !fq.is_empty() {
+                        if let Some(alias) = alias {
+                            self.file.import_aliases.push((alias, fq.clone()));
+                        }
                         self.file.imports.push(fq);
                     }
-                    // tolerate trailing tokens (e.g. `as alias`) to end of line
+                    // tolerate any remaining trailing tokens to end of line
                     while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
                         self.bump();
                     }

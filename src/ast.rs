@@ -871,6 +871,8 @@ pub struct File {
     pub package: Option<String>,
     /// Fully-qualified import names (e.g. `util.Calc`), used to resolve Java/JDK references.
     pub imports: Vec<String>,
+    /// Aliased imports as `(source alias, fully-qualified target)`.
+    pub import_aliases: Vec<(String, String)>,
     pub decls: Vec<DeclId>,
     /// Top-level declarations carrying the `expect` modifier (multiplatform headers). A matched
     /// `actual` in the same compiled source set replaces them (see `strip_matched_expects`); an

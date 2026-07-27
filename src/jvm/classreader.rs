@@ -12,6 +12,9 @@ pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PROTECTED: u16 = 0x0004;
 pub const ACC_STATIC: u16 = 0x0008;
 pub const ACC_BRIDGE: u16 = 0x0040;
+/// The final array parameter accepts Java vararg elements.
+pub const ACC_VARARGS: u16 = 0x0080;
+pub const ACC_ENUM: u16 = 0x4000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JavaNullability {
@@ -49,6 +52,9 @@ impl MethodSig {
     }
     pub fn is_bridge(&self) -> bool {
         self.access & ACC_BRIDGE != 0
+    }
+    pub fn is_vararg(&self) -> bool {
+        self.access & ACC_VARARGS != 0
     }
     pub fn has_same_parameter_descriptor(&self, other: &Self) -> bool {
         self.descriptor

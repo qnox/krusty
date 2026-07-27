@@ -904,10 +904,13 @@ impl JvmLibraries {
                 } else if m.is_static() {
                     // A Kotlin companion member compiles to a JVM static on the class.
                     member.call_sig = member_call_sig(&member, &m.name);
+                    // Plain Java methods carry vararg shape only in the class-file flag.
+                    member.call_sig.vararg |= m.is_vararg();
                     member.call_sig.platform_nullable_params = platform_nullable_params;
                     companion.push(member);
                 } else {
                     member.call_sig = member_call_sig(&member, &m.name);
+                    member.call_sig.vararg |= m.is_vararg();
                     member.call_sig.platform_nullable_params = platform_nullable_params;
                     members.push(member);
                 }
@@ -1071,6 +1074,8 @@ impl JvmLibraries {
                 crate::libraries::TypeKind::Interface
             } else if is_object {
                 crate::libraries::TypeKind::Object
+            } else if ci.access & crate::jvm::classreader::ACC_ENUM != 0 {
+                crate::libraries::TypeKind::Enum
             } else {
                 crate::libraries::TypeKind::Class
             };
@@ -2270,7 +2275,9 @@ impl SymbolSource for JvmLibraries {
                             );
                             recovered.unwrap_or(m.ret)
                         };
+                        // Preserve class-file call shape when metadata supplies the remaining facts.
                         let mut call_sig = member_facts.call_sig;
+                        call_sig.vararg |= m.call_sig.vararg;
                         call_sig
                             .platform_nullable_params
                             .clone_from(&m.call_sig.platform_nullable_params);

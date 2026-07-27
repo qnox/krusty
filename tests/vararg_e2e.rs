@@ -16,3 +16,23 @@ return \"OK\"\n\
 }\n";
     common::assert_box_ok_with_stdlib(src, "V");
 }
+
+#[test]
+fn classpath_java_instance_object_varargs_element_wise() {
+    // Instance and static calls must consume the same class-file vararg shape.
+    let src = "import java.util.Formatter\n\
+fun box(): String {\n\
+val s = Formatter().format(\"%s-%s-%s\", \"a\", \"b\", \"c\").toString()\n\
+return if (s == \"a-b-c\") \"OK\" else \"FAIL:$s\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "VarargsJavaInstance");
+}
+
+#[test]
+fn classpath_java_static_object_varargs_element_wise() {
+    let src = "fun box(): String {\n\
+val s = String.format(\"%s-%s-%s\", \"a\", \"b\", \"c\")\n\
+return if (s == \"a-b-c\") \"OK\" else \"FAIL:$s\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "VarargsJavaStatic");
+}
