@@ -15415,43 +15415,7 @@ impl<'a> Checker<'a> {
                 return Some(ret);
             }
         }
-        if let Ty::Obj(internal, _) = &rt {
-            // A `vararg` member (`fun f(vararg s: T)`) accepts any number of trailing `T` arguments,
-            // packed into the array parameter — element-type them rather than matching the single array
-            // parameter positionally (which would reject `f(x)` as "T but Array<T> expected").
-            if self.syms.method_is_vararg_name(*internal, name) {
-                if let Some(sig) = self.syms.method_of_name(*internal, name) {
-                    let n_fixed = sig.params.len().saturating_sub(1);
-                    if arg_tys.len() >= n_fixed {
-                        self.expect_call_args(&sig.params, true, args, arg_tys);
-                        return Some(
-                            self.inferred_member_ret(rt, name, &sig.params)
-                                .unwrap_or(sig.ret),
-                        );
-                    }
-                }
-            }
-        }
-        // A MODULE (user-declared) class member, resolved by arity through the module source only. An
-        // INHERITED classpath member must NOT bind here (it would arity-bind ignoring argument fit and
-        // record nothing for the lowerer) — it falls through to `resolve_instance_member` below.
         if let Ty::Obj(_, _) = rt {
-            let module_member = crate::module_symbols::ModuleSymbols::new(self.syms)
-                .instance_members(rt, name)
-                .into_iter()
-                .next();
-            if let Some(fi) = module_member {
-                let params = fi.params.clone();
-                if params.len() == arg_tys.len() {
-                    for (i, (p, a)) in params.iter().zip(arg_tys).enumerate() {
-                        self.expect_assignable(*p, *a, self.span(args[i]), "argument");
-                    }
-                    return Some(
-                        self.inferred_member_ret(rt, name, &params)
-                            .unwrap_or(fi.ret),
-                    );
-                }
-            }
             match self.record_classpath_member_call_with_slots(call, rt, name, args) {
                 ClasspathMemberSlotCall::Resolved(ret) => return Some(ret),
                 ClasspathMemberSlotCall::Ambiguous | ClasspathMemberSlotCall::Rejected => {
@@ -15469,11 +15433,6 @@ impl<'a> Checker<'a> {
                     return Some(ret);
                 }
             }
-        }
-        // A member extension keeps both its extension and dispatch receivers in scope.
-        if let Some(ret) = self.check_member_extension_function_call(call, rt, name, args, arg_tys)
-        {
-            return Some(ret);
         }
         // A MODULE extension on the receiver (`fun Recv.name(args)` declared in this compilation) — keyed
         // by the receiver's erased key, exactly as a qualified `recv.name(args)` extension call
@@ -17978,6 +17937,17 @@ impl<'a> Checker<'a> {
             .map(|(_, member)| member)
     }
 
+    fn check_applicable_module_member_call(
+        &mut self,
+        call: ExprId,
+        rt: Ty,
+        name: &str,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+    ) -> Option<Ty> {
+        self.check_module_member_call_mode(call, rt, name, args, arg_tys, true)
+    }
+
     fn check_module_member_call(
         &mut self,
         call: ExprId,
@@ -17985,6 +17955,18 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &[ExprId],
         arg_tys: &[Ty],
+    ) -> Option<Ty> {
+        self.check_module_member_call_mode(call, rt, name, args, arg_tys, false)
+    }
+
+    fn check_module_member_call_mode(
+        &mut self,
+        call: ExprId,
+        rt: Ty,
+        name: &str,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+        applicable_only: bool,
     ) -> Option<Ty> {
         let Ty::Obj(internal_name, _) = rt else {
             return None;
@@ -18021,6 +18003,9 @@ impl<'a> Checker<'a> {
             })
             .cloned()
             .collect::<Vec<_>>();
+        if applicable_only && applicable_members.is_empty() {
+            return None;
+        }
         if has_sibling_overloads && applicable_members.is_empty() {
             self.diags.error(
                 self.call_callee_name_span(call),
@@ -21159,75 +21144,45 @@ impl<'a> Checker<'a> {
                         return Ty::obj("kotlin/Any");
                     }
                 }
-                // Unqualified call to a sibling instance method: `foo()` → `this.foo()`. Inside an
-                // inner class, an unqualified call may target an enclosing method (`this.this$0.foo()`).
+                let implicit_receivers = self.implicit_receiver_types();
+                for receiver in implicit_receivers.iter().copied() {
+                    if let Some(ret) = self
+                        .check_applicable_module_member_call(call, receiver, &fname, args, &arg_tys)
+                    {
+                        return ret;
+                    }
+                    if let Some(ret) = self.check_member_extension_function_call(
+                        call, receiver, &fname, args, &arg_tys,
+                    ) {
+                        return ret;
+                    }
+                }
                 if !self.module_declares(&fname) {
-                    if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                        let internal_rendered = internal.render();
-                        crate::trace_compiler!(
-                            "resolve",
-                            "unqualified sibling call {fname}() on this_ty={internal_rendered}"
-                        );
-                        // `foo()` is only sugar for `this.foo()`, so resolve it through the SAME
-                        // module-member path the qualified call uses — that is what maps NAMED/OMITTED
-                        // arguments onto their parameters and records `resolved_call_arg_slots`. Reducing
-                        // the member to `(params, ret)` and zipping positionally (as this did) bound
-                        // `copy(resources = x)`'s argument to the FIRST parameter.
-                        //
-                        // Inside an inner class an unqualified call may instead target an ENCLOSING class's
-                        // method (`this.this$0.foo()`) — a LEXICAL scope, not the type hierarchy — so retry
-                        // against `inner_of`.
-                        let outer = self
-                            .syms
-                            .class_by_type_name(internal)
-                            .and_then(ClassSig::inner_of_name);
-                        for recv in std::iter::once(internal).chain(outer) {
-                            if let Some(ret) = self.check_module_member_call(
-                                call,
-                                Ty::obj_name(recv),
-                                &fname,
-                                args,
-                                &arg_tys,
+                    if let Some(outer) = self.this_ty.and_then(|receiver| {
+                        receiver
+                            .obj_internal()
+                            .and_then(|internal| {
+                                self.syms
+                                    .class_by_type_name(internal)
+                                    .and_then(ClassSig::inner_of_name)
+                            })
+                            .map(Ty::obj_name)
+                    }) {
+                        if !implicit_receivers.contains(&outer) {
+                            if let Some(ret) = self.check_applicable_module_member_call(
+                                call, outer, &fname, args, &arg_tys,
                             ) {
                                 return ret;
                             }
                         }
-                    } else {
-                        crate::trace_compiler!(
-                            "resolve",
-                            "unqualified call {fname}(): this_ty={:?} module_declares={}",
-                            self.this_ty,
-                            self.module_declares(&fname)
-                        );
                     }
-                    for recv in self.implicit_receiver_types().into_iter().skip(1) {
-                        if let Some(ret) =
-                            self.check_module_member_call(call, recv, &fname, args, &arg_tys)
-                        {
-                            return ret;
-                        }
-                    }
-                    // The declared receiver has no such member — try the flow-narrowed receiver from an
-                    // enclosing `if (this is B)` (`fun A.test() = if (this is B) foo()`, where `foo` is a
-                    // member of the subtype `B`). Record the narrowing on the call so the lowerer
-                    // `checkcast`s `this` to `B` before dispatching, mirroring the bare-name property read.
-                    // `this_narrow` is only ever a known reference subtype of the receiver.
                     if let Some(bt) = self.effective_this_narrow() {
                         if let Some(bi) = bt.obj_internal() {
-                            if let Some(m) = crate::module_symbols::ModuleSymbols::new(self.syms)
-                                .instance_members(bt, &fname)
-                                .into_iter()
-                                .next()
-                            {
+                            if let Some(ret) = self.check_applicable_module_member_call(
+                                call, bt, &fname, args, &arg_tys,
+                            ) {
                                 self.narrowed_this_member.insert(call, bi);
-                                let vararg = self
-                                    .syms
-                                    .method_of_name(bi, &fname)
-                                    .is_some_and(|s| s.vararg);
-                                self.expect_call_args(&m.params, vararg, args, &arg_tys);
-                                return self
-                                    .inferred_member_ret(bt, &fname, &m.params)
-                                    .unwrap_or(m.ret);
+                                return ret;
                             }
                         }
                     }
@@ -21894,10 +21849,26 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                if let Some(receiver) = implicit_receivers.iter().copied().find(|receiver| {
+                    !crate::module_symbols::ModuleSymbols::new(self.syms)
+                        .instance_members(*receiver, &fname)
+                        .is_empty()
+                }) {
+                    if let Some(ret) =
+                        self.check_module_member_call(call, receiver, &fname, args, &arg_tys)
+                    {
+                        return ret;
+                    }
+                }
                 let has_inapplicable_candidate = !self
                     .module
                     .top_level_overloads_in_scope(&fname, &self.fn_scope)
-                    .is_empty();
+                    .is_empty()
+                    || implicit_receivers.iter().copied().any(|receiver| {
+                        !self
+                            .member_extension_function_shapes(receiver, &fname)
+                            .is_empty()
+                    });
                 self.diags.error(
                     span,
                     if has_inapplicable_candidate {
