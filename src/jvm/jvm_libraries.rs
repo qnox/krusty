@@ -19,7 +19,7 @@ use crate::runtime::{
     CountedLoopInfo, PlatformAccessor, PlatformCtor, PlatformField, PlatformRangeCtor,
     RangeConstruction, RuntimeCtor, RuntimeOp,
 };
-use crate::symbol_resolver::{arg_fits, ty_subst, ty_subst_all};
+use crate::symbol_resolver::{ty_subst, ty_subst_all};
 use crate::symbol_source::{InheritanceShape, SymbolSource};
 use crate::types::{intern, type_name, Ty, TypeName, TypeNameList};
 
@@ -435,72 +435,6 @@ impl JvmLibraries {
         })
     }
 
-    fn member_return(&self, recv: Ty, name: &str, args: &[Ty]) -> Option<Ty> {
-        let Ty::Obj(start, start_args) = recv else {
-            return None;
-        };
-        if start_args.is_empty() {
-            return None; // no type arguments to propagate — the erased return is already correct
-        }
-        // Walk the generic hierarchy carrying each class's type arguments, substituting them through
-        // each `extends`/`implements` edge. Stop at the first class declaring `name`; substitute that
-        // member's generic return under the bindings reached there.
-        let mut seen = std::collections::HashSet::new();
-        let mut q = std::collections::VecDeque::new();
-        q.push_back((
-            super::jvm_class_map::to_jvm_type_name(start),
-            start_args.to_vec(),
-        ));
-        while let Some((internal, targs)) = q.pop_front() {
-            if !seen.insert(internal) {
-                continue;
-            }
-            let Some(ci) = self.cp.find_name(internal) else {
-                continue;
-            };
-            let (formals, supers) = ci.signature.as_deref().and_then(parse_class_gsig).unzip();
-            let formals = formals.unwrap_or_default();
-            let binds: std::collections::HashMap<String, Ty> =
-                formals.iter().cloned().zip(targs.iter().copied()).collect();
-            let found = ci
-                .methods
-                .iter()
-                .filter(|m| m.is_public() && !m.is_static() && m.name == name)
-                .find(|m| {
-                    let Some((params, _)) = parse_method_desc(&m.descriptor) else {
-                        return false;
-                    };
-                    params.len() == args.len()
-                        && params.iter().zip(args).all(|(p, a)| arg_fits(p, a))
-                });
-            if let Some(m) = found {
-                let sig = m.signature.as_deref()?;
-                let gsig = parse_method_gsig(sig)?;
-                let mut binds = binds;
-                for f in &gsig.formals {
-                    binds.remove(f);
-                }
-                return Some(ty_subst(gsig.ret, &binds));
-            }
-            if let Some(supers) = supers {
-                for sup in supers {
-                    if let Ty::Obj(sup_internal, sup_args) = sup {
-                        let sup_targs = ty_subst_all(sup_args, &binds);
-                        q.push_back((
-                            super::jvm_class_map::to_jvm_type_name(sup_internal),
-                            sup_targs,
-                        ));
-                    }
-                }
-            } else {
-                for i in ci.interfaces.iter_ids().chain(ci.super_class) {
-                    q.push_back((i, vec![]));
-                }
-            }
-        }
-        None
-    }
-
     /// The generic signature for `owner.jvm_name`, metadata-primary. When `@Metadata` DESCRIBES this
     /// function (a Kotlin callable), its metadata gsig is authoritative — the JVM-agnostic, Kotlin-faithful
     /// signature (nullability, variance, Kotlin type identities, and no synthetic `suspend` Continuation /
@@ -552,10 +486,9 @@ impl JvmLibraries {
 
     /// The type-parameter bindings a receiver induces at `target_internal` (`Repo<Cfg>` at `lib/Repo` →
     /// `{T: Cfg}`), by walking the generic hierarchy from the receiver and propagating each class's type
-    /// arguments through every `extends`/`implements` edge — the same walk `member_return` performs, but
-    /// exposed so a `suspend` member's return (recovered from `Continuation<T>`, which `member_return`
-    /// cannot use because the JVM return is erased to `Object`) can be substituted under the same bindings.
-    /// Empty when the receiver carries no type arguments or `target_internal` is not reached.
+    /// arguments through every `extends`/`implements` edge. A non-generic receiver can still fix a generic
+    /// supertype (`TokenList : List<Token>`), so an empty receiver argument list does not skip the walk.
+    /// Empty when no bindings are established or `target_internal` is not reached.
     fn receiver_type_bindings_name(
         &self,
         receiver: Ty,
@@ -564,9 +497,6 @@ impl JvmLibraries {
         let Ty::Obj(start, start_args) = receiver else {
             return std::collections::HashMap::new();
         };
-        if start_args.is_empty() {
-            return std::collections::HashMap::new();
-        }
         let target = super::jvm_class_map::to_jvm_type_name(target_internal);
         let mut seen = std::collections::HashSet::new();
         let mut q = std::collections::VecDeque::new();
@@ -605,6 +535,21 @@ impl JvmLibraries {
             }
         }
         std::collections::HashMap::new()
+    }
+
+    /// Receiver-induced class bindings with method-level formals removed. A member `<T>` shadows its
+    /// owner's `T`, so receiver specialization must never bind that method-owned variable.
+    fn member_receiver_bindings_name(
+        &self,
+        receiver: Ty,
+        target_internal: TypeName,
+        method_formals: &[String],
+    ) -> std::collections::HashMap<String, Ty> {
+        let mut bindings = self.receiver_type_bindings_name(receiver, target_internal);
+        for formal in method_formals {
+            bindings.remove(formal);
+        }
+        bindings
     }
 
     fn sam_method_for_class(&self, internal: &str) -> Option<LibraryMember> {
@@ -1328,11 +1273,10 @@ fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
 }
 
 /// A member's return type recovered from its generic signature ONLY when it is fully CONCRETE (carries
-/// type arguments, none of which is a free type variable) — `all(): List<Item>` → `List<Item>`. This lets
-/// a member of a NON-generic receiver still carry its return's type arguments (which `member_return`
-/// skips, as it only propagates the receiver's own arguments). A return naming a type variable
-/// (`fun <T> load(): T`, `List<E>.get(): E`) is NOT recovered here — it stays erased / is bound by
-/// `member_return` under the receiver's arguments.
+/// type arguments, none of which is a free type variable) — `all(): List<Item>` → `List<Item>`. This
+/// avoids a hierarchy walk when the return does not depend on receiver bindings. A return naming a type
+/// variable (`fun <T> load(): T`, `List<E>.get(): E`) is NOT recovered here — it stays erased / is bound
+/// by `member_return` under the receiver's applied supertype arguments.
 fn concrete_generic_ret(gsig: &GenericSig) -> Option<Ty> {
     fn is_concrete(g: Ty) -> bool {
         match g {
@@ -2204,7 +2148,16 @@ impl SymbolSource for JvmLibraries {
                             // A generic `suspend` member returns a type parameter (`byId(): T`) via
                             // `Continuation<T>`; bind `T` to the receiver's concrete argument
                             // (`Repo<Cfg>` → `T = Cfg`) so the return isn't erased to `Any`.
-                            let recv_binds = self.receiver_type_bindings_name(receiver, cn);
+                            let recv_binds = generic_sig
+                                .as_ref()
+                                .map(|signature| {
+                                    self.member_receiver_bindings_name(
+                                        receiver,
+                                        cn,
+                                        &signature.formals,
+                                    )
+                                })
+                                .unwrap_or_default();
                             let base = generic_sig
                                 .as_ref()
                                 .and_then(|g| suspend_return_from_gsig(g, &recv_binds))
@@ -2254,9 +2207,21 @@ impl SymbolSource for JvmLibraries {
                                 .map(kotlin_name_to_ty)
                                 .unwrap_or(base)
                         } else {
-                            let recovered = self
-                                .member_return(receiver, &m.name, &m.params)
-                                .or_else(|| generic_sig.as_ref().and_then(concrete_generic_ret));
+                            // Most members have no generic signature, and a fully concrete generic
+                            // return needs no receiver walk. Traverse the applied hierarchy only when
+                            // the return still contains a type variable that receiver/supertype
+                            // bindings may specialize.
+                            let recovered = generic_sig.as_ref().and_then(|signature| {
+                                concrete_generic_ret(signature).or_else(|| {
+                                    let bindings = self.member_receiver_bindings_name(
+                                        receiver,
+                                        cn,
+                                        &signature.formals,
+                                    );
+                                    (!bindings.is_empty())
+                                        .then(|| ty_subst(signature.ret, &bindings))
+                                })
+                            });
                             crate::trace_compiler!(
                                 "resolve",
                                 "member return {}.{}: recovered={:?} erased={:?} (gsig={})",
