@@ -491,6 +491,7 @@ mod tests {
         FrontendClassSig {
             internal: internal.into(),
             props: vec![],
+            receiver_function_props: HashSet::new(),
             member_ext_props: HashMap::new(),
             member_ext_funs: HashMap::new(),
             has_primary_ctor: true,

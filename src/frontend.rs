@@ -18,9 +18,9 @@ pub use crate::resolve::{
 pub(crate) use crate::resolve::{
     pick_overload, qualified_path, typeref_leaf, ClassNames, CtorDefaultValue,
     DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, InlineCall, InvokeKind,
-    IteratorDispatchTarget, LambdaCapture, LambdaInfo, ReceiverLambda, ResolvedCall,
-    ResolvedConstructor, ResolvedLocalFunctionCall, ResolvedMember, ResolvedModuleTopLevelCall,
-    Signature, StmtLowering,
+    IteratorDispatchTarget, LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ReceiverLambda,
+    ResolvedCall, ResolvedConstructor, ResolvedLocalFunctionCall, ResolvedMember,
+    ResolvedModuleTopLevelCall, Signature, StmtLowering,
 };
 use crate::source::{SourceInput, SourceKind};
 

@@ -70,6 +70,370 @@ fun box(): String {\n\
 }
 
 #[test]
+fn implicit_receiver_fn_param_invoke_with_unit_coerced_lambda() {
+    const SRC: &str = r#"
+class Element(val text: String)
+
+class Scope {
+    private fun StringBuilder.output(elements: Collection<Element>) {
+        emit(elements, "") { element ->
+            append(element.text)
+            append("")
+        }
+    }
+
+    private inline fun <E> StringBuilder.emit(
+        elements: Collection<E>,
+        separator: String,
+        render: StringBuilder.(E) -> Unit,
+    ) {
+        elements.forEachIndexed { index, element ->
+            render(element)
+            if (index != elements.size - 1) append(separator)
+        }
+    }
+
+    fun result(): String = buildString {
+        output(listOf(Element("O"), Element("K")))
+    }
+}
+
+fun box(): String = Scope().result()
+"#;
+    assert_eq!(
+        run(SRC).expect("implicit receiver fn with Unit-coerced lambda"),
+        "OK"
+    );
+}
+
+#[test]
+fn plain_function_param_does_not_take_an_implicit_receiver() {
+    const SRC: &str = r#"
+class Context {
+    fun call(function: (Context, Int) -> String): String = function(1)
+    fun callQualified(
+        context: Context,
+        function: (Context, Int) -> String,
+    ): String = context.function(1)
+}
+"#;
+    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("expects 2 args, got 1")),
+        "expected ordinary function arity diagnostic, got {diagnostics:?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("unresolved reference 'function'")),
+        "expected ordinary function member-call diagnostic, got {diagnostics:?}"
+    );
+}
+
+#[test]
+fn inferred_local_keeps_receiver_function_behavior() {
+    const SRC: &str = r#"
+var result = ""
+
+class Scope {
+    fun append(text: String) {
+        result += text
+    }
+
+    fun apply(action: Scope.() -> Unit) {
+        val alias = action
+        alias()
+    }
+}
+
+fun box(): String {
+    Scope().apply { append("OK") }
+    return result
+}
+"#;
+    assert_eq!(run(SRC).expect("inferred receiver-function local"), "OK");
+}
+
+#[test]
+fn conditional_local_keeps_receiver_function_behavior() {
+    const SRC: &str = r#"
+var result = ""
+
+class Scope {
+    fun append(text: String) {
+        result += text
+    }
+
+    fun apply(enabled: Boolean, action: Scope.() -> Unit) {
+        val alias = if (enabled) action else action
+        alias()
+    }
+}
+
+fun box(): String {
+    Scope().apply(true) { append("OK") }
+    return result
+}
+"#;
+    assert_eq!(run(SRC).expect("conditional receiver-function local"), "OK");
+}
+
+#[test]
+fn cast_local_keeps_receiver_function_behavior() {
+    const SRC: &str = r#"
+var result = ""
+
+class Scope {
+    fun append(text: String) {
+        result += text
+    }
+
+    fun apply(action: Scope.() -> Unit) {
+        val alias = action as Scope.() -> Unit
+        alias()
+    }
+}
+
+fun box(): String {
+    Scope().apply { append("OK") }
+    return result
+}
+"#;
+    assert_eq!(run(SRC).expect("cast receiver-function local"), "OK");
+}
+
+#[test]
+fn top_level_property_keeps_receiver_function_behavior() {
+    const SRC: &str = r#"
+var result = ""
+
+class Scope
+
+val action: Scope.() -> Unit = {
+    result += "O"
+}
+
+fun Scope.applyAction() {
+    action()
+    val alias = action
+    alias()
+}
+
+fun box(): String {
+    Scope().applyAction()
+    return if (result == "OO") "OK" else result
+}
+"#;
+    assert_eq!(
+        run(SRC).expect("top-level receiver-function property"),
+        "OK"
+    );
+}
+
+#[test]
+fn cross_file_property_keeps_receiver_function_behavior() {
+    let output = common::compile_and_run_files_with_stdlib(&[
+        (
+            "Action.kt",
+            r#"
+package sample
+
+var result = ""
+
+class Scope
+
+val action: Scope.() -> Unit = {
+    result += "OK"
+}
+"#,
+        ),
+        (
+            "Main.kt",
+            r#"
+package sample
+
+fun Scope.applyAction() {
+    action()
+}
+
+fun box(): String {
+    Scope().applyAction()
+    return result
+}
+"#,
+        ),
+    ]);
+    assert_eq!(output.expect("cross-file receiver-function property"), "OK");
+}
+
+#[test]
+fn member_extension_keeps_selected_top_level_property_origin() {
+    const SRC: &str = r#"
+var result = ""
+
+class Target
+
+val action: Target.() -> Unit = {
+    result += "OK"
+}
+
+class Host(val action: Target.() -> Unit) {
+    private fun Target.applyAction() {
+        action()
+    }
+
+    fun execute() {
+        Target().applyAction()
+    }
+}
+
+fun box(): String {
+    Host { result += "WRONG" }.execute()
+    return result
+}
+"#;
+    assert_eq!(
+        run(SRC).expect("selected top-level receiver-function property"),
+        "OK"
+    );
+}
+
+#[test]
+fn inner_class_keeps_enclosing_property_origin() {
+    const SRC: &str = r#"
+var result = ""
+
+open class Target
+
+class Container(val action: Target.() -> Unit) {
+    inner class Item : Target() {
+        fun applyAction() {
+            action()
+        }
+    }
+
+    fun execute() {
+        Item().applyAction()
+    }
+}
+
+fun box(): String {
+    Container { result += "OK" }.execute()
+    return result
+}
+"#;
+    assert_eq!(
+        run(SRC).expect("enclosing receiver-function property"),
+        "OK"
+    );
+}
+
+#[test]
+fn interface_property_keeps_receiver_function_behavior() {
+    const SRC: &str = r#"
+var result = ""
+
+interface Scope {
+    val action: Scope.() -> Unit
+
+    fun applyAction() {
+        action()
+    }
+}
+
+class Implementation(
+    override val action: Scope.() -> Unit,
+) : Scope
+
+fun box(): String {
+    Implementation { result += "OK" }.applyAction()
+    return result
+}
+"#;
+    assert_eq!(
+        run(SRC).expect("interface receiver-function property"),
+        "OK"
+    );
+}
+
+#[test]
+fn body_property_keeps_receiver_function_behavior_in_init() {
+    const SRC: &str = r#"
+var result = ""
+
+class Scope {
+    private val action: Scope.() -> Unit = { result += "O" }
+
+    init {
+        action()
+    }
+
+    fun finish() {
+        result += "K"
+    }
+}
+
+fun box(): String {
+    Scope().finish()
+    return result
+}
+"#;
+    assert_eq!(run(SRC).expect("receiver-function body property"), "OK");
+}
+
+#[test]
+fn class_property_keeps_receiver_function_behavior_in_secondary_constructor() {
+    const SRC: &str = r#"
+var result = ""
+
+class Scope(val action: Scope.() -> Unit) {
+    constructor(supplied: Scope.() -> Unit, marker: Int) : this(supplied) {
+        action()
+    }
+
+    fun finish() {
+        result += "K"
+    }
+}
+
+fun box(): String {
+    Scope({ result += "O" }, 0).finish()
+    return result
+}
+"#;
+    assert_eq!(
+        run(SRC).expect("receiver-function property in secondary constructor"),
+        "OK"
+    );
+}
+
+#[test]
+fn inherited_property_keeps_receiver_function_behavior() {
+    const SRC: &str = r#"
+var result = ""
+
+open class Container(protected val action: Container.() -> Unit)
+
+class Scope(action: Container.() -> Unit) : Container(action) {
+    fun apply() {
+        action()
+    }
+}
+
+fun box(): String {
+    Scope { result += "OK" }.apply()
+    return result
+}
+"#;
+    assert!(
+        common::front_end_diagnostics(SRC, &[], None).is_empty(),
+        "inherited receiver-function property should resolve"
+    );
+}
+
+#[test]
 fn ctor_receiver_lambda_binds_implicit_this() {
     // KT-606: a receiver lambda passed to a CONSTRUCTOR parameter (`config: Pipeline.() -> Unit`)
     // binds the receiver as implicit `this` — a bare member call inside dispatches on the receiver,
