@@ -305,6 +305,7 @@ fn lib_member(name: &str, sig: &Signature, owner: TypeName, is_interface: bool) 
     m.visibility = sig.visibility;
     m.inline = crate::libraries::InlineKind::from_flags(sig.is_inline, false);
     m.call_sig = sig.call_sig();
+    m.context_count = sig.context_count;
     m
 }
 

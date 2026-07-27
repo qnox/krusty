@@ -552,6 +552,8 @@ mod map_entry_destructure_e2e;
 mod map_get_nullable_elvis_e2e;
 #[path = "member_array_ctor_inference_e2e.rs"]
 mod member_array_ctor_inference_e2e;
+#[path = "member_context_parameters_e2e.rs"]
+mod member_context_parameters_e2e;
 #[path = "member_ctrl_inference_e2e.rs"]
 mod member_ctrl_inference_e2e;
 #[path = "member_default_implicit_receiver_e2e.rs"]

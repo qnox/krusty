@@ -21762,8 +21762,29 @@ impl<'a> Lower<'a> {
                         if let Some((class, index, _fid, mret)) =
                             self.link_local_method(&owner_name, target, params)
                         {
-                            let (provided, prelude) =
-                                self.lower_selected_module_member_args(e, &args, params, *vararg)?;
+                            // A CONTEXT member: the checker recorded the in-scope sources for the
+                            // leading context parameters — load and PREPEND them; the explicit
+                            // arguments fill the remaining value parameters (the member analog of
+                            // the top-level context-call block).
+                            let ctx_sources =
+                                self.info.context_args.get(&e).cloned().unwrap_or_default();
+                            if ctx_sources.len() >= params.len() && !ctx_sources.is_empty() {
+                                return None; // recorded sources must leave value params
+                            }
+                            let value_params = params.get(ctx_sources.len()..)?;
+                            let (provided, prelude) = self.lower_selected_module_member_args(
+                                e,
+                                &args,
+                                value_params,
+                                *vararg,
+                            )?;
+                            let mut all = Vec::with_capacity(params.len());
+                            for src in &ctx_sources {
+                                let (v, _) = self.lookup(src)?;
+                                all.push(Some(self.emit_get_value(v)));
+                            }
+                            all.extend(provided);
+                            let provided = all;
                             let call = self.emit_method_call(class, index, recv, provided);
                             // A generic higher-order member erases its `<R>` return to `Object`; the
                             // checker records the concrete result (`box.map { it.length }` → `Int`), so
@@ -21771,6 +21792,11 @@ impl<'a> Lower<'a> {
                             let call = self.coerce_generic_read(call, e, mret);
                             self.wrap_arg_prelude(call, prelude)
                         } else {
+                            // A CONTEXT member's prepend is only wired for the same-file linked
+                            // path above — decline the cross-file form (skip, never miscompile).
+                            if self.info.context_args.contains_key(&e) {
+                                return None;
+                            }
                             self.lower_cross_file_module_member_call(recv, resolved, &args, e)?
                         }
                     } else if matches!(name.as_str(), "toString" | "hashCode") && args.is_empty() {

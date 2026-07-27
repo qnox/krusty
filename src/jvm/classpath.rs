@@ -1682,6 +1682,7 @@ impl Classpath {
                         visibility: crate::libraries::Visibility::Public,
                         // Builtin members carry no source parameter-name metadata.
                         call_sig: crate::libraries::CallSig::default(),
+                        context_count: 0,
                     }
                 })
             })

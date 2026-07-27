@@ -62,6 +62,11 @@ pub struct LibraryMember {
     /// call and lambda-parameter typing without the removed receiver-indexed `functions()` seam. Default
     /// (empty) for a provider that records no source parameter metadata.
     pub call_sig: CallSig,
+    /// Number of leading context parameters in `params` (`context(a: A) fun m(x)` → `1`). The
+    /// call site supplies only the VALUE arguments; the checker resolves the context slice from
+    /// the caller's scope. `0` for classpath members (context members aren't decoded from
+    /// `@Metadata` yet).
+    pub context_count: usize,
 }
 
 /// A public static field read.
@@ -274,6 +279,7 @@ impl LibraryMember {
             suspend: false,
             visibility: Visibility::Public,
             call_sig: CallSig::default(),
+            context_count: 0,
         }
     }
 

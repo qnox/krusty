@@ -3125,10 +3125,21 @@ impl<'a> Parser<'a> {
             loop {
                 self.skip_newlines();
                 let mut mods = Vec::new();
+                // Context parameters on a MEMBER (`context(a: A)` before a member `fun`): buffer
+                // them exactly like the top-level form — `parse_fun` merges them as the leading
+                // value parameters. The soft keyword only counts when the prefix really precedes
+                // a `fun` (a call to a function NAMED `context` must not be eaten).
+                if self.context_prefix_precedes_fun() {
+                    mods.extend(self.maybe_parse_context_receivers());
+                }
                 if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text()))
                 {
-                    mods = self.skip_decl_prefix();
+                    mods.extend(self.skip_decl_prefix());
                     self.skip_newlines();
+                    // The prefix may also FOLLOW annotations/modifiers (`private context(a: A) fun`).
+                    if self.context_prefix_precedes_fun() {
+                        mods.extend(self.maybe_parse_context_receivers());
+                    }
                 }
                 let lateinit = mods.iter().any(|m| m == "lateinit");
                 let fun_inline = mods.iter().any(|m| m == "inline");

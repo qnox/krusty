@@ -2263,3 +2263,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `ranges/contains/inRangeLiteralComposition.kt`, `inRangeWithCustomContains.kt`,
   `regressions/kt5056.kt` — box conformance 3050 → 3053, FAIL: 0, no OK-set regressions.
   `tests/reference_range_expression_e2e.rs`.
+
+- **Context parameters on class members (`// LANGUAGE: +ContextParameters`).** The class-body
+  parser accepts a `context(...)` prefix before a member `fun` (before or after
+  annotations/modifiers; the soft keyword counts only when the prefix really precedes `fun`),
+  merging the context parameters as the leading value parameters exactly like the top-level and
+  local-function forms. `member_signature` carries `context_count` (and `LibraryMember` gained
+  the field, so the module member walk preserves it). A call supplying only the VALUE arguments
+  resolves through `check_context_module_member_call` — the member analog of the top-level
+  context path: each context type binds to the innermost in-scope source (shared
+  `resolve_context_args`), the sources are recorded in `context_args`, and the `ModuleMember`
+  lowering prepends the loaded sources before the explicit arguments. Context member EXTENSIONS,
+  context member PROPERTIES, and `context(A) () -> R` function types are later slices (the
+  corpus `contextParameters/*` files stack those, so this lands as capability without corpus
+  movement — verified FAIL: 0, no OK-set regressions). `tests/member_context_parameters_e2e.rs`.

@@ -5713,7 +5713,7 @@ fn member_signature(
         visibility: m.visibility,
         is_final: m.is_final,
         is_suspend: m.is_suspend,
-        context_count: 0,
+        context_count: m.context_count,
         source_decl: None,
         source_file: None,
         package: String::new(),
@@ -17394,6 +17394,16 @@ impl<'a> Checker<'a> {
             })
             .cloned()
             .collect::<Vec<_>>();
+        // A CONTEXT member (`context(a: A) fun add(x)`): the call site passes only the VALUE
+        // arguments; resolve the context slice from the caller's scope and record the sources for
+        // the lowering to prepend — the member analog of `resolve_context_module_top_level`.
+        if applicable_members.is_empty() {
+            if let Some(ret) =
+                self.check_context_module_member_call(call, rt, internal_name, name, args, arg_tys)
+            {
+                return Some(ret);
+            }
+        }
         if has_sibling_overloads && applicable_members.is_empty() {
             self.diags.error(
                 self.call_callee_name_span(call),
@@ -17547,6 +17557,99 @@ impl<'a> Checker<'a> {
         if let Some(slots) = mapped_slots {
             self.resolved_call_arg_slots.insert(call, slots);
         }
+        Some(ret)
+    }
+
+    /// A module-class MEMBER with context parameters, called with only its VALUE arguments
+    /// (`context(a: A) fun add(x: Int)`; `with(A(40)) { b.add(2) }`): resolve each context type
+    /// from the caller's scope (the shared [`Self::resolve_context_args`]), type-check the value
+    /// arguments against the post-context parameter slice, and record BOTH the selected member
+    /// and the context sources so the lowering prepends them.
+    fn check_context_module_member_call(
+        &mut self,
+        call: ExprId,
+        rt: Ty,
+        internal_name: TypeName,
+        name: &str,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+    ) -> Option<Ty> {
+        // Named-argument calls keep the ordinary (rejecting) path.
+        if self
+            .file
+            .call_arg_names
+            .get(&call.0)
+            .is_some_and(|ns| ns.iter().any(Option::is_some))
+        {
+            return None;
+        }
+        let members =
+            crate::module_symbols::ModuleSymbols::new(self.syms).instance_members(rt, name);
+        let mut best: Option<(usize, crate::libraries::LibraryMember, Vec<String>)> = None;
+        for m in members {
+            let ctx = m.context_count;
+            if ctx == 0 || ctx > m.params.len() {
+                continue;
+            }
+            // A vararg context member isn't modeled (the lowering's context prepend and the
+            // vararg packing don't compose yet) — decline, the file skips.
+            if m.call_sig.vararg {
+                continue;
+            }
+            let value_params = &m.params[ctx..];
+            if value_params.len() != arg_tys.len() {
+                continue;
+            }
+            let mut score = 0usize;
+            let mut fits = true;
+            for (&p, &a) in value_params.iter().zip(arg_tys) {
+                if !arg_assignable_simple(p, a) {
+                    fits = false;
+                    break;
+                }
+                score += if p == a { 2 } else { 1 };
+            }
+            if !fits {
+                continue;
+            }
+            let Some(sources) = self.resolve_context_args(&m.params[..ctx]) else {
+                continue;
+            };
+            if best.as_ref().is_none_or(|(b, ..)| score > *b) {
+                best = Some((score, m, sources));
+            }
+        }
+        let (_, fi, sources) = best?;
+        let ctx = fi.context_count;
+        for (i, (&p, &a)) in fi.params[ctx..].iter().zip(arg_tys).enumerate() {
+            self.expect_assignable(p, a, self.span(args[i]), "argument");
+        }
+        let ret = self
+            .inferred_member_ret(rt, name, &fi.params)
+            .unwrap_or(fi.ret);
+        let owner = fi.owner.unwrap_or(internal_name);
+        if fi.visibility != Visibility::Public {
+            self.reject_if_inaccessible(
+                fi.visibility,
+                name,
+                owner,
+                self.call_callee_name_span(call),
+            );
+        }
+        self.context_args.insert(call, sources);
+        self.resolved_calls.insert(
+            call,
+            ResolvedCall::ModuleMember {
+                receiver: rt,
+                owner,
+                name: name.to_string(),
+                params: fi.params.clone(),
+                physical_ret: fi.ret,
+                ret,
+                interface: fi.is_interface,
+                vararg: false,
+            },
+        );
         Some(ret)
     }
 
@@ -22835,6 +22938,7 @@ fun box(): String {
                         suspend: false,
                         visibility: crate::types::Visibility::Public,
                         call_sig: CallSig::default(),
+                        context_count: 0,
                     };
                     vec![
                         member(
