@@ -160,8 +160,9 @@ fn named_arg_no_such_parameter() {
     let d = diags("fun f(a: Int): Int = a\nfun box(): Int = f(z = 1)");
     assert_rejected(&d, "named argument with no such parameter");
     assert!(
-        d.iter().any(|m| m.contains("no parameter named")),
-        "expected 'no parameter named': {d:?}"
+        d.iter()
+            .any(|m| m.contains("no parameter with name 'z' found.")),
+        "expected canonical unknown named-parameter diagnostic: {d:?}"
     );
 }
 
