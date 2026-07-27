@@ -1774,6 +1774,9 @@ fn collect_file_type_names(file: &File, out: &mut std::collections::HashSet<Stri
         }
     }
     fn prop_names(p: &PropDecl, out: &mut std::collections::HashSet<String>) {
+        for parameter in &p.context_params {
+            collect_typeref_names(&parameter.ty, out);
+        }
         if let Some(r) = &p.receiver {
             collect_typeref_names(r, out);
         }
@@ -7778,6 +7781,12 @@ fn check_file_at_impl(
                 // `T` resolves rather than reading as an unresolved reference.
                 let resolve = class_internal_resolver(c.syms);
                 c.tparams = TParams::from_decl_with(&p.type_params, &p.type_param_bounds, &resolve);
+                c.check_duplicate_param_names(&p.context_params, p.span);
+                c.push_scope();
+                for parameter in &p.context_params {
+                    let parameter_type = c.resolve_ty(&parameter.ty);
+                    c.declare(&parameter.name, parameter_type, false);
+                }
                 // For an extension property (`val Recv.name: T get() = …`), `this` inside the
                 // accessors is the receiver.
                 let prev_this = c.this_ty;
@@ -7870,6 +7879,7 @@ fn check_file_at_impl(
                         }
                     }
                 }
+                c.pop_scope();
                 c.tparams.clear();
             }
         }
@@ -10969,23 +10979,25 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_fun(&mut self, f: &FunDecl, source_decl: Option<DeclId>) {
+    fn check_duplicate_param_names(&mut self, params: &[Param], span: Span) {
         // Duplicate parameter names are illegal (kotlinc reports a conflicting declaration). `_` is
-        // not a valid function parameter name in Kotlin, so no placeholder exception is needed.
-        {
-            let mut seen = std::collections::HashSet::new();
-            for p in &f.params {
-                if !seen.insert(p.name.as_str()) {
-                    self.diags.error(
-                        f.span,
-                        format!(
-                            "conflicting declaration: parameter '{}' is declared more than once",
-                            p.name
-                        ),
-                    );
-                }
+        // not a valid declaration parameter name, so no placeholder exception is needed.
+        let mut seen = std::collections::HashSet::new();
+        for parameter in params {
+            if !seen.insert(parameter.name.as_str()) {
+                self.diags.error(
+                    span,
+                    format!(
+                        "conflicting declaration: parameter '{}' is declared more than once",
+                        parameter.name
+                    ),
+                );
             }
         }
+    }
+
+    fn check_fun(&mut self, f: &FunDecl, source_decl: Option<DeclId>) {
+        self.check_duplicate_param_names(&f.params, f.span);
         // Duplicate type-parameter names (`fun <T, T> f()`) are illegal (conflicting declaration).
         {
             let mut seen = std::collections::HashSet::new();
@@ -24547,6 +24559,33 @@ fun box(): String {
         assert!(
             !info.context_args.contains_key(&call),
             "module top-level context calls must carry context sources in the resolved target"
+        );
+    }
+
+    #[test]
+    fn context_property_getter_sees_its_named_parameter() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "class Scope\n\
+             context(scope: Scope)\n\
+             val current: Scope get() = scope",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        assert_no_diags(&diagnostics);
+    }
+
+    #[test]
+    fn context_property_rejects_duplicate_parameter_names() {
+        err_contains(
+            "class Scope\n\
+             context(scope: Scope, scope: Scope)\n\
+             val current: Scope get() = scope",
+            "conflicting declaration: parameter 'scope' is declared more than once",
         );
     }
 

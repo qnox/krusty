@@ -569,6 +569,18 @@ fn jvm_inline_value_class() {
 // REJECTS TESTS — the backend declines cleanly for constructs it does not model yet.
 // ===================================================================================================
 
+// --- context properties: frontend analysis is supported, but accessor ABI adaptation is not ---
+
+#[test]
+fn context_property_rejected_until_accessor_abi_is_supported() {
+    assert!(rejects(
+        "class Scope\n\
+         context(scope: Scope)\n\
+         val current: Scope get() = scope\n\
+         fun main() {}\n"
+    ));
+}
+
 // --- delegated properties: distinct providers all deep-bail in ir_lower ---
 
 #[test]

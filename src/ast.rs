@@ -798,6 +798,10 @@ pub enum ClassInit {
 #[derive(Clone, Debug)]
 pub struct PropDecl {
     pub name: String,
+    /// Named context parameters from a declaration prefix (`context(scope: Scope) val current …`).
+    /// They are in scope for accessor bodies. Accessor-call adaptation must remain separate from the
+    /// extension receiver because Kotlin permits both, and permits more than one context parameter.
+    pub context_params: Vec<Param>,
     /// 1-based source line of the declaration, filled by the parser post-pass (0 = unknown).
     pub decl_line: u32,
     /// Declaration visibility (`public` by default). A `private set` narrows only the SETTER — that

@@ -233,6 +233,13 @@ pub fn lower_file_at_reporting(
                         !p.is_const
                             || p.init.is_some_and(|i| is_const_literal(file, i))
                     }) => {}
+            // Context-dependent property accessors require implicit context arguments in their JVM
+            // signatures and at every read/write site. The shared frontend can analyze their bodies,
+            // but emitting them as ordinary zero-argument accessors would change the ABI.
+            Decl::Property(p) if !p.context_params.is_empty() => {
+                lo.set_bail("gate:context-property");
+                return None;
+            }
             // A `val` extension property (`val Recv.name get() = …`) is lowered to a static getter; the
             // unsupported shapes (`var`, no `get()`) are skipped in pass 1.
             Decl::Property(p)

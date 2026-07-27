@@ -1259,8 +1259,8 @@ impl<'a> Parser<'a> {
             if self.at(TokenKind::Eof) {
                 break;
             }
-            // Drop any context parameters left buffered by a `context(...)` prefix that turned out NOT
-            // to precede a function (e.g. an ill-formed source), so they never leak onto a later `fun`.
+            // Drop any context parameters that an ill-formed or unsupported preceding declaration
+            // failed to consume, so they never leak onto a later declaration.
             self.pending_context_params.clear();
             // Consume leading annotations + declaration modifiers. `open`/`abstract` are applied to
             // the following class; the rest are ignored (krusty treats everything as public).
@@ -1273,9 +1273,9 @@ impl<'a> Parser<'a> {
             } else {
                 Vec::new()
             };
-            // Context receivers: `context(a: A, b: B)` before a `fun`. `context` is a soft keyword —
-            // treated as a context-parameter prefix only when directly followed by `(` at a declaration
-            // position; the params are buffered for the next `parse_fun` (mirrors pending annotations).
+            // Context parameters: `context(a: A, b: B)` before a function or property. `context` is a
+            // soft keyword — treated as a prefix only when directly followed by `(` at a declaration
+            // position; the params are buffered for the declaration parser (mirrors pending annotations).
             // Any modifiers written AFTER the prefix (`context(a: A) private fun f()`) are returned and
             // merged so visibility/modality aren't lost.
             mods.extend(self.maybe_parse_context_receivers());
@@ -1840,6 +1840,7 @@ impl<'a> Parser<'a> {
         // PropDecl does not retain annotations.
         let _ = self.take_pending_annotations();
         let _ = self.take_pending_annotation_args();
+        let context_params = std::mem::take(&mut self.pending_context_params);
         let start = self.tok().span;
         let is_var = self.at(TokenKind::KwVar);
         self.bump(); // val/var
@@ -2019,6 +2020,7 @@ impl<'a> Parser<'a> {
         PropDecl {
             is_open: false,
             name,
+            context_params,
             decl_line: 0,
             visibility: Visibility::Public,
             type_params,
@@ -2797,8 +2799,8 @@ impl<'a> Parser<'a> {
 
     /// Parse a parenthesised parameter list `( (mods name: Type (= default)?),* )` via the real
     /// grammar — never by skipping to a balanced `)`.
-    /// Consume a `context(a: A, b: B)` context-receiver prefix, buffering its parameters for the next
-    /// `parse_fun`. `context` is a soft keyword, so this fires ONLY when it is immediately followed by
+    /// Consume a `context(a: A, b: B)` prefix, buffering its parameters for the next function or
+    /// property parser. `context` is a soft keyword, so this fires ONLY when it is immediately followed by
     /// `(` at a declaration prefix — a value/expression named `context` never reaches here (it isn't a
     /// declaration start). No-op otherwise.
     fn maybe_parse_context_receivers(&mut self) -> Vec<String> {
@@ -8100,13 +8102,25 @@ mod tests {
 
     #[test]
     fn context_params_do_not_leak_to_later_function() {
-        // A `context(...)` prefix that does not precede a function must not pollute a LATER function's
-        // parameters (the buffer is cleared each declaration).
+        // A property's context parameters belong to that property and must not pollute a later function.
         let mut d = DiagSink::new();
-        // `context(a: A)` here precedes a `val`, not a `fun`; the following `g` must have no params.
-        let src = "class A\nfun g(): Int = 1\n";
+        let src = "class A\n\
+                   context(a: A)\n\
+                   val current: A get() = a\n\
+                   fun g(): Int = 1\n";
         let toks = lex(src, &mut d);
         let file = parse(src, &toks, &mut d);
+        let property = file
+            .decls
+            .iter()
+            .find_map(|&id| match file.decl(id) {
+                Decl::Property(property) if property.name == "current" => Some(property),
+                _ => None,
+            })
+            .expect("property parsed");
+        assert_eq!(property.context_params.len(), 1);
+        assert_eq!(property.context_params[0].name, "a");
+        assert_eq!(property.context_params[0].ty.name, "A");
         let g = file
             .decls
             .iter()
