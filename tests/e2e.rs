@@ -324,6 +324,8 @@ mod enum_value_of_intrinsic_e2e;
 mod enum_vararg_e2e;
 #[path = "expected_type_propagation_e2e.rs"]
 mod expected_type_propagation_e2e;
+#[path = "explicit_backing_field_e2e.rs"]
+mod explicit_backing_field_e2e;
 #[path = "expr_completeness_e2e.rs"]
 mod expr_completeness_e2e;
 #[path = "ext_on_subtype_receiver_e2e.rs"]
