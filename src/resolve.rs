@@ -15913,24 +15913,16 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        // A MODULE (user-declared) class member, resolved by arity through the module source only. An
-        // INHERITED classpath member must NOT bind here (it would arity-bind ignoring argument fit and
-        // record nothing for the lowerer) — it falls through to `resolve_instance_member` below.
+        // A MODULE (user-declared) class member. Delegate to the same overload/argument-slot resolver as
+        // an explicit `receiver.member(...)` call: an implicit receiver is only `this` sugar, so named
+        // arguments must select and map overloads identically. An INHERITED classpath member must NOT
+        // bind here — it falls through to the classpath resolver below.
         if let Ty::Obj(_, _) = rt {
-            let module_member = crate::module_symbols::ModuleSymbols::new(self.syms)
-                .instance_members(rt, name)
-                .into_iter()
-                .next();
-            if let Some(fi) = module_member {
-                let params = fi.params.clone();
-                if params.len() == arg_tys.len() {
-                    for (i, (p, a)) in params.iter().zip(arg_tys).enumerate() {
-                        self.expect_assignable(*p, *a, self.span(args[i]), "argument");
-                    }
-                    return Some(
-                        self.inferred_member_ret(rt, name, &params)
-                            .unwrap_or(fi.ret),
-                    );
+            let module_members =
+                crate::module_symbols::ModuleSymbols::new(self.syms).instance_members(rt, name);
+            if self.has_applicable_module_member(call, args, arg_tys, &module_members) {
+                if let Some(ret) = self.check_module_member_call(call, rt, name, args, arg_tys) {
+                    return Some(ret);
                 }
             }
             match self.record_classpath_member_call_with_slots(call, rt, name, args) {
@@ -18516,6 +18508,27 @@ impl<'a> Checker<'a> {
             .map(|(_, member)| member)
     }
 
+    fn has_applicable_module_member(
+        &self,
+        call: ExprId,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+        members: &[crate::libraries::LibraryMember],
+    ) -> bool {
+        let arg_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
+        let full_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
+        members.iter().any(|member| {
+            self.module_member_candidate_score(
+                member,
+                args,
+                &full_arg_tys,
+                arg_names,
+                self.file.call_has_trailing_lambda.contains(&call.0),
+            )
+            .is_some()
+        })
+    }
+
     fn has_applicable_instance_member(
         &self,
         call: ExprId,
@@ -19939,17 +19952,8 @@ impl<'a> Checker<'a> {
                 } else {
                     Vec::new()
                 };
-                let full_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
-                let applicable_module_member = module_members.iter().any(|member| {
-                    self.module_member_candidate_score(
-                        member,
-                        args,
-                        &full_arg_tys,
-                        arg_names.as_deref(),
-                        self.file.call_has_trailing_lambda.contains(&call.0),
-                    )
-                    .is_some()
-                });
+                let applicable_module_member =
+                    self.has_applicable_module_member(call, args, &arg_tys, &module_members);
                 if applicable_module_member || generic_member.is_some() {
                     if let Some(ret) =
                         self.check_module_member_call(call, rt, &name, args, &arg_tys)

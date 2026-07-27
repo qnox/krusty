@@ -177,6 +177,43 @@ fn named_args_to_classpath_member_fn_reorder_and_run() {
 }
 
 #[test]
+fn source_overlay_named_args_select_implicit_member_overload() {
+    // A synchronized workspace may overlay a source declaration on the last compiled copy still present
+    // on its classpath. The implicit receiver must resolve the source member overload by named slots,
+    // even when same-named context wrappers make the ordinary sibling-call fast path inapplicable.
+    let Some(diagnostics) = common::checker_diags_against(
+        "source_overlay_member",
+        "package sample\n\
+         class Item\n\
+         enum class Strategy { DIRECT }\n\
+         interface Processor {\n\
+         \x20   fun process(values: List<Pair<Item, Item>>, predicate: (Item) -> Boolean): String\n\
+         \x20   fun process(left: Item, right: Item, strategy: Strategy): String\n\
+         \x20   fun process(values: List<Pair<Item, Item>>, strategy: Strategy): String\n\
+         }\n\
+         interface Session : Processor\n",
+        "package sample\n\
+         interface Processor {\n\
+         \x20   fun process(values: List<Pair<Item, Item>>, predicate: (Item) -> Boolean): String\n\
+         \x20   fun process(left: Item, right: Item, strategy: Strategy): String\n\
+         \x20   fun process(values: List<Pair<Item, Item>>, strategy: Strategy): String\n\
+         }\n\
+         interface Session : Processor\n\
+         context(session: Session)\n\
+         fun process(values: List<Pair<Item, Item>>, predicate: (Item) -> Boolean): String = \"wrong\"\n\
+         context(session: Session)\n\
+         fun process(left: Item, right: Item, strategy: Strategy): String = \"wrong\"\n\
+         context(session: Session)\n\
+         fun process(values: List<Pair<Item, Item>>, strategy: Strategy): String = with(session) {\n\
+         \x20   process(values = values, strategy = strategy)\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
 fn named_classpath_member_vararg_reorders_and_passes_array() {
     common::expect_box_ok_against(
         "named_member_vararg",
