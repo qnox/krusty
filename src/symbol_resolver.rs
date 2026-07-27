@@ -754,8 +754,14 @@ fn best_companion_overload<'a>(
             arg_fits_source(lib, src, param, arg)
         }
     };
-    let logical =
-        |member: &LibraryMember| specialized_sam_member_params(member, args, lambda_literals);
+    let logical = |member: &LibraryMember| {
+        let params = specialized_sam_member_params(member, args, lambda_literals);
+        apply_platform_parameter_nullability(
+            params,
+            &member.call_sig.platform_nullable_params,
+            args,
+        )
+    };
     let named = candidates.filter(|member| member.name == name);
     if let Some(exact) = named.clone().find(|member| logical(member) == args) {
         return Some(exact);
@@ -2110,6 +2116,22 @@ fn value_erased_args(lib: &dyn SemanticPlatform, args: &[Ty]) -> Vec<Ty> {
         .collect()
 }
 
+pub(crate) fn apply_platform_parameter_nullability(
+    mut params: Vec<Ty>,
+    nullable: &[bool],
+    args: &[Ty],
+) -> Vec<Ty> {
+    for ((parameter, accepts_null), argument) in params.iter_mut().zip(nullable).zip(args) {
+        if *accepts_null
+            && (argument.is_nullable() || *argument == Ty::Null)
+            && parameter.is_reference()
+        {
+            *parameter = Ty::nullable(*parameter);
+        }
+    }
+    params
+}
+
 /// Resolve a constructor on a library type by argument types (with the type's own widening).
 fn resolve_constructor_name(
     lib: &dyn SemanticPlatform,
@@ -2128,7 +2150,13 @@ fn resolve_constructor_name(
         "resolve_constructor {internal} ctors={:?} args={args:?}",
         t.constructors.iter().map(|m| &m.params).collect::<Vec<_>>()
     );
-    if let Some(m) = t.constructors.iter().find(|m| m.params == args) {
+    if let Some(m) = t.constructors.iter().find(|m| {
+        apply_platform_parameter_nullability(
+            m.params.clone(),
+            &m.call_sig.platform_nullable_params,
+            args,
+        ) == args
+    }) {
         return Some(m.clone());
     }
     // A constructor PARAMETER of value-class type erases to its underlying in the JVM `<init>` descriptor
@@ -2137,7 +2165,13 @@ fn resolve_constructor_name(
     // argument erased to its underlying, mirroring the ABI the descriptor-read `ctor` params already carry.
     let erased = value_erased_args(lib, args);
     if erased != args {
-        if let Some(m) = t.constructors.iter().find(|m| m.params == erased) {
+        if let Some(m) = t.constructors.iter().find(|m| {
+            apply_platform_parameter_nullability(
+                m.params.clone(),
+                &m.call_sig.platform_nullable_params,
+                &erased,
+            ) == erased
+        }) {
             crate::trace_compiler!(
                 "value_classes",
                 "resolve_constructor {internal} matched via value-class-erased args {args:?} -> {erased:?}"
@@ -2150,11 +2184,14 @@ fn resolve_constructor_name(
     // most-specific overload still wins.
     let abi_args = abi_form_args(lib, args);
     if let Some(abi_args) = &abi_args {
-        if let Some(m) = t
-            .constructors
-            .iter()
-            .find(|m| params_match_abi_form(lib, &m.params, abi_args))
-        {
+        if let Some(m) = t.constructors.iter().find(|m| {
+            let params = apply_platform_parameter_nullability(
+                m.params.clone(),
+                &m.call_sig.platform_nullable_params,
+                abi_args,
+            );
+            params_match_abi_form(lib, &params, abi_args)
+        }) {
             crate::trace_compiler!(
                 "value_classes",
                 "resolve_constructor {internal} matched via abi-form args {args:?} -> {abi_args:?}"
@@ -2163,16 +2200,19 @@ fn resolve_constructor_name(
         }
     }
     match unique_most_specific(
-        t.constructors
-            .iter()
-            .filter(|m| {
-                m.params.len() == args.len()
-                    && m.params
-                        .iter()
-                        .zip(args)
-                        .all(|(p, a)| abi_arg_assignable_to_param(lib, *a, *p))
-            })
-            .map(|m| (m.params.clone(), m)),
+        t.constructors.iter().filter_map(|m| {
+            let params = apply_platform_parameter_nullability(
+                m.params.clone(),
+                &m.call_sig.platform_nullable_params,
+                args,
+            );
+            (params.len() == args.len()
+                && params
+                    .iter()
+                    .zip(args)
+                    .all(|(p, a)| abi_arg_assignable_to_param(lib, *a, *p)))
+            .then_some((params, m))
+        }),
         |_, left, right| abi_param_subtype(lib, left, right),
     ) {
         CandidateSelection::Selected(m) => {
@@ -3105,6 +3145,8 @@ fn select_overload(
         }
         let lp = logical_value_params(lib, o, recv, type_args);
         let lp = specialized_sam_params(&lp, o.generic_sig.as_ref(), args, lambda_literals);
+        let lp =
+            apply_platform_parameter_nullability(lp, &o.call_sig.platform_nullable_params, args);
         crate::trace_compiler!(
             "resolve",
             "  cand {name} rank={rank} logical_params={lp:?} owner={}",
