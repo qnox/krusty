@@ -1767,95 +1767,6 @@ fn build_state_machine(
         &real_params,
     );
 
-    // Capture metadata before flattening consumes the suspension scopes.
-    {
-        let mut slot_name: std::collections::HashMap<u32, String> =
-            std::collections::HashMap::new();
-        if let Some(names) = ir.param_names(fid) {
-            let this_off = u32::from(ir.functions[fid as usize].dispatch_receiver.is_some());
-            for (i, nm) in names.iter().enumerate() {
-                slot_name.insert(this_off + i as u32, nm.clone());
-            }
-        }
-        collect_slot_names(ir, b, &mut slot_name);
-        let s: Vec<String> = layout.fields().into_iter().map(|(nm, _)| nm).collect();
-        let mut ordered_slots: Vec<u32> = Vec::new();
-        let mut live: Vec<ExprId> = susp_scopes
-            .keys()
-            .copied()
-            .filter(|c| live_calls.contains(c))
-            .collect();
-        live.sort_unstable();
-        for call in &live {
-            for &(slot, _) in &susp_scopes[call] {
-                if !ordered_slots.contains(&slot) {
-                    ordered_slots.push(slot);
-                }
-            }
-        }
-        let n: Vec<String> = ordered_slots
-            .iter()
-            .enumerate()
-            .map(|(k, slot)| {
-                slot_name
-                    .get(slot)
-                    .cloned()
-                    .unwrap_or_else(|| s.get(k).cloned().unwrap_or_default())
-            })
-            .collect();
-        let body_stmts: Vec<ExprId> = match &ir.exprs[b as usize] {
-            IrExpr::Block { stmts, .. } => stmts.clone(),
-            _ => Vec::new(),
-        };
-        let call_line = |call: ExprId| -> Option<i32> {
-            ir.expr_lines
-                .get(&call)
-                .map(|&ln| ln as i32)
-                .or_else(|| {
-                    body_stmts
-                        .iter()
-                        .find(|&&st| expr_contains(ir, st, call))
-                        .and_then(|&st| nearest_line(ir, st))
-                        .map(|ln| ln as i32)
-                })
-                .or_else(|| ir.fn_decl_lines.get(&fid).map(|&ln| ln as i32))
-        };
-        let l: Vec<i32> = live.iter().filter_map(|&c| call_line(c)).collect();
-        let nl: Vec<i32> = live
-            .iter()
-            .filter_map(|&call| {
-                let lline = call_line(call)?;
-                let holder = body_stmts
-                    .iter()
-                    .position(|&st| expr_contains(ir, st, call));
-                Some(
-                    holder
-                        .and_then(|i| body_stmts.get(i + 1))
-                        .and_then(|next| ir.expr_lines.get(next))
-                        .map(|&ln| ln as i32)
-                        .unwrap_or(lline),
-                )
-            })
-            .collect();
-        let metadata = ContinuationMetadata {
-            l,
-            nl,
-            i: vec![0; s.len()],
-            s,
-            n,
-            m: fname.clone(),
-            c: cont_owner.replace('/', "."),
-            v: 2,
-            enclosing_class: cont_owner.clone(),
-            enclosing_method: fname.clone(),
-            enclosing_descriptor: crate::jvm::names::method_descriptor(
-                &ir.functions[fid as usize].params,
-                ir.functions[fid as usize].ret,
-            ),
-        };
-        continuation_metadata.insert(cont_internal.clone(), metadata);
-    }
-
     // Flatten the body into a state graph.
     let mut flat = Flat {
         ir,
@@ -1869,6 +1780,7 @@ fn build_state_machine(
         scopes: susp_scopes,
         layout: layout.clone(),
         states: vec![Vec::new()],
+        resume_calls: Vec::new(),
         state_handlers: vec![None],
         state_scope: vec![None],
         cur_handler: None,
@@ -1887,6 +1799,83 @@ fn build_state_machine(
             "build_state_machine fid={fid} BAIL: flattener failed"
         );
         return false;
+    }
+    let resume_calls = std::mem::take(&mut flat.resume_calls);
+    {
+        let ir = &*flat.ir;
+        let mut slot_name: std::collections::HashMap<u32, String> =
+            std::collections::HashMap::new();
+        if let Some(names) = ir.param_names(fid) {
+            let this_off = u32::from(ir.functions[fid as usize].dispatch_receiver.is_some());
+            for (i, nm) in names.iter().enumerate() {
+                slot_name.insert(this_off + i as u32, nm.clone());
+            }
+        }
+        collect_slot_names(ir, b, &mut slot_name);
+        let mut s = Vec::new();
+        let mut n = Vec::new();
+        let mut state_indices = Vec::new();
+        for (state_idx, call) in resume_calls.iter().enumerate() {
+            for (slot, _ty, kind, pos) in kind_positions(&flat.scopes[call]) {
+                s.push(format!("{kind}${pos}"));
+                n.push(slot_name.get(&slot).cloned().unwrap_or_default());
+                state_indices.push(state_idx as i32);
+            }
+        }
+        let body_stmts: Vec<ExprId> = match &ir.exprs[b as usize] {
+            IrExpr::Block { stmts, .. } => stmts.clone(),
+            _ => Vec::new(),
+        };
+        let call_line = |call: ExprId| -> Option<i32> {
+            ir.expr_lines
+                .get(&call)
+                .map(|&ln| ln as i32)
+                .or_else(|| {
+                    body_stmts
+                        .iter()
+                        .find(|&&st| expr_contains(ir, st, call))
+                        .and_then(|&st| nearest_line(ir, st))
+                        .map(|ln| ln as i32)
+                })
+                .or_else(|| ir.fn_decl_lines.get(&fid).map(|&ln| ln as i32))
+        };
+        let l: Vec<i32> = resume_calls
+            .iter()
+            .filter_map(|&call| call_line(call))
+            .collect();
+        let nl: Vec<i32> = resume_calls
+            .iter()
+            .filter_map(|&call| {
+                let lline = call_line(call)?;
+                let holder = body_stmts
+                    .iter()
+                    .position(|&st| expr_contains(ir, st, call));
+                Some(
+                    holder
+                        .and_then(|i| body_stmts.get(i + 1))
+                        .and_then(|next| ir.expr_lines.get(next))
+                        .map(|&ln| ln as i32)
+                        .unwrap_or(lline),
+                )
+            })
+            .collect();
+        let metadata = ContinuationMetadata {
+            l,
+            nl,
+            i: state_indices,
+            s,
+            n,
+            m: fname.clone(),
+            c: cont_owner.replace('/', "."),
+            v: 2,
+            enclosing_class: cont_owner.clone(),
+            enclosing_method: fname.clone(),
+            enclosing_descriptor: crate::jvm::names::method_descriptor(
+                &ir.functions[fid as usize].params,
+                ir.functions[fid as usize].ret,
+            ),
+        };
+        continuation_metadata.insert(cont_internal.clone(), metadata);
     }
     let states = std::mem::take(&mut flat.states);
     let state_handlers = std::mem::take(&mut flat.state_handlers);
@@ -2269,6 +2258,7 @@ fn build_lambda_state_machine(
         scopes: susp_scopes,
         layout: layout.clone(),
         states: vec![Vec::new()],
+        resume_calls: Vec::new(),
         state_handlers: vec![None],
         state_scope: vec![None],
         cur_handler: None,
@@ -2519,6 +2509,7 @@ struct Flat<'a> {
     field_base: u32,
     spilled: Vec<(u32, Ty)>,
     states: Vec<Vec<ExprId>>,
+    resume_calls: Vec<ExprId>,
     /// Parallel to `states`: the handler state (a `catch` body's entry) whose `try` region covers this
     /// state, if any. A suspension inside a `try { … } catch { … }` marks the try-body states with their
     /// handler; the assembly then routes an exception thrown while `this.label` is such a state to the
@@ -2646,6 +2637,7 @@ impl Flat<'_> {
             return;
         };
         self.spill_scope(out, &list);
+        self.resume_calls.push(call);
         if let Some(sc) = self.state_scope.get_mut(resume) {
             *sc = Some(list);
         }
