@@ -335,7 +335,7 @@ pub fn compile_in_process_metadata_cp(
 ) -> Option<Vec<(String, Vec<u8>)>> {
     use krusty::diag::DiagSink;
     use krusty::frontend::{check_file, collect_signatures_with_cp};
-    use krusty::jvm::ir_emit::{emit_all_with_opts, EmitOptions, EmitRun};
+    use krusty::jvm::ir_emit::{EmitOptions, EmitRun};
     use krusty::jvm::names::file_class_name;
 
     let _pg = ProfGuard::new("krusty");
@@ -362,7 +362,16 @@ pub fn compile_in_process_metadata_cp(
     let facade = file_class_name(stem, file.package.as_deref());
     let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
     let mut ir = krusty::ir_lower::lower_file(file, &info, &syms, &runtime)?;
-    krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms).ok()?;
+    let mut continuation_metadata = krusty::jvm::suspend::ContinuationMetadataMap::default();
+    krusty::jvm::backend::run_backend_passes_with_metadata(
+        &mut ir,
+        file,
+        &facade,
+        "main",
+        &syms,
+        &mut continuation_metadata,
+    )
+    .ok()?;
     let opts = EmitOptions {
         emit_class_metadata: true,
         // Match the CLI backend (`{stem}.kt`) so the bytes equal a `krusty -d …` run.
@@ -378,7 +387,15 @@ pub fn compile_in_process_metadata_cp(
     // fixtures are unaffected, and a future fixture mixing a class with top-level functions gets
     // the same facade record a real build would.
     let metadata = krusty::jvm::backend::facade_package_metadata(file, 0, &syms);
-    let outputs = emit_all_with_opts(&ir, &facade, &*cp, metadata.as_ref(), &opts, &run)?;
+    let outputs = krusty::jvm::ir_emit::emit_all_with_opts_and_metadata(
+        &ir,
+        &facade,
+        &*cp,
+        metadata.as_ref(),
+        &opts,
+        &run,
+        &continuation_metadata,
+    )?;
     (!outputs.is_empty()).then_some(outputs)
 }
 
