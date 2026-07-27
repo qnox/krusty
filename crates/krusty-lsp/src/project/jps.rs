@@ -841,6 +841,27 @@ mod tests {
     }
 
     #[test]
+    fn the_probe_resolves_an_injected_jdk_table() {
+        let tree = multi_module_tree();
+        tree.write("fake-jdk/lib/modules", "");
+        let table = tree.write(
+            "jdk.table.xml",
+            &format!(
+                r#"<application><component name="ProjectJdkTable">
+                     <jdk><name value="temurin-17" /><homePath value="{}" /></jdk>
+                   </component></application>"#,
+                tree.path("fake-jdk").display()
+            ),
+        );
+
+        let model = JpsProvider::new(tree.root())
+            .probe_with_jdk_tables(std::slice::from_ref(&table))
+            .unwrap();
+
+        assert_eq!(model.jdk_home, Some(tree.path("fake-jdk")));
+    }
+
+    #[test]
     fn a_malformed_modules_file_is_a_parse_error() {
         use crate::project::runner::testing::FakeRunner;
 
