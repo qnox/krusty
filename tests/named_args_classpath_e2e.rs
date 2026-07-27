@@ -177,6 +177,31 @@ fn named_args_to_classpath_member_fn_reorder_and_run() {
 }
 
 #[test]
+fn named_classpath_member_vararg_reorders_and_passes_array() {
+    common::expect_box_ok_against(
+        "named_member_vararg",
+        "package sample\n\
+         class Formatter {\n\
+         \x20   fun join(prefix: String, separator: String, vararg parts: String): String =\n\
+         \x20       prefix + parts.joinToString(separator)\n\
+         \x20   fun <T> genericJoin(prefix: String, vararg parts: T): String =\n\
+         \x20       prefix + parts.joinToString(\"\")\n\
+         }\n",
+        "import sample.Formatter\n\
+         fun box(): String {\n\
+         \x20   val values = arrayOf(\"A\", \"B\")\n\
+         \x20   val result = Formatter().join(\n\
+         \x20       separator = \":\",\n\
+         \x20       prefix = \"P\",\n\
+         \x20       parts = values,\n\
+         \x20   )\n\
+         \x20   val generic = Formatter().genericJoin(prefix = \"O\", parts = arrayOf(\"K\"))\n\
+         \x20   return if (result == \"PA:B\" && generic == \"OK\") \"OK\" else result + generic\n\
+         }\n",
+    );
+}
+
+#[test]
 fn named_args_to_classpath_extension_fn_reorder_and_run() {
     let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
         eprintln!("skipping: set JAVA_HOME");

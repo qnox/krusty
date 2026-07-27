@@ -5266,6 +5266,50 @@ impl<'a> Lower<'a> {
         call
     }
 
+    /// Lower an expanded classpath member vararg (`recv.f(fixed, a, b)`) into the method's physical
+    /// trailing array parameter. The checker-selected member carries the JVM `ACC_VARARGS` fact in its
+    /// existing `CallSig`; both Java and Kotlin classpath members therefore use this one packing path.
+    fn lower_library_member_vararg_args(
+        &mut self,
+        call: Option<AstExprId>,
+        args: &[AstExprId],
+        member: &crate::libraries::LibraryMember,
+    ) -> Option<Vec<u32>> {
+        if !member.call_sig.vararg {
+            return None;
+        }
+        let (array, fixed) = member.params.split_last()?;
+        if args.len() < fixed.len() {
+            return None;
+        }
+        if let Some(slots) = call
+            .and_then(|call| self.info.resolved_call_arg_slots.get(&call))
+            .cloned()
+        {
+            if slots.iter().any(Option::is_none) {
+                return None;
+            }
+            slots.last().and_then(|slot| *slot)?;
+            return self.lower_call_slot_args(args, &slots, &member.params);
+        }
+        let mut lowered = Vec::with_capacity(member.params.len());
+        for (&argument, &parameter) in args[..fixed.len()].iter().zip(fixed) {
+            lowered.push(self.lower_arg(argument, &ty_to_ir(parameter))?);
+        }
+        let trailing = &args[fixed.len()..];
+        if trailing.len() == 1 && self.info.ty(trailing[0]) == *array {
+            lowered.push(self.lower_arg(trailing[0], &ty_to_ir(*array))?);
+            return Some(lowered);
+        }
+        let element = array.array_elem()?;
+        let mut elements = Vec::with_capacity(trailing.len());
+        for &argument in trailing {
+            elements.push(self.lower_arg(argument, &ty_to_ir(element))?);
+        }
+        lowered.push(self.emit_vararg(*array, elements));
+        Some(lowered)
+    }
+
     fn emit_virtual_call(
         &mut self,
         owner: impl Into<TypeName>,
@@ -6494,18 +6538,26 @@ impl<'a> Lower<'a> {
         }
         let resolved = self.info.resolved_member(call_expr).cloned()?;
         let m = resolved.member;
-        if m.name != name || m.params.len() != args.len() {
+        if m.name != name {
             return None;
         }
         let field = self.runtime.object_instance_field(&internal_name)?;
         let recv = self.platform_static_field(field);
-        let mut a = Vec::new();
-        for (i, &arg) in args.iter().enumerate() {
-            match m.params.get(i) {
-                Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
-                None => a.push(self.expr(arg)?),
+        let a = if m.call_sig.vararg {
+            self.lower_library_member_vararg_args(Some(call_expr), args, &m)?
+        } else {
+            if m.params.len() != args.len() {
+                return None;
             }
-        }
+            let mut lowered = Vec::new();
+            for (i, &arg) in args.iter().enumerate() {
+                match m.params.get(i) {
+                    Some(p) => lowered.push(self.lower_arg(arg, &ty_to_ir(*p))?),
+                    None => lowered.push(self.expr(arg)?),
+                }
+            }
+            lowered
+        };
         let ret = resolved.ret;
         let suspend = resolved.suspend;
         let physical_ret = m.physical_ret;
@@ -7152,10 +7204,15 @@ impl<'a> Lower<'a> {
         }
         match self.info.resolved_constructor(call).cloned()? {
             ResolvedConstructor::Plain { member, args } => {
-                let mut lowered = Vec::new();
-                for (arg, pty) in args.iter().zip(&member.params) {
-                    lowered.push(self.lower_arg(*arg, &ty_to_ir(*pty))?);
-                }
+                let lowered = if member.call_sig.vararg {
+                    self.lower_library_member_vararg_args(Some(call), &args, &member)?
+                } else {
+                    let mut lowered = Vec::new();
+                    for (arg, pty) in args.iter().zip(&member.params) {
+                        lowered.push(self.lower_arg(*arg, &ty_to_ir(*pty))?);
+                    }
+                    lowered
+                };
                 // A value-class ctor is marked by an EMPTY descriptor: emit a `New` carrying the ctor
                 // parameter TYPES so the value-class pass realizes `constructor-impl` (arg supplied) or
                 // `constructor-impl$default` (arg omitted). A value class is single-field, so use its
@@ -11785,7 +11842,7 @@ impl<'a> Lower<'a> {
             .get(&source_expr)
             .or_else(|| self.info.resolved_operator_call(source_expr, name))
             .cloned()?;
-        self.lower_selected_op_call(recv_v, recv_ty, name, args, selected)
+        self.lower_selected_op_call(recv_v, recv_ty, name, args, selected, Some(source_expr))
     }
 
     fn lower_stmt_op_call(
@@ -11797,7 +11854,7 @@ impl<'a> Lower<'a> {
         args: &[AstExprId],
     ) -> Option<(u32, Ty)> {
         let selected = self.info.resolved_stmt_operator_call(stmt, name).cloned()?;
-        self.lower_selected_op_call(recv_v, recv_ty, name, args, selected)
+        self.lower_selected_op_call(recv_v, recv_ty, name, args, selected, None)
     }
 
     fn lower_selected_op_call(
@@ -11807,19 +11864,28 @@ impl<'a> Lower<'a> {
         name: &str,
         args: &[AstExprId],
         selected: ResolvedCall,
+        source_expr: Option<AstExprId>,
     ) -> Option<(u32, Ty)> {
         let internal = recv_ty.kotlin_class_internal()?;
         match selected {
             ResolvedCall::Member(resolved) => {
                 let member = resolved.member;
-                if member.name != name || member.params.len() != args.len() {
+                if member.name != name {
                     return None;
                 }
                 let physical_ret = member.physical_ret;
-                let mut a = Vec::new();
-                for (k, &arg) in args.iter().enumerate() {
-                    a.push(self.lower_arg(arg, &ty_to_ir(member.params[k]))?);
-                }
+                let a = if member.call_sig.vararg {
+                    self.lower_library_member_vararg_args(source_expr, args, &member)?
+                } else {
+                    if member.params.len() != args.len() {
+                        return None;
+                    }
+                    let mut lowered = Vec::new();
+                    for (k, &arg) in args.iter().enumerate() {
+                        lowered.push(self.lower_arg(arg, &ty_to_ir(member.params[k]))?);
+                    }
+                    lowered
+                };
                 let ret = resolved.ret;
                 let suspend = resolved.suspend;
                 let call = self.emit_library_member_call(recv_v, internal, member, ret, suspend, a);
@@ -13975,7 +14041,9 @@ impl<'a> Lower<'a> {
             }
             let ret = resolved.ret;
             let member = resolved.member;
-            let a = if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
+            let a = if member.call_sig.vararg {
+                self.lower_library_member_vararg_args(Some(e), args, &member)?
+            } else if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
                 if slots.iter().any(Option::is_none) {
                     return None;
                 }
@@ -17909,13 +17977,21 @@ impl<'a> Lower<'a> {
                                 // A classpath instance method (`s?.substring(1)`).
                                 if let Some(resolved) = self.info.resolved_member(e).cloned() {
                                     let m = resolved.member;
-                                    if m.name != name || m.params.len() != args.len() {
+                                    if m.name != name {
                                         return None;
                                     }
-                                    let mut a = Vec::new();
-                                    for (arg, pt) in args.iter().zip(&m.params) {
-                                        a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
-                                    }
+                                    let a = if m.call_sig.vararg {
+                                        self.lower_library_member_vararg_args(Some(e), &args, &m)?
+                                    } else {
+                                        if m.params.len() != args.len() {
+                                            return None;
+                                        }
+                                        let mut lowered = Vec::new();
+                                        for (arg, pt) in args.iter().zip(&m.params) {
+                                            lowered.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
+                                        }
+                                        lowered
+                                    };
                                     let ret = resolved.ret;
                                     let physical_ret = m.physical_ret;
                                     let call = self.emit_library_member_call(
@@ -22060,6 +22136,19 @@ impl<'a> Lower<'a> {
                                 .unwrap_or_else(|| "kotlin/Any".to_string())
                                 .into()
                         });
+                        if member.call_sig.vararg {
+                            let a =
+                                self.lower_library_member_vararg_args(Some(e), &args, &member)?;
+                            let call = self.emit_library_member_call(
+                                recv,
+                                owner,
+                                member,
+                                ret,
+                                resolved.suspend,
+                                a,
+                            );
+                            return Some(self.coerce_to_static(call, ret, physical_ret));
+                        }
                         // Fewer arguments than the resolved member has parameters means a DEFAULTED
                         // argument was omitted, but the `$default` path above (`lower_library_default_member_
                         // call`) could not fill it — e.g. a method inherited through DELEGATION (`class C(x:

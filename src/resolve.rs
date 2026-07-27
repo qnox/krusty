@@ -19032,12 +19032,18 @@ impl<'a> Checker<'a> {
                             );
                             if let ResolvedConstructor::Plain { member, .. } = target {
                                 let params =
-                                    crate::symbol_resolver::apply_platform_parameter_nullability(
+                                    crate::symbol_resolver::apply_platform_call_parameter_nullability(
                                         member.params.clone(),
                                         &member.call_sig.platform_nullable_params,
                                         &arg_tys,
+                                        member.call_sig.vararg,
                                     );
-                                self.expect_call_args(&params, false, args, &arg_tys);
+                                self.expect_call_args(
+                                    &params,
+                                    member.call_sig.vararg,
+                                    args,
+                                    &arg_tys,
+                                );
                             }
                             return Ty::obj_name(internal);
                         }

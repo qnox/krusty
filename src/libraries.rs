@@ -729,6 +729,7 @@ impl FunctionInfo {
         member.generic_sig = self.generic_sig.clone();
         member.inline = self.flags.inline;
         member.suspend = self.flags.suspend;
+        member.call_sig.vararg = self.call_sig.vararg;
         member
     }
 }
