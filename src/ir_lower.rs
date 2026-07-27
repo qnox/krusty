@@ -18010,14 +18010,14 @@ impl<'a> Lower<'a> {
             // the referenced function (no synthesized body). Bound/object/constructor references bail.
             Expr::CallableRef { receiver, name } => {
                 // `::foo` imported from a same-file `object` → a bound reference to the singleton member.
-                if let Some(ExprLowering::ImportedObjectMemberRef { internal }) =
+                if let Some(ExprLowering::ImportedObjectMemberRef { internal, member }) =
                     self.info.expr_lowers.get(&e).cloned()
                 {
                     if let Ty::Fun(sig) = self.info.ty(e) {
                         return self.lower_imported_object_ref(
                             e,
                             internal,
-                            &name,
+                            &member,
                             &sig.params,
                             sig.ret,
                         );
@@ -20241,10 +20241,10 @@ impl<'a> Lower<'a> {
                     // An unqualified call to a classpath `object` MEMBER imported via `import Obj.member`
                     // (`logger {}`): the checker recorded the object. Dispatch on the singleton — read
                     // `getstatic Obj.INSTANCE` as the receiver and invoke the member.
-                    if let Some(ExprLowering::ObjectMemberCall { internal }) =
+                    if let Some(ExprLowering::ObjectMemberCall { internal, member }) =
                         self.info.expr_lowers.get(&e)
                     {
-                        return self.lower_object_member_call(*internal, &fname, &args, e);
+                        return self.lower_object_member_call(*internal, member, &args, e);
                     }
                     let one_lambda_arg = self.single_lambda_arg(&args);
                     // Reified free function `serializer<T>()` (kotlinx.serialization.serializer): a
@@ -21119,10 +21119,10 @@ impl<'a> Lower<'a> {
                 }
                 // Instance method call `recv.m(args)`, or a stdlib intrinsic method.
                 Expr::Member { receiver, name } => {
-                    if let Some(ExprLowering::ObjectMemberCall { internal }) =
+                    if let Some(ExprLowering::ObjectMemberCall { internal, member }) =
                         self.info.expr_lowers.get(&e)
                     {
-                        return self.lower_object_member_call(*internal, &name, &args, e);
+                        return self.lower_object_member_call(*internal, member, &args, e);
                     }
                     // `ClassName.companionFun(args)` — a call to a module class's `companion object`
                     // function. `class_names` gives the class's real (package-correct) internal and
@@ -21986,6 +21986,14 @@ impl<'a> Lower<'a> {
                             self.lower_call_slot_args_with_element(
                                 &args, &slots, &mparams, elem_prim,
                             )?
+                        } else if member.call_sig.vararg && !mparams.is_empty() {
+                            // Pack a resolved Java vararg through the shared argument path.
+                            let n_fixed = mparams.len() - 1;
+                            if args.len() < n_fixed {
+                                return None;
+                            }
+                            let ir_params: Vec<Ty> = mparams.iter().map(|&p| ty_to_ir(p)).collect();
+                            self.lower_call_args_vararg(&args, &ir_params, true, n_fixed)?
                         } else {
                             let mut lowered = Vec::new();
                             for (i, &arg) in args.iter().enumerate() {
@@ -22031,34 +22039,13 @@ impl<'a> Lower<'a> {
                             .zip(self.info.resolved_companion(e).cloned())
                     } {
                         let owner = m.owner_type_or(internal);
-                        let vararg_arr = m.params.last().copied().filter(|last| {
-                            last.array_elem().is_some()
-                                && !(args.len() == m.params.len()
-                                    && args.last().is_some_and(|&arg| self.info.ty(arg) == *last))
-                        });
-                        let a = if let Some(arr_ty) = vararg_arr {
-                            let elem = arr_ty.array_elem().unwrap();
-                            let fixed = m.params.len() - 1;
-                            let mut a = Vec::with_capacity(fixed + 1);
-                            for (&arg, &pt) in args[..fixed].iter().zip(&m.params[..fixed]) {
-                                a.push(self.lower_arg(arg, &ty_to_ir(pt))?);
-                            }
-                            let mut elems = Vec::with_capacity(args.len() - fixed);
-                            for &arg in &args[fixed..] {
-                                elems.push(self.lower_arg(arg, &ty_to_ir(elem))?);
-                            }
-                            a.push(self.emit_vararg(arr_ty, elems));
-                            a
-                        } else {
-                            let mut a = Vec::new();
-                            for (i, &arg) in args.iter().enumerate() {
-                                match m.params.get(i) {
-                                    Some(p) => a.push(self.lower_arg(arg, &ty_to_ir(*p))?),
-                                    None => a.push(self.expr(arg)?),
-                                }
-                            }
-                            a
-                        };
+                        let params = tys_to_ir(&m.params);
+                        let fixed = m
+                            .params
+                            .len()
+                            .saturating_sub(usize::from(m.call_sig.vararg));
+                        let a =
+                            self.lower_call_args_vararg(&args, &params, m.call_sig.vararg, fixed)?;
                         let call = self.emit_static_call(owner, m.name, m.descriptor, m.inline, a);
                         self.coerce_to_static(call, m.ret, m.physical_ret)
                     } else if let Some(c) = self.info.resolved_extension(e).cloned() {
@@ -22537,6 +22524,38 @@ impl crate::synthetics::SyntheticIrBuilder for Lower<'_> {
         body: AstExprId,
     ) -> Option<ExprId> {
         Lower::build_fill_array(self, elem, size_arg, params, body)
+    }
+
+    fn synth_reified_type_arg(&self, call: AstExprId) -> Option<Ty> {
+        let tr = self
+            .afile
+            .call_type_args
+            .get(&call.0)
+            .and_then(|ts| ts.first())
+            .cloned()?;
+        self.ty_ref(&self.subst_type_ref(&tr))
+    }
+
+    fn synth_enum_static(
+        &mut self,
+        enum_ty: Ty,
+        values: bool,
+        args: Vec<ExprId>,
+    ) -> Option<ExprId> {
+        let internal = enum_ty.obj_internal()?;
+        let rendered = internal.render();
+        let (name, descriptor) = if values {
+            ("values", format!("()[L{rendered};"))
+        } else {
+            ("valueOf", format!("(Ljava/lang/String;)L{rendered};"))
+        };
+        Some(self.emit_static_call(
+            internal,
+            name.to_string(),
+            descriptor,
+            crate::libraries::InlineKind::None,
+            args,
+        ))
     }
 }
 

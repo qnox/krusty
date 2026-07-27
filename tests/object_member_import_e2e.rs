@@ -14,3 +14,11 @@ fn imported_same_file_object_member_call() {
         fun box(): String = foo(\"O\")\n";
     assert_eq!(run(SRC).expect("imported object member call"), "OK");
 }
+
+#[test]
+fn aliased_same_file_object_member_call() {
+    const SRC: &str = "import Host.foo as append\n\
+        object Host { fun foo(x: String): String = x + \"K\" }\n\
+        fun box(): String = append(\"O\")\n";
+    assert_eq!(run(SRC).expect("aliased object member call"), "OK");
+}

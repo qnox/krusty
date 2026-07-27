@@ -45,6 +45,11 @@ pub(crate) trait SyntheticIrBuilder {
         params: Vec<String>,
         body: AstExprId,
     ) -> Option<ExprId>;
+    /// Resolve the first reified type argument at this call site.
+    fn synth_reified_type_arg(&self, call: AstExprId) -> Option<Ty>;
+    /// Emit `E.values()` or `E.valueOf(String)`.
+    fn synth_enum_static(&mut self, enum_ty: Ty, values: bool, args: Vec<ExprId>)
+        -> Option<ExprId>;
 }
 
 /// Builds a synthetic call body, or returns `None` to fall through to normal lowering.
@@ -100,7 +105,35 @@ static TABLE: &[Synthetic] = &[
     syn("kotlin/Array", "Array", b_ref_array),
     syn("kotlin/emptyArray", "emptyArray", b_empty),
     syn("kotlin/arrayOfNulls", "arrayOfNulls", b_arr_nulls),
+    // Enum reflection intrinsics have no callable JVM facade.
+    syn("kotlin/enumValueOf", "enumValueOf", b_enum_value_of),
+    syn("kotlin/enumValues", "enumValues", b_enum_values),
 ];
+
+/// `enumValueOf<E>(name)` → `E.valueOf(name)`. Declines when the reified `E` is indeterminable.
+fn b_enum_value_of(
+    _syn: &'static Synthetic,
+    lw: &mut dyn SyntheticIrBuilder,
+    c: &SynthCall<'_>,
+) -> Option<ExprId> {
+    let [name_arg] = c.args else { return None };
+    let enum_ty = lw.synth_reified_type_arg(c.call)?;
+    let name_v = lw.lower_arg(*name_arg, &Ty::String)?;
+    lw.synth_enum_static(enum_ty, false, vec![name_v])
+}
+
+/// `enumValues<E>()` → `E.values()`.
+fn b_enum_values(
+    _syn: &'static Synthetic,
+    lw: &mut dyn SyntheticIrBuilder,
+    c: &SynthCall<'_>,
+) -> Option<ExprId> {
+    if !c.args.is_empty() {
+        return None;
+    }
+    let enum_ty = lw.synth_reified_type_arg(c.call)?;
+    lw.synth_enum_static(enum_ty, true, vec![])
+}
 
 /// The primitive element of an array creator whose name fixes it (`IntArray`/`intArrayOf` → `Int`).
 /// Local to the array bodies — kept out of the core `Synthetic` so the registry stays general.

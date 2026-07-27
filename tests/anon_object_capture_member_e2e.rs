@@ -31,6 +31,34 @@ fn anon_object_reads_enclosing_body_val() {
 }
 
 #[test]
+fn anon_object_in_property_initializer_reads_enclosing_val() {
+    // Property initializers use the same anonymous-object capture path as method bodies.
+    const SRC: &str = "interface T { fun result(): String }\n\
+        class A(val x: String) {\n\
+        \x20 val s: T = object : T { override fun result() = x }\n\
+        }\n\
+        fun box(): String = A(\"OK\").s.result()\n";
+    assert_eq!(
+        run(SRC).expect("anon in prop init reads enclosing val"),
+        "OK"
+    );
+}
+
+#[test]
+fn anon_object_in_property_initializer_reads_earlier_body_val() {
+    const SRC: &str = "interface T { fun result(): String }\n\
+        class A {\n\
+        \x20 val x: String = \"OK\"\n\
+        \x20 val s: T = object : T { override fun result() = x }\n\
+        }\n\
+        fun box(): String = A().s.result()\n";
+    assert_eq!(
+        run(SRC).expect("anon in prop init reads earlier body val"),
+        "OK"
+    );
+}
+
+#[test]
 fn anon_object_plain_backing_body_prop_captured() {
     // A plain immutable BACKING-field body property (no custom getter, explicit type) is captured by
     // value — its value at the anon's construction equals a `this@A.doubled` read (it never changes).

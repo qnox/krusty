@@ -14,6 +14,15 @@ fn imported_object_member_reference() {
     assert_eq!(run(SRC).expect("imported object member ref"), "OK");
 }
 
+#[test]
+fn aliased_object_member_reference() {
+    const SRC: &str = "import Host.foo as append\n\
+        object Host { fun foo(x: String): String = x + \"K\" }\n\
+        fun withO(fn: (String) -> String) = fn(\"O\")\n\
+        fun box(): String = withO(::append)\n";
+    assert_eq!(run(SRC).expect("aliased object member ref"), "OK");
+}
+
 // Vararg-collect adaptation on an imported same-file object member: `::foo` where `foo(vararg x)` is
 // imported from `object Host`, adapted to `(String) -> String`.
 #[test]
