@@ -5981,6 +5981,14 @@ impl<'a> Parser<'a> {
         )
     }
 
+    fn parse_call_type_args(&mut self) -> Vec<TypeRef> {
+        if self.at(TokenKind::Lt) && self.lookahead_is_type_args_call() {
+            self.parse_type_args()
+        } else {
+            Vec::new()
+        }
+    }
+
     // ---- expressions (Pratt) ----
     fn parse_expr(&mut self) -> ExprId {
         self.parse_elvis()
@@ -6475,6 +6483,7 @@ impl<'a> Parser<'a> {
                     let name_span = self.syntactic_ident_span(name_token);
                     let name = self.ident_or_error("member name");
                     let lspan = self.file.expr_spans[lhs.0 as usize];
+                    let type_args = self.parse_call_type_args();
                     let args = if self.at(TokenKind::LParen) {
                         self.bump();
                         self.skip_newlines();
@@ -6506,6 +6515,9 @@ impl<'a> Parser<'a> {
                         self.file
                             .exact_member_name_spans
                             .insert(safe_call.0, name_span);
+                    }
+                    if !type_args.is_empty() {
+                        self.file.call_type_args.insert(safe_call.0, type_args);
                     }
                     lhs = safe_call;
                 }

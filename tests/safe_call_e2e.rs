@@ -36,3 +36,17 @@ fun box(): String {\n\
 }\n";
     common::expect_box_ok_with_stdlib(src, "S");
 }
+
+#[test]
+fn safe_call_preserves_explicit_extension_type_arguments() {
+    let src = r#"
+fun strings(value: Any?): List<String> =
+    (value as? List<*>)?.filterIsInstance<String>() ?: emptyList()
+
+fun box(): String {
+    val values: Any? = listOf("a", 1, "b")
+    return if (strings(values) == listOf("a", "b") && strings(null).isEmpty()) "OK" else "FAIL"
+}
+"#;
+    common::expect_box_ok_with_stdlib(src, "S");
+}
