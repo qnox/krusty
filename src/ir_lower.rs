@@ -5289,25 +5289,11 @@ impl<'a> Lower<'a> {
     /// body is a separate method). Used where kotlinc's evaluation order forces an already-pushed
     /// operand (a call receiver) into a continuation spill slot.
     fn ir_subtree_suspends(&self, e: u32) -> bool {
-        if self.ir.suspend_calls.contains_key(&e) {
+        if self.ir_expr_suspends(e) {
             return true;
         }
-        match &self.ir.exprs[e as usize] {
-            IrExpr::Call {
-                callee: Callee::Local(fid),
-                ..
-            } if self.ir.suspend_funs.contains(fid) => return true,
-            IrExpr::MethodCall { class, index, .. } => {
-                if self.ir.classes[*class as usize]
-                    .methods
-                    .get(*index as usize)
-                    .is_some_and(|fid| self.ir.suspend_funs.contains(fid))
-                {
-                    return true;
-                }
-            }
-            IrExpr::Lambda { .. } => return false,
-            _ => {}
+        if matches!(self.ir.exprs[e as usize], IrExpr::Lambda { .. }) {
+            return false;
         }
         let mut found = false;
         crate::ir::for_each_child(&self.ir.exprs, e, &mut |c| {
@@ -5316,6 +5302,39 @@ impl<'a> Lower<'a> {
             }
         });
         found
+    }
+
+    fn ir_expr_suspends(&self, e: u32) -> bool {
+        if self.ir.suspend_calls.contains_key(&e) {
+            return true;
+        }
+        match &self.ir.exprs[e as usize] {
+            IrExpr::Call {
+                callee: Callee::Local(fid),
+                ..
+            } => self.ir.suspend_funs.contains(fid),
+            IrExpr::MethodCall { class, index, .. } => self.ir.classes[*class as usize]
+                .methods
+                .get(*index as usize)
+                .is_some_and(|fid| self.ir.suspend_funs.contains(fid)),
+            _ => false,
+        }
+    }
+
+    fn propagate_suspend_source_line(&mut self, e: u32, line: u32) {
+        let mut pending = Vec::new();
+        crate::ir::for_each_child(&self.ir.exprs, e, &mut |child| pending.push(child));
+        while let Some(expr) = pending.pop() {
+            if self.ir.expr_source_lines.contains_key(&expr) {
+                continue;
+            }
+            if self.ir_expr_suspends(expr) {
+                self.ir.expr_source_lines.insert(expr, line);
+            }
+            if !matches!(self.ir.exprs[expr as usize], IrExpr::Lambda { .. }) {
+                crate::ir::for_each_child(&self.ir.exprs, expr, &mut |child| pending.push(child));
+            }
+        }
     }
 
     fn emit_library_member_call(
@@ -17909,6 +17928,7 @@ impl<'a> Lower<'a> {
                 .filter(|&&line| line != 0)
             {
                 self.ir.expr_source_lines.entry(id).or_insert(line);
+                self.propagate_suspend_source_line(id, line);
             }
             if let Some(&line) = self
                 .afile

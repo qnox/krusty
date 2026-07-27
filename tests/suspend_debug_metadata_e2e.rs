@@ -735,6 +735,58 @@ fn continuation_metadata_uses_trailing_lambda_selector_line() {
 }
 
 #[test]
+fn continuation_metadata_uses_named_member_call_selector_line() {
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(javap) = javap_path() else {
+        return;
+    };
+
+    let source = "package demo\n\
+        class Recorder {\n\
+        \x20 suspend fun save(label: String, value: Int): Int = value\n\
+        }\n\
+        suspend fun work(recorder: Recorder): Int {\n\
+        \x20 val result = recorder.save(\n\
+        \x20\x20 value = 3,\n\
+        \x20\x20 label = \"entry\",\n\
+        \x20 )\n\
+        \x20 return result\n\
+        }\n";
+    let classes = common::compile_in_process_files(
+        &[("NamedMemberLine", source)],
+        &[stdlib, jdk.clone()],
+        Some(&jdk),
+    )
+    .expect("compile named member call continuation");
+    let bytes = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == "demo/NamedMemberLineKt$work$1").then_some(bytes))
+        .expect("work continuation");
+    let text = disassemble(
+        &javap,
+        bytes,
+        "NamedMemberLineKt$work$1.class",
+        "named_member_line",
+    );
+    let annotation = text
+        .rsplit_once("RuntimeVisibleAnnotations:")
+        .map(|(_, annotation)| annotation)
+        .expect("runtime-visible annotations");
+
+    for expected in ["l=[6]", "nl=[10]"] {
+        assert!(
+            annotation.contains(expected),
+            "missing {expected:?}:\n{text}"
+        );
+    }
+}
+
+#[test]
 fn continuation_uses_synthetic_kotlin_metadata() {
     let Some(stdlib) = common::stdlib_jar() else {
         return;
