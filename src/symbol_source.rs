@@ -291,6 +291,7 @@ mod tests {
                         receiver: None,
                         formals: Vec::new(),
                         ty: Ty::Int,
+                        context_count: 0,
                         getter: callable(&self.owner, name),
                         setter: None,
                         is_const: false,

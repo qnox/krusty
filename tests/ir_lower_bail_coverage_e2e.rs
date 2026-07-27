@@ -569,6 +569,28 @@ fn jvm_inline_value_class() {
 // REJECTS TESTS — the backend declines cleanly for constructs it does not model yet.
 // ===================================================================================================
 
+#[test]
+fn context_property_rejected_until_accessor_abi_is_supported() {
+    assert!(rejects(
+        "class Scope\n\
+         context(scope: Scope)\n\
+         val current: Scope get() = scope\n\
+         fun main() {}\n"
+    ));
+}
+
+#[test]
+fn member_context_property_rejected_until_accessor_abi_is_supported() {
+    assert!(rejects(
+        "class Scope\n\
+         class Owner {\n\
+             context(scope: Scope)\n\
+             val current: Scope get() = scope\n\
+         }\n\
+         fun main() {}\n"
+    ));
+}
+
 // --- delegated properties: distinct providers all deep-bail in ir_lower ---
 
 #[test]

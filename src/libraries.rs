@@ -848,6 +848,8 @@ pub struct PropertyInfo {
     pub formals: Vec<String>,
     /// The property's declared type.
     pub ty: Ty,
+    /// Number of leading context parameters in each accessor's parameter list.
+    pub context_count: usize,
     /// The real getter — an opaque platform emit handle (the erased descriptor lives here).
     pub getter: LibraryCallable,
     /// The setter, present iff the property is a `var`.

@@ -1259,8 +1259,6 @@ impl<'a> Parser<'a> {
             if self.at(TokenKind::Eof) {
                 break;
             }
-            // Drop any context parameters left buffered by a `context(...)` prefix that turned out NOT
-            // to precede a function (e.g. an ill-formed source), so they never leak onto a later `fun`.
             self.pending_context_params.clear();
             // Consume leading annotations + declaration modifiers. `open`/`abstract` are applied to
             // the following class; the rest are ignored (krusty treats everything as public).
@@ -1273,11 +1271,7 @@ impl<'a> Parser<'a> {
             } else {
                 Vec::new()
             };
-            // Context receivers: `context(a: A, b: B)` before a `fun`. `context` is a soft keyword —
-            // treated as a context-parameter prefix only when directly followed by `(` at a declaration
-            // position; the params are buffered for the next `parse_fun` (mirrors pending annotations).
-            // Any modifiers written AFTER the prefix (`context(a: A) private fun f()`) are returned and
-            // merged so visibility/modality aren't lost.
+            // `context` is a soft keyword and only starts a clause before a declaration.
             mods.extend(self.maybe_parse_context_receivers());
             // A `sealed` class is implicitly abstract and open (subclasses live in the same module).
             let is_sealed = mods.iter().any(|m| m == "sealed");
@@ -1840,6 +1834,7 @@ impl<'a> Parser<'a> {
         // PropDecl does not retain annotations.
         let _ = self.take_pending_annotations();
         let _ = self.take_pending_annotation_args();
+        let context_params = std::mem::take(&mut self.pending_context_params);
         let start = self.tok().span;
         let is_var = self.at(TokenKind::KwVar);
         self.bump(); // val/var
@@ -1989,6 +1984,7 @@ impl<'a> Parser<'a> {
             && !abstract_ok
             && !is_abstract
             && receiver.is_none()
+            && context_params.is_empty()
         {
             self.diags.error(
                 start,
@@ -2002,6 +1998,7 @@ impl<'a> Parser<'a> {
             && delegate.is_none()
             && !is_lateinit
             && receiver.is_none()
+            && context_params.is_empty()
         {
             self.diags.error(
                 start,
@@ -2019,6 +2016,7 @@ impl<'a> Parser<'a> {
         PropDecl {
             is_open: false,
             name,
+            context_params,
             decl_line: 0,
             visibility: Visibility::Public,
             type_params,
@@ -2130,11 +2128,7 @@ impl<'a> Parser<'a> {
         }
         loop {
             self.skip_newlines();
-            let mut mods = Vec::new();
-            if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
-                mods = self.skip_decl_prefix();
-                self.skip_newlines();
-            }
+            let mods = self.parse_member_decl_prefix();
             let lateinit = mods.iter().any(|m| m == "lateinit");
             match self.kind() {
                 TokenKind::RBrace | TokenKind::Eof => break,
@@ -2317,15 +2311,7 @@ impl<'a> Parser<'a> {
                 if self.eat(TokenKind::LBrace) {
                     self.skip_newlines();
                     while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
-                        let bmods = if self.at(TokenKind::At)
-                            || (self.at(TokenKind::Ident) && is_modifier(self.text()))
-                        {
-                            let m = self.skip_decl_prefix();
-                            self.skip_newlines();
-                            m
-                        } else {
-                            Vec::new()
-                        };
+                        let bmods = self.parse_member_decl_prefix();
                         if self.at(TokenKind::KwFun) {
                             body.push(self.parse_fun(
                                 bmods.iter().any(|m| m == "inline"),
@@ -2374,15 +2360,7 @@ impl<'a> Parser<'a> {
             // Members follow a `;` separator (lexed as a newline): `enum class C { A, B; fun f() … }`.
             loop {
                 self.skip_newlines();
-                let emods = if self.at(TokenKind::At)
-                    || (self.at(TokenKind::Ident) && is_modifier(self.text()))
-                {
-                    let m = self.skip_decl_prefix();
-                    self.skip_newlines();
-                    m
-                } else {
-                    Vec::new()
-                };
+                let emods = self.parse_member_decl_prefix();
                 match self.kind() {
                     TokenKind::KwFun => {
                         let mut f = self.parse_fun(
@@ -2795,12 +2773,21 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse a parenthesised parameter list `( (mods name: Type (= default)?),* )` via the real
-    /// grammar — never by skipping to a balanced `)`.
-    /// Consume a `context(a: A, b: B)` context-receiver prefix, buffering its parameters for the next
-    /// `parse_fun`. `context` is a soft keyword, so this fires ONLY when it is immediately followed by
-    /// `(` at a declaration prefix — a value/expression named `context` never reaches here (it isn't a
-    /// declaration start). No-op otherwise.
+    fn parse_member_decl_prefix(&mut self) -> Vec<String> {
+        self.pending_context_params.clear();
+        let mut modifiers =
+            if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
+                let modifiers = self.skip_decl_prefix();
+                self.skip_newlines();
+                modifiers
+            } else {
+                Vec::new()
+            };
+        modifiers.extend(self.maybe_parse_context_receivers());
+        modifiers
+    }
+
+    /// Buffer a `context(...)` clause for the following function or property.
     fn maybe_parse_context_receivers(&mut self) -> Vec<String> {
         if !(self.at(TokenKind::Ident)
             && self.text() == "context"
@@ -3128,12 +3115,7 @@ impl<'a> Parser<'a> {
             self.bump();
             loop {
                 self.skip_newlines();
-                let mut mods = Vec::new();
-                if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text()))
-                {
-                    mods = self.skip_decl_prefix();
-                    self.skip_newlines();
-                }
+                let mods = self.parse_member_decl_prefix();
                 let lateinit = mods.iter().any(|m| m == "lateinit");
                 let fun_inline = mods.iter().any(|m| m == "inline");
                 let fun_final = mods.iter().any(|m| m == "final");
@@ -3631,15 +3613,7 @@ impl<'a> Parser<'a> {
             self.bump();
             loop {
                 self.skip_newlines();
-                let imods = if self.at(TokenKind::At)
-                    || (self.at(TokenKind::Ident) && is_modifier(self.text()))
-                {
-                    let m = self.skip_decl_prefix();
-                    self.skip_newlines();
-                    m
-                } else {
-                    Vec::new()
-                };
+                let imods = self.parse_member_decl_prefix();
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => {
@@ -3766,12 +3740,7 @@ impl<'a> Parser<'a> {
             self.bump();
             loop {
                 self.skip_newlines();
-                let mut mods = Vec::new();
-                if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text()))
-                {
-                    mods = self.skip_decl_prefix();
-                    self.skip_newlines();
-                }
+                let mods = self.parse_member_decl_prefix();
                 let lateinit = mods.iter().any(|m| m == "lateinit");
                 let fun_inline = mods.iter().any(|m| m == "inline");
                 let fun_final = mods.iter().any(|m| m == "final");
@@ -3927,12 +3896,7 @@ impl<'a> Parser<'a> {
             self.bump();
             loop {
                 self.skip_newlines();
-                let mut mods = Vec::new();
-                if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text()))
-                {
-                    mods = self.skip_decl_prefix();
-                    self.skip_newlines();
-                }
+                let mods = self.parse_member_decl_prefix();
                 let lateinit = mods.iter().any(|m| m == "lateinit");
                 let fun_inline = mods.iter().any(|m| m == "inline");
                 let fun_final = mods.iter().any(|m| m == "final");
@@ -8100,13 +8064,24 @@ mod tests {
 
     #[test]
     fn context_params_do_not_leak_to_later_function() {
-        // A `context(...)` prefix that does not precede a function must not pollute a LATER function's
-        // parameters (the buffer is cleared each declaration).
         let mut d = DiagSink::new();
-        // `context(a: A)` here precedes a `val`, not a `fun`; the following `g` must have no params.
-        let src = "class A\nfun g(): Int = 1\n";
+        let src = "class A\n\
+                   context(a: A)\n\
+                   val current: A get() = a\n\
+                   fun g(): Int = 1\n";
         let toks = lex(src, &mut d);
         let file = parse(src, &toks, &mut d);
+        let property = file
+            .decls
+            .iter()
+            .find_map(|&id| match file.decl(id) {
+                Decl::Property(property) if property.name == "current" => Some(property),
+                _ => None,
+            })
+            .expect("property parsed");
+        assert_eq!(property.context_params.len(), 1);
+        assert_eq!(property.context_params[0].name, "a");
+        assert_eq!(property.context_params[0].ty.name, "A");
         let g = file
             .decls
             .iter()

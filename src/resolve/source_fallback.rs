@@ -439,6 +439,7 @@ mod tests {
             receiver: Some(Ty::obj_name(owner)),
             formals: Vec::new(),
             ty: Ty::Int,
+            context_count: 0,
             getter,
             setter,
             is_const: false,

@@ -594,6 +594,7 @@ mod tests {
                         receiver: Some(recv),
                         formals: Vec::new(),
                         ty: Ty::Int,
+                        context_count: 0,
                         getter: LibraryCallable::library(
                             "fixture/Container$Labels",
                             "getMarker",
