@@ -1133,6 +1133,13 @@ impl JvmLibraries {
                 .filter(|f| f.access & ACC_STATIC != 0 && f.descriptor == self_desc)
                 .map(|f| f.name.clone())
                 .collect();
+            let rendered_internal = internal_name.render();
+            let builtin_members =
+                if super::jvm_class_map::to_jvm_internal(&rendered_internal) != rendered_internal {
+                    self.builtin_members_for_type_name(internal_name)
+                } else {
+                    Vec::new()
+                };
             // A defaulted value-class primary constructor surfaces as the `constructor-impl$default` synthetic.
             let value_ctor_has_default = ci
                 .methods
@@ -1146,7 +1153,7 @@ impl JvmLibraries {
                 members: members
                     .into_iter()
                     .chain(value_class_metadata_members)
-                    .chain(self.builtin_members_for_type_name(internal_name))
+                    .chain(builtin_members)
                     .collect(),
                 companion,
                 companion_consts: self.companion_consts_for_class(&ci),
@@ -1954,16 +1961,14 @@ impl SymbolSource for JvmLibraries {
                 if mf.kotlin_name != name || !mf.is_extension {
                     continue;
                 }
-                // SOURCE receiver, PRECISE: the metadata generic signature's receiver carries type
-                // arguments and value-class identity (`Iterable<Int>` vs `Iterable<Long>`, `UInt` vs `Int`)
-                // that the erased `receiver_class` loses — the consumer selects the element/value-class
-                // -appropriate `@JvmName` variant from these. Fall back to the bare receiver class, then to
-                // a universal `Any` for a type-variable receiver (`<T> T.let`).
-                let receiver = mf
-                    .generic_sig
-                    .as_ref()
-                    .and_then(|g| g.receiver)
-                    .map(|r| ty_subst(r, &std::collections::HashMap::new()))
+
+                // Keep type-variable receivers intact so selection and descriptor lookup use the bound.
+                let raw_receiver = mf.generic_sig.as_ref().and_then(|g| g.receiver);
+                let receiver = raw_receiver
+                    .map(|r| match r {
+                        Ty::TyParam(..) => r,
+                        _ => ty_subst(r, &std::collections::HashMap::new()),
+                    })
                     .or_else(|| mf.receiver_class.map(kotlin_type_name_to_ty))
                     .unwrap_or_else(|| Ty::obj("kotlin/Any"));
                 // Emit handle: the JVM method + descriptor on the public facade. Prefer the metadata
@@ -1986,11 +1991,11 @@ impl SymbolSource for JvmLibraries {
                     .map(|ret| format!("{}{}", mf.kotlin_name, ret.segment()));
                 // The receiver's erased descriptor disambiguates same-named overloads on the facade
                 // (`maxOrNull([I)` vs `maxOrNull([D)`); the return descriptor disambiguates same-receiver
-                // overloads (`maxOrNull(Iterable)Double` vs `…Comparable`). A type-var return has no class,
-                // so `None` selects the generic-bound overload in the fallback.
+                // overloads (`maxOrNull(Iterable)Double` vs `…Comparable`). A type-var return has no class.
                 let recv_desc = type_descriptor(
                     <Self as crate::libraries::SemanticPlatform>::library_value_form(
-                        self, receiver,
+                        self,
+                        raw_receiver.unwrap_or(receiver),
                     ),
                 );
                 let ret_desc = mf.ret_class.map(|r| {
@@ -2004,17 +2009,15 @@ impl SymbolSource for JvmLibraries {
                 // The value parameters' ERASED JVM descriptors, from the metadata generic signature, so a
                 // bytecode lookup disambiguates same-receiver/same-return overloads by their VALUE param —
                 // both a concrete type (`appendLine(StringBuilder, int)` vs `appendLine(StringBuilder)`) and
-                // a FUNCTION type (`any(Iterable, Function1)` vs `any(Iterable)`). A type-variable param
-                // erases to `Object`; a function type to `FunctionN`. `None` (match by receiver alone) only
-                // when there is no generic signature.
+                // a FUNCTION type (`any(Iterable, Function1)` vs `any(Iterable)`). Type variables erase
+                // through their bounds. `None` (match by receiver alone) means no generic signature.
                 let value_param_descs: Option<Vec<String>> = mf.generic_sig.as_ref().map(|g| {
                     g.params
                         .iter()
                         .map(|p| {
-                            let ty = ty_subst(*p, &std::collections::HashMap::new());
                             type_descriptor(
                                 <Self as crate::libraries::SemanticPlatform>::library_value_form(
-                                    self, ty,
+                                    self, *p,
                                 ),
                             )
                         })
