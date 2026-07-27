@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use super::bsp::{self, BspProvider};
 use super::gradle::GradleProvider;
+use super::jps::JpsProvider;
 use super::maven::MavenProvider;
 use super::model::ProviderKind;
 use super::provider::{ExplicitProvider, NoBuildSystemProvider, ProjectProvider};
@@ -25,8 +26,10 @@ const MAVEN_MARKERS: &[&str] = &["pom.xml", "mvnw", "mvnw.cmd"];
 /// The build root and system found by walking up from `start`.
 ///
 /// Gradle wins when both markers sit in the same directory: a `pom.xml` left beside a Gradle build
-/// is nearly always a migration leftover, while the reverse is rare.
+/// is nearly always a migration leftover, while the reverse is rare. A JPS model is only selected
+/// if no build-tool marker exists in the bounded ancestor search.
 pub fn find_build_root(start: &Path) -> Option<(PathBuf, ProviderKind)> {
+    let mut jps_root = None;
     for directory in start.ancestors().take(MAX_ANCESTORS) {
         if GRADLE_MARKERS
             .iter()
@@ -40,15 +43,18 @@ pub fn find_build_root(start: &Path) -> Option<(PathBuf, ProviderKind)> {
         {
             return Some((directory.to_path_buf(), ProviderKind::Maven));
         }
+        if jps_root.is_none() && directory.join(".idea").join("modules.xml").is_file() {
+            jps_root = Some((directory.to_path_buf(), ProviderKind::Jps));
+        }
     }
-    None
+    jps_root
 }
 
 /// Choose the producer for `root`.
 ///
 /// Precedence: an explicit `-cp` short-circuits everything (the user stated the classpath); then a
 /// BSP connection file, which the user set up deliberately and which is the richest, most current
-/// source; then the Gradle and Maven probes; then nothing.
+/// source; then the Gradle and Maven probes; then a JPS model; then nothing.
 pub fn detect(root: &Path, explicit_classpath: &[PathBuf]) -> Box<dyn ProjectProvider> {
     if !explicit_classpath.is_empty() {
         return Box::new(ExplicitProvider::new(root, explicit_classpath.to_vec()));
@@ -59,6 +65,7 @@ pub fn detect(root: &Path, explicit_classpath: &[PathBuf]) -> Box<dyn ProjectPro
     match find_build_root(root) {
         Some((build_root, ProviderKind::Gradle)) => Box::new(GradleProvider::new(build_root)),
         Some((build_root, ProviderKind::Maven)) => Box::new(MavenProvider::new(build_root)),
+        Some((build_root, ProviderKind::Jps)) => Box::new(JpsProvider::new(build_root)),
         _ => Box::new(NoBuildSystemProvider::new(root)),
     }
 }
@@ -142,6 +149,51 @@ mod tests {
     #[test]
     fn a_directory_without_markers_falls_back_to_no_build_system() {
         let tree = TempTree::new("detect-none");
+        tree.write("src/main/kotlin/App.kt", "fun main() {}");
+        assert_eq!(detect(tree.root(), &[]).kind(), ProviderKind::None);
+    }
+
+    #[test]
+    fn a_project_described_only_by_idea_modules_is_recognised_as_jps() {
+        let tree = TempTree::new("detect-jps");
+        tree.write(".idea/modules.xml", "<project/>");
+        assert_eq!(detect(tree.root(), &[]).kind(), ProviderKind::Jps);
+    }
+
+    #[test]
+    fn gradle_outranks_an_idea_directory_in_the_same_project() {
+        let tree = TempTree::new("detect-jps-gradle");
+        tree.write("build.gradle.kts", "");
+        tree.write(".idea/modules.xml", "<project/>");
+        let provider = detect(tree.root(), &[]);
+        assert_eq!(provider.kind(), ProviderKind::Gradle);
+        assert!(!provider.watch_globs().contains(&"**/*.iml".to_string()));
+    }
+
+    #[test]
+    fn maven_outranks_an_idea_directory_in_the_same_project() {
+        let tree = TempTree::new("detect-jps-maven");
+        tree.write("pom.xml", "<project/>");
+        tree.write(".idea/modules.xml", "<project/>");
+        assert_eq!(detect(tree.root(), &[]).kind(), ProviderKind::Maven);
+    }
+
+    #[test]
+    fn a_parent_build_tool_outranks_a_nested_idea_model() {
+        let tree = TempTree::new("detect-jps-parent-gradle");
+        tree.write("settings.gradle.kts", "");
+        let nested = tree.directory("app/src");
+        tree.write("app/src/.idea/modules.xml", "<project/>");
+        assert_eq!(
+            find_build_root(&nested),
+            Some((tree.root.clone(), ProviderKind::Gradle))
+        );
+    }
+
+    #[test]
+    fn an_idea_directory_without_modules_xml_is_not_a_jps_project() {
+        let tree = TempTree::new("detect-jps-bare");
+        tree.write(".idea/workspace.xml", "<project/>");
         tree.write("src/main/kotlin/App.kt", "fun main() {}");
         assert_eq!(detect(tree.root(), &[]).kind(), ProviderKind::None);
     }

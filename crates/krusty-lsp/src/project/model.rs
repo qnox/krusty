@@ -124,6 +124,8 @@ pub enum ProviderKind {
     Bsp,
     Gradle,
     Maven,
+    /// A JetBrains project model described under `.idea/`; no build tool is consulted.
+    Jps,
     /// No build system was found: builtins, the JDK, and any local jar directories.
     None,
 }
@@ -135,6 +137,7 @@ impl ProviderKind {
             ProviderKind::Bsp => "bsp",
             ProviderKind::Gradle => "gradle",
             ProviderKind::Maven => "maven",
+            ProviderKind::Jps => "jps",
             ProviderKind::None => "none",
         }
     }

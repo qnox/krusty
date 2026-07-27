@@ -23,6 +23,7 @@ const PROJECT_WATCH_GLOBS: &[&str] = &[
     "**/*.bzl",
     "**/build.sbt",
     "**/build.sc",
+    "**/.idea/modules.xml",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,12 +72,17 @@ pub trait ProjectProvider {
         format!("{}-v1", self.kind().as_str())
     }
 
+    fn additional_watch_globs(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     fn watch_globs(&self) -> Vec<String> {
         if self.kind() == ProviderKind::Explicit {
             return Vec::new();
         }
         PROJECT_WATCH_GLOBS
             .iter()
+            .chain(self.additional_watch_globs())
             .map(|glob| glob.to_string())
             .collect()
     }
