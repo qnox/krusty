@@ -23,3 +23,40 @@ fn nested_template_multiple_inner() {
         }\n";
     assert_eq!(run(SRC).expect("nested template multi"), "OK");
 }
+
+#[test]
+fn multi_dollar_templates_preserve_literal_runs_and_raw_quotes() {
+    const SRC: &str = r#"
+fun box(): String {
+    val value = "OK"
+    val empty = $""
+    val plain = $$"plain"
+    val rawPlain = $$$"""raw"""
+    val single = $"[$value]"
+    val regular = $$"[$value][$$value][$$$value]"
+    val raw = $$"""[$value][$$value]"""""
+    val literal = $$$"plain $$value"
+    if (empty != "" || plain != "plain" || rawPlain != "raw") return "plain"
+    if (single != "[OK]") return "single: $single"
+    if (regular != "[\$value][OK][\$OK]") return "regular: $regular"
+    if (raw != "[\$value][OK]\"\"") return "raw: $raw"
+    if (literal != "plain \$\$value") return "literal: $literal"
+    return "OK"
+}
+"#;
+    assert_eq!(run(SRC).expect("multi-dollar templates"), "OK");
+}
+
+#[test]
+fn multi_dollar_templates_support_braced_backtick_and_nested_values() {
+    const SRC: &str = r#"
+fun box(): String {
+    val `when` = "O"
+    val count = 1
+    val direct = $$"$$`when`$${count}"
+    val nested = $$"[$${$$"$$`when`$${count}"}]"
+    return if (direct == "O1" && nested == "[O1]") "OK" else "$direct|$nested"
+}
+"#;
+    assert_eq!(run(SRC).expect("nested multi-dollar templates"), "OK");
+}
