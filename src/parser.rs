@@ -61,6 +61,7 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
             line_starts.push(i as u32 + 1);
         }
     }
+    file.source_line_count = line_starts.len() as u32;
     let line_at = |off: u32| -> u32 {
         // 1-based line: index of the last start <= off.
         match line_starts.binary_search(&off) {
