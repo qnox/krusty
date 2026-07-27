@@ -111,10 +111,37 @@ test-fast:
 conformance-plain:
     ./run-tests.sh --test conformance kotlin_codegen_box_conformance
 
-# Run the whole external/reference conformance binary without coverage instrumentation. Keep the
+# Run the whole external/reference conformance binary without coverage instrumentation, against the
+# LATEST supported Kotlin version only — the version-dependent half of `just ci`. This is what runs
+# locally and in the pre-commit/pre-push hooks: fast, one toolchain. CI additionally validates EVERY
+# supported version, one parallel job per version (see .github/workflows/ci.yml), each calling
+# `just conformance-one <ver>` — so local stays quick while CI covers the whole matrix. Keep the
 # memory-heavy Kotlin box corpus test isolated, then run every other conformance test in a fresh
-# process. This preserves the full conformance surface in CI without duplicating the own e2e suite.
+# process.
 conformance-all-plain:
+    ./run-tests.sh --test conformance kotlin_codegen_box_conformance
+    ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --test-threads=1
+
+# Run the external/reference conformance binary for ONE Kotlin reference version, plain (no coverage
+# instrumentation) — the per-version unit the CI matrix fans across (one job per supported version).
+# Version-matched kotlinc + box corpus + its own CARGO_TARGET_DIR (shared with `test-all`'s per-version
+# tree). Keep the memory-heavy Kotlin box corpus test isolated, then run every other conformance test
+# in a fresh single-threaded process. Kotlinc/box-corpus are auto-provisioned on a miss, so a direct
+# `just conformance-one <ver>` is self-sufficient.
+conformance-one VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v="{{VERSION}}"
+    kc_var="KRUSTY_KOTLINC_${v//./_}"
+    kc="${!kc_var:-}"
+    vendored="$PWD/target/cache/kotlinc/$v/kotlinc/bin/kotlinc"
+    [ -z "$kc" ] && [ -x "$vendored" ] && kc="$vendored"
+    [ -z "$kc" ] && kc="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
+    export CARGO_TARGET_DIR="target/kt-$v"
+    export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
+    export KRUSTY_LANGUAGE_VERSION="$v"
+    export KRUSTY_KOTLINC="$kc"
+    export KRUSTY_KOTLIN_BOX_DIR="${KRUSTY_KOTLIN_BOX_DIR:-$PWD/target/cache/box-corpus/$v/compiler/testData/codegen/box}"
     ./run-tests.sh --test conformance kotlin_codegen_box_conformance
     ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --test-threads=1
 
