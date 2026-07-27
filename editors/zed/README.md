@@ -9,19 +9,16 @@ from the official Kotlin extension.
 
 ## Install
 
-1. Build the server:
+No build step. The extension downloads the prebuilt `krusty-lsp` for your platform automatically.
 
-   ```sh
-   cargo build --release -p krusty-lsp
-   ```
+1. Install the **Kotlin** extension from Zed's extension gallery (it provides the tree-sitter
+   grammar).
 
-2. Install the **Kotlin** extension from Zed's extension gallery (tree-sitter grammar).
+2. Install the **Krusty** extension from Zed's extension gallery. *(Gallery listing pending — until
+   then, install from source; see [Until it's in the gallery](#until-its-in-the-gallery) below.)*
 
-3. Install this directory as a dev extension: command palette → `zed: install dev extension` →
-   select `editors/zed`. Zed compiles it to wasm; after editing the extension, use
-   `zed: reload extensions`.
-
-4. Point Zed at the server and disable the other Kotlin servers in `settings.json`:
+3. Point Zed's `Kotlin` language at `krusty-lsp` and disable the other Kotlin servers in
+   `settings.json`:
 
    ```json
    {
@@ -29,19 +26,72 @@ from the official Kotlin extension.
        "Kotlin": {
          "language_servers": ["krusty-lsp", "!kotlin-lsp", "!kotlin-language-server", "..."]
        }
-     },
-     "lsp": {
-       "krusty-lsp": {
-         "binary": {
-           "path": "/absolute/path/to/krusty/target/release/krusty-lsp",
-           "arguments": ["--stdio"]
-         }
-       }
      }
    }
    ```
 
-   Omit `binary.path` to take `krusty-lsp` from `PATH`.
+Open a Kotlin file. On first launch the extension shows *Checking for updates* then *Downloading*
+in the status bar while it fetches the server; subsequent launches reuse the cached binary.
+
+## Until it's in the gallery
+
+Before the gallery listing lands, install the extension from source. Zed compiles it locally, so a
+Rust toolchain with the wasm target is required (this is a one-time setup for the *extension*; the
+`krusty-lsp` server itself is still downloaded, not built):
+
+```sh
+rustup target add wasm32-wasip1
+```
+
+1. Install the **Kotlin** extension from Zed's gallery (grammar), as above.
+
+2. Clone this repository, then: command palette → `zed: install dev extension` → select the
+   `editors/zed` directory. Zed compiles the extension to wasm (~30s the first time).
+
+3. Apply the same `settings.json` from [Install](#install) to route `Kotlin` at `krusty-lsp`.
+
+Open a Kotlin file; the server downloads exactly as in the gallery flow. After editing the extension
+source, run `zed: reload extensions`.
+
+## Staying up to date
+
+The extension checks the latest [GitHub release](https://github.com/qnox/krusty/releases) **every
+time the language server starts** and downloads a newer build when one exists. An up-to-date launch
+costs a single version check with no download.
+
+Zed extensions are event-driven and cannot poll on a timer, so a long-lived session that never
+restarts the server will not pick up a new release on its own. To refresh mid-session run
+`editor: restart language server` from the command palette (or reopen the project).
+
+## Local development override
+
+To run your own build instead of the downloaded one — e.g. when hacking on the compiler — build the
+server and point Zed at it:
+
+```sh
+cargo build --release -p krusty-lsp
+```
+
+```json
+{
+  "lsp": {
+    "krusty-lsp": {
+      "binary": {
+        "path": "/absolute/path/to/krusty/target/release/krusty-lsp",
+        "arguments": ["--stdio"]
+      }
+    }
+  }
+}
+```
+
+A `binary.path` here, or any `krusty-lsp` found on `PATH`, takes precedence and is used as-is — the
+extension never overwrites a binary you provide. Omit `binary.path` and drop `krusty-lsp` on `PATH`
+to use your own without editing settings.
+
+To iterate on the extension itself, install this directory as a dev extension: command palette →
+`zed: install dev extension` → select `editors/zed`. Zed compiles it to wasm; after editing, run
+`zed: reload extensions`.
 
 ## Environment
 
