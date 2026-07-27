@@ -1,5 +1,27 @@
 use super::common;
 
+fn run_source_files_against(tag: &str, library: &str, sources: &[(&str, &str)]) -> Option<String> {
+    let dependency = common::compile_lib(tag, library)?;
+    let stdlib = common::stdlib_jar()?;
+    let jdk = common::jdk_modules()?;
+    common::compile_and_run_box_files(sources, &[dependency, stdlib], Some(&jdk))
+}
+
+fn source_file_diagnostics_against(
+    tag: &str,
+    library: &str,
+    sources: &[&str],
+) -> Option<Vec<String>> {
+    let dependency = common::compile_lib(tag, library)?;
+    let stdlib = common::stdlib_jar()?;
+    let jdk = common::jdk_modules()?;
+    Some(common::front_end_diagnostics_files(
+        sources,
+        &[dependency, stdlib],
+        Some(&jdk),
+    ))
+}
+
 #[test]
 fn unbound_classpath_callables_compile_and_run() {
     let library = r#"
@@ -159,4 +181,213 @@ fn classpath_callable_references_resolve_reflection_targets() {
     {
         assert_eq!(output, "OK");
     }
+}
+
+#[test]
+fn source_extension_reference_accepts_a_classpath_receiver() {
+    let library = r#"
+        package fixtures
+
+        class Record(val enabled: Boolean)
+    "#;
+    let main = r#"
+        import fixtures.*
+
+        private fun Record.isUsable(): Boolean = enabled
+
+        fun box(): String {
+            val predicate = Record::isUsable
+            return if (predicate(Record(true)) && !predicate(Record(false))) "OK" else "FAIL"
+        }
+    "#;
+
+    let output = common::run_box_against("source_extension_classpath_receiver", library, main);
+    assert_eq!(
+        output.unwrap_or_else(|| {
+            panic!(
+                "compile source extension reference on a classpath receiver: {:?}",
+                common::checker_diags_against(
+                    "source_extension_classpath_receiver_diag",
+                    library,
+                    main
+                )
+            )
+        }),
+        "OK"
+    );
+}
+
+#[test]
+fn private_source_extension_reference_stays_file_private() {
+    let library = r#"
+        package fixtures
+
+        class Record(val enabled: Boolean)
+    "#;
+    let Some(library_output) = common::compile_lib("source_extension_ref_visibility", library)
+    else {
+        return;
+    };
+    let declaration = r#"
+        import fixtures.*
+
+        private fun Record.isUsable(): Boolean = enabled
+    "#;
+    let use_site = r#"
+        import fixtures.*
+
+        fun expose(): (Record) -> Boolean = Record::isUsable
+    "#;
+
+    let diagnostics =
+        common::front_end_diagnostics_files(&[declaration, use_site], &[library_output], None);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("cannot access 'isUsable'")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn sibling_source_extension_reference_uses_its_declaring_facade() {
+    let library = r#"
+        package fixtures
+
+        class Record(val enabled: Boolean)
+    "#;
+    let declaration = r#"
+        package app
+
+        import fixtures.Record
+
+        fun Record.isUsable(): Boolean = enabled
+    "#;
+    let use_site = r#"
+        package app
+
+        import fixtures.Record
+
+        fun box(): String {
+            val predicate = Record::isUsable
+            return if (predicate(Record(true)) && !predicate(Record(false))) "OK" else "FAIL"
+        }
+    "#;
+
+    let output = run_source_files_against(
+        "source_extension_sibling_facade",
+        library,
+        &[("Extensions.kt", declaration), ("Use.kt", use_site)],
+    );
+    assert_eq!(output.as_deref(), Some("OK"));
+}
+
+#[test]
+fn unimported_source_extension_reference_is_not_visible() {
+    let library = r#"
+        package fixtures
+
+        class Record
+    "#;
+    let declaration = r#"
+        package extensions
+
+        import fixtures.Record
+
+        fun Record.label(): String = "extension"
+    "#;
+    let use_site = r#"
+        package use
+
+        import fixtures.Record
+
+        fun expose() = Record::label
+    "#;
+    let Some(diagnostics) = source_file_diagnostics_against(
+        "source_extension_import_scope",
+        library,
+        &[declaration, use_site],
+    ) else {
+        return;
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("callable references are not supported")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn source_extension_reference_accepts_a_supertype_receiver() {
+    let library = r#"
+        package fixtures
+
+        open class Base(val text: String)
+        class Derived(text: String) : Base(text)
+    "#;
+    let main = r#"
+        import fixtures.Base
+        import fixtures.Derived
+
+        fun Base.label(): String = text
+
+        fun box(): String {
+            val label = Derived::label
+            return label(Derived("OK"))
+        }
+    "#;
+    let output = common::run_box_against("source_extension_supertype_receiver", library, main);
+    assert_eq!(output.as_deref(), Some("OK"));
+}
+
+#[test]
+fn overloaded_source_extension_reference_is_ambiguous() {
+    let library = r#"
+        package fixtures
+
+        class Record
+    "#;
+    let main = r#"
+        import fixtures.Record
+
+        fun Record.select(): String = "zero"
+        fun Record.select(value: Int): String = value.toString()
+
+        fun expose() = Record::select
+    "#;
+    let Some(diagnostics) =
+        common::checker_diags_against("source_extension_reference_ambiguity", library, main)
+    else {
+        return;
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("ambigu")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn classpath_member_still_precedes_a_source_extension_reference() {
+    let library = r#"
+        package fixtures
+
+        class Record {
+            fun select(): String = "member"
+        }
+    "#;
+    let main = r#"
+        import fixtures.Record
+
+        fun Record.select(): String = "extension"
+
+        fun box(): String {
+            val select = Record::select
+            return select(Record())
+        }
+    "#;
+    let output = common::run_box_against("source_extension_member_precedence", library, main);
+    assert_eq!(output.as_deref(), Some("member"));
 }
