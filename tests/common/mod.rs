@@ -1326,6 +1326,23 @@ pub fn run_box_against(tag: &str, lib_src: &str, main: &str) -> Option<String> {
     compile_and_run_box(main, "Main", &[libout, stdlib], jdk_modules().as_deref())
 }
 
+/// Run a classpath fixture, skipping only when the external toolchain is unavailable.
+#[allow(dead_code)]
+pub fn expect_box_ok_against(tag: &str, lib_src: &str, main: &str) {
+    let Some(libout) = compile_lib(tag, lib_src) else {
+        return;
+    };
+    let Some(stdlib) = stdlib_jar() else {
+        return;
+    };
+    let Some(jdk) = jdk_modules() else {
+        return;
+    };
+    let output = compile_and_run_box(main, "Main", &[libout, stdlib], Some(&jdk))
+        .unwrap_or_else(|| panic!("{tag}: compile/run returned None"));
+    assert_eq!(output, "OK", "{tag}");
+}
+
 /// [`run_box_against`] with `kotlin-reflect` on the classpath.
 #[allow(dead_code)]
 pub fn run_box_against_with_reflect(tag: &str, lib_src: &str, main: &str) -> Option<String> {

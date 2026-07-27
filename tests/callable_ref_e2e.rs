@@ -76,6 +76,43 @@ fun box(): String {\n\
 }
 
 #[test]
+fn nested_lambda_keeps_classpath_receiver_type_for_overload() {
+    const LIBRARY: &str = r#"
+package fixture
+
+open class Item
+class Scope
+class Module
+"#;
+    const MAIN: &str = r#"
+import fixture.Item
+import fixture.Module
+import fixture.Scope
+
+class Picker {
+    private fun resolve(item: Item, scope: Scope?): Item? = item
+    private fun resolve(item: Item, module: Module): Item? = item
+    private fun <T> guarded(body: () -> T): T? = body()
+
+    fun select(original: Item?, current: Item, module: Module): Item? {
+        val value = original?.takeUnless(current::equals)?.let {
+            guarded { resolve(it, module) }
+        }
+        return value
+    }
+}
+
+fun box(): String {
+    val original = Item()
+    val selected = Picker().select(original, Item(), Module())
+    return if (selected === original) "OK" else "fail"
+}
+"#;
+
+    common::expect_box_ok_against("nested_lambda_classpath_receiver", LIBRARY, MAIN);
+}
+
+#[test]
 fn property_ref_keeps_api_and_fits_function_shape() {
     const SRC: &str = "class C(val n: Int)\n\
 fun apply1(f: (C) -> Int, c: C): Int = f(c)\n\
