@@ -2439,7 +2439,16 @@ fn emit_class(
     // an ABI refinement, not a runtime difference).
     // Backing fields are private; access goes through the synthesized `getX()`/`setX()` accessors
     // (kotlinc does the same) — for both normal classes and objects.
-    for field in c.fields.iter() {
+    let mut field_order: Vec<&crate::ir::IrField> = c.fields.iter().collect();
+    if is_continuation {
+        field_order.sort_by_key(|field| match field.name.as_str() {
+            "result" => 1,
+            "this$0" => 2,
+            "label" => 3,
+            _ => 0,
+        });
+    }
+    for field in field_order {
         let name = &field.name;
         let ty = &field.ty;
         // Map the field's (platform-neutral) visibility to JVM access flags: a `private` field →
@@ -2548,13 +2557,12 @@ fn emit_class(
             // so a super-constructor argument can read the outer instance (`inner class Inner :
             // Base(run { outerProp })`) — kotlinc emits the same. A `putfield` of the current class's own
             // field on the still-uninitialized `this` is legal per JVMS 4.10.2.4.
-            let stores_this0 = c.fields.first().is_some_and(|f0| f0.name == "this$0");
-            if stores_this0 {
-                let f0 = &c.fields[0];
+            if let Some(this0) = c.fields.iter().find(|field| field.name == "this$0") {
                 ctor.aload(0);
                 ctor.aload(1); // the outer instance = first constructor parameter
-                let fref = e.cw.fieldref(&fq_name, "this$0", &type_descriptor(f0.ty));
-                ctor.putfield(fref, slot_words(f0.ty) as i32);
+                let fref =
+                    e.cw.fieldref(&fq_name, "this$0", &type_descriptor(this0.ty));
+                ctor.putfield(fref, slot_words(this0.ty) as i32);
             }
             // `super(args)` — `this` is loaded first, so spill any branchy arg to temps before it.
             let super_args = c.super_args.clone();

@@ -4245,7 +4245,7 @@ fn build_continuation_class(
     });
     let inv_fid = ir.add_fun(IrFunction {
         name: "invokeSuspend".to_string(),
-        params: vec![object_ty()],
+        params: vec![Ty::obj("kotlin/Any")],
         ret: object_ty(),
         body: Some(inv_body),
         is_static: false,
@@ -4268,7 +4268,6 @@ fn build_continuation_class(
     // param to its `L$i` field, then `super(completion)`. A top-level fn with no live params is just
     // `<init>(Continuation)`.
     let mut ctor_args: Vec<IrCtorArg> = Vec::new();
-    let mut ctor_stores: Vec<ExprId> = Vec::new();
     let mut arg_idx = 1u32; // value-index of the next ctor argument (`this` is 0)
     if let Some(owner) = receiver {
         let recv_ty = Ty::obj_name(owner);
@@ -4277,14 +4276,6 @@ fn build_continuation_class(
                 .with_is_final(true)
                 .with_is_private(false),
         );
-        let this_c = ir.add_expr(IrExpr::GetValue(0));
-        let recv_v = ir.add_expr(IrExpr::GetValue(arg_idx));
-        ctor_stores.push(ir.add_expr(IrExpr::SetField {
-            receiver: this_c,
-            class: class_id,
-            index: recv_field_idx,
-            value: recv_v,
-        }));
         ctor_args.push(IrCtorArg {
             name: None,
             ty: recv_ty,
@@ -4304,12 +4295,6 @@ fn build_continuation_class(
         check: None,
     });
     let super_completion_idx = arg_idx;
-    let init_body = (!ctor_stores.is_empty()).then(|| {
-        ir.add_expr(IrExpr::Block {
-            stmts: ctor_stores,
-            value: None,
-        })
-    });
 
     let super_arg = ir.add_expr(IrExpr::GetValue(super_completion_idx));
     let class = IrClass {
@@ -4323,7 +4308,7 @@ fn build_continuation_class(
         fields,
         ctor_param_count: 0,
         ctor_args,
-        init_body,
+        init_body: None,
         explicit_param_stores: false,
         methods: vec![inv_fid],
         is_interface: false,
