@@ -2437,50 +2437,75 @@ pub fn lower_file_at_reporting(
                         }
                     }
                 }
-                // Collection special-member stubs: a class implementing a mapped `kotlin.collections`
-                // interface must provide the `java.util` method the interface declares for a Kotlin PROPERTY
-                // (`Map.size` → `size()`, `keys` → `keySet()`). kotlinc emits it as a synthetic bridge
-                // forwarding to the Kotlin getter (`getSize`/`getKeys`); without it the `java.util` abstract
-                // stays unimplemented and a call through the interface throws `AbstractMethodError`. The
-                // interface members are on the classpath (empty `props`), so scan the class's OWN overrides.
+                // Mapped Kotlin interfaces may expose a different physical JVM member name. Emit a
+                // forwarding bridge for each source override selected by the target platform.
                 let internal_name = existing_type_name(&internal)?;
-                if !c.is_interface()
-                    && lo
-                        .syms
-                        .supertype_internal_names_from(internal_name)
-                        .iter()
-                        .any(|&s| lo.syms.libraries.is_collection_interface_name(s))
-                {
+                if !c.is_interface() {
                     let cid = lo.class_info(&internal)?.id;
-                    for p in &c.body_props {
-                        let Some(stub) = lo.syms.libraries.collection_property_accessor(&p.name)
-                        else {
-                            continue;
-                        };
-                        let stub = stub.as_str();
-                        let Some((own_ty, _)) = lo.syms.prop_of_name(internal_name, &p.name) else {
-                            continue;
-                        };
-                        let already = lo.ir.classes[cid as usize]
-                            .bridges
-                            .iter()
-                            .any(|b| b.name == stub && b.erased_params.is_empty());
-                        if already {
-                            continue;
+                    let mapped_members = lo
+                        .syms
+                        .applied_hierarchy(Ty::obj_name(internal_name))
+                        .into_iter()
+                        .skip(1)
+                        .flat_map(|(_, supertype, _)| {
+                            lo.syms.libraries.mapped_interface_members(supertype)
+                        })
+                        .collect::<Vec<_>>();
+                    for mapped in mapped_members {
+                        if mapped.is_property {
+                            let Some((concrete_ret, _)) =
+                                lo.syms.prop_of_name(internal_name, &mapped.source_name)
+                            else {
+                                continue;
+                            };
+                            let already =
+                                lo.ir.classes[cid as usize].bridges.iter().any(|bridge| {
+                                    bridge.name == mapped.physical_name
+                                        && bridge.erased_params.is_empty()
+                                });
+                            if already {
+                                continue;
+                            }
+                            lo.ir.classes[cid as usize].bridges.push(crate::ir::Bridge {
+                                name: mapped.physical_name,
+                                erased_params: vec![],
+                                erased_ret: ty_to_ir(mapped.ret),
+                                concrete_params: vec![],
+                                concrete_ret: ty_to_ir(concrete_ret),
+                                target_name: Some(property_getter_name(&mapped.source_name)),
+                                box_ret: None,
+                                unbox_params: Vec::new(),
+                            });
+                        } else {
+                            let Some((_, implementation)) =
+                                lo.syms.method_matching_with_owner_name(
+                                    internal_name,
+                                    &mapped.source_name,
+                                    &mapped.params,
+                                )
+                            else {
+                                continue;
+                            };
+                            let erased_params = tys_to_ir(&mapped.params);
+                            let already =
+                                lo.ir.classes[cid as usize].bridges.iter().any(|bridge| {
+                                    bridge.name == mapped.physical_name
+                                        && bridge.erased_params == erased_params
+                                });
+                            if already {
+                                continue;
+                            }
+                            lo.ir.classes[cid as usize].bridges.push(crate::ir::Bridge {
+                                name: mapped.physical_name,
+                                erased_params,
+                                erased_ret: ty_to_ir(mapped.ret),
+                                concrete_params: tys_to_ir(&implementation.params),
+                                concrete_ret: ty_to_ir(implementation.ret),
+                                target_name: Some(mapped.source_name),
+                                box_ret: None,
+                                unbox_params: Vec::new(),
+                            });
                         }
-                        // The `java.util` stub and the Kotlin getter share the (erased) return, so the
-                        // bridge is a plain forward: `stub()` → `get<Name>()`.
-                        let ret = ty_to_ir(own_ty);
-                        lo.ir.classes[cid as usize].bridges.push(crate::ir::Bridge {
-                            name: stub.to_string(),
-                            erased_params: vec![],
-                            erased_ret: ret,
-                            concrete_params: vec![],
-                            concrete_ret: ret,
-                            target_name: Some(property_getter_name(&p.name)),
-                            box_ret: None,
-                            unbox_params: Vec::new(),
-                        });
                     }
                 }
                 // Interface bridges: for each implemented-interface method, if the class's actual
@@ -6227,6 +6252,21 @@ impl<'a> Lower<'a> {
         if let Some(receiver) = self.member_extension_dispatch_slot(owner) {
             return Some(self.emit_get_value(receiver));
         }
+        if let Some(current) = self.cur_class {
+            let captures_owner = self
+                .syms
+                .class_by_type_name(current)
+                .and_then(|class| class.inner_of_name())
+                == Some(owner);
+            if captures_owner {
+                if let Some((value, _)) = self.lookup("this$0") {
+                    return Some(self.emit_get_value(value));
+                }
+                let class = self.class_info_name(current)?.id;
+                let receiver = self.emit_get_value(0);
+                return Some(self.emit_get_field(receiver, class, 0));
+            }
+        }
         let class = self.syms.class_by_type_name(owner)?;
         if class.is_object {
             if let Some(info) = self.class_info_name(owner) {
@@ -6250,6 +6290,22 @@ impl<'a> Lower<'a> {
         args: &[AstExprId],
         call_expr: AstExprId,
     ) -> Option<u32> {
+        let ResolvedCall::ModuleMemberExtension { params, vararg, .. } = target else {
+            return None;
+        };
+        let (mut provided, prelude) =
+            self.lower_selected_module_member_args(call_expr, args, params, *vararg)?;
+        let call =
+            self.emit_module_member_extension_call(extension_value, target, &mut provided)?;
+        Some(self.wrap_arg_prelude(call, prelude))
+    }
+
+    fn emit_module_member_extension_call(
+        &mut self,
+        extension_value: u32,
+        target: &ResolvedCall,
+        provided: &mut [Option<u32>],
+    ) -> Option<u32> {
         let ResolvedCall::ModuleMemberExtension {
             owner,
             physical_receiver,
@@ -6259,7 +6315,6 @@ impl<'a> Lower<'a> {
             ret,
             physical_ret,
             interface,
-            vararg,
             ..
         } = target
         else {
@@ -6271,8 +6326,6 @@ impl<'a> Lower<'a> {
             extension_value,
             ty_to_ir(*physical_receiver),
         );
-        let (mut provided, prelude) =
-            self.lower_selected_module_member_args(call_expr, args, params, *vararg)?;
         if params.len() != physical_params.len() || provided.len() != params.len() {
             return None;
         }
@@ -6284,7 +6337,7 @@ impl<'a> Lower<'a> {
         }
         let mut lowered = Vec::with_capacity(provided.len() + 1);
         lowered.push(Some(extension_value));
-        lowered.extend(provided);
+        lowered.extend(provided.iter().copied());
         let mut method_params = Vec::with_capacity(physical_params.len() + 1);
         method_params.push(*physical_receiver);
         method_params.extend(physical_params.iter().copied());
@@ -6308,7 +6361,7 @@ impl<'a> Lower<'a> {
             );
             self.coerce_to_static(call, *ret, *physical_ret)
         };
-        Some(self.wrap_arg_prelude(call, prelude))
+        Some(call)
     }
 
     /// Lower a bare-name call to a classpath `object` member imported unqualified (`import Obj.m; m(args)`,
@@ -7667,6 +7720,15 @@ impl<'a> Lower<'a> {
                     vec![],
                 );
                 Some((c, ret))
+            }
+            DestructureComponentTarget::MemberExtension(target) => {
+                let ret = match target.as_ref() {
+                    ResolvedCall::ModuleMemberExtension { ret, .. } => *ret,
+                    _ => return None,
+                };
+                let mut provided = [];
+                let call = self.emit_module_member_extension_call(recv, &target, &mut provided)?;
+                Some((call, ret))
             }
             DestructureComponentTarget::IndexedGet(m) => {
                 let physical_ret = m.member.physical_ret;

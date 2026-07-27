@@ -226,6 +226,7 @@ struct AppliedMemberExtFunSig {
     params: Vec<Ty>,
     visibility: Visibility,
     is_final: bool,
+    is_operator: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -964,7 +965,7 @@ impl SymbolTable {
         self.classes.values().find(|sig| sig.internal == internal)
     }
 
-    fn applied_source_parents(
+    pub(crate) fn applied_source_parents(
         &self,
         class: &ClassSig,
         bindings: HashMap<String, Ty>,
@@ -1018,6 +1019,35 @@ impl SymbolTable {
                         .map(|(parent, applied)| (parent, applied, depth + 1)),
                 );
             }
+        }
+        hierarchy
+    }
+
+    pub(crate) fn applied_hierarchy(&self, root: Ty) -> Vec<(TypeName, Ty, usize)> {
+        let Some(internal) = root.obj_internal() else {
+            return Vec::new();
+        };
+        let mut pending = vec![(internal, root, 0)];
+        let mut seen = std::collections::HashSet::new();
+        let mut hierarchy = Vec::new();
+        while let Some((owner, applied, depth)) = pending.pop() {
+            if !seen.insert(owner) {
+                continue;
+            }
+            hierarchy.push((owner, applied, depth));
+            let parents = if let Some(class) = self.class_by_type_name(owner) {
+                self.applied_source_parents(class, class.type_parameter_bindings(applied))
+                    .into_iter()
+                    .map(|(_, ty)| ty)
+                    .collect()
+            } else {
+                self.libraries.direct_supertypes(applied)
+            };
+            pending.extend(
+                parents
+                    .into_iter()
+                    .filter_map(|parent| Some((parent.obj_internal()?, parent, depth + 1))),
+            );
         }
         hierarchy
     }
@@ -1283,7 +1313,8 @@ impl SymbolTable {
             })
             .collect::<Vec<_>>();
         let root = Ty::obj_args_name(internal, &bounds);
-        self.collect_super_member_ext_funs(internal, root, &mut out);
+        let mut visited = std::collections::HashSet::new();
+        self.collect_super_member_ext_funs(internal, root, &mut visited, &mut out);
         out
     }
 
@@ -1312,8 +1343,12 @@ impl SymbolTable {
         &self,
         internal: TypeName,
         owner_ty: Ty,
+        visited: &mut std::collections::HashSet<TypeName>,
         out: &mut Vec<AppliedMemberExtFunSig>,
     ) {
+        if !visited.insert(internal) {
+            return;
+        }
         let Some(class) = self.class_by_type_name(internal) else {
             return;
         };
@@ -1380,11 +1415,12 @@ impl SymbolTable {
                             params,
                             visibility: signature.signature.visibility,
                             is_final: signature.signature.is_final,
+                            is_operator: signature.signature.is_operator,
                         });
                     }
                 }
             }
-            self.collect_super_member_ext_funs(parent, parent_ty, out);
+            self.collect_super_member_ext_funs(parent, parent_ty, visited, out);
         }
     }
 
@@ -6410,6 +6446,8 @@ pub enum DestructureComponentTarget {
         ret: Ty,
         interface: bool,
     },
+    /// A `componentN` member extension selected through an implicit dispatch receiver.
+    MemberExtension(Box<ResolvedCall>),
     IndexedGet(crate::symbol_resolver::ResolvedMember),
 }
 
@@ -6447,6 +6485,10 @@ impl DestructureComponentTarget {
             | Self::CrossFileModuleMember { ret, .. }
             | Self::ModuleExtension { ret, .. }
             | Self::ModulePropertyGetter { ret, .. } => *ret,
+            Self::MemberExtension(target) => match target.as_ref() {
+                ResolvedCall::ModuleMemberExtension { ret, .. } => *ret,
+                _ => Ty::Error,
+            },
             Self::LibraryMember(m) | Self::IndexedGet(m) => m.ret,
             Self::LibraryExtension(c) => c.ret,
         }
@@ -8354,7 +8396,25 @@ struct MemberExtensionFunctionCandidate {
     call_sig: crate::libraries::CallSig,
     argument_parameters: Vec<(usize, usize)>,
     visibility: Visibility,
+    is_operator: bool,
     owner: TypeName,
+}
+
+impl MemberExtensionFunctionCandidate {
+    fn resolved_call(&self, extension_receiver: Ty, name: &str, interface: bool) -> ResolvedCall {
+        ResolvedCall::ModuleMemberExtension {
+            owner: self.owner,
+            extension_receiver,
+            physical_receiver: self.physical_receiver,
+            name: name.to_string(),
+            params: self.params.clone(),
+            physical_params: self.physical_params.clone(),
+            ret: self.ret,
+            physical_ret: self.physical_ret,
+            interface,
+            vararg: self.call_sig.vararg,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -8362,6 +8422,7 @@ struct MemberExtensionFunctionShape {
     priority: MemberExtensionPriority,
     function: MemberExtFunSig,
     class_bindings: HashMap<String, Ty>,
+    is_operator: bool,
     owner: TypeName,
 }
 
@@ -16212,22 +16273,69 @@ impl<'a> Checker<'a> {
     }
 
     fn destructure_component_target(
-        &self,
+        &mut self,
         recv: Ty,
         name: &str,
         params: &[Ty],
-    ) -> Option<DestructureComponentTarget> {
-        self.module_member_target(recv, name, params)
+        span: Span,
+    ) -> Result<Option<DestructureComponentTarget>, ()> {
+        if let Some(target) = self
+            .module_member_target(recv, name, params)
             .or_else(|| self.cross_file_module_member_target(recv, name, params))
             .or_else(|| {
                 self.resolve_instance_member(recv, name, params)
                     .map(DestructureComponentTarget::LibraryMember)
             })
-            .or_else(|| {
-                self.library_extension_callable(name, recv, params, &[])
-                    .map(DestructureComponentTarget::LibraryExtension)
-            })
-            .or_else(|| self.module_extension_target(recv, name, params))
+        {
+            return Ok(Some(target));
+        }
+        if let Some(target) = self.member_extension_component_target(recv, name, span)? {
+            return Ok(Some(target));
+        }
+        Ok(self
+            .library_extension_callable(name, recv, params, &[])
+            .map(DestructureComponentTarget::LibraryExtension)
+            .or_else(|| self.module_extension_target(recv, name, params)))
+    }
+
+    fn member_extension_component_target(
+        &mut self,
+        recv: Ty,
+        name: &str,
+        span: Span,
+    ) -> Result<Option<DestructureComponentTarget>, ()> {
+        let candidate = match self.member_extension_function(recv, name, &[], &[], None, &[]) {
+            Ok(Some(candidate)) => candidate,
+            Ok(None) => return Ok(None),
+            Err(()) => {
+                self.diags.error(
+                    span,
+                    format!("overload resolution ambiguity for member '{name}'"),
+                );
+                return Err(());
+            }
+        };
+        if !candidate.params.is_empty() {
+            return Ok(None);
+        }
+        if !candidate.is_operator {
+            self.diags.error(
+                span,
+                format!("'operator' modifier is required on '{name}'."),
+            );
+            return Err(());
+        }
+        if !self.member_accessible(candidate.visibility, candidate.owner) {
+            self.reject_if_inaccessible(candidate.visibility, name, candidate.owner, span);
+            return Err(());
+        }
+        let interface = self
+            .syms
+            .class_by_type_name(candidate.owner)
+            .is_some_and(|class| class.is_interface);
+        Ok(Some(DestructureComponentTarget::MemberExtension(Box::new(
+            candidate.resolved_call(recv, name, interface),
+        ))))
     }
 
     fn destructure_indexed_get_target(&self, recv: Ty) -> Option<DestructureComponentTarget> {
@@ -17130,6 +17238,7 @@ impl<'a> Checker<'a> {
                     continue;
                 };
                 let class_bindings = class.type_parameter_bindings(owner_ty);
+                let inherited_extensions = self.syms.supertype_member_ext_funs_name(owner);
                 for function in class.member_ext_funs(name) {
                     let declaration_tparams = TParams::from_bindings(class_bindings.clone())
                         .extended_with(
@@ -17157,6 +17266,27 @@ impl<'a> Checker<'a> {
                     }
                     let generic_receiver =
                         ty_mentions_param(function.receiver_ty, &function.type_params);
+                    let mut declared_params = function
+                        .signature
+                        .params
+                        .iter()
+                        .map(|parameter| {
+                            crate::symbol_resolver::ty_subst(*parameter, &class_bindings)
+                        })
+                        .collect::<Vec<_>>();
+                    if function.signature.vararg {
+                        if let Some(last) = declared_params.last_mut() {
+                            *last = Ty::array(*last);
+                        }
+                    }
+                    let is_operator = function.signature.is_operator
+                        || (function.signature.is_override
+                            && inherited_extensions.iter().any(|inherited| {
+                                inherited.name == name
+                                    && inherited.receiver == declared_receiver
+                                    && inherited.params == declared_params
+                                    && inherited.is_operator
+                            }));
                     shapes.push(MemberExtensionFunctionShape {
                         priority: MemberExtensionPriority {
                             dispatch_rank,
@@ -17166,6 +17296,7 @@ impl<'a> Checker<'a> {
                         },
                         function: function.clone(),
                         class_bindings: class_bindings.clone(),
+                        is_operator,
                         owner,
                     });
                 }
@@ -17438,6 +17569,7 @@ impl<'a> Checker<'a> {
                 call_sig: instantiated.call_sig,
                 argument_parameters: instantiated.argument_parameters,
                 visibility: shape.function.signature.visibility,
+                is_operator: shape.is_operator,
                 owner: shape.owner,
             });
         }
@@ -17516,18 +17648,7 @@ impl<'a> Checker<'a> {
                     .is_some_and(|class| class.is_interface);
                 self.resolved_calls.insert(
                     call,
-                    ResolvedCall::ModuleMemberExtension {
-                        owner: candidate.owner,
-                        extension_receiver,
-                        physical_receiver: candidate.physical_receiver,
-                        name: name.to_string(),
-                        params: candidate.params.clone(),
-                        physical_params: candidate.physical_params.clone(),
-                        ret: candidate.ret,
-                        physical_ret: candidate.physical_ret,
-                        interface,
-                        vararg: candidate.call_sig.vararg,
-                    },
+                    candidate.resolved_call(extension_receiver, name, interface),
                 );
                 Some(candidate.ret)
             }
@@ -22646,9 +22767,15 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     let comp = format!("component{}", idx + 1);
-                    let target = self
-                        .destructure_component_target(it, &comp, &[])
-                        .or_else(|| internal.and_then(|_| self.destructure_indexed_get_target(it)));
+                    let target = match self.destructure_component_target(it, &comp, &[], span) {
+                        Ok(target) => target.or_else(|| {
+                            internal.and_then(|_| self.destructure_indexed_get_target(it))
+                        }),
+                        Err(()) => {
+                            self.declare(name, Ty::Error, *is_var);
+                            continue;
+                        }
+                    };
                     match target {
                         Some(target) => {
                             let t = target.ret();
