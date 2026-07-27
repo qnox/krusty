@@ -137,3 +137,53 @@ fun box(): String = if (State.READY.name == "READY") "OK" else "FAIL"
     ]);
     assert_eq!(output.as_deref(), Some("OK"));
 }
+
+#[test]
+fn nullable_enum_subject_accepts_non_null_entries() {
+    let src = r#"
+enum class Phase {
+    READY,
+    WAITING
+}
+
+fun renderPhase(phase: Phase?): String {
+    when (phase) {
+        Phase.READY -> return "ready"
+        Phase.WAITING -> return "waiting"
+        null -> Unit
+    }
+    return "none"
+}
+
+fun box(): String =
+    if (renderPhase(Phase.READY) == "ready" && renderPhase(null) == "none") "OK" else "FAIL"
+"#;
+
+    common::expect_box_ok_with_stdlib(src, "NullableEnumWhen");
+}
+
+#[test]
+fn nullable_when_subject_comparability_is_type_generic() {
+    let source = r#"
+object Marker
+
+fun renderMarker(marker: Marker?): String =
+    when (marker) {
+        Marker -> "marker"
+        null -> "none"
+        else -> "other"
+    }
+
+fun renderNumber(number: Int?): String =
+    when (number) {
+        1 -> "one"
+        null -> "none"
+        else -> "other"
+    }
+"#;
+
+    let Some(diagnostics) = common::checker_diags_with_stdlib(source) else {
+        return;
+    };
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
