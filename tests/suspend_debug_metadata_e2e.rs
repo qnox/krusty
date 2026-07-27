@@ -181,9 +181,30 @@ fn continuation_uses_synthetic_kotlin_metadata() {
             "missing invokeSuspend metadata {expected:?}:\n{text}"
         );
     }
+    let (invoke_body, invoke_parameter_annotations) = invoke_suspend
+        .split_once("RuntimeInvisibleParameterAnnotations:")
+        .expect("invokeSuspend parameter annotations");
+    assert!(
+        invoke_body.contains("org.jetbrains.annotations.Nullable"),
+        "invokeSuspend return must be nullable:\n{text}"
+    );
+    assert!(
+        invoke_parameter_annotations.contains("org.jetbrains.annotations.NotNull"),
+        "invokeSuspend parameter must be non-null:\n{text}"
+    );
     assert!(
         !constructor.contains("LineNumberTable:") && !invoke_suspend.contains("LineNumberTable:"),
         "continuation methods must not carry line tables:\n{text}"
+    );
+    let receiver_store = constructor
+        .find("// Field this$0:Ldemo/Service;")
+        .expect("receiver field store");
+    let super_call = constructor
+        .find("// Method kotlin/coroutines/jvm/internal/ContinuationImpl")
+        .expect("continuation superclass constructor");
+    assert!(
+        receiver_store < super_call,
+        "receiver must be stored before the superclass constructor call:\n{text}"
     );
     let fields = text
         .split_once('{')
@@ -193,6 +214,15 @@ fn continuation_uses_synthetic_kotlin_metadata() {
     assert!(
         !fields.contains("RuntimeInvisibleAnnotations:"),
         "continuation fields must not carry property annotations:\n{text}"
+    );
+    let field_positions = ["I$0", "I$1", "result", "this$0", "label"].map(|field| {
+        fields
+            .find(&format!(" {field};"))
+            .unwrap_or_else(|| panic!("missing field {field:?}:\n{text}"))
+    });
+    assert!(
+        field_positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "wrong continuation field order:\n{text}"
     );
     assert!(
         !text.contains("of class demo/Service$work"),
