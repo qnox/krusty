@@ -1,8 +1,4 @@
-# krusty 🤡
-
-<p align="center">
-  <img src="docs/assets/krusty-mascot.webp" alt="krusty mascot" width="320">
-</p>
+# krusty
 
 <p align="center">
   <a href="https://github.com/qnox/krusty/actions/workflows/ci.yml"><img src="https://github.com/qnox/krusty/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -14,8 +10,6 @@
      krusty-emitted bytecode. The master build recomputes it and writes the badge JSON to a Gist
      (no repo commit) — see .github/workflows/conformance.yml. The gist id is wired via the
      CONFORMANCE_GIST_ID repo variable; updates need the GIST_TOKEN secret (PAT, `gist` scope). -->
-
-> *"Hey hey! It compiles Kotlin, kids!"*
 
 **krusty** is a memory-conscious **Kotlin → JVM bytecode compiler** written in Rust. Its frontend
 builds a module-wide source and symbol view. Its backend lowers one checked file per call while
