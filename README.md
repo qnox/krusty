@@ -210,3 +210,9 @@ A working compiler for a real, growing subset of Kotlin, with `kotlinc`-matching
 supports, Java interop, and Kotlin-consumer round-trips passing. The roadmap in
 [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) widens the language surface, each step
 gated by the same differential harness. It is a proof of concept, not yet a production compiler.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE). Unless you explicitly state otherwise,
+any contribution intentionally submitted for inclusion in this work shall be licensed as above,
+without any additional terms or conditions.
