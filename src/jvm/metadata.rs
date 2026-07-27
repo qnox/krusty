@@ -917,6 +917,48 @@ fn parse_type_nullable(body: &[u8]) -> bool {
     false
 }
 
+struct TypeParameterContext {
+    names: HashMap<u64, String>,
+    formals: Vec<String>,
+    formal_bounds: Vec<Vec<Ty>>,
+    erasure_bounds: HashMap<String, Ty>,
+}
+
+fn type_parameter_context(
+    inherited: &[(u64, String)],
+    declared: &[ParsedTypeParam],
+    records: &[Rec],
+    d2: &[String],
+) -> Option<TypeParameterContext> {
+    let mut names = inherited.iter().cloned().collect::<HashMap<_, _>>();
+    let mut formals = inherited
+        .iter()
+        .map(|(_, name)| name.clone())
+        .collect::<Vec<_>>();
+    let mut resolved = Vec::new();
+    for parameter in declared {
+        let name = resolve_string(records, d2, parameter.name_id as usize)?;
+        names.insert(parameter.id, name.clone());
+        formals.push(name.clone());
+        resolved.push(parameter);
+    }
+    let mut formal_bounds = vec![Vec::new(); inherited.len()];
+    formal_bounds.extend(resolved.into_iter().map(|parameter| {
+        parameter
+            .upper_bound_bodies
+            .iter()
+            .filter_map(|body| parse_type_gsig(body, records, d2, &names))
+            .collect()
+    }));
+    let erasure_bounds = primary_erasure_bounds(&formals, &formal_bounds);
+    Some(TypeParameterContext {
+        names,
+        formals,
+        formal_bounds,
+        erasure_bounds,
+    })
+}
+
 /// Build the metadata-primary [`GenericSig`] for a function: `formals` = the function's + enclosing
 /// class's type-parameter names; `receiver` = the EXTENSION's `receiver_type`, or — for a member — the
 /// declaring class parameterized by its own type parameters (`Box<T>`), or `None` for a top-level
@@ -932,31 +974,17 @@ fn build_generic_sig(
     d2: &[String],
     class_receiver: Option<(&str, &[(u64, String)])>,
 ) -> Option<GenericSig> {
-    // id → name for every type parameter in scope (the enclosing class's, then the function's).
     let class_tparams = class_receiver.map(|(_, tps)| tps).unwrap_or(&[]);
-    let mut tparams: HashMap<u64, String> = class_tparams.iter().cloned().collect();
-    let mut formals: Vec<String> = class_tparams.iter().map(|(_, n)| n.clone()).collect();
-    let mut function_parameters = Vec::new();
-    for parameter in &pf.type_params {
-        if let Some(name) = resolve_string(records, d2, parameter.name_id as usize) {
-            tparams.insert(parameter.id, name.clone());
-            formals.push(name.clone());
-            function_parameters.push((name, parameter));
-        }
-    }
-    let mut formal_bounds = vec![Vec::new(); class_tparams.len()];
-    for (_, parameter) in function_parameters {
-        let declared = parameter
-            .upper_bound_bodies
-            .iter()
-            .filter_map(|body| parse_type_gsig(body, records, d2, &tparams))
-            .collect::<Vec<_>>();
-        formal_bounds.push(declared);
-    }
-    let bounds = primary_erasure_bounds(&formals, &formal_bounds);
+    let context = type_parameter_context(class_tparams, &pf.type_params, records, d2)?;
     let receiver = if let Some(rb) = &pf.receiver_body {
         // An EXTENSION: its `receiver_type` is the receiver gsig node (`T`, `Ch`, `List<T>`, …).
-        Some(parse_type_gsig_bounded(rb, records, d2, &tparams, &bounds)?)
+        Some(parse_type_gsig_bounded(
+            rb,
+            records,
+            d2,
+            &context.names,
+            &context.erasure_bounds,
+        )?)
     } else {
         // A MEMBER: the declaring class parameterized by its own type parameters, so unifying it with the
         // actual receiver binds `T` exactly like an extension. `None` for a top-level function.
@@ -977,9 +1005,16 @@ fn build_generic_sig(
             // A `vararg elem: T` param's LOGICAL type is `Array<T>` (the JVM descriptor's array-ness); its
             // element type is `varargElementType`, so wrap it in `Array` to match the JVM `Signature` shape.
             let decoded = if let Some(elem) = &vp.vararg_elem_body {
-                parse_type_gsig_bounded(elem, records, d2, &tparams, &bounds).map(Ty::array)
+                parse_type_gsig_bounded(elem, records, d2, &context.names, &context.erasure_bounds)
+                    .map(Ty::array)
             } else {
-                parse_type_gsig_bounded(&vp.type_body, records, d2, &tparams, &bounds)
+                parse_type_gsig_bounded(
+                    &vp.type_body,
+                    records,
+                    d2,
+                    &context.names,
+                    &context.erasure_bounds,
+                )
             };
             // An unresolvable param erases to a fresh unbound var (→ `Any` downstream).
             decoded.unwrap_or_else(|| Ty::ty_param("\u{0}", Ty::obj("kotlin/Any")))
@@ -988,14 +1023,63 @@ fn build_generic_sig(
     let ret = pf
         .return_body
         .as_ref()
-        .and_then(|rb| parse_type_gsig_bounded(rb, records, d2, &tparams, &bounds))
+        .and_then(|rb| {
+            parse_type_gsig_bounded(rb, records, d2, &context.names, &context.erasure_bounds)
+        })
         .unwrap_or_else(|| Ty::obj("kotlin/Any"));
     Some(GenericSig {
-        formals,
-        formal_bounds,
+        formals: context.formals,
+        formal_bounds: context.formal_bounds,
         receiver,
         params,
         ret,
+    })
+}
+
+fn build_property_generic_sig(
+    type_params: &[ParsedTypeParam],
+    return_body: Option<&[u8]>,
+    return_nullable: bool,
+    receiver_body: Option<&[u8]>,
+    receiver_nullable: bool,
+    records: &[Rec],
+    d2: &[String],
+) -> Option<GenericSig> {
+    let context = type_parameter_context(&[], type_params, records, d2)?;
+    let receiver = match receiver_body {
+        Some(body) => {
+            let receiver = parse_type_gsig_bounded(
+                body,
+                records,
+                d2,
+                &context.names,
+                &context.erasure_bounds,
+            )?;
+            Some(if receiver_nullable {
+                Ty::nullable(receiver)
+            } else {
+                receiver
+            })
+        }
+        None => None,
+    };
+    let ret = parse_type_gsig_bounded(
+        return_body?,
+        records,
+        d2,
+        &context.names,
+        &context.erasure_bounds,
+    )?;
+    Some(GenericSig {
+        formals: context.formals,
+        formal_bounds: context.formal_bounds,
+        receiver,
+        params: Vec::new(),
+        ret: if return_nullable {
+            Ty::nullable(ret)
+        } else {
+            ret
+        },
     })
 }
 
@@ -1092,6 +1176,11 @@ pub struct MetaProp {
     /// The Kotlin return-type class name (`kotlin/String`), if it is a class type; `None` for a bare
     /// type parameter.
     pub ret_class: Option<TypeName>,
+    /// Whether the Kotlin property return is nullable (`T?`). JVM getter descriptors/signatures erase
+    /// this flag, so generic extension-property specialization must restore it from metadata.
+    pub ret_nullable: bool,
+    /// Metadata-primary generic relation between an extension receiver and its return.
+    pub generic_sig: Option<GenericSig>,
     /// The JVM getter method name (`getLength`, or a `@JvmName`/value-class-mangled spelling) + its
     /// descriptor, from the `JvmPropertySignature`. `None` if the metadata omits an explicit getter.
     pub getter: Option<MetaJvmMethodSig>,
@@ -1104,6 +1193,8 @@ pub struct MetaProp {
     /// The EXTENSION receiver's class name (`val String.foo` → `kotlin/String`) — `None` for an
     /// ordinary member/top-level property.
     pub receiver_class: Option<TypeName>,
+    /// Receiver presence, including a type-parameter receiver that has no class name.
+    pub is_extension: bool,
 }
 
 /// The FULLY-decoded `@kotlin.Metadata` of one classfile — every projection the compiler consumes,
@@ -1650,7 +1741,7 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
     let mut out = Vec::new();
     let records = ctx.records;
     let d2 = ctx.d2;
-    let mut types: Vec<&[u8]> = Vec::new();
+    let mut type_table = None;
     let mut props: Vec<&[u8]> = Vec::new();
     let mut pb = Pb { b: ctx.msg, i: 0 };
     while !pb.at_end() {
@@ -1664,24 +1755,7 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
             (30, 2) => {
                 let Some(n) = pb.varint() else { break };
                 let Some(b) = pb.bytes(n as usize) else { break };
-                let mut tp = Pb { b, i: 0 };
-                while !tp.at_end() {
-                    let Some(t) = tp.varint() else { break };
-                    match (t >> 3, t & 7) {
-                        (1, 2) => {
-                            let Some(m) = tp.varint() else { break };
-                            let Some(ty) = tp.bytes(m as usize) else {
-                                break;
-                            };
-                            types.push(ty);
-                        }
-                        (_, w) => {
-                            if tp.skip(w).is_none() {
-                                break;
-                            }
-                        }
-                    }
-                }
+                type_table = Some(b);
             }
             (_, w) => {
                 if pb.skip(w).is_none() {
@@ -1690,10 +1764,16 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
             }
         }
     }
+    let type_body_of_id = |tid: u64| type_table_entry(type_table?, tid as usize);
     let type_of_id = |tid: u64| -> Option<TypeName> {
-        let tb = types.get(tid as usize)?;
+        let (tb, _) = type_body_of_id(tid)?;
         let cn = parse_type_class_name(tb)?;
         resolve_class_name(records, d2, cn as usize).map(|name| type_name(&name))
+    };
+    let type_id_nullable = |tid: u64| -> bool {
+        type_table
+            .and_then(|table| type_table_entry(table, tid as usize))
+            .is_some_and(|(body, table_nullable)| table_nullable || parse_type_nullable(body))
     };
     // `Property.flags`: HAS_ANNOTATIONS(0) · VISIBILITY(1..3) · MODALITY(4..5) · IS_VAR(6) ·
     // HAS_GETTER(7) · HAS_SETTER(8) · IS_CONST(9) · …
@@ -1703,9 +1783,14 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
         let mut p = Pb { b: prop, i: 0 };
         let mut name_id = None;
         let mut ret = None;
+        let mut ret_nullable = false;
+        let mut ret_body = None;
         let mut flags = 0u64;
         let mut sig = (None, None);
         let mut receiver_class = None;
+        let mut receiver_body = None;
+        let mut receiver_nullable = false;
+        let mut type_params = Vec::new();
         while !p.at_end() {
             let Some(tag) = p.varint() else { break };
             match (tag >> 3, tag & 7) {
@@ -1714,21 +1799,48 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
                 (3, 2) => {
                     let Some(n) = p.varint() else { break };
                     let Some(tb) = p.bytes(n as usize) else { break };
+                    ret_nullable = parse_type_nullable(tb);
+                    ret_body = Some(tb);
                     ret = parse_type_class_name(tb)
                         .and_then(|cn| resolve_class_name(records, d2, cn as usize))
                         .map(|name| type_name(&name));
                 }
-                (9, 0) => ret = p.varint().and_then(type_of_id),
+                (4, 2) => {
+                    let Some(n) = p.varint() else { break };
+                    let Some(body) = p.bytes(n as usize) else {
+                        break;
+                    };
+                    if let Some(parameter) = parse_type_param(body) {
+                        type_params.push(parameter);
+                    }
+                }
+                (9, 0) => {
+                    if let Some(tid) = p.varint() {
+                        ret = type_of_id(tid);
+                        ret_nullable = type_id_nullable(tid);
+                        ret_body = type_body_of_id(tid).map(|(body, _)| body);
+                    }
+                }
                 // `Property.receiver_type` (field 5, inline `Type`) / `receiver_type_id` (field 10) —
                 // PRESENCE marks an EXTENSION property; recover the receiver's class name.
                 (5, 2) => {
                     let Some(n) = p.varint() else { break };
                     let Some(tb) = p.bytes(n as usize) else { break };
+                    receiver_body = Some(tb);
+                    receiver_nullable = parse_type_nullable(tb);
                     receiver_class = parse_type_class_name(tb)
                         .and_then(|cn| resolve_class_name(records, d2, cn as usize))
                         .map(|name| type_name(&name));
                 }
-                (10, 0) => receiver_class = p.varint().and_then(type_of_id),
+                (10, 0) => {
+                    if let Some(tid) = p.varint() {
+                        receiver_class = type_of_id(tid);
+                        if let Some((body, table_nullable)) = type_body_of_id(tid) {
+                            receiver_body = Some(body);
+                            receiver_nullable = table_nullable || parse_type_nullable(body);
+                        }
+                    }
+                }
                 (100, 2) => {
                     let Some(n) = p.varint() else { break };
                     let Some(ext) = p.bytes(n as usize) else {
@@ -1755,15 +1867,27 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
             })
         };
         let is_var = setter.is_some() || flags & IS_VAR_BIT != 0;
+        let generic_sig = build_property_generic_sig(
+            &type_params,
+            ret_body,
+            ret_nullable,
+            receiver_body,
+            receiver_nullable,
+            records,
+            d2,
+        );
         out.push(MetaProp {
             name,
             ret_class: ret,
+            ret_nullable,
+            generic_sig,
             getter: getter.and_then(resolve_sig),
             setter: setter.and_then(resolve_sig),
             visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
             is_const: flags & IS_CONST_BIT != 0,
             is_var,
             receiver_class,
+            is_extension: receiver_body.is_some(),
         });
     }
     out
@@ -2465,7 +2589,8 @@ fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<
 #[cfg(test)]
 mod module_reader_tests {
     use super::{
-        parse_type_gsig, parse_type_gsig_node, primary_erasure_bounds, read_kotlin_module,
+        decode_properties, parse_type_gsig, parse_type_gsig_node, primary_erasure_bounds,
+        read_kotlin_module, MetaCtx,
     };
     use crate::metadata::module::build_kotlin_module;
     use crate::types::Ty;
@@ -2533,5 +2658,32 @@ mod module_reader_tests {
     fn empty_or_short_input_is_empty() {
         assert!(read_kotlin_module(&[]).is_empty());
         assert!(read_kotlin_module(&[0u8; 8]).is_empty());
+    }
+
+    #[test]
+    fn property_return_type_id_honors_first_nullable() {
+        // Package.property (field 4): name=d2[0], returnTypeId=0.
+        // Package.typeTable (field 30): Type(className=d2[1]), firstNullable=0.
+        let msg = [
+            0x22, 0x04, 0x10, 0x00, 0x48, 0x00, 0xf2, 0x01, 0x06, 0x0a, 0x02, 0x30, 0x01, 0x10,
+            0x00,
+        ];
+        let d2 = vec!["maybe".to_string(), "kotlin/String".to_string()];
+        let ctx = MetaCtx {
+            msg: &msg,
+            records: &[],
+            d2: &d2,
+            methods: &[],
+        };
+
+        let properties = decode_properties(&ctx, 4);
+
+        assert_eq!(properties.len(), 1);
+        assert_eq!(properties[0].name, "maybe");
+        assert_eq!(
+            properties[0].ret_class.map(|name| name.render()),
+            Some("kotlin/String".to_string())
+        );
+        assert!(properties[0].ret_nullable);
     }
 }

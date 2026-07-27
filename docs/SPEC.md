@@ -1046,6 +1046,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   or is bound by `member_return` under the receiver's arguments. Test:
   `tests/interface_supertype_members_e2e.rs::concrete_generic_return_keeps_type_argument`.
 
+- **Class literals bind Java class-token APIs through nested generic returns.** `C::class` carries
+  `KClass<C>` during both signature inference and checking. Metadata specializes
+  `KClass<T>.java: Class<T>`, so Java method type parameters bind from `Class<C>` and substitute through
+  nested return types. Receiver-owned type parameters remain bound when a later member receives `null`;
+  method-owned parameters still bind from call arguments. Test:
+  `classpath_static_call_inference_e2e::class_literal_binds_nested_java_generic_returns`.
+
+- **Generic classpath extension properties retain Kotlin return semantics.** The metadata decoder
+  preserves property formals, receiver, return type, bounds, and nullability. Resolution specializes
+  that logical type from the receiver, while lowering bridges the erased getter result. Test:
+  `classpath_static_call_inference_e2e::generic_extension_property_keeps_nullability_and_kotlin_collection_type`.
+
 - **`@JvmStatic` member of a classpath `object` (`IdGen.of(x)`).** kotlinc emits it as a static
   method on the object class, so it lands in the type's `companion` (static) list, NOT as an instance
   member — a call on the object value previously failed as "unresolved method on `<object>`". Both the
