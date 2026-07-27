@@ -404,6 +404,8 @@ mod front_end_errors_e2e;
 mod front_end_errors_more_e2e;
 #[path = "full_form_destructuring_e2e.rs"]
 mod full_form_destructuring_e2e;
+#[path = "fully_qualified_source_type_e2e.rs"]
+mod fully_qualified_source_type_e2e;
 #[path = "function_type_is_e2e.rs"]
 mod function_type_is_e2e;
 #[path = "function_type_supertype_e2e.rs"]

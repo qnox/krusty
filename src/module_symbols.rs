@@ -40,11 +40,6 @@ impl<'a> ModuleSymbols<'a> {
             .unwrap_or_else(|| type_name(""))
     }
 
-    /// The user [`FrontendClassSig`] whose JVM internal name is `internal`, if any.
-    fn class_by_internal(&self, internal: &str) -> Option<&'a FrontendClassSig> {
-        self.syms.class_by_internal(internal)
-    }
-
     fn class_by_type_name(&self, internal: TypeName) -> Option<&'a FrontendClassSig> {
         self.syms.class_by_type_name(internal)
     }
@@ -109,6 +104,32 @@ impl<'a> ModuleSymbols<'a> {
             value_companion_fns: Vec::new(),
             value_underlying: None,
             alias_target: None,
+            type_params: Vec::new(),
+            sealed_subclasses: crate::types::TypeNameList::new(),
+            enum_entries: Vec::new(),
+            value_ctor_has_default: false,
+            ctor_named_params: Vec::new(),
+            value_class_properties: Vec::new(),
+            retention: None,
+        }
+    }
+
+    fn alias_shape(target: TypeName) -> LibraryType {
+        // Only `alias_target` is semantic at the alias name: import resolution immediately canonicalizes
+        // to the target and asks the owning module/library for its real shape.
+        LibraryType {
+            is_public: true,
+            kind: crate::libraries::TypeKind::Class,
+            supertypes: crate::types::TypeNameList::new(),
+            constructors: Vec::new(),
+            members: Vec::new(),
+            companion: Vec::new(),
+            companion_consts: HashMap::new(),
+            sam_method: None,
+            companion_object: None,
+            value_companion_fns: Vec::new(),
+            value_underlying: None,
+            alias_target: Some(target),
             type_params: Vec::new(),
             sealed_subclasses: crate::types::TypeNameList::new(),
             enum_entries: Vec::new(),
@@ -434,14 +455,22 @@ impl SymbolSource for ModuleSymbols<'_> {
     }
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
-        self.class_by_internal(internal)
-            .map(|c| self.type_shape_for(c))
+        self.resolve_type_name(type_name(internal))
+            .map(|shape| (*shape).clone())
     }
 
     fn resolve_type_name(&self, internal: TypeName) -> Option<std::rc::Rc<LibraryType>> {
         self.syms
             .class_by_type_name(internal)
             .map(|c| std::rc::Rc::new(self.type_shape_for(c)))
+            .or_else(|| {
+                self.syms
+                    .source_type_aliases
+                    .get(&internal)
+                    .copied()
+                    .map(Self::alias_shape)
+                    .map(std::rc::Rc::new)
+            })
     }
 
     fn inheritance_shape_name(&self, internal: TypeName) -> Option<InheritanceShape> {

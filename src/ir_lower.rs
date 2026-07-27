@@ -461,7 +461,7 @@ pub fn lower_file_at_reporting(
             // An `inner class` captures the enclosing instance: a synthetic `this$0` field of the outer
             // type, prepended as the first constructor-parameter field.
             let inner_outer: Option<String> = c.inner_of.as_ref().map(|o| class_internal(file, o));
-            let class_sig = syms.classes.get(&c.name)?;
+            let class_sig = syms.class_by_internal(&internal)?;
             let resolved_prop_ty = |name: &str| {
                 class_sig
                     .props
@@ -718,7 +718,7 @@ pub fn lower_file_at_reporting(
                 let resolved = if let Some(internal) = resolve_file_supertype(st, true) {
                     type_name(&internal)
                 } else {
-                    lo.syms.class_names.get(st).unwrap_or_else(|| type_name(st))
+                    lo.visible_type_name(st).unwrap_or_else(|| type_name(st))
                 };
                 if symbols
                     .inheritance_shape_name(resolved)
@@ -772,7 +772,8 @@ pub fn lower_file_at_reporting(
                                     .iter()
                                     .map(|a| {
                                         field_ty_with_args(file, a, &*syms.libraries, &|n| {
-                                            syms.class_names.get_class(n)
+                                            syms.type_name_in_file(file_index, n)
+                                                .filter(|internal| !internal.starts_with("__ty/"))
                                         })
                                     })
                                     .collect();
@@ -925,7 +926,7 @@ pub fn lower_file_at_reporting(
             let mut method_fids = Vec::new();
             for (mi, m) in c.methods.iter().enumerate() {
                 // Ordinary and extension overloads occupy separate signature tables.
-                let class_sig = syms.classes.get(&c.name)?;
+                let class_sig = syms.class_by_internal(&internal)?;
                 let extension_receiver = if m.receiver.is_some() {
                     let overload_idx = c.methods[..mi]
                         .iter()
@@ -1514,7 +1515,7 @@ pub fn lower_file_at_reporting(
                 // `AbstractMethodError`. Verify each overriding method matches exactly; otherwise (or for a
                 // classpath interface, whose methods aren't checked here) skip the file — never miscompile.
                 let mut comp_ifaces = Vec::new();
-                let csig0 = syms.classes.get(&c.name)?;
+                let csig0 = syms.class_by_internal(&internal)?;
                 for st in &c.companion_supertypes {
                     let is_file_iface = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(ic) if ic.name == *st && ic.is_interface()));
                     if !is_file_iface {
@@ -1631,7 +1632,7 @@ pub fn lower_file_at_reporting(
                     field_annotations: Vec::new(),
                     runtime_retained: false,
                 });
-                let csig = syms.classes.get(&c.name)?;
+                let csig = syms.class_by_internal(&internal)?;
                 let mut cmethods: HashMap<String, Vec<(u32, u32, Ty)>> = HashMap::new();
                 let mut cmethod_fids = Vec::new();
                 for (mi, m) in c.companion_methods.iter().enumerate() {
@@ -2763,7 +2764,7 @@ pub fn lower_file_at_reporting(
                     }
                     // A member extension has dispatch `this` at slot 0 and extension `this` at slot 1.
                     let dispatch_v = lo.fresh_value();
-                    let class_sig = syms.classes.get(&c.name)?;
+                    let class_sig = syms.class_by_internal(&internal)?;
                     let extension_signature = if m.receiver.is_some() {
                         Some(
                             class_sig
@@ -3041,7 +3042,10 @@ pub fn lower_file_at_reporting(
                         let this_v = lo.fresh_value();
                         lo.scope
                             .push(("this".to_string(), this_v, Ty::obj(&comp_fq)));
-                        let sig = syms.classes.get(&c.name)?.static_methods.get(&m.name)?;
+                        let sig = syms
+                            .class_by_internal(&internal)?
+                            .static_methods
+                            .get(&m.name)?;
                         for (p, t) in m.params.iter().zip(&sig.params) {
                             let v = lo.fresh_value();
                             lo.scope.push((p.name.clone(), v, *t));
@@ -5144,6 +5148,14 @@ impl<'a> Lower<'a> {
         *self.bail.borrow_mut() = reason.to_string();
     }
 
+    fn visible_type_name(&self, name: &str) -> Option<TypeName> {
+        self.syms.type_name_in_file(self.file_index, name)
+    }
+
+    fn visible_source_class(&self, name: &str) -> Option<&crate::frontend::FrontendClassSig> {
+        self.syms.source_class_in_file(self.file_index, name)
+    }
+
     fn can_access_source_private(&self, owner: TypeName) -> bool {
         self.inline_member_callsites
             .last()
@@ -6944,11 +6956,7 @@ impl<'a> Lower<'a> {
     /// Resolve a `catch` exception type name to its JVM internal name (mirrors the checker): a file
     /// class, a known class-name, or a classpath/stdlib throwable alias.
     fn catch_internal(&self, name: &str) -> Option<String> {
-        self.syms
-            .class_names
-            .get(name)
-            .map(TypeName::render)
-            .or_else(|| self.syms.classes.get(name).map(|c| c.internal()))
+        self.visible_type_name(name).map(TypeName::render)
     }
 
     /// Lower construction of a classpath (non-IR) class — `RuntimeException("x")`, `StringBuilder()`.
@@ -8794,15 +8802,13 @@ impl<'a> Lower<'a> {
         // arguments (`A<String> by a`) forwards correctly at the erased (`Object`) level; only a PRIMITIVE
         // instantiation needs bridges, and that is rejected at the delegation site.
         let iface_internal = self
-            .syms
-            .class_names
-            .get(iface_name)
+            .visible_type_name(iface_name)
             .map(TypeName::render)
             .unwrap_or_else(|| class_internal(file, iface_name));
         let iface_sig = self
             .syms
             .class_by_internal(&iface_internal)
-            .or_else(|| self.syms.classes.get(iface_name));
+            .or_else(|| self.visible_source_class(iface_name));
         if is_synth && iface_sig.is_some_and(|s| !s.props.is_empty()) {
             return None;
         }
@@ -8812,8 +8818,10 @@ impl<'a> Lower<'a> {
         // module-`ClassSig` super-interface graph breadth-first, deduping by name + parameter types.
         let mut methods: Vec<(String, Vec<Ty>, Ty)> = Vec::new();
         let mut seen_ifaces: std::collections::HashSet<TypeName> = std::collections::HashSet::new();
-        let mut queue = vec![existing_type_name(&iface_internal)
-            .or_else(|| self.syms.classes.get(iface_name).map(|c| c.internal_name()))?];
+        let mut queue = vec![existing_type_name(&iface_internal).or_else(|| {
+            self.visible_source_class(iface_name)
+                .map(|c| c.internal_name())
+        })?];
         while let Some(cur) = queue.pop() {
             if !seen_ifaces.insert(cur) {
                 continue;
@@ -9392,7 +9400,7 @@ impl<'a> Lower<'a> {
         {
             if name == "class" {
                 if let Expr::Name(x) = self.afile.expr(*r) {
-                    return self.syms.class_names.get(x).map(TypeName::render);
+                    return self.visible_type_name(x).map(TypeName::render);
                 }
             }
         }
@@ -14258,9 +14266,7 @@ impl<'a> Lower<'a> {
         } else if self.contains_class(&class_internal(self.afile, &r.name)) {
             // A nested class by source name (`Outer.Inner` → `Outer$Inner`).
             Ty::obj(&class_internal(self.afile, &r.name))
-        } else if let Some(cs) = self.syms.classes.get(&r.name) {
-            Ty::obj(&cs.internal())
-        } else if let Some(internal) = self.syms.class_names.get(&r.name) {
+        } else if let Some(internal) = self.visible_type_name(&r.name) {
             // A classpath / built-in mapped type (`Number`, `CharSequence`, `Runnable`, a Java class) —
             // the same name→internal map the checker resolves `is`/`as` targets against. `"__ty/<prim>"`
             // is an alias to a primitive, which `is`/`as` here doesn't model (skip).
@@ -18427,7 +18433,7 @@ impl<'a> Lower<'a> {
                 // declares a supertype get a registered `C$Companion` ClassSig (checked here); a local of
                 // the same name shadows it.
                 if self.lookup(&n).is_none() {
-                    if let Some(cls) = self.syms.classes.get(&n) {
+                    if let Some(cls) = self.visible_source_class(&n) {
                         let cls_internal = cls.internal();
                         let comp_internal = format!("{cls_internal}$Companion");
                         if self.syms.class_by_internal(&comp_internal).is_some() {
@@ -18443,7 +18449,7 @@ impl<'a> Lower<'a> {
                 // A SAME-MODULE `object` referenced as a value (`val h = Helper`): not on the classpath
                 // and not a local — read its singleton via `getstatic <internal>.INSTANCE`.
                 if self.lookup(&n).is_none() {
-                    if let Some(cls) = self.syms.classes.get(&n) {
+                    if let Some(cls) = self.visible_source_class(&n) {
                         if cls.is_object {
                             let internal = cls.internal();
                             return Some(self.emit_external_static_field(
@@ -21186,19 +21192,14 @@ impl<'a> Lower<'a> {
                     // (Gating on `companion_fun_names` — not `static_methods` — excludes a plugin-synthesized
                     // `serializer()`, which the serialization plugin places itself.)
                     if let Expr::Name(cls) = self.afile.expr(receiver) {
-                        if self
-                            .syms
-                            .classes
-                            .get(cls)
-                            .is_some_and(|c| c.companion_fun_names.contains(name.as_str()))
+                        if let Some(class) = self
+                            .visible_source_class(cls)
+                            .filter(|class| class.companion_fun_names.contains(name.as_str()))
                         {
-                            if let Some(internal) = self.syms.class_names.get(cls) {
-                                let comp = type_name(&format!("{}$Companion", internal.render()));
-                                if let Some(v) =
-                                    self.lower_object_member_call(comp, &name, &args, e)
-                                {
-                                    return Some(v);
-                                }
+                            let internal = class.internal_name();
+                            let comp = type_name(&format!("{}$Companion", internal.render()));
+                            if let Some(v) = self.lower_object_member_call(comp, &name, &args, e) {
+                                return Some(v);
                             }
                         }
                     }
