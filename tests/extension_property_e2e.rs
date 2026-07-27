@@ -589,6 +589,213 @@ fn member_extension_property_resolution() {
 }
 
 #[test]
+fn cross_package_extension_properties_follow_import_scope() {
+    let model = "\
+package sample.model
+
+class Item
+";
+    let first = "\
+package sample.first
+
+import sample.model.Item
+
+var Item.label: String
+    get() = \"OK\"
+    set(value) {}
+
+val <T> T.marker: String
+    get() = \"\"
+";
+    let second = "\
+package sample.second
+
+import sample.model.Item
+
+val Item.label: Int
+    get() = 7
+
+val Item.marker: String
+    get() = \"WRONG\"
+";
+    let entry = "\
+package sample.second
+
+import sample.first.label
+import sample.first.marker
+import sample.model.Item
+
+fun box(): String {
+    val item = Item()
+    item.label = \"ignored\"
+    val bound = item::label
+    bound.set(\"ignored\")
+    val unbound = Item::label
+    unbound.set(item, \"ignored\")
+    val arbitrary = Item()::label
+    arbitrary.set(\"ignored\")
+    return if (
+        item.label == \"OK\" &&
+        bound.get() == \"OK\" &&
+        unbound.get(item) == \"OK\" &&
+        arbitrary.get() == \"OK\" &&
+        item.marker == \"\"
+    ) \"OK\" else \"FAIL\"
+}
+";
+
+    common::expect_front_end_ok_files_with_stdlib(
+        &[model, first, second, entry],
+        "CrossPackageExtensionPropertyFrontend",
+    );
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            ("Model", model),
+            ("First", first),
+            ("Second", second),
+            ("Entry", entry),
+        ],
+        "CrossPackageExtensionPropertyLowering",
+    );
+}
+
+#[test]
+fn root_import_precedes_same_package_extension_property() {
+    let root = "\
+val <T> T.tag: String
+    get() = \"\"
+";
+    let same_package = "\
+package sample
+
+val String.tag: String
+    get() = \"WRONG\"
+";
+    let entry = "\
+package sample
+
+import tag
+
+fun box(): String = \"OK\" + \"\".tag
+";
+
+    common::expect_front_end_ok_files_with_stdlib(
+        &[root, same_package, entry],
+        "RootExtensionPropertyImportFrontend",
+    );
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            ("Root", root),
+            ("SamePackage", same_package),
+            ("Entry", entry),
+        ],
+        "RootExtensionPropertyImportLowering",
+    );
+}
+
+#[test]
+fn private_extension_properties_are_file_scoped() {
+    let first = "\
+package sample
+
+private val String.code: String
+    get() = \"O\"
+
+fun first(): String = \"\".code
+";
+    let second = "\
+package sample
+
+private val String.code: String
+    get() = \"K\"
+
+fun second(): String = \"\".code
+";
+    let entry = "\
+package sample
+
+fun box(): String = first() + second()
+";
+
+    common::expect_front_end_ok_files_with_stdlib(
+        &[first, second, entry],
+        "PrivateExtensionPropertyScopeFrontend",
+    );
+    common::expect_box_ok_files_with_stdlib(
+        &[("First", first), ("Second", second), ("Entry", entry)],
+        "PrivateExtensionPropertyScopeLowering",
+    );
+}
+
+#[test]
+fn cross_file_unit_extension_property_uses_reference_descriptor() {
+    let extension = "\
+package sample.first
+
+var String.signal: Unit
+    get() = Unit
+    set(value) {}
+";
+    let entry = "\
+package sample.second
+
+import sample.first.signal
+
+fun box(): String {
+    \"\".signal = Unit
+    \"\".signal
+    return \"OK\"
+}
+";
+
+    common::expect_front_end_ok_files_with_stdlib(
+        &[extension, entry],
+        "UnitExtensionPropertyFrontend",
+    );
+    common::expect_box_ok_files_with_stdlib(
+        &[("Extension", extension), ("Entry", entry)],
+        "UnitExtensionPropertyLowering",
+    );
+}
+
+#[test]
+fn cross_file_object_extension_property_reference_is_bound() {
+    let model = "\
+package sample.model
+
+object Token
+";
+    let extension = "\
+package sample.first
+
+import sample.model.Token
+
+val <T> T.label: String
+    get() = \"OK\"
+";
+    let entry = "\
+package sample.second
+
+import sample.first.label
+import sample.model.Token
+
+fun box(): String {
+    val ref = Token::label
+    return ref.get()
+}
+";
+
+    common::expect_front_end_ok_files_with_stdlib(
+        &[model, extension, entry],
+        "ObjectExtensionPropertyReferenceFrontend",
+    );
+    common::expect_box_ok_files_with_stdlib(
+        &[("Model", model), ("Extension", extension), ("Entry", entry)],
+        "ObjectExtensionPropertyReferenceLowering",
+    );
+}
+
+#[test]
 fn member_extension_classpath_members() {
     let Some(stdlib) = common::stdlib_jar() else {
         return;

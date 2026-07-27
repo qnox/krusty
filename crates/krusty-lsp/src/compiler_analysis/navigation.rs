@@ -480,11 +480,13 @@ impl DefinitionSymbols {
                                         property,
                                         analysis.types.as_ref(),
                                         if property.receiver.is_some() {
-                                            symbols.ext_props.values().find_map(|signature| {
-                                                (signature.source
-                                                    == (file_index as u32, declaration.0))
-                                                    .then_some(signature.ty)
-                                            })
+                                            symbols.ext_props.values().flatten().find_map(
+                                                |signature| {
+                                                    (signature.source
+                                                        == (file_index as u32, declaration.0))
+                                                        .then_some(signature.ty)
+                                                },
+                                            )
                                         } else {
                                             symbols.props.get(&property.name).map(|(ty, _, _)| *ty)
                                         },
@@ -511,21 +513,22 @@ impl DefinitionSymbols {
                 }
             }
         }
-        for ((receiver, name), signature) in &symbols.ext_props {
-            let Some(target) =
-                definitions.declaration_target(signature.source.0, signature.source.1)
-            else {
-                continue;
-            };
-            let package = files
-                .get(signature.source.0 as usize)
-                .map(|file| package_key(&file.file))
-                .unwrap_or_default();
-            definitions
-                .extensions
-                .entry((*receiver, name.clone()))
-                .or_default()
-                .push(ExtensionDefinition { package, target });
+        for ((receiver, name), signatures) in &symbols.ext_props {
+            for signature in signatures {
+                let Some(target) =
+                    definitions.declaration_target(signature.source.0, signature.source.1)
+                else {
+                    continue;
+                };
+                definitions
+                    .extensions
+                    .entry((*receiver, name.clone()))
+                    .or_default()
+                    .push(ExtensionDefinition {
+                        package: signature.package.clone(),
+                        target,
+                    });
+            }
         }
         definitions.build_implementation_targets(files, symbols, implementation_limit);
         let mut self_targets = vec![Vec::new(); files.len()];

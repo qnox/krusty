@@ -1952,7 +1952,7 @@ pub fn lower_file_at_reporting(
             // `getName(Recv): T` (and, for a `var`, `setName(Recv, T)`), exactly like an extension
             // function's lowering. No backing field; only a `get()`-bodied property is modeled. A `var`
             // needs an explicit `set(v) { … }` body (no backing field to default to).
-            if let Some(recv_ref) = &p.receiver {
+            if p.receiver.is_some() {
                 if p.getter.is_none() || p.delegate.is_some() {
                     return None;
                 }
@@ -1963,9 +1963,10 @@ pub fn lower_file_at_reporting(
                 if p.is_var && !has_set_body {
                     return None;
                 }
-                let recv_ty = ty_of(file, recv_ref, &*syms.libraries);
+                let signature = syms.source_extension_property((file_index, d.0))?;
+                let recv_ty = signature.receiver;
                 let recv_key = recv_ty.erased_recv();
-                let pty_ir = body_prop_ir_ty(file, info, p, &*syms.libraries);
+                let pty_ir = ty_to_ir(stored_value_ty(signature.ty));
                 let gfid = lo.ir.add_fun(IrFunction {
                     name: property_getter_name(&p.name),
                     params: vec![ty_to_ir(recv_ty)],
@@ -4048,18 +4049,19 @@ pub fn lower_file_at_reporting(
                 lo.boxed_elem.clear();
                 lo.next_value = 0;
                 lo.cur_class = None;
-                if let Some(recv_ref) = &p.receiver {
+                if p.receiver.is_some() {
                     // Extension property getter: lower `get() = …` with `this` = receiver (param 0).
-                    let recv_ty = ty_of(file, recv_ref, &*syms.libraries);
+                    let signature = syms.source_extension_property((file_index, d.0))?;
+                    let recv_ty = signature.receiver;
                     let recv_key = recv_ty.erased_recv();
-                    let pty = body_prop_ty(file, info, p, &*syms.libraries);
+                    let pty = stored_value_ty(signature.ty);
                     let gfid = *lo.ext_prop_get_ids.get(&(recv_key, p.name.clone()))?;
                     lo.cur_fn_name = property_getter_name(&p.name);
                     lo.lambda_seq = 0;
                     let this_v = lo.fresh_value();
                     lo.scope.push(("this".to_string(), this_v, recv_ty));
                     let body = p.getter.clone().unwrap();
-                    let pty_ir = body_prop_ir_ty(file, info, p, &*syms.libraries);
+                    let pty_ir = ty_to_ir(pty);
                     lo.lower_body(&body, &pty_ir, gfid)?;
                     // `var` extension property setter: `set(v) { … }` with `this` = receiver (param 0),
                     // the value parameter `v` (param 1).
@@ -10525,72 +10527,101 @@ impl<'a> Lower<'a> {
 
     /// Lower a property reference to a synthesized `PropertyReference*Impl`. The checker types the
     /// expression as its callable shape; this JVM lowering pass chooses the reflection runtime class.
-    fn lower_prop_ref(&mut self, _e: AstExprId, recv: AstExprId, name: &str) -> Option<u32> {
+    fn lower_prop_ref(&mut self, e: AstExprId, recv: AstExprId, name: &str) -> Option<u32> {
         // BOUND: the receiver is a value evaluated once and captured — an in-scope `Name`
         // (`obj::p`) or an arbitrary expression (`A(..)::p`, receiver evaluated exactly once).
         // UNBOUND: `Type::p` — the `Name` is a class, and the reference takes the receiver as its
         // `get` argument. `capture` holds the captured-receiver expression for the bound forms.
+        let source_extension = self.info.source_extension_property_ref(e).cloned();
+        let selected_owner = source_extension
+            .as_ref()
+            .and_then(|property| property.receiver.obj_internal());
         let (owner, capture): (TypeName, Option<u32>) = match self.afile.expr(recv).clone() {
             Expr::Name(rn) => match self.lookup(&rn) {
-                Some((v, ty)) => (ty.obj_internal()?, Some(self.emit_get_value(v))),
+                Some((v, ty)) => (
+                    selected_owner.or_else(|| ty.obj_internal())?,
+                    Some(self.emit_get_value(v)),
+                ),
                 None => {
-                    let owner = class_internal(self.afile, &rn);
-                    let owner_name = type_name(&owner);
+                    let source_object = self
+                        .syms
+                        .type_name_in_file(self.file_index, &rn)
+                        .filter(|&internal| self.syms.is_source_object_name(internal));
+                    let owner = selected_owner.unwrap_or_else(|| {
+                        let owner = class_internal(self.afile, &rn);
+                        type_name(&owner)
+                    });
                     // An OBJECT singleton receiver (`O::p`) is BOUND to `O.INSTANCE`; a plain class name
                     // (`Type::p`) stays an UNBOUND reference (`get(receiver)`).
-                    match self
-                        .class_info_name(owner_name)
-                        .map(|ci| ci.id)
-                        .filter(|&cid| self.ir.classes[cid as usize].is_object)
-                    {
-                        Some(cid) => {
-                            let inst = self.emit_static_instance(cid, cid, "INSTANCE");
-                            (owner_name, Some(inst))
+                    let capture = source_object.map(|internal| {
+                        if let Some(cid) = self.class_info_name(internal).map(|info| info.id) {
+                            self.emit_static_instance(cid, cid, "INSTANCE")
+                        } else {
+                            let internal = internal.render();
+                            self.emit_external_static_field(
+                                internal.clone(),
+                                "INSTANCE",
+                                format!("L{internal};"),
+                            )
                         }
-                        None => (owner_name, None),
-                    }
+                    });
+                    (owner, capture)
                 }
             },
             _ => {
                 // Only a USER-class receiver is handled here; a library receiver is left to
                 // `lower_bound_library_prop_ref` (checked BEFORE capturing, so the receiver expression
                 // isn't evaluated twice).
-                let owner = self.info.ty(recv).obj_internal()?;
-                if !self.contains_class_name(owner) {
+                let owner = selected_owner.or_else(|| self.info.ty(recv).obj_internal())?;
+                if source_extension.is_none() && !self.contains_class_name(owner) {
                     return None;
                 }
                 (owner, Some(self.expr(recv)?))
             }
         };
-        let owner_id = self.class_info_name(owner)?.id;
         // A member field property dispatches through the instance `getName()`/`setName()`; an EXTENSION
         // property (`val A.ext`, not a field) dispatches through the static `getName(A)`/`setName(A, v)`
         // on the facade — `ext_facade = Some(())` selects that emit shape.
-        let (prop_ty, is_var, ext_facade): (Ty, bool, Option<Option<TypeName>>) = {
-            // Search the receiver class and its superclasses for a backing field — an inherited member
-            // property's getter/setter are inherited too, so the reference dispatches them on the
-            // receiver just like an own property.
-            let mut field = None;
-            let mut cur = Some(owner_id);
-            while let Some(cid) = cur {
-                let cls = &self.ir.classes[cid as usize];
-                if let Some(idx) = cls.fields.iter().position(|f| f.name == *name) {
-                    field = Some((cls.fields[idx].ty, !cls.fields[idx].is_final));
-                    break;
-                }
-                cur = cls
-                    .has_non_top_superclass()
-                    .then(|| self.class_info_name(cls.superclass).map(|c| c.id))
+        let (prop_ty, is_var, ext_facade): (Ty, bool, Option<Option<TypeName>>) =
+            if let Some(property) = source_extension {
+                let facade = (property.source.0 != self.file_index)
+                    .then(|| {
+                        self.syms
+                            .ext_prop_facades_by_decl
+                            .get(&property.source)
+                            .copied()
+                    })
                     .flatten();
-            }
-            if let Some((pty, is_var)) = field {
-                (pty, is_var, None)
+                if property.source.0 != self.file_index && facade.is_none() {
+                    return None;
+                }
+                (stored_value_ty(property.ty), property.is_var, Some(facade))
             } else {
-                let gfid = self.ext_prop_get_id(Ty::obj_name(owner), name)?;
-                let is_var = self.ext_prop_set_id(Ty::obj_name(owner), name).is_some();
-                (self.ir.functions[gfid as usize].ret, is_var, Some(None))
-            }
-        };
+                let owner_id = self.class_info_name(owner)?.id;
+                // Search the receiver class and its superclasses for a backing field — an inherited member
+                // property's getter/setter are inherited too, so the reference dispatches them on the
+                // receiver just like an own property.
+                let mut field = None;
+                let mut cur = Some(owner_id);
+                while let Some(cid) = cur {
+                    let cls = &self.ir.classes[cid as usize];
+                    if let Some(idx) = cls.fields.iter().position(|f| f.name == *name) {
+                        field = Some((cls.fields[idx].ty, !cls.fields[idx].is_final));
+                        break;
+                    }
+                    cur = cls
+                        .has_non_top_superclass()
+                        .then(|| self.class_info_name(cls.superclass).map(|c| c.id))
+                        .flatten();
+                }
+                if let Some((pty, is_var)) = field {
+                    (pty, is_var, None)
+                } else {
+                    let gfid = self.ext_prop_get_id(Ty::obj_name(owner), name)?;
+                    let is_var = self.ext_prop_set_id(Ty::obj_name(owner), name).is_some();
+                    (self.ir.functions[gfid as usize].ret, is_var, Some(None))
+                }
+            };
         // A user function whose name collides with a MEMBER property's accessor (`var x` alongside a
         // `fun getX()`/`fun setX()`) means the `getX()`/`setX()` the reference dispatches to isn't
         // reliably emitted — the two share a JVM name and krusty doesn't split them by descriptor, so
@@ -16316,23 +16347,28 @@ impl<'a> Lower<'a> {
         name: &str,
         value: AstExprId,
     ) -> Option<u32> {
-        let rt = self.info.ty(receiver);
-        // A `var` extension property write (`x.name = v`) → its static setter `setName(x, v)`.
-        if let Some(sfid) = self.ext_prop_set_id(rt, name) {
-            let rty = self.ir.functions[sfid as usize]
-                .params
-                .first()
-                .cloned()
-                .unwrap_or_else(|| ty_to_ir(rt));
-            let pty = self.ir.functions[sfid as usize]
-                .params
-                .get(1)
-                .cloned()
-                .unwrap_or_else(|| ty_to_ir(self.info.ty(value)));
+        // The checker selected this source extension property through package/import scope. Reuse that
+        // declaration here instead of independently looking up `(receiver, name)` in a global map.
+        if let Some(target) = self.info.source_extension_property_write(stmt).cloned() {
+            let rty = ty_to_ir(target.receiver);
+            let value_ty = stored_value_ty(target.ty);
+            let pty = ty_to_ir(value_ty);
             let r = self.lower_arg(receiver, &rty)?;
             let v = self.lower_arg(value, &pty)?;
-            return Some(self.emit_local_call(sfid, vec![r, v]));
+            if target.source.0 == self.file_index {
+                let sfid = self.ext_prop_set_id(target.receiver, name)?;
+                return Some(self.emit_local_call(sfid, vec![r, v]));
+            }
+            let facade = *self.syms.ext_prop_facades_by_decl.get(&target.source)?;
+            return Some(self.emit_cross_file_call(
+                facade,
+                property_setter_name(name),
+                vec![target.receiver, value_ty],
+                Ty::Unit,
+                vec![r, v],
+            ));
         }
+        let rt = self.info.ty(receiver);
         // A property write on a `var` of a class defined in ANOTHER file → its `setX(v)` accessor
         // (the backing field is private). A cross-file `val` write bails.
         if self.class_of(rt).is_none() {
@@ -18857,16 +18893,22 @@ impl<'a> Lower<'a> {
                     };
                     return self.lower_member_read_on(recv, rt, &name, e);
                 }
-                // A `val` extension property read (`x.doubled`) → its static getter `getDoubled(x)`.
-                let rty = self.info.ty(receiver);
-                if let Some(gfid) = self.ext_prop_get_id(rty, &name) {
-                    let target = self.ir.functions[gfid as usize]
-                        .params
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| ty_to_ir(rty));
-                    let a = self.lower_arg(receiver, &target)?;
-                    return Some(self.emit_local_call(gfid, vec![a]));
+                // The checker selected this source extension property through package/import scope.
+                // Lower exactly that declaration, whether its facade is this file or another one.
+                if let Some(target) = self.info.source_extension_property_read(e).cloned() {
+                    let a = self.lower_arg(receiver, &ty_to_ir(target.receiver))?;
+                    if target.source.0 == self.file_index {
+                        let gfid = self.ext_prop_get_id(target.receiver, &name)?;
+                        return Some(self.emit_local_call(gfid, vec![a]));
+                    }
+                    let facade = *self.syms.ext_prop_facades_by_decl.get(&target.source)?;
+                    return Some(self.emit_cross_file_call(
+                        facade,
+                        property_getter_name(&name),
+                        vec![target.receiver],
+                        stored_value_ty(target.ty),
+                        vec![a],
+                    ));
                 }
                 // Primitive companion constant `Int.MAX_VALUE` / `Double.NaN` / ... selected by the checker.
                 if let Some(lc) = self.info.resolved_library_companion_const(e) {

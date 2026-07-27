@@ -132,6 +132,7 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
 
     let mut fns: Vec<(u32, u32, Option<String>, String)> = Vec::new();
     let mut props: Vec<(String, String)> = Vec::new();
+    let mut ext_props: Vec<(u32, u32, String)> = Vec::new();
     for (i, (file, stem)) in files.iter().zip(stems).enumerate() {
         let facade = file_class_name(stem, file.package.as_deref());
         for &d in &file.decls {
@@ -147,6 +148,7 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
                 Decl::Property(p) if p.receiver.is_none() => {
                     props.push((p.name.clone(), facade.clone()))
                 }
+                Decl::Property(_) => ext_props.push((i as u32, d.0, facade.clone())),
                 _ => {}
             }
         }
@@ -164,6 +166,10 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
             syms.prop_facades
                 .insert(name, (type_name(&facade), ty, is_var, is_const));
         }
+    }
+    for (file_index, decl_id, facade) in ext_props {
+        syms.ext_prop_facades_by_decl
+            .insert((file_index, decl_id), type_name(&facade));
     }
 }
 
@@ -406,15 +412,11 @@ pub fn facade_package_metadata(
         }
         // Match by the SOURCE declaration, not the name — two extension properties may share a name
         // on different receivers (`val String.x` / `val Int.x`); the source key picks this decl's.
-        let Some(((recv, _), prop_sig)) = syms
-            .ext_props
-            .iter()
-            .find(|(_, sig)| sig.source == (file_index, d.0))
-        else {
+        let Some(prop_sig) = syms.source_extension_property((file_index, d.0)) else {
             continue;
         };
         let (ty, is_var) = (prop_sig.ty, prop_sig.is_var);
-        let recv = *recv;
+        let recv = prop_sig.receiver;
         let cap = {
             let mut c = p.name.chars();
             c.next()
