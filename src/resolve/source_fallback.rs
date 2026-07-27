@@ -1,10 +1,10 @@
 use crate::libraries::{
-    Callables, FunctionInfo, FunctionSet, LibraryMember, LibraryType, PropertyInfo, PropertySet,
-    ResolvedSymbols, SemanticPlatform, SemanticSupertype, StaticFieldRef,
+    Callables, FunctionInfo, FunctionSet, LibraryMember, LibraryType, PropKind, PropertyInfo,
+    PropertySet, ResolvedSymbols, SemanticPlatform, SemanticSupertype, StaticFieldRef,
 };
 use crate::module_symbols::ModuleSymbols;
 use crate::symbol_source::{InheritanceShape, SymbolSource};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TypeName, Visibility};
 use std::rc::Rc;
 
 use super::SymbolTable;
@@ -35,8 +35,27 @@ fn same_function(left: &FunctionInfo, right: &FunctionInfo) -> bool {
         && left.callable.params == right.callable.params
 }
 
-fn same_property(left: &PropertyInfo, right: &PropertyInfo) -> bool {
-    left.kind == right.kind && left.receiver == right.receiver
+fn property_covers(
+    platform: &dyn SemanticPlatform,
+    primary: &PropertyInfo,
+    fallback: &PropertyInfo,
+) -> bool {
+    if primary.kind != fallback.kind
+        || primary.receiver != fallback.receiver
+        || primary.visibility != Visibility::Public
+        || (fallback.setter.is_some() && primary.setter.is_none())
+    {
+        return false;
+    }
+    primary.kind != PropKind::Member
+        || (primary.owner == fallback.owner
+            && platform
+                .resolve_type_name(primary.owner)
+                .is_some_and(|owner| owner.is_public))
+}
+
+fn same_property_declaration(left: &PropertyInfo, right: &PropertyInfo) -> bool {
+    left.kind == right.kind && left.receiver == right.receiver && left.owner == right.owner
 }
 
 fn merge_functions(mut primary: FunctionSet, fallback: FunctionSet) -> FunctionSet {
@@ -52,15 +71,37 @@ fn merge_functions(mut primary: FunctionSet, fallback: FunctionSet) -> FunctionS
     primary
 }
 
-fn merge_properties(mut primary: PropertySet, fallback: PropertySet) -> PropertySet {
+fn public_functions(mut functions: FunctionSet) -> FunctionSet {
+    functions
+        .overloads
+        .retain(|function| function.visibility == Visibility::Public);
+    functions
+}
+
+fn public_properties(mut properties: PropertySet) -> PropertySet {
+    properties
+        .overloads
+        .retain(|property| property.visibility == Visibility::Public);
+    properties
+}
+
+fn merge_properties(
+    platform: &dyn SemanticPlatform,
+    mut primary: PropertySet,
+    fallback: PropertySet,
+) -> PropertySet {
     for candidate in fallback.overloads {
-        if !primary
+        if primary
             .overloads
             .iter()
-            .any(|existing| same_property(existing, &candidate))
+            .any(|existing| property_covers(platform, existing, &candidate))
         {
-            primary.overloads.push(candidate);
+            continue;
         }
+        primary
+            .overloads
+            .retain(|existing| !same_property_declaration(existing, &candidate));
+        primary.overloads.push(candidate);
     }
     primary
 }
@@ -93,6 +134,7 @@ fn join_callables(functions: FunctionSet, properties: PropertySet) -> Callables 
 }
 
 fn merge_type(mut primary: LibraryType, fallback: LibraryType) -> LibraryType {
+    primary.is_public |= fallback.is_public;
     for candidate in fallback.constructors {
         if !primary
             .constructors
@@ -127,7 +169,7 @@ impl SymbolSource for SourceFallbackPlatform {
     fn member_overloads(&self, recv: Ty, name: &str) -> FunctionSet {
         merge_functions(
             self.platform.member_overloads(recv, name),
-            self.source().member_overloads(recv, name),
+            public_functions(self.source().member_overloads(recv, name)),
         )
     }
 
@@ -178,16 +220,21 @@ impl SymbolSource for SourceFallbackPlatform {
         Rc::new(ResolvedSymbols {
             classifier,
             callables: join_callables(
-                merge_functions(primary_functions, fallback_functions),
-                merge_properties(primary_properties, fallback_properties),
+                merge_functions(primary_functions, public_functions(fallback_functions)),
+                merge_properties(
+                    self.platform.as_ref(),
+                    primary_properties,
+                    public_properties(fallback_properties),
+                ),
             ),
         })
     }
 
     fn property_members(&self, recv: Ty, name: &str) -> PropertySet {
         merge_properties(
+            self.platform.as_ref(),
             self.platform.property_members(recv, name),
-            self.source().property_members(recv, name),
+            public_properties(self.source().property_members(recv, name)),
         )
     }
 
@@ -311,5 +358,178 @@ impl SemanticPlatform for SourceFallbackPlatform {
 
     fn iterable_element_type_name(&self, internal: TypeName) -> Option<Ty> {
         self.platform.iterable_element_type_name(internal)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::libraries::{Origin, TypeKind};
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct TypeVisibility {
+        public: HashMap<TypeName, bool>,
+    }
+
+    impl SymbolSource for TypeVisibility {
+        fn resolve_type_name(&self, internal: TypeName) -> Option<Rc<LibraryType>> {
+            self.public
+                .get(&internal)
+                .copied()
+                .map(|is_public| Rc::new(type_shape(is_public)))
+        }
+    }
+
+    impl SemanticPlatform for TypeVisibility {}
+
+    fn type_shape(is_public: bool) -> LibraryType {
+        LibraryType {
+            is_public,
+            kind: TypeKind::Class,
+            supertypes: Default::default(),
+            constructors: Vec::new(),
+            members: Vec::new(),
+            companion: Vec::new(),
+            companion_consts: HashMap::new(),
+            sam_method: None,
+            companion_object: None,
+            value_companion_fns: Vec::new(),
+            value_underlying: None,
+            alias_target: None,
+            type_params: Vec::new(),
+            sealed_subclasses: Default::default(),
+            enum_entries: Vec::new(),
+            value_ctor_has_default: false,
+            ctor_named_params: Vec::new(),
+            value_class_properties: Vec::new(),
+            retention: None,
+        }
+    }
+
+    fn property(
+        owner: TypeName,
+        visibility: Visibility,
+        mutable: bool,
+        origin: Origin,
+    ) -> PropertyInfo {
+        let mut getter = crate::libraries::LibraryCallable::library(
+            owner,
+            "getValue",
+            Vec::new(),
+            Ty::Int,
+            Ty::Int,
+            "()I",
+        );
+        getter.origin = origin.clone();
+        let setter = mutable.then(|| {
+            let mut setter = crate::libraries::LibraryCallable::library(
+                owner,
+                "setValue",
+                vec![Ty::Int],
+                Ty::Unit,
+                Ty::Unit,
+                "(I)V",
+            );
+            setter.origin = origin;
+            setter
+        });
+        PropertyInfo {
+            kind: PropKind::Member,
+            receiver: Some(Ty::obj_name(owner)),
+            formals: Vec::new(),
+            ty: Ty::Int,
+            getter,
+            setter,
+            is_const: false,
+            visibility,
+            owner,
+            receiver_rank: 0,
+        }
+    }
+
+    #[test]
+    fn source_property_replaces_incomplete_primary_metadata() {
+        let owner = crate::types::type_name("demo/Owner");
+        let mut platform = TypeVisibility::default();
+        platform.public.insert(owner, true);
+        let source = property(
+            owner,
+            Visibility::Public,
+            true,
+            Origin::Module { facade: owner },
+        );
+
+        for primary in [
+            property(owner, Visibility::Private, true, Origin::Library),
+            property(owner, Visibility::Public, false, Origin::Library),
+        ] {
+            let merged = merge_properties(
+                &platform,
+                PropertySet {
+                    overloads: vec![primary],
+                },
+                PropertySet {
+                    overloads: vec![source.clone()],
+                },
+            );
+            assert_eq!(merged.overloads.len(), 1);
+            assert!(merged.overloads[0].setter.is_some());
+            assert!(matches!(
+                merged.overloads[0].getter.origin,
+                Origin::Module { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn public_primary_property_covers_source_metadata() {
+        let owner = crate::types::type_name("demo/Owner");
+        let mut platform = TypeVisibility::default();
+        platform.public.insert(owner, true);
+        let merged = merge_properties(
+            &platform,
+            PropertySet {
+                overloads: vec![property(owner, Visibility::Public, true, Origin::Library)],
+            },
+            PropertySet {
+                overloads: vec![property(
+                    owner,
+                    Visibility::Public,
+                    true,
+                    Origin::Module { facade: owner },
+                )],
+            },
+        );
+
+        assert_eq!(merged.overloads.len(), 1);
+        assert!(matches!(merged.overloads[0].getter.origin, Origin::Library));
+    }
+
+    #[test]
+    fn property_on_non_public_primary_type_uses_source_metadata() {
+        let owner = crate::types::type_name("demo/Owner");
+        let mut platform = TypeVisibility::default();
+        platform.public.insert(owner, false);
+        let merged = merge_properties(
+            &platform,
+            PropertySet {
+                overloads: vec![property(owner, Visibility::Public, false, Origin::Library)],
+            },
+            PropertySet {
+                overloads: vec![property(
+                    owner,
+                    Visibility::Public,
+                    false,
+                    Origin::Module { facade: owner },
+                )],
+            },
+        );
+
+        assert_eq!(merged.overloads.len(), 1);
+        assert!(matches!(
+            merged.overloads[0].getter.origin,
+            Origin::Module { .. }
+        ));
     }
 }

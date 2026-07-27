@@ -8,6 +8,7 @@ use crate::features::LangFeatures;
 pub use crate::lexer::{NameToken as FrontendNameToken, NameTokenKind as FrontendNameTokenKind};
 use crate::libraries::{EmptySymbolSource, SemanticPlatform};
 pub(crate) use crate::resolve::ClassSig as FrontendClassSig;
+pub(crate) use crate::resolve::DeclaredPropertySig as FrontendDeclaredPropertySig;
 pub use crate::resolve::SymbolTable as FrontendSymbols;
 pub use crate::resolve::TypeInfo as FrontendTypeInfo;
 pub use crate::resolve::{
@@ -525,9 +526,12 @@ pub fn analyze_source_standalone(
 mod tests {
     use super::*;
     use crate::diag::{Diagnostic, Span};
-    use crate::libraries::{Callables, LibraryMember, LibraryType, TypeKind};
+    use crate::libraries::{
+        Callables, LibraryCallable, LibraryMember, LibraryType, PropKind, PropertyInfo,
+        PropertySet, TypeKind,
+    };
     use crate::source::SourceInput;
-    use crate::types::{Ty, TypeNameList};
+    use crate::types::{Ty, TypeNameList, Visibility};
 
     struct ExistingLibrary;
 
@@ -535,11 +539,19 @@ mod tests {
         fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
             matches!(
                 internal,
-                "fixture/Present" | "fixture/Stable" | "fixture/Qualified"
+                "fixture/Present"
+                    | "fixture/Stable"
+                    | "fixture/Qualified"
+                    | "fixture/Container"
+                    | "fixture/Container$Labels"
             )
             .then(|| LibraryType {
                 is_public: true,
-                kind: TypeKind::Class,
+                kind: if internal == "fixture/Container$Labels" {
+                    TypeKind::Object
+                } else {
+                    TypeKind::Class
+                },
                 supertypes: TypeNameList::new(),
                 constructors: Vec::new(),
                 members: Vec::new(),
@@ -572,6 +584,34 @@ mod tests {
                 value_class_properties: Vec::new(),
                 retention: None,
             })
+        }
+
+        fn property_members(&self, recv: Ty, name: &str) -> PropertySet {
+            if recv == Ty::obj("fixture/Container$Labels") && name == "marker" {
+                PropertySet {
+                    overloads: vec![PropertyInfo {
+                        kind: PropKind::Member,
+                        receiver: Some(recv),
+                        formals: Vec::new(),
+                        ty: Ty::Int,
+                        getter: LibraryCallable::library(
+                            "fixture/Container$Labels",
+                            "getMarker",
+                            Vec::new(),
+                            Ty::Int,
+                            Ty::Int,
+                            "()I",
+                        ),
+                        setter: None,
+                        is_const: false,
+                        visibility: Visibility::Private,
+                        owner: "fixture/Container$Labels".into(),
+                        receiver_rank: 0,
+                    }],
+                }
+            } else {
+                PropertySet::default()
+            }
         }
     }
 
@@ -641,6 +681,38 @@ mod tests {
             panic!("missing source fallback function")
         };
         assert_eq!(functions.overloads[0].source_key.map(|key| key.0), Some(1));
+    }
+
+    #[test]
+    fn dependency_fallback_keeps_a_source_property_missing_from_the_public_api() {
+        let features = LangFeatures::new();
+        let inputs = [
+            SourceInput::kotlin(
+                "package feature\n\
+                 import fixture.Container\n\
+                 fun use(): Int = Container.Labels.marker",
+            ),
+            SourceInput::kotlin(
+                "package fixture\n\
+                 class Container {\n\
+                     object Labels { val marker: Int = 1 }\n\
+                 }",
+            ),
+        ];
+        let mut diagnostics = DiagSink::new();
+        let analysis = analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            1,
+            Box::new(ExistingLibrary),
+            &features,
+            &mut diagnostics,
+        );
+        assert!(
+            analysis.types[0].is_some() && diagnostics.diags.is_empty(),
+            "{:?}",
+            diagnostics.diags
+        );
     }
 
     #[test]
