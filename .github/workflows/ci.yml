@@ -1,13 +1,15 @@
 name: ci
 
-# PR gate (req #4): the whole gate is one command — `just ci` (lint + test-all) — run identically
-# locally, in the pre-commit hook, and here. Also runs on master pushes so the default branch never
-# goes red unnoticed.
+# PR gate (req #4): the whole gate is one command — `just ci` (lint + coverage-gate +
+# conformance-all-plain) — run identically locally, in the pre-commit/pre-push hooks, and here in the
+# `ci` job. Also runs on master pushes so the default branch never goes red unnoticed. Locally and in
+# the hooks, conformance runs against the LATEST supported Kotlin version only, so the inner loop
+# stays fast.
 #
-# `just test-all` fans the suite across every supported Kotlin reference version IN PARALLEL itself
-# (one CARGO_TARGET_DIR per version) — no GitHub-Actions matrix needed, so local and CI parallelism
-# are the same code. Provision kotlinc and export KRUSTY_KOTLINC (or KRUSTY_KOTLINC_<ver>) to enable
-# the differential harness; kotlinc-gated tests skip otherwise.
+# CI additionally validates EVERY supported Kotlin reference version in the `conformance` job — one
+# parallel matrix job per version (list computed from the kotlin-versions manifest via
+# `just matrix-json`), each running `just conformance-one <ver>` against that version's own vendored
+# kotlinc + box corpus. So the local gate is quick and CI still covers the whole support matrix.
 on:
   pull_request:
   push:
@@ -21,6 +23,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The one-command local gate: lint + coverage + conformance (latest version only).
   ci:
     runs-on: ubuntu-latest
     steps:
@@ -39,8 +42,8 @@ jobs:
           distribution: zulu
           java-version: '25' # krusty's reference toolchain is Java 25; JVM-run e2e tests need it
       # Cache the reference kotlinc dist + the codegen/box corpus, keyed by manifest hash. `just ci`
-      # (-> test-all) provisions both per supported version on a miss, so the differential + the
-      # conformance gates actually run (they FAIL, not skip, without these).
+      # (-> conformance-all-plain) provisions the latest version's toolchain + corpus on a miss, so
+      # the conformance gate actually runs (it FAILS, not skips, without these).
       - name: cache kotlin toolchain + box corpus
         uses: actions/cache@v6
         with:
@@ -52,3 +55,43 @@ jobs:
           key: kotlin-toolchain-${{ hashFiles('kotlin-versions') }}
       - name: just ci
         run: just ci
+
+  # Emit the supported-version list (from the kotlin-versions manifest) as the conformance matrix.
+  versions:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: extractions/setup-just@v4
+      - id: set
+        run: echo "matrix=$(just matrix-json)" >> "$GITHUB_OUTPUT"
+
+  # Reference/box conformance against EVERY supported Kotlin version — one parallel job per version.
+  # fail-fast off so one version's failure doesn't cancel the others (each stands on its own).
+  conformance:
+    needs: versions
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJson(needs.versions.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: '25'
+      # Per-version kotlinc dist + box corpus cache. `just conformance-one` provisions both on a miss.
+      - name: cache kotlin toolchain + box corpus (${{ matrix.version }})
+        uses: actions/cache@v6
+        with:
+          path: |
+            target/cache/kotlinc/${{ matrix.version }}
+            target/cache/box-corpus/${{ matrix.version }}
+          key: kotlin-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+      - name: conformance ${{ matrix.version }}
+        run: just conformance-one ${{ matrix.version }}
