@@ -1283,15 +1283,19 @@ fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId 
             *ret = object_ty();
             args.push(cont);
         }
-        // A classpath `suspend` MEMBER (`repo.getConfig(id)`, an invokevirtual/invokeinterface): its
-        // physical CPS method appends the `Continuation` and erases the return to `Object`, so rewrite the
-        // (logical) descriptor to the CPS form before threading the continuation argument.
         IrExpr::Call {
             args,
-            callee: Callee::Virtual { descriptor, .. },
+            callee: Callee::Virtual {
+                descriptor, params, ..
+            },
             ..
         } => {
-            *descriptor = cps_descriptor(descriptor);
+            if let Some((params, ret)) = params {
+                params.push(continuation_ty());
+                *ret = object_ty();
+            } else {
+                *descriptor = cps_descriptor(descriptor);
+            }
             args.push(cont);
         }
         IrExpr::Call { args, .. } => args.push(cont),

@@ -1345,6 +1345,23 @@ fn suspend_fun_calls_cross_file_suspend_fun() {
     );
 }
 
+#[test]
+fn suspend_fun_calls_cross_file_suspend_member() {
+    run_suspend_2(
+        "xfile_member",
+        "interface Source {\n    suspend fun load(): Int\n}\n\
+         class SourceImpl : Source {\n    override suspend fun load(): Int = 42\n}\n",
+        "suspend fun caller(): Int {\n\
+             val source: Source = SourceImpl()\n\
+             val value = source.load()\n\
+             return value + 1\n\
+         }\n",
+        "UseKt",
+        "caller",
+        43,
+    );
+}
+
 /// Locate the vendored real `kotlinc` launcher (same `target/cache/kotlinc/<v>/…` tree as `stdlib_jar`).
 fn kotlinc_bin() -> Option<String> {
     let mut dir = std::env::current_dir().ok()?;

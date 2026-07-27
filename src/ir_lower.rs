@@ -6112,7 +6112,14 @@ impl<'a> Lower<'a> {
         self.emit_external_static_field(field.owner, field.name, field.descriptor)
     }
 
-    fn lower_cross_file_module_member_call(
+    fn record_suspend_call(&mut self, call: u32, suspend: bool, ret: Ty) -> u32 {
+        if suspend {
+            self.ir.suspend_calls.insert(call, ty_to_ir(ret));
+        }
+        call
+    }
+
+    fn lower_module_member_call(
         &mut self,
         recv: u32,
         target: &ResolvedCall,
@@ -6127,11 +6134,22 @@ impl<'a> Lower<'a> {
             ret,
             interface,
             vararg,
+            suspend,
             ..
         } = target
         else {
             return None;
         };
+        if let Some((class, index, _fid, linked_ret)) =
+            self.link_local_method(&owner.render(), name, params)
+        {
+            let (provided, prelude) =
+                self.lower_selected_module_member_args(call_expr, args, params, *vararg)?;
+            let call = self.emit_method_call(class, index, recv, provided);
+            let call = self.record_suspend_call(call, *suspend, *ret);
+            let call = self.coerce_to_static(call, *ret, linked_ret);
+            return Some(self.wrap_arg_prelude(call, prelude));
+        }
         if !interface {
             if let Some(slots) = self.info.resolved_call_arg_slots.get(&call_expr).cloned() {
                 if slots.iter().any(Option::is_none) {
@@ -6160,6 +6178,7 @@ impl<'a> Lower<'a> {
                         InlineKind::None,
                         lowered,
                     );
+                    let call = self.record_suspend_call(call, *suspend, *ret);
                     let call = self.coerce_to_static(call, *ret, *physical_ret);
                     return Some(self.wrap_arg_prelude(call, prelude));
                 }
@@ -6179,6 +6198,7 @@ impl<'a> Lower<'a> {
             Some(recv),
             lowered,
         );
+        let call = self.record_suspend_call(call, *suspend, *ret);
         let call = self.coerce_to_static(call, *ret, *physical_ret);
         Some(self.wrap_arg_prelude(call, prelude))
     }
@@ -6321,16 +6341,7 @@ impl<'a> Lower<'a> {
             } else {
                 return None;
             };
-            if let Some(
-                target @ ResolvedCall::ModuleMember {
-                    owner,
-                    params,
-                    inline,
-                    vararg,
-                    ..
-                },
-            ) = selected.as_ref()
-            {
+            if let Some(target @ ResolvedCall::ModuleMember { inline, .. }) = selected.as_ref() {
                 if inline.can_inline() {
                     return self.lower_inline_fn_call(
                         name,
@@ -6341,16 +6352,7 @@ impl<'a> Lower<'a> {
                         Some(target),
                     );
                 }
-                if let Some((class_id, index, _fid, ret)) =
-                    self.link_local_method(&owner.render(), name, params)
-                {
-                    let (lowered, prelude) =
-                        self.lower_selected_module_member_args(call_expr, args, params, *vararg)?;
-                    let call = self.emit_method_call(class_id, index, recv, lowered);
-                    let call = self.coerce_generic_read(call, call_expr, ret);
-                    return Some(self.wrap_arg_prelude(call, prelude));
-                }
-                return self.lower_cross_file_module_member_call(recv, target, args, call_expr);
+                return self.lower_module_member_call(recv, target, args, call_expr);
             }
             let (class_id, index, fid, ret) = self
                 .resolve_method_by_arity(internal, name, args.len())
@@ -6391,7 +6393,7 @@ impl<'a> Lower<'a> {
                     "INSTANCE",
                     format!("L{internal_name};"),
                 );
-                return self.lower_cross_file_module_member_call(recv, target, args, call_expr);
+                return self.lower_module_member_call(recv, target, args, call_expr);
             }
         }
         let sib_sig = self
@@ -11798,46 +11800,50 @@ impl<'a> Lower<'a> {
                 physical_ret,
                 ret: selected_ret,
                 interface,
+                suspend,
                 ..
             } => {
                 if target != name || selected_params.len() != args.len() {
                     return None;
                 }
-                let mut a = Vec::new();
-                for (k, &arg) in args.iter().enumerate() {
-                    a.push(self.lower_arg(arg, &ty_to_ir(selected_params[k]))?);
+                let mut lowered = Vec::new();
+                for (index, &arg) in args.iter().enumerate() {
+                    lowered.push(self.lower_arg(arg, &ty_to_ir(selected_params[index]))?);
                 }
-                let owner = owner.render();
-                if let Some((class, midx, _fid, method_ret)) =
-                    self.link_local_method(&owner, name, &selected_params)
+                let owner_name = owner.render();
+                let (call, emitted_ret) = if let Some((class, index, _fid, linked_ret)) =
+                    self.link_local_method(&owner_name, name, &selected_params)
                 {
-                    let call = self.emit_method_call(
-                        class,
-                        midx,
-                        recv_v,
-                        a.into_iter().map(Some).collect(),
-                    );
-                    Some((
-                        self.coerce_to_static(call, selected_ret, method_ret),
-                        selected_ret,
-                    ))
+                    (
+                        self.emit_method_call(
+                            class,
+                            index,
+                            recv_v,
+                            lowered.into_iter().map(Some).collect(),
+                        ),
+                        linked_ret,
+                    )
                 } else {
-                    let call = self.emit_call(
-                        Callee::Virtual {
-                            owner: type_name(&owner),
-                            name: target,
-                            descriptor: String::new(),
-                            params: Some((tys_to_ir(&selected_params), ty_to_ir(physical_ret))),
-                            interface,
-                        },
-                        Some(recv_v),
-                        a,
-                    );
-                    Some((
-                        self.coerce_to_static(call, selected_ret, physical_ret),
-                        selected_ret,
-                    ))
-                }
+                    (
+                        self.emit_call(
+                            Callee::Virtual {
+                                owner: type_name(&owner_name),
+                                name: target,
+                                descriptor: String::new(),
+                                params: Some((tys_to_ir(&selected_params), ty_to_ir(physical_ret))),
+                                interface,
+                            },
+                            Some(recv_v),
+                            lowered,
+                        ),
+                        physical_ret,
+                    )
+                };
+                let call = self.record_suspend_call(call, suspend, selected_ret);
+                Some((
+                    self.coerce_to_static(call, selected_ret, emitted_ret),
+                    selected_ret,
+                ))
             }
             ResolvedCall::ModuleExtension {
                 receiver,
@@ -13805,30 +13811,21 @@ impl<'a> Lower<'a> {
         // default (a data class `copy`'s defaults are `this.<field>` reads), so `copy(field = v)` bailed
         // the whole file. An omitted slot stays `None` and the backend emits `<name>$default(…, mask,
         // marker)`, exactly as it does for the qualified call.
-        if let Some(ResolvedCall::ModuleMember {
-            receiver,
-            owner,
-            name: target,
-            params,
-            vararg,
-            ..
-        }) = self.info.resolved_calls.get(&e).cloned()
-        {
-            if receiver != this_ty {
-                return None;
-            }
-            if target == name {
-                let owner = owner.render();
-                if let Some((class, index, _fid, mret)) =
-                    self.link_local_method(&owner, &target, &params)
-                {
-                    let (provided, prelude) =
-                        self.lower_selected_module_member_args(e, args, &params, vararg)?;
-                    let recv = self.emit_get_value(this_v);
-                    let call = self.emit_method_call(class, index, recv, provided);
-                    let call = self.coerce_generic_read(call, e, mret);
-                    return Some(self.wrap_arg_prelude(call, prelude));
+        if let Some(target) = self.info.resolved_calls.get(&e).cloned() {
+            if let ResolvedCall::ModuleMember {
+                receiver,
+                name: target_name,
+                ..
+            } = &target
+            {
+                if *receiver != this_ty {
+                    return None;
                 }
+                if target_name != name {
+                    return None;
+                }
+                let recv = self.emit_get_value(this_v);
+                return self.lower_module_member_call(recv, &target, args, e);
             }
         }
         // A user instance method on the receiver's class — `this.m(args)`.
@@ -21904,11 +21901,8 @@ impl<'a> Lower<'a> {
                         self.lower_module_member_extension_call(extension, target, &args, e)?
                     } else if let Some(
                         resolved @ ResolvedCall::ModuleMember {
-                            owner,
                             name: target,
-                            params,
                             inline,
-                            vararg,
                             ..
                         },
                     ) = module_target.as_ref()
@@ -21929,21 +21923,7 @@ impl<'a> Lower<'a> {
                             }
                         }
                         let recv = self.expr(receiver)?;
-                        let owner_name = owner.render();
-                        if let Some((class, index, _fid, mret)) =
-                            self.link_local_method(&owner_name, target, params)
-                        {
-                            let (provided, prelude) =
-                                self.lower_selected_module_member_args(e, &args, params, *vararg)?;
-                            let call = self.emit_method_call(class, index, recv, provided);
-                            // A generic higher-order member erases its `<R>` return to `Object`; the
-                            // checker records the concrete result (`box.map { it.length }` → `Int`), so
-                            // insert the `checkcast`/unbox kotlinc emits on the erased return.
-                            let call = self.coerce_generic_read(call, e, mret);
-                            self.wrap_arg_prelude(call, prelude)
-                        } else {
-                            self.lower_cross_file_module_member_call(recv, resolved, &args, e)?
-                        }
+                        self.lower_module_member_call(recv, resolved, &args, e)?
                     } else if matches!(name.as_str(), "toString" | "hashCode") && args.is_empty() {
                         // `x.toString()`/`x.hashCode()` → the `kotlin/Any` virtual (dispatches to any
                         // override), not a by-index member — so it needs no class-side method-table entry.
