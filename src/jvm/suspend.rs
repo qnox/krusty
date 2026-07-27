@@ -4017,7 +4017,13 @@ fn collect_suspension_lines(
                     }
                 }
             }
-            collect_suspension_lines(ir, *value, suspend_set, fall_through, out);
+            collect_suspension_lines(
+                ir,
+                *value,
+                suspend_set,
+                ir.expr_end_lines.get(value).copied().or(fall_through),
+                out,
+            );
         }
         _ => {
             let mut children = Vec::new();
