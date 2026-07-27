@@ -444,6 +444,63 @@ fn continuation_metadata_uses_later_value_branch_as_resume_line() {
 }
 
 #[test]
+fn continuation_metadata_uses_try_end_and_catch_name() {
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(javap) = javap_path() else {
+        return;
+    };
+
+    let source = "package demo\n\
+        suspend fun leaf() {}\n\
+        suspend fun work() {\n\
+        \x20 try {\n\
+        \x20\x20 leaf()\n\
+        \x20 } catch (failure: Exception) {\n\
+        \x20\x20 leaf()\n\
+        \x20\x20 println(failure.message)\n\
+        \x20 }\n\
+        }\n";
+    let classes = common::compile_in_process_files(
+        &[("TryResumeLine", source)],
+        &[stdlib, jdk.clone()],
+        Some(&jdk),
+    )
+    .expect("compile try continuation");
+    let bytes = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == "demo/TryResumeLineKt$work$1").then_some(bytes))
+        .expect("work continuation");
+    let text = disassemble(
+        &javap,
+        bytes,
+        "TryResumeLineKt$work$1.class",
+        "try_resume_line",
+    );
+    let annotation = text
+        .rsplit_once("RuntimeVisibleAnnotations:")
+        .map(|(_, annotation)| annotation)
+        .expect("runtime-visible annotations");
+
+    for expected in [
+        "l=[5,7]",
+        "nl=[6,8]",
+        "i=[1]",
+        "s=[\"L$0\"]",
+        "n=[\"failure\"]",
+    ] {
+        assert!(
+            annotation.contains(expected),
+            "missing {expected:?}:\n{text}"
+        );
+    }
+}
+
+#[test]
 fn continuation_uses_synthetic_kotlin_metadata() {
     let Some(stdlib) = common::stdlib_jar() else {
         return;

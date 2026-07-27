@@ -68,18 +68,18 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
             Err(k) => k as u32, // k = count of starts strictly <= off (since off not found)
         }
     };
-    // Per-node start lines for the statement-level `LineNumberTable` mapping (0 stays for a node
-    // with no real span). One pass over the arenas; `line_at` is a binary search.
+    let span_line_at = |span: Span, off: u32| {
+        if span.lo == 0 && span.hi == 0 {
+            0
+        } else {
+            line_at(off)
+        }
+    };
+    // Per-node start lines for the statement-level `LineNumberTable` mapping.
     file.expr_lines = file
         .expr_spans
         .iter()
-        .map(|s| {
-            if s.lo == 0 && s.hi == 0 {
-                0
-            } else {
-                line_at(s.lo)
-            }
-        })
+        .map(|&span| span_line_at(span, span.lo))
         .collect();
     file.expr_source_lines = file
         .expr_arena
@@ -107,23 +107,18 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
                 }
                 _ => file.expr_spans[index],
             };
-            if anchor.lo == 0 && anchor.hi == 0 {
-                0
-            } else {
-                line_at(anchor.lo)
-            }
+            span_line_at(anchor, anchor.lo)
         })
+        .collect();
+    file.expr_end_lines = file
+        .expr_spans
+        .iter()
+        .map(|&span| span_line_at(span, span.hi))
         .collect();
     file.stmt_lines = file
         .stmt_spans
         .iter()
-        .map(|s| {
-            if s.lo == 0 && s.hi == 0 {
-                0
-            } else {
-                line_at(s.lo)
-            }
-        })
+        .map(|&span| span_line_at(span, span.lo))
         .collect();
     // Snapshot each expression's start offset before the mutable walk of `decl_arena` (a disjoint
     // field, but only borrowck's field-splitting sees that — a helper can't).
