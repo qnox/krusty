@@ -96,7 +96,7 @@ fn package_value_param_defaults_round_trip() {
     assert_eq!(
         host.value_params
             .iter()
-            .map(|p| p.has_default)
+            .map(|p| p.has_default())
             .collect::<Vec<_>>(),
         vec![false, true],
         "build_package → package_functions must preserve each param's DECLARES_DEFAULT_VALUE flag"
@@ -129,7 +129,7 @@ fn package_extension_receiver_round_trips() {
         .find(|f| f.kotlin_name == "composable")
         .expect("the decoded package metadata must list `composable`");
     assert!(
-        f.is_extension,
+        f.is_extension(),
         "the receiver_type must mark it an extension"
     );
     assert_eq!(

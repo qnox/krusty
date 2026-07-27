@@ -655,7 +655,7 @@ impl JvmLibraries {
         };
         metadata::class_functions(&comp_ci)
             .iter()
-            .filter(|m| m.is_public)
+            .filter(|m| m.is_public())
             .filter_map(|m| {
                 let descriptor = m.jvm_desc?;
                 let (params, _) = parse_method_desc(descriptor)?;
@@ -693,21 +693,21 @@ impl JvmLibraries {
         }
         meta_fns
             .iter()
-            .filter(|m| m.is_public && !m.is_extension)
+            .filter(|m| m.is_public() && !m.is_extension())
             .filter_map(|m| {
                 let descriptor = m.jvm_desc?.to_string();
                 let (params, physical_ret) = parse_method_desc(&descriptor)?;
                 // Value-class implementation methods are static and take the erased receiver as their
                 // first JVM parameter. Source member resolution sees only the value parameters.
                 let logical_params = params.get(1..).unwrap_or(&[]).to_vec();
-                let ret = metadata_return_info(m.ret_class, m.ret_nullable).apply(physical_ret);
+                let ret = metadata_return_info(m.ret_class, m.ret_nullable()).apply(physical_ret);
                 let mut member =
                     LibraryMember::new(m.kotlin_name.clone(), logical_params, ret, descriptor);
                 member.owner = Some(type_name(&ci.this_class()));
                 member.physical_name = Some(m.jvm_name.clone());
                 member.physical_ret = physical_ret;
-                member.ret_nullable = m.ret_nullable;
-                member.inline = InlineKind::from_flags(m.is_inline, m.is_inline);
+                member.set_ret_nullable(m.ret_nullable());
+                member.inline = InlineKind::from_flags(m.is_inline(), m.is_inline());
                 Some(member)
             })
             .collect()
@@ -816,7 +816,7 @@ impl JvmLibraries {
                     .find(|f| f.jvm_name == jvm_name && f.value_params.len() == value_arity)
             };
             let member_call_sig = |member: &LibraryMember, jvm_name: &str| {
-                let value_arity = if member.suspend && !member.params.is_empty() {
+                let value_arity = if member.suspend() && !member.params.is_empty() {
                     member.params.len() - 1
                 } else {
                     member.params.len()
@@ -867,15 +867,15 @@ impl JvmLibraries {
                 // The member's parsed generic signature — carries type-variable binding facts so a caller can
                 // infer a generic return from the receiver's type arguments (`Repo<Config>.load(): Config`).
                 member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
-                member.suspend = self.cp.is_suspend_method_name(internal_name, &m.name);
+                member.set_suspend(self.cp.is_suspend_method_name(internal_name, &m.name));
                 // A `suspend` member's descriptor erases its return to `Object` (the CPS convention). Recover
                 // the LOGICAL return from `@Metadata` (`Int`, not `Object`) so a caller unboxes the suspension
                 // result — keeping the erased type as `physical_ret` for the emitter.
-                if member.suspend {
+                if member.suspend() {
                     let value_arity = member.params.len().saturating_sub(1);
                     if let Some(f) = member_meta(&m.name, value_arity) {
                         member.physical_ret = member.ret;
-                        let logical = metadata_return_info(f.ret_class, f.ret_nullable)
+                        let logical = metadata_return_info(f.ret_class, f.ret_nullable())
                             .apply(member.physical_ret);
                         // krusty erases REFERENCE nullability in `Ty` (`String?` is modeled as `String`);
                         // `ret_nullable` tracks only PRIMITIVE nullability (a boxed suspension result). So a
@@ -884,7 +884,7 @@ impl JvmLibraries {
                             member.ret = logical.non_null();
                         } else {
                             member.ret = logical;
-                            member.ret_nullable = f.ret_nullable;
+                            member.set_ret_nullable(f.ret_nullable());
                         }
                     }
                     // The EMIT descriptor is the LOGICAL (continuation-stripped) form — the coroutine pass
@@ -894,7 +894,7 @@ impl JvmLibraries {
                     member.descriptor = strip_continuation_param(&member.descriptor);
                 }
                 if is_map && member.name == "put" {
-                    member.ret_nullable = true;
+                    member.set_ret_nullable(true);
                 }
                 if m.name == "<init>" {
                     // Parse the ctor's generic signature so the resolver can infer a construction's type
@@ -922,7 +922,7 @@ impl JvmLibraries {
             // and expose the member under the source name — keeping the mangled JVM name as `physical_name`
             // and the erased descriptor for emit (the value-classes pass unboxes the `Vid` argument).
             for mf in meta_fns {
-                if !mf.is_public || mf.is_extension || mf.jvm_name == mf.kotlin_name {
+                if !mf.is_public() || mf.is_extension() || mf.jvm_name == mf.kotlin_name {
                     continue;
                 }
                 let Some(desc) = mf.jvm_desc else {
@@ -934,7 +934,7 @@ impl JvmLibraries {
                 // A `suspend` member appends a `Continuation` JVM parameter the SOURCE signature
                 // (`value_params`) excludes — drop it (the CPS pass re-threads it) and match the leading
                 // value parameters. Any OTHER count mismatch (`@Composable`, …) isn't a plain mangled member.
-                let value_params = if mf.is_suspend && !params.is_empty() {
+                let value_params = if mf.is_suspend() && !params.is_empty() {
                     &params[..params.len() - 1]
                 } else {
                     &params[..]
@@ -950,7 +950,7 @@ impl JvmLibraries {
                 // A `suspend` member's `params` carry the trailing `Continuation` (the resolver strips it when
                 // matching a call, exactly as for a non-mangled suspend member); the logical value parameters
                 // are the leading ones.
-                if mf.is_suspend {
+                if mf.is_suspend() {
                     logical.push(Ty::obj("kotlin/coroutines/Continuation"));
                 }
                 // The bare `ret_class` recovery erases a parameterized return to its raw class
@@ -960,20 +960,20 @@ impl JvmLibraries {
                 // when it has type arguments, applying return nullability, else keep the `ret_class` return.
                 let ret = match mf.generic_sig.as_ref() {
                     Some(g) if !g.ret.type_args().is_empty() => {
-                        if mf.ret_nullable {
+                        if mf.ret_nullable() {
                             Ty::nullable(g.ret)
                         } else {
                             g.ret
                         }
                     }
-                    _ => metadata_return_info(mf.ret_class, mf.ret_nullable).apply(physical_ret),
+                    _ => metadata_return_info(mf.ret_class, mf.ret_nullable()).apply(physical_ret),
                 };
                 let mut member =
                     LibraryMember::new(mf.kotlin_name.clone(), logical, ret, desc.to_string());
                 member.physical_name = Some(mf.jvm_name.clone());
                 member.physical_ret = physical_ret;
-                member.ret_nullable = mf.ret_nullable;
-                member.suspend = mf.is_suspend;
+                member.set_ret_nullable(mf.ret_nullable());
+                member.set_suspend(mf.is_suspend());
                 member.call_sig = mf.member_call_sig();
                 crate::trace_compiler!(
                     "resolve",
@@ -1958,7 +1958,7 @@ impl SymbolSource for JvmLibraries {
                 .lambda_return_overloads(&facade_rendered)
                 .contains(&name);
             for mf in self.cp.meta_functions_name(facade).iter() {
-                if mf.kotlin_name != name || !mf.is_extension {
+                if mf.kotlin_name != name || !mf.is_extension() {
                     continue;
                 }
 
@@ -2047,7 +2047,7 @@ impl SymbolSource for JvmLibraries {
                 } else {
                     continue;
                 };
-                let bytecode_public = cand.as_ref().map_or(mf.is_public, |c| c.public);
+                let bytecode_public = cand.as_ref().map_or(mf.is_public(), |c| c.public);
                 let Some((params, pret)) = parse_method_desc(&descriptor) else {
                     continue;
                 };
@@ -2057,9 +2057,9 @@ impl SymbolSource for JvmLibraries {
                 let call_sig = mf.extension_call_sig();
                 let ret_class = mf.ret_class.map(kotlin_type_name_to_ty);
                 let ret = match ret_class {
-                    Some(t) if mf.ret_nullable && t.is_jvm_scalar() => Ty::nullable(t),
+                    Some(t) if mf.ret_nullable() && t.is_jvm_scalar() => Ty::nullable(t),
                     Some(t) => t,
-                    None if mf.ret_nullable && pret.is_jvm_scalar() => Ty::nullable(pret),
+                    None if mf.ret_nullable() && pret.is_jvm_scalar() => Ty::nullable(pret),
                     None => pret,
                 };
                 // The metadata-primary generic signature drives lambda-parameter and return binding.
@@ -2073,10 +2073,11 @@ impl SymbolSource for JvmLibraries {
                     _ => Some(receiver),
                 };
                 // `@InlineOnly` (`inline` + bytecode-non-public) MUST be spliced; a plain `inline` MAY be.
-                let inline = InlineKind::from_flags(mf.is_inline, mf.is_inline && !bytecode_public);
+                let inline =
+                    InlineKind::from_flags(mf.is_inline(), mf.is_inline() && !bytecode_public);
                 let callable = LibraryCallable {
                     inline,
-                    suspend: mf.is_suspend,
+                    suspend: mf.is_suspend(),
                     source_receiver,
                     // Carry the resolved bytecode method's generic `Signature` — a `<reified T>` extension's
                     // splice reads its formal-type-parameter NAMES from here to bind the call's explicit
@@ -2086,18 +2087,18 @@ impl SymbolSource for JvmLibraries {
                     ..LibraryCallable::library(facade, jvm_name, params, ret, pret, descriptor)
                 };
                 overloads.push(FunctionInfo {
-                    ret: ReturnInfo::new(mf.ret_nullable, ret_class),
+                    ret: ReturnInfo::new(mf.ret_nullable(), ret_class),
                     // Public if EITHER the metadata OR the bytecode method is public: a value-class inline
                     // extension is metadata-public but bytecode-private (resolved, then spliced), while some
                     // metadata (a user library's top-level extension) under-reports visibility though the
                     // emitted `invokestatic` target is plainly public. Either sense makes it callable.
                     visibility: crate::libraries::Visibility::from_public(
-                        mf.is_public || bytecode_public,
+                        mf.is_public() || bytecode_public,
                     ),
                     generic_sig,
                     flags: FnFlags {
                         inline,
-                        suspend: mf.is_suspend,
+                        suspend: mf.is_suspend(),
                     },
                     call_sig,
                     ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
@@ -2395,7 +2396,7 @@ impl SymbolSource for JvmLibraries {
                         };
                         overloads.push(FunctionInfo {
                             ret: ReturnInfo::new(
-                                m.ret_nullable
+                                m.ret_nullable()
                                     || builtin_ret_nullable
                                     || (suspend_ret_nullable && !ret.is_reference()),
                                 None,

@@ -2118,10 +2118,8 @@ fn build_lambda_state_machine(
         let cls = &mut ir.classes[class_id as usize];
         let mut push = |name: &str, ty: Ty| {
             // State-machine fields are mutable and non-private (read/written cross-class).
-            cls.fields.push(crate::ir::IrField {
-                is_private: false,
-                ..crate::ir::IrField::new(name.to_string(), ty)
-            });
+            cls.fields
+                .push(crate::ir::IrField::new(name.to_string(), ty).with_is_private(false));
         };
         push("result", object_ty());
         push("label", int_ty());
@@ -4082,20 +4080,11 @@ fn build_continuation_class(
     // State-machine fields: `result`/`label`/`L$i` are mutable and non-private (read/written
     // cross-class by the resume machinery).
     let mut fields = vec![
-        crate::ir::IrField {
-            is_private: false,
-            ..crate::ir::IrField::new("result".to_string(), object_ty())
-        },
-        crate::ir::IrField {
-            is_private: false,
-            ..crate::ir::IrField::new("label".to_string(), int_ty())
-        },
+        crate::ir::IrField::new("result".to_string(), object_ty()).with_is_private(false),
+        crate::ir::IrField::new("label".to_string(), int_ty()).with_is_private(false),
     ];
     for (name, field_ty) in &layout_fields {
-        fields.push(crate::ir::IrField {
-            is_private: false,
-            ..crate::ir::IrField::new(name.clone(), *field_ty)
-        });
+        fields.push(crate::ir::IrField::new(name.clone(), *field_ty).with_is_private(false));
     }
 
     // Constructor value-indices: `this`=0, then (member) the receiver, then each captured value
@@ -4107,11 +4096,11 @@ fn build_continuation_class(
     let mut arg_idx = 1u32; // value-index of the next ctor argument (`this` is 0)
     if let Some(owner) = receiver {
         let recv_ty = Ty::obj_name(owner);
-        fields.push(crate::ir::IrField {
-            is_final: true,
-            is_private: false,
-            ..crate::ir::IrField::new("this$0".to_string(), recv_ty.clone())
-        });
+        fields.push(
+            crate::ir::IrField::new("this$0".to_string(), recv_ty.clone())
+                .with_is_final(true)
+                .with_is_private(false),
+        );
         let this_c = ir.add_expr(IrExpr::GetValue(0));
         let recv_v = ir.add_expr(IrExpr::GetValue(arg_idx));
         ctor_stores.push(ir.add_expr(IrExpr::SetField {

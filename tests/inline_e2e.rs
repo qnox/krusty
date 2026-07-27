@@ -28,7 +28,7 @@ fn splices_real_empty_array_body() {
         let fns = krusty::jvm::metadata::package_functions(&part);
         let inl: Vec<_> = fns
             .iter()
-            .filter(|f| f.is_inline)
+            .filter(|f| f.is_inline())
             .filter_map(|f| Some((f.jvm_name.as_str(), f.jvm_desc?)))
             .collect();
         assert!(
@@ -38,7 +38,7 @@ fn splices_real_empty_array_body() {
         // Name-based detection finds the common inline functions (which omit method_signature).
         for f in ["map", "filter", "forEach", "sumOf"] {
             assert!(
-                fns.iter().any(|mf| mf.is_inline && mf.kotlin_name == f),
+                fns.iter().any(|mf| mf.is_inline() && mf.kotlin_name == f),
                 "inline function {f} recognized from metadata"
             );
         }

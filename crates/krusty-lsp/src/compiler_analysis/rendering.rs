@@ -32,7 +32,7 @@ pub(crate) fn render_type(reference: &TypeRef) -> String {
         result.push_str(&render_type(argument));
         result.push('>');
     }
-    if reference.nullable {
+    if reference.nullable() {
         result.push('?');
     }
     result

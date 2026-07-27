@@ -136,14 +136,13 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
         let facade = file_class_name(stem, file.package.as_deref());
         for &d in &file.decls {
             match file.decl(d) {
-                Decl::Fun(f) if !f.is_inline || f.has_callable_inline_extension_body() => {
-                    fns.push((
+                Decl::Fun(f) if !f.is_inline() || f.has_callable_inline_extension_body() => fns
+                    .push((
                         i as u32,
                         d.0,
                         f.receiver.is_none().then(|| f.name.clone()),
                         facade.clone(),
-                    ))
-                }
+                    )),
                 Decl::Property(p) if p.receiver.is_none() => {
                     props.push((p.name.clone(), facade.clone()))
                 }
@@ -318,7 +317,7 @@ pub fn facade_package_metadata(
     let mut metas: Vec<crate::metadata::builder::FnMeta> = Vec::new();
     for &d in &file.decls {
         let Decl::Fun(f) = file.decl(d) else { continue };
-        if f.is_inline {
+        if f.is_inline() {
             continue;
         }
         // The decl's collected signature: a plain fn under `funs[name]`, an extension under
@@ -371,7 +370,7 @@ pub fn facade_package_metadata(
         // A `suspend fun`'s PHYSICAL method appends a `Continuation` and erases the return; record
         // the emit handle so a reader aligns the logical signature with the CPS method. A normal
         // fn's method is name + logical descriptor — recoverable without a recorded handle.
-        let jvm_desc = f.is_suspend.then(|| {
+        let jvm_desc = f.is_suspend().then(|| {
             let mut p = String::new();
             if let Some(r) = receiver {
                 p.push_str(&crate::jvm::names::type_descriptor(r));
@@ -388,7 +387,7 @@ pub fn facade_package_metadata(
             receiver,
             param_fun_recvs,
             param_defaults: sig.param_defaults.clone(),
-            suspend: f.is_suspend,
+            suspend: f.is_suspend(),
             jvm_desc,
         });
     }

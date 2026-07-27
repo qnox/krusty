@@ -64,7 +64,7 @@ fn decl_blockers(file: &File) -> Vec<&'static str> {
                 if f.receiver.is_some() {
                     out.push("fun: extension receiver");
                 }
-                if f.is_inline {
+                if f.is_inline() {
                     out.push("fun: inline");
                 }
             }

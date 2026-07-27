@@ -63,7 +63,7 @@ fn nullable_type_parameter_return_metadata_is_kept() {
         ret.ret_class.is_none(),
         "takeIf returns a type parameter, not a concrete class"
     );
-    assert!(ret.ret_nullable, "takeIf returns T? in metadata");
+    assert!(ret.ret_nullable(), "takeIf returns T? in metadata");
 }
 
 /// The Kotlin collection hierarchy is read from `collections.kotlin_builtins` exactly as kotlinc stores

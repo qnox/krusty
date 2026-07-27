@@ -1323,21 +1323,19 @@ impl IrPlugin for SerializationPlugin {
             // serializer adds one `KSerializer` field per type parameter (`typeSerial0..N` at fields 1..=N),
             // set from the constructor parameters.
             // Field 0 `descriptor` + each `typeSerial{k}` are `final` private fields.
-            ser.fields = vec![crate::ir::IrField {
-                is_final: true,
-                ..crate::ir::IrField::new(
-                    "descriptor".to_string(),
-                    class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
-                )
-            }];
+            ser.fields = vec![crate::ir::IrField::new(
+                "descriptor".to_string(),
+                class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+            )
+            .with_is_final(true)];
             for k in 0..n_tp {
-                ser.fields.push(crate::ir::IrField {
-                    is_final: true,
-                    ..crate::ir::IrField::new(
+                ser.fields.push(
+                    crate::ir::IrField::new(
                         format!("typeSerial{k}"),
                         kserializer_of(class_ty("kotlin/Any")),
                     )
-                });
+                    .with_is_final(true),
+                );
             }
             ser.ctor_param_count = n_tp as u32;
             // The N constructor params are type-param serializers (`is_field=false`): stored manually in

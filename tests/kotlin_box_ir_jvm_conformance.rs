@@ -540,7 +540,7 @@ fn compile_blocks(
         let facade = file_class_name(&blocks[i].0, file.package.as_deref());
         for &d in &file.decls {
             match file.decl(d) {
-                Decl::Fun(f) if f.receiver.is_none() && !f.is_inline => {
+                Decl::Fun(f) if f.receiver.is_none() && !f.is_inline() => {
                     fns.push((i as u32, d.0, f.name.clone(), facade.clone()))
                 }
                 Decl::Property(p) if p.receiver.is_none() => {

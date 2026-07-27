@@ -394,13 +394,59 @@ pub struct ForRange {
 }
 
 /// A syntactic type reference. v0: just a simple name (`Int`, `String`, ...).
+/// Bit-packed boolean flags for a [`TypeRef`], collapsing `nullable`/`definitely_non_null`/
+/// `fun_has_receiver`/`fun_suspend` into one byte. Read through the `TypeRef` accessors of the same
+/// names; `nullable` is also mutated through `set_nullable`; built with the `with_*` chain. Headroom
+/// for four more flags.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TrFlags(u8);
+
+impl TrFlags {
+    const NULLABLE: u8 = 1 << 0;
+    const DEFINITELY_NON_NULL: u8 = 1 << 1;
+    const FUN_HAS_RECEIVER: u8 = 1 << 2;
+    const FUN_SUSPEND: u8 = 1 << 3;
+
+    #[inline]
+    const fn with(mut self, mask: u8, on: bool) -> Self {
+        if on {
+            self.0 |= mask;
+        } else {
+            self.0 &= !mask;
+        }
+        self
+    }
+    #[inline]
+    const fn has(self, mask: u8) -> bool {
+        self.0 & mask != 0
+    }
+
+    #[inline]
+    pub const fn with_nullable(self, on: bool) -> Self {
+        self.with(Self::NULLABLE, on)
+    }
+    #[inline]
+    pub const fn with_definitely_non_null(self, on: bool) -> Self {
+        self.with(Self::DEFINITELY_NON_NULL, on)
+    }
+    #[inline]
+    pub const fn with_fun_has_receiver(self, on: bool) -> Self {
+        self.with(Self::FUN_HAS_RECEIVER, on)
+    }
+    #[inline]
+    pub const fn with_fun_suspend(self, on: bool) -> Self {
+        self.with(Self::FUN_SUSPEND, on)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TypeRef {
     pub name: String,
-    /// Trailing `?` — a nullable type (e.g. `String?`).
-    pub nullable: bool,
-    /// A trailing `& Any` on a type parameter (`T & Any`), which removes substituted nullability.
-    pub definitely_non_null: bool,
+    /// Bit-packed `nullable`/`definitely_non_null`/`fun_has_receiver`/`fun_suspend` (read via the
+    /// accessors below; `nullable` set via `set_nullable`). `nullable` — trailing `?`.
+    /// `definitely_non_null` — a trailing `& Any` on a type parameter (`T & Any`). `fun_has_receiver` —
+    /// a receiver function type `Recv.(A) -> R`. `fun_suspend` — a `suspend` function type.
+    pub flags: TrFlags,
     /// The first generic type argument, captured for `Array<T>` (element) and function types
     /// (the return type). General class type arguments live in `targs`.
     pub arg: Option<Box<TypeRef>>,
@@ -413,12 +459,33 @@ pub struct TypeRef {
     pub fun_params: Vec<TypeRef>,
     /// Leading physical parameters that bind as context receivers in a lambda.
     pub fun_context_count: u32,
-    /// Whether `fun_params[fun_context_count]` is an extension receiver.
-    pub fun_has_receiver: bool,
-    /// For a `suspend` function type `suspend (A) -> R`: `true`. Lowers to `Function{n+1}` with a
-    /// trailing `kotlin/coroutines/Continuation` parameter and an `Object`-erased result (kotlinc's
-    /// suspend-lambda ABI), distinct from the plain `Function{n}` of a non-suspend function type.
-    pub fun_suspend: bool,
+}
+
+impl TypeRef {
+    #[inline]
+    pub fn nullable(&self) -> bool {
+        self.flags.has(TrFlags::NULLABLE)
+    }
+    #[inline]
+    pub fn definitely_non_null(&self) -> bool {
+        self.flags.has(TrFlags::DEFINITELY_NON_NULL)
+    }
+    #[inline]
+    pub fn fun_has_receiver(&self) -> bool {
+        self.flags.has(TrFlags::FUN_HAS_RECEIVER)
+    }
+    #[inline]
+    pub fn fun_suspend(&self) -> bool {
+        self.flags.has(TrFlags::FUN_SUSPEND)
+    }
+    #[inline]
+    pub fn set_nullable(&mut self, on: bool) {
+        self.flags = self.flags.with_nullable(on);
+    }
+    #[inline]
+    pub fn set_definitely_non_null(&mut self, on: bool) {
+        self.flags = self.flags.with_definitely_non_null(on);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -445,6 +512,71 @@ pub enum FunBody {
     Expr(ExprId),
     Block(ExprId), // a Block expr
     None,          // (no body — not valid for v0 top-level, but parseable)
+}
+
+/// Bit-packed boolean modifiers for a [`FunDecl`], collapsing its eight `is_*` modifier bytes into one
+/// `u8` (a real 8-byte-per-decl saving). Read through the `FunDecl` accessors of the same names;
+/// `is_open`/`is_override`/`is_operator` are mutated through the matching `set_*` methods; built with
+/// the `with_*` chain. All eight bits are in use — a ninth flag needs a wider field.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FdFlags(u8);
+
+impl FdFlags {
+    const IS_INLINE: u8 = 1 << 0;
+    const IS_FINAL: u8 = 1 << 1;
+    const IS_OPEN: u8 = 1 << 2;
+    const IS_OVERRIDE: u8 = 1 << 3;
+    const IS_ABSTRACT: u8 = 1 << 4;
+    const IS_SUSPEND: u8 = 1 << 5;
+    const IS_TAILREC: u8 = 1 << 6;
+    const IS_OPERATOR: u8 = 1 << 7;
+
+    #[inline]
+    const fn with(mut self, mask: u8, on: bool) -> Self {
+        if on {
+            self.0 |= mask;
+        } else {
+            self.0 &= !mask;
+        }
+        self
+    }
+    #[inline]
+    const fn has(self, mask: u8) -> bool {
+        self.0 & mask != 0
+    }
+
+    #[inline]
+    pub const fn with_is_inline(self, on: bool) -> Self {
+        self.with(Self::IS_INLINE, on)
+    }
+    #[inline]
+    pub const fn with_is_final(self, on: bool) -> Self {
+        self.with(Self::IS_FINAL, on)
+    }
+    #[inline]
+    pub const fn with_is_open(self, on: bool) -> Self {
+        self.with(Self::IS_OPEN, on)
+    }
+    #[inline]
+    pub const fn with_is_override(self, on: bool) -> Self {
+        self.with(Self::IS_OVERRIDE, on)
+    }
+    #[inline]
+    pub const fn with_is_abstract(self, on: bool) -> Self {
+        self.with(Self::IS_ABSTRACT, on)
+    }
+    #[inline]
+    pub const fn with_is_suspend(self, on: bool) -> Self {
+        self.with(Self::IS_SUSPEND, on)
+    }
+    #[inline]
+    pub const fn with_is_tailrec(self, on: bool) -> Self {
+        self.with(Self::IS_TAILREC, on)
+    }
+    #[inline]
+    pub const fn with_is_operator(self, on: bool) -> Self {
+        self.with(Self::IS_OPERATOR, on)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -481,32 +613,18 @@ pub struct FunDecl {
     /// `return` to this line in the `LineNumberTable`. 0 = unknown / expression body. Filled by the
     /// same parser post-pass as `decl_line`.
     pub body_close_line: u32,
-    pub is_inline: bool,
-    /// `final` modifier — cannot be overridden. Data-class synthesis skips methods a parent marks
-    /// `final` (overriding them would produce wrong behavior).
-    pub is_final: bool,
-    /// `open` or `override` (without `final`) — the member is overridable, so the JVM backend must
-    /// NOT emit `ACC_FINAL` (kotlinc's ABI: a separately-compiled module, or javac in a mixed
-    /// build, may override it).
-    pub is_open: bool,
-    /// `override` modifier — the member MUST match a supertype member (kotlinc rejects an
-    /// `override` that overrides nothing; with member overloads a same-name sibling no longer
-    /// counts as a match).
-    pub is_override: bool,
-    /// `abstract` modifier — a member with no body, only valid in an abstract class or interface.
-    pub is_abstract: bool,
+    /// Bit-packed `is_inline`/`is_final`/`is_open`/`is_override`/`is_abstract`/`is_suspend`/`is_tailrec`/
+    /// `is_operator` (read via the accessors below; `is_open`/`is_override`/`is_operator` set via `set_*`).
+    /// `is_final` — `final`, cannot be overridden. `is_open` — `open`/`override` without `final`, so the
+    /// JVM backend must NOT emit `ACC_FINAL`. `is_override` — the member MUST match a supertype member.
+    /// `is_abstract` — no body, only valid in an abstract class/interface. `is_suspend` — a coroutine,
+    /// lowered CPS with a trailing `Continuation`. `is_tailrec` — a self-recursive tailrec rewritten to a
+    /// loop. `is_inline`/`is_operator` — the `inline`/`operator` modifiers.
+    pub flags: FdFlags,
     /// Declaration visibility (`public`/`internal`/`protected`/`private`; `public` by default).
     /// Public/internal/protected functions get `Intrinsics.checkNotNullParameter` guards on their
     /// non-null reference parameters (kotlinc does); private ones do not (read via `visibility.is_private()`).
     pub visibility: Visibility,
-    /// `suspend` modifier — a coroutine. Lowered continuation-passing-style: an extra
-    /// `kotlin.coroutines.Continuation` parameter is appended and the return type erases to
-    /// `java.lang.Object` (a leaf function with no suspension point needs no state machine).
-    pub is_suspend: bool,
-    /// `tailrec` modifier — a self-recursive function whose tail calls the lowerer rewrites into a loop
-    /// (param reassignment + `continue`), so deep recursion doesn't overflow the stack.
-    pub is_tailrec: bool,
-    pub is_operator: bool,
     /// Simple names of annotations applied to this function (`@Composable fun f()` → `["Composable"]`),
     /// mirroring `ClassDecl.annotations`. Used by the compiler-extension surface (`crate::plugins`) to
     /// find annotated functions.
@@ -515,14 +633,58 @@ pub struct FunDecl {
 
 impl FunDecl {
     pub(crate) fn has_callable_inline_extension_body(&self) -> bool {
-        self.is_inline
+        self.is_inline()
             && self.receiver.is_some()
             && self.type_params.is_empty()
             && self.params.iter().all(|parameter| {
                 parameter.ty.name != "<fun>"
                     && parameter.ty.fun_params.is_empty()
-                    && !parameter.ty.fun_suspend
+                    && !parameter.ty.fun_suspend()
             })
+    }
+    #[inline]
+    pub fn is_inline(&self) -> bool {
+        self.flags.has(FdFlags::IS_INLINE)
+    }
+    #[inline]
+    pub fn is_final(&self) -> bool {
+        self.flags.has(FdFlags::IS_FINAL)
+    }
+    #[inline]
+    pub fn is_open(&self) -> bool {
+        self.flags.has(FdFlags::IS_OPEN)
+    }
+    #[inline]
+    pub fn is_override(&self) -> bool {
+        self.flags.has(FdFlags::IS_OVERRIDE)
+    }
+    #[inline]
+    pub fn is_abstract(&self) -> bool {
+        self.flags.has(FdFlags::IS_ABSTRACT)
+    }
+    #[inline]
+    pub fn is_suspend(&self) -> bool {
+        self.flags.has(FdFlags::IS_SUSPEND)
+    }
+    #[inline]
+    pub fn is_tailrec(&self) -> bool {
+        self.flags.has(FdFlags::IS_TAILREC)
+    }
+    #[inline]
+    pub fn is_operator(&self) -> bool {
+        self.flags.has(FdFlags::IS_OPERATOR)
+    }
+    #[inline]
+    pub fn set_is_open(&mut self, on: bool) {
+        self.flags = self.flags.with_is_open(on);
+    }
+    #[inline]
+    pub fn set_is_override(&mut self, on: bool) {
+        self.flags = self.flags.with_is_override(on);
+    }
+    #[inline]
+    pub fn set_is_operator(&mut self, on: bool) {
+        self.flags = self.flags.with_is_operator(on);
     }
 }
 

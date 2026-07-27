@@ -40,7 +40,7 @@ fn compile_two(a: &str, b: &str) -> Option<Vec<(String, Vec<u8>)>> {
         let facade = file_class_name(stems[i], file.package.as_deref());
         for &d in &file.decls {
             if let krusty::ast::Decl::Fun(f) = file.decl(d) {
-                if f.receiver.is_none() && !f.is_inline {
+                if f.receiver.is_none() && !f.is_inline() {
                     let facade_name = krusty::types::type_name(&facade);
                     syms.fn_facades_by_decl.insert((i as u32, d.0), facade_name);
                     syms.fn_facades.insert(f.name.clone(), facade_name);

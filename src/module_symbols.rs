@@ -8,7 +8,8 @@
 //! lowerer can pick the same-file / cross-file / library emit form from resolution alone.
 
 use crate::frontend::{
-    pick_overload, FrontendClassSig, FrontendDeclaredPropertySig, FrontendSymbols, Signature,
+    pick_overload, FrontendClassSig, FrontendDeclaredPropertySig, FrontendSymbols, SigFlags,
+    Signature,
 };
 use crate::libraries::{
     FnFlags, FnKind, FunctionInfo, FunctionSet, InlineKind, LibraryCallable, LibraryMember,
@@ -57,13 +58,13 @@ impl<'a> ModuleSymbols<'a> {
             .iter()
             .flat_map(|(n, sigs)| {
                 sigs.iter()
-                    .map(move |s| lib_member(n, s, c.internal_name(), c.is_interface))
+                    .map(move |s| lib_member(n, s, c.internal_name(), c.is_interface()))
             })
             .collect();
         let companion = c
             .static_methods
             .iter()
-            .map(|(n, s)| lib_member(n, s, c.internal_name(), c.is_interface))
+            .map(|(n, s)| lib_member(n, s, c.internal_name(), c.is_interface()))
             .collect();
         // The primary constructor (+ secondaries) as `<init>` members returning Unit.
         let mut constructors = Vec::new();
@@ -89,9 +90,9 @@ impl<'a> ModuleSymbols<'a> {
         }
         // Module objects resolve as values via the existing user-object path (StaticInstance), not the
         // classpath ExternalStaticField path, so this needn't distinguish `Object`.
-        let kind = if c.is_annotation {
+        let kind = if c.is_annotation() {
             crate::libraries::TypeKind::Annotation
-        } else if c.is_interface {
+        } else if c.is_interface() {
             crate::libraries::TypeKind::Interface
         } else {
             crate::libraries::TypeKind::Class
@@ -156,7 +157,7 @@ impl<'a> ModuleSymbols<'a> {
             return; // a classpath supertype — not owned by the module source
         };
         for sig in c.methods_named(name) {
-            out.push(lib_member(name, sig, c.internal_name(), c.is_interface));
+            out.push(lib_member(name, sig, c.internal_name(), c.is_interface()));
         }
         for i in c.interfaces.iter_ids() {
             self.collect_member_libs(i, name, out, seen);
@@ -186,19 +187,20 @@ impl<'a> ModuleSymbols<'a> {
             .map(|fi| crate::frontend::Signature {
                 params: fi.callable.params.clone(),
                 ret: fi.callable.ret,
-                vararg: fi.call_sig.vararg,
+                flags: SigFlags::default()
+                    .with_vararg(fi.call_sig.vararg)
+                    .with_is_inline(fi.flags.inline.can_inline())
+                    .with_is_operator(false)
+                    .with_is_override(false)
+                    .with_is_final(true)
+                    .with_is_suspend(fi.flags.suspend),
                 required: fi.call_sig.required,
                 param_defaults: fi.call_sig.param_defaults.clone(),
                 param_default_values: Vec::new(),
                 param_names: fi.call_sig.param_names.clone(),
                 lambda_param_types: fi.call_sig.lambda_param_types.clone(),
                 lambda_recv: Vec::new(),
-                is_inline: fi.flags.inline.can_inline(),
-                is_operator: false,
-                is_override: false,
                 visibility: fi.visibility,
-                is_final: true,
-                is_suspend: fi.flags.suspend,
                 context_count: fi.context_count,
                 source_decl: None,
                 source_file: None,
@@ -383,10 +385,10 @@ impl<'a> ModuleSymbols<'a> {
 fn lib_member(name: &str, sig: &Signature, owner: TypeName, is_interface: bool) -> LibraryMember {
     let mut m = LibraryMember::new(name.to_string(), sig.params.clone(), sig.ret, String::new());
     m.owner = Some(owner);
-    m.is_interface = is_interface;
-    m.suspend = sig.is_suspend;
+    m.set_is_interface(is_interface);
+    m.set_suspend(sig.is_suspend());
     m.visibility = sig.visibility;
-    m.inline = crate::libraries::InlineKind::from_flags(sig.is_inline, false);
+    m.inline = crate::libraries::InlineKind::from_flags(sig.is_inline(), false);
     m.call_sig = sig.call_sig();
     m
 }
@@ -414,8 +416,8 @@ fn fn_info(
         params,
         ret: sig.ret,
         physical_ret: sig.ret,
-        suspend: sig.is_suspend,
-        inline: InlineKind::from_flags(sig.is_inline, false),
+        suspend: sig.is_suspend(),
+        inline: InlineKind::from_flags(sig.is_inline(), false),
         default_call: false,
         vararg_elem: None,
         signature: None,
@@ -433,10 +435,10 @@ fn fn_info(
             .zip(sig.source_decl)
             .map(|(file, decl)| (file, decl.0)),
         flags: FnFlags {
-            inline: InlineKind::from_flags(sig.is_inline, false),
+            inline: InlineKind::from_flags(sig.is_inline(), false),
             // Same-file `suspend fun` — flows from the AST via `Signature.is_suspend` so the resolver
             // reports suspend-ness uniformly with classpath callees (whose flag comes from @Metadata).
-            suspend: sig.is_suspend,
+            suspend: sig.is_suspend(),
         },
         visibility: sig.visibility,
         ..FunctionInfo::plain(kind, receiver, callable)
@@ -629,12 +631,12 @@ impl SymbolSource for ModuleSymbols<'_> {
     fn inheritance_shape_name(&self, internal: TypeName) -> Option<InheritanceShape> {
         let class = self.class_by_type_name(internal)?;
         Some(InheritanceShape {
-            is_interface: class.is_interface,
-            is_extensible: !class.is_interface && !class.is_final,
-            has_no_arg_constructor: !class.is_sealed && class.has_no_arg_constructor(),
-            supports_external_subclassing: !class.is_sealed
-                && (!class.is_abstract
-                    || (!class.has_abstract_members && class.interfaces.is_empty())),
+            is_interface: class.is_interface(),
+            is_extensible: !class.is_interface() && !class.is_final(),
+            has_no_arg_constructor: !class.is_sealed() && class.has_no_arg_constructor(),
+            supports_external_subclassing: !class.is_sealed()
+                && (!class.is_abstract()
+                    || (!class.has_abstract_members() && class.interfaces.is_empty())),
         })
     }
 }
@@ -649,19 +651,20 @@ mod tests {
         Signature {
             params,
             ret,
-            vararg: false,
+            flags: SigFlags::default()
+                .with_vararg(false)
+                .with_is_inline(false)
+                .with_is_operator(false)
+                .with_is_override(false)
+                .with_is_final(false)
+                .with_is_suspend(false),
             required: 0,
             param_defaults: vec![],
             param_default_values: vec![],
             param_names: vec![],
             lambda_param_types: vec![],
             lambda_recv: vec![],
-            is_inline: false,
-            is_operator: false,
-            is_override: false,
             visibility: crate::types::Visibility::Public,
-            is_final: false,
-            is_suspend: false,
             context_count: 0,
             source_decl: None,
             source_file: None,
@@ -682,13 +685,7 @@ mod tests {
             ctor_param_shapes: vec![],
             ctor_param_names: vec![],
             methods: HashMap::new(),
-            is_interface: false,
-            is_object: false,
-            is_abstract: false,
-            is_fun_interface: false,
-            is_sealed: false,
-            is_final: false,
-            has_abstract_members: false,
+            flags: crate::resolve::ClassFlags::default(),
             inner_of: None,
             static_methods: HashMap::new(),
             companion_fun_names: HashSet::new(),
@@ -699,7 +696,6 @@ mod tests {
             super_internal: None,
             super_type_args: Vec::new(),
             super_ctor_params: Vec::new(),
-            is_annotation: false,
             ctor_defaults: vec![],
             secondary_ctors: vec![],
             tparam_names: vec![],
@@ -738,7 +734,7 @@ mod tests {
         s.required = 1;
         s.param_defaults = vec![false, true];
         s.param_names = vec!["a".into(), "b".into()];
-        s.vararg = false;
+        s.set_vararg(false);
         st.funs.insert("f".into(), vec![s]);
         let m = ModuleSymbols::new(&st);
         let cs = &m.top_level_overloads("f")[0].call_sig;
@@ -856,7 +852,7 @@ mod tests {
         let mut st = FrontendSymbols::default();
         let mut c = class("demo/Host");
         let mut method = sig(vec![Ty::Int], Ty::Int);
-        method.is_inline = true;
+        method.set_is_inline(true);
         c.methods.insert("apply".into(), vec![method]);
         st.insert_class("Host".into(), c);
         let m = ModuleSymbols::new(&st);
@@ -948,17 +944,17 @@ mod tests {
         final_required.ctor_params = vec![Ty::Int];
         final_required.ctor_defaults = vec![None];
         final_required.secondary_ctors = vec![vec![Ty::Int]];
-        final_required.is_final = true;
+        final_required.set_is_final(true);
         st.insert_class("FinalRequired".into(), final_required);
 
         let mut abstract_with_interface = class("demo/AbstractWithInterface");
-        abstract_with_interface.is_abstract = true;
+        abstract_with_interface.set_is_abstract(true);
         abstract_with_interface.interfaces = vec![type_name("demo/RequiredInterface")].into();
         st.insert_class("AbstractWithInterface".into(), abstract_with_interface);
 
         let mut sealed = class("demo/Sealed");
-        sealed.is_abstract = true;
-        sealed.is_sealed = true;
+        sealed.set_is_abstract(true);
+        sealed.set_is_sealed(true);
         st.insert_class("Sealed".into(), sealed);
 
         let source = ModuleSymbols::new(&st);

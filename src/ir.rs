@@ -507,6 +507,50 @@ pub struct IrEnumEntry {
 
 /// One instance field of an [`IrClass`]. Groups what were parallel `Vec`s keyed by field index, so a
 /// field's type / generic-param name / constant default / finality / visibility can't desync.
+/// Bit-packed boolean flags for an [`IrField`], collapsing `has_default`/`is_final`/`is_private`/
+/// `is_lateinit` into one byte. Read through the `IrField` accessors of the same names; built with the
+/// `with_*` chain. Headroom for four more flags before the byte fills.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IrfFlags(u8);
+
+impl IrfFlags {
+    const HAS_DEFAULT: u8 = 1 << 0;
+    const IS_FINAL: u8 = 1 << 1;
+    const IS_PRIVATE: u8 = 1 << 2;
+    const IS_LATEINIT: u8 = 1 << 3;
+
+    #[inline]
+    const fn with(mut self, mask: u8, on: bool) -> Self {
+        if on {
+            self.0 |= mask;
+        } else {
+            self.0 &= !mask;
+        }
+        self
+    }
+    #[inline]
+    const fn has(self, mask: u8) -> bool {
+        self.0 & mask != 0
+    }
+
+    #[inline]
+    pub const fn with_has_default(self, on: bool) -> Self {
+        self.with(Self::HAS_DEFAULT, on)
+    }
+    #[inline]
+    pub const fn with_is_final(self, on: bool) -> Self {
+        self.with(Self::IS_FINAL, on)
+    }
+    #[inline]
+    pub const fn with_is_private(self, on: bool) -> Self {
+        self.with(Self::IS_PRIVATE, on)
+    }
+    #[inline]
+    pub const fn with_is_lateinit(self, on: bool) -> Self {
+        self.with(Self::IS_LATEINIT, on)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct IrField {
     pub name: String,
@@ -519,20 +563,15 @@ pub struct IrField {
     /// `val t: T? = null` → `Some(Null)`), else `None` (no default, or a non-constant one). Later
     /// compiler passes may use it; the core backend ignores it.
     pub default: Option<IrConst>,
-    /// Whether the primary-constructor parameter declared ANY default (constant or not, e.g.
-    /// `routes: List<String> = emptyList()`). Distinct from `default` (constant-only) — the `@Metadata`
-    /// emitter needs this to set the `DECLARES_DEFAULT_VALUE` value-parameter flag as kotlinc does.
-    pub has_default: bool,
-    /// The backing field is immutable (`val`) — emitted `final`.
-    pub is_final: bool,
-    /// Private backing field — the Kotlin default (reached via accessors). `false` for a non-private
-    /// field read/written cross-class (a coroutine continuation's `result`/`label`). Each backend maps
-    /// this to its own access representation (the JVM emitter → `ACC_PRIVATE`/`ACC_PUBLIC`).
-    pub is_private: bool,
-    /// Backs a `lateinit var`. EVERY read of such a field (a backend `GetField`) null-checks it and
-    /// throws `UninitializedPropertyAccessException` when still unset — matching kotlinc, which inserts
-    /// the check at each access site (not only the property getter).
-    pub is_lateinit: bool,
+    /// Bit-packed `has_default`/`is_final`/`is_private`/`is_lateinit` (read via the accessors below).
+    /// `has_default` — the primary-constructor parameter declared ANY default (constant or not, e.g.
+    /// `routes: List<String> = emptyList()`); distinct from `default` (constant-only), needed so the
+    /// `@Metadata` emitter sets the `DECLARES_DEFAULT_VALUE` value-parameter flag as kotlinc does.
+    /// `is_final` — the backing field is immutable (`val`), emitted `final`. `is_private` — private
+    /// backing field (the Kotlin default, reached via accessors); `false` for a field read/written
+    /// cross-class (a coroutine continuation's `result`/`label`). `is_lateinit` — backs a `lateinit
+    /// var`; every backend read null-checks it and throws when still unset, matching kotlinc.
+    pub flags: IrfFlags,
 }
 
 impl IrField {
@@ -544,11 +583,38 @@ impl IrField {
             ty,
             type_param: None,
             default: None,
-            has_default: false,
-            is_final: false,
-            is_private: true,
-            is_lateinit: false,
+            flags: IrfFlags::default().with_is_private(true),
         }
+    }
+
+    #[inline]
+    pub fn has_default(&self) -> bool {
+        self.flags.has(IrfFlags::HAS_DEFAULT)
+    }
+    #[inline]
+    pub fn is_final(&self) -> bool {
+        self.flags.has(IrfFlags::IS_FINAL)
+    }
+    #[inline]
+    pub fn is_private(&self) -> bool {
+        self.flags.has(IrfFlags::IS_PRIVATE)
+    }
+    #[inline]
+    pub fn is_lateinit(&self) -> bool {
+        self.flags.has(IrfFlags::IS_LATEINIT)
+    }
+
+    /// Chainable override of `is_final` on top of [`IrField::new`] (replaces a `..IrField::new` spread).
+    #[inline]
+    pub fn with_is_final(mut self, on: bool) -> Self {
+        self.flags = self.flags.with_is_final(on);
+        self
+    }
+    /// Chainable override of `is_private` on top of [`IrField::new`].
+    #[inline]
+    pub fn with_is_private(mut self, on: bool) -> Self {
+        self.flags = self.flags.with_is_private(on);
+        self
     }
 }
 
@@ -1875,9 +1941,9 @@ mod tests {
         assert_eq!(f.type_param, None);
         assert_eq!(f.default, None);
         // Kotlin default: private backing field, not known-final, not lateinit.
-        assert!(f.is_private);
-        assert!(!f.is_final);
-        assert!(!f.is_lateinit);
+        assert!(f.is_private());
+        assert!(!f.is_final());
+        assert!(!f.is_lateinit());
     }
 
     #[test]
@@ -2100,10 +2166,7 @@ mod tests {
             ty: Ty::String,
             type_param: None,
             default: None,
-            has_default: false,
-            is_final: true,
-            is_lateinit: false,
-            is_private: false,
+            flags: IrfFlags::default().with_is_final(true),
         });
         f.add_class(c);
         let fid = add_toplevel_fn(&mut f, "foo", Ty::obj("X"));
