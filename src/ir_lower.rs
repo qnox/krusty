@@ -484,6 +484,13 @@ pub fn lower_file_at_reporting(
                     .find_map(|(n, t, _)| (n == name).then_some(stored_value_ty(*t)))
                     .unwrap_or(Ty::Error)
             };
+            let declared_prop_ty = |name: &str| {
+                class_sig
+                    .declared_props
+                    .get(name)
+                    .map(|property| property.ty)
+                    .unwrap_or_else(|| resolved_prop_ty(name))
+            };
             // Constructor-parameter fields, then class-body-property fields (initialized in `init_body`).
             // Field types come from the resolver's ClassSig so nested/imported/user classifier decisions
             // are made in the front end and lowering only consumes resolved semantic types.
@@ -1306,16 +1313,30 @@ pub fn lower_file_at_reporting(
             // Interfaces have no backing fields. An enum's ctor properties get getters here too (kotlinc
             // emits `private` fields + `getX()`); `emit_enum_class` emits those fields private to match.
             if !c.is_interface() {
-                let field_props: Vec<(String, bool, bool)> = c
+                let field_props: Vec<(String, bool, bool, Ty)> = c
                     .props
                     .iter()
                     .filter(|p| p.is_property)
-                    .map(|p| (p.name.clone(), p.is_var, p.visibility.is_private()))
+                    .map(|p| {
+                        (
+                            p.name.clone(),
+                            p.is_var,
+                            p.visibility.is_private(),
+                            declared_prop_ty(&p.name),
+                        )
+                    })
                     .chain(
                         c.body_props
                             .iter()
                             .filter(|p| is_backing_field_prop(p))
-                            .map(|p| (p.name.clone(), p.is_var, p.visibility.is_private())),
+                            .map(|p| {
+                                (
+                                    p.name.clone(),
+                                    p.is_var,
+                                    p.visibility.is_private(),
+                                    declared_prop_ty(&p.name),
+                                )
+                            }),
                     )
                     .collect();
                 // An inner class's `this$0` occupies field index 0, so the declared properties' fields
@@ -1336,7 +1357,8 @@ pub fn lower_file_at_reporting(
                 let has_companion = !c.companion_methods.is_empty()
                     || c.companion_props.iter().any(|p| !p.is_const)
                     || c.companion_base.is_some();
-                for (pi, (pname, is_var, is_private)) in field_props.iter().enumerate() {
+                for (pi, (pname, is_var, is_private, property_ty)) in field_props.iter().enumerate()
+                {
                     let fidx = pi + field_offset;
                     if *is_private && !c.is_value && !has_companion {
                         continue;
@@ -1346,6 +1368,7 @@ pub fn lower_file_at_reporting(
                     // bare `Ty` — so a nullable value-class property getter erases consistently with the
                     // field (`z: Z1?` → `LZ1;`, not the collapsed final underlying).
                     let fty_ir = lo.ir.classes[id as usize].fields[fidx].ty;
+                    let property_ir = ty_to_ir(*property_ty);
                     // `open`/`override` property accessors must stay non-final (kotlinc's member
                     // modality — same rule as methods). Only BODY properties carry the flag;
                     // an `open val` PRIMARY-CONSTRUCTOR property isn't modeled yet.
@@ -1360,13 +1383,18 @@ pub fn lower_file_at_reporting(
                         // emission inserts the uninitialized null-check throw (so does every other read).
                         let this_e = lo.emit_get_value(0);
                         let gf = lo.emit_get_field(this_e, id, fidx as u32);
-                        let ret = lo.emit_return(Some(gf));
+                        let value = if fty == *property_ty {
+                            gf
+                        } else {
+                            lo.emit_type_op(IrTypeOp::ImplicitCoercion, gf, property_ir.clone())
+                        };
+                        let ret = lo.emit_return(Some(value));
                         let body = lo.emit_block(vec![ret], None);
                         let mi = method_fids.len() as u32;
                         let fid = lo.ir.add_fun(IrFunction {
                             name: gname.clone(),
                             params: vec![],
-                            ret: fty_ir,
+                            ret: property_ir.clone(),
                             body: Some(body),
                             is_static: false,
                             dispatch_receiver: Some(type_name(&internal)),
@@ -1386,7 +1414,10 @@ pub fn lower_file_at_reporting(
                         if prop_open {
                             lo.ir.open_methods.insert(fid);
                         }
-                        methods.entry(gname).or_default().push((mi, fid, fty));
+                        methods
+                            .entry(gname)
+                            .or_default()
+                            .push((mi, fid, *property_ty));
                         method_fids.push(fid);
                     }
                     if *is_var {
@@ -1394,7 +1425,12 @@ pub fn lower_file_at_reporting(
                         if !methods.contains_key(&sname) {
                             let this_e = lo.emit_get_value(0);
                             let v = lo.emit_get_value(1);
-                            let sf = lo.emit_set_field(this_e, id, fidx as u32, v);
+                            let value = if fty == *property_ty {
+                                v
+                            } else {
+                                lo.emit_type_op(IrTypeOp::ImplicitCoercion, v, fty_ir.clone())
+                            };
+                            let sf = lo.emit_set_field(this_e, id, fidx as u32, value);
                             let body = lo.emit_block(vec![sf], None);
                             let mi = method_fids.len() as u32;
                             // kotlinc guards a non-null reference setter parameter with
@@ -1411,7 +1447,7 @@ pub fn lower_file_at_reporting(
                             };
                             let fid = lo.ir.add_fun(IrFunction {
                                 name: sname.clone(),
-                                params: vec![fty_ir.clone()],
+                                params: vec![property_ir.clone()],
                                 ret: Ty::Unit,
                                 body: Some(body),
                                 is_static: false,

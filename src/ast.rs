@@ -956,6 +956,11 @@ pub enum ClassInit {
     Block(ExprId),   // an `init { … }` block expression
 }
 
+#[derive(Clone, Debug)]
+pub struct ExplicitBackingField {
+    pub ty: Option<TypeRef>,
+}
+
 /// A top-level `val`/`var` property: `val name: Type = init`.
 #[derive(Clone, Debug)]
 pub struct PropDecl {
@@ -1006,6 +1011,7 @@ pub struct PropDecl {
     /// `val x: T by <expr>` — a DELEGATED property. The expression is the delegate; reads route through
     /// `delegate.getValue(thisRef, property)` (and writes through `setValue`). `None` for a plain property.
     pub delegate: Option<ExprId>,
+    pub explicit_backing_field: Option<ExplicitBackingField>,
     pub span: Span,
 }
 
