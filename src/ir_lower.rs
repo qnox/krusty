@@ -17862,6 +17862,14 @@ impl<'a> Lower<'a> {
             {
                 self.ir.expr_source_lines.entry(id).or_insert(line);
             }
+            if let Some(&line) = self
+                .afile
+                .expr_end_lines
+                .get(e.0 as usize)
+                .filter(|&&line| line != 0)
+            {
+                self.ir.expr_end_lines.entry(id).or_insert(line);
+            }
         }
         // Survey diagnostic: tag the innermost unsupported expression that caused the bail (the first
         // `None` to bubble up wins, since deeper frames run first and a tag is only refined from a
