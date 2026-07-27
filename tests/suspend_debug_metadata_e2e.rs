@@ -501,6 +501,97 @@ fn continuation_metadata_uses_try_end_and_catch_name() {
 }
 
 #[test]
+fn continuation_metadata_uses_successor_initializer_line() {
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(javap) = javap_path() else {
+        return;
+    };
+
+    let source = "package demo\n\
+        suspend fun leaf() {}\n\
+        suspend fun work(flag: Boolean): Int {\n\
+        \x20 leaf()\n\
+        \x20 val value =\n\
+        \x20\x20 when (flag) { true -> 1; else -> 2 }\n\
+        \x20 return value\n\
+        }\n";
+    let classes = common::compile_in_process_files(
+        &[("SuccessorLine", source)],
+        &[stdlib, jdk.clone()],
+        Some(&jdk),
+    )
+    .expect("compile successor-line continuation");
+    let bytes = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == "demo/SuccessorLineKt$work$1").then_some(bytes))
+        .expect("work continuation");
+    let text = disassemble(
+        &javap,
+        bytes,
+        "SuccessorLineKt$work$1.class",
+        "successor_line",
+    );
+    let annotation = text
+        .rsplit_once("RuntimeVisibleAnnotations:")
+        .map(|(_, annotation)| annotation)
+        .expect("runtime-visible annotations");
+
+    for expected in ["l=[4]", "nl=[6]"] {
+        assert!(
+            annotation.contains(expected),
+            "missing {expected:?}:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn continuation_metadata_marks_direct_tail_suspension() {
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(javap) = javap_path() else {
+        return;
+    };
+
+    let source = "package demo\n\
+        suspend fun leaf(value: Int): Int = value\n\
+        suspend fun work(): Int {\n\
+        \x20 val first = leaf(1)\n\
+        \x20 return leaf(first)\n\
+        }\n";
+    let classes = common::compile_in_process_files(
+        &[("TailResume", source)],
+        &[stdlib, jdk.clone()],
+        Some(&jdk),
+    )
+    .expect("compile tail-resume continuation");
+    let bytes = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == "demo/TailResumeKt$work$1").then_some(bytes))
+        .expect("work continuation");
+    let text = disassemble(&javap, bytes, "TailResumeKt$work$1.class", "tail_resume");
+    let annotation = text
+        .rsplit_once("RuntimeVisibleAnnotations:")
+        .map(|(_, annotation)| annotation)
+        .expect("runtime-visible annotations");
+
+    for expected in ["l=[4,5]", "nl=[5,-1]"] {
+        assert!(
+            annotation.contains(expected),
+            "missing {expected:?}:\n{text}"
+        );
+    }
+}
+
+#[test]
 fn continuation_uses_synthetic_kotlin_metadata() {
     let Some(stdlib) = common::stdlib_jar() else {
         return;
