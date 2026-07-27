@@ -3278,9 +3278,10 @@ fn best_by_args<'a>(
         integer_literal_adapts(*p, *a, integer_literals.get(i).copied().unwrap_or(false))
     };
     let function_like_fits = |p: &Ty, a: &Ty| {
-        p.fun_arity()
-            .zip(lib.function_like_arity(*a))
-            .is_some_and(|(param, arg)| usize::from(param) == arg)
+        a.fun_arity().is_none()
+            && p.fun_arity()
+                .zip(lib.function_like_arity(*a))
+                .is_some_and(|(param, arg)| usize::from(param) == arg)
     };
     // The DEFAULT-omitting passes accept a reference SUBTYPE / value-class-underlying argument (a
     // `joinToString(separator: CharSequence = …)` call with a `String`), matching the assignability the
@@ -3461,7 +3462,7 @@ fn fun_return_compatible(lib: &dyn SemanticPlatform, param: Ty, arg: Ty) -> bool
     {
         return true;
     }
-    if matches!(ar, Ty::Error) {
+    if matches!(ar, Ty::Error | Ty::Nothing) {
         return true;
     }
     if pr.non_null() == ar.non_null() {
@@ -3760,6 +3761,47 @@ mod tests {
             },
         );
         assert!(matches!(ambiguous, CandidateSelection::Ambiguous));
+    }
+
+    #[test]
+    fn concrete_lambda_return_rejects_same_arity_fallback() {
+        let source = FakeSource {
+            name: "unused",
+            receiver: None,
+            info: top_level_nullable_string_info(),
+        };
+        assert!(fun_return_compatible(&source, Ty::Unit, Ty::Nothing));
+
+        let int_transform = Ty::fun(vec![Ty::Int], Ty::Int);
+        let string_transform = Ty::fun(vec![Ty::Int], Ty::String);
+        let candidate = |name: &str, transform: Ty| {
+            FunctionInfo::plain(
+                FnKind::TopLevel,
+                None,
+                LibraryCallable::library(
+                    "fixture/Calls",
+                    name,
+                    vec![transform],
+                    Ty::Unit,
+                    Ty::Unit,
+                    "(Lkotlin/jvm/functions/Function1;)V",
+                ),
+            )
+        };
+        let int_candidate = candidate("chooseInt", int_transform);
+        let string_candidate = candidate("chooseString", string_transform);
+        let candidates = [
+            (&int_candidate, vec![int_transform]),
+            (&string_candidate, vec![string_transform]),
+        ];
+        let argument = Ty::fun(vec![Ty::Error], Ty::String);
+
+        let selected = best_by_args(&source, &candidates, &[argument], &[], &[true]);
+
+        let CandidateSelection::Selected(selected) = selected else {
+            panic!("concrete lambda return should select one overload");
+        };
+        assert_eq!(selected.callable.name, "chooseString");
     }
 
     #[test]
