@@ -10873,65 +10873,67 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Collect every smart-cast narrowing established by a `&&`-chain condition (`a && b && c`), recursing
-    /// through nested `&&` so the operand to the right of the whole chain sees ALL of them (`x is Double?
-    /// && y is Int? && x == y` narrows BOTH `x` and `y` for the `==`). A non-`&&` leaf contributes its own
-    /// (positive) narrowing, if any.
-    fn collect_and_narrowings(&self, cond: ExprId, out: &mut Vec<(String, Ty)>) {
-        let mut nonnull = std::collections::HashSet::new();
-        self.collect_and_narrowings_inner(cond, out, &mut nonnull);
-        // Combine `x is T?` and `x != null` regardless of their order in the chain.
-        if !nonnull.is_empty() {
-            let refined: Vec<(String, Ty)> = out
-                .iter()
-                .filter_map(|(n, t)| match t {
-                    Ty::Nullable(inner) if nonnull.contains(n.as_str()) && !inner.is_unsigned() => {
-                        Some((n.clone(), **inner))
-                    }
-                    _ => None,
-                })
-                .collect();
-            out.extend(refined);
+    fn condition_narrowings(&self, cond: ExprId, truth: bool) -> Vec<(String, Ty)> {
+        let mut candidates = Vec::new();
+        self.collect_condition_narrowings(cond, truth, &mut candidates);
+        let nonnull: std::collections::HashSet<String> = candidates
+            .iter()
+            .filter_map(|(name, ty)| (!ty.is_nullable()).then_some(name.clone()))
+            .collect();
+        let mut result = Vec::new();
+        let mut conflicts = std::collections::HashSet::new();
+        for (name, ty) in candidates {
+            if conflicts.contains(&name) {
+                continue;
+            }
+            let ty = match ty {
+                Ty::Nullable(inner) if nonnull.contains(name.as_str()) && !inner.is_unsigned() => {
+                    *inner
+                }
+                _ => ty,
+            };
+            let Some((_, current)) = result.iter_mut().find(|(existing, _)| *existing == name)
+            else {
+                result.push((name, ty));
+                continue;
+            };
+            let context = crate::assignable::TyCtx::new();
+            if crate::assignable::is_subtype(&context, self, ty, *current) {
+                *current = ty;
+            } else if !crate::assignable::is_subtype(&context, self, *current, ty) {
+                result.retain(|(existing, _)| *existing != name);
+                conflicts.insert(name);
+            }
+        }
+        result
+    }
+
+    fn collect_condition_narrowings(&self, cond: ExprId, truth: bool, out: &mut Vec<(String, Ty)>) {
+        if let Expr::Binary { op, lhs, rhs, .. } = self.file.expr(cond).clone() {
+            let combines = (truth && op == BinOp::And) || (!truth && op == BinOp::Or);
+            if combines {
+                self.collect_condition_narrowings(lhs, truth, out);
+                self.collect_condition_narrowings(rhs, truth, out);
+                return;
+            }
+        }
+        if let Some(binding) = self.smartcast_binding(cond, !truth) {
+            out.push(binding);
         }
     }
 
-    fn collect_and_narrowings_inner(
-        &self,
-        cond: ExprId,
-        out: &mut Vec<(String, Ty)>,
-        nonnull: &mut std::collections::HashSet<String>,
-    ) {
-        if let Expr::Binary {
-            op: BinOp::And,
-            lhs,
-            rhs,
-            ..
-        } = self.file.expr(cond).clone()
-        {
-            self.collect_and_narrowings_inner(lhs, out, nonnull);
-            self.collect_and_narrowings_inner(rhs, out, nonnull);
-            return;
-        }
-        // Record the names a `x != null` leaf proves non-null (the narrowing refinement above only
-        // fires on a STABLE binding — the `is`-leaf that produced the `Int?` narrowing already
-        // enforces val/parameter stability, so the name alone suffices here).
-        if let Expr::Binary {
-            op: BinOp::Ne,
-            lhs,
-            rhs,
-            ..
-        } = self.file.expr(cond).clone()
-        {
-            match (self.file.expr(lhs).clone(), self.file.expr(rhs).clone()) {
-                (Expr::Name(n), Expr::NullLit) | (Expr::NullLit, Expr::Name(n)) => {
-                    nonnull.insert(n);
-                }
-                _ => {}
-            }
-        }
-        if let Some(b) = self.smartcast_binding(cond, false) {
-            out.push(b);
-        }
+    fn narrowing_is_supported(&self, name: &str, ty: Ty, compound: bool) -> bool {
+        let is_value = ty
+            .obj_internal()
+            .and_then(|internal| self.syms.class_by_type_name(internal))
+            .is_some_and(|class| class.value_field.is_some());
+        let source_ty = if name == "this" {
+            self.this_ty
+        } else {
+            self.lookup(name).map(|local| local.ty)
+        };
+        let unboxes_nullable = matches!(source_ty, Some(Ty::Nullable(inner)) if *inner == ty);
+        (!is_value || unboxes_nullable) && (!compound || ty != Ty::Boolean)
     }
 
     fn check_fun(&mut self, f: &FunDecl, source_decl: Option<DeclId>) {
@@ -13623,33 +13625,12 @@ impl<'a> Checker<'a> {
                 rhs,
                 operator_span,
             } => {
-                // `a && b` / `a || b`: a smart-cast established by `a` holds while checking `b`. In `&&`,
-                // the RHS is reached when `a` is TRUE (`x is String && x.length`); in `||`, when `a` is
-                // FALSE, so the RHS gets `a`'s NEGATED narrowing (`x !is String || x.length` — reaching
-                // the RHS means `x` IS a `String`). Narrow `x` in a scope for the right operand, mirroring
-                // the `if`-then/else narrowing.
                 if matches!(op, BinOp::And | BinOp::Or) {
-                    let for_else = matches!(op, BinOp::Or);
                     let lt = self.expr(lhs);
-                    // `&&`: the RHS sees EVERY narrowing from the (possibly compound) left chain
-                    // (`x is Double? && y is Int? && x == y`). `||`: a single negated narrowing.
-                    let casts: Vec<(String, Ty)> = if op == BinOp::And {
-                        let mut v = Vec::new();
-                        self.collect_and_narrowings(lhs, &mut v);
-                        v
-                    } else {
-                        self.smartcast_binding(lhs, for_else).into_iter().collect()
-                    };
+                    let casts = self.condition_narrowings(lhs, op == BinOp::And);
                     self.push_scope();
                     for (n, t) in &casts {
-                        // Don't narrow to a VALUE class: it's erased to its underlying type, and a
-                        // smart-cast use in the same boolean expr (`x is V && x == …`) would take the
-                        // unboxed-equals path the `&&`-narrowing lowering doesn't model — miscompile.
-                        let is_value = t
-                            .obj_internal()
-                            .and_then(|i| self.syms.class_by_type_name(i))
-                            .is_some_and(|c| c.value_field.is_some());
-                        if !is_value {
+                        if self.narrowing_is_supported(n, *t, true) {
                             self.declare(n, *t, false);
                         }
                     }
@@ -13949,35 +13930,14 @@ impl<'a> Checker<'a> {
             } => {
                 let ct = self.expr(cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "if condition");
-                // Smart-cast: `if (x is T)` narrows a stable `x` to `T` in the then-branch. An `&&`-chain
-                // condition (`if (a is Double && b is Double) a == b`) narrows EVERY operand of the chain,
-                // so the then-branch sees both (the `==` then unboxes to an IEEE primitive compare).
-                let mut then_casts = Vec::new();
-                self.collect_and_narrowings(cond, &mut then_casts);
-                let is_and_chain =
+                let then_casts = self.condition_narrowings(cond, true);
+                let then_compound =
                     matches!(self.file.expr(cond), Expr::Binary { op: BinOp::And, .. });
                 self.push_scope();
-                // Declare innermost-last so a variable narrowed twice in a chain (`x is Comparable<*> &&
-                // x is Double`) keeps the LAST (most-specific) narrowing; a duplicate-typed reference +
-                // primitive pair would otherwise leave the slot inconsistent.
-                let mut seen = std::collections::HashSet::new();
-                for (n, t) in then_casts.iter().rev() {
-                    if !seen.insert(n.clone()) {
-                        continue;
+                for (name, ty) in &then_casts {
+                    if self.narrowing_is_supported(name, *ty, then_compound) {
+                        self.declare(name, *ty, false);
                     }
-                    // Don't narrow to a VALUE class (erased to its underlying — the smart-cast use would
-                    // take an unmodeled unboxed path; mirrors the `&&`-narrowing guard).
-                    let is_value = t
-                        .obj_internal()
-                        .and_then(|i| self.syms.class_by_type_name(i))
-                        .is_some_and(|c| c.value_field.is_some());
-                    // A `Boolean` narrowed inside an `&&` chain then used as a `compareTo` receiver
-                    // mis-lowers (a primitive `Boolean` has no instance `compareTo`); leave it un-narrowed
-                    // in the chain case (a single `if (x is Boolean)` is unchanged).
-                    if is_value || (is_and_chain && *t == Ty::Boolean) {
-                        continue;
-                    }
-                    self.declare(n, *t, false);
                 }
                 // `if (this is B)` narrows the implicit receiver to `B` for the branch body.
                 let tt =
@@ -13991,10 +13951,14 @@ impl<'a> Checker<'a> {
                 self.pop_scope();
                 match else_branch {
                     Some(eb) => {
-                        let else_cast = self.smartcast_binding(cond, true);
+                        let else_casts = self.condition_narrowings(cond, false);
+                        let else_compound =
+                            matches!(self.file.expr(cond), Expr::Binary { op: BinOp::Or, .. });
                         self.push_scope();
-                        if let Some((n, t)) = &else_cast {
-                            self.declare(n, *t, false);
+                        for (name, ty) in &else_casts {
+                            if self.narrowing_is_supported(name, *ty, else_compound) {
+                                self.declare(name, *ty, false);
+                            }
                         }
                         let et = self.with_this_narrow(self.this_is_narrowing(cond, true), |c| {
                             match &expected {
@@ -14029,8 +13993,15 @@ impl<'a> Checker<'a> {
                         } = self.file.expr(ie).clone()
                         {
                             if self.expr_diverges(then_branch) {
-                                if let Some((n, t)) = self.smartcast_binding(cond, true) {
-                                    self.declare(&n, t, false);
+                                let casts = self.condition_narrowings(cond, false);
+                                let compound = matches!(
+                                    self.file.expr(cond),
+                                    Expr::Binary { op: BinOp::Or, .. }
+                                );
+                                for (name, ty) in casts {
+                                    if self.narrowing_is_supported(&name, ty, compound) {
+                                        self.declare(&name, ty, false);
+                                    }
                                 }
                             }
                         }
@@ -14045,8 +14016,15 @@ impl<'a> Checker<'a> {
                                     && !args.is_empty()
                                     && self.is_resolved_stdlib_precondition_call(ie, &fname)
                                 {
-                                    if let Some((n, t)) = self.smartcast_binding(args[0], false) {
-                                        self.declare(&n, t, false);
+                                    let casts = self.condition_narrowings(args[0], true);
+                                    let compound = matches!(
+                                        self.file.expr(args[0]),
+                                        Expr::Binary { op: BinOp::And, .. }
+                                    );
+                                    for (name, ty) in casts {
+                                        if self.narrowing_is_supported(&name, ty, compound) {
+                                            self.declare(&name, ty, false);
+                                        }
                                     }
                                 }
                             }
