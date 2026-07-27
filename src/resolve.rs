@@ -5694,6 +5694,14 @@ fn infer_lit_ty_p(
             let rt = infer_lit_ty_p(file, *hi, class_names, fun_rets, props, src, env);
             Ty::range_value_type(lt, rt).unwrap_or(Ty::Error)
         }
+        Expr::NotNull { operand } => {
+            let ty = infer_lit_ty_p(file, *operand, class_names, fun_rets, props, src, env);
+            if ty == Ty::Null {
+                Ty::Nothing
+            } else {
+                ty.non_null()
+            }
+        }
         Expr::CallableRef { receiver, name } => {
             if name == "class" {
                 let represented = receiver
