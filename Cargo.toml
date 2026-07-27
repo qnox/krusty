@@ -3,6 +3,7 @@ name = "krusty"
 version = "0.0.1"
 edition = "2021"
 description = "Memory-lean Kotlin->JVM compiler PoC (per-file streaming pipeline)"
+license = "Apache-2.0"
 autotests = false
 
 [workspace]
