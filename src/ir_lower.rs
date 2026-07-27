@@ -216,7 +216,25 @@ pub fn lower_file_at_reporting(
     }
 
     lo.set_bail("deep"); // refined below as lowering progresses (survey diagnostic only)
-                         // Only files of top-level functions + *simple* classes take the IR path.
+    let has_context_property = file
+        .decls
+        .iter()
+        .any(|&declaration| match file.decl(declaration) {
+            Decl::Property(property) => !property.context_params.is_empty(),
+            Decl::Class(class) => class
+                .body_props
+                .iter()
+                .chain(&class.companion_props)
+                .chain(class.enum_entries.iter().flat_map(|entry| &entry.props))
+                .any(|property| !property.context_params.is_empty()),
+            Decl::Fun(_) => false,
+        });
+    if has_context_property {
+        lo.set_bail("gate:context-property");
+        return None;
+    }
+
+    // Only files of top-level functions + *simple* classes take the IR path.
     for &d in &file.decls {
         match file.decl(d) {
             Decl::Fun(_) => {} // top-level function, extension function, or `inline fun` (expanded at call sites)

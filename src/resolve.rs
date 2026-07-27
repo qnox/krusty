@@ -191,6 +191,7 @@ fn extract_ctor_default(
 pub struct MemberExtPropSig {
     receiver: Ty,
     ret: Ty,
+    context_params: Vec<Ty>,
     type_params: Vec<String>,
     type_param_bounds: Vec<Ty>,
     is_var: bool,
@@ -233,6 +234,7 @@ pub struct DeclaredPropertySig {
     pub visibility: Visibility,
     pub getter_name: String,
     pub setter_name: Option<String>,
+    pub context_params: Vec<Ty>,
 }
 
 #[derive(Clone, Debug)]
@@ -434,6 +436,13 @@ impl ClassSig {
     }
 
     pub fn prop(&self, name: &str) -> Option<(Ty, bool)> {
+        if self
+            .declared_props
+            .get(name)
+            .is_some_and(|property| !property.context_params.is_empty())
+        {
+            return None;
+        }
         self.props
             .iter()
             .find_map(|(n, t, v)| (n == name).then_some((*t, *v)))
@@ -766,9 +775,17 @@ impl ClassNames {
 pub struct ExtPropSig {
     pub ty: Ty,
     pub is_var: bool,
+    pub context_params: Vec<Ty>,
     /// Whether the declared receiver accepts null.
     pub accepts_nullable_receiver: bool,
     pub source: (u32, u32),
+}
+
+pub struct ContextPropSig {
+    pub name: String,
+    pub ty: Ty,
+    pub is_var: bool,
+    pub context_params: Vec<Ty>,
 }
 
 pub struct SymbolTable {
@@ -783,6 +800,9 @@ pub struct SymbolTable {
     /// `is_const` distinguishes a `const val` (public field, no accessor, cross-file `getstatic`) from a
     /// plain `val`/`var` (private field, read/written through `getX`/`setX`).
     pub props: HashMap<String, (Ty, bool, bool)>,
+    /// Context-dependent top-level properties keyed by source declaration.
+    pub context_props: HashMap<(u32, u32), ContextPropSig>,
+    pub context_prop_names: std::collections::HashSet<String>,
     /// Top-level *computed* properties (`val g: T get() = …`): a `getG()` static method, no field.
     pub computed_props: std::collections::HashSet<String>,
     /// Simple names declared as `object` singletons (accessed via `Name.member`).
@@ -827,6 +847,8 @@ impl Default for SymbolTable {
             funs: HashMap::new(),
             classes: HashMap::new(),
             props: HashMap::new(),
+            context_props: HashMap::new(),
+            context_prop_names: std::collections::HashSet::new(),
             computed_props: std::collections::HashSet::new(),
             objects: std::collections::HashSet::new(),
             enums: HashMap::new(),
@@ -857,6 +879,10 @@ impl SymbolTable {
         for property in self.ext_props.values_mut() {
             property.source.0 += offset;
         }
+        self.context_props = std::mem::take(&mut self.context_props)
+            .into_iter()
+            .map(|((file, declaration), property)| ((file + offset, declaration), property))
+            .collect();
         for class in self.classes.values_mut() {
             for signature in class.methods.values_mut().flatten() {
                 offset_signature(signature);
@@ -892,6 +918,7 @@ impl SymbolTable {
                 self.ext_props
                     .get(&(k, name.to_string()))
                     .filter(|signature| !recv.is_nullable() || signature.accepts_nullable_receiver)
+                    .filter(|signature| signature.context_params.is_empty())
             })
             .map(|s| (s.ty, s.is_var))
     }
@@ -1811,6 +1838,9 @@ fn collect_file_type_names(file: &File, out: &mut std::collections::HashSet<Stri
         }
     }
     fn prop_names(p: &PropDecl, out: &mut std::collections::HashSet<String>) {
+        for parameter in &p.context_params {
+            collect_typeref_names(&parameter.ty, out);
+        }
         if let Some(r) = &p.receiver {
             collect_typeref_names(r, out);
         }
@@ -2203,6 +2233,31 @@ fn expand_type_aliases(class_names: &mut ClassNames, aliases: &HashMap<String, S
 /// Convenience wrapper — uses an empty classpath (no stdlib type scanning).
 pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
     collect_signatures_with_cp(files, Box::new(EmptySymbolSource), diags)
+}
+
+fn validate_context_property(property: &PropDecl, abstract_allowed: bool, diags: &mut DiagSink) {
+    if property.context_params.is_empty() {
+        return;
+    }
+    let default_accessor = !abstract_allowed
+        && (property.getter.is_none()
+            || property.is_var
+                && property
+                    .setter
+                    .as_ref()
+                    .is_none_or(|setter| setter.body.is_none()));
+    if property.init.is_some()
+        || property.delegate.is_some()
+        || property.is_lateinit
+        || property.is_const
+        || property.getter_reads_field
+        || default_accessor
+    {
+        diags.error(
+            property.span,
+            "context property cannot have a backing field".to_string(),
+        );
+    }
 }
 
 /// Like `collect_signatures` but also seeds class names and type aliases from the target's
@@ -2786,6 +2841,7 @@ pub fn collect_signatures_with_cp(
                                     setter_name: property
                                         .is_var
                                         .then(|| property_setter_name(&property.name)),
+                                    context_params: Vec::new(),
                                 },
                             )
                         })
@@ -2809,6 +2865,7 @@ pub fn collect_signatures_with_cp(
                         })
                         .collect();
                     for bp in &c.body_props {
+                        validate_context_property(bp, c.is_interface() || bp.is_abstract, diags);
                         let resolve = |name: &str| class_names.get(name);
                         let btp =
                             ctp.extended_with(&bp.type_params, &bp.type_param_bounds, &resolve);
@@ -2817,11 +2874,30 @@ pub fn collect_signatures_with_cp(
                             &bp.type_param_bounds,
                             &resolve,
                         );
+                        let context_params = bp
+                            .context_params
+                            .iter()
+                            .map(|parameter| ty_of_ref(&parameter.ty, &class_names, &btp, diags))
+                            .collect::<Vec<_>>();
+                        let symbolic_context_params = bp
+                            .context_params
+                            .iter()
+                            .map(|parameter| {
+                                ty_of_ref(&parameter.ty, &class_names, &symbolic_btp, diags)
+                            })
+                            .collect::<Vec<_>>();
                         let extension_receiver = bp
                             .receiver
                             .as_ref()
                             .map(|receiver| ty_of_ref(receiver, &class_names, &btp, diags));
                         let mut property_scope = Vec::new();
+                        property_scope.extend(
+                            bp.context_params
+                                .iter()
+                                .zip(&context_params)
+                                .filter(|(parameter, _)| parameter.name != "_")
+                                .map(|(parameter, ty)| (parameter.name.clone(), *ty, false)),
+                        );
                         if let Some(receiver) = extension_receiver {
                             property_scope.push(("this".to_string(), receiver, false));
                         }
@@ -2923,6 +2999,7 @@ pub fn collect_signatures_with_cp(
                                             ty_of_ref(ret, &class_names, &symbolic_btp, diags)
                                         })
                                         .unwrap_or(ty),
+                                    context_params: symbolic_context_params,
                                     type_params: bp.type_params.clone(),
                                     type_param_bounds: bp
                                         .type_params
@@ -2939,7 +3016,9 @@ pub fn collect_signatures_with_cp(
                                 });
                             continue;
                         }
-                        props.push((bp.name.clone(), ty, bp.is_var));
+                        if bp.context_params.is_empty() {
+                            props.push((bp.name.clone(), ty, bp.is_var));
+                        }
                         declared_props.insert(
                             bp.name.clone(),
                             DeclaredPropertySig {
@@ -2947,9 +3026,12 @@ pub fn collect_signatures_with_cp(
                                 visibility: bp.visibility,
                                 getter_name: property_getter_name(&bp.name),
                                 setter_name: bp.is_var.then(|| property_setter_name(&bp.name)),
+                                context_params,
                             },
                         );
-                        init_scope.push((bp.name.clone(), ty, bp.is_var));
+                        if bp.context_params.is_empty() {
+                            init_scope.push((bp.name.clone(), ty, bp.is_var));
+                        }
                     }
                     // An inner class's methods can read the enclosing instance's properties (via
                     // `this$0`); add the outer class's backing-field properties so an expression-bodied
@@ -3712,6 +3794,7 @@ pub fn collect_signatures_with_cp(
                     }
                 }
                 Decl::Property(p) => {
+                    validate_context_property(p, false, diags);
                     // Extension property `val Recv.name: T get() = …`: register by (erased receiver,
                     // name); emitted as a static `getName(Recv)`/`setName(Recv, T)`.
                     if let Some(recv_ref) = &p.receiver {
@@ -3722,6 +3805,18 @@ pub fn collect_signatures_with_cp(
                         let ptp =
                             TParams::from_decl_with(&p.type_params, &p.type_param_bounds, &resolve);
                         let recv_ty = ty_of_ref(recv_ref, &class_names, &ptp, diags);
+                        let context_params = p
+                            .context_params
+                            .iter()
+                            .map(|parameter| ty_of_ref(&parameter.ty, &class_names, &ptp, diags))
+                            .collect::<Vec<_>>();
+                        let context_scope = p
+                            .context_params
+                            .iter()
+                            .zip(&context_params)
+                            .filter(|(parameter, _)| parameter.name != "_")
+                            .map(|(parameter, ty)| (parameter.name.clone(), *ty, false))
+                            .collect::<Vec<_>>();
                         let receiver_type_parameter = (recv_ref.arg.is_none()
                             && recv_ref.targs.is_empty()
                             && recv_ref.fun_params.is_empty()
@@ -3746,12 +3841,14 @@ pub fn collect_signatures_with_cp(
                             p.ty.as_ref()
                                 .map(|r| ty_of_ref(r, &class_names, &ptp, diags))
                                 .or_else(|| match &p.getter {
-                                    Some(FunBody::Expr(g)) => Some(infer_lit_ty(
+                                    Some(FunBody::Expr(g)) => Some(infer_lit_ty_scoped(
                                         file,
                                         *g,
                                         &class_names,
                                         &fun_rets,
+                                        &context_scope,
                                         &*libraries,
+                                        &table,
                                     )),
                                     _ => None,
                                 })
@@ -3769,6 +3866,7 @@ pub fn collect_signatures_with_cp(
                                 ExtPropSig {
                                     ty,
                                     is_var: p.is_var,
+                                    context_params,
                                     accepts_nullable_receiver,
                                     source: (i as u32, d.0),
                                 },
@@ -3779,6 +3877,20 @@ pub fn collect_signatures_with_cp(
                     // A top-level *computed* property (custom getter, no initializer) — needs a type
                     // annotation (no getter-return inference at top level yet); emitted as `getX()`.
                     let is_computed = p.getter.is_some() && p.init.is_none();
+                    let context_params = p
+                        .context_params
+                        .iter()
+                        .map(|parameter| {
+                            ty_of_ref(&parameter.ty, &class_names, &TParams::default(), diags)
+                        })
+                        .collect::<Vec<_>>();
+                    let context_scope = p
+                        .context_params
+                        .iter()
+                        .zip(&context_params)
+                        .filter(|(parameter, _)| parameter.name != "_")
+                        .map(|(parameter, ty)| (parameter.name.clone(), *ty, false))
+                        .collect::<Vec<_>>();
                     // A top-level backing-field property with a CUSTOM accessor (`val x = init get() =
                     // field`, `var y = init set(v){…}`) is lowered as a facade static + custom
                     // `getX`/`setX` (with `field` bound to the static). Reject only a custom accessor with
@@ -3810,9 +3922,15 @@ pub fn collect_signatures_with_cp(
                         // for a computed property, from its expression getter body).
                         match (&p.ty, &p.getter) {
                             (Some(r), _) => ty_of_ref(r, &class_names, &Default::default(), diags),
-                            (None, Some(FunBody::Expr(g))) if is_computed => {
-                                infer_lit_ty(file, *g, &class_names, &fun_rets, &*libraries)
-                            }
+                            (None, Some(FunBody::Expr(g))) if is_computed => infer_lit_ty_scoped(
+                                file,
+                                *g,
+                                &class_names,
+                                &fun_rets,
+                                &context_scope,
+                                &*libraries,
+                                &table,
+                            ),
                             (None, _) => p
                                 .init
                                 .map(|i| {
@@ -3842,9 +3960,22 @@ pub fn collect_signatures_with_cp(
                     if is_computed {
                         table.computed_props.insert(p.name.clone());
                     }
-                    table
-                        .props
-                        .insert(p.name.clone(), (ty, p.is_var, p.is_const));
+                    if context_params.is_empty() {
+                        table
+                            .props
+                            .insert(p.name.clone(), (ty, p.is_var, p.is_const));
+                    } else {
+                        table.context_props.insert(
+                            (i as u32, d.0),
+                            ContextPropSig {
+                                name: p.name.clone(),
+                                ty,
+                                is_var: p.is_var,
+                                context_params,
+                            },
+                        );
+                        table.context_prop_names.insert(p.name.clone());
+                    }
                 }
             }
         }
@@ -6995,7 +7126,16 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
                 pre.this_labels
                     .push((property.name.clone(), receiver_ty, false));
                 pre.symbolic_signature_inference = true;
+                pre.push_scope();
+                for parameter in &property.context_params {
+                    if parameter.name == "_" {
+                        continue;
+                    }
+                    let parameter_type = pre.resolve_ty(&parameter.ty);
+                    pre.declare(&parameter.name, parameter_type, false);
+                }
                 let inferred = pre.expr(*getter);
+                pre.pop_scope();
                 pre.symbolic_signature_inference = false;
                 inferred_member_ext_rets.push((
                     internal_name,
@@ -7624,6 +7764,11 @@ fn check_file_at_impl(
                         &bp.type_param_bounds,
                         &class_internal_resolver(c.syms),
                     );
+                    c.check_duplicate_param_names(
+                        &bp.context_params,
+                        bp.context_params.len(),
+                        bp.span,
+                    );
                     if let Some(init) = bp.init {
                         let declared = bp.ty.as_ref().map(|r| c.resolve_ty(r));
                         let it = match declared {
@@ -7691,10 +7836,25 @@ fn check_file_at_impl(
                                             (name == &bp.name).then_some(*ty)
                                         })
                                     })
+                                    .or_else(|| {
+                                        class
+                                            .declared_props
+                                            .get(&bp.name)
+                                            .map(|property| property.ty)
+                                    })
                             })
                         })
                         .unwrap_or(Ty::Error);
-                    let field_ty = bp.receiver.is_none().then_some(prop_ty);
+                    c.push_scope();
+                    for parameter in &bp.context_params {
+                        if parameter.name == "_" {
+                            continue;
+                        }
+                        let parameter_type = c.resolve_ty(&parameter.ty);
+                        c.declare(&parameter.name, parameter_type, false);
+                    }
+                    let field_ty =
+                        (bp.receiver.is_none() && bp.context_params.is_empty()).then_some(prop_ty);
                     if let Some(getter) = &bp.getter {
                         c.with_ret_field(prop_ty, field_ty, |c| match getter {
                             FunBody::Expr(g) => {
@@ -7724,6 +7884,7 @@ fn check_file_at_impl(
                             });
                         }
                     }
+                    c.pop_scope();
                     c.scopes
                         .last_mut()
                         .expect("class body scope")
@@ -7841,6 +8002,15 @@ fn check_file_at_impl(
                 // `T` resolves rather than reading as an unresolved reference.
                 let resolve = class_internal_resolver(c.syms);
                 c.tparams = TParams::from_decl_with(&p.type_params, &p.type_param_bounds, &resolve);
+                c.check_duplicate_param_names(&p.context_params, p.context_params.len(), p.span);
+                c.push_scope();
+                for parameter in &p.context_params {
+                    if parameter.name == "_" {
+                        continue;
+                    }
+                    let parameter_type = c.resolve_ty(&parameter.ty);
+                    c.declare(&parameter.name, parameter_type, false);
+                }
                 // For an extension property (`val Recv.name: T get() = …`), `this` inside the
                 // accessors is the receiver.
                 let prev_this = c.this_ty;
@@ -7860,12 +8030,19 @@ fn check_file_at_impl(
                                     .map(|s| s.ty)
                             })
                         })
+                        .or_else(|| {
+                            c.syms
+                                .context_props
+                                .get(&(c.file_index, d.0))
+                                .map(|property| property.ty)
+                        })
                         .unwrap_or(Ty::Error);
                 // A top-level computed property (`val g: T get() = …`) emits a `getG()` static method
                 // (Phase: top-level computed). Type-check the getter body against the declared type. A
                 // top-level backing-field property (`val x = init get() = field`) binds `field` to the
                 // property type for the accessor body (like a member accessor).
-                let has_backing_field = p.receiver.is_none() && p.init.is_some();
+                let has_backing_field =
+                    p.receiver.is_none() && p.context_params.is_empty() && p.init.is_some();
                 if let Some(g) = &p.getter {
                     let field_ty = has_backing_field.then_some(prop_ty);
                     c.with_ret_field(prop_ty, field_ty, |c| match g {
@@ -7933,6 +8110,7 @@ fn check_file_at_impl(
                         }
                     }
                 }
+                c.pop_scope();
                 c.tparams.clear();
             }
         }
@@ -10222,6 +10400,7 @@ impl<'a> Checker<'a> {
     fn value_root_shadows_classifier(&self, name: &str) -> bool {
         self.lexical_value_declares(name)
             || self.syms.props.contains_key(name)
+            || self.syms.context_prop_names.contains(name)
             || self.syms.prop_facades.contains_key(name)
     }
     fn register_local_fun(&mut self, name: &str, stmt_id: StmtId, sig: Signature) {
@@ -11082,23 +11261,31 @@ impl<'a> Checker<'a> {
         (!is_value || unboxes_nullable) && (!compound || ty != Ty::Boolean)
     }
 
-    fn check_fun(&mut self, f: &FunDecl, source_decl: Option<DeclId>) {
-        // Duplicate parameter names are illegal (kotlinc reports a conflicting declaration). `_` is
-        // not a valid function parameter name in Kotlin, so no placeholder exception is needed.
-        {
-            let mut seen = std::collections::HashSet::new();
-            for p in &f.params {
-                if !seen.insert(p.name.as_str()) {
-                    self.diags.error(
-                        f.span,
-                        format!(
-                            "conflicting declaration: parameter '{}' is declared more than once",
-                            p.name
-                        ),
-                    );
-                }
+    fn check_duplicate_param_names(
+        &mut self,
+        params: &[Param],
+        anonymous_prefix: usize,
+        span: Span,
+    ) {
+        let mut seen = std::collections::HashSet::new();
+        for (index, parameter) in params.iter().enumerate() {
+            if index < anonymous_prefix && parameter.name == "_" {
+                continue;
+            }
+            if !seen.insert(parameter.name.as_str()) {
+                self.diags.error(
+                    span,
+                    format!(
+                        "conflicting declaration: parameter '{}' is declared more than once",
+                        parameter.name
+                    ),
+                );
             }
         }
+    }
+
+    fn check_fun(&mut self, f: &FunDecl, source_decl: Option<DeclId>) {
+        self.check_duplicate_param_names(&f.params, f.context_count, f.span);
         // Duplicate type-parameter names (`fun <T, T> f()`) are illegal (conflicting declaration).
         {
             let mut seen = std::collections::HashSet::new();
@@ -13720,7 +13907,13 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    if let Some(&(ty, _, _)) = self.syms.props.get(&n) {
+                    if self.syms.context_prop_names.contains(&n) {
+                        self.diags.error(
+                            self.span(e),
+                            "context property access is not supported".to_string(),
+                        );
+                        Ty::Error
+                    } else if let Some(&(ty, _, _)) = self.syms.props.get(&n) {
                         ty // top-level property
                     } else if crate::libraries::coroutine_intrinsic(&n)
                         == Some(crate::libraries::CoroutineIntrinsic::CoroutineSuspended)
@@ -16663,6 +16856,9 @@ impl<'a> Checker<'a> {
                 };
                 let class_bindings = class.type_parameter_bindings(owner_ty);
                 for sig in class.member_ext_props(name) {
+                    if !sig.context_params.is_empty() {
+                        continue;
+                    }
                     let mut applicability_bindings = class_bindings.clone();
                     applicability_bindings.extend(
                         sig.type_params
@@ -22087,6 +22283,13 @@ impl<'a> Checker<'a> {
                                     .as_ref()
                                     .map(|resolution| resolution.property_ty)
                             })
+                            .or_else(|| {
+                                self.syms
+                                    .context_props
+                                    .values()
+                                    .find(|property| property.name == name)
+                                    .map(|property| property.ty)
+                            })
                             .or_else(|| self.syms.props.get(&name).map(|&(ty, _, _)| ty))
                     };
                 let vt = match assignment_expected {
@@ -22154,6 +22357,12 @@ impl<'a> Checker<'a> {
                                         "assignment",
                                     );
                                     self.record_implicit_property_write(s, &resolution);
+                                }
+                                None if self.syms.context_prop_names.contains(&name) => {
+                                    self.diags.error(
+                                        target_span,
+                                        "context property access is not supported".to_string(),
+                                    );
                                 }
                                 None => match self.syms.props.get(&name).copied() {
                                     Some((lty, is_var, _)) => {
@@ -24568,6 +24777,149 @@ fun box(): String {
         assert!(
             !info.context_args.contains_key(&call),
             "module top-level context calls must carry context sources in the resolved target"
+        );
+    }
+
+    #[test]
+    fn context_property_getter_sees_its_named_parameter() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "class Scope\n\
+             context(scope: Scope)\n\
+             val current: Scope get() = scope",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        assert_no_diags(&diagnostics);
+    }
+
+    #[test]
+    fn context_property_getter_infers_from_its_parameter() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "class Scope\n\
+             context(scope: Scope)\n\
+             val current get() = scope",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        assert_no_diags(&diagnostics);
+        assert_eq!(
+            symbols
+                .context_props
+                .values()
+                .find(|property| property.name == "current")
+                .map(|property| property.ty),
+            Some(Ty::obj("Scope"))
+        );
+    }
+
+    #[test]
+    fn member_context_property_getter_sees_its_parameter() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "class Scope\n\
+             class Owner {\n\
+                 context(scope: Scope)\n\
+                 val current get() = scope\n\
+             }",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        assert_no_diags(&diagnostics);
+        assert_eq!(
+            symbols
+                .classes
+                .get("Owner")
+                .and_then(|class| class.declared_props.get("current"))
+                .map(|property| property.ty),
+            Some(Ty::obj("Scope"))
+        );
+    }
+
+    #[test]
+    fn anonymous_context_property_parameters_may_repeat() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "class Scope\n\
+             context(_: Scope, _: Scope)\n\
+             val current: Int get() = 1",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        assert_no_diags(&diagnostics);
+    }
+
+    #[test]
+    fn context_property_rejects_duplicate_parameter_names() {
+        err_contains(
+            "class Scope\n\
+             context(scope: Scope, scope: Scope)\n\
+             val current: Scope get() = scope",
+            "conflicting declaration: parameter 'scope' is declared more than once",
+        );
+    }
+
+    #[test]
+    fn context_property_rejects_backing_field() {
+        err_contains(
+            "class Scope\n\
+             context(scope: Scope)\n\
+             val current: Scope = scope",
+            "context property cannot have a backing field",
+        );
+    }
+
+    #[test]
+    fn context_property_access_does_not_use_zero_arg_accessor() {
+        err_contains(
+            "class Scope\n\
+             context(scope: Scope)\n\
+             val current: Scope get() = scope\n\
+             context(scope: Scope)\n\
+             fun read(): Scope = current",
+            "context property access is not supported",
+        );
+    }
+
+    #[test]
+    fn member_context_property_access_does_not_use_zero_arg_accessor() {
+        err_contains(
+            "class Scope\n\
+             class Owner {\n\
+                 context(scope: Scope)\n\
+                 val current: Scope get() = scope\n\
+             }\n\
+             fun read(owner: Owner): Scope = owner.current",
+            "unresolved reference 'current'",
+        );
+    }
+
+    #[test]
+    fn context_extension_property_access_does_not_use_zero_arg_accessor() {
+        err_contains(
+            "class Scope\n\
+             class Owner\n\
+             context(scope: Scope)\n\
+             val Owner.current: Scope get() = scope\n\
+             fun read(owner: Owner): Scope = owner.current",
+            "unresolved reference 'current'",
         );
     }
 

@@ -343,19 +343,23 @@ impl<'a> ModuleSymbols<'a> {
                 Some(source_accessor(
                     class.internal_name(),
                     name,
-                    Vec::new(),
+                    property.context_params.clone(),
                     property.ty,
                     property.visibility,
                     here,
+                    property.context_params.len(),
                 ))
             } else if property.setter_name.as_deref() == Some(name) {
+                let mut params = property.context_params.clone();
+                params.push(property.ty);
                 Some(source_accessor(
                     class.internal_name(),
                     name,
-                    vec![property.ty],
+                    params,
                     Ty::Unit,
                     property.visibility,
                     here,
+                    property.context_params.len(),
                 ))
             } else {
                 None
@@ -464,10 +468,12 @@ fn source_accessor(
     ret: Ty,
     visibility: Visibility,
     receiver_rank: u32,
+    context_count: usize,
 ) -> FunctionInfo {
     FunctionInfo {
         visibility,
         receiver_rank,
+        context_count,
         ..FunctionInfo::plain(
             FnKind::Member,
             Some(Ty::obj_name(owner)),
@@ -486,11 +492,18 @@ fn source_property(
         receiver: Some(Ty::obj_name(owner)),
         formals: Vec::new(),
         ty: property.ty,
-        getter: source_callable(owner, property.getter_name.clone(), Vec::new(), property.ty),
-        setter: property
-            .setter_name
-            .as_ref()
-            .map(|setter| source_callable(owner, setter.clone(), vec![property.ty], Ty::Unit)),
+        context_count: property.context_params.len(),
+        getter: source_callable(
+            owner,
+            property.getter_name.clone(),
+            property.context_params.clone(),
+            property.ty,
+        ),
+        setter: property.setter_name.as_ref().map(|setter| {
+            let mut params = property.context_params.clone();
+            params.push(property.ty);
+            source_callable(owner, setter.clone(), params, Ty::Unit)
+        }),
         is_const: false,
         visibility: property.visibility,
         owner,
@@ -786,6 +799,7 @@ mod tests {
                 visibility: Visibility::Protected,
                 getter_name: "getState".into(),
                 setter_name: Some("setState".into()),
+                context_params: Vec::new(),
             },
         );
         let mut sub = class("demo/Sub");
