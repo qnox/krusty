@@ -1241,25 +1241,9 @@ fn gsig_unbox_wrapper(g: Ty) -> Ty {
     let Ty::Obj(internal, _) = g else {
         return g;
     };
-    if internal.matches("java/lang/Integer") || internal.matches("kotlin/Int") {
-        Ty::Int
-    } else if internal.matches("java/lang/Long") || internal.matches("kotlin/Long") {
-        Ty::Long
-    } else if internal.matches("java/lang/Short") || internal.matches("kotlin/Short") {
-        Ty::Short
-    } else if internal.matches("java/lang/Byte") || internal.matches("kotlin/Byte") {
-        Ty::Byte
-    } else if internal.matches("java/lang/Character") || internal.matches("kotlin/Char") {
-        Ty::Char
-    } else if internal.matches("java/lang/Boolean") || internal.matches("kotlin/Boolean") {
-        Ty::Boolean
-    } else if internal.matches("java/lang/Double") || internal.matches("kotlin/Double") {
-        Ty::Double
-    } else if internal.matches("java/lang/Float") || internal.matches("kotlin/Float") {
-        Ty::Float
-    } else {
-        g
-    }
+    super::jvm_class_map::wrapper_to_kotlin_prim_name(internal)
+        .map(super::classpath::kotlin_name_to_ty)
+        .unwrap_or_else(|| super::classpath::kotlin_type_name_to_ty(internal))
 }
 
 /// Parse a leading `<Name:Bound...>` formal-type-parameter block, returning the formal names and the
@@ -3170,6 +3154,17 @@ mod tests {
                 &[Ty::ty_param("R", Ty::obj("kotlin/Any"))],
             )]
         );
+    }
+
+    #[test]
+    fn function_generic_signature_canonicalizes_bottom_and_unit_returns() {
+        let unit = parse_method_gsig("(Lkotlin/jvm/functions/Function0<Lkotlin/Unit;>;)V")
+            .expect("Unit function signature");
+        assert_eq!(unit.params, [Ty::fun(Vec::new(), Ty::Unit)]);
+
+        let bottom = parse_method_gsig("(Lkotlin/jvm/functions/Function0<Lkotlin/Nothing;>;)V")
+            .expect("Nothing function signature");
+        assert_eq!(bottom.params, [Ty::fun(Vec::new(), Ty::Nothing)]);
     }
 
     #[test]
