@@ -798,6 +798,8 @@ pub enum ClassInit {
 #[derive(Clone, Debug)]
 pub struct PropDecl {
     pub name: String,
+    /// Parameters from a preceding `context(...)` clause.
+    pub context_params: Vec<Param>,
     /// 1-based source line of the declaration, filled by the parser post-pass (0 = unknown).
     pub decl_line: u32,
     /// Declaration visibility (`public` by default). A `private set` narrows only the SETTER — that

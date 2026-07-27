@@ -1376,6 +1376,7 @@ impl<'a> SymbolResolver<'a> {
                         _ => Vec::new(),
                     })
                     .filter(|p| p.kind == PropKind::Extension)
+                    .filter(|p| p.context_count == 0)
                     .filter_map(|p| {
                         let decl_recv = ty_subst(p.receiver?, &std::collections::HashMap::new());
                         let rank = recv_mro.rank(&self.src, decl_recv)?;
@@ -2678,6 +2679,7 @@ fn property_getter_via_query(
         .property_members(recv, property)
         .overloads
         .into_iter()
+        .filter(|property| property.context_count == 0)
         .min_by_key(|p| p.receiver_rank)
         .map(|p| p.getter.name)
         .filter(|getter| !getter.contains('-'))?;
@@ -2734,6 +2736,7 @@ fn resolve_property_setter(
         .property_members(recv, property)
         .overloads
         .into_iter()
+        .filter(|property| property.context_count == 0)
         .min_by_key(|p| p.receiver_rank)
         .and_then(|p| p.setter)?;
     if setter.name.contains('-') {
