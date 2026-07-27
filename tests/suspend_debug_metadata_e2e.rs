@@ -3,7 +3,7 @@ use std::process::Command;
 use super::common;
 
 #[test]
-fn continuation_emits_runtime_visible_debug_metadata() {
+fn continuation_emits_debug_and_enclosing_metadata() {
     let Some(jdk) = common::jdk_modules() else {
         return;
     };
@@ -79,4 +79,26 @@ fn continuation_emits_runtime_visible_debug_metadata() {
             "missing {expected:?}:\n{text}"
         );
     }
+
+    let enclosing = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("EnclosingMethod:"))
+        .expect("EnclosingMethod attribute");
+    assert!(
+        enclosing.contains("// demo.DebugKt.work"),
+        "wrong enclosing method:\n{text}"
+    );
+    let name_and_type = enclosing
+        .split_once('.')
+        .and_then(|(_, suffix)| suffix.split_whitespace().next())
+        .expect("EnclosingMethod name-and-type index");
+    let prefix = format!("{name_and_type} = NameAndType");
+    let descriptor = text
+        .lines()
+        .find(|line| line.trim_start().starts_with(&prefix))
+        .expect("EnclosingMethod name-and-type entry");
+    assert!(
+        descriptor.contains("work:(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;"),
+        "wrong enclosing descriptor:\n{text}"
+    );
 }

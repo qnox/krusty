@@ -449,6 +449,8 @@ pub struct ClassWriter {
     major: u16,
     /// Source-file simple name for the `SourceFile` attribute (set via [`ClassWriter::set_source_file`]).
     source_file: Option<String>,
+    /// Owner, method name, and descriptor for the `EnclosingMethod` attribute.
+    enclosing_method: Option<(String, String, String)>,
     pub internal_name: String,
 }
 
@@ -509,6 +511,7 @@ impl ClassWriter {
             permitted_subclasses: Vec::new(),
             major: MAJOR_JAVA8,
             source_file: None,
+            enclosing_method: None,
             internal_name: internal_name.to_string(),
         }
     }
@@ -527,6 +530,15 @@ impl ClassWriter {
     /// default) emits no attribute.
     pub fn set_source_file(&mut self, name: Option<String>) {
         self.source_file = name;
+    }
+
+    /// Set the enclosing class and method for a local class.
+    pub fn set_enclosing_method(&mut self, owner: &str, method: &str, descriptor: &str) {
+        self.enclosing_method = Some((
+            owner.to_string(),
+            method.to_string(),
+            descriptor.to_string(),
+        ));
     }
 
     /// Register a candidate `InnerClasses` entry (a nested class in this file). `finish` emits it only
@@ -1948,6 +1960,15 @@ impl ClassWriter {
         // this class actually references as a class constant (the `has_class` filter), in registration
         // order. `inner` is already interned (that is why it passed the filter); `outer`/`name` intern
         // here — before the pool is serialized.
+        let enclosing_method_attr = self.enclosing_method.take().map(|(owner, method, desc)| {
+            let name = self.cp.utf8("EnclosingMethod");
+            let class_idx = self.cp.class(&owner);
+            let nat_idx = self.cp.name_and_type(&method, &desc);
+            let mut body = Vec::new();
+            u2(&mut body, class_idx);
+            u2(&mut body, nat_idx);
+            (name, body)
+        });
         let permitted_attr = (!self.permitted_subclasses.is_empty()).then(|| {
             let name = self.cp.utf8("PermittedSubclasses");
             let mut body = Vec::new();
@@ -2136,6 +2157,7 @@ impl ClassWriter {
         ordered.extend(
             [
                 inner_classes_attr,
+                enclosing_method_attr,
                 sourcefile_attr,
                 deprecated_attr,
                 rva_attr,
