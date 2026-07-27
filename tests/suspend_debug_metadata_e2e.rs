@@ -199,6 +199,54 @@ fn continuation_metadata_preserves_elvis_subject_lines() {
 }
 
 #[test]
+fn continuation_metadata_orders_mixed_spills_and_terminal_resume() {
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(javap) = javap_path() else {
+        return;
+    };
+
+    let source = "package demo\n\
+        suspend fun leaf() {}\n\
+        suspend fun work(count: Int, ref: String) {\n\
+        \x20 leaf()\n\
+        \x20 leaf()\n\
+        }\n";
+    let classes = common::compile_in_process_files(
+        &[("MixedSpills", source)],
+        &[stdlib, jdk.clone()],
+        Some(&jdk),
+    )
+    .expect("compile mixed-spill continuation");
+    let bytes = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == "demo/MixedSpillsKt$work$1").then_some(bytes))
+        .expect("work continuation");
+    let text = disassemble(&javap, bytes, "MixedSpillsKt$work$1.class", "mixed_spills");
+    let annotation = text
+        .rsplit_once("RuntimeVisibleAnnotations:")
+        .map(|(_, annotation)| annotation)
+        .expect("runtime-visible annotations");
+
+    for expected in [
+        "l=[4,5]",
+        "nl=[5,6]",
+        "i=[0,0,1,1]",
+        "s=[\"L$0\",\"I$0\",\"L$0\",\"I$0\"]",
+        "n=[\"ref\",\"count\",\"ref\",\"count\"]",
+    ] {
+        assert!(
+            annotation.contains(expected),
+            "missing {expected:?}:\n{text}"
+        );
+    }
+}
+
+#[test]
 fn continuation_uses_synthetic_kotlin_metadata() {
     let Some(stdlib) = common::stdlib_jar() else {
         return;
