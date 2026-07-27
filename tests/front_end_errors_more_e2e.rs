@@ -215,8 +215,12 @@ fn duplicate_named_argument() {
 
 #[test]
 fn return_without_a_value_from_non_unit() {
-    let d = diags("fun f(): Int { return }\nfun box(): Int = 0");
+    let d = diags("fun value(): Int { return }");
     assert_rejected(&d, "value-less return from a non-Unit function");
+    assert_eq!(
+        d,
+        vec!["return type mismatch: expected 'Int', actual 'Unit'.".to_string()]
+    );
 }
 
 #[test]
