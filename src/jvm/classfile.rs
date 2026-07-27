@@ -723,7 +723,8 @@ impl ClassWriter {
         // `finish` writes a single `RuntimeVisibleAnnotations` attribute even alongside user annotations.
         let mut body = Vec::new();
         u2(&mut body, anno_type);
-        u2(&mut body, 5); // element_value_pairs: mv, k, xi, d1, d2
+        let has_payload = !d1.is_empty() || !d2.is_empty();
+        u2(&mut body, if has_payload { 5 } else { 3 });
         let n_mv = self.cp.utf8("mv");
         u2(&mut body, n_mv);
         self.ev_int_array(&mut body, mv);
@@ -733,12 +734,14 @@ impl ClassWriter {
         let n_xi = self.cp.utf8("xi");
         u2(&mut body, n_xi);
         self.ev_int(&mut body, xi);
-        let n_d1 = self.cp.utf8("d1");
-        u2(&mut body, n_d1);
-        self.ev_str_array(&mut body, d1);
-        let n_d2 = self.cp.utf8("d2");
-        u2(&mut body, n_d2);
-        self.ev_str_array(&mut body, d2);
+        if has_payload {
+            let n_d1 = self.cp.utf8("d1");
+            u2(&mut body, n_d1);
+            self.ev_str_array(&mut body, d1);
+            let n_d2 = self.cp.utf8("d2");
+            u2(&mut body, n_d2);
+            self.ev_str_array(&mut body, d2);
+        }
         self.runtime_annotations.push(body);
     }
 

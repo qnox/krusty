@@ -2,6 +2,37 @@ use std::process::Command;
 
 use super::common;
 
+fn javap_path() -> Option<String> {
+    let java_home = std::env::var("KRUSTY_REF_JAVA_HOME")
+        .ok()
+        .or_else(|| std::env::var("JAVA_HOME").ok())?;
+    let javap = format!("{java_home}/bin/javap");
+    std::path::Path::new(&javap).exists().then_some(javap)
+}
+
+fn disassemble(javap: &str, bytes: &[u8], class_file_name: &str, tag: &str) -> String {
+    let dir = std::env::temp_dir().join(format!(
+        "krusty_suspend_metadata_{tag}_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create javap directory");
+    let class_file = dir.join(class_file_name);
+    std::fs::write(&class_file, bytes).expect("write continuation class");
+    let output = Command::new(javap)
+        .args(["-v", "-p"])
+        .arg(&class_file)
+        .output()
+        .expect("run javap");
+    let _ = std::fs::remove_dir_all(dir);
+    assert!(
+        output.status.success(),
+        "javap failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("javap output")
+}
+
 #[test]
 fn continuation_emits_debug_and_enclosing_metadata() {
     let Some(jdk) = common::jdk_modules() else {
@@ -10,16 +41,9 @@ fn continuation_emits_debug_and_enclosing_metadata() {
     let Some(stdlib) = common::stdlib_jar() else {
         return;
     };
-    let Some(java_home) = std::env::var("KRUSTY_REF_JAVA_HOME")
-        .ok()
-        .or_else(|| std::env::var("JAVA_HOME").ok())
-    else {
+    let Some(javap) = javap_path() else {
         return;
     };
-    let javap = format!("{java_home}/bin/javap");
-    if !std::path::Path::new(&javap).exists() {
-        return;
-    }
 
     let source = "package demo\n\
         suspend fun leaf(value: Int): Int = value\n\
@@ -36,25 +60,7 @@ fn continuation_emits_debug_and_enclosing_metadata() {
         .find_map(|(name, bytes)| (name == "demo/DebugKt$work$1").then_some(bytes))
         .expect("work continuation");
 
-    let dir = std::env::temp_dir().join(format!(
-        "krusty_suspend_debug_metadata_{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("create javap directory");
-    let class_file = dir.join("DebugKt$work$1.class");
-    std::fs::write(&class_file, bytes).expect("write continuation class");
-    let output = Command::new(javap)
-        .args(["-v", "-p"])
-        .arg(&class_file)
-        .output()
-        .expect("run javap");
-    let _ = std::fs::remove_dir_all(dir);
-    assert!(
-        output.status.success(),
-        "javap failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = disassemble(&javap, bytes, "DebugKt$work$1.class", "debug");
     let annotation = text
         .rsplit_once("RuntimeVisibleAnnotations:")
         .map(|(_, annotation)| annotation)
@@ -101,4 +107,50 @@ fn continuation_emits_debug_and_enclosing_metadata() {
         descriptor.contains("work:(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;"),
         "wrong enclosing descriptor:\n{text}"
     );
+}
+
+#[test]
+fn continuation_uses_synthetic_kotlin_metadata() {
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(javap) = javap_path() else {
+        return;
+    };
+    let source = "package demo\n\
+        suspend fun leaf(value: Int): Int = value\n\
+        suspend fun work(value: Int): Int {\n\
+        \x20 val saved = value\n\
+        \x20 return saved + leaf(value)\n\
+        }\n";
+    let classes = common::compile_in_process_metadata_cp(source, "Synthetic", &[stdlib])
+        .expect("compile suspend continuation metadata");
+    let bytes = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == "demo/SyntheticKt$work$1").then_some(bytes))
+        .expect("work continuation");
+    let text = disassemble(&javap, bytes, "SyntheticKt$work$1.class", "synthetic");
+
+    let metadata = text
+        .rsplit_once("kotlin.Metadata(")
+        .map(|(_, metadata)| metadata)
+        .expect("Kotlin metadata");
+    for expected in ["mv=[2,4,0]", "k=3", "xi=48"] {
+        assert!(metadata.contains(expected), "missing {expected:?}:\n{text}");
+    }
+    for forbidden in [
+        "d1=[",
+        "d2=[",
+        "getResult",
+        "setResult",
+        "getLabel",
+        "setLabel",
+        "getI$0",
+        "setI$0",
+    ] {
+        assert!(
+            !text.contains(forbidden),
+            "unexpected {forbidden:?}:\n{text}"
+        );
+    }
 }
