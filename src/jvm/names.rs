@@ -88,6 +88,18 @@ pub fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str) -> &'a str {
     }
 }
 
+pub fn mapped_builtin_virtual_source_name<'a>(owner: &str, name: &'a str) -> &'a str {
+    match (owner, name) {
+        ("java/lang/Number", "byteValue") => "toByte",
+        ("java/lang/Number", "shortValue") => "toShort",
+        ("java/lang/Number", "intValue") => "toInt",
+        ("java/lang/Number", "longValue") => "toLong",
+        ("java/lang/Number", "floatValue") => "toFloat",
+        ("java/lang/Number", "doubleValue") => "toDouble",
+        _ => name,
+    }
+}
+
 fn split_field_descriptor(desc: &str) -> Option<(&str, &str)> {
     let bytes = desc.as_bytes();
     let mut end = bytes.iter().take_while(|byte| **byte == b'[').count();

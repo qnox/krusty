@@ -912,6 +912,14 @@ impl JvmLibraries {
                     member.call_sig = member_call_sig(&member, &m.name);
                     member.call_sig.vararg |= m.is_vararg();
                     member.call_sig.platform_nullable_params = platform_nullable_params;
+                    let source_name =
+                        super::names::mapped_builtin_virtual_source_name(&ci.this_class(), &m.name);
+                    if source_name != m.name {
+                        let mut alias = member.clone();
+                        alias.name = source_name.to_string();
+                        alias.physical_name = Some(m.name.clone());
+                        members.push(alias);
+                    }
                     members.push(member);
                 }
             }
@@ -1134,12 +1142,19 @@ impl JvmLibraries {
                 .map(|f| f.name.clone())
                 .collect();
             let rendered_internal = internal_name.render();
-            let builtin_members =
+            let mut builtin_members =
                 if super::jvm_class_map::to_jvm_internal(&rendered_internal) != rendered_internal {
                     self.builtin_members_for_type_name(internal_name)
                 } else {
                     Vec::new()
                 };
+            builtin_members.retain(|builtin| {
+                !members.iter().any(|member| {
+                    member.physical_name.is_some()
+                        && member.name == builtin.name
+                        && member.descriptor == builtin.descriptor
+                })
+            });
             // A defaulted value-class primary constructor surfaces as the `constructor-impl$default` synthetic.
             let value_ctor_has_default = ci
                 .methods
