@@ -13,7 +13,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::jvm::classreader::{parse_class, read_method_code, ClassInfo, MethodCode};
@@ -384,6 +384,37 @@ fn global_jimage_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, std::sync
         std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<JimageIndex>>>,
     > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+#[derive(Clone, Copy)]
+struct JarEntryMetadata {
+    data_start: u64,
+    compressed_size: u64,
+    uncompressed_size: u64,
+    compression: zip::CompressionMethod,
+    crc32: u32,
+}
+
+fn read_jar_index(jar: &Path) -> Option<HashMap<String, JarEntryMetadata>> {
+    let mut archive = zip::ZipArchive::new(File::open(jar).ok()?).ok()?;
+    let mut entries = HashMap::with_capacity(archive.len());
+    for index in 0..archive.len() {
+        let entry = archive.by_index_raw(index).ok()?;
+        if entry.encrypted() {
+            continue;
+        }
+        entries.insert(
+            entry.name().to_string(),
+            JarEntryMetadata {
+                data_start: entry.data_start()?,
+                compressed_size: entry.compressed_size(),
+                uncompressed_size: entry.size(),
+                compression: entry.compression(),
+                crc32: entry.crc32(),
+            },
+        );
+    }
+    Some(entries)
 }
 
 /// A process-global cache of a value derived from a SINGLE classpath entry (jar / dir / jimage), keyed
@@ -986,12 +1017,10 @@ pub struct Classpath {
     // include the same jar. L1 miss → per-entry L2 walk in classpath order → parse.
     local_cache: RefCell<crate::lru::LruCache<TypeName, Option<std::sync::Arc<ClassInfo>>>>,
     entry_caches: Vec<ClassCache>,
-    /// Open `ZipArchive` per jar path, so reading an entry is a central-directory hash lookup + inflate
-    /// — NOT a re-parse of the whole central directory (which `zip::ZipArchive::new` does, thousands of
-    /// entries for kotlin-stdlib). This is the classloader/javac strategy: parse each jar's directory
-    /// once, then read class bytes lazily on demand. Profiling showed the per-read re-parse dominated
-    /// type checking. Lives behind a `RefCell` (one `Classpath` per thread; never shared across threads).
-    archives: RefCell<HashMap<PathBuf, zip::ZipArchive<File>>>,
+    /// Per-jar central-directory projection used to seek directly to an entry without retaining the
+    /// archive's `File`. A `Classpath` is an immutable dependency snapshot (the LSP replaces its worker
+    /// on reconfiguration), as are all other caches keyed by its entry paths.
+    jar_indices: RefCell<HashMap<PathBuf, HashMap<String, JarEntryMetadata>>>,
     /// Per-entry ext contributions (each cached process-globally by its path), fetched once per
     /// instance. The ext lookups union these per queried name — no composed whole-cp index.
     ext: RefCell<Option<std::rc::Rc<Vec<std::sync::Arc<EntryExt>>>>>,
@@ -1107,7 +1136,7 @@ impl Classpath {
                 .iter()
                 .map(|p| global_entry_class_cache(p))
                 .collect(),
-            archives: RefCell::new(HashMap::new()),
+            jar_indices: RefCell::new(HashMap::new()),
             ext: RefCell::new(None),
             types: RefCell::new(None),
             pkg_tree: RefCell::new(None),
@@ -1914,23 +1943,40 @@ impl Classpath {
         *self.jimage.borrow_mut() = Some(entry);
     }
 
-    /// Read one entry's bytes from `jar`, reusing a cached open `ZipArchive` so the central directory is
-    /// parsed once per jar rather than per read. Returns `None` if the jar or entry is absent (an absent
-    /// entry is a cheap hash miss on the already-parsed directory).
+    /// Read one entry's bytes from `jar`, reusing a safe owned projection of its central directory
+    /// without retaining the archive's file descriptor between reads.
     fn jar_entry(&self, jar: &Path, name: &str) -> Option<Vec<u8>> {
-        let mut archives = self.archives.borrow_mut();
-        let archive = match archives.get_mut(jar) {
-            Some(a) => a,
-            None => {
-                let f = File::open(jar).ok()?;
-                let a = zip::ZipArchive::new(f).ok()?;
-                archives.entry(jar.to_path_buf()).or_insert(a)
-            }
+        let cached = {
+            let indices = self.jar_indices.borrow();
+            indices.get(jar).map(|entries| entries.get(name).copied())
         };
-        let mut entry = archive.by_name(name).ok()?;
-        let mut buf = Vec::with_capacity(entry.size() as usize);
-        entry.read_to_end(&mut buf).ok()?;
-        Some(buf)
+        let metadata = if let Some(metadata) = cached {
+            metadata?
+        } else {
+            let entries = read_jar_index(jar)?;
+            let metadata = entries.get(name).copied();
+            self.jar_indices
+                .borrow_mut()
+                .insert(jar.to_path_buf(), entries);
+            metadata?
+        };
+        let capacity = usize::try_from(metadata.uncompressed_size).ok()?;
+        let mut file = File::open(jar).ok()?;
+        file.seek(SeekFrom::Start(metadata.data_start)).ok()?;
+        let compressed = file.take(metadata.compressed_size);
+        let mut bytes = Vec::with_capacity(capacity);
+        match metadata.compression {
+            zip::CompressionMethod::Stored => {
+                let mut reader = compressed;
+                reader.read_to_end(&mut bytes).ok()?;
+            }
+            zip::CompressionMethod::Deflated => {
+                let mut reader = flate2::read::DeflateDecoder::new(compressed);
+                reader.read_to_end(&mut bytes).ok()?;
+            }
+            _ => return None,
+        }
+        (bytes.len() == capacity && crc32fast::hash(&bytes) == metadata.crc32).then_some(bytes)
     }
 
     pub fn find(&self, internal: &str) -> Option<std::sync::Arc<ClassInfo>> {
@@ -3471,6 +3517,95 @@ mod fq_tests {
     /// never fails on CI regardless of where the stdlib lives.
     fn test_stdlib_jar() -> Option<PathBuf> {
         crate::toolchain::stdlib_jar()
+    }
+
+    fn write_test_jar(path: &Path, contents: &[u8]) {
+        use std::io::Write;
+
+        let file = File::create(path).expect("create test jar");
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file(
+                "sample.txt",
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )
+            .expect("start test jar entry");
+        archive.write_all(contents).expect("write test jar entry");
+        archive.finish().expect("finish test jar");
+    }
+
+    #[cfg(unix)]
+    fn run_low_descriptor_jar_probe() {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `limit` points to initialized writable storage and the child process changes only
+        // its own soft descriptor limit.
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
+        limit.rlim_cur = limit.rlim_max.min(64);
+        // SAFETY: the retrieved hard limit is preserved and the requested soft limit does not exceed it.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+
+        let directory =
+            std::env::temp_dir().join(format!("krusty-jar-entry-fds-{}", std::process::id()));
+        std::fs::create_dir(&directory).expect("create jar probe directory");
+        let classpath = Classpath::new(Vec::new());
+        let mut paths = Vec::new();
+        for index in 0..96 {
+            let path = directory.join(format!("{index}.jar"));
+            write_test_jar(&path, b"entry");
+            assert_eq!(
+                classpath.jar_entry(&path, "sample.txt").as_deref(),
+                Some(b"entry".as_slice())
+            );
+            paths.push(path);
+        }
+        for path in paths {
+            std::fs::remove_file(path).expect("jar probe closes every archive");
+        }
+        std::fs::remove_dir(directory).expect("remove jar probe directory");
+    }
+
+    #[test]
+    fn jar_entry_closes_files_under_low_descriptor_limit() {
+        #[cfg(unix)]
+        {
+            const PROBE_ENV: &str = "KRUSTY_JAR_DESCRIPTOR_PROBE";
+            if std::env::var_os(PROBE_ENV).is_some() {
+                run_low_descriptor_jar_probe();
+                return;
+            }
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("locate current test executable"),
+            )
+            .args([
+                "--exact",
+                "jvm::classpath::fq_tests::jar_entry_closes_files_under_low_descriptor_limit",
+                "--nocapture",
+            ])
+            .env(PROBE_ENV, "1")
+            .status()
+            .expect("run isolated descriptor probe");
+            assert!(status.success(), "isolated descriptor probe failed");
+        }
+
+        #[cfg(not(unix))]
+        {
+            let path = std::env::temp_dir()
+                .join(format!("krusty-jar-entry-fds-{}.jar", std::process::id()));
+            let classpath = Classpath::new(Vec::new());
+            write_test_jar(&path, b"entry");
+            assert_eq!(
+                classpath.jar_entry(&path, "sample.txt").as_deref(),
+                Some(b"entry".as_slice())
+            );
+            std::fs::remove_file(path).expect("entry read closes the jar");
+        }
     }
 
     // Every `Classpath` gets a distinct process-unique `id`, EVEN when an earlier instance has been

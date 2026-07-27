@@ -13,6 +13,8 @@ resolver = "2"
 [dependencies]
 # Read `.class` entries from `.jar` classpath entries (Java/Kotlin library support).
 zip = { version = "8", default-features = false, features = ["deflate"] }
+# Validate lazily-inflated jar entries after reading them through the cached central-directory index.
+crc32fast = "1"
 # Inflate zlib-compressed JDK jimage resources (JetBrains Runtime / `jlink --compress` images).
 flate2 = "1"
 # Kotlin identifier categories.

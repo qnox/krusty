@@ -540,6 +540,7 @@ dependencies = [
 name = "krusty"
 version = "0.0.1"
 dependencies = [
+ "crc32fast",
  "dhat",
  "flate2",
  "libc",
