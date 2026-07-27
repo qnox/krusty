@@ -169,6 +169,11 @@ impl<'a> Lexer<'a> {
             };
         }
         let c = self.b[self.i];
+        if c == b'$' {
+            if let Some(dollars) = self.multi_dollar_prefix_len() {
+                return self.prefixed_string(lo, dollars);
+            }
+        }
         let kind = match c {
             b'\n' => {
                 self.i += 1;
@@ -434,13 +439,12 @@ impl<'a> Lexer<'a> {
     }
 
     fn string(&mut self, lo: u32) -> Token {
-        // Raw strings (`"""..."""`): no escape processing, may span lines. Interpolation (`$x`/`${}`)
-        // is not yet supported — reject (skip) rather than mis-lex it as literal text.
+        // Raw strings (`"""..."""`) use their own delimiter and verbatim-chunk scanner.
         if self.peek2() == b'"' && self.b.get(self.i + 2) == Some(&b'"') {
             return self.raw_string(lo);
         }
         if self.string_has_interpolation() {
-            return self.string_template(lo);
+            return self.string_template_at(lo, self.i, 1);
         }
         self.i += 1; // opening quote
         while self.i < self.b.len() && self.b[self.i] != b'"' {
@@ -465,11 +469,11 @@ impl<'a> Lexer<'a> {
     /// Lex a raw string `"""..."""`. Content is verbatim (no escapes); the closing delimiter is a run
     /// of three quotes (a run of >3 leaves the surplus quotes in the content). A raw string with
     /// `$x`/`${…}` interpolation is lexed as a template (like a regular string, but verbatim chunks and
-    /// the triple-quote delimiter). The emitted `StringLit` token spans the whole literal; the parser
-    /// strips the three leading/trailing quotes.
+    /// the triple-quote delimiter). A non-template is emitted as one `StringLit`; a template is expanded
+    /// into `RawTemplateStart` / chunk / interpolation tokens.
     fn raw_string(&mut self, lo: u32) -> Token {
         if self.raw_string_has_interpolation() {
-            return self.raw_string_template(lo);
+            return self.raw_string_template_at(lo, self.i, 1);
         }
         self.i += 3; // opening `"""`
         loop {
@@ -508,11 +512,8 @@ impl<'a> Lexer<'a> {
             {
                 return false; // reached the closing delimiter with no interpolation
             }
-            if self.b[j] == b'$' {
-                let next = self.b.get(j + 1).copied().unwrap_or(0);
-                if next == b'{' || is_ident_start_at(self.b, j + 1) {
-                    return true;
-                }
+            if self.interpolation_marker_at(j, 1).is_some() {
+                return true;
             }
             j += 1;
         }
@@ -522,12 +523,17 @@ impl<'a> Lexer<'a> {
     /// Lex an interpolated raw string into the same token sequence as `string_template`, but with
     /// verbatim chunks (no escape processing) and a triple-quote delimiter. Emits `RawTemplateStart`
     /// so the parser keeps the chunks verbatim.
-    fn raw_string_template(&mut self, lo: u32) -> Token {
+    fn raw_string_template_at(
+        &mut self,
+        lo: u32,
+        quote_start: usize,
+        interpolation_dollars: usize,
+    ) -> Token {
         let mut toks: Vec<Token> = vec![Token {
             kind: TokenKind::RawTemplateStart,
-            span: Span::new(lo, lo + 3),
+            span: Span::new(lo, (quote_start + 3) as u32),
         }];
-        self.i += 3; // opening `"""`
+        self.i = quote_start + 3; // opening `"""`
         let mut chunk_lo = self.i;
         loop {
             if self.i >= self.b.len() {
@@ -555,16 +561,16 @@ impl<'a> Lexer<'a> {
                 self.i += q; // one or two quotes are ordinary content
                 continue;
             }
-            let next = self.b.get(self.i + 1).copied().unwrap_or(0);
-            if c == b'$' && (next == b'{' || is_ident_start_at(self.b, self.i + 1)) {
-                if self.i > chunk_lo {
+            if let Some((dollar_lo, after_dollars)) =
+                self.interpolation_marker_at(self.i, interpolation_dollars)
+            {
+                if dollar_lo > chunk_lo {
                     toks.push(Token {
                         kind: TokenKind::StrChunk,
-                        span: Span::new(chunk_lo as u32, self.i as u32),
+                        span: Span::new(chunk_lo as u32, dollar_lo as u32),
                     });
                 }
-                let dollar_lo = self.i;
-                self.i += 1; // consume `$`
+                self.i = after_dollars;
                 toks.push(Token {
                     kind: TokenKind::Dollar,
                     span: Span::new(dollar_lo as u32, self.i as u32),
@@ -593,6 +599,8 @@ impl<'a> Lexer<'a> {
                         }
                         toks.push(t);
                     }
+                } else if self.b[self.i] == b'`' {
+                    toks.push(self.backtick_ident());
                 } else {
                     let id_lo = self.i;
                     while self.i < self.b.len() && is_ident_continue_at(self.b, self.i) {
@@ -604,6 +612,10 @@ impl<'a> Lexer<'a> {
                     });
                 }
                 chunk_lo = self.i;
+            } else if c == b'$' {
+                while self.b.get(self.i) == Some(&b'$') {
+                    self.i += 1;
+                }
             } else {
                 self.i += 1;
             }
@@ -625,11 +637,8 @@ impl<'a> Lexer<'a> {
                 j += 2;
                 continue;
             }
-            if self.b[j] == b'$' {
-                let next = self.b.get(j + 1).copied().unwrap_or(0);
-                if next == b'{' || is_ident_start_at(self.b, j + 1) {
-                    return true;
-                }
+            if self.interpolation_marker_at(j, 1).is_some() {
+                return true;
             }
             j += 1;
         }
@@ -638,13 +647,19 @@ impl<'a> Lexer<'a> {
 
     /// Lex an interpolated string into the token sequence
     /// `TemplateStart (StrChunk | Dollar Ident | Dollar LBrace <expr> RBrace)* TemplateEnd`,
-    /// returning the first token and queueing the rest.
-    fn string_template(&mut self, lo: u32) -> Token {
+    /// returning the first token and queueing the rest. `Dollar` may span multiple `$` characters for
+    /// a prefixed multi-dollar literal.
+    fn string_template_at(
+        &mut self,
+        lo: u32,
+        quote_start: usize,
+        interpolation_dollars: usize,
+    ) -> Token {
         let mut toks: Vec<Token> = vec![Token {
             kind: TokenKind::TemplateStart,
-            span: Span::new(lo, lo + 1),
+            span: Span::new(lo, (quote_start + 1) as u32),
         }];
-        self.i += 1; // opening quote
+        self.i = quote_start + 1; // opening quote
         let mut chunk_lo = self.i;
         while self.i < self.b.len() && self.b[self.i] != b'"' {
             let c = self.b[self.i];
@@ -652,16 +667,16 @@ impl<'a> Lexer<'a> {
                 self.i += 2;
                 continue;
             }
-            let next = self.b.get(self.i + 1).copied().unwrap_or(0);
-            if c == b'$' && (next == b'{' || is_ident_start_at(self.b, self.i + 1)) {
-                if self.i > chunk_lo {
+            if let Some((dollar_lo, after_dollars)) =
+                self.interpolation_marker_at(self.i, interpolation_dollars)
+            {
+                if dollar_lo > chunk_lo {
                     toks.push(Token {
                         kind: TokenKind::StrChunk,
-                        span: Span::new(chunk_lo as u32, self.i as u32),
+                        span: Span::new(chunk_lo as u32, dollar_lo as u32),
                     });
                 }
-                let dollar_lo = self.i;
-                self.i += 1; // consume `$`
+                self.i = after_dollars;
                 toks.push(Token {
                     kind: TokenKind::Dollar,
                     span: Span::new(dollar_lo as u32, self.i as u32),
@@ -693,6 +708,8 @@ impl<'a> Lexer<'a> {
                         }
                         toks.push(t);
                     }
+                } else if self.b[self.i] == b'`' {
+                    toks.push(self.backtick_ident());
                 } else {
                     let id_lo = self.i;
                     while self.i < self.b.len() && is_ident_continue_at(self.b, self.i) {
@@ -704,6 +721,10 @@ impl<'a> Lexer<'a> {
                     });
                 }
                 chunk_lo = self.i;
+            } else if c == b'$' {
+                while self.b.get(self.i) == Some(&b'$') {
+                    self.i += 1;
+                }
             } else {
                 self.i += 1;
             }
@@ -727,6 +748,49 @@ impl<'a> Lexer<'a> {
         let first = toks.remove(0);
         self.pending.extend(toks);
         first
+    }
+
+    /// A run of one or more `$` characters immediately followed by a quote introduces Kotlin's
+    /// multi-dollar string form. The run length becomes the interpolation threshold inside the
+    /// literal: with `$$"..."`, only `$$name` / `$${expr}` interpolate while a lone `$` is text.
+    fn multi_dollar_prefix_len(&self) -> Option<usize> {
+        let mut quote = self.i;
+        while self.b.get(quote) == Some(&b'$') {
+            quote += 1;
+        }
+        (quote > self.i && self.b.get(quote) == Some(&b'"')).then_some(quote - self.i)
+    }
+
+    fn prefixed_string(&mut self, lo: u32, dollars: usize) -> Token {
+        let quote_start = self.i + dollars;
+        if self.b.get(quote_start + 1) == Some(&b'"') && self.b.get(quote_start + 2) == Some(&b'"')
+        {
+            self.raw_string_template_at(lo, quote_start, dollars)
+        } else {
+            self.string_template_at(lo, quote_start, dollars)
+        }
+    }
+
+    /// If `at` begins a dollar run that is long enough for this literal and is followed by a valid
+    /// interpolation target, return the final `required` dollars (the marker) and the byte after the
+    /// run. Extra leading dollars remain literal text, matching kotlinc (`$$"$$$name"` -> `$` + name).
+    fn interpolation_marker_at(&self, at: usize, required: usize) -> Option<(usize, usize)> {
+        if self.b.get(at) != Some(&b'$') {
+            return None;
+        }
+        let mut after = at;
+        while self.b.get(after) == Some(&b'$') {
+            after += 1;
+        }
+        let count = after - at;
+        if count < required {
+            return None;
+        }
+        let starts_interpolation = self
+            .b
+            .get(after)
+            .is_some_and(|next| *next == b'{' || *next == b'`' || is_ident_start_at(self.b, after));
+        starts_interpolation.then_some((after - required, after))
     }
 }
 
@@ -974,6 +1038,41 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(identifiers, vec![(Span::new(8, 12), "π٢")]);
+        assert!(!diagnostics.has_errors());
+    }
+
+    #[test]
+    fn multi_dollar_template_keeps_shorter_dollar_runs_literal() {
+        use TokenKind::*;
+
+        let source = r#"$$"$$name$suffix""#;
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        assert_eq!(
+            tokens.iter().map(|token| token.kind).collect::<Vec<_>>(),
+            vec![TemplateStart, Dollar, Ident, StrChunk, TemplateEnd, Eof]
+        );
+        assert_eq!(tokens[0].text(source), "$$\"");
+        assert_eq!(tokens[1].text(source), "$$");
+        assert_eq!(tokens[2].text(source), "name");
+        assert_eq!(tokens[3].text(source), "$suffix");
+        assert!(!diagnostics.has_errors());
+    }
+
+    #[test]
+    fn multi_dollar_template_uses_the_last_marker_dollars_after_literal_padding() {
+        use TokenKind::*;
+
+        let source = r#"$$"$$$`item`""#;
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        assert_eq!(
+            tokens.iter().map(|token| token.kind).collect::<Vec<_>>(),
+            vec![TemplateStart, StrChunk, Dollar, Ident, TemplateEnd, Eof]
+        );
+        assert_eq!(tokens[1].text(source), "$");
+        assert_eq!(tokens[2].text(source), "$$");
+        assert_eq!(tokens[3].text(source), "item");
         assert!(!diagnostics.has_errors());
     }
 }

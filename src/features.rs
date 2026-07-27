@@ -7,10 +7,22 @@
 use std::collections::HashSet;
 
 /// The set of enabled language features (by their kotlinc `LanguageFeature` name, e.g.
-/// `NameBasedDestructuring`). Empty = the default language version's feature set.
-#[derive(Default, Clone, Debug, PartialEq, Eq)]
+/// `NameBasedDestructuring`). [`Default`] is the current Kotlin language version's stable feature
+/// set; directives and command-line flags apply ordered overrides.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LangFeatures {
     enabled: HashSet<String>,
+}
+
+impl Default for LangFeatures {
+    fn default() -> Self {
+        // Krusty's default language level tracks the Kotlin 2.4 corpus. Multi-dollar interpolation
+        // became a regular language feature in Kotlin 2.2 (`LanguageFeature.MultiDollarInterpolation`
+        // has `sinceVersion = KOTLIN_2_2`), so it is on unless an older/explicit feature set disables it.
+        Self {
+            enabled: HashSet::from(["MultiDollarInterpolation".to_string()]),
+        }
+    }
 }
 
 impl LangFeatures {
@@ -105,6 +117,10 @@ impl LangFeatures {
             }
             return true;
         }
+        if arg == "-Xmulti-dollar-interpolation" {
+            self.enable("MultiDollarInterpolation");
+            return true;
+        }
         false
     }
 }
@@ -153,6 +169,18 @@ mod tests {
         assert!(g.apply_cli_arg("-Xname-based-destructuring=disable"));
         assert!(!g.has("NameBasedDestructuring"));
         assert!(!g.has("EnableNameBasedDestructuringShortForm"));
+        assert!(g.apply_cli_arg("-Xmulti-dollar-interpolation"));
+        assert!(g.has("MultiDollarInterpolation"));
         assert!(!g.apply_cli_arg("foo.kt"));
+    }
+
+    #[test]
+    fn current_default_enables_multi_dollar_but_directive_can_disable_it() {
+        let mut features = LangFeatures::new();
+        assert!(features.has("MultiDollarInterpolation"));
+        features.apply_directive("-MultiDollarInterpolation");
+        assert!(!features.has("MultiDollarInterpolation"));
+        features.apply_directive("+MultiDollarInterpolation");
+        assert!(features.has("MultiDollarInterpolation"));
     }
 }

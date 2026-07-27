@@ -23,3 +23,39 @@ fn nested_template_multiple_inner() {
         }\n";
     assert_eq!(run(SRC).expect("nested template multi"), "OK");
 }
+
+#[test]
+fn multi_dollar_templates_use_the_prefix_as_the_interpolation_threshold() {
+    const SRC: &str = r#"
+fun box(): String {
+    val value = "OK"
+    val count = 2
+    val ordinary = $$"$$value$suffix"
+    val raw = $$"""[$$value][$count]"""
+    val expression = $$"$${value + count}"
+    val extraDollar = $$$"$$$$value"
+    val literal = $$$$"plain $value"
+    return if (
+        ordinary == "OK\$suffix" &&
+        raw == "[OK][\$count]" &&
+        expression == "OK2" &&
+        extraDollar == "\$OK" &&
+        literal == "plain \$value"
+    ) "OK" else "fail"
+}
+"#;
+    assert_eq!(run(SRC).expect("multi-dollar templates"), "OK");
+}
+
+#[test]
+fn multi_dollar_templates_support_backticks_and_nested_templates() {
+    const SRC: &str = r#"
+fun box(): String {
+    val `when` = "OK"
+    val direct = $$"$$`when`"
+    val nested = $$"outer $${$$"$$`when`$tail"}"
+    return if (direct == "OK" && nested == "outer OK\$tail") "OK" else "fail"
+}
+"#;
+    assert_eq!(run(SRC).expect("nested multi-dollar templates"), "OK");
+}

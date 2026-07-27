@@ -21,7 +21,7 @@ pub enum TokenKind {
     RawTemplateStart,
     TemplateEnd,
     StrChunk, // a literal text piece of a template (text() is the raw chunk)
-    Dollar,   // `$` before an interpolation
+    Dollar,   // the `$` marker before an interpolation (possibly repeated in a multi-dollar string)
     // keywords
     KwFun,
     KwClass,
