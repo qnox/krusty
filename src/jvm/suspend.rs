@@ -169,7 +169,7 @@ pub fn lower_suspend(
             }
         }
         let suspension_lines = if let (Some(b), None) = (body, forward) {
-            capture_suspension_lines(ir, b, &suspend_set)
+            capture_suspension_lines(ir, b, &suspend_set, ir.fn_close_lines.get(&fid).copied())
         } else {
             std::collections::HashMap::new()
         };
@@ -1823,7 +1823,17 @@ fn build_state_machine(
         let mut n = Vec::new();
         let mut state_indices = Vec::new();
         for (state_idx, call) in resume_calls.iter().enumerate() {
-            for (slot, _ty, kind, pos) in kind_positions(&flat.scopes[call]) {
+            let mut positions = kind_positions(&flat.scopes[call]);
+            positions.sort_by_key(|&(_, _, kind, pos)| {
+                (
+                    SPILL_KIND_ORDER
+                        .iter()
+                        .position(|&entry| entry == kind)
+                        .unwrap_or(SPILL_KIND_ORDER.len()),
+                    pos,
+                )
+            });
+            for (slot, _ty, kind, pos) in positions {
                 s.push(format!("{kind}${pos}"));
                 n.push(slot_name.get(&slot).cloned().unwrap_or_default());
                 state_indices.push(state_idx as i32);
@@ -3790,6 +3800,7 @@ fn capture_suspension_lines(
     ir: &IrFile,
     body: ExprId,
     suspend_set: &HashSet<u32>,
+    final_resume_line: Option<u32>,
 ) -> std::collections::HashMap<ExprId, (u32, u32)> {
     let items: Vec<ExprId> = match &ir.exprs[body as usize] {
         IrExpr::Block { stmts, value } => {
@@ -3809,6 +3820,7 @@ fn capture_suspension_lines(
             .flatten()
             .copied()
             .next()
+            .or(final_resume_line)
             .unwrap_or(line);
         let mut calls = HashSet::new();
         collect_suspend_calls(ir, item, suspend_set, &mut calls);
