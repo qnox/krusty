@@ -40,6 +40,12 @@ type Branches = Vec<(Option<ExprId>, ExprId)>;
 /// A direct suspension at a statement: `(optional bound local + type, the call ExprId)`. The call (a
 /// `Call` or `MethodCall`) is reused — the continuation is threaded into it by `emit_call`.
 type Suspension = (Option<(u32, Ty)>, ExprId);
+#[derive(Clone, Default)]
+struct SuspensionScope {
+    values: Vec<(u32, Ty)>,
+    names: std::collections::HashMap<u32, String>,
+}
+type SuspensionScopes = std::collections::HashMap<ExprId, SuspensionScope>;
 const CONTINUATION: &str = "kotlin/coroutines/Continuation";
 const CONTINUATION_IMPL: &str = "kotlin/coroutines/jvm/internal/ContinuationImpl";
 
@@ -85,6 +91,8 @@ pub fn lower_suspend(
     // by the callee's logical result type even after the callee has itself been CPS-rewritten to `Object`.
     let orig_rets: Vec<Ty> = ir.functions.iter().map(|f| f.ret.clone()).collect();
     let fids = ir.suspend_funs.clone();
+    let mut pre_splice_scopes: std::collections::HashMap<u32, SuspensionScopes> =
+        std::collections::HashMap::new();
     crate::trace_compiler!(
         "suspend",
         "lower_suspend facade={facade} suspend_funs={fids:?} suspend_lambda_sm={}",
@@ -105,7 +113,7 @@ pub fn lower_suspend(
         // block-scoped local (a `for`-loop iterator) into every later suspension's scope. Suspend-call
         // expr ids are stable through the transforms; keyed per function.
         if let (Some(b), None) = (body, forward) {
-            if !ir.pre_splice_scopes.contains_key(&fid) {
+            if !pre_splice_scopes.contains_key(&fid) {
                 let is_lambda = ir.suspend_lambda_sm.iter().any(|(f2, _, _)| *f2 == fid);
                 let prefix: Vec<(u32, Ty)> = if is_lambda {
                     Vec::new()
@@ -164,7 +172,7 @@ pub fn lower_suspend(
                             }
                         }
                     }
-                    ir.pre_splice_scopes.insert(fid, out);
+                    pre_splice_scopes.insert(fid, out);
                 }
             }
         }
@@ -248,13 +256,18 @@ pub fn lower_suspend(
             rewrite_current_continuation(ir, b, p_old);
             // The pre-splice scope lists (captured above) hold PRE-shift local indices — shift them
             // identically so they match the machine's value numbering.
-            if let Some(scopes) = ir.pre_splice_scopes.get_mut(&fid) {
-                for list in scopes.values_mut() {
-                    for e in list.iter_mut() {
+            if let Some(scopes) = pre_splice_scopes.get_mut(&fid) {
+                for scope in scopes.values_mut() {
+                    for e in &mut scope.values {
                         if e.0 >= p_old {
                             e.0 += 1;
                         }
                     }
+                    scope.names = scope
+                        .names
+                        .drain()
+                        .map(|(slot, name)| (if slot >= p_old { slot + 1 } else { slot }, name))
+                        .collect();
                 }
             }
         }
@@ -292,6 +305,7 @@ pub fn lower_suspend(
                 fid,
                 body.unwrap(),
                 unit_ret,
+                pre_splice_scopes.remove(&fid),
                 &suspension_lines,
                 continuation_metadata,
             ) {
@@ -302,7 +316,14 @@ pub fn lower_suspend(
     // Suspend LAMBDAS with multiple suspensions / control flow: their `invokeSuspend` is a state machine
     // whose continuation is the lambda instance itself (ir_lower handled the single-suspension shapes).
     for (fid, class_id, field_base) in ir.suspend_lambda_sm.clone() {
-        if !build_lambda_state_machine(ir, fid, class_id, field_base, &orig_rets) {
+        if !build_lambda_state_machine(
+            ir,
+            fid,
+            class_id,
+            field_base,
+            &orig_rets,
+            pre_splice_scopes.remove(&fid),
+        ) {
             return false;
         }
     }
@@ -1425,6 +1446,7 @@ fn build_state_machine(
     fid: u32,
     b: ExprId,
     unit_ret: bool,
+    captured_scopes: Option<SuspensionScopes>,
     suspension_lines: &std::collections::HashMap<ExprId, (u32, u32)>,
     continuation_metadata: &mut ContinuationMetadataMap,
 ) -> bool {
@@ -1730,25 +1752,27 @@ fn build_state_machine(
     // The PRE-SPLICE per-suspension scope lists (captured in `lower_suspend` before
     // `splice_return_blocks` could leak block-scoped locals); catch variables remap to their
     // exception-spill locals allocated above.
-    let mut susp_scopes: std::collections::HashMap<ExprId, Vec<(u32, Ty)>> =
-        ir.pre_splice_scopes.remove(&fid).unwrap_or_else(|| {
-            let mut w = ScopeWalk {
-                ir,
-                suspend_set: &suspend_set,
-                params: &param_caps,
-                scope: Vec::new(),
-                pending: Vec::new(),
-                out: Default::default(),
-            };
-            w.walk_stmts(&stmts);
-            w.out
-        });
+    let mut susp_scopes = captured_scopes.unwrap_or_else(|| {
+        let mut w = ScopeWalk {
+            ir,
+            suspend_set: &suspend_set,
+            params: &param_caps,
+            scope: Vec::new(),
+            pending: Vec::new(),
+            out: Default::default(),
+        };
+        w.walk_stmts(&stmts);
+        w.out
+    });
     for (cvar, ev) in &catch_spills {
-        for list in susp_scopes.values_mut() {
-            for e in list.iter_mut() {
+        for scope in susp_scopes.values_mut() {
+            for e in &mut scope.values {
                 if e.0 == *cvar {
                     e.0 = *ev;
                 }
+            }
+            if let Some(name) = scope.names.remove(cvar) {
+                scope.names.insert(*ev, name);
             }
         }
     }
@@ -1758,9 +1782,9 @@ fn build_state_machine(
     let mut live_calls: HashSet<ExprId> = HashSet::new();
     collect_suspend_calls(ir, b, &suspend_set, &mut live_calls);
     let mut layout = SpillLayout::default();
-    for (call, list) in &susp_scopes {
+    for (call, scope) in &susp_scopes {
         if live_calls.contains(call) {
-            layout.add_list(list);
+            layout.add_list(&scope.values);
         }
     }
 
@@ -1823,7 +1847,8 @@ fn build_state_machine(
         let mut n = Vec::new();
         let mut state_indices = Vec::new();
         for (state_idx, call) in resume_calls.iter().enumerate() {
-            let mut positions = kind_positions(&flat.scopes[call]);
+            let scope = &flat.scopes[call];
+            let mut positions = kind_positions(&scope.values);
             positions.sort_by_key(|&(_, _, kind, pos)| {
                 (
                     SPILL_KIND_ORDER
@@ -1835,7 +1860,14 @@ fn build_state_machine(
             });
             for (slot, _ty, kind, pos) in positions {
                 s.push(format!("{kind}${pos}"));
-                n.push(slot_name.get(&slot).cloned().unwrap_or_default());
+                n.push(
+                    scope
+                        .names
+                        .get(&slot)
+                        .or_else(|| slot_name.get(&slot))
+                        .cloned()
+                        .unwrap_or_default(),
+                );
                 state_indices.push(state_idx as i32);
             }
         }
@@ -2090,6 +2122,7 @@ fn build_lambda_state_machine(
     class_id: ClassId,
     field_base: u32,
     orig_rets: &[Ty],
+    captured_scopes: Option<SuspensionScopes>,
 ) -> bool {
     let Some(b) = ir.functions[fid as usize].body else {
         return false;
@@ -2199,25 +2232,24 @@ fn build_lambda_state_machine(
     // The PRE-SPLICE per-suspension scope lists (captured in `lower_suspend`); a lambda has no
     // value-param prefix (captures/params live in leading fields, reloaded each entry). A lambda
     // fid the prelude never visited (not in `suspend_funs`) falls back to a post-transform walk.
-    let susp_scopes: std::collections::HashMap<ExprId, Vec<(u32, Ty)>> =
-        ir.pre_splice_scopes.remove(&fid).unwrap_or_else(|| {
-            let mut w = ScopeWalk {
-                ir,
-                suspend_set: &suspend_set,
-                params: &[],
-                scope: Vec::new(),
-                pending: Vec::new(),
-                out: Default::default(),
-            };
-            w.walk_stmts(&stmts);
-            w.out
-        });
+    let susp_scopes = captured_scopes.unwrap_or_else(|| {
+        let mut w = ScopeWalk {
+            ir,
+            suspend_set: &suspend_set,
+            params: &[],
+            scope: Vec::new(),
+            pending: Vec::new(),
+            out: Default::default(),
+        };
+        w.walk_stmts(&stmts);
+        w.out
+    });
     let mut live_calls: HashSet<ExprId> = HashSet::new();
     collect_suspend_calls(ir, b, &suspend_set, &mut live_calls);
     let mut layout = SpillLayout::default();
-    for (call, list) in &susp_scopes {
+    for (call, scope) in &susp_scopes {
         if live_calls.contains(call) {
-            layout.add_list(list);
+            layout.add_list(&scope.values);
         }
     }
 
@@ -2523,7 +2555,7 @@ struct Flat<'a> {
     catch_spills: std::collections::HashMap<u32, u32>,
     /// Per-suspension lexical scope lists (kotlinc's positional-spill model, see
     /// docs/POSITIONAL_SPILLS.md): suspend-call expr id → `params ++ in-scope locals`.
-    scopes: std::collections::HashMap<ExprId, Vec<(u32, Ty)>>,
+    scopes: SuspensionScopes,
     /// The positional field layout (per-kind maxima over every scope list).
     layout: SpillLayout,
     /// Per RESUME state: the scope list its arm restores (`None` for a non-resume state).
@@ -2587,7 +2619,7 @@ impl Flat<'_> {
     /// The scope list for `call` — the snapshot from the pre-flatten walk. `None` (a shape the
     /// walk didn't reach) fails the machine: the layout wouldn't cover it (skip, never miscompile).
     fn scope_list_for(&self, call: ExprId) -> Option<Vec<(u32, Ty)>> {
-        self.scopes.get(&call).cloned()
+        self.scopes.get(&call).map(|scope| scope.values.clone())
     }
     /// Store `list` POSITIONALLY into the spill fields (kotlinc: each suspension stores its
     /// in-scope vars at per-kind positions; different states reuse the same fields).
@@ -3588,12 +3620,11 @@ struct ScopeWalk<'a> {
     ir: &'a IrFile,
     suspend_set: &'a HashSet<u32>,
     params: &'a [(u32, Ty)],
-    /// (local, ty, named)
-    scope: Vec<(u32, Ty, bool)>,
+    scope: Vec<(u32, Ty, Option<String>)>,
     /// Exprs that may still execute after the current walk point (rest-of-list statements, whole
     /// enclosing loops).
     pending: Vec<ExprId>,
-    out: std::collections::HashMap<ExprId, Vec<(u32, Ty)>>,
+    out: SuspensionScopes,
 }
 
 impl ScopeWalk<'_> {
@@ -3608,13 +3639,20 @@ impl ScopeWalk<'_> {
             if !self.scope.iter().any(|(l, _, _)| *l == index) {
                 // Every NAMED source variable participates (kotlinc's scope rule; kind decides the
                 // field family: references L$, ints I$, …).
-                self.scope.push((index, spill_field_ty(ty), true));
+                self.scope.push((
+                    index,
+                    spill_field_ty(ty),
+                    self.ir.value_names.get(&st).cloned(),
+                ));
             }
         }
     }
     fn snapshot(&mut self, call: ExprId) {
-        let mut list: Vec<(u32, Ty)> = self.params.to_vec();
-        for &(l, ref ty, named) in &self.scope {
+        let mut snapshot = SuspensionScope {
+            values: self.params.to_vec(),
+            names: std::collections::HashMap::new(),
+        };
+        for &(slot, ref ty, ref name) in &self.scope {
             // NAMED vars spill by scope (kotlinc's rule). An unnamed temp NEVER gets a slot —
             // kotlinc holds those on the operand stack; every splice-materialization local that
             // kotlinc names is emitted `named` at its lowering site. A krusty-only temp that
@@ -3622,11 +3660,12 @@ impl ScopeWalk<'_> {
             // diverge (the arm restores wouldn't cover it). (kotlinc's `nullOutSpilledVariable`
             // stores are FIELD HYGIENE — clearing a previous state's spill of a now-dead var —
             // and never allocate positions beyond some state's live list.)
-            if named {
-                list.push((l, ty.clone()));
+            snapshot.values.push((slot, ty.clone()));
+            if let Some(name) = name {
+                snapshot.names.insert(slot, name.clone());
             }
         }
-        self.out.insert(call, list);
+        self.out.insert(call, snapshot);
     }
     fn walk_stmts(&mut self, stmts: &[ExprId]) {
         let base = self.scope.len();
@@ -3706,7 +3745,7 @@ impl ScopeWalk<'_> {
                     // REWRITES the captured lists to that index (`catch_spills` remap below).
                     if !self.scope.iter().any(|(l, _, _)| *l == c.var) {
                         self.scope
-                            .push((c.var, Ty::obj(&c.exc_internal.render()), true));
+                            .push((c.var, Ty::obj(&c.exc_internal.render()), c.name.clone()));
                     }
                     self.walk(c.body);
                     self.close_scope(base);
@@ -3796,38 +3835,126 @@ fn nearest_line(ir: &IrFile, root: ExprId) -> Option<u32> {
     best
 }
 
+fn expression_source_line(ir: &IrFile, expr: ExprId) -> Option<u32> {
+    ir.expr_source_lines
+        .get(&expr)
+        .copied()
+        .or_else(|| nearest_line(ir, expr))
+}
+
+fn collect_suspension_lines(
+    ir: &IrFile,
+    expr: ExprId,
+    suspend_set: &HashSet<u32>,
+    fall_through: Option<u32>,
+    out: &mut std::collections::HashMap<ExprId, (u32, u32)>,
+) {
+    if is_suspend_call(ir, expr, suspend_set) {
+        if let Some(line) = expression_source_line(ir, expr) {
+            let resume = fall_through.unwrap_or(line);
+            out.entry(expr).or_insert((line, resume));
+        }
+        return;
+    }
+
+    match &ir.exprs[expr as usize] {
+        IrExpr::Block { stmts, value } => {
+            let items: Vec<ExprId> = stmts.iter().copied().chain(value.iter().copied()).collect();
+            for (index, &item) in items.iter().enumerate() {
+                let next = items[index + 1..]
+                    .iter()
+                    .find_map(|&next| expression_source_line(ir, next))
+                    .or(fall_through);
+                collect_suspension_lines(ir, item, suspend_set, next, out);
+            }
+        }
+        IrExpr::When { branches } => {
+            for (index, (condition, body)) in branches.iter().enumerate() {
+                let next_condition = branches[index + 1..].iter().find_map(|(condition, _)| {
+                    condition.and_then(|c| expression_source_line(ir, c))
+                });
+                if let Some(condition) = condition {
+                    collect_suspension_lines(
+                        ir,
+                        *condition,
+                        suspend_set,
+                        expression_source_line(ir, *body)
+                            .or(next_condition)
+                            .or(fall_through),
+                        out,
+                    );
+                }
+                collect_suspension_lines(ir, *body, suspend_set, fall_through, out);
+            }
+        }
+        IrExpr::While {
+            cond, body, update, ..
+        } => {
+            let cond_line = expression_source_line(ir, *cond);
+            collect_suspension_lines(
+                ir,
+                *cond,
+                suspend_set,
+                expression_source_line(ir, *body).or(fall_through),
+                out,
+            );
+            collect_suspension_lines(
+                ir,
+                *body,
+                suspend_set,
+                update
+                    .and_then(|update| expression_source_line(ir, update))
+                    .or(cond_line)
+                    .or(fall_through),
+                out,
+            );
+            if let Some(update) = update {
+                collect_suspension_lines(ir, *update, suspend_set, cond_line.or(fall_through), out);
+            }
+        }
+        IrExpr::Try {
+            body,
+            catches,
+            finally,
+            ..
+        } => {
+            let region_fall_through = finally
+                .and_then(|finally| expression_source_line(ir, finally))
+                .or(fall_through);
+            collect_suspension_lines(ir, *body, suspend_set, region_fall_through, out);
+            for catch in catches {
+                collect_suspension_lines(ir, catch.body, suspend_set, region_fall_through, out);
+            }
+            if let Some(finally) = finally {
+                collect_suspension_lines(ir, *finally, suspend_set, fall_through, out);
+            }
+        }
+        _ => {
+            let mut children = Vec::new();
+            for_each_child(&ir.exprs, expr, &mut |child| children.push(child));
+            for (index, &child) in children.iter().enumerate() {
+                let next = children[index + 1..]
+                    .iter()
+                    .find_map(|&next| expression_source_line(ir, next))
+                    .or_else(|| {
+                        expression_source_line(ir, expr)
+                            .filter(|&line| Some(line) != expression_source_line(ir, child))
+                    })
+                    .or(fall_through);
+                collect_suspension_lines(ir, child, suspend_set, next, out);
+            }
+        }
+    }
+}
+
 fn capture_suspension_lines(
     ir: &IrFile,
     body: ExprId,
     suspend_set: &HashSet<u32>,
     final_resume_line: Option<u32>,
 ) -> std::collections::HashMap<ExprId, (u32, u32)> {
-    let items: Vec<ExprId> = match &ir.exprs[body as usize] {
-        IrExpr::Block { stmts, value } => {
-            stmts.iter().copied().chain(value.iter().copied()).collect()
-        }
-        _ => vec![body],
-    };
-    let lines: Vec<Option<u32>> = items.iter().map(|&item| nearest_line(ir, item)).collect();
     let mut result = std::collections::HashMap::new();
-    for (index, &item) in items.iter().enumerate() {
-        let Some(line) = lines[index] else {
-            continue;
-        };
-        let resume_line = lines
-            .iter()
-            .skip(index + 1)
-            .flatten()
-            .copied()
-            .next()
-            .or(final_resume_line)
-            .unwrap_or(line);
-        let mut calls = HashSet::new();
-        collect_suspend_calls(ir, item, suspend_set, &mut calls);
-        for call in calls {
-            result.entry(call).or_insert((line, resume_line));
-        }
-    }
+    collect_suspension_lines(ir, body, suspend_set, final_resume_line, &mut result);
     result
 }
 
