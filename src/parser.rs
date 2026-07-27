@@ -45,89 +45,7 @@ pub fn parse_with_features(
     rewrite_anon_captures(&mut p.file);
     fill_class_decl_lines(&mut p.file, src);
     expand_fun_type_aliases(&mut p.file);
-    rewrite_import_aliases(&mut p.file);
     p.file
-}
-
-/// Substitute each aliased import (`import a.b.Member as Alias`) back to its real member name at every
-/// bare-name USE (`Alias(...)`, `Alias` value read → `Member`). The full target path is already in
-/// `file.imports`, so once the use site names the real member, ordinary import resolution handles it —
-/// covering static methods, static fields, top-level functions, and types uniformly.
-///
-/// An alias whose name is also BOUND in the file (a local/param, or a top-level/member declaration —
-/// any of which would shadow the import) is left untouched: renaming its uses could bind them to the
-/// wrong symbol, so we skip it and let the name stay unresolved (the file cleanly skips, never a
-/// miscompile). Names introduced only as the alias itself are safe to rename.
-fn rewrite_import_aliases(file: &mut File) {
-    if file.import_aliases.is_empty() {
-        return;
-    }
-    // Every identifier the file BINDS: declaration names, function/constructor parameters, lambda
-    // parameters, and statement locals. A flat arena scan — no recursion.
-    let mut bound: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for &d in &file.decls {
-        match file.decl(d) {
-            Decl::Fun(f) => {
-                bound.insert(f.name.clone());
-                bound.extend(f.params.iter().map(|p| p.name.clone()));
-            }
-            Decl::Class(c) => {
-                bound.insert(c.name.clone());
-                bound.extend(c.props.iter().map(|p| p.name.clone()));
-                bound.extend(c.body_props.iter().map(|p| p.name.clone()));
-                for m in &c.methods {
-                    bound.insert(m.name.clone());
-                    bound.extend(m.params.iter().map(|p| p.name.clone()));
-                }
-            }
-            Decl::Property(p) => {
-                bound.insert(p.name.clone());
-            }
-        }
-    }
-    for s in &file.stmt_arena {
-        match s {
-            Stmt::Local { name, .. }
-            | Stmt::LocalLateinit { name, .. }
-            | Stmt::LocalDelegate { name, .. } => {
-                bound.insert(name.clone());
-            }
-            Stmt::Destructure { entries, .. } => {
-                bound.extend(entries.iter().map(|(n, _)| n.clone()));
-            }
-            _ => {}
-        }
-    }
-    for e in &file.expr_arena {
-        if let Expr::Lambda { params, .. } = e {
-            bound.extend(params.iter().cloned());
-        }
-    }
-
-    // Renames that survive the shadow check: alias → real.
-    let renames: std::collections::HashMap<&str, &str> = file
-        .import_aliases
-        .iter()
-        .filter(|(alias, _)| !bound.contains(alias.as_str()))
-        .map(|(alias, real)| (alias.as_str(), real.as_str()))
-        .collect();
-    if renames.is_empty() {
-        return;
-    }
-    let updates: Vec<(usize, String)> = file
-        .expr_arena
-        .iter()
-        .enumerate()
-        .filter_map(|(i, e)| match e {
-            Expr::Name(n) => renames.get(n.as_str()).map(|real| (i, real.to_string())),
-            _ => None,
-        })
-        .collect();
-    for (i, real) in updates {
-        if let Expr::Name(n) = &mut file.expr_arena[i] {
-            *n = real;
-        }
-    }
 }
 
 /// Fill each `ClassDecl::decl_line` with the 1-based source line of its `span.lo`. kotlinc maps the
@@ -585,17 +503,21 @@ fn rewrite_anon_captures(file: &mut File) {
             Decl::Class(c) => {
                 let class_tps: std::collections::HashSet<String> =
                     c.type_params.iter().cloned().collect();
+                let ctor_props: Vec<(String, TypeRef)> = c
+                    .props
+                    .iter()
+                    .filter(|p| p.is_property && !p.is_var)
+                    .map(|p| (p.name.clone(), p.ty.clone()))
+                    .collect();
                 // The enclosing class's IMMUTABLE properties are also capturable by an anonymous object
                 // in a method body (`class A(val x) { fun foo() = object { fun r() = x } }`): a `val`
                 // never changes, so capturing its value at the anon's construction is equivalent to
                 // reading `this@A.x` — resolved by appending `x` (which reads `this.x` at the call site)
                 // as an anon-constructor argument. A `var` is excluded (a later mutation wouldn't be
                 // observed by a by-value capture), as is a body property without an explicit type.
-                let class_props: Vec<(String, TypeRef)> = c
-                    .props
+                let class_props: Vec<(String, TypeRef)> = ctor_props
                     .iter()
-                    .filter(|p| p.is_property && !p.is_var)
-                    .map(|p| (p.name.clone(), p.ty.clone()))
+                    .cloned()
                     .chain(c.body_props.iter().filter_map(|p| {
                         // Only a plain immutable BACKING-field property is captured by value: a `var`
                         // (mutable), a custom-getter property (recomputes on each read, so a captured
@@ -623,24 +545,18 @@ fn rewrite_anon_captures(file: &mut File) {
                         push_body(params, tps, root);
                     }
                 }
-                // An anonymous object can also appear in a class property INITIALIZER or delegate
-                // (`val s = object : T { … x … }`, `val s: T by lazy { object … }`), not only a method
-                // body. Such an expression is evaluated during construction, where the primary-constructor
-                // immutable properties are already set — so they are capturable by value exactly as from a
-                // method body. Body properties are deliberately NOT offered: a forward reference to a
-                // later-declared one would read a not-yet-initialized value, so those stay unresolved and
-                // the file cleanly skips.
-                let ctor_props: Vec<(String, TypeRef)> = c
-                    .props
-                    .iter()
-                    .filter(|p| p.is_property && !p.is_var)
-                    .map(|p| (p.name.clone(), p.ty.clone()))
-                    .collect();
-                if !ctor_props.is_empty() {
-                    for p in &c.body_props {
-                        for &root in p.init.iter().chain(p.delegate.iter()) {
-                            push_body(ctor_props.clone(), class_tps.clone(), root);
-                        }
+                // Initializers run in source order. Constructor properties and earlier immutable
+                // backing properties are initialized at each construction point; later properties are
+                // not. Feed that ordered environment through the same capture path as method bodies.
+                let mut initialized = ctor_props;
+                for p in &c.body_props {
+                    for &root in p.init.iter().chain(p.delegate.iter()) {
+                        push_body(initialized.clone(), class_tps.clone(), root);
+                    }
+                    let plain =
+                        !p.is_var && p.getter.is_none() && p.receiver.is_none() && p.init.is_some();
+                    if let Some(ty) = plain.then(|| p.ty.clone()).flatten() {
+                        initialized.push((p.name.clone(), ty));
                     }
                 }
             }
@@ -1402,21 +1318,18 @@ impl<'a> Parser<'a> {
                         self.bump(); // '*'
                         fq.push_str(".*");
                     }
-                    // `import a.b.Member as Alias` — capture the rename so a post-parse pass can
-                    // substitute the alias back to the real member at use sites (`as` is a soft keyword).
+                    let mut alias = None;
                     if self.at(TokenKind::Ident) && self.text() == "as" {
                         self.bump(); // 'as'
                         if self.at(TokenKind::Ident) {
-                            let alias = self.text().to_string();
+                            alias = Some(self.text().to_string());
                             self.bump();
-                            if let Some(real) = fq.rsplit('.').next() {
-                                if !real.is_empty() && real != alias {
-                                    self.file.import_aliases.push((alias, real.to_string()));
-                                }
-                            }
                         }
                     }
                     if !fq.is_empty() {
+                        if let Some(alias) = alias {
+                            self.file.import_aliases.push((alias, fq.clone()));
+                        }
                         self.file.imports.push(fq);
                     }
                     // tolerate any remaining trailing tokens to end of line

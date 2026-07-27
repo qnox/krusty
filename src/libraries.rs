@@ -730,8 +730,7 @@ impl FunctionInfo {
         member.generic_sig = self.generic_sig.clone();
         member.inline = self.flags.inline;
         member.suspend = self.flags.suspend;
-        // Carry the call shape (parameter names/defaults and the `vararg` flag) so the lowerer packs a
-        // Java `T...` varargs call's trailing arguments into its array parameter.
+        // Keep source call shape coupled to the selected overload.
         member.call_sig = self.call_sig.clone();
         member
     }
@@ -1009,6 +1008,7 @@ pub enum TypeKind {
     Class,
     Interface,
     Annotation,
+    Enum,
     /// A Kotlin `object` (singleton) — has a `public static final INSTANCE` field of its own type, read
     /// as `getstatic <Type>.INSTANCE` when the object is referenced as a value.
     Object,
@@ -1023,6 +1023,9 @@ impl LibraryType {
     }
     pub fn is_object(&self) -> bool {
         self.kind == TypeKind::Object
+    }
+    pub fn is_enum(&self) -> bool {
+        self.kind == TypeKind::Enum
     }
 
     /// Whether an enum entry named `name` is declared on this type — lets `EnumName.ENTRY` resolve.

@@ -58,10 +58,7 @@ fn classpath_object_and_nested_resolution() {
 
 #[test]
 fn classpath_nested_type_static_member_via_outer_name() {
-    // `Outer.Nested.MEMBER` on a classpath type, reached through the OUTER class name (e.g.
-    // `jakarta.mail.Message.RecipientType.TO`). The receiver `Locale.Category` is a `Member` chain
-    // naming a NESTED type; its static member (`DISPLAY`, an enum constant) must resolve. Previously the
-    // outer name was left `unresolved` because the receiver was flattened with `/` instead of `$`.
+    // A nested classpath type used as a static receiver must resolve through its outer type.
     let Some(jdk) = common::jdk_modules() else {
         eprintln!("skipping: no JDK modules");
         return;

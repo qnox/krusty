@@ -542,16 +542,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   arguments into a fresh array (`newarray`/`anewarray` + per-element store) and passes it, like kotlinc.
   Spread (`*arr`) is not modeled. `for (x in arr)` over an array iterates by index
   (`i = 0; while (i < arr.size) { x = arr[i]; …; i++ }`, array and size hoisted).
-- **Classpath Java varargs (`T...`)**: a Java varargs method's erased descriptor shows a plain `[T`
-  array, indistinguishable from a real array parameter — the only signal is the class file's
-  `ACC_VARARGS` flag. krusty reads it (`MethodSig::is_vararg`) into `CallSig::vararg` when building a
-  classpath member (`FunctionInfo::member_with_return` carries it onto the resolved member), so
-  overload resolution selects the vararg overload once the argument count exceeds the fixed-arity
-  siblings (`Logger.debug(String, Object)` / `(String, Object, Object)` vs `(String, Object...)`) and
-  the lowerer packs the trailing element arguments into the array parameter — matching how a Kotlin
-  `vararg` (whose flag comes from `@Metadata`) is handled. Without the flag, `log.debug(fmt, a, b, c)`
-  reported "none of the candidates is applicable". Test:
-  `vararg_e2e::classpath_java_instance_object_varargs_element_wise`.
+- **Classpath Java varargs (`T...`)**: the class reader carries `ACC_VARARGS` into `CallSig::vararg`.
+  The shared call-argument lowerer then packs trailing elements into the final array parameter for
+  both static and instance calls. An ordinary array parameter remains fixed-arity.
 - Range expressions as **values**: `a..b` and `a..<b` are the only true range *operators* (parsed at a
   precedence tighter than infix functions, looser than additive). `a..b` over `Int`/`Long`/`Char`
   constructs the matching stdlib range object via `new IntRange/LongRange/CharRange(II/JJ/CC)` (kotlinc's
@@ -586,14 +579,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   branch — an `if`/`when`/elvis or a **safe call** `c?.calc()` — is rejected (the file skips): a branch
   mid-`Vararg`-fill emits a StackMapTable frame inside the element-store sequence that the verifier
   rejects, so `is_branchy` treats those as non-spliceable (`ArrayOfRef` in `tests/feature_box_e2e.rs`).
-- **Enum reflection intrinsics** `enumValueOf<E>(name)` / `enumValues<E>()`: declared in the kotlin
-  builtins (`kotlin.kotlin_builtins`) but, like the array creators, realized in codegen with **no JVM
-  facade** — kotlinc emits the enum's own synthetic statics `E.valueOf(name)` / `E.values()`. krusty
-  does the same: the synthetic registry (`synthetics.rs`) contributes the IR body, resolving the reified
-  `E` from the call's type argument (or, inside an expanded `<reified …>` inline body, from
-  `reified_subst`); the checker types the call as `E` / `Array<E>`. Gated on the name not being shadowed
-  by a user declaration/local, like the array intrinsics. Test:
-  `enum_value_of_intrinsic_e2e::{enum_value_of_and_values_intrinsics_run,enum_value_of_forwarded_through_reified_inline}`.
+- **Enum reflection intrinsics** `enumValueOf<E>(name)` / `enumValues<E>()`: the checker requires an
+  enum type argument and types the result as `E` / `Array<E>`. The synthetic registry emits
+  `E.valueOf(name)` / `E.values()`, including through an expanded reified inline function.
 - **Primitive-array init constructor** `IntArray(n) { i -> elem }` (and `Long`/`Double`/`Float`/`Boolean`/
   `Char`/`Byte`/`Short`): kotlinc inlines the index lambda into a fill loop, which krusty reproduces by
   desugaring to `{ val n = <size>; val a = new T[n]; var i = 0; while (i < n) { a[i] = <body[it:=i]>; i++ }; a }`
@@ -1077,24 +1065,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `$`, existence verified through `resolve_type`) — mirrored in both `resolve_ty` (checker) and `ty_ref`
   (lowerer) so `is`/`as`/`when` targets and a nested-class constructor (`Subject.User("x")` → `new
   lib/Subject$User`) all resolve the same `Outer$Nested` internal. Test: `tests/classpath_object_nested_e2e.rs`.
-  A **static member reached through the outer class name** (`Message.RecipientType.TO`,
-  `Thread.State.NEW`) follows the same rule in expression position: `classpath_type_receiver_internal`
-  maps the outer simple name to its classpath FQN and folds the trailing segments into `$`-joined
-  nested classes via `nested_internal_name`, so the receiver `Outer.Nested` types as
-  `<pkg>/Outer$Nested` and its `static_field`/enum-constant member resolves. Previously the receiver
-  was flattened with `/` and never matched the real nested internal, leaving the outer name unresolved
-  (test: `::classpath_nested_type_static_member_via_outer_name`).
+  Static access through `Outer.Nested.MEMBER` uses the same nested-name resolver in expression
+  position, producing `<pkg>/Outer$Nested` before resolving the field.
 
-- **Aliased imports (`import a.b.Member as Alias`).** The parser records `(alias, real-simple-name)`
-  in `File::import_aliases` and still pushes the full target to `File::imports`; a post-parse pass
-  (`rewrite_import_aliases`) substitutes `Alias → Member` at every bare-name USE, after which ordinary
-  import resolution handles it uniformly — static methods, top-level functions, and types. The alias's
-  real name is the last path segment, so a backtick-escaped keyword member (`Filters.\`in\` as
-  filterIn`) resolves too. An alias whose name is ALSO bound in the file (a local/param, or a
-  top-level/member declaration that would shadow the import) is left untouched — renaming its uses
-  could bind them to the wrong symbol, so the name stays unresolved and the file cleanly skips rather
-  than miscompiling. Tests: `static_member_import_e2e::aliased_java_static_method_import_resolves`,
-  `::import_alias_is_shadowed_by_a_local_of_the_same_name`.
+- **Aliased imports (`import a.b.Member as Alias`).** The import map binds the alias directly to the
+  full target for types and values. Ordinary lexical resolution handles local shadowing; lowering uses
+  the resolved target member name.
 
 - **Unqualified sibling nested-class construction (`Inner()` inside `class Outer { class Inner }`).** Kotlin
   scopes a nested class unqualified within its enclosing class body. When a `Name`-callee call is otherwise
@@ -1539,16 +1515,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   making the by-value capture stale) — the checker records `local_fun_captures` as ordered `(name,
   type)` and the lowerer passes each captured value (or holder) at the call site.
 
-- **Anonymous-object capture** (`object : I { … }` expression): desugared to a hoisted synth class +
-  a construction. `rewrite_anon_captures` turns each captured enclosing name — a function/method
-  parameter, a read-only local, or an enclosing-class immutable (`val`) property — into a synth-class
-  constructor `val` and passes it at construction, after which ordinary member resolution handles the
-  body reference. This holds not only inside method bodies but inside a class **property initializer
-  or delegate** (`val s = object : T { … x … }`, `val s: T by lazy { object … }`): such an expression
-  runs during construction, where the primary-constructor immutable properties are already set, so they
-  are captured by value exactly as from a method body (`::anon_object_in_property_initializer_reads_enclosing_val`).
-  A body property is NOT offered to an initializer's anon (a forward reference would read a
-  not-yet-initialized value) — it stays unresolved and the file cleanly skips.
+- **Anonymous-object capture** (`object : I { … }`): captured parameters, read-only locals, and
+  initialized immutable enclosing properties become synthetic constructor properties. Property
+  initializers and delegates see constructor properties and earlier backing properties, not later ones.
 
 - **Captured-`var` boxing rule** (precise): a captured `var` is boxed into a `Ref$XxxRef` iff it is
   *reassigned somewhere in the function* (`fn_reassigned`, scanned over the whole body including nested

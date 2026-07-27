@@ -45,13 +45,9 @@ pub(crate) trait SyntheticIrBuilder {
         params: Vec<String>,
         body: AstExprId,
     ) -> Option<ExprId>;
-    /// The reified type ARGUMENT of `call` as a concrete `Ty` (`enumValueOf<E>(…)` → `E`), resolving a
-    /// type parameter of an enclosing expanded `<reified …>` inline body to its call-site type. `None`
-    /// when there is no type argument or it cannot be made concrete.
+    /// Resolve the first reified type argument at this call site.
     fn synth_reified_type_arg(&self, call: AstExprId) -> Option<Ty>;
-    /// Emit an enum's synthetic static — `E.values(): [E` (`values`) or `E.valueOf(String): E`
-    /// (`!values`, taking the single name argument) — for `enum_ty == E`. `None` if `enum_ty` is not a
-    /// reference type (no enum internal name).
+    /// Emit `E.values()` or `E.valueOf(String)`.
     fn synth_enum_static(&mut self, enum_ty: Ty, values: bool, args: Vec<ExprId>)
         -> Option<ExprId>;
 }
@@ -109,9 +105,7 @@ static TABLE: &[Synthetic] = &[
     syn("kotlin/Array", "Array", b_ref_array),
     syn("kotlin/emptyArray", "emptyArray", b_empty),
     syn("kotlin/arrayOfNulls", "arrayOfNulls", b_arr_nulls),
-    // Enum reflection intrinsics — declared in the kotlin builtins but realized in codegen (no JVM
-    // facade): `enumValueOf<E>(name)` → `E.valueOf(name)`, `enumValues<E>()` → `E.values()`, exactly as
-    // kotlinc emits. The reified `E` comes from the call's type argument (or `reified_subst`).
+    // Enum reflection intrinsics have no callable JVM facade.
     syn("kotlin/enumValueOf", "enumValueOf", b_enum_value_of),
     syn("kotlin/enumValues", "enumValues", b_enum_values),
 ];

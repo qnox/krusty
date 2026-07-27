@@ -32,9 +32,7 @@ fn anon_object_reads_enclosing_body_val() {
 
 #[test]
 fn anon_object_in_property_initializer_reads_enclosing_val() {
-    // An anonymous object in a class PROPERTY INITIALIZER (not a method body) must also capture the
-    // enclosing class's immutable properties — `class A(val x) { val s = object : T { … x … } }`. The
-    // capture rewrite previously walked only method bodies, so this form left `x` unresolved.
+    // Property initializers use the same anonymous-object capture path as method bodies.
     const SRC: &str = "interface T { fun result(): String }\n\
         class A(val x: String) {\n\
         \x20 val s: T = object : T { override fun result() = x }\n\
@@ -42,6 +40,20 @@ fn anon_object_in_property_initializer_reads_enclosing_val() {
         fun box(): String = A(\"OK\").s.result()\n";
     assert_eq!(
         run(SRC).expect("anon in prop init reads enclosing val"),
+        "OK"
+    );
+}
+
+#[test]
+fn anon_object_in_property_initializer_reads_earlier_body_val() {
+    const SRC: &str = "interface T { fun result(): String }\n\
+        class A {\n\
+        \x20 val x: String = \"OK\"\n\
+        \x20 val s: T = object : T { override fun result() = x }\n\
+        }\n\
+        fun box(): String = A().s.result()\n";
+    assert_eq!(
+        run(SRC).expect("anon in prop init reads earlier body val"),
         "OK"
     );
 }

@@ -30,8 +30,6 @@ fn classpath_varargs_static_qualified_and_via_import() {
 
 #[test]
 fn aliased_java_static_method_import_resolves() {
-    // `import a.b.member as alias` — the alias must resolve to the imported member. The parser
-    // previously discarded the `as alias`, leaving every use of the alias unresolved.
     const SRC: &str = "import java.lang.Integer.parseInt as pi\n\
         fun box(): String {\n\
         \x20 val n = pi(\"42\") + pi(\"8\")\n\
@@ -45,8 +43,6 @@ fn aliased_java_static_method_import_resolves() {
 
 #[test]
 fn import_alias_is_shadowed_by_a_local_of_the_same_name() {
-    // A local binding named like the alias shadows it (Kotlin). The alias rewrite must leave the name
-    // alone so the local — not the imported member — is read.
     const SRC: &str = "import java.lang.Integer.parseInt as v\n\
         fun box(): String {\n\
         \x20 val v = 7\n\
@@ -54,6 +50,31 @@ fn import_alias_is_shadowed_by_a_local_of_the_same_name() {
         }\n";
     assert_eq!(
         common::compile_and_run_with_stdlib(SRC, "Main").expect("alias shadowed by local"),
+        "OK"
+    );
+}
+
+#[test]
+fn import_alias_shadowing_is_lexical_not_file_wide() {
+    const SRC: &str = "import java.lang.Integer.parseInt as v\n\
+        fun parsed(): Int = v(\"42\")\n\
+        fun box(): String {\n\
+        \x20 val v = 7\n\
+        \x20 return if (v == 7 && parsed() == 42) \"OK\" else \"FAIL\"\n\
+        }\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(SRC, "Main").expect("lexically shadowed alias"),
+        "OK"
+    );
+}
+
+#[test]
+fn imported_type_alias_resolves_in_type_position() {
+    const SRC: &str = "import java.util.ArrayList as ListImpl\n\
+        fun size(xs: ListImpl<String>): Int = xs.size\n\
+        fun box(): String = if (size(ListImpl<String>()) == 0) \"OK\" else \"FAIL\"\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(SRC, "Main").expect("aliased imported type"),
         "OK"
     );
 }

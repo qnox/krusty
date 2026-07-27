@@ -1795,7 +1795,13 @@ pub fn import_map(file: &File) -> HashMap<String, String> {
             continue;
         }
         if let Some(simple) = fq.rsplit('.').next() {
-            m.insert(simple.to_string(), fq.replace('.', "/"));
+            let internal = fq.replace('.', "/");
+            let source_name = file
+                .import_aliases
+                .iter()
+                .find_map(|(alias, target)| (target == fq).then_some(alias.as_str()))
+                .unwrap_or(simple);
+            m.insert(source_name.to_string(), internal);
         }
     }
     m
@@ -6763,7 +6769,7 @@ pub enum ExprLowering {
     /// An unqualified function reference `::foo` where `foo` is imported from a SAME-FILE `object`
     /// (`import Host.foo`) — a BOUND reference to that object's singleton member, lowered exactly like
     /// `Host::foo` (capture `Host.INSTANCE`, invoke the member).
-    ImportedObjectMemberRef { internal: TypeName },
+    ImportedObjectMemberRef { internal: TypeName, member: String },
     /// A function reference `::of` whose target has a trailing `vararg` (and no fixed defaults), adapted
     /// to a function type of LARGER arity: the expected function type's extra parameters (beyond the
     /// `fixed` leading fixed parameters) are COLLECTED into the vararg array. `target_params` is `of`'s
@@ -6818,7 +6824,7 @@ pub enum ExprLowering {
     /// unqualified (`import Obj.m; m()`). Kotlin dispatches this on the singleton, so lowering reads
     /// `getstatic <internal>.INSTANCE` as the receiver and invokes the member — the same shape a qualified
     /// `Obj.m(args)` produces (a receiver whose [`ObjectValue`] lowering names `internal`).
-    ObjectMemberCall { internal: TypeName },
+    ObjectMemberCall { internal: TypeName, member: String },
     /// A `this@Label` that denotes the INNERMOST receiver (the current `this`), so it lowers as a bare
     /// `this`. Only recorded for the innermost match; an outer-receiver label is left unresolved/skipped.
     LabeledThisInner,
@@ -11783,6 +11789,23 @@ impl<'a> Checker<'a> {
             .map(|r| self.resolve_ty_no_diag(r))
     }
 
+    fn is_enum_type(&self, ty: Ty) -> bool {
+        let Some(internal) = ty.obj_internal() else {
+            return false;
+        };
+        internal.matches("kotlin/Enum")
+            || internal.matches("java/lang/Enum")
+            || self.syms.enums.iter().any(|(name, _)| {
+                self.syms
+                    .classes
+                    .get(name)
+                    .is_some_and(|c| c.internal == internal)
+            })
+            || self
+                .resolved_type_name(internal)
+                .is_some_and(|t| t.is_enum())
+    }
+
     fn classpath_companion_ty(&self, name: &str) -> Option<Ty> {
         let internal = self.syms.class_names.get(name)?;
         if internal.starts_with("__ty/") {
@@ -12781,12 +12804,12 @@ impl<'a> Checker<'a> {
         }
         // The target is a same-file top-level function, or a member imported from a same-file `object`
         // (`import Host.foo`) — the latter recorded so the adapter invokes it on `Host.INSTANCE`.
-        let (sig, object_internal) = if let Some(sig) = self.syms.single_fun(name) {
-            (sig, None)
+        let (sig, object_internal, target_name) = if let Some(sig) = self.syms.single_fun(name) {
+            (sig, None, name.to_string())
         } else if !self.module_declares(name) {
-            let internal = self.object_member_import(name)?;
-            let sig = self.syms.method_of_name(internal, name)?;
-            (sig, Some(internal))
+            let (internal, member) = self.object_member_import(name)?;
+            let sig = self.syms.method_of_name(internal, &member)?;
+            (sig, Some(internal), member)
         } else {
             return None;
         };
@@ -12814,7 +12837,7 @@ impl<'a> Checker<'a> {
                 self.expr_lowers.insert(
                     ref_expr,
                     ExprLowering::AdaptedVarargCollect {
-                        name: name.to_string(),
+                        name: target_name,
                         target_params: sig.params.clone(),
                         adapted_params: exp.params.clone(),
                         ret: exp.ret,
@@ -14639,12 +14662,12 @@ impl<'a> Checker<'a> {
                     // bound reference to the singleton member, lowered like `Host::foo`. Only when the
                     // module does not declare `foo` itself (a local declaration shadows the import).
                     if !self.module_declares(&name) {
-                        if let Some(internal) = self.object_member_import(&name) {
-                            if let Some(sig) = self.syms.method_of_name(internal, &name) {
+                        if let Some((internal, member)) = self.object_member_import(&name) {
+                            if let Some(sig) = self.syms.method_of_name(internal, &member) {
                                 if sig.requires_all_args() {
                                     self.expr_lowers.insert(
                                         e,
-                                        ExprLowering::ImportedObjectMemberRef { internal },
+                                        ExprLowering::ImportedObjectMemberRef { internal, member },
                                     );
                                     return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                                 }
@@ -17711,11 +17734,7 @@ impl<'a> Checker<'a> {
                 if self.value_root_shadows_classifier(root) {
                     return None;
                 }
-                // Map the (possibly imported) OUTER name to its classpath FQN, then let
-                // `nested_internal_name` fold the trailing segments into `$`-joined nested classes
-                // (`Message.RecipientType` → `jakarta/mail/Message$RecipientType`). A path that is
-                // already fully qualified resolves without the prefix step. Without this, the receiver
-                // was flattened with `/` and never matched the real nested internal name.
+                // Resolve the outer classifier, then apply the shared nested-name recovery.
                 let fq = self
                     .imported_type_internal(root)
                     .map(|outer| format!("{outer}{}", &path[root.len()..]))
@@ -17730,25 +17749,22 @@ impl<'a> Checker<'a> {
     /// a/b/Obj/member`), the object's internal name — so an unqualified call `member(args)` can dispatch
     /// on the singleton. `None` unless the import's owner path resolves to an object carrying a member of
     /// this name (the owner-value lowering, `getstatic Obj.INSTANCE`, requires a plain object INSTANCE).
-    fn object_member_import(&self, name: &str) -> Option<TypeName> {
+    fn object_member_import(&self, name: &str) -> Option<(TypeName, String)> {
         let full = self.imports.get(name)?;
         let (owner_path, member) = full.rsplit_once('/')?;
-        if member != name {
-            return None;
-        }
         // A SAME-FILE object with a member of this name — dispatch on its singleton exactly like a
         // classpath object (`getstatic Obj.INSTANCE; invoke`).
         if self.syms.objects.contains(owner_path) {
             if let Some(cls) = self.syms.classes.get(owner_path) {
-                if cls.methods.contains_key(name) {
-                    return Some(cls.internal_name());
+                if cls.methods.contains_key(member) {
+                    return Some((cls.internal_name(), member.to_string()));
                 }
             }
         }
         let owner = self.nested_internal_name(owner_path)?;
         self.resolved_type_name(owner)
             .filter(|t| t.is_object())
-            .map(|_| owner)
+            .map(|_| (owner, member.to_string()))
     }
 
     /// Primary-constructor parameter names/defaults of a same-file class, in declaration order — for
@@ -18810,8 +18826,13 @@ impl<'a> Checker<'a> {
                                     args,
                                     &arg_tys,
                                 ) {
-                                    self.expr_lowers
-                                        .insert(call, ExprLowering::ObjectMemberCall { internal });
+                                    self.expr_lowers.insert(
+                                        call,
+                                        ExprLowering::ObjectMemberCall {
+                                            internal,
+                                            member: name.clone(),
+                                        },
+                                    );
                                     return ret;
                                 }
                             }
@@ -18859,7 +18880,10 @@ impl<'a> Checker<'a> {
                                 let owner = type_name(&comp_internal);
                                 self.expr_lowers.insert(
                                     call,
-                                    ExprLowering::ObjectMemberCall { internal: owner },
+                                    ExprLowering::ObjectMemberCall {
+                                        internal: owner,
+                                        member: name.clone(),
+                                    },
                                 );
                                 self.resolved_calls.insert(
                                     call,
@@ -19872,7 +19896,7 @@ impl<'a> Checker<'a> {
                         // miscompile the calling convention.
                         .filter(|m| !m.suspend)
                     {
-                        self.expect_call_args(&m.params, false, args, &arg_tys);
+                        self.expect_call_args(&m.params, m.call_sig.vararg, args, &arg_tys);
                         // Record the resolved static member so the lowerer emits it without
                         // re-resolving (see [`TypeInfo::resolved_companions`]).
                         let ret = m.ret;
@@ -20901,35 +20925,28 @@ impl<'a> Checker<'a> {
                                 return Ty::obj_args("kotlin/Array", &[Ty::nullable(elem)]);
                             }
                         }
-                        // `enumValueOf<E>(name)` / `enumValues<E>()` are compiler intrinsics (declared in
-                        // the kotlin builtins, no JVM facade). The value type is the reified enum type
-                        // ARGUMENT; lowering synthesizes `E.valueOf(name)` / `E.values()`.
+                        // `enumValueOf<E>(name)` / `enumValues<E>()` have no callable JVM facade.
+                        // Validate the reified type here; lowering only realizes the selected enum static.
                         if fname == "enumValueOf" && args.len() == 1 {
-                            let arg = self
-                                .file
-                                .call_type_args
-                                .get(&call.0)
-                                .and_then(|ts| ts.first())
-                                .cloned();
                             self.expect_assignable(
                                 Ty::String,
                                 arg_tys[0],
                                 self.span(args[0]),
                                 "enum name",
                             );
-                            return arg
-                                .map(|r| self.resolve_ty(&r))
-                                .unwrap_or_else(|| Ty::obj("kotlin/Enum"));
+                            if let Some(enum_ty) = self
+                                .reified_type_arg(call)
+                                .filter(|ty| self.is_enum_type(*ty))
+                            {
+                                return enum_ty;
+                            }
                         }
                         if fname == "enumValues" && args.is_empty() {
-                            if let Some(r) = self
-                                .file
-                                .call_type_args
-                                .get(&call.0)
-                                .and_then(|ts| ts.first())
-                                .cloned()
+                            if let Some(enum_ty) = self
+                                .reified_type_arg(call)
+                                .filter(|ty| self.is_enum_type(*ty))
                             {
-                                return Ty::array(self.resolve_ty(&r));
+                                return Ty::array(enum_ty);
                             }
                         }
                         let element_hint = self
@@ -21753,13 +21770,13 @@ impl<'a> Checker<'a> {
                 // Kotlin dispatches on the singleton — record the object so LOWERING emits
                 // `getstatic Obj.INSTANCE; invokevirtual`. Args (including a trailing lambda) were typed
                 // above, so `resolve_instance_member` selects the overload.
-                if let Some(internal) = self.object_member_import(&fname) {
+                if let Some((internal, member)) = self.object_member_import(&fname) {
                     // A SAME-FILE object member resolves through the module (`method_of`), not the
                     // classpath — the same singleton dispatch (`ObjectMemberCall`) lowers it. A local
                     // declaration of the same name SHADOWS the import (Kotlin), so only bind the import
                     // when the module does not declare `fname` itself.
                     if !self.module_declares(&fname) {
-                        if let Some(sig) = self.syms.method_of_name(internal, &fname) {
+                        if let Some(sig) = self.syms.method_of_name(internal, &member) {
                             if sig.requires_all_args() && args.len() == sig.params.len() {
                                 for (i, &a) in args.iter().enumerate() {
                                     self.expect_assignable(
@@ -21769,23 +21786,28 @@ impl<'a> Checker<'a> {
                                         "argument",
                                     );
                                 }
-                                self.expr_lowers
-                                    .insert(call, ExprLowering::ObjectMemberCall { internal });
+                                self.expr_lowers.insert(
+                                    call,
+                                    ExprLowering::ObjectMemberCall {
+                                        internal,
+                                        member: member.clone(),
+                                    },
+                                );
                                 return sig.ret;
                             }
                         }
                     }
                     let internal_rendered = internal.render();
                     if let Some(m) =
-                        self.resolve_instance_member(Ty::obj_name(internal), &fname, &arg_tys)
+                        self.resolve_instance_member(Ty::obj_name(internal), &member, &arg_tys)
                     {
                         crate::trace_compiler!(
                             "resolve",
-                            "unqualified object-member import {fname}() -> {internal_rendered}.{fname}"
+                            "unqualified object-member import {fname}() -> {internal_rendered}.{member}"
                         );
                         let ret = m.ret;
                         self.expr_lowers
-                            .insert(call, ExprLowering::ObjectMemberCall { internal });
+                            .insert(call, ExprLowering::ObjectMemberCall { internal, member });
                         self.resolved_calls.insert(call, ResolvedCall::Member(m));
                         return ret;
                     }
@@ -21842,48 +21864,46 @@ impl<'a> Checker<'a> {
                         f.rsplit_once('/')
                             .map(|(o, m)| (o.to_string(), m.to_string()))
                     }) {
-                        if member == fname {
-                            if let Some(owner_internal) = self.nested_internal(&owner_path) {
-                                if let Some(m) =
-                                    self.resolve_companion(&owner_internal, &fname, &arg_tys)
-                                {
-                                    let owner = m.owner_name_or(&owner_internal);
-                                    let phys =
-                                        m.physical_name.clone().unwrap_or_else(|| m.name.clone());
-                                    let mut callable = crate::libraries::LibraryCallable::library(
-                                        owner,
-                                        phys,
-                                        m.params.clone(),
-                                        m.ret,
-                                        m.physical_ret,
-                                        m.descriptor.clone(),
-                                    );
-                                    callable.suspend = m.suspend;
-                                    let ret = m.ret;
-                                    let vararg =
-                                        m.params.last().and_then(|p| p.array_elem()).filter(|_| {
-                                            m.params.len() != args.len()
-                                                || arg_tys.last() != m.params.last()
-                                        });
-                                    if let Some(elem) = vararg {
-                                        callable.vararg_elem = Some(elem);
-                                        let fixed = m.params.len() - 1;
-                                        for (i, &a) in args.iter().enumerate() {
-                                            let pt = if i < fixed { m.params[i] } else { elem };
-                                            self.expect_assignable(
-                                                pt,
-                                                arg_tys[i],
-                                                self.span(a),
-                                                "argument",
-                                            );
-                                        }
-                                    } else {
-                                        self.expect_call_args(&m.params, false, args, &arg_tys);
+                        if let Some(owner_internal) = self.nested_internal(&owner_path) {
+                            if let Some(m) =
+                                self.resolve_companion(&owner_internal, &member, &arg_tys)
+                            {
+                                let owner = m.owner_name_or(&owner_internal);
+                                let phys =
+                                    m.physical_name.clone().unwrap_or_else(|| m.name.clone());
+                                let mut callable = crate::libraries::LibraryCallable::library(
+                                    owner,
+                                    phys,
+                                    m.params.clone(),
+                                    m.ret,
+                                    m.physical_ret,
+                                    m.descriptor.clone(),
+                                );
+                                callable.suspend = m.suspend;
+                                let ret = m.ret;
+                                let vararg = m
+                                    .call_sig
+                                    .vararg
+                                    .then(|| m.params.last().and_then(|p| p.array_elem()))
+                                    .flatten();
+                                if let Some(elem) = vararg {
+                                    callable.vararg_elem = Some(elem);
+                                    let fixed = m.params.len() - 1;
+                                    for (i, &a) in args.iter().enumerate() {
+                                        let pt = if i < fixed { m.params[i] } else { elem };
+                                        self.expect_assignable(
+                                            pt,
+                                            arg_tys[i],
+                                            self.span(a),
+                                            "argument",
+                                        );
                                     }
-                                    self.resolved_calls
-                                        .insert(call, ResolvedCall::TopLevel(callable));
-                                    return ret;
+                                } else {
+                                    self.expect_call_args(&m.params, false, args, &arg_tys);
                                 }
+                                self.resolved_calls
+                                    .insert(call, ResolvedCall::TopLevel(callable));
+                                return ret;
                             }
                         }
                     }

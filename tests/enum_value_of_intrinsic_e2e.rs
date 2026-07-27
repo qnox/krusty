@@ -26,3 +26,12 @@ inline fun <reified T : Enum<T>> parse(s: String): T = enumValueOf<T>(s)\n\
 fun box(): String = if (parse<Color>(\"GREEN\") == Color.GREEN) \"OK\" else \"no\"\n";
     common::expect_box_ok_with_stdlib(src, "EnumValueOfForward");
 }
+
+#[test]
+fn enum_value_of_rejects_a_non_enum_type() {
+    let src = "fun box(): String = enumValueOf<String>(\"OK\")\n";
+    assert!(
+        common::compile_and_run_with_stdlib(src, "EnumValueOfNonEnum").is_none(),
+        "a non-enum type argument must not reach enum intrinsic lowering"
+    );
+}
