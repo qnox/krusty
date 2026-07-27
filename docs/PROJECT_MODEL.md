@@ -29,15 +29,19 @@ Providers are selected in this order:
 2. A JVM-capable `.bsp/*.json` connection.
 3. Gradle markers: settings/build scripts or wrapper.
 4. Maven markers: `pom.xml` or wrapper.
-5. No build system. The workspace is one source root and `lib/*.jar` plus `libs/*.jar` form its
+5. A JetBrains JPS model listed by `.idea/modules.xml`.
+6. No build system. The workspace is one source root and `lib/*.jar` plus `libs/*.jar` form its
    classpath.
 
 Gradle wins when Gradle and Maven markers occur in the same directory. Detection walks at most 16
-ancestors so opening a subdirectory can still find its build root.
+ancestors so opening a subdirectory can still find its build root. JPS is the fallback across the
+whole ancestor search; a nested `.idea` directory cannot hide a parent Gradle or Maven build.
 
 Non-explicit providers register a common set of build-marker and local-jar watcher globs. On a
 watched change the server detects the provider again, which covers adding or removing BSP, Gradle,
 Maven, and local-jar markers after initialization.
+JPS adds `.iml`, `misc.xml`, and project-library globs only while it is the active provider, so IDE
+metadata churn cannot trigger Gradle or Maven probes.
 
 ## Gradle
 
@@ -81,6 +85,19 @@ including failed probes.
 
 Maven `settings.xml` and `toolchains.xml` participate in invalidation. Maven toolchain selection is
 not yet imported into `ProjectModel`; normal JDK discovery still applies.
+
+## JPS
+
+The JPS provider reads IntelliJ's `.idea/modules.xml`, the listed `.iml` files, project libraries,
+compiler output settings, language levels, and project SDK without launching the IDE or a JVM.
+Every `.iml` becomes a main module and, when test roots or test-scoped dependencies exist, a test
+module. All content roots are included. Project and module libraries contribute their class roots;
+module order entries become model dependencies.
+
+IntelliJ path macros and `file:`/`jar:` URLs are resolved through the same standards-based local-file
+URI parser used by other providers. Unknown macros and unavailable home-dependent macros are ignored
+instead of becoming relative paths. The project SDK name is matched against JetBrains
+`jdk.table.xml` files and accepted only when the resulting directory is a valid JDK home.
 
 ## BSP
 
@@ -133,7 +150,8 @@ A candidate must contain `lib/modules`. If no JDK is found, the server reports o
 ## Tests
 
 Provider detection, fingerprinting, model mapping, refresh failure retention, URI handling, and
-command construction are unit-tested. Gradle, Maven, and BSP parsing use recorded responses or fake
-transports, so the default test suite does not require those tools to be installed.
+command construction are unit-tested. Gradle, Maven, JPS, and BSP parsing use recorded responses,
+temporary project trees, or fake transports, so the default test suite does not require those tools
+or an IntelliJ installation.
 
 The tests do not currently execute real Gradle, Maven, Android, multiplatform, or BSP fixtures in CI.

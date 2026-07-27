@@ -4,12 +4,20 @@
 pub struct Element {
     pub name: String,
     pub text: String,
+    pub attributes: Vec<(String, String)>,
     pub children: Vec<Element>,
 }
 
 impl Element {
     pub fn child(&self, name: &str) -> Option<&Element> {
         self.children.iter().find(|child| child.name == name)
+    }
+
+    pub fn attr(&self, name: &str) -> Option<&str> {
+        self.attributes
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
     }
 
     pub fn children_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Element> {
@@ -48,6 +56,10 @@ fn element(node: roxmltree::Node<'_, '_>) -> Element {
             .children()
             .filter(|child| child.is_text())
             .filter_map(|child| child.text())
+            .collect(),
+        attributes: node
+            .attributes()
+            .map(|attribute| (attribute.name().to_string(), attribute.value().to_string()))
             .collect(),
         children: node
             .children()
@@ -120,5 +132,25 @@ mod tests {
         assert_eq!(project.text_at(&["artifactId"]), Some("a&b"));
         assert_eq!(project.text_at(&["groupId"]), Some("x.y"));
         assert_eq!(parse("<a><b></a></b>"), None);
+    }
+
+    #[test]
+    fn attributes_are_captured_and_readable() {
+        let doc = parse(r#"<orderEntry type="library" name="junit" scope="TEST" />"#).unwrap();
+        assert_eq!(doc.attr("type"), Some("library"));
+        assert_eq!(doc.attr("name"), Some("junit"));
+        assert_eq!(doc.attr("scope"), Some("TEST"));
+        assert_eq!(doc.attr("missing"), None);
+    }
+
+    #[test]
+    fn attributes_on_nested_children_are_reachable() {
+        let doc =
+            parse(r#"<content><sourceFolder url="file://x" isTestSource="true" /></content>"#)
+                .unwrap();
+        let folder = doc.child("sourceFolder").unwrap();
+        assert_eq!(folder.attr("isTestSource"), Some("true"));
+        // Existing text/child API still works.
+        assert_eq!(doc.text_at(&["sourceFolder"]), None);
     }
 }

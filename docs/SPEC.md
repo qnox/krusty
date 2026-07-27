@@ -854,6 +854,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   into a `Ref` exactly like a plain captured `var` local (`var [a,b]=A(); val f={a=3}; f()` sees `a==3`).
   Tests: `multiDecl/*` box corpus (+96 gate), `tests/name_based_destructuring_e2e.rs`.
 
+- **JPS (`.idea/`) project model.** For IntelliJ-native projects without a Gradle, Maven, or BSP model,
+  the LSP statically reads `.idea/modules.xml`, every listed `*.iml`, `.idea/libraries/*.xml`, and
+  `.idea/misc.xml`; no IDE, JVM, or build tool is launched. Detection order is `Explicit` > `BSP` >
+  `Gradle`/`Maven` > `JPS` > `None`. JPS remains the fallback across the full bounded ancestor search, so
+  a nested `.idea` model cannot hide a parent build-tool marker. Each `.iml` maps to a main module and,
+  when it declares test roots or test-scoped dependencies, a test module. All `<content>` roots are
+  scanned; generated roots are marked, resources are excluded, project and module library `CLASSES`
+  roots form the classpath, and module order entries form dependency edges. `RUNTIME` entries are excluded
+  from compile classpaths; `TEST` entries are visible only to the test module. The test module depends on
+  its main module and receives the main output as a friend path.
+
+  IntelliJ path macros (`$PROJECT_DIR$`, `$MODULE_DIR$`, `$MAVEN_REPOSITORY$`, `$USER_HOME$`) are expanded
+  before `file:` and `jar:` URLs pass through the shared local-file URI decoder. Unknown macros and
+  unavailable home-dependent macros are skipped instead of becoming relative paths. Project and module
+  language levels become `jvm_target`; preview levels use their underlying JVM version. The project SDK
+  name is matched against JetBrains `jdk.table.xml` files and accepted only when it resolves to a valid
+  JDK home. Malformed or unreadable listed model files fail the probe, allowing transactional refresh to
+  retain the last good model. JPS-only watcher globs are registered only while JPS is active, preventing
+  IntelliJ metadata churn from retriggering Gradle or Maven. The shared XML reader now exposes element
+  attributes for this attribute-driven format. Tests: `crates/krusty-lsp/src/project/jps.rs`,
+  `project/detect.rs`, and the shared project-model test suite.
+
 - **Primitive-bounded type parameters (specialization).** kotlinc specializes a type parameter with a
   primitive upper bound to that primitive — `fun <T: Int> f(t: T): T` compiles to descriptor `(I)I`, not
   `(Object)Object`. krusty specializes a FUNCTION type parameter whose bound is an INTEGRAL wrappable
