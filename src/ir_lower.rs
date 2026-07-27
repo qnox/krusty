@@ -18091,6 +18091,33 @@ impl<'a> Lower<'a> {
                         );
                     }
                 }
+                if let Some(ExprLowering::ModuleFunctionRef { target, owner }) =
+                    self.info.expr_lowers.get(&e).cloned()
+                {
+                    let Ty::Fun(signature) = self.info.ty(e) else {
+                        return None;
+                    };
+                    if signature.params.len() != target.params.len() || signature.ret == Ty::Nothing
+                    {
+                        return None;
+                    }
+                    return self.make_func_ref(
+                        e.0,
+                        false,
+                        signature.params.len() as u8,
+                        owner,
+                        name.clone(),
+                        1,
+                        crate::ir::FrDispatch::Static,
+                        owner,
+                        target.name,
+                        false,
+                        tys_to_ir(&signature.params),
+                        ty_to_ir(signature.ret),
+                        None,
+                        Some((tys_to_ir(&target.params), ty_to_ir(target.physical_ret))),
+                    );
+                }
                 // A property reference is typed by its callable shape, but still lowers to the Kotlin
                 // property-reference runtime object on the JVM.
                 if let Some(recv) = receiver {
