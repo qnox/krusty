@@ -2,7 +2,7 @@
 //! (internal `A$B$C`) — not the truncated `B.C` the immediate-parent prefix alone produces — so a
 //! member of `B` can reference `C` by simple name (Kotlin's nested-type scoping). Previously krusty
 //! REJECTED `val c: C` inside a nested `B` as unresolved, dropping the whole file (the dominant
-//! RED_REJECTED bucket on the generated httpclient models). This asserts the file now compiles + runs.
+//! RED_REJECTED bucket on generated models). This asserts the file now compiles + runs.
 use super::common;
 
 fn run(src: &str) -> Option<String> {

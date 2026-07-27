@@ -113,7 +113,7 @@ pub fn lower_suspend(
         // block-scoped local (a `for`-loop iterator) into every later suspension's scope. Suspend-call
         // expr ids are stable through the transforms; keyed per function.
         if let (Some(b), None) = (body, forward) {
-            if !pre_splice_scopes.contains_key(&fid) {
+            if let std::collections::hash_map::Entry::Vacant(entry) = pre_splice_scopes.entry(fid) {
                 let is_lambda = ir.suspend_lambda_sm.iter().any(|(f2, _, _)| *f2 == fid);
                 let prefix: Vec<(u32, Ty)> = if is_lambda {
                     Vec::new()
@@ -172,7 +172,7 @@ pub fn lower_suspend(
                             }
                         }
                     }
-                    pre_splice_scopes.insert(fid, out);
+                    entry.insert(out);
                 }
             }
         }
@@ -1440,6 +1440,7 @@ fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> boo
 /// local live across any suspension point is spilled to a continuation field (restored at the loop top so
 /// its slot is frame-consistent on every dispatch path). Returns `false` (skip, never miscompile) for a
 /// shape the flattener doesn't handle yet (a suspension nested deeper than a branch value, in a loop, …).
+#[allow(clippy::too_many_arguments)]
 fn build_state_machine(
     ir: &mut IrFile,
     facade: &str,

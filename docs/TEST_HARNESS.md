@@ -54,6 +54,11 @@ compiler and codegen/box corpus, exports `KRUSTY_KOTLINC` and `KRUSTY_KOTLIN_BOX
 binaries once with Cargo's `gate` profile, runs the internally parallel conformance binary alone, then
 runs the remaining test binaries in slow-first parallel order.
 
+CI builds the conformance test binary once and runs that artifact against every version in
+`kotlin-versions`. `KRUSTY_LANGUAGE_VERSION`, `KRUSTY_KOTLINC`, and `KRUSTY_KOTLIN_BOX_DIR` select the
+runtime reference toolchain, so the matrix does not rebuild Rust code per Kotlin version. Each leg
+must retain zero accepted-case miscompiles and score at least 40% before a release can publish.
+
 Do not use `--release` for tests. The release build cycle takes longer than it saves at runtime, and
 `run-tests.sh --release` is rejected intentionally.
 

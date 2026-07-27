@@ -1,8 +1,8 @@
 //! Kotlin nested-type scoping: inside a class, an UNQUALIFIED simple name referring to that class's own
 //! nested type SHADOWS a same-named top-level (or imported) type. krusty resolved the top-level instead,
 //! so a member's field/getter/componentN/copy carried the wrong type — pervasive in the generated
-//! httpclient models, where an event inlines a nested `GhMilestoneClient` that shadows the shared
-//! top-level one. The checker's `resolve_type` (via `enclosing_nested_type`), the signature-phase
+//! client models, where an event inlines a nested client type that shadows the shared top-level one.
+//! The checker's `resolve_type` (via `enclosing_nested_type`), the signature-phase
 //! class-scope extension, and the lowerer's `field_ty_in` all prefer the nested form consistently.
 use super::common;
 

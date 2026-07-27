@@ -11,7 +11,8 @@
 
 use crate::conformance::directive;
 use crate::jvm::classpath::Classpath;
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 /// Locate a complete kotlin-stdlib jar from the dist or standard local caches, mirroring how a
 /// drop-in `kotlinc` user supplies it via `-classpath`. "Complete" = the jar's facades yield type
@@ -111,13 +112,68 @@ fn max_reference_version() -> &'static str {
         .unwrap_or("2.0.21")
 }
 
-/// The `lib/` dir of the provisioned kotlinc dist we differential-test against. Its jars are the
-/// **exact** ones the reference compiler ships, so we prefer them over Maven/gradle copies.
+fn nonempty_path(value: Option<OsString>) -> Option<PathBuf> {
+    value.filter(|value| !value.is_empty()).map(PathBuf::from)
+}
+
+fn reference_version_from(env: Option<String>) -> String {
+    env.filter(|v| !v.is_empty())
+        .unwrap_or_else(|| max_reference_version().to_string())
+}
+
+fn reference_version() -> String {
+    reference_version_from(std::env::var("KRUSTY_LANGUAGE_VERSION").ok())
+}
+
+fn find_ancestor(start: &Path, mut matches: impl FnMut(&Path) -> bool) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|path| matches(path))
+        .map(Path::to_path_buf)
+}
+
+fn workspace_root_from(start: &Path) -> Option<PathBuf> {
+    find_ancestor(start, |path| path.join("kotlin-versions").is_file())
+}
+
+fn workspace_root() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| workspace_root_from(path.parent()?))
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|path| workspace_root_from(&path))
+        })
+}
+
+fn provisioned_path(root: &Path, kind: &str, version: &str, suffix: &str) -> PathBuf {
+    root.join("target")
+        .join("cache")
+        .join(kind)
+        .join(version)
+        .join(suffix)
+}
+
+fn toolchain_path(env: Option<OsString>, kind: &str, suffix: &str) -> Option<PathBuf> {
+    nonempty_path(env).or_else(|| {
+        Some(provisioned_path(
+            &workspace_root()?,
+            kind,
+            &reference_version(),
+            suffix,
+        ))
+    })
+}
+
+/// The `lib/` dir of the reference kotlinc dist we differential-test against — its jars are the
+/// exact ones the reference compiler ships. `KRUSTY_KOTLINC` overrides the provisioned dist.
 pub fn kotlinc_lib_dir() -> Option<PathBuf> {
-    let kc = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
-        "target/cache/kotlinc/{}/kotlinc/bin/kotlinc",
-        max_reference_version()
-    ));
+    let kc = toolchain_path(
+        std::env::var_os("KRUSTY_KOTLINC"),
+        "kotlinc",
+        "kotlinc/bin/kotlinc",
+    )?;
     let lib = kc.is_file().then_some(kc)?.parent()?.parent()?.join("lib");
     lib.is_dir().then_some(lib)
 }
@@ -152,12 +208,14 @@ pub fn kotlin_version() -> String {
         .unwrap_or_else(|| max_reference_version().to_string())
 }
 
-/// The provisioned Kotlin codegen/box corpus root.
+/// The provisioned Kotlin codegen/box corpus root. `KRUSTY_KOTLIN_BOX_DIR` overrides the
+/// version-selected cache path.
 pub fn box_corpus_dir() -> Option<PathBuf> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
-        "target/cache/box-corpus/{}/compiler/testData/codegen/box",
-        max_reference_version()
-    ));
+    let p = toolchain_path(
+        std::env::var_os("KRUSTY_KOTLIN_BOX_DIR"),
+        "box-corpus",
+        "compiler/testData/codegen/box",
+    )?;
     p.is_dir().then_some(p)
 }
 
@@ -326,5 +384,59 @@ fn collect_stdlib_jars(dir: &std::path::Path, out: &mut Vec<PathBuf>, depth: usi
                 out.push(p);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reference_version_prefers_env() {
+        assert_eq!(reference_version_from(Some("1.9.24".to_string())), "1.9.24");
+        // Empty env var counts as unset -> compile-time max.
+        assert_eq!(
+            reference_version_from(Some(String::new())),
+            max_reference_version()
+        );
+        assert_eq!(reference_version_from(None), max_reference_version());
+    }
+
+    #[test]
+    fn provisioned_paths_share_versioned_cache_layout() {
+        let a = provisioned_path(
+            Path::new("/m"),
+            "box-corpus",
+            "1.9.24",
+            "compiler/testData/codegen/box",
+        );
+        let b = provisioned_path(Path::new("/m"), "kotlinc", "1.9.24", "kotlinc/bin/kotlinc");
+        assert_eq!(
+            a,
+            Path::new("/m/target/cache/box-corpus/1.9.24/compiler/testData/codegen/box")
+        );
+        assert_eq!(
+            b,
+            Path::new("/m/target/cache/kotlinc/1.9.24/kotlinc/bin/kotlinc")
+        );
+    }
+
+    #[test]
+    fn ancestor_is_discovered_from_a_nested_path() {
+        let nested = Path::new("/workspace/target/gate/deps");
+        assert_eq!(
+            find_ancestor(nested, |path| path.ends_with("workspace")),
+            Some(PathBuf::from("/workspace"))
+        );
+    }
+
+    #[test]
+    fn path_override_is_os_native_and_empty_is_unset() {
+        assert_eq!(
+            nonempty_path(Some(OsString::from("/toolchain"))),
+            Some(PathBuf::from("/toolchain"))
+        );
+        assert_eq!(nonempty_path(Some(OsString::new())), None);
+        assert_eq!(nonempty_path(None), None);
     }
 }

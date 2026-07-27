@@ -1,15 +1,7 @@
 name: ci
 
-# PR gate (req #4): the whole gate is one command — `just ci` (lint + coverage-gate +
-# conformance-all-plain) — run identically locally, in the pre-commit/pre-push hooks, and here in the
-# `ci` job. Also runs on master pushes so the default branch never goes red unnoticed. Locally and in
-# the hooks, conformance runs against the LATEST supported Kotlin version only, so the inner loop
-# stays fast.
-#
-# CI additionally validates EVERY supported Kotlin reference version in the `conformance` job — one
-# parallel matrix job per version (list computed from the kotlin-versions manifest via
-# `just matrix-json`), each running `just conformance-one <ver>` against that version's own vendored
-# kotlinc + box corpus. So the local gate is quick and CI still covers the whole support matrix.
+# Build the conformance test binary once, run it against every supported Kotlin version, and publish
+# only after every version passes the zero-miscompile and 40% coverage gates.
 on:
   pull_request:
   push:
@@ -20,10 +12,11 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
-  # The one-command local gate: lint + coverage + conformance (latest version only).
+  # Fast, version-independent correctness gate: lint + coverage + latest-version regression
+  # conformance (zero miscompiles). Identical to the local/hook gate (`just ci`).
   ci:
     runs-on: ubuntu-latest
     steps:
@@ -40,10 +33,7 @@ jobs:
       - uses: actions/setup-java@v5
         with:
           distribution: zulu
-          java-version: '25' # krusty's reference toolchain is Java 25; JVM-run e2e tests need it
-      # Cache the reference kotlinc dist + the codegen/box corpus, keyed by manifest hash. `just ci`
-      # (-> conformance-all-plain) provisions the latest version's toolchain + corpus on a miss, so
-      # the conformance gate actually runs (it FAILS, not skips, without these).
+          java-version: '25'
       - name: cache kotlin toolchain + box corpus
         uses: actions/cache@v6
         with:
@@ -56,21 +46,40 @@ jobs:
       - name: just ci
         run: just ci
 
-  # Emit the supported-version list (from the kotlin-versions manifest) as the conformance matrix.
+  build-conformance-bin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v4
+      - name: build conformance test binary
+        run: |
+          set -euo pipefail
+          bin=$(just conformance-bin)
+          cp "$bin" conformance-bin
+      - uses: actions/upload-artifact@v7
+        with:
+          name: conformance-bin
+          path: conformance-bin
+          if-no-files-found: error
+
+  # Supported-version matrix + the max version (for the badge later), from the kotlin-versions manifest.
   versions:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
+      max: ${{ steps.set.outputs.max }}
     steps:
       - uses: actions/checkout@v7
       - uses: extractions/setup-just@v4
       - id: set
-        run: echo "matrix=$(just matrix-json)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "matrix=$(just matrix-json)" >> "$GITHUB_OUTPUT"
+          echo "max=$(just max-version)" >> "$GITHUB_OUTPUT"
 
-  # Reference/box conformance against EVERY supported Kotlin version — one parallel job per version.
-  # fail-fast off so one version's failure doesn't cancel the others (each stands on its own).
   conformance:
-    needs: versions
+    needs: [build-conformance-bin, versions]
     strategy:
       fail-fast: false
       matrix:
@@ -78,14 +87,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v4
       - uses: actions/setup-java@v5
         with:
           distribution: zulu
           java-version: '25'
-      # Per-version kotlinc dist + box corpus cache. `just conformance-one` provisions both on a miss.
       - name: cache kotlin toolchain + box corpus (${{ matrix.version }})
         uses: actions/cache@v6
         with:
@@ -93,5 +99,156 @@ jobs:
             target/cache/kotlinc/${{ matrix.version }}
             target/cache/box-corpus/${{ matrix.version }}
           key: kotlin-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
-      - name: conformance ${{ matrix.version }}
-        run: just conformance-one ${{ matrix.version }}
+      - name: download conformance test binary
+        uses: actions/download-artifact@v8
+        with:
+          name: conformance-bin
+      - name: run conformance ${{ matrix.version }}
+        run: |
+          set -euo pipefail
+          chmod +x conformance-bin
+          just conformance-run "$PWD/conformance-bin" "${{ matrix.version }}" > pct.txt
+          read -r pct passed scanned < pct.txt
+          echo "pct=$pct passed=$passed scanned=$scanned"
+      - name: upload pct
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pct-${{ matrix.version }}
+          path: pct.txt
+          if-no-files-found: error
+      - name: enforce >= 40%
+        run: |
+          set -euo pipefail
+          read -r pct _ _ < pct.txt
+          awk "BEGIN{exit !($pct >= 40)}" \
+            || { echo "conformance ${{ matrix.version }} = ${pct}% < 40% — blocking" >&2; exit 1; }
+          echo "conformance ${{ matrix.version }} = ${pct}% >= 40% OK"
+
+  # Build the release binaries per OS/arch (master only). Independent of conformance so it can run in
+  # parallel; publishing is what waits on the gate.
+  build-release:
+    if: github.ref == 'refs/heads/master'
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { triple: x86_64-unknown-linux-gnu,  os: ubuntu-latest }
+          - { triple: aarch64-unknown-linux-gnu, os: ubuntu-latest, cross: true }
+          - { triple: aarch64-apple-darwin,      os: macos-15 }
+          - { triple: x86_64-apple-darwin,       os: macos-15-intel }
+          - { triple: x86_64-pc-windows-msvc,   os: windows-latest }
+          - { triple: aarch64-pc-windows-msvc,  os: windows-11-arm }
+    runs-on: ${{ matrix.target.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target.triple }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target.triple }}
+      - uses: extractions/setup-just@v4
+      - name: install aarch64-linux linker
+        if: matrix.target.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - name: build
+        shell: bash
+        run: just build-release "${{ matrix.target.triple }}"
+      - name: package compiler
+        id: compiler_pkg
+        shell: bash
+        run: echo "path=$(just package "${{ matrix.target.triple }}")" >> "$GITHUB_OUTPUT"
+      - name: package language server
+        id: lsp_pkg
+        shell: bash
+        run: echo "path=$(just package "${{ matrix.target.triple }}" krusty-lsp)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: krusty-${{ matrix.target.triple }}
+          path: |
+            ${{ steps.compiler_pkg.outputs.path }}
+            ${{ steps.lsp_pkg.outputs.path }}
+          if-no-files-found: error
+
+  release:
+    needs: [ci, conformance, versions, build-release]
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: extractions/setup-just@v4
+      - name: collect all target artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: krusty-*
+          path: dist
+          merge-multiple: true
+      - name: compute version + tag
+        id: v
+        run: |
+          ver=$(just version)
+          echo "ver=$ver"  >> "$GITHUB_OUTPUT"
+          echo "tag=v$ver" >> "$GITHUB_OUTPUT"
+      - name: package Zed extension
+        shell: bash
+        run: just package-zed
+      - name: publish
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.v.outputs.tag }}
+          name: krusty ${{ steps.v.outputs.ver }}
+          target_commitish: ${{ github.sha }}
+          files: dist/**
+          fail_on_unmatched_files: true
+      # Badge: read the max version's pct (produced by the conformance matrix) and publish to the gist.
+      - name: download max-version pct
+        if: ${{ vars.CONFORMANCE_GIST_ID != '' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: pct-${{ needs.versions.outputs.max }}
+      - name: compute badge color
+        if: ${{ vars.CONFORMANCE_GIST_ID != '' }}
+        id: c
+        run: |
+          set -euo pipefail
+          read -r pct passed scanned < pct.txt
+          color=red
+          awk "BEGIN{exit !($pct>=10)}" && color=orange || true
+          awk "BEGIN{exit !($pct>=40)}" && color=yellow || true
+          awk "BEGIN{exit !($pct>=70)}" && color=brightgreen || true
+          {
+            echo "pct=$pct"; echo "passed=$passed"; echo "scanned=$scanned"; echo "color=$color"
+          } >> "$GITHUB_OUTPUT"
+      - name: publish conformance badge → gist
+        if: ${{ vars.CONFORMANCE_GIST_ID != '' }}
+        uses: Schneegans/dynamic-badges-action@v1.9.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.CONFORMANCE_GIST_ID }}
+          filename: krusty-conformance.json
+          label: Kotlin ${{ needs.versions.outputs.max }} conformance
+          message: ${{ steps.c.outputs.pct }}% (${{ steps.c.outputs.passed }}/${{ steps.c.outputs.scanned }})
+          color: ${{ steps.c.outputs.color }}
+      - name: publish kotlin-version badge → gist
+        if: ${{ vars.CONFORMANCE_GIST_ID != '' }}
+        uses: Schneegans/dynamic-badges-action@v1.9.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.CONFORMANCE_GIST_ID }}
+          filename: krusty-kotlin.json
+          label: Kotlin
+          message: ${{ needs.versions.outputs.max }}
+          color: blue

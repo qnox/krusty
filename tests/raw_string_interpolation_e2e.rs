@@ -1,6 +1,6 @@
 //! Raw (triple-quoted) string interpolation: `"""$x/${e}"""`. krusty's lexer previously REJECTED any
 //! `$`/`${}` inside a raw string ("raw string interpolation is not supported"), dropping the whole
-//! file — pervasive in the generated httpclient `*Client.kt` files, which build request URLs as
+//! file — common in generated client files, which build request URLs as
 //! `"""$baseUrl/repos/${owner}/${repo}"""`. The lexer now lexes a raw template (verbatim chunks, no
 //! escape processing, triple-quote delimiter) into the same token stream as a regular template.
 use super::common;

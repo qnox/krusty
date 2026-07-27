@@ -122,12 +122,8 @@ conformance-all-plain:
     ./run-tests.sh --test conformance kotlin_codegen_box_conformance
     ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --test-threads=1
 
-# Run the external/reference conformance binary for ONE Kotlin reference version, plain (no coverage
-# instrumentation) — the per-version unit the CI matrix fans across (one job per supported version).
-# Version-matched kotlinc + box corpus + its own CARGO_TARGET_DIR (shared with `test-all`'s per-version
-# tree). Keep the memory-heavy Kotlin box corpus test isolated, then run every other conformance test
-# in a fresh single-threaded process. Kotlinc/box-corpus are auto-provisioned on a miss, so a direct
-# `just conformance-one <ver>` is self-sufficient.
+# Run all conformance tests for one runtime-selected Kotlin version. The shared Cargo target avoids
+# per-version rebuilds; the reference compiler and corpus are provisioned on demand.
 conformance-one VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -137,7 +133,6 @@ conformance-one VERSION:
     vendored="$PWD/target/cache/kotlinc/$v/kotlinc/bin/kotlinc"
     [ -z "$kc" ] && [ -x "$vendored" ] && kc="$vendored"
     [ -z "$kc" ] && kc="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
-    export CARGO_TARGET_DIR="target/kt-$v"
     export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
     export KRUSTY_LANGUAGE_VERSION="$v"
     export KRUSTY_KOTLINC="$kc"
@@ -325,21 +320,44 @@ test-all *ARGS:
 
 # --- Kotlin box-suite conformance (drives the README badge) ---
 
-# Run the codegen/box conformance suite and print "<pct> <passed> <scanned>". Auto-provisions the
-# reference kotlinc + box corpus (cached) so it never silently skips. Coverage <100% is fine — the
-# gate is "never miscompile an accepted case", not a percentage; the % is informational (the badge).
-conformance:
+# Build the conformance test binary and print its path.
+conformance-bin:
     #!/usr/bin/env bash
     set -euo pipefail
-    v="$(just max-version)"
-    export KRUSTY_KOTLINC="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
-    export KRUSTY_KOTLIN_BOX_DIR="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
-    out=$(cargo test --profile gate --test conformance kotlin_codegen_box_conformance -- --nocapture 2>&1 || true)
-    line=$(printf '%s\n' "$out" | grep -E 'box\(\)=OK:' | tail -1)
-    [ -n "$line" ] || { echo "no conformance summary — set KRUSTY_KOTLIN_BOX_DIR and JAVA_HOME" >&2; exit 1; }
-    scanned=$(printf '%s' "$line" | sed -E 's/.*scanned: ([0-9]+).*/\1/')
-    passed=$(printf '%s' "$line" | sed -E 's/.*box\(\)=OK: ([0-9]+).*/\1/')
-    printf '%s %s %s\n' "$(awk -v p="$passed" -v s="$scanned" 'BEGIN{printf "%.1f", (s>0)?100*p/s:0}')" "$passed" "$scanned"
+    bin=$(cargo test --no-run --profile gate --test conformance --message-format=json \
+      | jq -r 'select(.reason=="compiler-artifact" and .target.name=="conformance") | .executable // empty' \
+      | tail -1)
+    [ -n "$bin" ] && [ -x "$bin" ] || { echo "could not locate conformance test binary" >&2; exit 1; }
+    printf '%s\n' "$bin"
+
+# Run the codegen/box conformance suite and print "<pct> <passed> <scanned>". The suite's native
+# exit status still enforces zero miscompiles; the percentage is an additional release threshold.
+conformance VERSION=`just max-version`:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just conformance-run "$(just conformance-bin)" "{{VERSION}}"
+
+# Run a PREBUILT conformance test binary (path BIN) against Kotlin VERSION and print
+# "<pct> <passed> <scanned>". The test writes the report before its assertions, so callers receive
+# the metric without suppressing a zero-miscompile failure.
+conformance-run BIN VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v="{{VERSION}}"
+    bin="{{BIN}}"
+    [ -x "$bin" ] || { echo "conformance binary is not executable: $bin" >&2; exit 1; }
+    kotlinc="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
+    box_dir="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
+    export KRUSTY_LANGUAGE_VERSION="$v"
+    export KRUSTY_KOTLINC="$kotlinc"
+    export KRUSTY_KOTLIN_BOX_DIR="$box_dir"
+    export RUST_MIN_STACK="${RUST_MIN_STACK:-134217728}"
+    report=$(mktemp)
+    trap 'rm -f "$report"' EXIT
+    KRUSTY_CONFORMANCE_REPORT="$report" \
+      "$bin" kotlin_codegen_box_conformance --nocapture >&2
+    [ -s "$report" ] || { echo "conformance test did not write its report" >&2; exit 1; }
+    cat "$report"
 
 # Write the shields.io endpoint badges (docs/badges/*.json) from current numbers. CI commits these
 # on master; safe to run locally to preview. Color ramps with the conformance percentage.

@@ -1,7 +1,7 @@
 //! A constructor/property parameter whose TYPE is on the next line (a wrapped declaration the code
 //! generator emits for long names: `val x:\n    Type`) must parse — Kotlin allows a newline after the
 //! `:` of a type annotation. krusty's parser required the type immediately after the colon and rejected
-//! the whole file (a RED_REJECTED bucket on the generated httpclient models).
+//! the whole file (a RED_REJECTED bucket on generated models).
 use super::common;
 
 #[test]
