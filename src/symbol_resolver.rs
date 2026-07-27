@@ -3198,6 +3198,22 @@ fn select_overload(
             );
             continue;
         }
+        if kind == FnKind::Extension
+            && !generic_bounds_admit(
+                lib,
+                mro_src,
+                o.generic_sig.as_ref(),
+                binding_receiver,
+                args,
+                type_args,
+            )
+        {
+            crate::trace_compiler!(
+                "resolve",
+                "  drop {name} because inferred type arguments violate declared bounds"
+            );
+            continue;
+        }
         let lp = logical_value_params(lib, o, binding_receiver, type_args);
         let lp = specialized_sam_params(&lp, o.generic_sig.as_ref(), args, lambda_literals);
         let lp =
@@ -3249,6 +3265,45 @@ fn select_overload(
     None
 }
 
+fn generic_bounds_admit(
+    lib: &dyn SemanticPlatform,
+    src: &dyn SymbolSource,
+    generic_sig: Option<&GenericSig>,
+    receiver: Ty,
+    args: &[Ty],
+    type_args: &[Ty],
+) -> bool {
+    let Some(gsig) = generic_sig else {
+        return true;
+    };
+    let mut binds = seeded_gsig_binds(gsig, type_args);
+    if let Some(declared_receiver) = gsig.receiver {
+        unify_ty(declared_receiver, receiver, &mut binds);
+    }
+    for (&parameter, &argument) in gsig.params.iter().zip(args) {
+        unify_ty(parameter, argument, &mut binds);
+    }
+    gsig.formals
+        .iter()
+        .zip(&gsig.formal_bounds)
+        .all(|(formal, bounds)| {
+            let Some(actual) = binds.get(formal).copied() else {
+                return true;
+            };
+            bounds.iter().all(|bound| {
+                let bound = ty_subst(*bound, &binds);
+                actual == bound
+                    || crate::assignable::is_assignable(
+                        &crate::assignable::TyCtx::new(),
+                        &SourceOracle(src),
+                        actual,
+                        bound,
+                    )
+                    || platform_arg_assignable(lib, &bound, &actual)
+            })
+        })
+}
+
 /// LOGICAL value parameters of an overload — what a call site's arguments are matched against, with the
 /// receiver excluded (it is an attribute). Member/top-level `callable.params` are already value-only; an
 /// extension's `callable.params` prepend the receiver in the JVM emit shape, so bind the generic signature
@@ -3260,9 +3315,6 @@ fn logical_value_params(
     recv: Ty,
     type_args: &[Ty],
 ) -> Vec<Ty> {
-    if !o.is_extension() {
-        return o.callable.params.clone();
-    }
     match o.generic_sig.as_ref() {
         Some(gsig) => {
             let mut binds = seeded_gsig_binds(gsig, type_args);
@@ -3270,9 +3322,9 @@ fn logical_value_params(
                 unify_ty(recv_sig, recv, &mut binds);
             }
             let mut out = ty_subst_all(&gsig.params, &binds);
+            let physical_offset = usize::from(o.is_extension());
             for (i, p) in out.iter_mut().enumerate() {
-                // `callable.params[0]` is the receiver in the emit shape, so value params start at `+1`.
-                if let Some(cp) = o.callable.params.get(i + 1) {
+                if let Some(cp) = o.callable.params.get(i + physical_offset) {
                     if lib.value_underlying(*cp).is_some() {
                         *p = *cp;
                     }
@@ -3280,7 +3332,8 @@ fn logical_value_params(
             }
             out
         }
-        None => o.extension_value_params().to_vec(),
+        None if o.is_extension() => o.extension_value_params().to_vec(),
+        None => o.callable.params.clone(),
     }
 }
 
