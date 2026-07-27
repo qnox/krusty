@@ -1056,6 +1056,15 @@ impl SymbolTable {
         SourceConstructorMatcher { symbols: self }
     }
 
+    pub(crate) fn is_source_subtype(&self, sub: Ty, sup: Ty) -> bool {
+        crate::assignable::is_subtype(
+            &crate::assignable::TyCtx::new(),
+            &self.source_constructor_matcher(),
+            sub,
+            sup,
+        )
+    }
+
     pub fn class_simple_name(&self, internal: TypeName) -> Option<&str> {
         self.classes
             .iter()
@@ -5620,9 +5629,52 @@ impl TParams {
         resolve: &dyn Fn(&str) -> Option<TypeName>,
     ) -> Self {
         let mut out = self.clone();
-        out.erasure
-            .extend(TParams::from_decl_with(names, bounds, resolve).erasure);
+        let mut declared = TParams::from_decl_with(names, bounds, resolve);
+        for name in names {
+            if let Some(bound) = self.enclosing_bound_erasure(name, names, bounds) {
+                declared.erasure.insert(name.clone(), bound);
+            }
+        }
+        out.erasure.extend(declared.erasure);
         out
+    }
+
+    fn enclosing_bound_erasure(
+        &self,
+        name: &str,
+        local_names: &[String],
+        bounds: &[(String, TypeRef)],
+    ) -> Option<Ty> {
+        let mut current = name;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            if !seen.insert(current) {
+                return None;
+            }
+            let bound = bounds
+                .iter()
+                .find_map(|(owner, bound)| (owner == current).then_some(bound))?;
+            if bound.nullable
+                || bound.arg.is_some()
+                || !bound.targs.is_empty()
+                || !bound.fun_params.is_empty()
+            {
+                return None;
+            }
+            if local_names.iter().any(|local| local == &bound.name) {
+                current = &bound.name;
+                continue;
+            }
+            let mut erased = self.erasure.get(&bound.name).copied()?;
+            let mut bound_names = std::collections::HashSet::new();
+            while let Ty::TyParam(parameter, upper) = erased {
+                if !bound_names.insert(parameter) {
+                    return None;
+                }
+                erased = *upper;
+            }
+            return Some(erased);
+        }
     }
 
     /// Preserve type variables while inferring a declaration's semantic shape.
@@ -5649,9 +5701,13 @@ impl TParams {
         bounds: &[(String, TypeRef)],
         resolve: &dyn Fn(&str) -> Option<TypeName>,
     ) -> Self {
+        let declared = self.extended_with(names, bounds, resolve);
         let mut out = self.clone();
-        out.erasure
-            .extend(TParams::symbolic_from_decl_with(names, bounds, resolve).erasure);
+        out.erasure.extend(
+            names
+                .iter()
+                .map(|name| (name.clone(), Ty::ty_param(name, declared.erase(name)))),
+        );
         out
     }
 
@@ -9606,43 +9662,46 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        let candidates = self
-            .syms
-            .ext_fun_overloads(receiver, name)
-            .iter()
-            .filter(|s| {
-                s.is_operator
-                    && !s.vararg
-                    && !(s.visibility.is_private() && s.source_file != Some(self.file_index))
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if let Some(sig) =
-            pick_overload(&candidates, arg_tys).and_then(|index| candidates.into_iter().nth(index))
-        {
-            self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
-            let owner = sig
-                .source_file
-                .zip(sig.source_decl)
-                .and_then(|(file, declaration)| {
-                    self.syms
-                        .fn_facades_by_decl
-                        .get(&(file, declaration.0))
-                        .copied()
-                });
-            return Some((
-                sig.ret,
-                ResolvedCall::ModuleExtension {
-                    receiver,
-                    name: name.to_string(),
-                    params: sig.params.clone(),
-                    ret: sig.ret,
-                    owner,
-                },
-            ));
-        }
-        self.resolve_instance_member(receiver, name, arg_tys)
+        (!receiver.is_nullable())
+            .then(|| self.resolve_instance_member(receiver, name, arg_tys))
+            .flatten()
             .map(|m| (m.ret, ResolvedCall::Member(m)))
+            .or_else(|| {
+                let candidates = self
+                    .syms
+                    .ext_fun_overloads(receiver, name)
+                    .iter()
+                    .filter(|s| {
+                        s.is_operator
+                            && !s.vararg
+                            && !(s.visibility.is_private()
+                                && s.source_file != Some(self.file_index))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let sig = pick_overload(&candidates, arg_tys)
+                    .and_then(|index| candidates.into_iter().nth(index))?;
+                self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
+                let owner = sig
+                    .source_file
+                    .zip(sig.source_decl)
+                    .and_then(|(file, declaration)| {
+                        self.syms
+                            .fn_facades_by_decl
+                            .get(&(file, declaration.0))
+                            .copied()
+                    });
+                Some((
+                    sig.ret,
+                    ResolvedCall::ModuleExtension {
+                        receiver,
+                        name: name.to_string(),
+                        params: sig.params.clone(),
+                        ret: sig.ret,
+                        owner,
+                    },
+                ))
+            })
             .or_else(|| {
                 self.library_extension_callable(name, receiver, arg_tys, &[])
                     .map(|callable| (callable.ret, ResolvedCall::Extension(callable)))
@@ -13589,7 +13648,7 @@ impl<'a> Checker<'a> {
                     Ty::Error
                 }
             }
-            Expr::RangeTo { lo, hi, .. } => {
+            Expr::RangeTo { lo, hi, kind } => {
                 let lt = self.expr(lo);
                 let rt = self.expr(hi);
                 // `a..b` / `a..<b` constructs the matching stdlib range object. `Char..Char` is a
@@ -13599,6 +13658,16 @@ impl<'a> Checker<'a> {
                 if let Some(ty) = Ty::range_value_type(lt, rt) {
                     ty
                 } else {
+                    // Non-primitive inclusive ranges dispatch through `rangeTo`.
+                    if matches!(kind, crate::ast::RangeKind::Through) {
+                        if let Some((range_ty, range_call)) =
+                            self.operator_call_ret(lt, "rangeTo", &[rt], &[hi], self.span(e))
+                        {
+                            self.resolved_operator_calls
+                                .insert((e, SyntheticOperatorCall::RangeTo), range_call);
+                            return self.set(e, range_ty);
+                        }
+                    }
                     self.diags.error(
                         self.span(e),
                         "krusty: range expression is only supported for Int/Long/Char operands"

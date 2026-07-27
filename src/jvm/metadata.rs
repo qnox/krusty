@@ -28,7 +28,57 @@ fn parse_type_gsig(
     d2: &[String],
     tparams: &HashMap<u64, String>,
 ) -> Option<Ty> {
-    parse_type_gsig_node(body, records, d2, tparams, false)
+    parse_type_gsig_bounded(body, records, d2, tparams, &HashMap::new())
+}
+
+fn parse_type_gsig_bounded(
+    body: &[u8],
+    records: &[Rec],
+    d2: &[String],
+    tparams: &HashMap<u64, String>,
+    bounds: &HashMap<String, Ty>,
+) -> Option<Ty> {
+    parse_type_gsig_node(body, records, d2, tparams, bounds, false)
+}
+
+fn primary_erasure_bounds(formals: &[String], formal_bounds: &[Vec<Ty>]) -> HashMap<String, Ty> {
+    fn resolve(
+        name: &str,
+        direct: &HashMap<String, Ty>,
+        resolved: &mut HashMap<String, Ty>,
+        visiting: &mut std::collections::HashSet<String>,
+    ) -> Ty {
+        if let Some(bound) = resolved.get(name) {
+            return *bound;
+        }
+        if !visiting.insert(name.to_string()) {
+            return Ty::obj("kotlin/Any");
+        }
+        let bound = match direct.get(name).copied() {
+            Some(Ty::TyParam(other, _)) => resolve(other, direct, resolved, visiting),
+            Some(bound) => bound,
+            None => Ty::obj("kotlin/Any"),
+        };
+        visiting.remove(name);
+        resolved.insert(name.to_string(), bound);
+        bound
+    }
+
+    let direct = formals
+        .iter()
+        .zip(formal_bounds)
+        .filter_map(|(name, bounds)| bounds.first().map(|bound| (name.clone(), *bound)))
+        .collect::<HashMap<_, _>>();
+    let mut resolved = HashMap::new();
+    for name in formals {
+        resolve(
+            name,
+            &direct,
+            &mut resolved,
+            &mut std::collections::HashSet::new(),
+        );
+    }
+    resolved
 }
 
 fn parse_type_gsig_node(
@@ -36,6 +86,7 @@ fn parse_type_gsig_node(
     records: &[Rec],
     d2: &[String],
     tparams: &HashMap<u64, String>,
+    bounds: &HashMap<String, Ty>,
     nested: bool,
 ) -> Option<Ty> {
     let mut pb = Pb { b: body, i: 0 };
@@ -63,7 +114,7 @@ fn parse_type_gsig_node(
                         (2, 2) => {
                             let tn = ap.varint()? as usize;
                             let tb = ap.bytes(tn)?;
-                            arg = parse_type_gsig_node(tb, records, d2, tparams, true);
+                            arg = parse_type_gsig_node(tb, records, d2, tparams, bounds, true);
                         }
                         (_, w) => ap.skip(w)?,
                     }
@@ -77,11 +128,21 @@ fn parse_type_gsig_node(
         let internal = resolve_class_name(records, d2, id as usize)?;
         gsig_from_kotlin_class(&internal, args)
     } else if let Some(id) = tp_id {
-        tparams
-            .get(&id)
-            .map(|n| Ty::ty_param(n, Ty::obj("kotlin/Any")))?
+        tparams.get(&id).map(|n| {
+            let bound = bounds
+                .get(n)
+                .copied()
+                .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+            Ty::ty_param(n, bound)
+        })?
     } else if let Some(id) = tpn_id {
-        resolve_string(records, d2, id as usize).map(|s| Ty::ty_param(&s, Ty::obj("kotlin/Any")))?
+        resolve_string(records, d2, id as usize).map(|s| {
+            let bound = bounds
+                .get(&s)
+                .copied()
+                .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+            Ty::ty_param(&s, bound)
+        })?
     } else {
         return None;
     };
@@ -879,22 +940,23 @@ fn build_generic_sig(
     for parameter in &pf.type_params {
         if let Some(name) = resolve_string(records, d2, parameter.name_id as usize) {
             tparams.insert(parameter.id, name.clone());
-            formals.push(name);
-            function_parameters.push(parameter);
+            formals.push(name.clone());
+            function_parameters.push((name, parameter));
         }
     }
     let mut formal_bounds = vec![Vec::new(); class_tparams.len()];
-    for parameter in function_parameters {
-        let bounds = parameter
+    for (_, parameter) in function_parameters {
+        let declared = parameter
             .upper_bound_bodies
             .iter()
             .filter_map(|body| parse_type_gsig(body, records, d2, &tparams))
-            .collect();
-        formal_bounds.push(bounds);
+            .collect::<Vec<_>>();
+        formal_bounds.push(declared);
     }
+    let bounds = primary_erasure_bounds(&formals, &formal_bounds);
     let receiver = if let Some(rb) = &pf.receiver_body {
         // An EXTENSION: its `receiver_type` is the receiver gsig node (`T`, `Ch`, `List<T>`, …).
-        Some(parse_type_gsig(rb, records, d2, &tparams)?)
+        Some(parse_type_gsig_bounded(rb, records, d2, &tparams, &bounds)?)
     } else {
         // A MEMBER: the declaring class parameterized by its own type parameters, so unifying it with the
         // actual receiver binds `T` exactly like an extension. `None` for a top-level function.
@@ -915,9 +977,9 @@ fn build_generic_sig(
             // A `vararg elem: T` param's LOGICAL type is `Array<T>` (the JVM descriptor's array-ness); its
             // element type is `varargElementType`, so wrap it in `Array` to match the JVM `Signature` shape.
             let decoded = if let Some(elem) = &vp.vararg_elem_body {
-                parse_type_gsig(elem, records, d2, &tparams).map(Ty::array)
+                parse_type_gsig_bounded(elem, records, d2, &tparams, &bounds).map(Ty::array)
             } else {
-                parse_type_gsig(&vp.type_body, records, d2, &tparams)
+                parse_type_gsig_bounded(&vp.type_body, records, d2, &tparams, &bounds)
             };
             // An unresolvable param erases to a fresh unbound var (→ `Any` downstream).
             decoded.unwrap_or_else(|| Ty::ty_param("\u{0}", Ty::obj("kotlin/Any")))
@@ -926,7 +988,7 @@ fn build_generic_sig(
     let ret = pf
         .return_body
         .as_ref()
-        .and_then(|rb| parse_type_gsig(rb, records, d2, &tparams))
+        .and_then(|rb| parse_type_gsig_bounded(rb, records, d2, &tparams, &bounds))
         .unwrap_or_else(|| Ty::obj("kotlin/Any"));
     Some(GenericSig {
         formals,
@@ -2402,7 +2464,9 @@ fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<
 
 #[cfg(test)]
 mod module_reader_tests {
-    use super::{parse_type_gsig, parse_type_gsig_node, read_kotlin_module};
+    use super::{
+        parse_type_gsig, parse_type_gsig_node, primary_erasure_bounds, read_kotlin_module,
+    };
     use crate::metadata::module::build_kotlin_module;
     use crate::types::Ty;
     use std::collections::HashMap;
@@ -2413,13 +2477,39 @@ mod module_reader_tests {
         let parameters = HashMap::from([(0, "T".to_string())]);
 
         assert_eq!(
-            parse_type_gsig_node(&type_parameter, &[], &[], &parameters, true),
+            parse_type_gsig_node(
+                &type_parameter,
+                &[],
+                &[],
+                &parameters,
+                &HashMap::new(),
+                true
+            ),
             Some(Ty::nullable(Ty::ty_param("T", Ty::obj("kotlin/Any"))))
         );
         assert_eq!(
             parse_type_gsig(&type_parameter, &[], &[], &parameters),
             Some(Ty::ty_param("T", Ty::obj("kotlin/Any")))
         );
+    }
+
+    #[test]
+    fn primary_erasure_follows_dependent_bounds_and_stops_cycles() {
+        let any = Ty::obj("kotlin/Any");
+        let char_sequence = Ty::obj("kotlin/CharSequence");
+        let formals = vec!["T".to_string(), "U".to_string()];
+        let bounds = vec![
+            vec![Ty::ty_param("U", any)],
+            vec![char_sequence, Ty::obj("java/io/Serializable")],
+        ];
+        let resolved = primary_erasure_bounds(&formals, &bounds);
+        assert_eq!(resolved["T"], char_sequence);
+        assert_eq!(resolved["U"], char_sequence);
+
+        let cyclic = vec![vec![Ty::ty_param("U", any)], vec![Ty::ty_param("T", any)]];
+        let resolved = primary_erasure_bounds(&formals, &cyclic);
+        assert_eq!(resolved["T"], any);
+        assert_eq!(resolved["U"], any);
     }
 
     #[test]

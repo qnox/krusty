@@ -2252,3 +2252,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   for Kotlin properties and methods with different physical names, such as `Map.keys` and
   `CharSequence.get`. Tests: `tests/for_destructuring_components_e2e.rs`,
   `tests/collection_special_member_stub_e2e.rs`.
+
+- **Reference range expressions and bound-aware classpath generics.** A standalone `a..b` over
+  reference operands resolves through the ordinary `rangeTo` operator path after primitive range
+  handling. Classpath generic signatures preserve declared bounds for receiver matching and JVM
+  erasure. Tests: `tests/reference_range_expression_e2e.rs`.
