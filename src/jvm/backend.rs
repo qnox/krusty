@@ -46,6 +46,19 @@ pub fn run_backend_passes(
     module_name: &str,
     syms: &FrontendSymbols,
 ) -> Result<(), SkipReason> {
+    let mut discard = crate::jvm::suspend::ContinuationDebugMap::default();
+    run_backend_passes_with_debug(ir, file, facade, module_name, syms, &mut discard)
+}
+
+/// Run the JVM pass pipeline and retain continuation metadata for class emission.
+pub fn run_backend_passes_with_debug(
+    ir: &mut crate::ir::IrFile,
+    file: &File,
+    facade: &str,
+    module_name: &str,
+    syms: &FrontendSymbols,
+    cont_debug: &mut crate::jvm::suspend::ContinuationDebugMap,
+) -> Result<(), SkipReason> {
     let resolve_class_name = |name: &str| syms.class_names.get(name).map(|name| name.render());
     crate::plugins::run_enabled(
         ir,
@@ -73,7 +86,7 @@ pub fn run_backend_passes(
     if !crate::jvm::value_classes::lower_value_classes(ir, &vc_resolver, &module_value_classes) {
         return Err(SkipReason::ValueClasses);
     }
-    if !crate::jvm::suspend::lower_suspend(ir, facade) {
+    if !crate::jvm::suspend::lower_suspend(ir, facade, cont_debug) {
         return Err(SkipReason::Suspend);
     }
     crate::jvm::ir_emit::mark_must_inline_lambdas(ir);
@@ -225,7 +238,15 @@ impl Backend for JvmBackend {
         };
         // The shared post-lowering pass pipeline (see `run_backend_passes`); an unlowerable shape →
         // diagnose and skip the file rather than miscompile.
-        if let Err(reason) = run_backend_passes(&mut ir, file, &facade_name, module_name, syms) {
+        let mut cont_debug = crate::jvm::suspend::ContinuationDebugMap::default();
+        if let Err(reason) = run_backend_passes_with_debug(
+            &mut ir,
+            file,
+            &facade_name,
+            module_name,
+            syms,
+            &mut cont_debug,
+        ) {
             let what = match reason {
                 SkipReason::ValueClasses => "value-class",
                 SkipReason::Suspend => "suspend-function",
@@ -241,13 +262,14 @@ impl Backend for JvmBackend {
         // are reported separately (via `run.inline_bail`): selected inline calls are required to splice,
         // so those are backend errors to fix rather than silent skips.
         let run = crate::jvm::ir_emit::EmitRun::default();
-        let Some(classes) = crate::jvm::ir_emit::emit_all_with_opts(
+        let Some(classes) = crate::jvm::ir_emit::emit_all_with_opts_and_debug(
             &ir,
             &facade_name,
             &*self.cp,
             metadata.as_ref(),
             &emit_opts,
             &run,
+            &cont_debug,
         ) else {
             if let Some(reason) = run.inline_bail() {
                 diags.error(
