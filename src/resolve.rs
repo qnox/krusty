@@ -742,12 +742,34 @@ impl ClassNames {
     pub fn contains_key(&self, k: &str) -> bool {
         self.user.contains_key(k) || self.base.contains_key(k)
     }
-    /// Does some registered simple name resolve to this JVM internal name? Used to confirm a
-    /// qualified nested supertype (`Foo/Bar` → `Foo$Bar`) names a REAL declared class.
-    pub fn has_internal(&self, internal: &str) -> bool {
+    fn has_internal(&self, internal: &str) -> bool {
         existing_type_name(internal).is_some_and(|internal| {
             self.user.values().any(|&v| v == internal) || self.base.values().any(|&v| v == internal)
         })
+    }
+    /// Resolve the slash-flattened spelling produced for a qualified supertype. The slash may divide
+    /// either packages or nested classifiers, so seed the longest resolvable outer prefix and fold only
+    /// its remaining segments to JVM `$` separators. The candidate must name a registered declaration.
+    pub fn get_qualified_supertype(&self, name: &str) -> Option<TypeName> {
+        if let Some(internal) = self.get(name) {
+            return Some(internal);
+        }
+        if let Some(internal) = self.get(&name.replace('/', ".")) {
+            return Some(internal);
+        }
+        let mut split = name.rfind('/');
+        while let Some(position) = split {
+            let outer = &name[..position];
+            let nested = &name[position + 1..];
+            if let Some(base) = self.get(outer) {
+                let candidate = format!("{}${}", base.render(), nested.replace('/', "$"));
+                if self.has_internal(&candidate) {
+                    return existing_type_name(&candidate);
+                }
+            }
+            split = outer.rfind('/');
+        }
+        None
     }
     pub fn library_companion_const(
         &self,
@@ -3463,18 +3485,10 @@ pub fn collect_signatures_with_cp(
                     // at load; reject (skip) instead — never emit an unresolved supertype.
                     let mut resolve_super = |s: &str| -> String {
                         let resolved = class_names
-                            .get(s)
+                            .get_qualified_supertype(s)
                             .map(TypeName::render)
                             // An erased type parameter used as a supertype (degenerate) stays as-is.
                             .or_else(|| ctp.contains(s).then(|| s.to_string()))
-                            // A QUALIFIED nested supertype (`Foo.Bar` → `Foo/Bar` here) whose outer isn't a
-                            // package: the nested class is registered as `Outer$Nested`. Accept the dollar
-                            // form only when it names a REAL declared class (some registered simple name
-                            // maps to it), so an unresolved name still errors.
-                            .or_else(|| {
-                                (s.contains('/') && class_names.has_internal(&s.replace('/', "$")))
-                                    .then(|| s.replace('/', "$"))
-                            })
                             // A supertype named by SIMPLE name from inside a nested class may be a SIBLING
                             // (or enclosing-scope) nested type: `class Outer { interface Foo; class Impl: Foo }`.
                             // Try the name qualified by each enclosing prefix of the current class

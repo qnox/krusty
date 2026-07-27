@@ -1687,16 +1687,17 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse a type declared in an INTERFACE body and, if it implements the enclosing interface `iface`,
-    /// hoist it to a top-level `Iface.Sub` class (a sealed interface's subclasses). A nested type that
-    /// does NOT implement the interface (a plain helper that may reach a private interface member via a
-    /// synthetic accessor krusty doesn't emit) is parsed and dropped, so the file skips rather than
-    /// miscompiles.
+    /// Parse a type declared in an INTERFACE body. Nested interfaces are always static JVM classifiers,
+    /// so hoist them even when they refine a sibling interface instead of naming the enclosing interface
+    /// directly. Nested classes/objects keep the narrower sealed-subclass rule: an unrelated helper may
+    /// reach a private interface member through a synthetic accessor krusty does not emit.
     fn register_interface_nested(&mut self, iface: &str) {
+        let start = self.file.decls.len();
         let mut nested = self.parse_nested_type_decl();
         let implements = nested.supertypes.iter().any(|s| s.name == iface)
             || nested.base_class.as_deref() == Some(iface);
-        if implements {
+        if nested.is_interface() || implements {
+            self.reprefix_hoisted(iface, start);
             nested.name = format!("{iface}.{}", nested.name);
             let id = self.file.add_decl(Decl::Class(nested));
             self.file.decls.push(id);
