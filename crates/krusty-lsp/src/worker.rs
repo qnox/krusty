@@ -41,6 +41,7 @@ struct AnalysisRequest<'a> {
     sources: &'a [&'a str],
     source_kinds: &'a [u8],
     result_count: usize,
+    inferred_count: usize,
     language_features: &'a [&'a str],
 }
 
@@ -50,6 +51,8 @@ struct OwnedAnalysisRequest {
     #[serde(default)]
     source_kinds: Vec<u8>,
     result_count: usize,
+    #[serde(default)]
+    inferred_count: Option<usize>,
     #[serde(default)]
     language_features: Vec<String>,
 }
@@ -183,6 +186,7 @@ pub(crate) fn source_set_fits(lengths: impl IntoIterator<Item = usize>) -> bool 
 fn encode_request(
     inputs: &[SourceInput<'_>],
     result_count: usize,
+    inferred_count: usize,
     features: &LangFeatures,
 ) -> io::Result<Vec<u8>> {
     if !source_set_fits(inputs.iter().map(|source| source.text.len())) {
@@ -191,10 +195,10 @@ fn encode_request(
             "open source set exceeds analysis limit",
         ));
     }
-    if result_count > inputs.len() {
+    if result_count > inferred_count || inferred_count > inputs.len() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "analysis result count exceeds source count",
+            "analysis result and inference prefixes do not align with the source count",
         ));
     }
     let sources = inputs.iter().map(|source| source.text).collect::<Vec<_>>();
@@ -211,6 +215,7 @@ fn encode_request(
             sources: &sources,
             source_kinds: &source_kinds,
             result_count,
+            inferred_count,
             language_features: &language_features,
         },
     )
@@ -304,9 +309,10 @@ impl WorkerProcess {
         &mut self,
         inputs: &[SourceInput<'_>],
         result_count: usize,
+        inferred_count: usize,
         language_features: &LangFeatures,
     ) -> io::Result<Vec<DocumentAnalysis>> {
-        let request = encode_request(inputs, result_count, language_features)?;
+        let request = encode_request(inputs, result_count, inferred_count, language_features)?;
         write_framed(&mut self.stdin, &request)?;
         drop(request);
         let response = self.read_response(analysis_timeout(inputs))?;
@@ -388,21 +394,24 @@ impl AnalysisWorker {
             .iter()
             .map(|source| SourceInput::kotlin(source))
             .collect::<Vec<_>>();
-        self.analyze_inputs_prefix(&inputs, sources.len())
+        self.analyze_inputs_prefix(&inputs, sources.len(), sources.len())
     }
 
     pub fn analyze_inputs_prefix(
         &mut self,
         inputs: &[SourceInput<'_>],
         result_count: usize,
+        inferred_count: usize,
     ) -> io::Result<Vec<DocumentAnalysis>> {
         if self.analyses >= self.max_analyses {
             self.restart()?;
         }
-        match self
-            .process
-            .analyze(inputs, result_count, &self.language_features)
-        {
+        match self.process.analyze(
+            inputs,
+            result_count,
+            inferred_count,
+            &self.language_features,
+        ) {
             Ok(analysis) => {
                 self.analyses += 1;
                 Ok(analysis)
@@ -414,9 +423,12 @@ impl AnalysisWorker {
             }
             Err(_) => {
                 self.restart()?;
-                let analysis =
-                    self.process
-                        .analyze(inputs, result_count, &self.language_features)?;
+                let analysis = self.process.analyze(
+                    inputs,
+                    result_count,
+                    inferred_count,
+                    &self.language_features,
+                )?;
                 self.analyses += 1;
                 Ok(analysis)
             }
@@ -437,10 +449,11 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
     while let Some(body) = read_framed(reader, MAX_WORKER_MESSAGE_BYTES)? {
         let request: OwnedAnalysisRequest = serde_json::from_slice(&body).map_err(json_io)?;
         drop(body);
-        if request.result_count > request.sources.len() {
+        let inferred_count = request.inferred_count.unwrap_or(request.sources.len());
+        if request.result_count > inferred_count || inferred_count > request.sources.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "analysis result count exceeds source count",
+                "analysis result and inference prefixes do not align with the source count",
             ));
         }
         if !source_set_fits(request.sources.iter().map(String::len)) {
@@ -480,8 +493,10 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             language_features.enable(feature);
         }
         let platform = Box::new(JvmLibraries::new(classpath.clone()));
-        let source_set = compiler_analysis::analyze_source_inputs_with_features(
+        let source_set = compiler_analysis::analyze_source_inputs_prefix_with_features(
             &inputs,
+            request.result_count,
+            inferred_count,
             platform,
             &language_features,
         );
@@ -611,6 +626,19 @@ mod tests {
     fn source_and_wire_buffers_are_bounded_before_worker_io() {
         assert!(source_set_fits([MAX_SOURCE_SET_BYTES]));
         assert!(!source_set_fits([MAX_SOURCE_SET_BYTES, 1]));
+        let inputs = [SourceInput::kotlin("fun use() = 1")];
+        assert_eq!(
+            encode_request(&inputs, 1, 0, &LangFeatures::new())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            encode_request(&inputs, 0, 2, &LangFeatures::new())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
 
         let mut output = BoundedVec::new(4);
         output.write_all(b"1234").unwrap();
@@ -737,6 +765,7 @@ mod tests {
             sources: &sources,
             source_kinds: &source_kinds,
             result_count: sources.len(),
+            inferred_count: sources.len(),
             language_features: &[],
         })
         .unwrap();
@@ -767,6 +796,27 @@ mod tests {
     }
 
     #[test]
+    fn worker_protocol_accepts_an_older_request_without_an_inference_prefix() {
+        let request = br#"{
+            "sources":["fun answer(): Int = 42"],
+            "source_kinds":[0],
+            "result_count":1,
+            "language_features":[]
+        }"#;
+        let mut input = Vec::new();
+        write_framed(&mut input, request).unwrap();
+        let mut output = Vec::new();
+
+        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
+
+        let response = read_framed(&mut Cursor::new(output), MAX_WORKER_MESSAGE_BYTES)
+            .unwrap()
+            .unwrap();
+        let analyses = serde_json::from_slice::<Vec<AnalysisResponse>>(&response).unwrap();
+        assert!(analyses[0].diagnostics.is_empty());
+    }
+
+    #[test]
     fn worker_protocol_applies_project_language_features() {
         let sources = ["\
 data class Entry(val first: String, val second: String)
@@ -782,6 +832,7 @@ fun combine(entries: Array<Entry>): String {
             sources: &sources,
             source_kinds: &source_kinds,
             result_count: sources.len(),
+            inferred_count: sources.len(),
             language_features: &["NameBasedDestructuring"],
         })
         .unwrap();

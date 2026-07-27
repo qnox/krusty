@@ -335,8 +335,51 @@ pub fn analyze_source_set_with_features(
     )
 }
 
+/// Analyze a source set with checked, inferred, and declaration-only file prefixes.
+pub fn analyze_source_set_prefix_with_features(
+    sources: &[SourceInput<'_>],
+    checked_count: usize,
+    inferred_count: usize,
+    platform: Box<dyn SemanticPlatform>,
+    project_features: &LangFeatures,
+    diags: &mut DiagSink,
+) -> SourceSetAnalysis {
+    analyze_source_set_with_features_and_prepare_prefix(
+        sources,
+        checked_count,
+        inferred_count,
+        platform,
+        project_features,
+        |_, _| {},
+        diags,
+    )
+}
+
 pub fn analyze_source_set_with_features_and_prepare<F>(
     sources: &[SourceInput<'_>],
+    platform: Box<dyn SemanticPlatform>,
+    project_features: &LangFeatures,
+    prepare_symbols: F,
+    diags: &mut DiagSink,
+) -> SourceSetAnalysis
+where
+    F: FnOnce(&[File], &mut FrontendSymbols),
+{
+    analyze_source_set_with_features_and_prepare_prefix(
+        sources,
+        sources.len(),
+        sources.len(),
+        platform,
+        project_features,
+        prepare_symbols,
+        diags,
+    )
+}
+
+fn analyze_source_set_with_features_and_prepare_prefix<F>(
+    sources: &[SourceInput<'_>],
+    checked_count: usize,
+    inferred_count: usize,
     platform: Box<dyn SemanticPlatform>,
     project_features: &LangFeatures,
     prepare_symbols: F,
@@ -367,12 +410,32 @@ where
         files.push(file);
     }
 
+    assert!(checked_count <= inferred_count && inferred_count <= files.len());
     if multiplatform {
         strip_matched_expects(&mut files);
     }
-    let mut symbols = collect_signatures_with_cp(&files, platform, diags);
+    let platform = if inferred_count < files.len() {
+        let mut fallback_diags = DiagSink::new();
+        let mut fallback =
+            collect_signatures_with_cp(&files[inferred_count..], platform, &mut fallback_diags);
+        fallback.offset_source_files(inferred_count as u32);
+        let platform = std::mem::replace(&mut fallback.libraries, Box::new(EmptySymbolSource));
+        Box::new(crate::resolve::SourceFallbackPlatform::new(
+            platform, fallback,
+        )) as Box<dyn SemanticPlatform>
+    } else {
+        platform
+    };
+    let mut symbols = collect_signatures_with_cp(&files[..inferred_count], platform, diags);
     prepare_symbols(&files, &mut symbols);
-    let types = check_source_set_skipping(&files, &mut symbols, &parse_errors, diags);
+    let types = check_source_set_skipping(
+        &files,
+        &mut symbols,
+        &parse_errors,
+        checked_count,
+        inferred_count,
+        diags,
+    );
     SourceSetAnalysis {
         files,
         symbols,
@@ -384,14 +447,16 @@ fn check_source_set_skipping(
     files: &[File],
     symbols: &mut FrontendSymbols,
     skip: &[bool],
+    checked_count: usize,
+    inferred_count: usize,
     diags: &mut DiagSink,
 ) -> Vec<Option<FrontendTypeInfo>> {
-    preinfer_module_returns(files, symbols, diags);
+    preinfer_module_returns(&files[..inferred_count.min(files.len())], symbols, diags);
     files
         .iter()
         .enumerate()
         .map(|(index, _)| {
-            if skip.get(index).copied().unwrap_or(false) {
+            if index >= checked_count || skip.get(index).copied().unwrap_or(false) {
                 None
             } else {
                 diags.set_file(index as u32);
@@ -412,7 +477,7 @@ pub fn check_source_set(
     symbols: &mut FrontendSymbols,
     diags: &mut DiagSink,
 ) -> Vec<Option<FrontendTypeInfo>> {
-    check_source_set_skipping(files, symbols, &[], diags)
+    check_source_set_skipping(files, symbols, &[], files.len(), files.len(), diags)
 }
 
 /// Analyze a source set using only per-source feature directives.
@@ -460,7 +525,57 @@ pub fn analyze_source_standalone(
 mod tests {
     use super::*;
     use crate::diag::{Diagnostic, Span};
+    use crate::libraries::{Callables, LibraryMember, LibraryType, TypeKind};
     use crate::source::SourceInput;
+    use crate::types::{Ty, TypeNameList};
+
+    struct ExistingLibrary;
+
+    impl crate::symbol_source::SymbolSource for ExistingLibrary {
+        fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
+            matches!(
+                internal,
+                "fixture/Present" | "fixture/Stable" | "fixture/Qualified"
+            )
+            .then(|| LibraryType {
+                is_public: true,
+                kind: TypeKind::Class,
+                supertypes: TypeNameList::new(),
+                constructors: Vec::new(),
+                members: Vec::new(),
+                companion: match internal {
+                    "fixture/Stable" => vec![LibraryMember::new(
+                        "current".to_string(),
+                        Vec::new(),
+                        Ty::Int,
+                        String::new(),
+                    )],
+                    "fixture/Qualified" => vec![LibraryMember::new(
+                        "select".to_string(),
+                        vec![Ty::obj("right/Token")],
+                        Ty::Int,
+                        String::new(),
+                    )],
+                    _ => Vec::new(),
+                },
+                companion_consts: std::collections::HashMap::new(),
+                sam_method: None,
+                companion_object: None,
+                value_companion_fns: Vec::new(),
+                value_underlying: None,
+                alias_target: None,
+                type_params: Vec::new(),
+                sealed_subclasses: TypeNameList::new(),
+                enum_entries: Vec::new(),
+                value_ctor_has_default: false,
+                ctor_named_params: Vec::new(),
+                value_class_properties: Vec::new(),
+                retention: None,
+            })
+        }
+    }
+
+    impl SemanticPlatform for ExistingLibrary {}
 
     #[test]
     fn standalone_analysis_accepts_simple_function() {
@@ -479,6 +594,53 @@ mod tests {
         assert!(diags.has_errors());
         assert!(syms.is_some());
         assert!(info.is_some());
+    }
+
+    #[test]
+    fn dependency_fallback_preserves_primary_and_adds_missing_signatures() {
+        let features = LangFeatures::new();
+        let mut diagnostics = DiagSink::new();
+        let analysis = analyze_source_set_prefix_with_features(
+            &[
+                SourceInput::kotlin(
+                    "package feature\n\
+                     import fixture.Qualified\n\
+                     import fixture.Stable\n\
+                     import fixture.added\n\
+                     import left.Token\n\
+                     fun use(): Int = Stable.current() + Stable.current(1) + Qualified.select(Token()) + added(1)",
+                ),
+                SourceInput::kotlin(
+                    "package fixture\nimport left.Token\n\
+                     fun added(value: Int): Int = value\n\
+                     class Present\n\
+                     class Stable { companion object {\n\
+                     \u{20} fun current(): String = \"source\"\n\
+                     \u{20} fun current(value: Int): Int = value\n\
+                     } }\n\
+                     class Qualified { companion object {\n\
+                     \u{20} fun select(value: Token): Int = 1\n\
+                     } }\n\
+                     class Added",
+                ),
+                SourceInput::kotlin("package left\nclass Token"),
+            ],
+            1,
+            1,
+            Box::new(ExistingLibrary),
+            &features,
+            &mut diagnostics,
+        );
+        assert!(
+            analysis.types[0].is_some() && diagnostics.diags.is_empty(),
+            "{:?}",
+            diagnostics.diags
+        );
+        let added = analysis.symbols.libraries.resolve_symbols("fixture/added");
+        let Callables::Functions(functions) = added.callables else {
+            panic!("missing source fallback function")
+        };
+        assert_eq!(functions.overloads[0].source_key.map(|key| key.0), Some(1));
     }
 
     #[test]

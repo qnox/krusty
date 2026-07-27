@@ -114,9 +114,31 @@ pub fn analyze_source_inputs_with_features(
     platform: Box<dyn SemanticPlatform>,
     project_features: &LangFeatures,
 ) -> SourceSetAnalysis {
+    analyze_source_inputs_prefix_with_features(
+        inputs,
+        inputs.len(),
+        inputs.len(),
+        platform,
+        project_features,
+    )
+}
+
+pub fn analyze_source_inputs_prefix_with_features(
+    inputs: &[SourceInput<'_>],
+    checked_count: usize,
+    inferred_count: usize,
+    platform: Box<dyn SemanticPlatform>,
+    project_features: &LangFeatures,
+) -> SourceSetAnalysis {
     let mut diags = DiagSink::new();
-    let analysis =
-        frontend::analyze_source_set_with_features(inputs, platform, project_features, &mut diags);
+    let analysis = frontend::analyze_source_set_prefix_with_features(
+        inputs,
+        checked_count,
+        inferred_count,
+        platform,
+        project_features,
+        &mut diags,
+    );
     let mut diagnostics = vec![Vec::new(); inputs.len()];
     for mut diagnostic in diags.diags {
         let file = diagnostic.file as usize;
@@ -189,6 +211,44 @@ mod tests {
                 span.lo <= value_offset && value_offset < span.hi && ty == krusty::types::Ty::Int
             }),
             "caller was checked before value() acquired its inferred Int return"
+        );
+    }
+
+    #[test]
+    fn prefix_analysis_resolves_a_support_source_companion_declaration() {
+        let inputs = [
+            SourceInput::kotlin(
+                "package feature\nimport fixture.Bridge\n\
+                 fun use(): Bridge? {\n\
+                 \u{20} val bridge = Bridge.current()\n\
+                 \u{20} if (bridge == null) return null\n\
+                 \u{20} return bridge.next()\n\
+                 }",
+            ),
+            SourceInput::kotlin(
+                "package fixture\ninterface Bridge {\n\
+                 \u{20} fun next(): Bridge?\n\
+                 \u{20} companion object { fun current(): Bridge? = null }\n\
+                 }",
+            ),
+        ];
+        let analysis = analyze_source_inputs_prefix_with_features(
+            &inputs,
+            1,
+            1,
+            Box::new(krusty::libraries::EmptySymbolSource),
+            &LangFeatures::new(),
+        );
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+        assert!(analysis.files[0].types.is_some());
+        assert!(
+            analysis.files[1].types.is_none(),
+            "support declarations must not diagnose dependency bodies as part of the consumer module"
         );
     }
 

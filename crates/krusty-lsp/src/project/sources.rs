@@ -7,6 +7,8 @@ use super::model::ProjectModel;
 
 const MAX_INVENTORY_ENTRIES: usize = 32 * 1024;
 
+pub type LoadedProjectSources<'a> = (&'a [(String, String)], usize);
+
 #[derive(Default)]
 pub struct ProjectSources {
     cache: Option<Cache>,
@@ -14,8 +16,10 @@ pub struct ProjectSources {
 
 struct Cache {
     roots: Vec<PathBuf>,
+    inferred_roots: Vec<PathBuf>,
     excluded_paths: Vec<PathBuf>,
     documents: Vec<(String, String)>,
+    inferred_count: usize,
     bytes: usize,
 }
 
@@ -30,7 +34,7 @@ impl ProjectSources {
         documents: &[(&str, &str)],
         open_uris: &[&str],
         max_bytes: usize,
-    ) -> Result<&[(String, String)], String> {
+    ) -> Result<LoadedProjectSources<'_>, String> {
         let source_paths = documents
             .iter()
             .filter_map(|(uri, _)| url::Url::parse(uri).ok()?.to_file_path().ok())
@@ -47,31 +51,55 @@ impl ProjectSources {
         let remaining = max_bytes - open_bytes;
 
         let mut root_policies = BTreeMap::new();
+        let mut inferred_roots = Vec::new();
+        let mut inferred_modules = HashSet::new();
         for source_path in &source_paths {
             if let Some(module) = model.module_for_source(source_path) {
+                if let Some(id) = &module.id {
+                    inferred_modules.insert(id.clone());
+                }
                 for root in &module.source_roots {
                     let broad_root = root.path == model.root || root.path == module.base_directory;
                     root_policies
                         .entry(root.path.clone())
                         .and_modify(|broad| *broad |= broad_root)
                         .or_insert(broad_root);
+                    if !inferred_roots.contains(&root.path) {
+                        inferred_roots.push(root.path.clone());
+                    }
+                }
+                for dependency in module
+                    .depends_on
+                    .iter()
+                    .filter_map(|dependency| model.module(dependency))
+                {
+                    for root in &dependency.source_roots {
+                        let broad_root =
+                            root.path == model.root || root.path == dependency.base_directory;
+                        root_policies
+                            .entry(root.path.clone())
+                            .and_modify(|broad| *broad |= broad_root)
+                            .or_insert(broad_root);
+                    }
                 }
             }
         }
         let roots = root_policies.keys().cloned().collect::<Vec<_>>();
+        inferred_roots.sort();
 
         let mut excluded_paths = excluded_paths.into_iter().collect::<Vec<_>>();
         excluded_paths.sort();
-        let cache_matches = self
-            .cache
-            .as_ref()
-            .is_some_and(|cache| cache.roots == roots && cache.excluded_paths == excluded_paths);
+        let cache_matches = self.cache.as_ref().is_some_and(|cache| {
+            cache.roots == roots
+                && cache.inferred_roots == inferred_roots
+                && cache.excluded_paths == excluded_paths
+        });
         if cache_matches {
             let cache = self.cache.as_ref().unwrap();
             if cache.bytes > remaining {
                 return Err(size_limit_message(max_bytes));
             }
-            return Ok(&cache.documents);
+            return Ok((&cache.documents, cache.inferred_count));
         }
 
         let mut remaining_entries = MAX_INVENTORY_ENTRIES;
@@ -86,15 +114,27 @@ impl ProjectSources {
         paths.retain(|path| excluded_paths.binary_search(path).is_err());
         paths.sort();
         paths.dedup();
+        let (mut inferred_paths, dependency_paths): (Vec<_>, Vec<_>) =
+            paths.into_iter().partition(|path| {
+                model
+                    .module_for_source(path)
+                    .and_then(|module| module.id.as_ref())
+                    .is_some_and(|id| inferred_modules.contains(id))
+            });
+        let inferred_count = inferred_paths.len();
+        inferred_paths.extend(dependency_paths);
 
-        let (documents, bytes) = load_documents(paths, remaining, max_bytes)?;
+        let (documents, bytes) = load_documents(inferred_paths, remaining, max_bytes)?;
         self.cache = Some(Cache {
             roots,
+            inferred_roots,
             excluded_paths,
             documents,
+            inferred_count,
             bytes,
         });
-        Ok(&self.cache.as_ref().unwrap().documents)
+        let cache = self.cache.as_ref().unwrap();
+        Ok((&cache.documents, cache.inferred_count))
     }
 }
 
@@ -226,7 +266,7 @@ mod tests {
         let open_uris = [active_uri.as_str(), blocked_uri.as_str()];
         let mut sources = ProjectSources::default();
 
-        let loaded = sources
+        let (loaded, inferred_count) = sources
             .load(&model, &documents, &open_uris, MAX_BYTES)
             .unwrap();
 
@@ -235,6 +275,76 @@ mod tests {
             loaded,
             [(file_uri(&support), "val support = 1".to_string())]
         );
+        assert_eq!(inferred_count, 1);
+    }
+
+    #[test]
+    fn load_partitions_own_and_direct_project_dependency_sources() {
+        let directory = temp_path("dependency-source");
+        let base_root = directory.join("base/src");
+        let consumer_root = directory.join("feature/src");
+        let dependency_root = consumer_root.join("foundation");
+        fs::create_dir_all(&base_root).unwrap();
+        fs::create_dir_all(&dependency_root).unwrap();
+        fs::create_dir_all(&consumer_root).unwrap();
+        let base = base_root.join("Marker.kt");
+        let dependency = dependency_root.join("Bridge.kt");
+        let consumer = consumer_root.join("Use.kt");
+        let local = consumer_root.join("Local.kt");
+        fs::write(&base, "package fixture\ninterface Marker\n").unwrap();
+        fs::write(
+            &dependency,
+            "package fixture\ninterface Bridge { companion object { fun current(): Bridge? = null } }\n",
+        )
+        .unwrap();
+        fs::write(&consumer, "package fixture\nfun use() = Bridge.current()\n").unwrap();
+        fs::write(&local, "package fixture\nfun local() = 1\n").unwrap();
+
+        let base_id = ModuleId::new(":base", "main");
+        let mut base_module = Module::new(base_id.clone(), directory.join("base"));
+        base_module.source_roots = vec![SourceRoot::source(base_root)];
+        let dependency_id = ModuleId::new(":foundation", "main");
+        let mut dependency_module =
+            Module::new(dependency_id.clone(), directory.join("foundation"));
+        dependency_module.source_roots = vec![SourceRoot::source(dependency_root)];
+        dependency_module.depends_on = vec![base_id];
+        let mut consumer_module =
+            Module::new(ModuleId::new(":feature", "main"), directory.join("feature"));
+        consumer_module.source_roots = vec![SourceRoot::source(consumer_root)];
+        consumer_module.depends_on = vec![dependency_id];
+        let model = ProjectModel::new(&directory, ProviderKind::Gradle).with_modules(vec![
+            base_module,
+            dependency_module,
+            consumer_module,
+        ]);
+        let consumer_uri = file_uri(&consumer);
+        let documents = [(
+            consumer_uri.as_str(),
+            "package fixture\nfun use() = Bridge.current()\n",
+        )];
+        let open_uris = [consumer_uri.as_str()];
+        let mut sources = ProjectSources::default();
+
+        let (loaded, inferred_count) = sources
+            .load(&model, &documents, &open_uris, MAX_BYTES)
+            .unwrap();
+
+        fs::remove_dir_all(directory).ok();
+        assert_eq!(
+            loaded,
+            [
+                (
+                    file_uri(&local),
+                    "package fixture\nfun local() = 1\n".to_string()
+                ),
+                (
+                    file_uri(&dependency),
+                    "package fixture\ninterface Bridge { companion object { fun current(): Bridge? = null } }\n"
+                        .to_string()
+                )
+            ]
+        );
+        assert_eq!(inferred_count, 1);
     }
 
     #[test]

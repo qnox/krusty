@@ -17,6 +17,9 @@ use crate::libraries::{
 use crate::symbol_source::SymbolSource;
 use crate::types::{existing_type_name, type_name, Ty, TypeName, Visibility};
 
+mod source_fallback;
+pub(crate) use source_fallback::SourceFallbackPlatform;
+
 pub type ResolvedMember = crate::symbol_resolver::ResolvedMember;
 
 #[derive(Clone, Debug)]
@@ -833,6 +836,34 @@ impl Default for SymbolTable {
 }
 
 impl SymbolTable {
+    pub(crate) fn offset_source_files(&mut self, offset: u32) {
+        let offset_signature = |signature: &mut Signature| {
+            if let Some(file) = &mut signature.source_file {
+                *file += offset;
+            }
+        };
+        for signature in self.funs.values_mut().flatten() {
+            offset_signature(signature);
+        }
+        for signature in self.ext_funs.values_mut().flatten() {
+            offset_signature(signature);
+        }
+        for property in self.ext_props.values_mut() {
+            property.source.0 += offset;
+        }
+        for class in self.classes.values_mut() {
+            for signature in class.methods.values_mut().flatten() {
+                offset_signature(signature);
+            }
+            for signature in class.static_methods.values_mut() {
+                offset_signature(signature);
+            }
+            for signature in class.member_ext_funs.values_mut().flatten() {
+                offset_signature(&mut signature.signature);
+            }
+        }
+    }
+
     pub fn insert_class(&mut self, name: String, sig: ClassSig) -> Option<ClassSig> {
         self.insert_class_sig(name, sig)
     }
