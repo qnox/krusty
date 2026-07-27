@@ -12270,19 +12270,7 @@ impl<'a> Lower<'a> {
         } else {
             (recv, None)
         };
-        let iter_call = match iter_dispatch {
-            IteratorDispatchTarget::Member {
-                owner_fallback,
-                member,
-            } => {
-                let ret = member.ret;
-                let suspend = member.suspend;
-                self.emit_library_member_call(recv, owner_fallback, *member, ret, suspend, vec![])
-            }
-            IteratorDispatchTarget::Extension(callable) => {
-                self.emit_library_static_call(*callable, vec![recv], false)
-            }
-        };
+        let iter_call = self.lower_iterator_call(recv, iter_dispatch);
         let it_v = self.fresh_value();
         let var_it = self.emit_named_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
 
@@ -12375,6 +12363,32 @@ impl<'a> Lower<'a> {
         stmts.push(var_it);
         stmts.push(wh);
         Some(self.emit_block(stmts, None))
+    }
+
+    fn lower_iterator_call(&mut self, receiver: u32, target: IteratorDispatchTarget) -> u32 {
+        match target {
+            IteratorDispatchTarget::Member {
+                owner_fallback,
+                resolved,
+            } => {
+                let crate::symbol_resolver::ResolvedMember {
+                    member,
+                    ret,
+                    suspend,
+                } = *resolved;
+                self.emit_library_member_call(
+                    receiver,
+                    owner_fallback,
+                    member,
+                    ret,
+                    suspend,
+                    vec![],
+                )
+            }
+            IteratorDispatchTarget::Extension(callable) => {
+                self.emit_library_static_call(*callable, vec![receiver], false)
+            }
+        }
     }
 
     /// Lower a positional argument list against parallel parameter types, coercing each argument to its
@@ -15951,19 +15965,7 @@ impl<'a> Lower<'a> {
         let recv_to_v = self.fresh_value();
         let var_recv_to = self.emit_named_variable(recv_to_v, ty_to_ir(it_ty), Some(recv_g0));
         let recv_g = self.emit_get_value(recv_to_v);
-        let iter_call = match iter_dispatch {
-            IteratorDispatchTarget::Member {
-                owner_fallback,
-                member,
-            } => {
-                let ret = member.ret;
-                let suspend = member.suspend;
-                self.emit_library_member_call(recv_g, owner_fallback, *member, ret, suspend, vec![])
-            }
-            IteratorDispatchTarget::Extension(callable) => {
-                self.emit_library_static_call(*callable, vec![recv_g], false)
-            }
-        };
+        let iter_call = self.lower_iterator_call(recv_g, iter_dispatch);
         let it_v = self.fresh_value();
         let var_it = self.emit_named_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
 

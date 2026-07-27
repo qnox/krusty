@@ -6183,7 +6183,7 @@ pub enum DestructureComponentTarget {
 pub enum IteratorDispatchTarget {
     Member {
         owner_fallback: TypeName,
-        member: Box<crate::libraries::LibraryMember>,
+        resolved: Box<crate::symbol_resolver::ResolvedMember>,
     },
     Extension(Box<crate::libraries::LibraryCallable>),
 }
@@ -6191,7 +6191,7 @@ pub enum IteratorDispatchTarget {
 impl IteratorDispatchTarget {
     pub fn ret(&self) -> Ty {
         match self {
-            Self::Member { member, .. } => member.ret,
+            Self::Member { resolved, .. } => resolved.ret,
             Self::Extension(callable) => callable.ret,
         }
     }
@@ -15563,19 +15563,20 @@ impl<'a> Checker<'a> {
 
     fn iterator_protocol_target(&self, iterable_ty: Ty) -> Option<IteratorProtocolTarget> {
         let internal = iterable_ty.obj_internal()?;
-        let iterator = if let Some(member) = self.resolve_instance_name(internal, "iterator", &[]) {
-            IteratorDispatchTarget::Member {
-                owner_fallback: internal,
-                member: Box::new(member),
-            }
-        } else {
-            IteratorDispatchTarget::Extension(Box::new(self.library_extension_callable(
-                "iterator",
-                iterable_ty,
-                &[],
-                &[],
-            )?))
-        };
+        let iterator =
+            if let Some(member) = self.resolve_instance_member(iterable_ty, "iterator", &[]) {
+                IteratorDispatchTarget::Member {
+                    owner_fallback: internal,
+                    resolved: Box::new(member),
+                }
+            } else {
+                IteratorDispatchTarget::Extension(Box::new(self.library_extension_callable(
+                    "iterator",
+                    iterable_ty,
+                    &[],
+                    &[],
+                )?))
+            };
         let iter_ty = iterator.ret();
         let iter_internal = iter_ty.obj_internal()?;
         let has_next = self.resolve_instance_name(iter_internal, "hasNext", &[])?;
@@ -24251,8 +24252,9 @@ fun box(): String {
         assert!(
             matches!(
                 &protocol.iterator,
-                IteratorDispatchTarget::Member { owner_fallback, member }
-                    if owner_fallback.matches("BoxedIterable") && member.name == "iterator"
+                IteratorDispatchTarget::Member { owner_fallback, resolved }
+                    if owner_fallback.matches("BoxedIterable")
+                        && resolved.member.name == "iterator"
             ),
             "checker must record the member iterator dispatch selected for foreach lowering"
         );
