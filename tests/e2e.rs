@@ -768,6 +768,8 @@ mod safe_cast_elvis_e2e;
 mod sam_classpath_e2e;
 #[path = "sam_conversion_e2e.rs"]
 mod sam_conversion_e2e;
+#[path = "sam_generic_lambda_param_e2e.rs"]
+mod sam_generic_lambda_param_e2e;
 #[path = "same_package_classpath_e2e.rs"]
 mod same_package_classpath_e2e;
 #[path = "samefile_nested_object_value_e2e.rs"]
