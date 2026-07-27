@@ -637,6 +637,54 @@ fn continuation_metadata_uses_inline_lambda_smap_line() {
 }
 
 #[test]
+fn continuation_metadata_uses_trailing_lambda_selector_line() {
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(javap) = javap_path() else {
+        return;
+    };
+
+    let source = "package demo\n\
+        suspend fun values(): List<Int> = listOf(1)\n\
+        suspend fun work(): List<Int> {\n\
+        \x20 val result = values()\n\
+        \x20\x20 .filter { it > 0 }\n\
+        \x20 return result\n\
+        }\n";
+    let classes = common::compile_in_process_files(
+        &[("TrailingLambdaLine", source)],
+        &[stdlib, jdk.clone()],
+        Some(&jdk),
+    )
+    .expect("compile trailing-lambda continuation");
+    let bytes = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == "demo/TrailingLambdaLineKt$work$1").then_some(bytes))
+        .expect("work continuation");
+    let text = disassemble(
+        &javap,
+        bytes,
+        "TrailingLambdaLineKt$work$1.class",
+        "trailing_lambda_line",
+    );
+    let annotation = text
+        .rsplit_once("RuntimeVisibleAnnotations:")
+        .map(|(_, annotation)| annotation)
+        .expect("runtime-visible annotations");
+
+    for expected in ["l=[4]", "nl=[5]"] {
+        assert!(
+            annotation.contains(expected),
+            "missing {expected:?}:\n{text}"
+        );
+    }
+}
+
+#[test]
 fn continuation_uses_synthetic_kotlin_metadata() {
     let Some(stdlib) = common::stdlib_jar() else {
         return;
