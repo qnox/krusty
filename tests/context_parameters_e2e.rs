@@ -64,6 +64,73 @@ fn implicit_receiver_member_shadows_top_level() {
 }
 
 #[test]
+fn nearer_dispatch_member_extension_beats_inapplicable_outer_member() {
+    const SRC: &str = "class Scope {\n\
+        \x20 fun Token.select(): String = \"extension\"\n\
+        \x20 fun Token.choose(): String = \"OK\"\n\
+        \x20 fun Token.defaulted(): String = \"extension\"\n\
+        \x20 fun Token.named(value: String): String = \"extension\"\n\
+        \x20 fun Token.spread(vararg values: String): String = \"extension\"\n\
+        \x20 fun Token.block(action: () -> String): String = \"extension\"\n\
+        }\n\
+        class Token {\n\
+        \x20 fun select(): String = \"member\"\n\
+        \x20 fun choose(scope: Scope): String = \"wrong\"\n\
+        \x20 fun defaulted(value: String = \"D\"): String = value\n\
+        \x20 fun named(prefix: String = \"N\", value: String): String = prefix + value\n\
+        \x20 fun spread(vararg values: String): String = \"vararg\"\n\
+        \x20 fun block(prefix: String = \"T\", action: () -> String): String = prefix + action()\n\
+        }\n\
+        fun Token.forward(scope: Scope): String = with(scope) {\n\
+        \x20 select() + choose() + defaulted() + named(value = \"K\") +\n\
+        \x20     spread(\"x\", \"y\") + block { \"L\" }\n\
+        }\n\
+        fun box(): String = Token().forward(Scope())\n";
+    assert_eq!(
+        run(SRC).expect("nearer dispatch member extension"),
+        "memberOKDNKvarargTL"
+    );
+}
+
+#[test]
+fn member_extension_uses_nearest_implicit_extension_receiver() {
+    const SRC: &str = "class Token\n\
+        class Host {\n\
+        \x20 fun Token.choose(): String = \"OK\"\n\
+        \x20 fun run(token: Token): String = with(token) { choose() }\n\
+        }\n\
+        fun box(): String = Host().run(Token())\n";
+    assert_eq!(run(SRC).expect("nearest extension receiver"), "OK");
+}
+
+#[test]
+fn member_extension_uses_nearest_applicable_dispatch_receiver() {
+    const SRC: &str = "class Token\n\
+        class Scope {\n\
+        \x20 fun Token.choose(): String = \"OK\"\n\
+        }\n\
+        class Host {\n\
+        \x20 fun Token.choose(): String = \"outer\"\n\
+        \x20 fun run(token: Token, scope: Scope): String = with(token) {\n\
+        \x20     with(scope) { choose() }\n\
+        \x20 }\n\
+        }\n\
+        fun box(): String = Host().run(Token(), Scope())\n";
+    assert_eq!(run(SRC).expect("nearest dispatch receiver"), "OK");
+}
+
+#[test]
+fn inapplicable_nearest_member_does_not_hide_member_extension() {
+    const SRC: &str = "class Scope { fun choose(value: Int): String = \"member\" }\n\
+        class Host {\n\
+        \x20 fun Scope.choose(): String = \"OK\"\n\
+        \x20 fun run(scope: Scope): String = with(scope) { choose() }\n\
+        }\n\
+        fun box(): String = Host().run(Scope())\n";
+    assert_eq!(run(SRC).expect("applicable member extension"), "OK");
+}
+
+#[test]
 fn context_top_level_function_maps_reordered_named_arguments() {
     const SRC: &str = "class C\n\
         context(c: C) fun combine(a: String, b: String): String = a + b\n\
