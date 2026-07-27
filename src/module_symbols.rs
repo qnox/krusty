@@ -221,6 +221,7 @@ impl<'a> ModuleSymbols<'a> {
                 context_count: fi.context_count,
                 source_decl: None,
                 source_file: None,
+                source_receiver: None,
                 package: String::new(),
             })
             .collect::<Vec<_>>();
@@ -340,6 +341,7 @@ fn fn_info(
     rank: u32,
     origin: Origin,
 ) -> FunctionInfo {
+    let source_receiver = sig.source_receiver.or(receiver);
     let mut params: Vec<Ty> = Vec::new();
     if let Some(r) = receiver {
         params.push(r);
@@ -360,7 +362,7 @@ fn fn_info(
         origin,
         // A module extension's declared receiver, verbatim; the value-class pass filters by value-class
         // identity, so a generic or non-value-class receiver is inert here.
-        source_receiver: receiver,
+        source_receiver,
     };
     FunctionInfo {
         receiver_rank: rank,
@@ -512,6 +514,7 @@ mod tests {
             context_count: 0,
             source_decl: None,
             source_file: None,
+            source_receiver: None,
             package: String::new(),
         }
     }
@@ -689,6 +692,26 @@ mod tests {
         // receiver prepended → params = [Point, Int]
         assert_eq!(o.callable.params, vec![recv, Ty::Int]);
         assert_eq!(o.receiver_rank, 0);
+    }
+
+    #[test]
+    fn extension_preserves_declared_source_receiver() {
+        let mut st = FrontendSymbols::default();
+        let declared = Ty::nullable(Ty::obj("demo/Token"));
+        let erased = declared.erased_recv();
+        let mut extension = sig(vec![], Ty::String);
+        extension.source_receiver = Some(declared);
+        st.ext_funs
+            .insert((erased, "render".into()), vec![extension]);
+
+        let m = ModuleSymbols::new(&st);
+        let fs = match m.resolve_symbols("render").callables {
+            crate::libraries::Callables::Functions(f) => f.overloads,
+            _ => Vec::new(),
+        };
+        assert_eq!(fs.len(), 1);
+        assert_eq!(fs[0].callable.params, vec![erased]);
+        assert_eq!(fs[0].callable.source_receiver, Some(declared));
     }
 
     #[test]

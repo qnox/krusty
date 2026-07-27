@@ -1761,34 +1761,10 @@ pub fn lower_file_at_reporting(
             }
             if let Some(recv_ref) = &f.receiver {
                 // Extension function `fun Recv.name(…)` → a static method whose first parameter is the
-                // receiver (Kotlin's compilation strategy). Keyed by (erased receiver, name). A
-                // receiver that doesn't resolve to a concrete type (a generic `T.foo()`) isn't modeled —
-                // bail rather than guess `Object`.
-                let recv_ty = lo.ext_receiver_ty(file, recv_ref);
-                if recv_ty == Ty::Error {
-                    return None;
-                }
+                // receiver (Kotlin's compilation strategy). Reuse the declaration-keyed signature
+                // collection result so a generic receiver keeps its resolved upper-bound erasure.
+                let (recv_ty, sig) = syms.source_ext_fun(file_index, d)?;
                 let recv_key = recv_ty.erased_recv();
-                // Select THIS declaration's overload from the receiver+name set by its parameter list —
-                // an extension may be overloaded by arity (`fun R.f()` and `fun R.f(x)`), each emitted as
-                // its own static method and keyed by arity so the call site picks the right one.
-                let want: Vec<Ty> = f
-                    .params
-                    .iter()
-                    .map(|p| {
-                        let t = ty_of(file, &p.ty, &*syms.libraries);
-                        if p.is_vararg {
-                            Ty::array(t)
-                        } else {
-                            t
-                        }
-                    })
-                    .collect();
-                let sig = syms
-                    .ext_fun_overloads(recv_ty, &f.name)
-                    .iter()
-                    .find(|s| s.params == want)
-                    .or_else(|| syms.ext_fun_overloads(recv_ty, &f.name).first())?;
                 let recv_param = if recv_ref.nullable {
                     mark_nullable(ty_to_ir(recv_ty))
                 } else {
@@ -2071,27 +2047,11 @@ pub fn lower_file_at_reporting(
                     &*syms.libraries,
                 );
                 lo.lambda_seq = 0;
-                let (fid, sig) = if let Some(recv_ref) = &f.receiver {
+                let (fid, sig) = if f.receiver.is_some() {
                     // Extension body: `this` is the receiver (parameter 0), then the declared params.
-                    // Pick this declaration's exact signature and its signature-keyed method id.
-                    let recv_ty = lo.ext_receiver_ty(file, recv_ref);
+                    // Pick this declaration's exact collected receiver/signature and signature-keyed id.
+                    let (recv_ty, sig) = syms.source_ext_fun(file_index, d)?;
                     let recv_key = recv_ty.erased_recv();
-                    let want: Vec<Ty> = f
-                        .params
-                        .iter()
-                        .map(|p| {
-                            let t = ty_of(file, &p.ty, &*syms.libraries);
-                            if p.is_vararg {
-                                Ty::array(t)
-                            } else {
-                                t
-                            }
-                        })
-                        .collect();
-                    let sig = syms
-                        .ext_fun_overloads(recv_ty, &f.name)
-                        .iter()
-                        .find(|s| s.params == want)?;
                     let fid = *lo.ext_fun_id_by_sig.get(&(
                         recv_key,
                         f.name.clone(),
@@ -14244,20 +14204,6 @@ impl<'a> Lower<'a> {
         base
     }
 
-    /// An extension function RECEIVER type: `ty_of` (file-local + built-ins, e.g. `String`), falling back
-    /// to the classpath-aware [`ty_ref`] when `ty_of` can't resolve it (a classpath type like
-    /// `kotlinx...SerialDescriptor` — `ty_of` yields `Error`/`Any` since it doesn't consult imports). The
-    /// registration and body-lowering of the extension must agree with the checker's receiver descriptor.
-    fn ext_receiver_ty(&self, file: &ast::File, r: &ast::TypeRef) -> Ty {
-        let base = ty_of(file, r, &*self.syms.libraries);
-        if base == Ty::Error || base.is_erased_top() {
-            if let Some(rt) = self.classpath_ty_ref(r) {
-                return rt;
-            }
-        }
-        base
-    }
-
     fn classpath_ty_ref(&self, r: &ast::TypeRef) -> Option<Ty> {
         let nn = ast::TypeRef {
             nullable: false,
@@ -15340,6 +15286,7 @@ impl<'a> Lower<'a> {
                                 context_count: 0,
                                 source_decl: None,
                                 source_file: None,
+                                source_receiver: None,
                                 package: String::new(),
                             },
                             *ret,
