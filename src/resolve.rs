@@ -13246,22 +13246,29 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn resolved_explicit_type_args(&mut self, call: ExprId) -> Vec<Ty> {
+        self.file
+            .call_type_args
+            .get(&call.0)
+            .cloned()
+            .map(|args| args.iter().map(|arg| self.resolve_ty(arg)).collect())
+            .unwrap_or_default()
+    }
+
     /// Type safe-call lambda arguments from the selected receiver callable.
-    fn ext_arg_tys(&mut self, call: ExprId, receiver: Ty, name: &str, args: &[ExprId]) -> Vec<Ty> {
+    fn ext_arg_tys(
+        &mut self,
+        call: ExprId,
+        receiver: Ty,
+        name: &str,
+        args: &[ExprId],
+        explicit_type_args: &[Ty],
+    ) -> Vec<Ty> {
         let partial: Vec<Option<Ty>> = args
             .iter()
             .map(|&x| (!matches!(self.file.expr(x), Expr::Lambda { .. })).then(|| self.expr(x)))
             .collect();
         let arg_names = self.file.call_arg_names.get(&call.0).cloned();
-        let explicit_type_args = self
-            .file
-            .call_type_args
-            .get(&call.0)
-            .cloned()
-            .unwrap_or_default()
-            .iter()
-            .map(|argument| self.resolve_ty(argument))
-            .collect::<Vec<_>>();
         let members =
             crate::module_symbols::ModuleSymbols::new(self.syms).instance_members(receiver, name);
         let method_sig = self.best_module_member_candidate(
@@ -13286,7 +13293,7 @@ impl<'a> Checker<'a> {
                 args,
                 &partial,
                 arg_names.as_deref(),
-                &explicit_type_args,
+                explicit_type_args,
             )
         });
         let member_extension_plan = member_extension_plan.flatten();
@@ -14174,7 +14181,11 @@ impl<'a> Checker<'a> {
                             // call), dropping to the naive `arg_tys` fallback below that re-typed the lambda's
                             // `it` as `Any`. `recv` restores parity with the non-safe call path.
                             let recv = rt.non_null();
-                            let arg_tys = self.ext_arg_tys(e, recv, &name, a);
+                            let type_args = self.resolved_explicit_type_args(e);
+                            let arg_tys = self.ext_arg_tys(e, recv, &name, a, &type_args);
+                            if !type_args.is_empty() {
+                                self.resolved_call_type_args.insert(e, type_args.clone());
+                            }
                             if let ("toString", []) = (name.as_str(), arg_tys.as_slice()) {
                                 Ty::String
                             } else if let ("hashCode", []) = (name.as_str(), arg_tys.as_slice()) {
@@ -14195,7 +14206,7 @@ impl<'a> Checker<'a> {
                                         &name,
                                         recv,
                                         &arg_tys,
-                                        &[],
+                                        &type_args,
                                     )
                                     .unwrap_or(Ty::Error)
                                 }
@@ -14220,15 +14231,6 @@ impl<'a> Checker<'a> {
                                         )
                                         .is_some()
                                     });
-                                let explicit_type_args = self
-                                    .file
-                                    .call_type_args
-                                    .get(&e.0)
-                                    .cloned()
-                                    .unwrap_or_default()
-                                    .iter()
-                                    .map(|argument| self.resolve_ty(argument))
-                                    .collect::<Vec<_>>();
                                 let applicable_member_extension = self
                                     .member_extension_function(
                                         recv,
@@ -14236,7 +14238,7 @@ impl<'a> Checker<'a> {
                                         a,
                                         &arg_tys,
                                         arg_names.as_deref(),
-                                        &explicit_type_args,
+                                        &type_args,
                                     )
                                     .is_ok_and(|candidate| candidate.is_some());
                                 (applicable_module_member || !applicable_member_extension)
@@ -14278,7 +14280,7 @@ impl<'a> Checker<'a> {
                                             &name,
                                             recv,
                                             &arg_tys,
-                                            &[],
+                                            &type_args,
                                         )
                                     })
                                     .unwrap_or(Ty::Error)
@@ -14292,7 +14294,7 @@ impl<'a> Checker<'a> {
                                         &name,
                                         recv,
                                         &arg_tys,
-                                        &[],
+                                        &type_args,
                                     )
                                 })
                                 .unwrap_or(Ty::Error)
@@ -20296,13 +20298,7 @@ impl<'a> Checker<'a> {
                 }
                 // Extension / static method from any classpath library (e.g. Kotlin stdlib).
                 // Receiver type is passed as the first argument (invokestatic at the JVM level).
-                let call_targs: Vec<Ty> = self
-                    .file
-                    .call_type_args
-                    .get(&call.0)
-                    .cloned()
-                    .map(|ts| ts.iter().map(|r| self.resolve_ty(r)).collect())
-                    .unwrap_or_default();
+                let call_targs = self.resolved_explicit_type_args(call);
                 crate::trace_compiler!(
                     "resolve",
                     "EXT-SECTION name={name} rt={rt:?} call_targs={call_targs:?}"
@@ -22447,13 +22443,7 @@ impl<'a> Checker<'a> {
                 // A receiver-less top-level library function (`listOf(…)`): resolve it through the
                 // library set (vararg-aware), checking each argument against the resolved parameters.
                 if !user_shadows {
-                    let call_targs: Vec<Ty> = self
-                        .file
-                        .call_type_args
-                        .get(&call.0)
-                        .cloned()
-                        .map(|ts| ts.iter().map(|r| self.resolve_ty(r)).collect())
-                        .unwrap_or_default();
+                    let call_targs = self.resolved_explicit_type_args(call);
                     // NAMED arguments to a classpath function (`describe(count = 3, name = "hi")`): map
                     // labels through the callee's `@Metadata` names so overload resolution and
                     // per-argument checking pair against parameter slots. Lowering uses the recorded slots
