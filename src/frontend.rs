@@ -6,7 +6,7 @@ use crate::ast::File;
 use crate::diag::{DiagSink, Severity};
 use crate::features::LangFeatures;
 pub use crate::lexer::{NameToken as FrontendNameToken, NameTokenKind as FrontendNameTokenKind};
-use crate::libraries::{EmptySymbolSource, SemanticPlatform};
+use crate::libraries::{Callables, EmptySymbolSource, SemanticPlatform, Ty, TypeName};
 pub(crate) use crate::resolve::ClassSig as FrontendClassSig;
 pub use crate::resolve::SymbolTable as FrontendSymbols;
 pub use crate::resolve::TypeInfo as FrontendTypeInfo;
@@ -319,6 +319,178 @@ pub fn parse_source_with_detected_features(src: &str, diags: &mut DiagSink) -> F
     parse_source(src, &features, diags)
 }
 
+fn retain_library_fallback_declarations(
+    files: &mut [File],
+    inferred_count: usize,
+    libraries: &dyn SemanticPlatform,
+) {
+    fn internal_name_matches_source(
+        source: &str,
+        file: &File,
+        library: TypeName,
+        libraries: &dyn SemanticPlatform,
+    ) -> bool {
+        let mut candidates = Vec::new();
+        if source.contains('.') {
+            candidates.push(source.to_string());
+        } else {
+            candidates.extend(
+                file.imports
+                    .iter()
+                    .filter(|import| import.rsplit('.').next().is_some_and(|name| name == source))
+                    .cloned(),
+            );
+            if let Some(package) = &file.package {
+                candidates.push(format!("{package}.{source}"));
+            }
+            if let Some(internal) = libraries.builtin_type_internal(source) {
+                candidates.push(internal.replace('/', "."));
+            }
+        }
+        candidates.into_iter().any(|candidate| {
+            let mut internal = candidate.replace('.', "/");
+            loop {
+                if library.matches(&internal) {
+                    return true;
+                }
+                let Some(separator) = internal.rfind('/') else {
+                    return false;
+                };
+                internal.replace_range(separator..=separator, "$");
+            }
+        })
+    }
+
+    fn source_type_matches_library(
+        source: &crate::ast::TypeRef,
+        library: Ty,
+        file: &File,
+        libraries: &dyn SemanticPlatform,
+    ) -> bool {
+        let library = library.non_null();
+        if source.name == "<fun>" {
+            let Ty::Fun(signature) = library else {
+                return false;
+            };
+            return source.fun_suspend == signature.suspend
+                && source.fun_params.len() == signature.params.len()
+                && source
+                    .fun_params
+                    .iter()
+                    .zip(&signature.params)
+                    .all(|(source, library)| {
+                        source_type_matches_library(source, *library, file, libraries)
+                    })
+                && source.arg.as_deref().is_some_and(|source| {
+                    source_type_matches_library(source, signature.ret, file, libraries)
+                });
+        }
+        if let Some(primitive) = Ty::from_name(&source.name) {
+            return library == primitive;
+        }
+        if let Some(element) = Ty::primitive_array_element(&source.name) {
+            return library.array_elem() == Some(element);
+        }
+        if source.name == "Array" {
+            return source
+                .arg
+                .as_deref()
+                .or_else(|| source.targs.first())
+                .zip(library.array_elem())
+                .is_some_and(|(source, library)| {
+                    source_type_matches_library(source, library, file, libraries)
+                });
+        }
+        match library {
+            Ty::Obj(internal, arguments) => {
+                internal_name_matches_source(&source.name, file, internal, libraries)
+                    && source.targs.len() == arguments.len()
+                    && source.targs.iter().zip(arguments).all(|(source, library)| {
+                        source_type_matches_library(source, *library, file, libraries)
+                    })
+            }
+            Ty::TyParam(name, _) => source.name == name,
+            _ => false,
+        }
+    }
+
+    fn companion_function_exists(
+        source: &crate::ast::FunDecl,
+        library: &crate::libraries::LibraryType,
+        file: &File,
+        libraries: &dyn SemanticPlatform,
+    ) -> bool {
+        library.companion.iter().any(|candidate| {
+            candidate.name == source.name
+                && candidate.params.len() == source.params.len()
+                && source
+                    .params
+                    .iter()
+                    .zip(&candidate.params)
+                    .all(|(source, library)| {
+                        if source.is_vararg {
+                            library.array_elem().is_some_and(|library| {
+                                source_type_matches_library(&source.ty, library, file, libraries)
+                            })
+                        } else {
+                            source_type_matches_library(&source.ty, *library, file, libraries)
+                        }
+                    })
+        })
+    }
+
+    for file in files.iter_mut().skip(inferred_count) {
+        let package = file
+            .package
+            .as_deref()
+            .map(|package| package.replace('.', "/"))
+            .unwrap_or_default();
+        let fqn = |name: &str| {
+            if package.is_empty() {
+                name.to_string()
+            } else {
+                format!("{package}/{name}")
+            }
+        };
+        let retained = file
+            .decls
+            .iter()
+            .copied()
+            .filter(|declaration| match file.decl(*declaration) {
+                crate::ast::Decl::Class(class) => {
+                    let internal = fqn(&class.name.replace('.', "$"));
+                    libraries.resolve_type(&internal).is_none_or(|library| {
+                        class.companion_methods.iter().any(|function| {
+                            !companion_function_exists(function, &library, file, libraries)
+                        }) || class.companion_props.iter().any(|property| {
+                            !library
+                                .companion
+                                .iter()
+                                .any(|member| member.name == property.name)
+                                && !library.companion_consts.contains_key(&property.name)
+                        })
+                    })
+                }
+                crate::ast::Decl::Fun(function) => !matches!(
+                    libraries.resolve_symbols(&fqn(&function.name)).callables,
+                    Callables::Functions(_) | Callables::Both { .. }
+                ),
+                crate::ast::Decl::Property(property) => !matches!(
+                    libraries.resolve_symbols(&fqn(&property.name)).callables,
+                    Callables::Properties(_) | Callables::Both { .. }
+                ),
+            })
+            .collect::<Vec<_>>();
+        file.expect_decls
+            .retain(|declaration| retained.contains(declaration));
+        file.decls = retained;
+        file.type_aliases
+            .retain(|(alias, _)| libraries.resolve_type(&fqn(alias)).is_none());
+        file.type_alias_fun
+            .retain(|(alias, _, _)| libraries.resolve_type(&fqn(alias)).is_none());
+    }
+}
+
 /// Analyze a source set with project-wide and per-source language features.
 pub fn analyze_source_set_with_features(
     sources: &[SourceInput<'_>],
@@ -335,8 +507,57 @@ pub fn analyze_source_set_with_features(
     )
 }
 
+/// Analyze a source set while checking only its leading `checked_count` files and inferring
+/// expression-body declaration returns only through its leading `inferred_count` files.
+///
+/// Every source is parsed and contributes declarations to the shared symbol table; files after the
+/// inference prefix are declaration-only support sources. This lets consumers retain full
+/// same-module inference while indexing source dependencies without diagnosing or evaluating their
+/// bodies as part of the current compilation module.
+pub fn analyze_source_set_prefix_with_features(
+    sources: &[SourceInput<'_>],
+    checked_count: usize,
+    inferred_count: usize,
+    platform: Box<dyn SemanticPlatform>,
+    project_features: &LangFeatures,
+    diags: &mut DiagSink,
+) -> SourceSetAnalysis {
+    analyze_source_set_with_features_and_prepare_prefix(
+        sources,
+        checked_count,
+        inferred_count,
+        platform,
+        project_features,
+        |_, _| {},
+        diags,
+    )
+}
+
 pub fn analyze_source_set_with_features_and_prepare<F>(
     sources: &[SourceInput<'_>],
+    platform: Box<dyn SemanticPlatform>,
+    project_features: &LangFeatures,
+    prepare_symbols: F,
+    diags: &mut DiagSink,
+) -> SourceSetAnalysis
+where
+    F: FnOnce(&[File], &mut FrontendSymbols),
+{
+    analyze_source_set_with_features_and_prepare_prefix(
+        sources,
+        sources.len(),
+        sources.len(),
+        platform,
+        project_features,
+        prepare_symbols,
+        diags,
+    )
+}
+
+fn analyze_source_set_with_features_and_prepare_prefix<F>(
+    sources: &[SourceInput<'_>],
+    checked_count: usize,
+    inferred_count: usize,
     platform: Box<dyn SemanticPlatform>,
     project_features: &LangFeatures,
     prepare_symbols: F,
@@ -370,9 +591,17 @@ where
     if multiplatform {
         strip_matched_expects(&mut files);
     }
+    retain_library_fallback_declarations(&mut files, inferred_count, &*platform);
     let mut symbols = collect_signatures_with_cp(&files, platform, diags);
     prepare_symbols(&files, &mut symbols);
-    let types = check_source_set_skipping(&files, &mut symbols, &parse_errors, diags);
+    let types = check_source_set_skipping(
+        &files,
+        &mut symbols,
+        &parse_errors,
+        checked_count,
+        inferred_count,
+        diags,
+    );
     SourceSetAnalysis {
         files,
         symbols,
@@ -384,14 +613,16 @@ fn check_source_set_skipping(
     files: &[File],
     symbols: &mut FrontendSymbols,
     skip: &[bool],
+    checked_count: usize,
+    inferred_count: usize,
     diags: &mut DiagSink,
 ) -> Vec<Option<FrontendTypeInfo>> {
-    preinfer_module_returns(files, symbols, diags);
+    preinfer_module_returns(&files[..inferred_count.min(files.len())], symbols, diags);
     files
         .iter()
         .enumerate()
         .map(|(index, _)| {
-            if skip.get(index).copied().unwrap_or(false) {
+            if index >= checked_count || skip.get(index).copied().unwrap_or(false) {
                 None
             } else {
                 diags.set_file(index as u32);
@@ -412,7 +643,7 @@ pub fn check_source_set(
     symbols: &mut FrontendSymbols,
     diags: &mut DiagSink,
 ) -> Vec<Option<FrontendTypeInfo>> {
-    check_source_set_skipping(files, symbols, &[], diags)
+    check_source_set_skipping(files, symbols, &[], files.len(), files.len(), diags)
 }
 
 /// Analyze a source set using only per-source feature directives.
@@ -460,7 +691,56 @@ pub fn analyze_source_standalone(
 mod tests {
     use super::*;
     use crate::diag::{Diagnostic, Span};
+    use crate::libraries::{LibraryMember, LibraryType, Ty, TypeKind, TypeNameList};
     use crate::source::SourceInput;
+
+    struct ExistingLibrary;
+
+    impl crate::symbol_source::SymbolSource for ExistingLibrary {
+        fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
+            matches!(
+                internal,
+                "fixture/Present" | "fixture/Stable" | "fixture/Qualified"
+            )
+            .then(|| LibraryType {
+                is_public: true,
+                kind: TypeKind::Class,
+                supertypes: TypeNameList::new(),
+                constructors: Vec::new(),
+                members: Vec::new(),
+                companion: match internal {
+                    "fixture/Stable" => vec![LibraryMember::new(
+                        "current".to_string(),
+                        Vec::new(),
+                        Ty::Int,
+                        String::new(),
+                    )],
+                    "fixture/Qualified" => vec![LibraryMember::new(
+                        "select".to_string(),
+                        vec![Ty::obj("right/Token")],
+                        Ty::Int,
+                        String::new(),
+                    )],
+                    _ => Vec::new(),
+                },
+                companion_consts: std::collections::HashMap::new(),
+                sam_method: None,
+                companion_object: None,
+                value_companion_fns: Vec::new(),
+                value_underlying: None,
+                alias_target: None,
+                type_params: Vec::new(),
+                sealed_subclasses: TypeNameList::new(),
+                enum_entries: Vec::new(),
+                value_ctor_has_default: false,
+                ctor_named_params: Vec::new(),
+                value_class_properties: Vec::new(),
+                retention: None,
+            })
+        }
+    }
+
+    impl SemanticPlatform for ExistingLibrary {}
 
     #[test]
     fn standalone_analysis_accepts_simple_function() {
@@ -479,6 +759,86 @@ mod tests {
         assert!(diags.has_errors());
         assert!(syms.is_some());
         assert!(info.is_some());
+    }
+
+    #[test]
+    fn dependency_support_keeps_missing_classifiers_and_companion_members() {
+        let mut diagnostics = DiagSink::new();
+        let features = LangFeatures::new();
+        let mut files = vec![
+            parse_source(
+                "package feature\n\
+                 import fixture.Qualified\n\
+                 import fixture.Stable\n\
+                 import left.Token\n\
+                 fun use(): Int = Stable.current(1) + Qualified.select(Token())",
+                &features,
+                &mut diagnostics,
+            ),
+            parse_source(
+                "package fixture\nimport left.Token\n\
+                 class Present\n\
+                 class Stable { companion object {\n\
+                 \u{20} fun current(): Int = 0\n\
+                 \u{20} fun current(value: Int): Int = value\n\
+                 } }\n\
+                 class Qualified { companion object {\n\
+                 \u{20} fun select(value: Token): Int = 1\n\
+                 } }\n\
+                 class Added",
+                &features,
+                &mut diagnostics,
+            ),
+            parse_source("package left\nclass Token", &features, &mut diagnostics),
+        ];
+
+        retain_library_fallback_declarations(&mut files, 1, &ExistingLibrary);
+
+        let names = files[1]
+            .decls
+            .iter()
+            .filter_map(|declaration| match files[1].decl(*declaration) {
+                crate::ast::Decl::Class(class) => Some(class.name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["Stable", "Qualified", "Added"]);
+
+        let mut diagnostics = DiagSink::new();
+        let analysis = analyze_source_set_prefix_with_features(
+            &[
+                SourceInput::kotlin(
+                    "package feature\n\
+                     import fixture.Qualified\n\
+                     import fixture.Stable\n\
+                     import left.Token\n\
+                     fun use(): Int = Stable.current(1) + Qualified.select(Token())",
+                ),
+                SourceInput::kotlin(
+                    "package fixture\nimport left.Token\n\
+                     class Present\n\
+                     class Stable { companion object {\n\
+                     \u{20} fun current(): Int = 0\n\
+                     \u{20} fun current(value: Int): Int = value\n\
+                     } }\n\
+                     class Qualified { companion object {\n\
+                     \u{20} fun select(value: Token): Int = 1\n\
+                     } }\n\
+                     class Added",
+                ),
+                SourceInput::kotlin("package left\nclass Token"),
+            ],
+            1,
+            1,
+            Box::new(ExistingLibrary),
+            &features,
+            &mut diagnostics,
+        );
+        assert!(
+            analysis.types[0].is_some() && diagnostics.diags.is_empty(),
+            "{:?}",
+            diagnostics.diags
+        );
     }
 
     #[test]

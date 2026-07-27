@@ -1,7 +1,6 @@
 //! Library metadata shared by symbol sources.
 
-pub use crate::types::Visibility;
-use crate::types::{Ty, TypeName, TypeNameList};
+pub use crate::types::{Ty, TypeName, TypeNameList, Visibility};
 use std::collections::HashMap;
 
 /// A parsed generic signature in Kotlin's logical shape: formal type-parameter names, an OPTIONAL

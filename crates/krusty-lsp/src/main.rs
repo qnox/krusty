@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use krusty_lsp::{
-    detect, resolve_jdk, AnalysisWorker, DocumentAnalysis, JdkRequest, LspOptions, ProcessRunner,
-    ProjectFeedback, ProjectMessageKind, ProjectSources, ProjectSync, ProviderKind, RefreshOutcome,
-    SystemEnvironment,
+    detect, resolve_jdk, AnalysisWorker, DocumentAnalysis, JdkRequest, LoadedProjectSources,
+    LspOptions, ProcessRunner, ProjectFeedback, ProjectMessageKind, ProjectSources, ProjectSync,
+    ProviderKind, RefreshOutcome, SystemEnvironment,
 };
 
 fn main() {
@@ -235,24 +235,25 @@ impl krusty_lsp::Analysis for WorkerHost {
         documents: &[(&str, &str)],
         open_uris: &[&str],
     ) -> (Vec<DocumentAnalysis>, Vec<(String, String)>) {
-        let support_documents = match self.project_support_sources(documents, open_uris) {
-            Ok(sources) => sources.to_vec(),
-            Err(message) => {
-                let analyses = documents
-                    .iter()
-                    .map(|_| {
-                        DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
-                            span: krusty::diag::Span::new(0, 0),
-                            editor_span: None,
-                            severity: krusty::diag::Severity::Error,
-                            msg: message.clone(),
-                            file: 0,
-                        }])
-                    })
-                    .collect();
-                return (analyses, Vec::new());
-            }
-        };
+        let (support_documents, inferred_support_count) =
+            match self.project_support_sources(documents, open_uris) {
+                Ok((sources, inferred_count)) => (sources.to_vec(), inferred_count),
+                Err(message) => {
+                    let analyses = documents
+                        .iter()
+                        .map(|_| {
+                            DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
+                                span: krusty::diag::Span::new(0, 0),
+                                editor_span: None,
+                                severity: krusty::diag::Severity::Error,
+                                msg: message.clone(),
+                                file: 0,
+                            }])
+                        })
+                        .collect();
+                    return (analyses, Vec::new());
+                }
+            };
         let mut inputs = documents
             .iter()
             .map(|(uri, source)| {
@@ -264,7 +265,11 @@ impl krusty_lsp::Analysis for WorkerHost {
         }));
         let analyses = self
             .worker
-            .analyze_inputs_prefix(&inputs, documents.len())
+            .analyze_inputs_prefix(
+                &inputs,
+                documents.len(),
+                documents.len() + inferred_support_count,
+            )
             .unwrap_or_else(|error| {
                 documents
                     .iter()
@@ -377,9 +382,9 @@ impl WorkerHost {
         &mut self,
         documents: &[(&str, &str)],
         open_uris: &[&str],
-    ) -> Result<&[(String, String)], String> {
+    ) -> Result<LoadedProjectSources<'_>, String> {
         let Some(model) = self.sync.as_ref().and_then(ProjectSync::model) else {
-            return Ok(&[]);
+            return Ok((&[], 0));
         };
         self.project_sources.load(
             model,
