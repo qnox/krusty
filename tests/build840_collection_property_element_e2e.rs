@@ -75,3 +75,36 @@ fn typed_element_binds_primitive() {
         "OK"
     );
 }
+
+#[test]
+fn classpath_iterator_uses_declared_element_parameter() {
+    const LIBRARY: &str = r#"
+package fixture
+
+interface Entry {
+    val marker: String
+}
+
+class Item(override val marker: String) : Entry
+
+class Bag<K, V>(private val values: List<V>) : Iterable<V> {
+    override fun iterator(): Iterator<V> = values.iterator()
+}
+
+object Samples {
+    fun entries(): Bag<String, Entry> = Bag(listOf(Item("OK")))
+}
+"#;
+    const MAIN: &str = r#"
+import fixture.Samples
+
+fun box(): String {
+    for (entry in Samples.entries()) {
+        return entry.marker
+    }
+    return "empty"
+}
+"#;
+
+    common::expect_box_ok_against("classpath_iterator_element_parameter", LIBRARY, MAIN);
+}
