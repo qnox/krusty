@@ -809,6 +809,7 @@ mod tests {
             "state".into(),
             DeclaredPropertySig {
                 ty: Ty::String,
+                storage_ty: None,
                 visibility: Visibility::Protected,
                 getter_name: "getState".into(),
                 setter_name: Some("setState".into()),

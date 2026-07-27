@@ -382,6 +382,7 @@ impl ClassFlags {
 #[derive(Clone, Debug)]
 pub struct DeclaredPropertySig {
     pub ty: Ty,
+    pub storage_ty: Option<Ty>,
     pub visibility: Visibility,
     pub getter_name: String,
     pub setter_name: Option<String>,
@@ -627,12 +628,11 @@ impl ClassSig {
     }
 
     pub fn prop(&self, name: &str) -> Option<(Ty, bool)> {
-        if self
-            .declared_props
-            .get(name)
-            .is_some_and(|property| !property.context_params.is_empty())
-        {
-            return None;
+        if let Some(property) = self.declared_props.get(name) {
+            return property
+                .context_params
+                .is_empty()
+                .then_some((property.ty, property.setter_name.is_some()));
         }
         self.props
             .iter()
@@ -2088,6 +2088,13 @@ fn collect_file_type_names(file: &File, out: &mut std::collections::HashSet<Stri
         if let Some(r) = &p.ty {
             collect_typeref_names(r, out);
         }
+        if let Some(ty) = p
+            .explicit_backing_field
+            .as_ref()
+            .and_then(|field| field.ty.as_ref())
+        {
+            collect_typeref_names(ty, out);
+        }
     }
     // Every bare VALUE reference (`val x = EmptyCoroutineContext` — an object singleton/top-level fun
     // used as a value) is a candidate too: a wildcard/explicit import resolves it no differently from a
@@ -2497,6 +2504,24 @@ fn validate_context_property(property: &PropDecl, abstract_allowed: bool, diags:
         diags.error(
             property.span,
             "context property cannot have a backing field".to_string(),
+        );
+    }
+}
+
+fn validate_explicit_backing_field(property: &PropDecl, diags: &mut DiagSink) {
+    if property.explicit_backing_field.is_some()
+        && (property.is_var
+            || property.is_open
+            || property.getter.is_some()
+            || property.setter.is_some()
+            || property.delegate.is_some()
+            || property.is_const
+            || property.receiver.is_some()
+            || !property.context_params.is_empty())
+    {
+        diags.error(
+            property.span,
+            "an explicit backing field requires a final, read-only property with default accessors",
         );
     }
 }
@@ -3080,6 +3105,7 @@ pub fn collect_signatures_with_cp(
                                 property.name.clone(),
                                 DeclaredPropertySig {
                                     ty: ty_of_ref(&property.ty, &class_names, &ctp, diags),
+                                    storage_ty: None,
                                     visibility: property.visibility,
                                     getter_name: property_getter_name(&property.name),
                                     setter_name: property
@@ -3110,6 +3136,7 @@ pub fn collect_signatures_with_cp(
                         .collect();
                     for bp in &c.body_props {
                         validate_context_property(bp, c.is_interface() || bp.is_abstract, diags);
+                        validate_explicit_backing_field(bp, diags);
                         let resolve = |name: &str| class_names.get(name);
                         let btp =
                             ctp.extended_with(&bp.type_params, &bp.type_param_bounds, &resolve);
@@ -3146,7 +3173,7 @@ pub fn collect_signatures_with_cp(
                             property_scope.push(("this".to_string(), receiver, false));
                         }
                         property_scope.extend(init_scope.iter().cloned());
-                        let ty = if let Some(de) = bp.delegate {
+                        let property_ty = if let Some(de) = bp.delegate {
                             // A delegated member property: type = annotation, else the delegate's
                             // `getValue` return type.
                             match &bp.ty {
@@ -3207,7 +3234,61 @@ pub fn collect_signatures_with_cp(
                                     .unwrap_or(Ty::Error),
                             }
                         };
-                        if ty == Ty::Error
+                        let storage_ty = bp.explicit_backing_field.as_ref().map(|field| {
+                            field
+                                .ty
+                                .as_ref()
+                                .map(|ty| ty_of_ref(ty, &class_names, &btp, diags))
+                                .or_else(|| {
+                                    bp.init.map(|init| {
+                                        infer_lit_ty_scoped(
+                                            file,
+                                            init,
+                                            &class_names,
+                                            &fun_rets,
+                                            &property_scope,
+                                            &*libraries,
+                                            &table,
+                                        )
+                                    })
+                                })
+                                .unwrap_or(Ty::Error)
+                        });
+                        if storage_ty == Some(Ty::Error) {
+                            diags.error(
+                                bp.span,
+                                format!(
+                                    "cannot infer the backing field type of '{}'; add an explicit type",
+                                    bp.name
+                                ),
+                            );
+                        }
+                        if let Some(field_ty) = storage_ty {
+                            if !table.is_source_subtype(field_ty, property_ty) {
+                                diags.error(
+                                    bp.span,
+                                    format!(
+                                        "backing field type of '{}' is not a subtype of its property type",
+                                        bp.name
+                                    ),
+                                );
+                            }
+                            if crate::assignable::TypeOracle::value_underlying(
+                                &table.source_constructor_matcher(),
+                                field_ty,
+                            )
+                            .is_some()
+                            {
+                                diags.error(
+                                    bp.span,
+                                    format!(
+                                        "value-class backing field is not supported for '{}'",
+                                        bp.name
+                                    ),
+                                );
+                            }
+                        }
+                        if property_ty == Ty::Error
                             && bp.ty.is_none()
                             && (bp.init.is_some() || matches!(bp.getter, Some(FunBody::Block(_))))
                         {
@@ -3242,7 +3323,7 @@ pub fn collect_signatures_with_cp(
                                         .map(|ret| {
                                             ty_of_ref(ret, &class_names, &symbolic_btp, diags)
                                         })
-                                        .unwrap_or(ty),
+                                        .unwrap_or(property_ty),
                                     context_params: symbolic_context_params,
                                     type_params: bp.type_params.clone(),
                                     type_param_bounds: bp
@@ -3260,13 +3341,15 @@ pub fn collect_signatures_with_cp(
                                 });
                             continue;
                         }
+                        let resolved_storage_ty = storage_ty.unwrap_or(property_ty);
                         if bp.context_params.is_empty() {
-                            props.push((bp.name.clone(), ty, bp.is_var));
+                            props.push((bp.name.clone(), resolved_storage_ty, bp.is_var));
                         }
                         declared_props.insert(
                             bp.name.clone(),
                             DeclaredPropertySig {
-                                ty,
+                                ty: property_ty,
+                                storage_ty,
                                 visibility: bp.visibility,
                                 getter_name: property_getter_name(&bp.name),
                                 setter_name: bp.is_var.then(|| property_setter_name(&bp.name)),
@@ -3274,7 +3357,7 @@ pub fn collect_signatures_with_cp(
                             },
                         );
                         if bp.context_params.is_empty() {
-                            init_scope.push((bp.name.clone(), ty, bp.is_var));
+                            init_scope.push((bp.name.clone(), resolved_storage_ty, bp.is_var));
                         }
                     }
                     // An inner class's methods can read the enclosing instance's properties (via
@@ -8220,8 +8303,16 @@ fn check_file_at_impl(
                         bp.context_params.len(),
                         bp.span,
                     );
+                    let declared_property = c
+                        .syms
+                        .classes
+                        .get(&cl.name)
+                        .and_then(|class| class.declared_props.get(&bp.name))
+                        .map(|property| (property.ty, property.storage_ty));
                     if let Some(init) = bp.init {
-                        let declared = bp.ty.as_ref().map(|r| c.resolve_ty(r));
+                        let declared = declared_property
+                            .map(|(property_ty, field_ty)| field_ty.unwrap_or(property_ty))
+                            .or_else(|| bp.ty.as_ref().map(|r| c.resolve_ty(r)));
                         let it = match declared {
                             Some(expected) => c.expr_expected(init, expected),
                             None => c.expr(init),
@@ -8273,6 +8364,7 @@ fn check_file_at_impl(
                         .ty
                         .as_ref()
                         .map(|r| c.resolve_ty(r))
+                        .or_else(|| declared_property.map(|(property_ty, _)| property_ty))
                         .or_else(|| {
                             c.syms.classes.get(&cl.name).and_then(|class| {
                                 extension_receiver
@@ -8304,8 +8396,12 @@ fn check_file_at_impl(
                         let parameter_type = c.resolve_ty(&parameter.ty);
                         c.declare(&parameter.name, parameter_type, false);
                     }
-                    let field_ty =
-                        (bp.receiver.is_none() && bp.context_params.is_empty()).then_some(prop_ty);
+                    let field_ty = (bp.receiver.is_none() && bp.context_params.is_empty())
+                        .then_some(
+                            declared_property
+                                .and_then(|(_, field_ty)| field_ty)
+                                .unwrap_or(prop_ty),
+                        );
                     if let Some(getter) = &bp.getter {
                         c.with_ret_field(prop_ty, field_ty, |c| match getter {
                             FunBody::Expr(g) => {
@@ -10848,6 +10944,7 @@ impl<'a> Checker<'a> {
         fn collect(
             syms: &SymbolTable,
             owner: TypeName,
+            use_storage_type: bool,
             seen: &mut std::collections::HashSet<TypeName>,
             properties: &mut Vec<ScopedProperty>,
         ) {
@@ -10858,10 +10955,10 @@ impl<'a> Checker<'a> {
                 return;
             };
             if let Some(parent) = class.super_internal_name() {
-                collect(syms, parent, seen, properties);
+                collect(syms, parent, false, seen, properties);
             }
             for interface in class.interfaces.iter() {
-                collect(syms, interface, seen, properties);
+                collect(syms, interface, false, seen, properties);
             }
             properties.extend(
                 class
@@ -10870,7 +10967,11 @@ impl<'a> Checker<'a> {
                     .filter(|(_, property)| property.context_params.is_empty())
                     .map(|(name, property)| ScopedProperty {
                         name: name.clone(),
-                        ty: property.ty,
+                        ty: if use_storage_type {
+                            property.storage_ty.unwrap_or(property.ty)
+                        } else {
+                            property.ty
+                        },
                         is_var: property.setter_name.is_some(),
                         owner,
                     }),
@@ -10881,6 +10982,7 @@ impl<'a> Checker<'a> {
         collect(
             self.syms,
             owner,
+            self.this_ty.and_then(Ty::obj_internal) == Some(owner),
             &mut std::collections::HashSet::new(),
             &mut properties,
         );
@@ -23892,6 +23994,19 @@ mod tests {
         (errs, Some(info))
     }
 
+    fn check_with_detected_features(src: &str) -> Vec<String> {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file_with_detected_features(src, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.clone())
+            .collect()
+    }
+
     fn ok(src: &str) {
         let (errs, _) = check(src);
         assert!(errs.is_empty(), "unexpected errors: {errs:?}");
@@ -25856,6 +25971,48 @@ fun box(): String {
              val current: Scope = scope",
             "context property cannot have a backing field",
         );
+    }
+
+    #[test]
+    fn explicit_backing_field_requires_read_only_property() {
+        let errors = check_with_detected_features(
+            "// LANGUAGE: +ExplicitBackingFields\n\
+             class Holder {\n\
+                 var value: Any field: String = \"value\"\n\
+             }",
+        );
+        assert!(errors.iter().any(|error| {
+            error.contains(
+                "explicit backing field requires a final, read-only property with default accessors",
+            )
+        }));
+    }
+
+    #[test]
+    fn explicit_backing_field_type_must_refine_property_type() {
+        let errors = check_with_detected_features(
+            "// LANGUAGE: +ExplicitBackingFields\n\
+             class Holder {\n\
+                 val value: String field: Any = \"value\"\n\
+             }",
+        );
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("backing field type of 'value' is not a subtype")));
+    }
+
+    #[test]
+    fn explicit_backing_field_rejects_unsupported_value_class_storage() {
+        let errors = check_with_detected_features(
+            "// LANGUAGE: +ExplicitBackingFields\n\
+             @JvmInline value class Label(val text: String)\n\
+             class Holder {\n\
+                 val value: Any field: Label = Label(\"value\")\n\
+             }",
+        );
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("value-class backing field is not supported")));
     }
 
     #[test]

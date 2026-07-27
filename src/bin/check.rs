@@ -1,14 +1,11 @@
 use krusty::diag::DiagSink;
-use krusty::frontend::{check_file, collect_signatures};
-use krusty::lexer::lex;
-use krusty::parser::parse;
+use krusty::frontend::{check_file, collect_signatures, parse_source_with_detected_features};
 
 fn main() {
     for path in std::env::args().skip(1) {
         let src = std::fs::read_to_string(&path).unwrap_or_default();
         let mut d = DiagSink::new();
-        let toks = lex(&src, &mut d);
-        let files = vec![parse(&src, &toks, &mut d)];
+        let files = vec![parse_source_with_detected_features(&src, &mut d)];
         let mut syms = collect_signatures(&files, &mut d);
         check_file(&files[0], &mut syms, &mut d);
         if d.diags.is_empty() {

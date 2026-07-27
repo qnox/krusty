@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn frontend_tools_use_only_their_declared_frontend_handoff_dependencies() {
-        assert_allowed_crate_modules("src/bin/check.rs", &["diag", "frontend", "lexer", "parser"]);
+        assert_allowed_crate_modules("src/bin/check.rs", &["diag", "frontend"]);
         assert_allowed_crate_modules(
             "src/bin/blockers.rs",
             &["diag", "frontend", "lexer", "parser"],

@@ -30,6 +30,7 @@ pub fn parse_with_features(
         name_based_destructuring: features.has("NameBasedDestructuring"),
         short_form_destructuring: features.has("EnableNameBasedDestructuringShortForm"),
         multi_dollar_interpolation: features.has("MultiDollarInterpolation"),
+        explicit_backing_fields: features.has("ExplicitBackingFields"),
         no_trailing_lambda: false,
         lexical_type_params: Vec::new(),
         lexical_type_param_bounds: Vec::new(),
@@ -1104,6 +1105,7 @@ struct Parser<'a> {
     diags: &'a mut DiagSink,
     /// `NameBasedDestructuring` language feature: allow square-bracket destructuring (`[a, b]`).
     name_based_destructuring: bool,
+    explicit_backing_fields: bool,
     /// `+EnableNameBasedDestructuringShortForm`: a plain paren entry `(a, b)` binds each variable to
     /// the RECEIVER PROPERTY of the same name (not `componentN`). An explicit `(a = prop)` still
     /// renames. Bracket `[a, b]` stays positional.
@@ -1940,7 +1942,7 @@ impl<'a> Parser<'a> {
             None
         };
         let init_operator = self.eat_span(TokenKind::Eq);
-        let init = if init_operator.is_some() {
+        let mut init = if init_operator.is_some() {
             self.skip_newlines();
             Some(self.parse_expr())
         } else {
@@ -1963,6 +1965,7 @@ impl<'a> Parser<'a> {
         // (optionally preceded by a visibility modifier) — anything else ends the property.
         let mut getter: Option<FunBody> = None;
         let mut setter: Option<PropAccessor> = None;
+        let mut explicit_backing_field = None;
         // A bare `get`/`set` (default accessor with no body) was seen — the property then has a real
         // backing field and MUST be initialized (a bare accessor is not an abstract declaration).
         let mut saw_bare_accessor = false;
@@ -1984,6 +1987,45 @@ impl<'a> Parser<'a> {
                 }
                 self.bump();
                 self.skip_newlines();
+            }
+            if self.explicit_backing_fields
+                && !is_private
+                && explicit_backing_field.is_none()
+                && self.at(TokenKind::Ident)
+                && self.text() == "field"
+                && self
+                    .t
+                    .get(self.i + 1)
+                    .is_some_and(|t| matches!(t.kind, TokenKind::Colon | TokenKind::Eq))
+            {
+                self.bump();
+                let field_ty = if self.eat(TokenKind::Colon) {
+                    Some(self.parse_type())
+                } else {
+                    None
+                };
+                let field_init_operator = self.eat_span(TokenKind::Eq);
+                let field_init = if field_init_operator.is_some() {
+                    self.skip_newlines();
+                    Some(self.parse_expr())
+                } else {
+                    None
+                };
+                if init.is_some() && field_init.is_some() {
+                    self.diags.error(
+                        self.tok().span,
+                        "krusty: a property with an explicit backing field cannot also have its own initializer",
+                    );
+                } else if let Some(field_init) = field_init {
+                    if let Some(operator) = field_init_operator {
+                        self.file
+                            .value_operator_spans
+                            .insert(field_init.0, operator);
+                    }
+                    init = Some(field_init);
+                }
+                explicit_backing_field = Some(ExplicitBackingField { ty: field_ty });
+                continue;
             }
             if !self.at(TokenKind::Ident) || !matches!(self.text(), "get" | "set") {
                 self.i = save; // not an accessor — restore (incl. any consumed newlines/modifier)
@@ -2082,7 +2124,6 @@ impl<'a> Parser<'a> {
             ty,
             is_var,
             is_override: false,
-            init,
             is_lateinit,
             getter,
             getter_reads_field,
@@ -2090,6 +2131,8 @@ impl<'a> Parser<'a> {
             is_const,
             is_abstract,
             delegate,
+            explicit_backing_field,
+            init,
             span: Span::new(start.lo, end.hi),
         }
     }
