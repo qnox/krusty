@@ -2293,3 +2293,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference operands resolves through the ordinary `rangeTo` operator path after primitive range
   handling. Classpath generic signatures preserve declared bounds for receiver matching and JVM
   erasure. Tests: `tests/reference_range_expression_e2e.rs`.
+
+- **Source generic signatures participate in call-site substitution.** Module callables retain
+  their declared type parameters, receiver, parameters, bounds, and return type. Receiver-call
+  resolution uses that signature to specialize higher-order parameters, so a declaration such as
+  `fun <T> Container<T>.transform(f: (T) -> T)` types `f` from the applied receiver.
