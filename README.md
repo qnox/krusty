@@ -17,68 +17,99 @@
 
 > *"Hey hey! It compiles Kotlin, kids!"*
 
-A **memory-lean Kotlin → JVM bytecode compiler** written in Rust, built as a proof of concept for a
-*linear, per-file streaming* pipeline — the opposite of holding the whole program graph in memory.
-The clown nose is the only thing that's a joke; the bytecode is real, and the real `kotlinc` accepts
-it as a genuine Kotlin library.
+**krusty** is a memory-conscious **Kotlin → JVM bytecode compiler** written in Rust. Its frontend
+builds a module-wide source and symbol view. Its backend lowers one checked file per call while
+carrying the state needed to finalize module metadata. It emits `.class` files,
+`@kotlin.Metadata`, and `META-INF/*.kotlin_module` for the supported language subset.
 
-Follow-up to the `kotlin-memory-bench` finding that kotlinc's whole-module pipeline is what caps
-memory optimization; krusty is the per-file design built from scratch.
+**Goal:** emit bytecode that is **byte-for-byte identical** to the reference `kotlinc` for every
+construct krusty supports, not only ABI-compatible output. Differential bytecode tests, Kotlin/Java
+consumer tests, and the Kotlin `codegen/box` corpus provide the oracle for that goal.
 
-## What works today
+---
 
-krusty compiles a growing subset of Kotlin and emits `.class` files (plus `@kotlin.Metadata` and
-`META-INF/*.kotlin_module`) whose **public ABI matches `kotlinc` exactly**, verified by a
-differential test harness against the real compiler:
+## Contents
 
-- **Top-level functions** — arithmetic (Int/Long/Double + widening), comparisons, short-circuit
-  `&&`/`||`, `if`/`while`, blocks with `val`/`var` locals, string concat, calls.
-- **Classes** — primary-constructor properties (`val`/`var` → backing fields + `getX`/`setX`),
-  member functions (instance methods with property access), **named constructor arguments**
-  (`C(b = 9)`, skipping leading literal defaults), **custom property accessors** over a backing
-  field (`val x = "O"; get() = field + "K"`), and **interface delegation** to a `val`-param or an
-  expression (`class D : I by Impl()`).
-- **Type operators** — `is`/`as`/`as?`, including the unchecked cast to a type parameter (`x as T`,
-  erased to its bound only at JVM emit), the nullable reference cast (`x as Foo?`, a `null`-passing
-  `checkcast`), and the primitive→reference box cast (`42 as Any`, `b as Byte?`).
-- **`@kotlin.Metadata`** — file facades (kind=2) and classes (kind=1), so a **Kotlin** consumer
-  compiled by the real `kotlinc` resolves krusty's API (functions *and* classes via property
-  syntax) and runs against it.
-- **Java interop** — reads `.class` signatures from directories **and `.jar`s** to resolve and call
-  real Java static methods; `java.lang.String` instance methods.
-- **Drop-in for `kotlinc`** — accepts kotlinc-style flags (`-d`, `-classpath`/`-cp`,
-  `-include-runtime`, `-module-name`, `-jvm-target`, `-version`, `-help`, …), compiles source files
-  **or directories**, and writes either a directory of `.class`es or a **`.jar`** (manifest +
-  classes + `<module>.kotlin_module`). Unsupported flags are ignored with a note so existing build
-  invocations keep working. A jar produced by krusty is consumable by the real `kotlinc`.
+- [Motivation](#motivation)
+- [Why memory-lean matters](#why-memory-lean-matters)
+- [What makes it different](#what-makes-it-different)
+- [Compiler plugins](#compiler-plugins)
+- [Design](#design)
+- [Project layout](#project-layout)
+- [Build & test](#build--test)
+- [Language server](#language-server)
+  - [Zed setup](#zed-setup)
+- [Status](#status)
 
-## Why
+---
 
-Production Kotlin compilation keeps large amounts of state resident (whole-module IR, caches that
-pay off only for incremental dev builds). CI builds have a different profile. krusty explores how
-lean a from-scratch pipeline can be when it processes **one file at a time** with a data-oriented,
-index-based AST — and whether such output can still be a drop-in Kotlin library.
+## Motivation
+
+krusty began as an agent-driven experiment: could a Kotlin compiler be rebuilt in Rust and driven by
+differential tests all the way to executable JVM bytecode? The implementation explores compact,
+index-based compiler data and file-oriented backend lowering while retaining the module-wide
+frontend state needed for Kotlin name and type resolution.
+
+## Why memory-lean matters
+
+Compilation is repeated across local builds, pull requests, merge queues, and version matrices.
+Memory use limits how many jobs can share a runner and which runner size a build requires, so reducing
+resident compiler state can improve capacity as well as latency.
+
+The compiler currently retains parsed files, module symbols, and checked frontend data for the
+source set, so total memory is not bounded by the largest source file. The backend API processes one
+checked file per `lower_file` call and carries explicit module state into finalization. This boundary
+makes memory behavior measurable and leaves room to shorten frontend lifetimes without changing the
+backend contract.
+
+## What makes it different
+
+Compiling Kotlin to JVM bytecode is the baseline. krusty focuses on these implementation properties:
+
+- **Byte-level fidelity.** Tests compare emitted classes and metadata with `kotlinc`, then compile
+  Kotlin and Java consumers against krusty's output.
+- **Classpath bytecode inlining.** Supported inline calls can splice the selected callable's
+  compiled body instead of relying on a function-name-specific rewrite.
+- **Explicit plugin paths.** kotlinx.serialization uses a native IR pass; KSP uses a code-generation
+  host for external processors. The general Kotlin compiler-plugin ABI is not exposed.
+- **File-oriented backend contract.** Module-wide resolution feeds one checked file per backend call,
+  with explicit state carried into module finalization.
+
+It offers a **kotlinc-compatible command line for the supported subset**: kotlinc-style flags in, a
+`.class` directory or `.jar` out. The supported language subset lives in
+[`docs/SPEC.md`](docs/SPEC.md); the badges above track the current Kotlin version and `codegen/box`
+conformance.
+
+## Compiler plugins
+
+krusty does not implement the general Kotlin compiler-plugin extension ABI. Plugin behavior is
+integrated through narrower contracts that the compiler can validate explicitly:
+
+- **kotlinx.serialization** uses a native IR pass for `@Serializable` synthesis
+  ([`src/plugins/serialization.rs`](src/plugins/serialization.rs)).
+- **KSP (Kotlin Symbol Processing)** uses a version-pinned code-generation host for external KSP
+  processors and feeds generated source back through compilation
+  ([`src/plugins/ksp.rs`](src/plugins/ksp.rs)).
+
+Other third-party Kotlin compiler plugins are currently unsupported. See
+[`docs/PLUGIN_API.md`](docs/PLUGIN_API.md) for the implemented paths, test matrix, and remaining
+limitations.
 
 ## Design
 
-- **Data-oriented AST** — every node is a `u32` index into parallel `Vec`s; a file's whole tree is
-  one bulk-freeable allocation block (no pointer graph).
-- **Linear pipeline** — lex → parse → collect global signatures → *per file*: typecheck → emit →
-  write `.class` → drop. Only one file's codegen state is live at a time.
+- **Data-oriented AST** — nodes are arena indices rather than a pointer graph. Each file has its own
+  arenas, while the source set remains available for module-wide checking.
+- **Module frontend, file backend** — parse source set → collect module signatures → check source
+  set → lower each checked file → finalize module artifacts.
 - **Hand-written class-file writer** — constant pool, `Code` attribute with automatic
   `max_stack`/`max_locals`, branch fixups; no external bytecode dependency.
 - **Correctness by differential testing** — the source of truth is the real `kotlinc`: ABI
   signatures (`javap`) must match, and Kotlin/Java consumers must compile and run identically.
-- **Conformance** — krusty is run against JetBrains/Kotlin's own `codegen/box` suite (7,352 cases):
-  it skips what it can't yet compile, runs `box()` on the JVM for what it can, and is asserted to
-  **never miscompile a case it accepts** (latest sweep: 476 cases compiled, all `box() == OK`, 0
-  failures). Coverage grows automatically as the language widens.
-- **Inline functions** — `inline fun`s are inlined from their **real compiled bytecode**, not a
-  hardcoded per-function desugar: a library scope function such as `x.let { … }` / `x.also { … }` is
-  resolved through the classpath and its actual stdlib body is spliced at the call site (lambda body
-  included), exactly as `kotlinc`'s inliner does — no `invokestatic` to the inline callee survives.
+- **Conformance** — krusty runs against JetBrains/Kotlin's own `codegen/box` suite: it skips what it
+  can't yet compile, runs `box()` on the JVM for what it can, and is asserted to **never miscompile a
+  case it accepts**. The conformance badge reports the current pass share.
 
-## Layout
+## Project layout
 
 ```
 src/lexer.rs, parser.rs, ast.rs   front end (Pratt expressions, arena AST)
@@ -101,77 +132,87 @@ docs/METADATA_NOTES.md            reverse-engineered @Metadata schema
 cargo build
 ./run-tests.sh                   # normal full-suite gate; no parameters needed
 just test                        # equivalent harness entrypoint
+```
 
-# kotlinc-style usage (krusty is a drop-in for the supported subset):
+kotlinc-style usage for the supported subset:
+
+```sh
 krusty src/ -d out/                          # compile a source tree to a class dir
 krusty src/ -d mylib.jar -module-name mylib  # ... or to a library .jar
 krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath
 krusty -version | -help
+```
 
-# LSP server over JSON-RPC on stdin/stdout
-# (incremental UTF-16 sync, diagnostics, completion + resolve, signature help, hover,
-#  go-to-definition, go-to-type-definition, go-to-implementation, references, rename,
-#  hierarchical document symbols,
-#  semantic highlighting):
+The harness self-provisions the reference Kotlin compiler and box corpus through `just` when
+available, uses the fast `gate` profile, builds once, and runs test binaries in parallel. Pass
+arguments only for a focused Cargo test/filter. Do not use `--release` for tests: the longer build
+cycle outweighs the faster run. See [`docs/TEST_HARNESS.md`](docs/TEST_HARNESS.md) for the full
+harness reference, including profiling knobs and the `KRUSTY_KOTLINC` / `KRUSTY_REF_JAVA_HOME` /
+`KRUSTY_KOTLIN_STDLIB` environment overrides.
+
+## Language server
+
+krusty ships a compiler-backed LSP server over JSON-RPC (stdin/stdout). Releases publish separate
+compiler and language-server archives per platform.
+
+```sh
 cargo build -p krusty-lsp
 target/debug/krusty-lsp --stdio -cp deps.jar:classes/
 ```
 
-Releases publish separate compiler and language-server archives for each platform.
-The LSP analyzes all open Kotlin documents as one source set and uses a restartable compiler worker
-to keep process-lifetime compiler interning bounded during long editor sessions. Completion is
-lexically scoped, includes declarations from other open files, and handles an incomplete `receiver.`
-or `receiver?.` for a simple named receiver without rerunning analysis for the request.
-Go-to-definition and find-references use the same analyzed source set and compact cached file/span
-identities; reference queries add no second occurrence index.
-Rename reuses those identities and the authoritative open-document text to reconstruct the official
-minimal edits, including exact UTF-16 ranges. It retains no source copy in AST or snapshot state.
-Go-to-type-definition uses checked expression and declaration types to return exact source-class
-locations from an integer-only span index sharing the bounded navigation budget; it retains no type
-names or source text.
-Go-to-implementation returns exact transitive source class and member overrides, including generic
-substitution and overload selection, from the same bounded integer-only navigation representation.
-Hover returns official Kotlin LSP declaration signatures and identifier ranges from a bounded,
-interned snapshot; it does not retain compiler ASTs or duplicate source strings.
-Document symbols likewise come from a bounded, compact hierarchy whose UTF-16 full and selection
-ranges are positioned once by the compiler worker; requests do not rescan source or rerun analysis.
-Signature help reports source functions, overloads, constructors, members, local functions, inferred
-generic substitutions, named/default/vararg parameters, and nested calls from a bounded interned
-snapshot. Its call records retain only byte ranges and containment links; labels carry LSP UTF-16
-parameter offsets, and requests neither retain another source string nor rerun compiler analysis.
-Per-call generic/named overload customization is streamed into that snapshot and dropped immediately,
-so repeated call sites cannot multiply the bounded declaration catalog in transient memory. Discovery
-sorts bounded 12-byte call sites, then derives and charges argument/name data one call at a time.
+It analyzes all open Kotlin documents as one source set through a restartable compiler worker that
+keeps process-lifetime interning bounded over long editor sessions. Supported requests:
 
-The test harness self-provisions the reference Kotlin compiler and box corpus through `just` when
-available, uses the fast `gate` profile, builds once, and runs test binaries in parallel. Pass
-arguments only for a focused Cargo test/filter. `KRUSTY_TEST_JOBS=<n>` overrides full-suite binary
-parallelism for profiling. Do not use `--release` for tests because the longer build cycle outweighs
-the faster run. See `docs/TEST_HARNESS.md` for the agent-facing harness reference.
+- diagnostics, semantic highlighting, hover
+- completion (with resolve) and signature help
+- go-to-definition, -type-definition, and -implementation
+- find references and rename
+- hierarchical document symbols
 
-For performance work, use the harness output instead of inventing one-off runners. Full `./run-tests.sh`
-prints the slowest test binaries. Compiler-only conformance profiling is:
+Navigation and symbol data are served from compact, interned, integer-indexed snapshots rather than
+retained compiler ASTs. A restartable worker limits the lifetime of compiler analysis state.
 
-```sh
-KRUSTY_NO_RUN=1 KRUSTY_FLAMEGRAPH=1 ./run-tests.sh --test kotlin_box_ir_jvm_conformance -- --nocapture
-```
+### Zed setup
 
-That writes `target/flamegraph.svg` and prints phase timing. New JVM-running tests should use the
-shared helpers in `tests/common` (`compile_and_run_box`, `run_box`, `javac_run`) so they reuse the
-persistent JVM runners rather than spawning `javac`/`java` per case.
+Zed can't launch an arbitrary server from `settings.json`, so krusty ships a small dev extension in
+[`editors/zed`](editors/zed) that registers `krusty-lsp` as a second server for the `Kotlin`
+language (grammar and syntax still come from the official Kotlin extension). Quick start:
 
-Explicit environment overrides are still supported:
+1. Build the server: `cargo build --release -p krusty-lsp`.
+2. Install the **Kotlin** extension from Zed's gallery (for the tree-sitter grammar).
+3. Install this repo's extension: command palette → `zed: install dev extension` → select
+   `editors/zed`.
+4. Point Zed at the binary and turn off the other Kotlin servers in `settings.json`:
 
-```sh
-KRUSTY_KOTLINC=/path/to/kotlinc/bin/kotlinc \
-KRUSTY_REF_JAVA_HOME=/path/to/jdk-21 \
-KRUSTY_KOTLIN_STDLIB=/path/to/kotlin-stdlib.jar \
-./run-tests.sh
-```
+   ```json
+   {
+     "languages": {
+       "Kotlin": {
+         "language_servers": ["krusty-lsp", "!kotlin-lsp", "!kotlin-language-server", "..."]
+       }
+     },
+     "lsp": {
+       "krusty-lsp": {
+         "binary": {
+           "path": "/absolute/path/to/krusty/target/release/krusty-lsp",
+           "arguments": ["--stdio"]
+         }
+       }
+     }
+   }
+   ```
+
+   Omit `binary.path` to take `krusty-lsp` from `PATH`.
+
+The extension forwards the worktree shell environment, so `JAVA_HOME` (from the shell, mise, or
+direnv) reaches the server; without a JDK it resolves no `java.*` symbols. The server detects BSP /
+Gradle / Maven project models and refreshes the classpath on build-file changes; passing `-cp` in
+`arguments` pins a fixed classpath instead. The extension launches the same server and capabilities
+listed above. See [`editors/zed/README.md`](editors/zed/README.md) for the full guide.
 
 ## Status
 
-A working compiler for a real (and growing) subset, with `kotlinc`-equivalent public ABI for the
-supported language, Java interop, and Kotlin-consumer round-trips passing. The roadmap
-(`docs/IMPLEMENTATION_PLAN.md`) widens the language surface — data classes, secondary constructors,
-class-typed members, generics, nullability — each gated by the same differential harness.
+A working compiler for a real, growing subset of Kotlin, with `kotlinc`-matching output for what it
+supports, Java interop, and Kotlin-consumer round-trips passing. The roadmap in
+[`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) widens the language surface, each step
+gated by the same differential harness. It is a proof of concept, not yet a production compiler.
