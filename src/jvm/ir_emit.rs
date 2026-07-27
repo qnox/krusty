@@ -59,6 +59,7 @@ impl EmitRun {
 pub struct EmitEnv<'a> {
     bodies: &'a dyn MethodBodies,
     run: &'a EmitRun,
+    cont_debug: &'a crate::jvm::suspend::ContinuationDebugMap,
 }
 
 /// A built `@kotlin.Metadata` annotation for a file facade: the `k`/`mv`/`xi` ints and the `d1` (the
@@ -1549,7 +1550,12 @@ pub fn emit_all(
     // modules) uses [`emit_all_with_class_meta`]. The run accumulators are discarded here (callers that
     // need the inline-bail reason use `emit_all_with_opts` with their own `EmitRun`).
     let run = EmitRun::default();
-    let env = EmitEnv { bodies, run: &run };
+    let empty_cont_debug = crate::jvm::suspend::ContinuationDebugMap::default();
+    let env = EmitEnv {
+        bodies,
+        run: &run,
+        cont_debug: &empty_cont_debug,
+    };
     emit_all_with_class_meta(ir, facade, &env, metadata, &EmitOptions::default(), &|_| {
         None
     })
@@ -1566,7 +1572,24 @@ pub fn emit_all_with_opts(
     opts: &EmitOptions,
     run: &EmitRun,
 ) -> Option<Vec<(String, Vec<u8>)>> {
-    let env = EmitEnv { bodies, run };
+    emit_all_with_opts_and_debug(ir, facade, bodies, metadata, opts, run, &Default::default())
+}
+
+/// Emit classes with continuation metadata produced by the JVM suspend pass.
+pub fn emit_all_with_opts_and_debug(
+    ir: &IrFile,
+    facade: &str,
+    bodies: &dyn MethodBodies,
+    metadata: Option<&KotlinMetadata>,
+    opts: &EmitOptions,
+    run: &EmitRun,
+    cont_debug: &crate::jvm::suspend::ContinuationDebugMap,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    let env = EmitEnv {
+        bodies,
+        run,
+        cont_debug,
+    };
     emit_all_with_class_meta(ir, facade, &env, metadata, opts, &|_| None)
 }
 
@@ -2282,6 +2305,19 @@ fn emit_class(
     let raw_class_sig = ir.class_signature(&fq_name);
     let jvm_sig = raw_class_sig.and_then(jvm_class_signature);
     let mut cw = new_writer_generic(&fq_name, jvm_sig.as_deref(), &superclass, opts);
+    if let Some(dbg) = env.cont_debug.get(&fq_name) {
+        cw.set_debug_metadata(
+            opts.source_file.as_deref().unwrap_or(""),
+            &dbg.l,
+            &dbg.nl,
+            &dbg.i,
+            &dbg.s,
+            &dbg.n,
+            &dbg.m,
+            &dbg.c,
+            dbg.v,
+        );
+    }
     register_sealed_subtypes(
         &mut cw,
         ir,

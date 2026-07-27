@@ -818,6 +818,8 @@ mod suspend_collection_hof_suspend_lambda_e2e;
 mod suspend_continuation_owner_e2e;
 #[path = "suspend_conversion_e2e.rs"]
 mod suspend_conversion_e2e;
+#[path = "suspend_debug_metadata_e2e.rs"]
+mod suspend_debug_metadata_e2e;
 #[path = "suspend_default_call_chained_receiver_e2e.rs"]
 mod suspend_default_call_chained_receiver_e2e;
 #[path = "suspend_default_param_e2e.rs"]
