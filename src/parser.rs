@@ -1922,24 +1922,35 @@ impl<'a> Parser<'a> {
         loop {
             let save = self.i;
             self.skip_newlines();
-            // Optional modifiers on the accessor, in any order: a visibility (`private set`) and/or
-            // `inline` (`inline get()`, `private inline set(…)`). `inline` is erased here — krusty emits
-            // an ordinary accessor — so it only needs to be consumed so the `get`/`set` still parses.
-            let mut is_private = false;
-            while self.at(TokenKind::Ident)
-                && matches!(
-                    self.text(),
-                    "private" | "protected" | "internal" | "public" | "inline"
-                )
-            {
-                if self.text() == "private" {
-                    is_private = true;
-                }
-                self.bump();
-                self.skip_newlines();
+            if !self.accessor_follows_prefix() {
+                self.i = save;
+                break;
             }
-            if !self.at(TokenKind::Ident) || !matches!(self.text(), "get" | "set") {
-                self.i = save; // not an accessor — restore (incl. any consumed newlines/modifier)
+            // Optional annotations/modifiers on the accessor, in any order: `@Suppress get()`, a
+            // visibility (`private set`), and/or `inline` (`inline get()`, `private inline set(…)`).
+            // They are erased here — krusty emits an ordinary accessor — so they only need to be
+            // consumed so the `get`/`set` still parses.
+            let mut is_private = false;
+            loop {
+                self.skip_newlines();
+                if self.at(TokenKind::At) {
+                    self.i = self
+                        .annotation_end_at(self.i)
+                        .expect("accessor annotation validated by lookahead");
+                    continue;
+                }
+                if self.at(TokenKind::Ident)
+                    && matches!(
+                        self.text(),
+                        "private" | "protected" | "internal" | "public" | "inline"
+                    )
+                {
+                    if self.text() == "private" {
+                        is_private = true;
+                    }
+                    self.bump();
+                    continue;
+                }
                 break;
             }
             let is_get = self.text() == "get";
@@ -2042,6 +2053,108 @@ impl<'a> Parser<'a> {
             is_abstract,
             delegate,
             span: Span::new(start.lo, end.hi),
+        }
+    }
+
+    /// Whether the cursor is followed by a property accessor after any accessor annotations,
+    /// visibility, or `inline` modifiers. This lookahead keeps an annotation belonging to the next
+    /// declaration out of the current property without speculatively adding its arguments to the AST.
+    fn accessor_follows_prefix(&self) -> bool {
+        let mut i = self.i;
+        loop {
+            while self
+                .t
+                .get(i)
+                .is_some_and(|token| token.kind == TokenKind::Newline)
+            {
+                i += 1;
+            }
+            let Some(token) = self.t.get(i) else {
+                return false;
+            };
+            if token.kind == TokenKind::At {
+                let Some(end) = self.annotation_end_at(i) else {
+                    return false;
+                };
+                i = end;
+                continue;
+            }
+            if token.kind == TokenKind::Ident
+                && matches!(
+                    token.text(self.src),
+                    "private" | "protected" | "internal" | "public" | "inline"
+                )
+            {
+                i += 1;
+                continue;
+            }
+            return token.kind == TokenKind::Ident && matches!(token.text(self.src), "get" | "set");
+        }
+    }
+
+    /// Return the first token after an annotation beginning at `i`, without building annotation
+    /// argument expressions. Declaration/accessor lookahead uses this single scanner for qualified
+    /// names, use-site targets, and nested argument lists.
+    fn annotation_end_at(&self, mut i: usize) -> Option<usize> {
+        if !self
+            .t
+            .get(i)
+            .is_some_and(|token| token.kind == TokenKind::At)
+        {
+            return None;
+        }
+        i += 1;
+        if self
+            .t
+            .get(i)
+            .is_some_and(|token| token.kind == TokenKind::Ident)
+            && self
+                .t
+                .get(i + 1)
+                .is_some_and(|token| token.kind == TokenKind::Colon)
+        {
+            i += 2;
+        }
+        if !self
+            .t
+            .get(i)
+            .is_some_and(|token| token.kind == TokenKind::Ident)
+        {
+            return None;
+        }
+        i += 1;
+        while self
+            .t
+            .get(i)
+            .is_some_and(|token| token.kind == TokenKind::Dot)
+            && self
+                .t
+                .get(i + 1)
+                .is_some_and(|token| token.kind == TokenKind::Ident)
+        {
+            i += 2;
+        }
+        if !self
+            .t
+            .get(i)
+            .is_some_and(|token| token.kind == TokenKind::LParen)
+        {
+            return Some(i);
+        }
+        let mut depth = 0usize;
+        loop {
+            match self.t.get(i).map(|token| token.kind) {
+                Some(TokenKind::LParen) => depth += 1,
+                Some(TokenKind::RParen) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i + 1);
+                    }
+                }
+                Some(TokenKind::Eof) | None => return None,
+                _ => {}
+            }
+            i += 1;
         }
     }
 
@@ -2869,34 +2982,10 @@ impl<'a> Parser<'a> {
             match self.t.get(j) {
                 Some(t) if t.kind == TokenKind::Newline => j += 1,
                 Some(t) if t.kind == TokenKind::At => {
-                    // Skip an annotation and its optional `(...)` argument list.
-                    j += 1;
-                    while self.t.get(j).is_some_and(|t| t.kind == TokenKind::Ident) {
-                        j += 1;
-                        if self.t.get(j).is_some_and(|t| t.kind == TokenKind::Dot) {
-                            j += 1;
-                        } else {
-                            break;
-                        }
-                    }
-                    if self.t.get(j).is_some_and(|t| t.kind == TokenKind::LParen) {
-                        let mut d = 0usize;
-                        loop {
-                            match self.t.get(j).map(|t| t.kind) {
-                                Some(TokenKind::LParen) => d += 1,
-                                Some(TokenKind::RParen) => {
-                                    d -= 1;
-                                    if d == 0 {
-                                        j += 1;
-                                        break;
-                                    }
-                                }
-                                Some(TokenKind::Eof) | None => return false,
-                                _ => {}
-                            }
-                            j += 1;
-                        }
-                    }
+                    let Some(end) = self.annotation_end_at(j) else {
+                        return false;
+                    };
+                    j = end;
                 }
                 Some(t) if t.kind == TokenKind::Ident && is_modifier(t.text(self.src)) => j += 1,
                 Some(t) => return t.kind == TokenKind::KwFun,
