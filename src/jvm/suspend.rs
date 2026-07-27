@@ -3829,6 +3829,16 @@ fn expression_source_line(ir: &IrFile, expr: ExprId) -> Option<u32> {
     direct_expression_source_line(ir, expr).or_else(|| nearest_expression_source_line(ir, expr))
 }
 
+fn execution_start_line(ir: &IrFile, expr: ExprId) -> Option<u32> {
+    if let IrExpr::Variable {
+        init: Some(init), ..
+    } = ir.exprs[expr as usize]
+    {
+        return expression_source_line(ir, init);
+    }
+    direct_expression_source_line(ir, expr)
+}
+
 fn nearest_expression_source_line(ir: &IrFile, root: ExprId) -> Option<u32> {
     let mut stack = vec![root];
     let mut seen = HashSet::new();
@@ -3871,7 +3881,7 @@ fn collect_suspension_lines(
                 let next = items[index + 1..]
                     .iter()
                     .find_map(|&next| {
-                        direct_expression_source_line(ir, next).or_else(|| {
+                        execution_start_line(ir, next).or_else(|| {
                             let current = expression_source_line(ir, item)?;
                             nearest_expression_source_line(ir, next).filter(|&line| line > current)
                         })
@@ -3950,6 +3960,9 @@ fn collect_suspension_lines(
         ) =>
         {
             collect_suspension_lines(ir, *init, suspend_set, fall_through, out);
+        }
+        IrExpr::Return(Some(value)) if is_suspend_call(ir, *value, suspend_set) => {
+            collect_suspension_lines(ir, *value, suspend_set, Some(u32::MAX), out);
         }
         _ => {
             let mut children = Vec::new();
