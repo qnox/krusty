@@ -41,3 +41,18 @@ fun box(): String {
 "#;
     common::expect_box_ok_with_stdlib(src, "PropInferChainedMember");
 }
+
+#[test]
+fn property_type_from_asserted_initializer() {
+    let src = r#"
+class Settings {
+    val separator = System.getProperty("path.separator")!!
+    fun value(): String = separator
+}
+
+fun box(): String {
+    return if (Settings().value().isNotEmpty()) "OK" else "FAIL"
+}
+"#;
+    common::expect_box_ok_with_stdlib(src, "PropInferAsserted");
+}
