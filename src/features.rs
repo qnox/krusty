@@ -1,16 +1,22 @@
 //! Language-feature flags — krusty's model of kotlinc's `-XXLanguage:`/`-X` toggles and the test
-//! infrastructure's `// LANGUAGE:` directive. A DEFAULT compile enables none of these (matching a
-//! default-flags `kotlinc`); a drop-in enables a feature only when its flag/directive is present, so
-//! experimental syntax (e.g. name-based `[a, b]` destructuring) is rejected by default and accepted
-//! only under the corresponding flag — exactly as the reference compiler behaves.
+//! infrastructure's `// LANGUAGE:` directive. Stable features for krusty's Kotlin language level are
+//! enabled by default; directives and command-line flags apply ordered overrides.
 
 use std::collections::HashSet;
 
 /// The set of enabled language features (by their kotlinc `LanguageFeature` name, e.g.
-/// `NameBasedDestructuring`). Empty = the default language version's feature set.
-#[derive(Default, Clone, Debug, PartialEq, Eq)]
+/// `NameBasedDestructuring`).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LangFeatures {
     enabled: HashSet<String>,
+}
+
+impl Default for LangFeatures {
+    fn default() -> Self {
+        Self {
+            enabled: HashSet::from(["MultiDollarInterpolation".to_string()]),
+        }
+    }
 }
 
 impl LangFeatures {
@@ -105,6 +111,10 @@ impl LangFeatures {
             }
             return true;
         }
+        if arg == "-Xmulti-dollar-interpolation" {
+            self.enable("MultiDollarInterpolation");
+            return true;
+        }
         false
     }
 }
@@ -153,6 +163,18 @@ mod tests {
         assert!(g.apply_cli_arg("-Xname-based-destructuring=disable"));
         assert!(!g.has("NameBasedDestructuring"));
         assert!(!g.has("EnableNameBasedDestructuringShortForm"));
+        assert!(g.apply_cli_arg("-Xmulti-dollar-interpolation"));
+        assert!(g.has("MultiDollarInterpolation"));
         assert!(!g.apply_cli_arg("foo.kt"));
+    }
+
+    #[test]
+    fn stable_features_can_be_disabled_and_reenabled() {
+        let mut features = LangFeatures::new();
+        assert!(features.has("MultiDollarInterpolation"));
+        features.apply_directive("-MultiDollarInterpolation");
+        assert!(!features.has("MultiDollarInterpolation"));
+        features.apply_directive("+MultiDollarInterpolation");
+        assert!(features.has("MultiDollarInterpolation"));
     }
 }

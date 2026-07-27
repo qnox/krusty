@@ -8,7 +8,7 @@ use crate::features::LangFeatures;
 use crate::token::{Token, TokenKind};
 use crate::types::Visibility;
 
-/// Parse with the default (no experimental flags) language feature set.
+/// Parse with the default language feature set.
 pub fn parse(src: &str, tokens: &[Token], diags: &mut DiagSink) -> File {
     parse_with_features(src, tokens, diags, &LangFeatures::default())
 }
@@ -29,6 +29,7 @@ pub fn parse_with_features(
         diags,
         name_based_destructuring: features.has("NameBasedDestructuring"),
         short_form_destructuring: features.has("EnableNameBasedDestructuringShortForm"),
+        multi_dollar_interpolation: features.has("MultiDollarInterpolation"),
         no_trailing_lambda: false,
         lexical_type_params: Vec::new(),
         lexical_type_param_bounds: Vec::new(),
@@ -1080,6 +1081,7 @@ struct Parser<'a> {
     /// the RECEIVER PROPERTY of the same name (not `componentN`). An explicit `(a = prop)` still
     /// renames. Bracket `[a, b]` stays positional.
     short_form_destructuring: bool,
+    multi_dollar_interpolation: bool,
     /// When set, `parse_postfix` does NOT attach a trailing `{ … }` to a call as a lambda argument —
     /// used where a following `{` belongs to an enclosing construct (a `: I by Impl()` delegate, whose
     /// `{` opens the class body, not a lambda on the delegate call).
@@ -7000,6 +7002,12 @@ impl<'a> Parser<'a> {
     /// Parse a string template: `TemplateStart (StrChunk | Dollar Ident | Dollar { expr })* TemplateEnd`.
     fn parse_template(&mut self) -> ExprId {
         let start = self.tok().span;
+        if self.text().starts_with('$') && !self.multi_dollar_interpolation {
+            self.diags.error(
+                start,
+                "multi-dollar string interpolation is disabled by the language feature set",
+            );
+        }
         // A raw (triple-quoted) template's chunks are verbatim — no escape processing.
         let raw = self.kind() == TokenKind::RawTemplateStart;
         self.bump(); // TemplateStart / RawTemplateStart
@@ -8722,5 +8730,23 @@ mod tests {
         assert!(!d.has_errors());
         assert_eq!(file.package.as_deref(), Some("demo"));
         assert_eq!(file.decls.len(), 2);
+    }
+
+    #[test]
+    fn multi_dollar_interpolation_honors_feature_overrides() {
+        let source =
+            "// LANGUAGE: -MultiDollarInterpolation\nfun render(value: String) = $$\"$$value\"";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let features = LangFeatures::from_source(source);
+        let _ = parse_with_features(source, &tokens, &mut diagnostics, &features);
+        assert_eq!(
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>(),
+            ["multi-dollar string interpolation is disabled by the language feature set"]
+        );
     }
 }
