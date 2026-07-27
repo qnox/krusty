@@ -169,3 +169,306 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run(SRC).expect("member wins"), "OK");
 }
+
+#[test]
+fn bare_receiver_function_uses_implicit_receiver() {
+    const SRC: &str = r#"
+var result = ""
+
+class Scope {
+    fun append(value: String) {
+        result += value
+    }
+
+    fun apply(action: Scope.() -> Unit) {
+        action()
+    }
+}
+
+fun box(): String {
+    Scope().apply { append("OK") }
+    return result
+}
+"#;
+    assert_eq!(run(SRC).expect("bare receiver function"), "OK");
+}
+
+#[test]
+fn inferred_expression_preserves_receiver_function_shape() {
+    const SRC: &str = r#"
+var result = ""
+
+class Scope {
+    fun apply(enabled: Boolean, action: Scope.() -> Unit) {
+        val alias = if (enabled) action else action as Scope.() -> Unit
+        alias()
+    }
+}
+
+fun box(): String {
+    Scope().apply(true) { result = "OK" }
+    return result
+}
+"#;
+    assert_eq!(run(SRC).expect("receiver function expression"), "OK");
+}
+
+#[test]
+fn top_level_receiver_function_uses_implicit_receiver() {
+    const SRC: &str = r#"
+var result = ""
+class Scope
+
+val action: Scope.() -> Unit = {
+    result += "O"
+}
+
+fun Scope.applyAction() {
+    action()
+    val alias = action
+    alias()
+}
+
+fun box(): String {
+    Scope().applyAction()
+    return if (result == "OO") "OK" else result
+}
+"#;
+    assert_eq!(run(SRC).expect("top-level receiver function"), "OK");
+}
+
+#[test]
+fn dispatch_property_origin_is_preserved() {
+    const SRC: &str = r#"
+var result = ""
+class Target
+
+val action: Target.() -> Unit = {
+    result += "WRONG"
+}
+
+class Host(
+    val action: Target.() -> Unit,
+    val finish: Target.() -> Unit,
+) {
+    private fun Target.applyAction() {
+        action()
+        finish()
+    }
+
+    fun execute() {
+        Target().applyAction()
+    }
+}
+
+fun box(): String {
+    Host(
+        { result += "O" },
+        { result += "K" },
+    ).execute()
+    return result
+}
+"#;
+    assert_eq!(run(SRC).expect("dispatch property origin"), "OK");
+}
+
+#[test]
+fn enclosing_and_interface_property_origins_are_preserved() {
+    const SRC: &str = r#"
+var result = ""
+open class Target
+
+class Container(val action: Target.() -> Unit) {
+    inner class Item : Target() {
+        fun applyAction() {
+            action()
+        }
+    }
+}
+
+interface Scope {
+    val finish: Scope.() -> Unit
+
+    fun applyFinish() {
+        finish()
+    }
+}
+
+class Implementation(
+    override val finish: Scope.() -> Unit,
+) : Scope
+
+fun box(): String {
+    Container { result += "O" }.Item().applyAction()
+    Implementation { result += "K" }.applyFinish()
+    return result
+}
+"#;
+    assert_eq!(run(SRC).expect("receiver function property origins"), "OK");
+}
+
+#[test]
+fn cross_file_receiver_function_property_uses_implicit_receiver() {
+    let output = common::compile_and_run_files_with_stdlib(&[
+        (
+            "Action.kt",
+            r#"
+package sample
+
+var result = ""
+class Scope
+
+val action: Scope.() -> Unit = {
+    result = "OK"
+}
+"#,
+        ),
+        (
+            "Main.kt",
+            r#"
+package sample
+
+fun Scope.applyAction() {
+    action()
+}
+
+fun box(): String {
+    Scope().applyAction()
+    return result
+}
+"#,
+        ),
+    ]);
+    assert_eq!(output.expect("cross-file receiver function property"), "OK");
+}
+
+#[test]
+fn nearest_compatible_implicit_receiver_is_selected() {
+    const SRC: &str = r#"
+var result = ""
+
+open class Base
+class Derived : Base()
+
+class Host {
+    fun execute(action: Base.() -> Unit) {
+        Base().run {
+            Derived().run {
+                action()
+            }
+        }
+    }
+}
+
+fun box(): String {
+    Host().execute {
+        result = if (this is Derived) "OK" else "WRONG"
+    }
+    return result
+}
+"#;
+    assert_eq!(run(SRC).expect("implicit receiver tower"), "OK");
+}
+
+#[test]
+fn ordinary_function_does_not_consume_implicit_receiver() {
+    const SRC: &str = r#"
+class Scope {
+    fun call(function: (Scope, Int) -> String): String = function(1)
+}
+"#;
+    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("expects 2 args, got 1")),
+        "expected ordinary function arity diagnostic, got {diagnostics:?}"
+    );
+}
+
+#[test]
+fn unrelated_explicit_receiver_is_rejected() {
+    const SRC: &str = r#"
+class Expected
+class Unrelated
+
+fun call(value: Unrelated, action: Expected.() -> Unit) {
+    value.action()
+}
+"#;
+    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("unresolved reference 'action'")),
+        "expected receiver mismatch diagnostic, got {diagnostics:?}"
+    );
+}
+
+#[test]
+fn member_extension_accepts_unit_receiver_lambda() {
+    const SRC: &str = r#"
+class Element(val text: String)
+
+class Scope {
+    private fun StringBuilder.output(elements: Collection<Element>) {
+        emit(elements) { element ->
+            append(element.text)
+            append("")
+        }
+    }
+
+    private inline fun <E> StringBuilder.emit(
+        elements: Collection<E>,
+        render: StringBuilder.(E) -> Unit,
+    ) {
+        elements.forEach { element ->
+            render(element)
+        }
+    }
+
+    fun result(): String = buildString {
+        output(listOf(Element("O"), Element("K")))
+    }
+}
+
+fun box(): String = Scope().result()
+"#;
+    assert_eq!(run(SRC).expect("Unit receiver lambda"), "OK");
+}
+
+#[test]
+fn member_extension_precedes_dispatch_receiver_function_property() {
+    const SRC: &str = r#"
+class A {
+    fun test1(): Boolean {
+        val foo: String.() -> Boolean = { false }
+        fun String.foo(): Boolean = true
+        return "1".foo()
+    }
+
+    fun test2(): Boolean {
+        val foo: String.() -> Boolean = { false }
+        fun String.foo(): Boolean = true
+        return with("2") { foo() }
+    }
+}
+
+class B {
+    val foo: String.() -> Boolean = { false }
+    fun String.foo(): Boolean = true
+
+    fun test3(): Boolean = "1".foo()
+    fun test4(): Boolean = with("2") { foo() }
+}
+
+fun box(): String {
+    if (!A().test1()) return "FAIL 1"
+    if (A().test2()) return "FAIL 2"
+    if (!B().test3()) return "FAIL 3"
+    if (!B().test4()) return "FAIL 4"
+    return "OK"
+}
+"#;
+    assert_eq!(run(SRC).expect("receiver function precedence"), "OK");
+}

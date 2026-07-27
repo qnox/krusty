@@ -13,8 +13,8 @@ use crate::frontend::{
     qualified_path, typeref_leaf, ClassNames, CompoundAssignmentTarget, CtorDefaultValue,
     DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, FrontendSymbols,
     FrontendTypeInfo, InlineCall, InvokeKind, IteratorDispatchTarget, LambdaCapture, LambdaInfo,
-    ReceiverLambda, ResolvedCall, ResolvedConstructor, ResolvedLocalFunctionCall, ResolvedMember,
-    ResolvedModuleTopLevelCall, Signature, StmtLowering,
+    ReceiverFnValueOrigin, ReceiverLambda, ResolvedCall, ResolvedConstructor,
+    ResolvedLocalFunctionCall, ResolvedMember, ResolvedModuleTopLevelCall, Signature, StmtLowering,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
@@ -1895,6 +1895,7 @@ pub fn lower_file_at_reporting(
                 for cap in &local_fun.captures {
                     params.push(captured_param_ir(lo.runtime, cap.ty, cap.shared_cell)?);
                 }
+                params.extend(local_fun.receiver.map(stored_value_ty));
                 params.extend(local_fun.sig.params.iter().map(|t| stored_value_ty(*t)));
                 let ret = ty_to_ir(local_fun.sig.ret);
                 let id = lo.ir.add_fun(IrFunction {
@@ -4208,6 +4209,10 @@ pub fn lower_file_at_reporting(
             } else {
                 lo.scope.push((cap.name.clone(), v, cap.ty));
             }
+        }
+        if let Some(receiver) = local_fun.receiver {
+            let v = lo.fresh_value();
+            lo.scope.push(("this".to_string(), v, receiver));
         }
         for (p, t) in f.params.iter().zip(&sig.params) {
             let v = lo.fresh_value();
@@ -13040,27 +13045,103 @@ impl<'a> Lower<'a> {
     /// `java/lang/String.length()` just like `uppercase()`). `recv` is the already-lowered receiver
     /// value. `e` is the source property read, so lowering reuses checker-selected handles and applies
     /// expression-specific generic coercions. Returns `None` when the type exposes no such member.
-    /// The function VALUE named by a checker-selected [`ExprLowering::ReceiverFnInvoke`]: a scope
-    /// local/parameter, or — inside a class member (an anonymous object whose capture was desugared
-    /// to a ctor `val`) — a property read off the implicit `this`. The checker resolved the name in
-    /// its implicit-this-inclusive scope; the lowerer's scope only holds real slots, so the member
-    /// case reads the field here.
-    fn receiver_fn_value(&mut self, name: &str, e: AstExprId) -> Option<u32> {
-        if let Some((slot, _)) = self.lookup(name) {
-            return Some(self.emit_get_value(slot));
+    fn receiver_fn_dispatch_value(&mut self, owner: TypeName) -> Option<u32> {
+        if let Some(value) = self.member_extension_dispatch_value(owner) {
+            return Some(value);
         }
-        let internal = self.cur_class?;
-        let this_v = self.member_extension_dispatch_value(internal)?;
-        // Same-class access reads the backing field directly (an anon-object capture is a ctor
-        // `val` on this very class); a cross-file/library shape resolves through the member-read
-        // path like any qualified property.
-        if let Some((fclass, idx, _)) = self.resolve_field_name(internal, name) {
-            if self.can_access_source_private(internal) {
-                return Some(self.emit_get_field(this_v, fclass, idx));
+
+        if let Some((slot, ty)) = self.lookup("this$0") {
+            let matches = ty.obj_internal().is_some_and(|internal| {
+                internal == owner
+                    || self
+                        .syms
+                        .supertype_internal_names(&internal.render())
+                        .contains(&owner)
+            });
+            if matches {
+                return Some(self.emit_get_value(slot));
             }
-            return self.lower_member_read_on(this_v, Ty::obj_name(internal), name, e);
         }
-        self.lower_member_read_on(this_v, Ty::obj_name(internal), name, e)
+
+        let mut current = self.cur_class?;
+        let mut value = self.emit_get_value(0);
+        let mut seen = std::collections::HashSet::new();
+        while seen.insert(current) {
+            let class = self.class_info_name(current)?.id;
+            let outer = self
+                .ir
+                .classes
+                .get(class as usize)?
+                .fields
+                .first()
+                .filter(|field| field.name == "this$0")?
+                .ty
+                .non_null()
+                .obj_internal()?;
+            value = self.emit_get_field(value, class, 0);
+            if outer == owner
+                || self
+                    .syms
+                    .supertype_internal_names(&outer.render())
+                    .contains(&owner)
+            {
+                return Some(value);
+            }
+            current = outer;
+        }
+        None
+    }
+
+    fn receiver_fn_value(&mut self, name: &str, origin: ReceiverFnValueOrigin) -> Option<u32> {
+        match origin {
+            ReceiverFnValueOrigin::Local => {
+                let (slot, _) = self.lookup(name)?;
+                Some(self.emit_get_value(slot))
+            }
+            ReceiverFnValueOrigin::DispatchProperty(owner) => {
+                let receiver = self.receiver_fn_dispatch_value(owner)?;
+                if self
+                    .syms
+                    .class_by_type_name(owner)
+                    .is_some_and(|class| class.is_interface)
+                {
+                    let (class, index, _, _) =
+                        self.resolve_method_name(owner, &property_getter_name(name))?;
+                    return Some(self.emit_method_call(class, index, receiver, vec![]));
+                }
+                if let Some((class, index, _)) = self.resolve_field_name(owner, name) {
+                    if self.can_access_source_private(owner)
+                        && !self
+                            .field_accessor_props
+                            .contains(&(owner, name.to_string()))
+                    {
+                        return Some(self.emit_get_field(receiver, class, index));
+                    }
+                }
+                let (class, index, _, _) =
+                    self.resolve_method_name(owner, &property_getter_name(name))?;
+                Some(self.emit_method_call(class, index, receiver, vec![]))
+            }
+            ReceiverFnValueOrigin::TopLevelProperty => {
+                if let Some(&(getter, _)) = self.computed_props.get(name) {
+                    return Some(self.emit_local_call(getter, vec![]));
+                }
+                if let Some(&(index, _)) = self.statics.get(name) {
+                    return Some(self.emit_get_static(index));
+                }
+                let (facade, ty, _, is_const) = self.syms.prop_facades.get(name).cloned()?;
+                if is_const {
+                    return None;
+                }
+                Some(self.emit_cross_file_call(
+                    facade,
+                    property_getter_name(name),
+                    vec![],
+                    ty_to_ir(ty),
+                    vec![],
+                ))
+            }
+        }
     }
 
     fn implicit_receivers(&self) -> Vec<(u32, Ty)> {
@@ -13428,9 +13509,11 @@ impl<'a> Lower<'a> {
         let params = self.ir.functions[fid as usize].params.clone();
         let local_fun = self.info.local_fun(stmt_id)?;
         let ncap = local_fun.captures.len();
+        let receiver_count = usize::from(local_fun.receiver.is_some());
         let ctx_n = target.context_args.len();
-        if ncap + target.sig.params.len() != params.len()
+        if ncap + receiver_count + target.sig.params.len() != params.len()
             || args.len() + ctx_n > target.sig.params.len()
+            || target.receiver.is_some() != local_fun.receiver.is_some()
         {
             return None;
         }
@@ -13439,6 +13522,9 @@ impl<'a> Lower<'a> {
         for cap in &local_fun.captures {
             let (cv, _) = self.lookup(&cap.name)?;
             lowered.push(self.emit_get_value(cv));
+        }
+        if let (Some(receiver), Some(receiver_ty)) = (target.receiver, local_fun.receiver) {
+            lowered.push(self.lower_arg(receiver, &ty_to_ir(receiver_ty))?);
         }
         for src in &target.context_args {
             let (v, _) = self.lookup(src)?;
@@ -13468,7 +13554,7 @@ impl<'a> Lower<'a> {
             }
             arg_prelude = prelude;
         } else {
-            for (arg, pt) in args.iter().zip(&params[ncap + ctx_n..]) {
+            for (arg, pt) in args.iter().zip(&params[ncap + receiver_count + ctx_n..]) {
                 lowered.push(self.lower_arg(*arg, pt)?);
             }
         }
@@ -17713,6 +17799,8 @@ impl<'a> Lower<'a> {
                     name,
                     params,
                     ret,
+                    origin,
+                    implicit_receiver: _,
                     suspend,
                 }) = self.info.expr_lowers.get(&e).cloned()
                 {
@@ -17720,7 +17808,7 @@ impl<'a> Lower<'a> {
                     if arg_list.len() + 1 != params.len() {
                         return None;
                     }
-                    let func = self.receiver_fn_value(&name, e)?;
+                    let func = self.receiver_fn_value(&name, origin)?;
                     let mut a = vec![recv2];
                     for (&arg, p) in arg_list.iter().zip(&params[1..]) {
                         a.push(self.lower_arg(arg, &ty_to_ir(*p))?);
@@ -20123,6 +20211,13 @@ impl<'a> Lower<'a> {
                     self.expr(body)?
                 }
             }
+            Expr::Call { callee, args }
+                if matches!(self.afile.expr(callee), Expr::Member { .. })
+                    && self.info.resolved_local_function(e).is_some() =>
+            {
+                let target = self.info.resolved_local_function(e).cloned()?;
+                self.lower_local_function_call(e, &target, &args)?
+            }
             // Member-syntax invoke of a RECEIVER-function-typed value in scope (`b.f()` where
             // `f: Bar.() -> R` is a local/param): read the local function value and invoke it with
             // the receiver as the folded-first argument (checker-selected, see
@@ -20137,19 +20232,32 @@ impl<'a> Lower<'a> {
                     name,
                     params,
                     ret,
+                    origin,
+                    implicit_receiver,
                     suspend,
                 }) = self.info.expr_lowers.get(&e).cloned()
                 else {
                     return None;
                 };
-                let Expr::Member { receiver, .. } = self.afile.expr(callee).clone() else {
-                    return None;
-                };
                 if args.len() + 1 != params.len() {
                     return None;
                 }
-                let recv = self.lower_arg(receiver, &ty_to_ir(params[0]))?;
-                let func = self.receiver_fn_value(&name, e)?;
+                let recv = match self.afile.expr(callee).clone() {
+                    Expr::Member { receiver, .. } => {
+                        self.lower_arg(receiver, &ty_to_ir(params[0]))?
+                    }
+                    Expr::Name(_) => {
+                        let selected = implicit_receiver?;
+                        let (slot, actual) = self
+                            .implicit_receivers()
+                            .into_iter()
+                            .find(|(_, ty)| *ty == selected)?;
+                        let value = self.emit_get_value(slot);
+                        self.coerce_argument_value(value, actual, params[0])?
+                    }
+                    _ => return None,
+                };
+                let func = self.receiver_fn_value(&name, origin)?;
                 let mut ir_args = vec![recv];
                 for (&arg, p) in args.iter().zip(&params[1..]) {
                     ir_args.push(self.lower_arg(arg, &ty_to_ir(*p))?);
