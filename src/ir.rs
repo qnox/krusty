@@ -1245,6 +1245,44 @@ pub struct IrGenericSig {
 }
 
 impl IrFile {
+    pub(crate) fn expr_diverges_by(
+        &self,
+        expression: ExprId,
+        leaf: &impl Fn(ExprId, &IrExpr) -> bool,
+    ) -> bool {
+        match self.expr(expression) {
+            IrExpr::Return(_)
+            | IrExpr::Throw { .. }
+            | IrExpr::Break { .. }
+            | IrExpr::Continue { .. } => true,
+            IrExpr::Block { stmts, value } => match value {
+                Some(value) => self.expr_diverges_by(*value, leaf),
+                None => stmts
+                    .last()
+                    .is_some_and(|stmt| self.expr_diverges_by(*stmt, leaf)),
+            },
+            IrExpr::When { branches } => {
+                branches.iter().any(|(condition, _)| condition.is_none())
+                    && branches
+                        .iter()
+                        .all(|(_, body)| self.expr_diverges_by(*body, leaf))
+            }
+            IrExpr::Try {
+                body,
+                catches,
+                finally,
+                ..
+            } => {
+                finally.is_some_and(|finally| self.expr_diverges_by(finally, leaf))
+                    || (self.expr_diverges_by(*body, leaf)
+                        && catches
+                            .iter()
+                            .all(|catch| self.expr_diverges_by(catch.body, leaf)))
+            }
+            _ => leaf(expression, self.expr(expression)),
+        }
+    }
+
     pub fn with_package(package: Option<String>) -> Self {
         IrFile {
             package,
@@ -1761,6 +1799,25 @@ mod tests {
             None => panic!("expected class type"),
         }
         assert!(matches!(f.expr(body), IrExpr::Block { .. }));
+    }
+
+    #[test]
+    fn expr_diverges_by_handles_branches_and_custom_leaves() {
+        let mut f = IrFile::default();
+        let condition = f.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+        let first = f.add_expr(IrExpr::Return(None));
+        let second = f.add_expr(IrExpr::Throw { operand: condition });
+        let exhaustive = f.add_expr(IrExpr::When {
+            branches: vec![(Some(condition), first), (None, second)],
+        });
+        let non_exhaustive = f.add_expr(IrExpr::When {
+            branches: vec![(Some(condition), first)],
+        });
+        let custom_leaf = f.add_expr(IrExpr::Const(IrConst::Int(1)));
+
+        assert!(f.expr_diverges_by(exhaustive, &|_, _| false));
+        assert!(!f.expr_diverges_by(non_exhaustive, &|_, _| false));
+        assert!(f.expr_diverges_by(custom_leaf, &|id, _| id == custom_leaf));
     }
 
     #[test]

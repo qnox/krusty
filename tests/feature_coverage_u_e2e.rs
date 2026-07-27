@@ -165,6 +165,170 @@ fun box(): String {\n\
     run_ok(src, "InlineLambdaNonlocalReturnFromWhen");
 }
 
+#[test]
+fn inline_member_lambda_nonlocal_return() {
+    let src = "class Gate {\n\
+    inline fun <T> pass(value: T, action: () -> T?): T? = if (value == null) null else action()\n\
+    fun choose(stop: Boolean): String? = pass(\"OK\") {\n\
+        if (stop) return null\n\
+        \"OK\"\n\
+    }\n\
+    inline fun touch(action: () -> Unit) { action() }\n\
+    fun mutate(): Int {\n\
+        var count = 0\n\
+        touch { count += 1 }\n\
+        return count\n\
+    }\n\
+}\n\
+class Caller(private val prefix: String) {\n\
+    fun choose(stop: Boolean): String? {\n\
+        val value = \"caller\"\n\
+        return Gate().pass(\"callee\") {\n\
+            if (stop) return null\n\
+            prefix + value\n\
+        }\n\
+    }\n\
+}\n\
+fun outside(stop: Boolean): String? = Gate().pass(\"OK\") {\n\
+    if (stop) return null\n\
+    \"OK\"\n\
+}\n\
+fun box(): String {\n\
+    val gate = Gate()\n\
+    if (gate.choose(true) != null || gate.choose(false) != \"OK\") return \"member\"\n\
+    if (gate.mutate() != 1) return \"capture\"\n\
+    if (outside(true) != null || outside(false) != \"OK\") return \"outside\"\n\
+    val caller = Caller(\"P\")\n\
+    if (caller.choose(true) != null || caller.choose(false) != \"Pcaller\") return \"scope\"\n\
+    return \"OK\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "InlineMemberLambdaNonlocalReturn");
+}
+
+#[test]
+fn inline_member_reads_function_property() {
+    let src = "class Runner(val action: () -> String) {\n\
+    inline fun run(block: (String) -> String): String = block(action())\n\
+}\n\
+fun box(): String = Runner { \"OK\" }.run { \"OK\" }\n";
+    common::expect_box_ok_with_stdlib(src, "InlineMemberFunctionProperty");
+}
+
+#[test]
+fn inline_member_lambdas_share_mutable_caller_state() {
+    let library = "class Inline {\n\
+    inline fun combine(first: (Int) -> Int, second: (Double) -> Double): Double {\n\
+        return first(25) + second(11.5)\n\
+    }\n\
+}\n";
+    let main = "fun box(): String {\n\
+    var delta = 0.0\n\
+    val result = Inline().combine(\n\
+        { value: Int -> delta = 1.0; value },\n\
+        { value: Double -> value + delta }\n\
+    )\n\
+    return if (result == 37.5) \"OK\" else result.toString()\n\
+}\n";
+    let output = common::compile_and_run_files_with_stdlib(&[
+        ("InlineMemberSharedStateLib", library),
+        ("InlineMemberSharedStateMain", main),
+    ])
+    .expect("cross-file inline member call should compile");
+    assert_eq!(output, "OK");
+}
+
+#[test]
+fn implicit_inline_value_class_member_keeps_receiver_representation() {
+    let src = "@JvmInline\n\
+value class InlineValue(val value: Int) {\n\
+    private companion object { private const val CONSTANT = \"OK\" }\n\
+    fun read(): String = readConstant()\n\
+    private inline fun readConstant(): String = CONSTANT\n\
+}\n\
+fun box(): String = InlineValue(1).read()\n";
+    common::expect_box_ok_with_stdlib(src, "ImplicitInlineValueClassMember");
+}
+
+#[test]
+fn inline_member_generic_class_substitution() {
+    let src = "open class Envelope<T>(val item: T) {\n\
+    inline fun <R> transform(block: (T) -> R): R = block(item)\n\
+}\n\
+class Message : Envelope<String>(\"OK\")\n\
+fun box(): String {\n\
+    return if (Message().transform { it.length } == 2) \"OK\" else \"FAIL\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "InlineMemberGenericClassSubstitution");
+}
+
+#[test]
+fn inline_member_uses_selected_overload() {
+    let src = "class Selector {\n\
+    inline fun select(value: Int, block: (Int) -> String): String = block(value)\n\
+    inline fun select(value: String, block: (String) -> String): String = block(value)\n\
+}\n\
+fun box(): String = Selector().select(\"OK\") { it }\n";
+    common::expect_box_ok_with_stdlib(src, "InlineMemberSelectedOverload");
+}
+
+#[test]
+fn safe_inline_member_call_uses_non_null_receiver() {
+    let src = "class Gate(val value: String) {\n\
+    inline fun inspect(block: (String) -> String): String = block(value)\n\
+    inline fun inspectUnit(block: () -> Unit) { block() }\n\
+}\n\
+fun choose(gate: Gate?): String {\n\
+    gate?.inspect { return it }\n\
+    return \"NULL\"\n\
+}\n\
+fun chooseUnit(gate: Gate?): String {\n\
+    gate?.inspectUnit { return \"OK\" }\n\
+    return \"NULL\"\n\
+}\n\
+fun box(): String = choose(Gate(\"OK\")) + choose(null) + chooseUnit(Gate(\"unused\")) + chooseUnit(null)\n";
+    let output = common::compile_and_run_files_with_stdlib(&[("InlineMemberSafeCall", src)])
+        .expect("safe inline member call should compile");
+    assert_eq!(output, "OKNULLOKNULL");
+}
+
+#[test]
+fn inline_object_and_companion_members() {
+    let src = "object Gate {\n\
+    inline fun inspect(value: String, block: (String) -> String): String = block(value)\n\
+}\n\
+class Container {\n\
+    companion object {\n\
+        inline fun inspect(value: String, block: (String) -> String): String = block(value)\n\
+    }\n\
+}\n\
+fun fromObject(): String {\n\
+    Gate.inspect(\"OK\") { return it }\n\
+    return \"FAIL\"\n\
+}\n\
+fun fromCompanion(): String {\n\
+    Container.inspect(\"OK\") { return it }\n\
+    return \"FAIL\"\n\
+}\n\
+fun box(): String = fromObject() + fromCompanion()\n";
+    let output = common::compile_and_run_files_with_stdlib(&[("InlineSingletonMember", src)])
+        .expect("inline singleton member calls should compile");
+    assert_eq!(output, "OKOK");
+}
+
+#[test]
+fn inline_value_class_member_uses_unboxed_receiver() {
+    let src = "@JvmInline\n\
+value class Token(val value: String) {\n\
+    inline fun inspect(block: (String) -> String): String = block(value)\n\
+}\n\
+fun choose(): String {\n\
+    Token(\"OK\").inspect { return it }\n\
+    return \"FAIL\"\n\
+}\n\
+fun box(): String = choose()\n";
+    common::expect_box_ok_with_stdlib(src, "InlineValueClassMember");
+}
+
 // --- inline lambda containing a throw -------------------------------------------------------------
 
 #[test]

@@ -175,6 +175,7 @@ pub fn lower_file_at_reporting(
         index_subst: HashMap::new(),
         inline_lambdas: Vec::new(),
         inline_active: Vec::new(),
+        inline_member_callsites: Vec::new(),
         reified_subst: Vec::new(),
         inline_return: Vec::new(),
         inline_lambda_ret: Vec::new(),
@@ -3434,8 +3435,12 @@ pub fn lower_file_at_reporting(
                                 let val = lo.with_init_shared_cells(init_e, |lo| {
                                     lo.lower_arg(init_e, &field_ty)
                                 })?;
-                                let recv = lo.emit_get_value(this_v);
-                                stmts.push(lo.emit_set_field(recv, class_id, field_idx, val));
+                                if lo.expr_diverges(init_e) {
+                                    stmts.push(val);
+                                } else {
+                                    let recv = lo.emit_get_value(this_v);
+                                    stmts.push(lo.emit_set_field(recv, class_id, field_idx, val));
+                                }
                             }
                             ast::ClassInit::Block(e) => {
                                 // An `init { … }` block: lower its statements for effect.
@@ -4871,9 +4876,30 @@ fn is_field_accessor_prop(p: &ast::PropDecl) -> bool {
         && (p.getter.is_some() || p.setter.as_ref().is_some_and(|s| s.body.is_some()))
 }
 
-/// One active inlined-lambda parameter: `(param name, lambda parameter names, lambda body, lambda
-/// parameter types, the inline fn's name — the implicit label for a `return@<fn>` local return)`.
-type InlineLambda = (String, Vec<String>, AstExprId, Vec<Ty>, String);
+#[derive(Clone)]
+struct InlineLambda {
+    name: String,
+    params: Vec<String>,
+    body: AstExprId,
+    param_tys: Vec<Ty>,
+    label: String,
+    lexical_scope: Vec<(String, u32, Ty)>,
+    lexical_class: Option<TypeName>,
+    lexical_fn_name: String,
+}
+
+struct InlineMemberTarget {
+    receiver: Ty,
+    owner: TypeName,
+    params: Vec<Ty>,
+    ret: Ty,
+}
+
+#[derive(Clone, Copy)]
+enum InlineReceiver {
+    Expr(AstExprId),
+    Value(u32),
+}
 
 /// Lowering info for a local delegated property (`val x by Del()` in a function body). Reads compile to
 /// `<delegate>.getValue(null, propref)`, a `var`'s writes to `setValue(null, propref, value)`.
@@ -5078,6 +5104,7 @@ pub(crate) struct Lower<'a> {
     /// so re-entering an active call id bails (the file skips). Source-level NESTING (`a { a { 5 } }`)
     /// uses DISTINCT call sites, so it is allowed. (kotlinc rejects only genuine recursion.)
     inline_active: Vec<u32>,
+    inline_member_callsites: Vec<Option<TypeName>>,
     /// Active reified type-parameter bindings while expanding a `<reified T>` inline fn: `T` → the
     /// call's actual type argument. Consulted by `subst_type_ref` so `is T`/`as T`/`T::class` in the
     /// inlined body specialize to the concrete type. A stack — nested reified inline calls compose.
@@ -5108,6 +5135,14 @@ impl<'a> Lower<'a> {
     /// internal `deep*`-phase refinement). Replaces the former free `set_bail` thread-local write.
     fn set_bail(&self, reason: &str) {
         *self.bail.borrow_mut() = reason.to_string();
+    }
+
+    fn can_access_source_private(&self, owner: TypeName) -> bool {
+        self.inline_member_callsites
+            .last()
+            .copied()
+            .unwrap_or(self.cur_class)
+            == Some(owner)
     }
 
     fn arg_tys(&self, args: &[AstExprId]) -> Vec<Ty> {
@@ -5715,7 +5750,7 @@ impl<'a> Lower<'a> {
         name: &str,
         writable: bool,
     ) -> Option<(u32, u32)> {
-        if self.cur_class != Some(owner)
+        if !self.can_access_source_private(owner)
             || (writable
                 && self
                     .field_accessor_var_props
@@ -6130,8 +6165,8 @@ impl<'a> Lower<'a> {
         Some(self.wrap_arg_prelude(call, prelude))
     }
 
-    fn member_extension_dispatch_value(&mut self, owner: TypeName) -> Option<u32> {
-        let receiver = self.scope.iter().rev().find_map(|(name, value, ty)| {
+    fn member_extension_dispatch_slot(&self, owner: TypeName) -> Option<u32> {
+        self.scope.iter().rev().find_map(|(name, value, ty)| {
             if name != "$dispatch" && name != "this" {
                 return None;
             }
@@ -6142,8 +6177,11 @@ impl<'a> Lower<'a> {
                         .contains(&owner)
                 });
             compatible.then_some(*value)
-        });
-        if let Some(receiver) = receiver {
+        })
+    }
+
+    fn member_extension_dispatch_value(&mut self, owner: TypeName) -> Option<u32> {
+        if let Some(receiver) = self.member_extension_dispatch_slot(owner) {
             return Some(self.emit_get_value(receiver));
         }
         let class = self.syms.class_by_type_name(owner)?;
@@ -6269,11 +6307,22 @@ impl<'a> Lower<'a> {
                 target @ ResolvedCall::ModuleMember {
                     owner,
                     params,
+                    inline,
                     vararg,
                     ..
                 },
             ) = selected.as_ref()
             {
+                if inline.can_inline() {
+                    return self.lower_inline_fn_call(
+                        name,
+                        args,
+                        call_expr.0,
+                        Some(InlineReceiver::Value(recv)),
+                        None,
+                        Some(target),
+                    );
+                }
                 if let Some((class_id, index, _fid, ret)) =
                     self.link_local_method(&owner.render(), name, params)
                 {
@@ -6612,8 +6661,12 @@ impl<'a> Lower<'a> {
                         return None;
                     }
                     let val = self.lower_arg(init_e, &field_ty)?;
-                    let recv = self.emit_get_value(this_v);
-                    stmts.push(self.emit_set_field(recv, class_id, field_idx, val));
+                    if self.expr_diverges(init_e) {
+                        stmts.push(val);
+                    } else {
+                        let recv = self.emit_get_value(this_v);
+                        stmts.push(self.emit_set_field(recv, class_id, field_idx, val));
+                    }
                 }
                 ast::ClassInit::Block(e) => {
                     let Expr::Block {
@@ -9345,6 +9398,49 @@ impl<'a> Lower<'a> {
                 }
                 _ => None,
             })
+    }
+
+    fn source_member_decl(&self, target: &InlineMemberTarget, name: &str) -> Option<ast::FunDecl> {
+        if let Some(class) = self.class_decl_by_type_name(target.owner) {
+            let class_sig = self.syms.class_by_type_name(target.owner)?;
+            return class
+                .methods
+                .iter()
+                .enumerate()
+                .find_map(|(index, method)| {
+                    if method.name != name || method.receiver.is_some() {
+                        return None;
+                    }
+                    let overload = class.methods[..index]
+                        .iter()
+                        .filter(|candidate| candidate.name == name && candidate.receiver.is_none())
+                        .count();
+                    class_sig
+                        .methods_named(name)
+                        .get(overload)
+                        .filter(|signature| signature.params == target.params)
+                        .map(|_| method.clone())
+                });
+        }
+
+        let owner = target.owner.render();
+        let outer = owner.strip_suffix("$Companion")?;
+        let outer_name = type_name(outer);
+        let class = self.class_decl_by_type_name(outer_name)?;
+        let signature = self
+            .syms
+            .class_by_type_name(outer_name)?
+            .static_methods
+            .get(name)?;
+        (signature.params == target.params)
+            .then(|| {
+                class
+                    .companion_methods
+                    .iter()
+                    .find(|method| method.name == name && method.receiver.is_none())
+                    .cloned()
+            })
+            .flatten()
     }
 
     fn serializable_uses_companion_accessor(&self, c: &ast::ClassDecl) -> bool {
@@ -12878,7 +12974,7 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         let (class, idx, pty) = self.resolve_field(recv_internal, name)?;
         let owner_internal = self.ir.classes[class as usize].fq_name_id();
-        if self.cur_class != Some(owner_internal) {
+        if !self.can_access_source_private(owner_internal) {
             if let Some((mclass, mindex, _, _)) =
                 self.resolve_method(recv_internal, &property_getter_name(name))
             {
@@ -12914,14 +13010,16 @@ impl<'a> Lower<'a> {
             return Some(self.emit_get_value(slot));
         }
         let internal = self.cur_class?;
+        let this_v = self.member_extension_dispatch_value(internal)?;
         // Same-class access reads the backing field directly (an anon-object capture is a ctor
         // `val` on this very class); a cross-file/library shape resolves through the member-read
         // path like any qualified property.
         if let Some((fclass, idx, _)) = self.resolve_field_name(internal, name) {
-            let this_v = self.emit_get_value(0);
-            return Some(self.emit_get_field(this_v, fclass, idx));
+            if self.can_access_source_private(internal) {
+                return Some(self.emit_get_field(this_v, fclass, idx));
+            }
+            return self.lower_member_read_on(this_v, Ty::obj_name(internal), name, e);
         }
-        let this_v = self.emit_get_value(0);
         self.lower_member_read_on(this_v, Ty::obj_name(internal), name, e)
     }
 
@@ -13618,6 +13716,23 @@ impl<'a> Lower<'a> {
         args: &[AstExprId],
         e: AstExprId,
     ) -> Option<u32> {
+        if let Some(target) = self.info.resolved_calls.get(&e).cloned() {
+            let inline = matches!(
+                &target,
+                ResolvedCall::ModuleMember {
+                    name: target_name,
+                    inline,
+                    ..
+                } if target_name == name && inline.can_inline()
+            );
+            if inline {
+                if let Some(inlined) =
+                    self.lower_inline_fn_call(name, args, e.0, None, None, Some(&target))
+                {
+                    return Some(inlined);
+                }
+            }
+        }
         if let Some(
             target @ ResolvedCall::ModuleMemberExtension {
                 extension_receiver, ..
@@ -16171,7 +16286,9 @@ impl<'a> Lower<'a> {
         let owner_internal = self.class_of(rt)?.internal();
         // The backing field is private; a write from outside the declaring class goes through
         // the public `setX()` accessor (matching kotlinc). Inside the class, write directly.
-        if self.cur_class != existing_type_name(&owner_internal) {
+        if !existing_type_name(&owner_internal)
+            .is_some_and(|owner| self.can_access_source_private(owner))
+        {
             if let Some((mclass, mindex, mfid, _)) =
                 self.resolve_method(&owner_internal, &property_setter_name(name))
             {
@@ -16328,12 +16445,36 @@ impl<'a> Lower<'a> {
         fname: &str,
         args: &[AstExprId],
         call_id: u32,
-        recv: Option<AstExprId>,
+        recv: Option<InlineReceiver>,
         module_target: Option<&ResolvedModuleTopLevelCall>,
+        member_target: Option<&ResolvedCall>,
     ) -> Option<u32> {
-        // Find the selected source declaration. Receiver-less module calls carry the checker's
-        // declaration key; extension inline calls still use the receiver-qualified declaration path.
-        let f = if let Some(target) = module_target {
+        let member = match member_target {
+            Some(ResolvedCall::ModuleMember {
+                receiver,
+                owner,
+                name,
+                params,
+                ret,
+                ..
+            }) if name == fname => Some(InlineMemberTarget {
+                receiver: *receiver,
+                owner: *owner,
+                params: params.clone(),
+                ret: *ret,
+            }),
+            Some(_) => return None,
+            None => None,
+        };
+        let member_owner_ty = member.as_ref().and_then(|member| {
+            self.syms
+                .applied_source_hierarchy(member.receiver)
+                .into_iter()
+                .find_map(|(candidate, applied, _)| (candidate == member.owner).then_some(applied))
+        });
+        let f = if let Some(member) = member.as_ref() {
+            self.source_member_decl(member, fname)?
+        } else if let Some(target) = module_target {
             if recv.is_some() || target.name != fname || target.source_file != Some(self.file_index)
             {
                 return None;
@@ -16355,29 +16496,35 @@ impl<'a> Lower<'a> {
                 })?
                 .clone()
         };
-        // A non-extension call must hit a non-extension fn and vice versa. An extension binds its receiver
-        // as `this` (below). No default/vararg params. Non-reified generic type params are SPECIALIZED
-        // from the actual argument types; REIFIED type params are bound to the call's explicit type
-        // arguments and substituted into `is T`/`as T`/`T::class` in the body.
-        if f.receiver.is_some() != recv.is_some() {
+        if !f.is_inline {
+            return None;
+        }
+        if member.is_none() && f.receiver.is_some() != recv.is_some() {
+            return None;
+        }
+        if member.is_some() && f.receiver.is_some() {
             return None;
         }
         // The extension receiver type (`inline fun String.foo()` → `String`), or `None` for a plain fn.
         // A GENERIC receiver (`<T> T.foo()`) is specialized to the ACTUAL receiver's type at the call site.
-        let recv_ty = match (&f.receiver, recv) {
-            (Some(r), Some(ra)) => {
-                let t = if f.type_params.iter().any(|tp| tp == &r.name) {
-                    self.recv_ty(ra)
-                } else {
-                    ty_of(self.afile, r, &*self.syms.libraries)
-                };
-                if t == Ty::Error {
-                    return None;
+        let recv_ty = if let Some(member) = member.as_ref() {
+            Some(member_owner_ty.unwrap_or_else(|| Ty::obj_name(member.owner)))
+        } else {
+            match (&f.receiver, recv) {
+                (Some(r), Some(InlineReceiver::Expr(ra))) => {
+                    let t = if f.type_params.iter().any(|tp| tp == &r.name) {
+                        self.recv_ty(ra)
+                    } else {
+                        ty_of(self.afile, r, &*self.syms.libraries)
+                    };
+                    if t == Ty::Error {
+                        return None;
+                    }
+                    Some(t)
                 }
-                Some(t)
+                (None, None) => None,
+                _ => return None,
             }
-            (None, None) => None,
-            _ => return None,
         };
         // Default parameters ARE modeled (an inline fn substitutes the default expression directly — no
         // `$default` method): an omitted parameter is filled with its default below. A `vararg` IS
@@ -16394,7 +16541,8 @@ impl<'a> Lower<'a> {
         if vararg {
             let vp = f.params.last().unwrap();
             let is_tparam = f.type_params.iter().any(|tp| tp == &vp.ty.name);
-            if recv_ty.is_some() || is_tparam || !vp.ty.fun_params.is_empty() {
+            if (recv_ty.is_some() && member.is_none()) || is_tparam || !vp.ty.fun_params.is_empty()
+            {
                 return None;
             }
         }
@@ -16414,7 +16562,9 @@ impl<'a> Lower<'a> {
         // Value-parameter types + return type. An extension is keyed in `ext_funs` by `(erased
         // receiver, name)` with value params only; a GENERIC extension isn't registered there (its
         // receiver erased to `Any`), so derive from the decl.
-        let (sig_params, sig_ret): (Vec<Ty>, Ty) = if let Some(rt) = &recv_ty {
+        let (sig_params, sig_ret): (Vec<Ty>, Ty) = if let Some(member) = &member {
+            (member.params.clone(), member.ret)
+        } else if let Some(rt) = &recv_ty {
             // Match THIS declaration's overload by its parameter list (an extension may be overloaded
             // by arity); fall back to the first overload when the decl's types don't line up.
             let want: Vec<Ty> = f
@@ -16550,6 +16700,15 @@ impl<'a> Lower<'a> {
         let tparams: std::collections::HashSet<&str> =
             f.type_params.iter().map(String::as_str).collect();
         let mut tbinds: std::collections::HashMap<String, Ty> = std::collections::HashMap::new();
+        if let (Some(member), Some(applied)) = (member.as_ref(), member_owner_ty) {
+            if let Some(class) = self.syms.class_by_type_name(member.owner) {
+                tbinds.extend(class.type_parameter_bindings(applied));
+            }
+        }
+        // A method type parameter shadows an equally-named class parameter.
+        for parameter in &f.type_params {
+            tbinds.remove(parameter);
+        }
         for (i, p) in f.params.iter().enumerate().take(n_fixed) {
             if tparams.contains(p.ty.name.as_str())
                 && !matches!(self.afile.expr(args[i]), Expr::Lambda { .. })
@@ -16563,11 +16722,22 @@ impl<'a> Lower<'a> {
         // type, so a lambda parameter typed by it (`f: (T) -> …`) specializes too. Without this the lambda
         // param slot is typed the erased `Object` while the checker recorded the concrete type in its
         // frames — an inconsistent-frame `VerifyError` (`<T> T.alsoLog { … }` capturing a variable).
-        if let (Some(rt), Some(recv_ref)) = (recv_ty, &f.receiver) {
-            if tparams.contains(recv_ref.name.as_str()) {
-                tbinds.entry(recv_ref.name.clone()).or_insert(rt);
+        if member.is_none() {
+            if let (Some(rt), Some(recv_ref)) = (recv_ty, &f.receiver) {
+                if tparams.contains(recv_ref.name.as_str()) {
+                    tbinds.entry(recv_ref.name.clone()).or_insert(rt);
+                }
             }
         }
+        let member_param_shapes = member.as_ref().and_then(|member| {
+            self.syms
+                .class_by_type_name(member.owner)?
+                .generic_methods
+                .get(fname)?
+                .iter()
+                .find(|method| method.params == member.params)
+                .map(|method| method.param_shapes.clone())
+        });
         let active_depth = self.inline_active.len();
         self.inline_active.push(call_id);
         // Bind each reified type parameter to the call's explicit type argument (resolved through any
@@ -16592,33 +16762,50 @@ impl<'a> Lower<'a> {
             self.reified_subst.push(map);
         }
         let depth = self.scope.len();
+        let caller_scope = self.scope.clone();
+        let caller_class = self.cur_class;
+        let caller_fn_name = self.cur_fn_name.clone();
         let lam_depth = self.inline_lambdas.len();
         let mut stmts = Vec::new();
-        // An extension fn binds its receiver as `this`: evaluate it once into a temp, visible as `this`
-        // in the body (so `this`, `this.member`, and implicit-receiver member access all resolve to it).
         if let Some(rt) = &recv_ty {
-            let recv_ast = match recv {
-                Some(r) => r,
-                None => {
-                    self.scope.truncate(depth);
-                    self.inline_active.truncate(active_depth);
-                    self.reified_subst.truncate(reif_depth);
-                    return None;
-                }
-            };
             let rt = *rt;
-            let slot = self.fresh_value();
-            let val = match self.lower_arg(recv_ast, &ty_to_ir(rt)) {
-                Some(v) => v,
-                None => {
-                    self.scope.truncate(depth);
-                    self.inline_active.truncate(active_depth);
-                    self.reified_subst.truncate(reif_depth);
-                    return None;
-                }
-            };
-            stmts.push(self.emit_variable(slot, ty_to_ir(rt), Some(val)));
-            self.scope.push(("this".to_string(), slot, rt));
+            if let Some(slot) = member
+                .as_ref()
+                .filter(|_| recv.is_none())
+                .and_then(|member| self.member_extension_dispatch_slot(member.owner))
+            {
+                self.scope.push(("this".to_string(), slot, rt));
+            } else {
+                let slot = self.fresh_value();
+                let value = if let Some(member) = member.as_ref() {
+                    match recv {
+                        Some(InlineReceiver::Expr(receiver)) => {
+                            self.lower_arg(receiver, &ty_to_ir(rt))
+                        }
+                        Some(InlineReceiver::Value(receiver)) => Some(receiver),
+                        None => self.member_extension_dispatch_value(member.owner),
+                    }
+                } else {
+                    match recv {
+                        Some(InlineReceiver::Expr(receiver)) => {
+                            self.lower_arg(receiver, &ty_to_ir(rt))
+                        }
+                        Some(InlineReceiver::Value(receiver)) => Some(receiver),
+                        None => None,
+                    }
+                };
+                let val = match value {
+                    Some(v) => v,
+                    None => {
+                        self.scope.truncate(depth);
+                        self.inline_active.truncate(active_depth);
+                        self.reified_subst.truncate(reif_depth);
+                        return None;
+                    }
+                };
+                stmts.push(self.emit_variable(slot, ty_to_ir(rt), Some(val)));
+                self.scope.push(("this".to_string(), slot, rt));
+            }
         }
         for (i, pty) in sig_params.iter().enumerate() {
             // The trailing `vararg` parameter: pack the remaining arguments into a fresh array bound to it
@@ -16696,29 +16883,41 @@ impl<'a> Lower<'a> {
                     }
                     // The lambda's parameter types, with the inline fn's type params specialized
                     // (`(T)->T` on a `twice(1){…}` call → `it: Int`, not the erased `Any` of `fnsig`).
-                    let lam_param_tys: Vec<Ty> = f.params[i]
-                        .ty
-                        .fun_params
-                        .iter()
-                        .map(|fp| {
-                            tbinds
-                                .get(fp.name.as_str())
-                                .copied()
-                                .unwrap_or_else(|| ty_of(self.afile, fp, &*self.syms.libraries))
+                    let lam_param_tys: Vec<Ty> = member_param_shapes
+                        .as_ref()
+                        .and_then(|shapes| shapes.get(i))
+                        .map(|shape| crate::symbol_resolver::ty_subst(*shape, &tbinds))
+                        .and_then(|shape| match shape {
+                            Ty::Fun(signature) => Some(signature.params.clone()),
+                            _ => None,
                         })
-                        .collect();
+                        .unwrap_or_else(|| {
+                            f.params[i]
+                                .ty
+                                .fun_params
+                                .iter()
+                                .map(|fp| {
+                                    tbinds.get(fp.name.as_str()).copied().unwrap_or_else(|| {
+                                        ty_of(self.afile, fp, &*self.syms.libraries)
+                                    })
+                                })
+                                .collect()
+                        });
                     let lam_param_tys = if lam_param_tys.len() == fnsig.params.len() {
                         lam_param_tys
                     } else {
                         fnsig.params.clone()
                     };
-                    self.inline_lambdas.push((
-                        pnames[i].clone(),
+                    self.inline_lambdas.push(InlineLambda {
+                        name: pnames[i].clone(),
                         params,
-                        lbody,
-                        lam_param_tys,
-                        fname.to_string(),
-                    ));
+                        body: lbody,
+                        param_tys: lam_param_tys,
+                        label: fname.to_string(),
+                        lexical_scope: caller_scope.clone(),
+                        lexical_class: caller_class,
+                        lexical_fn_name: caller_fn_name.clone(),
+                    });
                 } else {
                     // A function-typed argument that is NOT a lambda literal — a callable reference
                     // (`::g`, `obj::m`), or a function-valued variable. It can't be inline-expanded as a
@@ -16744,9 +16943,11 @@ impl<'a> Lower<'a> {
                 // A value parameter: evaluate once into a temp, visible by name in the body. A parameter
                 // declared as a type param uses the call's concrete argument type (specialized), not the
                 // erased `Any` — so the inlined body sees `Int` and avoids spurious boxing.
-                let spty = tbinds
-                    .get(f.params[i].ty.name.as_str())
-                    .copied()
+                let spty = member_param_shapes
+                    .as_ref()
+                    .and_then(|shapes| shapes.get(i))
+                    .map(|shape| crate::symbol_resolver::ty_subst(*shape, &tbinds))
+                    .or_else(|| tbinds.get(f.params[i].ty.name.as_str()).copied())
                     .unwrap_or(*pty);
                 let slot = self.fresh_value();
                 let val = match self.lower_arg(args[i], &ty_to_ir(spty)) {
@@ -16793,7 +16994,23 @@ impl<'a> Lower<'a> {
         } else {
             None
         };
+        let saved_class = self.cur_class;
+        let saved_fn_name = self.cur_fn_name.clone();
+        let member_callsite_depth = self.inline_member_callsites.len();
+        if let Some(member) = member {
+            let callsite = self
+                .inline_member_callsites
+                .last()
+                .copied()
+                .unwrap_or(saved_class);
+            self.inline_member_callsites.push(callsite);
+            self.cur_class = Some(member.owner);
+            self.cur_fn_name = fname.to_string();
+        }
         let body_val = self.expr(body);
+        self.cur_class = saved_class;
+        self.cur_fn_name = saved_fn_name;
+        self.inline_member_callsites.truncate(member_callsite_depth);
         self.scope.truncate(depth);
         self.inline_lambdas.truncate(lam_depth);
         self.inline_active.truncate(active_depth);
@@ -16876,7 +17093,11 @@ impl<'a> Lower<'a> {
         match kind {
             InvokeKind::Function { ret, suspend } => {
                 if let Expr::Name(fname) = self.afile.expr(receiver).clone() {
-                    if let Some(idx) = self.inline_lambdas.iter().rposition(|(n, ..)| *n == fname) {
+                    if let Some(idx) = self
+                        .inline_lambdas
+                        .iter()
+                        .rposition(|lambda| lambda.name == fname)
+                    {
                         return self.lower_inline_lambda_invoke(idx, args);
                     }
                 }
@@ -16978,25 +17199,40 @@ impl<'a> Lower<'a> {
     }
 
     fn lower_inline_lambda_invoke(&mut self, idx: usize, args: &[AstExprId]) -> Option<u32> {
-        let (_, lam_params, lam_body, lam_param_tys, lam_label) = self.inline_lambdas[idx].clone();
+        let InlineLambda {
+            params: lam_params,
+            body: lam_body,
+            param_tys: lam_param_tys,
+            label: lam_label,
+            lexical_scope,
+            lexical_class,
+            lexical_fn_name,
+            ..
+        } = self.inline_lambdas[idx].clone();
         if args.len() != lam_params.len() || lam_params.len() != lam_param_tys.len() {
             return None;
         }
-        let depth = self.scope.len();
+        let callee_scope = self.scope.clone();
+        let callee_class = self.cur_class;
+        let callee_fn_name = self.cur_fn_name.clone();
         let mut stmts = Vec::new();
+        let mut bindings = Vec::new();
         for ((pname, pty), &arg) in lam_params.iter().zip(&lam_param_tys).zip(args) {
             let slot = self.fresh_value();
             let val = match self.lower_arg(arg, &ty_to_ir(*pty)) {
                 Some(v) => v,
                 None => {
-                    self.scope.truncate(depth);
                     return None;
                 }
             };
             let var = self.emit_variable(slot, ty_to_ir(*pty), Some(val));
             stmts.push(var);
-            self.scope.push((pname.clone(), slot, *pty));
+            bindings.push((pname.clone(), slot, *pty));
         }
+        self.scope = lexical_scope;
+        self.scope.extend(bindings);
+        self.cur_class = lexical_class;
+        self.cur_fn_name = lexical_fn_name;
         // A `return@<inlineFn>` in the lambda body is a LOCAL return from this lambda invocation. Wrap the
         // spliced body in a `while(true){ … break }` labeled `brk` and register a frame so the labeled
         // return lowers to `break@brk` — exactly the inline-fn return mechanism, one level in. Only a
@@ -17024,7 +17260,9 @@ impl<'a> Lower<'a> {
                 ));
                 let body_val = self.expr(lam_body);
                 self.inline_lambda_ret.pop();
-                self.scope.truncate(depth);
+                self.scope = callee_scope;
+                self.cur_class = callee_class;
+                self.cur_fn_name = callee_fn_name;
                 let body_val = body_val?;
                 // Normal fall-through: the body's own value is the result.
                 let assign = self.emit_set_value(result_slot, body_val);
@@ -17041,7 +17279,9 @@ impl<'a> Lower<'a> {
                 .push((lam_label.clone(), 0, brk.clone(), Ty::Unit, false));
             let body_val = self.expr(lam_body);
             self.inline_lambda_ret.pop();
-            self.scope.truncate(depth);
+            self.scope = callee_scope;
+            self.cur_class = callee_class;
+            self.cur_fn_name = callee_fn_name;
             let body_val = body_val?;
             let brk_stmt = self.emit_break(Some(brk.clone()));
             let loop_body = self.emit_block(vec![body_val, brk_stmt], None);
@@ -17059,7 +17299,9 @@ impl<'a> Lower<'a> {
         let saved_inl_ret = std::mem::take(&mut self.inline_return);
         let body_val = self.expr(lam_body);
         self.inline_return = saved_inl_ret;
-        self.scope.truncate(depth);
+        self.scope = callee_scope;
+        self.cur_class = callee_class;
+        self.cur_fn_name = callee_fn_name;
         let body_val = body_val?;
         if stmts.is_empty() {
             Some(body_val)
@@ -17094,7 +17336,9 @@ impl<'a> Lower<'a> {
         let recv2 = self.emit_get_value(v);
         let member = if let Some((fclass, idx, _)) = self.resolve_field(&internal, name) {
             let owner_internal = self.ir.classes[fclass as usize].fq_name();
-            if self.cur_class != existing_type_name(&owner_internal) {
+            if !existing_type_name(&owner_internal)
+                .is_some_and(|owner| self.can_access_source_private(owner))
+            {
                 if let Some((mclass, mindex, _, _)) =
                     self.resolve_method(&internal, &property_getter_name(name))
                 {
@@ -17448,8 +17692,29 @@ impl<'a> Lower<'a> {
                 } else {
                     match args {
                         Some(args) => {
-                            if let Some(target @ ResolvedCall::ModuleMemberExtension { .. }) =
-                                self.info.resolved_calls.get(&e).cloned()
+                            if let Some(target @ ResolvedCall::ModuleMember { .. }) =
+                                self.info.resolved_calls.get(&e).cloned().filter(|target| {
+                                    matches!(
+                                        target,
+                                        ResolvedCall::ModuleMember {
+                                            name: target_name,
+                                            inline,
+                                            ..
+                                        } if target_name == &name && inline.can_inline()
+                                    )
+                                })
+                            {
+                                self.lower_inline_fn_call(
+                                    &name,
+                                    &args,
+                                    e.0,
+                                    Some(InlineReceiver::Value(recv2)),
+                                    None,
+                                    Some(&target),
+                                )?
+                            } else if let Some(
+                                target @ ResolvedCall::ModuleMemberExtension { .. },
+                            ) = self.info.resolved_calls.get(&e).cloned()
                             {
                                 self.lower_module_member_extension_call(recv2, &target, &args, e)?
                             } else if let Some((class, index, fid, physical_ret)) =
@@ -17525,6 +17790,7 @@ impl<'a> Lower<'a> {
                         }
                     }
                 };
+                let member_diverges = self.ir.expr_diverges_by(member, &|_, _| false);
                 crate::trace_compiler!(
                     "value_classes",
                     "safecall {name} result_ty={result_ty:?} obj_internal={:?} vc={}",
@@ -17535,6 +17801,14 @@ impl<'a> Lower<'a> {
                         .get(i.render().rsplit('/').next().unwrap_or(""))
                         .is_some_and(|c| c.value_field.is_some()))
                 );
+                if member_diverges
+                    || result_ty.non_null() == Ty::Nothing
+                    || (from_scope_fn && lambda_body_diverges)
+                {
+                    let guard = self.emit_when(vec![(Some(cond), member)]);
+                    let nullv = self.emit_const(IrConst::Null);
+                    return Some(self.emit_block(vec![var, guard], Some(nullv)));
+                }
                 // A nullable-primitive result (`s?.length` : `Int?`): box the primitive member value so
                 // both `when` branches are the wrapper reference (the other branch is `null`).
                 let member = if result_ty.nullable_primitive().is_some() {
@@ -17561,19 +17835,6 @@ impl<'a> Lower<'a> {
                 } else {
                     member
                 };
-                // A safe call whose non-null arm DIVERGES — either the member/block value is `Nothing?`
-                // (`x?.let { return … }`, `x?.run { throw … }`, or a member returning `Nothing`) or a
-                // receiver-returning scope block diverges (`x?.also { return … }`, `x?.apply { throw … }`).
-                // A diverging arm produces no value, so modelling it as a value-producing `when` branch would
-                // merge a valueless branch with the `null` branch and leave a `Top` on the operand stack
-                // (VerifyError). Instead guard the divergent member as a plain statement — `if (recv != null)
-                // { member }` — and yield `null` unconditionally; the `null` is only ever observed when the
-                // receiver was null (else control left via the `return`/`throw`).
-                if result_ty.non_null() == Ty::Nothing || (from_scope_fn && lambda_body_diverges) {
-                    let guard = self.emit_when(vec![(Some(cond), member)]);
-                    let nullv = self.emit_const(IrConst::Null);
-                    return Some(self.emit_block(vec![var, guard], Some(nullv)));
-                }
                 let nullb = self.emit_const(IrConst::Null);
                 let when = self.emit_when(vec![(Some(cond), member), (None, nullb)]);
                 self.emit_block(vec![var], Some(when))
@@ -18285,6 +18546,7 @@ impl<'a> Lower<'a> {
                             .class_info_name(cur)
                             .is_some_and(|ci| self.ir.classes[ci.id as usize].is_interface);
                         let field = if cur_is_iface
+                            || !self.can_access_source_private(cur)
                             || self.field_accessor_props.contains(&(cur, n.clone()))
                         {
                             // A custom-accessor property reads through `getX`, never the raw field.
@@ -19951,8 +20213,10 @@ impl<'a> Lower<'a> {
                     // A call `param(args)` where `param` is a lambda parameter of the `inline fun`
                     // currently being expanded: inline the passed lambda's body in place.
                     if self.lookup(&fname).is_none() {
-                        if let Some(idx) =
-                            self.inline_lambdas.iter().rposition(|(n, ..)| *n == fname)
+                        if let Some(idx) = self
+                            .inline_lambdas
+                            .iter()
+                            .rposition(|lambda| lambda.name == fname)
                         {
                             return self.lower_inline_lambda_invoke(idx, &args);
                         }
@@ -19973,6 +20237,7 @@ impl<'a> Lower<'a> {
                                 e.0,
                                 None,
                                 Some(&target),
+                                None,
                             );
                         }
                     }
@@ -21331,9 +21596,14 @@ impl<'a> Lower<'a> {
                                     || ty_of(self.afile, r, &*self.syms.libraries).erased_recv() == recv_key))
                         });
                         if is_inline_ext {
-                            if let Some(r) =
-                                self.lower_inline_fn_call(&name, &args, e.0, Some(receiver), None)
-                            {
+                            if let Some(r) = self.lower_inline_fn_call(
+                                &name,
+                                &args,
+                                e.0,
+                                Some(InlineReceiver::Expr(receiver)),
+                                None,
+                                None,
+                            ) {
                                 return Some(r);
                             }
                         }
@@ -21559,6 +21829,7 @@ impl<'a> Lower<'a> {
                             owner,
                             name: target,
                             params,
+                            inline,
                             vararg,
                             ..
                         },
@@ -21566,6 +21837,18 @@ impl<'a> Lower<'a> {
                     {
                         if *target != name {
                             return None;
+                        }
+                        if inline.can_inline() {
+                            if let Some(inlined) = self.lower_inline_fn_call(
+                                &name,
+                                &args,
+                                e.0,
+                                Some(InlineReceiver::Expr(receiver)),
+                                None,
+                                Some(resolved),
+                            ) {
+                                return Some(inlined);
+                            }
                         }
                         let recv = self.expr(receiver)?;
                         let owner_name = owner.render();

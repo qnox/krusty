@@ -620,6 +620,26 @@ mod tests {
     }
 
     #[test]
+    fn member_inline_flag_flows_through_module_symbols() {
+        let mut st = FrontendSymbols::default();
+        let mut c = class("demo/Host");
+        let mut method = sig(vec![Ty::Int], Ty::Int);
+        method.is_inline = true;
+        c.methods.insert("apply".into(), vec![method]);
+        st.insert_class("Host".into(), c);
+        let m = ModuleSymbols::new(&st);
+
+        let members = m.instance_members(Ty::obj("demo/Host"), "apply");
+        assert_eq!(members.len(), 1);
+        assert!(members[0].inline.can_inline());
+
+        let overloads = m.member_overloads(Ty::obj("demo/Host"), "apply");
+        assert_eq!(overloads.overloads.len(), 1);
+        assert!(overloads.overloads[0].flags.inline.can_inline());
+        assert!(overloads.overloads[0].callable.inline.can_inline());
+    }
+
+    #[test]
     fn extension_prepends_receiver_and_keys_by_erased_receiver() {
         let mut st = FrontendSymbols::default();
         let recv = Ty::obj("demo/Point");

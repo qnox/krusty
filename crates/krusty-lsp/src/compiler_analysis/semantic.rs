@@ -2132,14 +2132,26 @@ impl<'a> SemanticClassifier<'a> {
         name: &str,
         kind: MemberKind,
     ) -> Option<DefinitionTarget> {
-        let member = self.type_info?.resolved_companion(expression)?;
-        if member.name != name {
+        let types = self.type_info?;
+        if let Some(member) = types.resolved_companion(expression) {
+            if member.name != name {
+                return None;
+            }
+            let owner = member.owner?.render();
+            let owner = owner.strip_suffix("$Companion").unwrap_or(&owner);
+            return self
+                .definition_symbols
+                .member_target(owner, name, kind, &member.params);
+        }
+
+        let (owner, resolved_name, params) = types.resolved_module_member_signature(expression)?;
+        if resolved_name != name {
             return None;
         }
-        let owner = member.owner?.render();
-        let owner = owner.strip_suffix("$Companion").unwrap_or(&owner);
+        let owner = owner.render();
+        let owner = owner.strip_suffix("$Companion")?;
         self.definition_symbols
-            .member_target(owner, name, kind, &member.params)
+            .member_target(owner, name, kind, params)
     }
 
     fn record_member_definitions(
