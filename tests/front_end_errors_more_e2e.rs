@@ -206,6 +206,11 @@ fn return_at_top_level() {
 fn duplicate_named_argument() {
     let d = diags("fun f(a: Int): Int = a\nfun box(): Int = f(a = 1, a = 2)");
     assert_rejected(&d, "the same named argument supplied twice");
+    assert!(
+        d.iter()
+            .any(|message| message.contains("argument already passed for this parameter.")),
+        "expected canonical duplicate named-argument diagnostic: {d:?}"
+    );
 }
 
 #[test]
