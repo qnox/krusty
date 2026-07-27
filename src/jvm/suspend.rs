@@ -3859,6 +3859,47 @@ fn nearest_expression_source_line(ir: &IrFile, root: ExprId) -> Option<u32> {
     best
 }
 
+fn contains_lambda(ir: &IrFile, root: ExprId) -> bool {
+    if matches!(ir.exprs[root as usize], IrExpr::Lambda { .. }) {
+        return true;
+    }
+    let mut found = false;
+    for_each_child(&ir.exprs, root, &mut |child| {
+        found |= contains_lambda(ir, child);
+    });
+    found
+}
+
+fn is_inline_lambda_call(ir: &IrFile, expr: ExprId) -> bool {
+    let IrExpr::Call {
+        callee: Callee::Static { inline, .. },
+        args,
+        ..
+    } = &ir.exprs[expr as usize]
+    else {
+        return false;
+    };
+    *inline != InlineKind::None && args.iter().any(|&arg| contains_lambda(ir, arg))
+}
+
+fn resumes_into_inline_call(ir: &IrFile, root: ExprId, suspension: ExprId) -> bool {
+    fn walk(ir: &IrFile, expr: ExprId, suspension: ExprId, inline_consumer: bool) -> Option<bool> {
+        if expr == suspension {
+            return Some(inline_consumer);
+        }
+        let inline_consumer = inline_consumer || is_inline_lambda_call(ir, expr);
+        let mut result = None;
+        for_each_child(&ir.exprs, expr, &mut |child| {
+            if result.is_none() {
+                result = walk(ir, child, suspension, inline_consumer);
+            }
+        });
+        result
+    }
+
+    walk(ir, root, suspension, false).unwrap_or(false)
+}
+
 fn collect_suspension_lines(
     ir: &IrFile,
     expr: ExprId,
@@ -3963,6 +4004,19 @@ fn collect_suspension_lines(
         }
         IrExpr::Return(Some(value)) if is_suspend_call(ir, *value, suspend_set) => {
             collect_suspension_lines(ir, *value, suspend_set, Some(u32::MAX), out);
+        }
+        IrExpr::Return(Some(value)) => {
+            let mut calls = HashSet::new();
+            collect_suspend_calls(ir, *value, suspend_set, &mut calls);
+            for call in calls {
+                if resumes_into_inline_call(ir, *value, call) {
+                    if let Some(line) = expression_source_line(ir, call) {
+                        out.entry(call)
+                            .or_insert((line, ir.source_line_count.saturating_add(1)));
+                    }
+                }
+            }
+            collect_suspension_lines(ir, *value, suspend_set, fall_through, out);
         }
         _ => {
             let mut children = Vec::new();
