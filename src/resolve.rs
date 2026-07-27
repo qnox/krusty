@@ -3881,6 +3881,42 @@ impl std::fmt::Display for CallArgMappingError {
     }
 }
 
+/// Tracks structural argument-mapping results while probing an overload set. A mapping error is
+/// reportable only when every candidate rejects the call for the same reason; one successfully mapped
+/// candidate (even if its argument types later fail) or conflicting mapping errors must fall through to
+/// ordinary overload diagnostics.
+#[derive(Default)]
+struct CallArgMappingProbe {
+    mapped_candidate: bool,
+    unanimous_error: Option<CallArgMappingError>,
+    conflicting_errors: bool,
+}
+
+impl CallArgMappingProbe {
+    fn observe<T>(&mut self, result: Result<T, CallArgMappingError>) -> Option<T> {
+        match result {
+            Ok(mapped) => {
+                self.mapped_candidate = true;
+                Some(mapped)
+            }
+            Err(error) => {
+                match &self.unanimous_error {
+                    None => self.unanimous_error = Some(error),
+                    Some(first) if first == &error => {}
+                    Some(_) => self.conflicting_errors = true,
+                }
+                None
+            }
+        }
+    }
+
+    fn into_unanimous_error(self) -> Option<CallArgMappingError> {
+        (!self.mapped_candidate && !self.conflicting_errors)
+            .then_some(self.unanimous_error)
+            .flatten()
+    }
+}
+
 pub fn map_call_args(
     args: &[ExprId],
     names: Option<&[Option<String>]>,
@@ -8241,6 +8277,7 @@ struct Checker<'a> {
 enum ClasspathMemberSlotCall {
     Resolved(Ty),
     Ambiguous,
+    Rejected,
     NoMatch,
 }
 
@@ -9512,16 +9549,6 @@ impl<'a> Checker<'a> {
         error: CallArgMappingError,
     ) {
         let message = error.to_string();
-        self.report_call_arg_mapping_error_message(call, args, error, message);
-    }
-
-    fn report_call_arg_mapping_error_message(
-        &mut self,
-        call: ExprId,
-        args: &[ExprId],
-        error: CallArgMappingError,
-        message: String,
-    ) {
         let compiler_span = match &error {
             CallArgMappingError::NoParameterNamed(name) => self
                 .named_call_argument_span(call, name)
@@ -15164,7 +15191,9 @@ impl<'a> Checker<'a> {
         if rt == Ty::String {
             match self.record_classpath_member_call_with_slots(call, rt, name, args) {
                 ClasspathMemberSlotCall::Resolved(ret) => return Some(ret),
-                ClasspathMemberSlotCall::Ambiguous => return Some(Ty::Error),
+                ClasspathMemberSlotCall::Ambiguous | ClasspathMemberSlotCall::Rejected => {
+                    return Some(Ty::Error);
+                }
                 ClasspathMemberSlotCall::NoMatch => {}
             }
             if let Some(m) = self.resolve_instance_member(rt, name, arg_tys) {
@@ -15212,7 +15241,9 @@ impl<'a> Checker<'a> {
             }
             match self.record_classpath_member_call_with_slots(call, rt, name, args) {
                 ClasspathMemberSlotCall::Resolved(ret) => return Some(ret),
-                ClasspathMemberSlotCall::Ambiguous => return Some(Ty::Error),
+                ClasspathMemberSlotCall::Ambiguous | ClasspathMemberSlotCall::Rejected => {
+                    return Some(Ty::Error);
+                }
                 ClasspathMemberSlotCall::NoMatch => {}
             }
             if let Some(m) = self.resolve_instance_member(rt, name, arg_tys) {
@@ -15647,6 +15678,7 @@ impl<'a> Checker<'a> {
             .get(&call.0)
             .cloned()
             .filter(|ns| ns.iter().any(Option::is_some))?;
+        let mut mapping_probe = CallArgMappingProbe::default();
         let mut candidates: Vec<_> = self
             .resolver()
             .resolve_symbol(
@@ -15662,7 +15694,8 @@ impl<'a> Checker<'a> {
             .filter(|o| o.call_sig.has_param_names())
             .filter_map(|o| {
                 let params = o.extension_value_params().to_vec();
-                let slots = map_call_sig_args(args, Some(&names), &o.call_sig).ok()?;
+                let slots =
+                    mapping_probe.observe(map_call_sig_args(args, Some(&names), &o.call_sig))?;
                 let mut score = self.call_slot_score(&params, &slots)?;
                 if matches!(o.callable.origin, Origin::Module { .. }) {
                     score += 1_000_000;
@@ -15678,7 +15711,13 @@ impl<'a> Checker<'a> {
         {
             return None;
         }
-        let (_, fi, params, slots) = candidates.into_iter().next()?;
+        let Some((_, fi, params, slots)) = candidates.into_iter().next() else {
+            if let Some(error) = mapping_probe.into_unanimous_error() {
+                self.report_call_arg_mapping_error(call, args, error);
+                return Some(Ty::Error);
+            }
+            return None;
+        };
         let slot_tys: Vec<Option<Ty>> = slots
             .iter()
             .map(|slot| slot.map(|arg| self.expr_types[arg.0 as usize]))
@@ -17362,6 +17401,7 @@ impl<'a> Checker<'a> {
     ) -> ClasspathMemberSlotCall {
         let arg_names = self.file.call_arg_names.get(&call.0).cloned();
         let needs_slot_map = arg_names.is_some();
+        let mut mapping_probe = CallArgMappingProbe::default();
         let mut candidates: Vec<_> = self
             .resolver()
             .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
@@ -17376,7 +17416,11 @@ impl<'a> Checker<'a> {
                 if !needs_slot_map {
                     return None;
                 }
-                let slots = map_call_sig_args(args, arg_names.as_deref(), &o.call_sig).ok()?;
+                let slots = mapping_probe.observe(map_call_sig_args(
+                    args,
+                    arg_names.as_deref(),
+                    &o.call_sig,
+                ))?;
                 let score = self.call_slot_score(&params, &slots)?;
                 Some((score, o, params, slots))
             })
@@ -17395,6 +17439,12 @@ impl<'a> Checker<'a> {
             return ClasspathMemberSlotCall::Ambiguous;
         }
         let Some((_, fi, params, slots)) = candidates.into_iter().next() else {
+            if arg_names.is_some() {
+                if let Some(error) = mapping_probe.into_unanimous_error() {
+                    self.report_call_arg_mapping_error(call, args, error);
+                    return ClasspathMemberSlotCall::Rejected;
+                }
+            }
             return ClasspathMemberSlotCall::NoMatch;
         };
         for (i, slot) in slots.iter().enumerate() {
@@ -18204,10 +18254,7 @@ impl<'a> Checker<'a> {
                                         }
                                     }
                                     Err(error) => {
-                                        let message = format!("constructor '{qname}': {error}");
-                                        self.report_call_arg_mapping_error_message(
-                                            call, args, error, message,
-                                        );
+                                        self.report_call_arg_mapping_error(call, args, error);
                                     }
                                 }
                                 return self.ctor_result_name(call, cls.internal_name());
@@ -18310,10 +18357,7 @@ impl<'a> Checker<'a> {
                                 Ok(Some(_)) => return Ty::obj_name(internal),
                                 Ok(None) => {}
                                 Err(error) => {
-                                    let message = format!("constructor '{qualified}': {error}");
-                                    self.report_call_arg_mapping_error_message(
-                                        call, args, error, message,
-                                    );
+                                    self.report_call_arg_mapping_error(call, args, error);
                                     return Ty::Error;
                                 }
                             }
@@ -19132,7 +19176,9 @@ impl<'a> Checker<'a> {
                 }
                 match self.record_classpath_member_call_with_slots(call, rt, &name, args) {
                     ClasspathMemberSlotCall::Resolved(ret) => return ret,
-                    ClasspathMemberSlotCall::Ambiguous => return Ty::Error,
+                    ClasspathMemberSlotCall::Ambiguous | ClasspathMemberSlotCall::Rejected => {
+                        return Ty::Error;
+                    }
                     ClasspathMemberSlotCall::NoMatch => {}
                 }
                 if rt == Ty::String {
@@ -21357,7 +21403,7 @@ impl<'a> Checker<'a> {
                         .filter(|ns| ns.iter().any(Option::is_some))
                     {
                         Some(names) => {
-                            let pnames: Vec<Vec<String>> = crate::libraries::FunctionSet {
+                            let signatures: Vec<CallSig> = crate::libraries::FunctionSet {
                                 overloads: self
                                     .resolver()
                                     .resolve_symbol(
@@ -21370,21 +21416,33 @@ impl<'a> Checker<'a> {
                                     .unwrap_or_default(),
                             }
                             .into_top_level_with_param_names()
-                            .map(|o| o.call_sig.param_names)
+                            .map(|o| o.call_sig)
                             .collect();
-                            match pnames.as_slice() {
-                                [pn] => match map_call_args(args, Some(names), pn, pn.len(), &[]) {
-                                    Ok(slots) if slots.iter().all(Option::is_some) => {
-                                        let sa: Vec<ExprId> =
-                                            slots.iter().copied().flatten().collect();
-                                        let at = sa
-                                            .iter()
-                                            .map(|a| self.expr_types[a.0 as usize])
-                                            .collect();
-                                        (sa, at, Some(slots))
+                            let mut mapping_probe = CallArgMappingProbe::default();
+                            let mappings: Vec<_> = signatures
+                                .iter()
+                                .filter_map(|signature| {
+                                    mapping_probe.observe(map_call_sig_args(
+                                        args,
+                                        Some(names),
+                                        signature,
+                                    ))
+                                })
+                                .collect();
+                            match mappings.as_slice() {
+                                [slots] if slots.iter().all(Option::is_some) => {
+                                    let sa: Vec<ExprId> = slots.iter().copied().flatten().collect();
+                                    let at =
+                                        sa.iter().map(|a| self.expr_types[a.0 as usize]).collect();
+                                    (sa, at, Some(slots.clone()))
+                                }
+                                [] => {
+                                    if let Some(error) = mapping_probe.into_unanimous_error() {
+                                        self.report_call_arg_mapping_error(call, args, error);
+                                        return Ty::Error;
                                     }
-                                    _ => (args.to_vec(), arg_tys.clone(), None),
-                                },
+                                    (args.to_vec(), arg_tys.clone(), None)
+                                }
                                 _ => (args.to_vec(), arg_tys.clone(), None),
                             }
                         }
@@ -23175,6 +23233,15 @@ fun box(): String {
                     Ty::String,
                     "(Ljava/lang/String;)Ljava/lang/String;",
                 ),
+                "test/tag" => (
+                    crate::libraries::FnKind::Extension,
+                    Some(Ty::String),
+                    "test/TextKt",
+                    "tag",
+                    vec![Ty::String, Ty::Int],
+                    Ty::String,
+                    "(Ljava/lang/String;I)Ljava/lang/String;",
+                ),
                 "test/containerTag" => (
                     crate::libraries::FnKind::Extension,
                     Some(Ty::obj("Container")),
@@ -23203,6 +23270,8 @@ fun box(): String {
                     vec!["thisRef".to_string(), "property".to_string()]
                 } else if name == "withLock" {
                     vec!["owner".to_string(), "action".to_string()]
+                } else if name == "tag" {
+                    vec!["a".to_string()]
                 } else {
                     vec!["s".to_string()]
                 },
@@ -24743,6 +24812,44 @@ fun box(): String {
             })
             .collect();
         assert_eq!(values, vec![Some("x".to_string()), Some("2".to_string())]);
+    }
+
+    #[test]
+    fn unknown_named_argument_diagnostic_is_consistent_across_call_origins() {
+        let cases = [
+            "fun bad(): String = knownTop(z = \"x\")",
+            "fun bad(): String = \"\".known(z = 1)",
+            "import test.tag\nfun bad(): String = \"\".tag(z = 1)",
+            "class Outer { class Inner(val a: Int) }\n\
+             fun bad(): Outer.Inner = Outer.Inner(z = 1)",
+        ];
+        for source in cases {
+            let mut diagnostics = DiagSink::new();
+            let file = parse_file(source, &mut diagnostics);
+            let files = vec![file];
+            let mut symbols =
+                collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
+            let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+            let diagnostic = diagnostics
+                .diags
+                .iter()
+                .find(|diagnostic| diagnostic.msg == "no parameter with name 'z' found.")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "expected canonical unknown-name diagnostic for {source:?}, got {:?}",
+                        diagnostics
+                            .diags
+                            .iter()
+                            .map(|diagnostic| &diagnostic.msg)
+                            .collect::<Vec<_>>()
+                    )
+                });
+            assert_eq!(
+                &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
+                "z"
+            );
+        }
     }
 
     #[test]
