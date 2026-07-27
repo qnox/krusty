@@ -1347,11 +1347,16 @@ fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
         if name == "Companion" {
             continue; // handled above
         }
+        let anonymous = is_coroutine_state_machine(c);
         cw.add_inner_class(InnerClassSpec {
             inner: fq.clone(),
-            outer: Some(fq[..pos].to_string()),
-            name: Some(name.to_string()),
-            access: inner_class_access(c),
+            outer: (!anonymous).then(|| fq[..pos].to_string()),
+            name: (!anonymous).then(|| name.to_string()),
+            access: if anonymous {
+                0x0008 | 0x0010
+            } else {
+                inner_class_access(c)
+            },
         });
     }
 }
@@ -2325,7 +2330,8 @@ fn emit_class(
     let raw_class_sig = ir.class_signature(&fq_name);
     let jvm_sig = raw_class_sig.and_then(jvm_class_signature);
     let mut cw = new_writer_generic(&fq_name, jvm_sig.as_deref(), &superclass, opts);
-    if let Some(metadata) = env.continuation_metadata.get(&fq_name) {
+    let continuation_metadata = env.continuation_metadata.get(&fq_name);
+    if let Some(metadata) = continuation_metadata {
         cw.set_enclosing_method(
             &metadata.enclosing_class,
             &metadata.enclosing_method,
@@ -2360,8 +2366,20 @@ fn emit_class(
     // (`class Box<T>(var a: T)` → `(TT;)V`); a PARAMETERIZED concrete-type param reads its full generic
     // signature (`List<String>` → `Ljava/util/List<Ljava/lang/String;>;`). `None` when no param needs it.
     // Computed once here: the pool seeder interns it and the `<init>` emission attaches it.
-    let ctor_signature: Option<String> = class_ctor_generic_sig(ir, c, &fq_name);
     let is_continuation = is_continuation_class(c);
+    let has_continuation_receiver = c.fields.iter().any(|field| field.name == "this$0");
+    let ctor_signature = continuation_metadata
+        .map(|metadata| {
+            if has_continuation_receiver {
+                format!(
+                    "(L{};Lkotlin/coroutines/Continuation<-L{fq_name};>;)V",
+                    metadata.enclosing_class
+                )
+            } else {
+                format!("(Lkotlin/coroutines/Continuation<-L{fq_name};>;)V")
+            }
+        })
+        .or_else(|| class_ctor_generic_sig(ir, c, &fq_name));
     if !is_coroutine_state_machine(c)
         && opts.emit_class_metadata
         && build_class_metadata(ir, c, opts).is_some()
@@ -3049,17 +3067,57 @@ fn emit_class(
     // computed `@Metadata` — including data classes (their synthesized methods get a LocalVariableTable
     // + @NotNull/@Nullable). NOTE: the constant-pool seeding (above) is still plain-class only, so a
     // data class is not yet FULLY byte-identical (its pool order differs) — but the attributes match.
-    if computed.is_some() {
+    if computed.is_some() && !is_coroutine_state_machine(c) {
         attach_synth_debug_tables(ir, c, &mut cw, &ctor_lines);
         attach_declared_method_debug(ir, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
+    }
+    if let Some(metadata) = continuation_metadata {
+        let self_desc = format!("L{fq_name};");
+        let has_this0 = c.fields.iter().any(|f| f.name == "this$0");
+        let mut ctor_locals: Vec<(String, String, u16)> =
+            vec![("this".to_string(), self_desc.clone(), 0)];
+        let mut slot = 1u16;
+        if has_this0 {
+            ctor_locals.push((
+                "this$0".to_string(),
+                format!("L{};", metadata.enclosing_class),
+                slot,
+            ));
+            slot += 1;
+        }
+        ctor_locals.push((
+            "$completion".to_string(),
+            "Lkotlin/coroutines/Continuation;".to_string(),
+            slot,
+        ));
+        let ctor_desc = if has_this0 {
+            format!(
+                "(L{};Lkotlin/coroutines/Continuation;)V",
+                metadata.enclosing_class
+            )
+        } else {
+            "(Lkotlin/coroutines/Continuation;)V".to_string()
+        };
+        cw.set_method_debug("<init>", &ctor_desc, None, &ctor_locals);
+        cw.set_method_debug(
+            "invokeSuspend",
+            "(Ljava/lang/Object;)Ljava/lang/Object;",
+            None,
+            &[
+                ("this".to_string(), self_desc, 0),
+                ("$result".to_string(), "Ljava/lang/Object;".to_string(), 1),
+            ],
+        );
     }
     if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
     // Seed the nested simple name at kotlinc's post-metadata pool position.
-    if let Some(pos) = fq_name.rfind('$') {
-        cw.seed_utf8(&fq_name[pos + 1..]);
+    if !is_coroutine_state_machine(c) {
+        if let Some(pos) = fq_name.rfind('$') {
+            cw.seed_utf8(&fq_name[pos + 1..]);
+        }
     }
     cw.finish()
 }
