@@ -43,6 +43,21 @@ type Suspension = (Option<(u32, Ty)>, ExprId);
 const CONTINUATION: &str = "kotlin/coroutines/Continuation";
 const CONTINUATION_IMPL: &str = "kotlin/coroutines/jvm/internal/ContinuationImpl";
 
+/// JVM `DebugMetadata` values computed before continuation spill scopes are discarded.
+#[derive(Clone, Debug, Default)]
+pub struct ContinuationDebug {
+    pub l: Vec<i32>,
+    pub nl: Vec<i32>,
+    pub i: Vec<i32>,
+    pub s: Vec<String>,
+    pub n: Vec<String>,
+    pub m: String,
+    pub c: String,
+    pub v: i32,
+}
+
+pub type ContinuationDebugMap = std::collections::HashMap<String, ContinuationDebug>;
+
 fn object_ty() -> Ty {
     Ty::nullable(Ty::obj("kotlin/Any"))
 }
@@ -57,7 +72,7 @@ fn continuation_ty() -> Ty {
 /// name (e.g. `SKt`) — the continuation class for `bar` is `SKt$bar$1`. Returns `false` (skip the whole
 /// file, never miscompile) on any suspend shape this pass can't yet transform.
 #[must_use]
-pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
+pub fn lower_suspend(ir: &mut IrFile, facade: &str, cont_debug: &mut ContinuationDebugMap) -> bool {
     let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
     // Snapshot every function's *declared* (pre-CPS) return type, so hoisted suspension temps are typed
     // by the callee's logical result type even after the callee has itself been CPS-rewritten to `Object`.
@@ -259,7 +274,7 @@ pub fn lower_suspend(ir: &mut IrFile, facade: &str) -> bool {
             }
         } else {
             let unit_ret = orig_rets[fid as usize] == Ty::Unit;
-            if !build_state_machine(ir, facade, fid, body.unwrap(), unit_ret) {
+            if !build_state_machine(ir, facade, fid, body.unwrap(), unit_ret, cont_debug) {
                 return false;
             }
         }
@@ -1384,7 +1399,14 @@ fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> boo
 /// local live across any suspension point is spilled to a continuation field (restored at the loop top so
 /// its slot is frame-consistent on every dispatch path). Returns `false` (skip, never miscompile) for a
 /// shape the flattener doesn't handle yet (a suspension nested deeper than a branch value, in a loop, …).
-fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_ret: bool) -> bool {
+fn build_state_machine(
+    ir: &mut IrFile,
+    facade: &str,
+    fid: u32,
+    b: ExprId,
+    unit_ret: bool,
+    cont_debug: &mut ContinuationDebugMap,
+) -> bool {
     // Normalize a block-valued initializer (`val a = (x ?: foo())`, `a?.b ?: foo()` — elvis / safe-call
     // lower to `Variable{ init: Block{ prelude…, value: When } }`) into `prelude…; Variable{ init: When }`,
     // so the conditional suspension surfaces as a `Variable{init: When}` the flattener handles.
@@ -1730,6 +1752,89 @@ fn build_state_machine(ir: &mut IrFile, facade: &str, fid: u32, b: ExprId, unit_
         receiver,
         &real_params,
     );
+
+    // Capture metadata before flattening consumes the suspension scopes.
+    {
+        let mut slot_name: std::collections::HashMap<u32, String> =
+            std::collections::HashMap::new();
+        if let Some(names) = ir.param_names(fid) {
+            let this_off = u32::from(ir.functions[fid as usize].dispatch_receiver.is_some());
+            for (i, nm) in names.iter().enumerate() {
+                slot_name.insert(this_off + i as u32, nm.clone());
+            }
+        }
+        collect_slot_names(ir, b, &mut slot_name);
+        let s: Vec<String> = layout.fields().into_iter().map(|(nm, _)| nm).collect();
+        let mut ordered_slots: Vec<u32> = Vec::new();
+        let mut live: Vec<ExprId> = susp_scopes
+            .keys()
+            .copied()
+            .filter(|c| live_calls.contains(c))
+            .collect();
+        live.sort_unstable();
+        for call in &live {
+            for &(slot, _) in &susp_scopes[call] {
+                if !ordered_slots.contains(&slot) {
+                    ordered_slots.push(slot);
+                }
+            }
+        }
+        let n: Vec<String> = ordered_slots
+            .iter()
+            .enumerate()
+            .map(|(k, slot)| {
+                slot_name
+                    .get(slot)
+                    .cloned()
+                    .unwrap_or_else(|| s.get(k).cloned().unwrap_or_default())
+            })
+            .collect();
+        let body_stmts: Vec<ExprId> = match &ir.exprs[b as usize] {
+            IrExpr::Block { stmts, .. } => stmts.clone(),
+            _ => Vec::new(),
+        };
+        let call_line = |call: ExprId| -> Option<i32> {
+            ir.expr_lines
+                .get(&call)
+                .map(|&ln| ln as i32)
+                .or_else(|| {
+                    body_stmts
+                        .iter()
+                        .find(|&&st| expr_contains(ir, st, call))
+                        .and_then(|&st| nearest_line(ir, st))
+                        .map(|ln| ln as i32)
+                })
+                .or_else(|| ir.fn_decl_lines.get(&fid).map(|&ln| ln as i32))
+        };
+        let l: Vec<i32> = live.iter().filter_map(|&c| call_line(c)).collect();
+        let nl: Vec<i32> = live
+            .iter()
+            .filter_map(|&call| {
+                let lline = call_line(call)?;
+                let holder = body_stmts
+                    .iter()
+                    .position(|&st| expr_contains(ir, st, call));
+                Some(
+                    holder
+                        .and_then(|i| body_stmts.get(i + 1))
+                        .and_then(|next| ir.expr_lines.get(next))
+                        .map(|&ln| ln as i32)
+                        .unwrap_or(lline),
+                )
+            })
+            .collect();
+        let dbg = ContinuationDebug {
+            l,
+            nl,
+            i: vec![0; s.len()],
+            s,
+            n,
+            m: fname.clone(),
+            c: cont_owner.replace('/', "."),
+            v: 2,
+        };
+        cont_debug.insert(cont_internal.clone(), dbg);
+    }
 
     // Flatten the body into a state graph.
     let mut flat = Flat {
@@ -3662,6 +3767,57 @@ fn collect_cond_susp_temp_bindings(
                 && expr_calls_suspend(ir, init, suspend_set)
             {
                 out.push(index);
+            }
+        }
+        for_each_child(&ir.exprs, cur, &mut |c| stack.push(c));
+    }
+}
+
+/// Return the first source line represented in an expression subtree.
+fn nearest_line(ir: &IrFile, root: ExprId) -> Option<u32> {
+    let mut stack = vec![root];
+    let mut seen: HashSet<u32> = HashSet::new();
+    let mut best: Option<u32> = None;
+    while let Some(cur) = stack.pop() {
+        if !seen.insert(cur) {
+            continue;
+        }
+        if let Some(&ln) = ir.expr_lines.get(&cur) {
+            best = Some(best.map_or(ln, |b| b.min(ln)));
+        }
+        for_each_child(&ir.exprs, cur, &mut |c| stack.push(c));
+    }
+    best
+}
+
+fn expr_contains(ir: &IrFile, root: ExprId, needle: ExprId) -> bool {
+    let mut stack = vec![root];
+    let mut seen: HashSet<u32> = HashSet::new();
+    while let Some(cur) = stack.pop() {
+        if cur == needle {
+            return true;
+        }
+        if !seen.insert(cur) {
+            continue;
+        }
+        for_each_child(&ir.exprs, cur, &mut |c| stack.push(c));
+    }
+    false
+}
+
+fn collect_slot_names(ir: &IrFile, e: ExprId, out: &mut std::collections::HashMap<u32, String>) {
+    let mut stack = vec![e];
+    let mut seen: HashSet<u32> = HashSet::new();
+    while let Some(cur) = stack.pop() {
+        if !seen.insert(cur) {
+            continue;
+        }
+        if let IrExpr::Variable {
+            index, named: true, ..
+        } = ir.exprs[cur as usize]
+        {
+            if let Some(name) = ir.value_names.get(&cur) {
+                out.entry(index).or_insert_with(|| name.clone());
             }
         }
         for_each_child(&ir.exprs, cur, &mut |c| stack.push(c));
