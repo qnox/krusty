@@ -55,6 +55,39 @@ fn named_args_to_classpath_top_level_fn_reorder_and_run() {
 }
 
 #[test]
+fn unknown_named_args_on_classpath_callables_are_rejected_canonically() {
+    let Some(libout) = common::compile_lib(
+        "unknown_named_args",
+        "package lib\n\
+         fun top(a: Int): Int = a\n\
+         class Holder { fun member(a: Int): Int = a }\n\
+         fun String.extension(a: Int): Int = a\n\
+         class Outer { class Inner(val a: Int) }\n",
+    ) else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let classpath = vec![libout, stdlib];
+    let cases = [
+        "import lib.top\nfun bad(): Int = top(z = 1)",
+        "import lib.Holder\nfun bad(): Int = Holder().member(z = 1)",
+        "import lib.extension\nfun bad(): Int = \"\".extension(z = 1)",
+        "import lib.Outer\nfun bad(): Outer.Inner = Outer.Inner(z = 1)",
+    ];
+    for source in cases {
+        let diagnostics =
+            common::front_end_diagnostics(source, &classpath, common::jdk_modules().as_deref());
+        assert_eq!(
+            diagnostics,
+            ["no parameter with name 'z' found."],
+            "unexpected diagnostics for {source:?}"
+        );
+    }
+}
+
+#[test]
 fn classpath_top_level_named_args_preserve_source_eval_order() {
     let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
         eprintln!("skipping: set JAVA_HOME");

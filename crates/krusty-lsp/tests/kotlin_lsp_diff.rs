@@ -834,6 +834,11 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
              fun missingConstructorArgument(): RequiredPair = RequiredPair(1)\n",
         ),
         (
+            "UnknownNamedArgument.kt",
+            "fun namedPair(left: Int, right: String): String = right\n\
+             fun unknownNamedArgument(): String = namedPair(left = 1, unknown = 2, right = \"ok\")\n",
+        ),
+        (
             "ValReassignment.kt",
             "fun reassignValue(): Int {\n\
              \u{20}\u{20}val value = 1\n\
