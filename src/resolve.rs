@@ -12,7 +12,8 @@ use std::collections::HashMap;
 use crate::ast::*;
 use crate::diag::{DiagSink, Span};
 use crate::libraries::{
-    required_arity, CallSig, EmptySymbolSource, InlineKind, Origin, ParamList, SemanticPlatform,
+    required_arity, CallSig, EmptySymbolSource, GenericSig, InlineKind, Origin, ParamList,
+    SemanticPlatform,
 };
 use crate::names::{property_getter_name, property_setter_name};
 use crate::symbol_source::SymbolSource;
@@ -82,6 +83,8 @@ impl SigFlags {
 pub struct Signature {
     pub params: Vec<Ty>,
     pub ret: Ty,
+    /// Declared generic callable shape retained for call-site inference.
+    pub generic_sig: Option<GenericSig>,
     /// Bit-packed `vararg`/`is_inline`/`is_operator`/`is_override`/`is_final`/`is_suspend` (read via the
     /// accessors below; `vararg` set via `set_vararg`). `vararg` — the last parameter is `vararg`.
     /// `is_final` — a `final` member a subclass cannot override. `is_suspend` — a `suspend fun`.
@@ -2803,9 +2806,11 @@ pub fn collect_signatures_with_cp(
                             }
                         })
                         .collect();
+                    let generic_sig = source_generic_signature(f, &class_names, ret, diags);
                     let sig = Signature {
                         params,
                         ret,
+                        generic_sig,
                         flags: SigFlags::default()
                             .with_vararg(vararg)
                             .with_is_inline(f.is_inline())
@@ -3558,6 +3563,7 @@ pub fn collect_signatures_with_cp(
                                 vec![Signature {
                                     params: vec![],
                                     ret: *ty,
+                                    generic_sig: None,
                                     flags: SigFlags::default()
                                         .with_vararg(false)
                                         .with_is_inline(false)
@@ -3586,6 +3592,7 @@ pub fn collect_signatures_with_cp(
                             vec![Signature {
                                 params: props.iter().map(|(_, t, _)| *t).collect(),
                                 ret: self_ty,
+                                generic_sig: None,
                                 flags: SigFlags::default(),
                                 required: 0,
                                 param_defaults: vec![true; props.len()],
@@ -3747,6 +3754,7 @@ pub fn collect_signatures_with_cp(
                                     "kotlinx/serialization/KSerializer",
                                     &[Ty::obj(&internal)],
                                 ),
+                                generic_sig: None,
                                 flags: SigFlags::default()
                                     .with_vararg(false)
                                     .with_is_inline(false)
@@ -6317,6 +6325,7 @@ fn member_signature(
     Signature {
         params,
         ret,
+        generic_sig: None,
         flags: SigFlags::default()
             .with_vararg(m.params.last().is_some_and(|p| p.is_vararg))
             .with_is_inline(m.is_inline())
@@ -6336,6 +6345,65 @@ fn member_signature(
         source_file: Some(source_file),
         package: String::new(),
     }
+}
+
+fn source_generic_signature(
+    function: &FunDecl,
+    classes: &ClassNames,
+    resolved_ret: Ty,
+    diags: &mut DiagSink,
+) -> Option<GenericSig> {
+    if function.type_params.is_empty() {
+        return None;
+    }
+    let type_params = TParams::symbolic_from_decl_with(
+        &function.type_params,
+        &function.type_param_bounds,
+        &|name| classes.get(name),
+    );
+    let resolve = |reference: &TypeRef, diags: &mut DiagSink| {
+        ty_of_ref(reference, classes, &type_params, diags)
+    };
+    let receiver = function
+        .receiver
+        .as_ref()
+        .map(|reference| resolve(reference, diags));
+    let params = function
+        .params
+        .iter()
+        .map(|parameter| {
+            let ty = resolve(&parameter.ty, diags);
+            if parameter.is_vararg {
+                Ty::array(ty)
+            } else {
+                ty
+            }
+        })
+        .collect();
+    let ret = function
+        .ret
+        .as_ref()
+        .map(|reference| resolve(reference, diags))
+        .unwrap_or(resolved_ret);
+    let formal_bounds = function
+        .type_params
+        .iter()
+        .map(|parameter| {
+            function
+                .type_param_bounds
+                .iter()
+                .filter(|(owner, _)| owner == parameter)
+                .map(|(_, bound)| resolve(bound, diags))
+                .collect()
+        })
+        .collect();
+    Some(GenericSig {
+        formals: function.type_params.clone(),
+        formal_bounds,
+        receiver,
+        params,
+        ret,
+    })
 }
 
 /// The phase-independent leaf of a `TypeRef`, resolved identically by every type resolver (signature
@@ -23743,6 +23811,7 @@ impl<'a> Checker<'a> {
         let sig = Signature {
             params: params.clone(),
             ret: ret_ty,
+            generic_sig: None,
             flags: SigFlags::default()
                 .with_vararg(f.params.last().map_or(false, |p| p.is_vararg))
                 .with_is_inline(false)
