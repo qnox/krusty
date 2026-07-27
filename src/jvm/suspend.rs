@@ -3818,28 +3818,35 @@ fn collect_cond_susp_temp_bindings(
     }
 }
 
-/// Return the first source line represented in an expression subtree.
-fn nearest_line(ir: &IrFile, root: ExprId) -> Option<u32> {
-    let mut stack = vec![root];
-    let mut seen: HashSet<u32> = HashSet::new();
-    let mut best: Option<u32> = None;
-    while let Some(cur) = stack.pop() {
-        if !seen.insert(cur) {
-            continue;
-        }
-        if let Some(&ln) = ir.expr_lines.get(&cur) {
-            best = Some(best.map_or(ln, |b| b.min(ln)));
-        }
-        for_each_child(&ir.exprs, cur, &mut |c| stack.push(c));
-    }
-    best
-}
-
-fn expression_source_line(ir: &IrFile, expr: ExprId) -> Option<u32> {
+fn direct_expression_source_line(ir: &IrFile, expr: ExprId) -> Option<u32> {
     ir.expr_source_lines
         .get(&expr)
         .copied()
-        .or_else(|| nearest_line(ir, expr))
+        .or_else(|| ir.expr_lines.get(&expr).copied())
+}
+
+fn expression_source_line(ir: &IrFile, expr: ExprId) -> Option<u32> {
+    direct_expression_source_line(ir, expr).or_else(|| nearest_expression_source_line(ir, expr))
+}
+
+fn nearest_expression_source_line(ir: &IrFile, root: ExprId) -> Option<u32> {
+    let mut stack = vec![root];
+    let mut seen = HashSet::new();
+    let mut best = None;
+    while let Some(expr) = stack.pop() {
+        if !seen.insert(expr) {
+            continue;
+        }
+        if let Some(&line) = ir
+            .expr_source_lines
+            .get(&expr)
+            .or_else(|| ir.expr_lines.get(&expr))
+        {
+            best = Some(best.map_or(line, |current: u32| current.min(line)));
+        }
+        for_each_child(&ir.exprs, expr, &mut |child| stack.push(child));
+    }
+    best
 }
 
 fn collect_suspension_lines(
@@ -3863,7 +3870,12 @@ fn collect_suspension_lines(
             for (index, &item) in items.iter().enumerate() {
                 let next = items[index + 1..]
                     .iter()
-                    .find_map(|&next| expression_source_line(ir, next))
+                    .find_map(|&next| {
+                        direct_expression_source_line(ir, next).or_else(|| {
+                            let current = expression_source_line(ir, item)?;
+                            nearest_expression_source_line(ir, next).filter(|&line| line > current)
+                        })
+                    })
                     .or(fall_through);
                 collect_suspension_lines(ir, item, suspend_set, next, out);
             }
@@ -3928,6 +3940,15 @@ fn collect_suspension_lines(
             if let Some(finally) = finally {
                 collect_suspension_lines(ir, *finally, suspend_set, fall_through, out);
             }
+        }
+        IrExpr::Variable {
+            init: Some(init), ..
+        } if matches!(
+            ir.exprs[*init as usize],
+            IrExpr::Block { .. } | IrExpr::When { .. } | IrExpr::Try { .. }
+        ) =>
+        {
+            collect_suspension_lines(ir, *init, suspend_set, fall_through, out);
         }
         _ => {
             let mut children = Vec::new();
