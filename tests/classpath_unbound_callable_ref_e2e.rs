@@ -160,3 +160,98 @@ fn classpath_callable_references_resolve_reflection_targets() {
         assert_eq!(output, "OK");
     }
 }
+
+#[test]
+fn source_extension_reference_accepts_a_classpath_receiver() {
+    let library = r#"
+        package fixtures
+
+        class Record(val enabled: Boolean)
+    "#;
+    let main = r#"
+        import fixtures.*
+
+        private fun Record.isUsable(): Boolean = enabled
+
+        fun box(): String {
+            val predicate = Record::isUsable
+            return if (predicate(Record(true)) && !predicate(Record(false))) "OK" else "FAIL"
+        }
+    "#;
+
+    let output = common::run_box_against("source_extension_classpath_receiver", library, main);
+    assert_eq!(
+        output.unwrap_or_else(|| {
+            panic!(
+                "compile source extension reference on a classpath receiver: {:?}",
+                common::checker_diags_against(
+                    "source_extension_classpath_receiver_diag",
+                    library,
+                    main
+                )
+            )
+        }),
+        "OK"
+    );
+}
+
+#[test]
+fn private_source_extension_reference_stays_file_private() {
+    let library = r#"
+        package fixtures
+
+        class Record(val enabled: Boolean)
+    "#;
+    let Some(library_output) = common::compile_lib("source_extension_ref_visibility", library)
+    else {
+        return;
+    };
+    let declaration = r#"
+        import fixtures.*
+
+        private fun Record.isUsable(): Boolean = enabled
+    "#;
+    let use_site = r#"
+        import fixtures.*
+
+        fun expose(): (Record) -> Boolean = Record::isUsable
+    "#;
+
+    let diagnostics =
+        common::front_end_diagnostics_files(&[declaration, use_site], &[library_output], None);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("cannot access 'isUsable'")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn classpath_member_still_precedes_a_source_extension_reference() {
+    let library = r#"
+        package fixtures
+
+        class Record {
+            fun select(value: String = "member"): String = value
+        }
+    "#;
+    let main = r#"
+        import fixtures.*
+
+        fun Record.select(): String = "extension"
+
+        fun expose() = Record::select
+    "#;
+    let Some(diagnostics) =
+        common::checker_diags_against("source_extension_member_precedence", library, main)
+    else {
+        return;
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("callable references are not supported")),
+        "{diagnostics:?}"
+    );
+}

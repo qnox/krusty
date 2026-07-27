@@ -8895,6 +8895,22 @@ impl<'a> Checker<'a> {
             .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
             .and_then(Symbol::method_ref)
     }
+    fn visible_source_extension_ref(&self, recv: Ty, name: &str) -> Result<Option<Signature>, ()> {
+        let extensions = self.syms.ext_fun_overloads(recv, name);
+        if let Some(signature) = extensions
+            .iter()
+            .find(|signature| {
+                !signature.visibility.is_private() || signature.source_file == Some(self.file_index)
+            })
+            .cloned()
+        {
+            Ok(Some(signature))
+        } else if extensions.is_empty() {
+            Ok(None)
+        } else {
+            Err(())
+        }
+    }
     fn resolve_instance_name(
         &self,
         internal: TypeName,
@@ -14431,12 +14447,28 @@ impl<'a> Checker<'a> {
                                 // the extension's own args — `(A, ext-args…) -> ext-ret`. (A member of
                                 // the same name, checked above, takes precedence.)
                                 let recv_ty = Ty::obj(&cls.internal());
-                                if let Some(sig) = self.syms.ext_fun(recv_ty, &name).cloned() {
-                                    if sig.requires_all_args() && sig.ret != Ty::Nothing {
+                                let member_declared =
+                                    self.resolver().declares_member(&cls.internal(), &name);
+                                match (!member_declared)
+                                    .then(|| self.visible_source_extension_ref(recv_ty, &name))
+                                {
+                                    Some(Ok(Some(sig)))
+                                        if sig.requires_all_args() && sig.ret != Ty::Nothing =>
+                                    {
                                         let mut params = vec![recv_ty];
                                         params.extend(sig.params.iter().copied());
                                         return self.set(e, Ty::fun(params, sig.ret));
                                     }
+                                    Some(Err(())) => {
+                                        self.diags.error(
+                                            self.span(e),
+                                            format!(
+                                                "cannot access '{name}': it is private in its file"
+                                            ),
+                                        );
+                                        return Ty::Error;
+                                    }
+                                    _ => {}
                                 }
                                 // unbound property reference `Type::prop` keeps property-reference APIs.
                                 if let Some(is_var) = cls
@@ -14476,6 +14508,34 @@ impl<'a> Checker<'a> {
                                         );
                                         return self.set(e, Ty::fun(params, member.ret));
                                     }
+                                }
+                                // A source extension remains an ordinary source callable even when its
+                                // receiver type comes from a dependency. Keep member precedence above,
+                                // then expose the receiver as the first parameter of the unbound ref.
+                                let member_declared =
+                                    recv_ty.obj_internal().is_some_and(|internal| {
+                                        self.resolver().declares_member(&internal.render(), &name)
+                                    });
+                                match (!member_declared)
+                                    .then(|| self.visible_source_extension_ref(recv_ty, &name))
+                                {
+                                    Some(Ok(Some(sig)))
+                                        if sig.requires_all_args() && sig.ret != Ty::Nothing =>
+                                    {
+                                        let mut params = vec![recv_ty];
+                                        params.extend(sig.params.iter().copied());
+                                        return self.set(e, Ty::fun(params, sig.ret));
+                                    }
+                                    Some(Err(())) => {
+                                        self.diags.error(
+                                            self.span(e),
+                                            format!(
+                                                "cannot access '{name}': it is private in its file"
+                                            ),
+                                        );
+                                        return Ty::Error;
+                                    }
+                                    _ => {}
                                 }
                                 if let Some((_, is_var)) = self.syms.ext_prop(recv_ty, &name) {
                                     if let Some(ty) = self.property_ref_ty(1, is_var) {

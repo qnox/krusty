@@ -11121,11 +11121,17 @@ impl<'a> Lower<'a> {
             None => {
                 let internal = class_internal(self.afile, &rn);
                 let internal_name = type_name(&internal);
-                let cid = self.class_info_name(internal_name)?.id;
-                if self.ir.classes[cid as usize].is_object {
-                    let inst = self.emit_static_instance(cid, cid, "INSTANCE");
-                    (Some(inst), Ty::obj_name(internal_name))
+                if let Some(cid) = self.class_info_name(internal_name).map(|class| class.id) {
+                    if self.ir.classes[cid as usize].is_object {
+                        let inst = self.emit_static_instance(cid, cid, "INSTANCE");
+                        (Some(inst), Ty::obj_name(internal_name))
+                    } else {
+                        (None, *params.first()?)
+                    }
                 } else {
+                    // The receiver can be a dependency type while the referenced extension is
+                    // declared in this source module. Its type was already resolved by the checker
+                    // and is the first parameter of an unbound reference.
                     (None, *params.first()?)
                 }
             }
