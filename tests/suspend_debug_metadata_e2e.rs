@@ -110,6 +110,53 @@ fn continuation_emits_debug_and_enclosing_metadata() {
 }
 
 #[test]
+fn continuation_metadata_repeats_spills_for_each_suspension() {
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(javap) = javap_path() else {
+        return;
+    };
+
+    let source = "package demo\n\
+        suspend fun leaf(value: String) {}\n\
+        suspend fun work(orgId: String, id: String): String {\n\
+        \x20 leaf(orgId)\n\
+        \x20 leaf(id)\n\
+        \x20 return orgId + id\n\
+        }\n";
+    let classes = common::compile_in_process_files(
+        &[("MultiState", source)],
+        &[stdlib, jdk.clone()],
+        Some(&jdk),
+    )
+    .expect("compile multi-state continuation");
+    let bytes = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == "demo/MultiStateKt$work$1").then_some(bytes))
+        .expect("work continuation");
+    let text = disassemble(&javap, bytes, "MultiStateKt$work$1.class", "multi_state");
+    let annotation = text
+        .rsplit_once("RuntimeVisibleAnnotations:")
+        .map(|(_, annotation)| annotation)
+        .expect("runtime-visible annotations");
+
+    for expected in [
+        "i=[0,0,1,1]",
+        "s=[\"L$0\",\"L$1\",\"L$0\",\"L$1\"]",
+        "n=[\"orgId\",\"id\",\"orgId\",\"id\"]",
+    ] {
+        assert!(
+            annotation.contains(expected),
+            "missing {expected:?}:\n{text}"
+        );
+    }
+}
+
+#[test]
 fn continuation_uses_synthetic_kotlin_metadata() {
     let Some(stdlib) = common::stdlib_jar() else {
         return;
