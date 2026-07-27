@@ -5626,6 +5626,30 @@ impl<'a> Lower<'a> {
         self.ir.external_static_field(&owner, name, descriptor)
     }
 
+    /// Lower an enum entry through the owner selected by the checker, independent of whether source
+    /// syntax used a bare name or `EnumType.ENTRY`.
+    fn lower_resolved_enum_entry(&mut self, e: AstExprId, name: &str) -> Option<u32> {
+        let enum_internal = self.info.resolved_enum_entry_owner(e)?;
+        if let Some(cls) = self.class_info_name(enum_internal).map(|class| class.id) {
+            if let Some(index) = self.ir.classes[cls as usize]
+                .enum_entries
+                .iter()
+                .position(|entry| entry.name == name)
+            {
+                return Some(self.ir.add_expr(IrExpr::EnumEntry {
+                    class: cls,
+                    index: index as u32,
+                }));
+            }
+        }
+        let enum_internal = enum_internal.render();
+        Some(self.emit_external_static_field(
+            enum_internal.clone(),
+            name,
+            format!("L{enum_internal};"),
+        ))
+    }
+
     /// Returns the already-checked `getValue` target for a delegated property.
     fn delegate_getvalue_info(
         &self,
@@ -18497,6 +18521,9 @@ impl<'a> Lower<'a> {
                     let descriptor = self.runtime.type_descriptor(self.info.ty(e))?;
                     return Some(self.emit_external_static_field(owner.render(), &n, &descriptor));
                 }
+                if self.info.resolved_enum_entry_owner(e).is_some() {
+                    return self.lower_resolved_enum_entry(e, &n);
+                }
                 // `this@Label` the checker resolved: `LabeledThisInner` (the current receiver) reads as a
                 // bare `this`; `LabeledThisOuter` (the immediate enclosing class of an `inner class`) reads
                 // the captured outer instance `this.this$0` (field index 0). Any other (unmarked) label
@@ -19009,26 +19036,8 @@ impl<'a> Lower<'a> {
                     return Some(self.emit_const(c));
                 }
                 // Use the enum owner selected by the checker.
-                if let Some(enum_internal) = self.info.resolved_enum_entry_owner(e) {
-                    if let Some(ci) = self.class_info_name(enum_internal) {
-                        let cls = ci.id;
-                        if let Some(idx) = self.ir.classes[cls as usize]
-                            .enum_entries
-                            .iter()
-                            .position(|entry| entry.name == name)
-                        {
-                            return Some(self.ir.add_expr(IrExpr::EnumEntry {
-                                class: cls,
-                                index: idx as u32,
-                            }));
-                        }
-                    }
-                    let enum_internal = enum_internal.render();
-                    return Some(self.emit_external_static_field(
-                        enum_internal.clone(),
-                        name.clone(),
-                        format!("L{enum_internal};"),
-                    ));
+                if self.info.resolved_enum_entry_owner(e).is_some() {
+                    return self.lower_resolved_enum_entry(e, &name);
                 }
                 if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
                     let internal = class_internal(self.afile, &rn);

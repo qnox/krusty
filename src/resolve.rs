@@ -10883,6 +10883,41 @@ impl<'a> Checker<'a> {
             .then_some(internal)
     }
 
+    /// Source classes visible in the lexical receiver tower, innermost first. Kotlin nested classes
+    /// are JVM-static by default, so add their `$`-encoded enclosing classes even when no captured
+    /// receiver exists.
+    fn lexical_source_class_names(&self) -> Vec<TypeName> {
+        let companion = self
+            .companion_of
+            .as_deref()
+            .and_then(|class| self.visible_source_class(class))
+            .map(ClassSig::internal_name);
+        let roots = companion.into_iter().chain(
+            self.this_labels
+                .iter()
+                .rev()
+                .filter(|(_, _, is_class)| *is_class)
+                .filter_map(|(_, receiver, _)| receiver.obj_internal()),
+        );
+        let mut classes = Vec::new();
+        for owner in roots {
+            let rendered = owner.render();
+            let mut candidate = rendered.as_str();
+            loop {
+                let internal = type_name(candidate);
+                if self.syms.class_by_type_name(internal).is_some() && !classes.contains(&internal)
+                {
+                    classes.push(internal);
+                }
+                let Some((enclosing, _)) = candidate.rsplit_once('$') else {
+                    break;
+                };
+                candidate = enclosing;
+            }
+        }
+        classes
+    }
+
     /// If a bare type name `n` denotes a reference type usable as an unbound class literal `n::class`,
     /// its `Ty`. Checks built-ins, user classes, enclosing nested types, and imports, but not the global
     /// simple-name index because it collides with built-in names. Primitive or unknown names return `None`.
@@ -14104,21 +14139,6 @@ impl<'a> Checker<'a> {
                 // local named `field` would have been found by `lookup` above).
                 None if n == "field" && self.field_ty.is_some() => self.field_ty.unwrap(),
                 None => {
-                    // Unqualified companion property inside a companion member.
-                    if let Some(cls) = &self.companion_of {
-                        if let Some(&ty) = self
-                            .visible_source_class(cls)
-                            .and_then(|c| c.static_props.get(&n).map(|(ty, _)| ty))
-                        {
-                            return self.set(e, ty);
-                        }
-                        // A top-level property accessed from a companion member would target the wrong
-                        // class in codegen (the facade, not this class) — reject (skip).
-                        if self.syms.props.contains_key(&n) {
-                            self.diags.error(self.span(e), "krusty: top-level property access from a companion member is not supported".to_string());
-                            return self.set(e, Ty::Error);
-                        }
-                    }
                     if let Some(bt) = self.effective_this_narrow() {
                         if let Some(bi) = bt.obj_internal() {
                             if let Some((ty, _)) = self.lookup_prop_name(bi, &n) {
@@ -14152,23 +14172,6 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    // An unqualified COMPANION property inside a REGULAR member (`HEX_RADIX` where
-                    // `companion object { const val HEX_RADIX = 16 }`): the companion's members are hoisted
-                    // to static fields on the outer class and are readable unqualified from any member.
-                    // The `companion_of` branch above only fires when checking a companion member; this
-                    // covers the bare form from a plain method (the qualified `C.HEX_RADIX` path already
-                    // resolves it via `static_props`).
-                    for receiver in implicit_receivers.iter().copied() {
-                        if let Ty::Obj(internal, _) = receiver {
-                            if let Some(&ty) = self
-                                .syms
-                                .class_by_type_name(internal)
-                                .and_then(|c| c.static_props.get(&n).map(|(ty, _)| ty))
-                            {
-                                return self.set(e, ty);
-                            }
-                        }
-                    }
                     // A bare name resolved against the implicit receiver (`this`) of arbitrary type —
                     // e.g. `length` inside `"ab".run { length }` (`this` is `String`). Goes through the
                     // general member read so builtin/library members (`String.length`) resolve too.
@@ -14189,6 +14192,47 @@ impl<'a> Checker<'a> {
                             }
                             return self.set(e, ty);
                         }
+                    }
+                    let lexical_classes = self.lexical_source_class_names();
+                    // Inside the companion itself, its own property is the direct lexical member and
+                    // shadows a same-named enum entry. Inner implicit receivers were checked above.
+                    if self.companion_of.is_some() {
+                        if let Some(&ty) = lexical_classes.first().and_then(|owner| {
+                            self.syms
+                                .class_by_type_name(*owner)
+                                .and_then(|class| class.static_props.get(&n).map(|(ty, _)| ty))
+                        }) {
+                            return self.set(e, ty);
+                        }
+                    }
+                    // Walk one lexical class at a time. Within an ordinary enum member its entry
+                    // precedes that enum's companion property, while an inner class's companion
+                    // still precedes an outer enum entry.
+                    for (index, owner) in lexical_classes.iter().copied().enumerate() {
+                        if self
+                            .syms
+                            .source_enum_entries(owner)
+                            .is_some_and(|entries| entries.iter().any(|candidate| candidate == &n))
+                        {
+                            self.resolved_enum_entries.insert(e, owner);
+                            return self.set(e, Ty::obj_name(owner));
+                        }
+                        if self.companion_of.is_some() && index == 0 {
+                            continue;
+                        }
+                        if let Some(&ty) = self
+                            .syms
+                            .class_by_type_name(owner)
+                            .and_then(|class| class.static_props.get(&n).map(|(ty, _)| ty))
+                        {
+                            return self.set(e, ty);
+                        }
+                    }
+                    if self.companion_of.is_some() && self.syms.props.contains_key(&n) {
+                        // A top-level property accessed from a companion member would target the
+                        // wrong class in codegen (the facade, not this class) — reject (skip).
+                        self.diags.error(self.span(e), "krusty: top-level property access from a companion member is not supported".to_string());
+                        return self.set(e, Ty::Error);
                     }
                     if let Some(cls) = self.visible_source_object(&n) {
                         // A bare `object` name used as a value (`val x = Foo`, or a self-reference
