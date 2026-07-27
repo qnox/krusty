@@ -7395,6 +7395,17 @@ impl<'a> Lower<'a> {
         call
     }
 
+    fn emit_extension_property_get(
+        &mut self,
+        e: AstExprId,
+        getter: crate::libraries::LibraryCallable,
+        receiver: u32,
+    ) -> u32 {
+        let physical_ret = getter.physical_ret;
+        let call = self.emit_library_static_call(getter, vec![receiver], false);
+        self.coerce_erased_call_result(e, call, &physical_ret, true)
+    }
+
     /// Lower a lambda literal `{ a, b -> body }` to an `IrExpr::Lambda` (emitted as `invokedynamic` +
     /// `LambdaMetafactory`). The body becomes a synthesized static method `<enclosing>$lambda$<n>`
     /// with the lambda's (real, from the checker) parameter types. Non-capturing only: a body that
@@ -18732,6 +18743,15 @@ impl<'a> Lower<'a> {
                 );
             }
             Expr::Name(n) => {
+                if let Some(ExprLowering::ExtensionPropertyGet { getter }) =
+                    self.info.expr_lowers.get(&e).cloned()
+                {
+                    let (this_v, this_ty) = self.lookup("this")?;
+                    let receiver = self.emit_get_value(this_v);
+                    let target = getter.params.first().copied().unwrap_or(this_ty);
+                    let receiver = self.coerce_argument_value(receiver, this_ty, target)?;
+                    return Some(self.emit_extension_property_get(e, *getter, receiver));
+                }
                 if let Some(ExprLowering::IntrinsicProperty(member)) =
                     self.info.expr_lowers.get(&e).cloned()
                 {
@@ -19173,22 +19193,16 @@ impl<'a> Lower<'a> {
                     let field = self.runtime.object_instance_field(&internal)?;
                     return Some(self.platform_static_field(field));
                 }
-                // A classpath EXTENSION property recorded by the checker (`d.elementDescriptors`) →
-                // `invokestatic <Kt>.get<Name>(recv)`.
                 if let Some(ExprLowering::ExtensionPropertyGet { getter }) =
                     self.info.expr_lowers.get(&e).cloned()
                 {
-                    // Coerce the receiver to the getter's first (receiver) parameter type — a primitive /
-                    // array / value-class receiver must be boxed/unboxed to match the static getter's
-                    // descriptor, exactly as an extension-function call coerces its receiver arg. Passing the
-                    // raw receiver value VerifyErrors (`arr.indices`).
                     let target = getter
                         .params
                         .first()
                         .copied()
                         .unwrap_or_else(|| self.info.ty(receiver));
-                    let a = self.lower_arg(receiver, &target)?;
-                    return Some(self.emit_library_static_call(*getter, vec![a], false));
+                    let receiver = self.lower_arg(receiver, &target)?;
+                    return Some(self.emit_extension_property_get(e, *getter, receiver));
                 }
                 // Reading an annotation member (`a.x`, `a` typed as the annotation interface): the JVM
                 // accessor is the bare member name `x()` (not `getX`), dispatched by `invokeinterface`.

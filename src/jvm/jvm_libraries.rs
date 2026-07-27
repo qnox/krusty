@@ -2109,10 +2109,11 @@ impl SymbolSource for JvmLibraries {
             // decode (`meta_properties_name`), the property analogue of `meta_functions_name`.
             let mprops = self.cp.meta_properties_name(facade);
             for mp in mprops.iter() {
-                if mp.name != name || mp.receiver_class.is_none() {
+                if mp.name != name || !mp.is_extension {
                     continue; // this property name, extension only
                 }
                 let mp = mp.clone();
+                let property_gsig = mp.generic_sig.clone();
                 let Some(getter_sig) = mp.getter else {
                     continue;
                 };
@@ -2133,12 +2134,23 @@ impl SymbolSource for JvmLibraries {
                 if gparams.len() != 1 {
                     continue;
                 }
-                let ret_ty = mp.ret_class.map_or(gret, kotlin_type_name_to_ty);
+                let generic_receiver = property_gsig.as_ref().and_then(|gsig| gsig.receiver);
+                let fallback_ret = mp.ret_class.map_or(gret, kotlin_type_name_to_ty);
+                let property_ty = property_gsig.as_ref().map_or_else(
+                    || {
+                        if mp.ret_nullable {
+                            Ty::nullable(fallback_ret)
+                        } else {
+                            fallback_ret
+                        }
+                    },
+                    |gsig| gsig.ret,
+                );
                 let getter = LibraryCallable::library(
                     facade,
                     getter_sig.name,
                     gparams,
-                    ret_ty,
+                    property_ty,
                     gret,
                     getter_sig.desc,
                 );
@@ -2166,12 +2178,17 @@ impl SymbolSource for JvmLibraries {
                 });
                 props.push(PropertyInfo {
                     kind: PropKind::Extension,
-                    receiver: Some(
-                        mp.receiver_class
-                            .map_or(Ty::obj("kotlin/Any"), Ty::obj_name),
-                    ),
-                    formals: Vec::new(),
-                    ty: mp.ret_class.map_or(Ty::obj("kotlin/Any"), Ty::obj_name),
+                    receiver: generic_receiver.or_else(|| {
+                        Some(
+                            mp.receiver_class
+                                .map_or(Ty::obj("kotlin/Any"), Ty::obj_name),
+                        )
+                    }),
+                    formals: property_gsig
+                        .as_ref()
+                        .map(|gsig| gsig.formals.clone())
+                        .unwrap_or_default(),
+                    ty: property_ty,
                     context_count: 0,
                     getter,
                     setter,
