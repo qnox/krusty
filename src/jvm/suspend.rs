@@ -3933,7 +3933,8 @@ fn collect_suspension_lines(
             let region_fall_through = finally
                 .and_then(|finally| expression_source_line(ir, finally))
                 .or(fall_through);
-            collect_suspension_lines(ir, *body, suspend_set, region_fall_through, out);
+            let body_fall_through = ir.expr_end_lines.get(body).copied().or(region_fall_through);
+            collect_suspension_lines(ir, *body, suspend_set, body_fall_through, out);
             for catch in catches {
                 collect_suspension_lines(ir, catch.body, suspend_set, region_fall_through, out);
             }

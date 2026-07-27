@@ -1111,6 +1111,8 @@ pub struct IrFile {
     pub expr_lines: std::collections::HashMap<u32, u32>,
     /// Source line for every lowered expression whose AST node has a source location.
     pub expr_source_lines: std::collections::HashMap<u32, u32>,
+    /// Source end line for every lowered expression whose AST node has a source location.
+    pub expr_end_lines: std::collections::HashMap<u32, u32>,
     /// Source names for `IrExpr::Variable` nodes included in `LocalVariableTable`.
     /// Compiler-generated temporaries are omitted.
     pub value_names: std::collections::HashMap<u32, String>,
