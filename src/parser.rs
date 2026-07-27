@@ -2159,6 +2159,41 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Whether the tokens after a class name/type-parameter list form an explicit primary-constructor
+    /// header, allowing newlines before and between constructor annotations/modifiers. Look ahead before
+    /// consuming so `class A` followed by an annotated sibling declaration keeps that annotation.
+    fn primary_constructor_header_follows(&self) -> bool {
+        let mut i = self.i;
+        loop {
+            while self.t.get(i).is_some_and(|token| {
+                token.kind == TokenKind::Newline && token.text(self.src) != ";"
+            }) {
+                i += 1;
+            }
+            let Some(token) = self.t.get(i) else {
+                return false;
+            };
+            if token.kind == TokenKind::At {
+                let Some(end) = self.annotation_end_at(i) else {
+                    return false;
+                };
+                i = end;
+                continue;
+            }
+            if token.kind == TokenKind::Ident
+                && is_modifier(token.text(self.src))
+                && self
+                    .t
+                    .get(i + 1)
+                    .is_none_or(|next| next.kind != TokenKind::Colon)
+            {
+                i += 1;
+                continue;
+            }
+            return token.kind == TokenKind::Ident && token.text(self.src) == "constructor";
+        }
+    }
+
     /// Whether the expression tree at `e` reads the property backing field — a bare `field`
     /// identifier. Used to detect that a custom getter (`get() = field + …`) has a backing field.
     fn expr_reads_field(&self, e: ExprId) -> bool {
@@ -3119,12 +3154,16 @@ impl<'a> Parser<'a> {
         let lexical_type_param_lens =
             self.push_lexical_type_params(&type_params, &type_param_bounds);
         // An explicit primary-constructor `constructor` keyword (`class A private constructor(...)`,
-        // possibly preceded by modifiers/annotations) marks a primary ctor even before the params.
-        if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
-            self.skip_decl_prefix();
-            // ClassDecl does not retain constructor annotations.
-            let _ = self.take_pending_annotations();
-            let _ = self.take_pending_annotation_args();
+        // possibly preceded by modifiers/annotations on following lines) marks a primary ctor even
+        // before the params. Look ahead first so an annotated sibling declaration is not consumed.
+        if self.primary_constructor_header_follows() {
+            self.skip_newlines();
+            if self.at(TokenKind::At) || (self.at(TokenKind::Ident) && is_modifier(self.text())) {
+                self.skip_decl_prefix();
+                // ClassDecl does not retain constructor annotations.
+                let _ = self.take_pending_annotations();
+                let _ = self.take_pending_annotation_args();
+            }
         }
         let header_ctor_kw = self.at(TokenKind::Ident) && self.text() == "constructor";
         if header_ctor_kw {
@@ -8418,7 +8457,7 @@ mod tests {
     fn parses_annotated_explicit_primary_constructor_without_splitting_the_class() {
         let mut diagnostics = DiagSink::new();
         let source =
-            "class Injected @Deprecated(\"old\") constructor(val value: Int)\nclass Fresh\n";
+            "class Injected\n@Deprecated(\"old\") constructor(val value: Int)\nclass Fresh\n";
         let tokens = lex(source, &mut diagnostics);
         let file = parse(source, &tokens, &mut diagnostics);
         assert!(
@@ -8442,6 +8481,52 @@ mod tests {
         assert_eq!(class.props[0].name, "value");
         assert!(class.annotations.is_empty());
         assert!(find_class("Fresh").annotations.is_empty());
+    }
+
+    #[test]
+    fn class_header_lookahead_keeps_sibling_annotation() {
+        let mut diagnostics = DiagSink::new();
+        let source = "class First\n@Deprecated(\"old\") class Second\n";
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected: {}",
+            diagnostics.render("test.kt", source)
+        );
+        assert_eq!(file.decls.len(), 2);
+        let second = file
+            .decls
+            .iter()
+            .find_map(|&declaration| match file.decl(declaration) {
+                Decl::Class(class) if class.name == "Second" => Some(class),
+                _ => None,
+            })
+            .expect("Second class");
+        assert_eq!(second.annotations, ["Deprecated"]);
+    }
+
+    #[test]
+    fn class_header_lookahead_stops_at_semicolon() {
+        let mut diagnostics = DiagSink::new();
+        let source =
+            "class First; @Deprecated(\"old\") constructor(val value: Int)\nclass Second\n";
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        let find_class = |name: &str| {
+            file.decls
+                .iter()
+                .find_map(|&declaration| match file.decl(declaration) {
+                    Decl::Class(class) if class.name == name => Some(class),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{name} class"))
+        };
+        assert!(
+            find_class("First").props.is_empty(),
+            "constructor after semicolon was attached to First"
+        );
+        assert!(find_class("Second").annotations.is_empty());
     }
 
     #[test]
