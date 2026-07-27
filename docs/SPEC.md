@@ -2243,3 +2243,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`fun get(foo: String)`) is never bridged. Corpus: `multiDecl/*MemberExtensions*`,
   `forIn*WithIndex/*`, `forInCharSequenceWithMultipleGetFunctions.kt` — box conformance
   3028 → 3050, FAIL: 0, no OK-set regressions. `tests/for_destructuring_components_e2e.rs`.
+
+- **Reference range expressions and bound-aware classpath generics.** A standalone `a..b` over
+  REFERENCE operands now resolves: the checker's `Expr::RangeTo` falls back (inclusive `..` only)
+  to the `rangeTo` operator — a user member (`P(1)..P(5)`) or the stdlib
+  `Comparable<T>.rangeTo → ClosedRange<T>` extension — recording the selection
+  (`SyntheticOperatorCall::RangeTo`); the lowering emits it via a new `ResolvedCall::Extension`
+  arm in `lower_selected_op_call` (classpath static with the receiver as leading argument).
+  Three enabling fixes: (a) `@Metadata` now decodes a function TYPE PARAMETER's first
+  `upper_bound` (`parse_type_param` field 5 → `parse_type_gsig_bounded`), so a signature's
+  `TyParam` carries its real bound instead of `Any`; (b) extension DISCOVERY keeps a
+  type-variable receiver as that bounded `TyParam` (erasing it to `Any` made every BOUNDED
+  extension universal — misapplied to any receiver) and looks the bytecode method up under the
+  BOUND's erased descriptor (`rangeTo(Ljava/lang/Comparable;…)`); (c) a classpath generic
+  interface method whose type-variable param erases to a non-`Object` reference bound
+  (`ClosedRange<T : Comparable<T>>.contains` → `contains(Ljava/lang/Comparable;)Z`) overridden
+  with the narrowed type gets the erased bridge — strictly that novel shape (override-declared,
+  reference narrowing, non-suspend, decodable bounds), beside the untouched SAM path. Corpus:
+  `ranges/contains/inRangeLiteralComposition.kt`, `inRangeWithCustomContains.kt`,
+  `regressions/kt5056.kt` — box conformance 3050 → 3053, FAIL: 0, no OK-set regressions.
+  `tests/reference_range_expression_e2e.rs`.

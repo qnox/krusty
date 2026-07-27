@@ -720,6 +720,8 @@ mod receiver_lambda_in_method_e2e;
 mod reference_adaptation_e2e;
 #[path = "reference_in_range_e2e.rs"]
 mod reference_in_range_e2e;
+#[path = "reference_range_expression_e2e.rs"]
+mod reference_range_expression_e2e;
 #[path = "reified_inline_check_e2e.rs"]
 mod reified_inline_check_e2e;
 #[path = "reified_inline_splice_ldc_wide_e2e.rs"]

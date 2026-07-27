@@ -1885,16 +1885,26 @@ impl SymbolSource for JvmLibraries {
                 if mf.kotlin_name != name || !mf.is_extension {
                     continue;
                 }
+
                 // SOURCE receiver, PRECISE: the metadata generic signature's receiver carries type
                 // arguments and value-class identity (`Iterable<Int>` vs `Iterable<Long>`, `UInt` vs `Int`)
                 // that the erased `receiver_class` loses — the consumer selects the element/value-class
                 // -appropriate `@JvmName` variant from these. Fall back to the bare receiver class, then to
                 // a universal `Any` for a type-variable receiver (`<T> T.let`).
-                let receiver = mf
-                    .generic_sig
-                    .as_ref()
-                    .and_then(|g| g.receiver)
-                    .map(|r| ty_subst(r, &std::collections::HashMap::new()))
+                // The RAW gsig receiver keeps a type-variable's declared bound
+                // (`TyParam("T", Comparable<T>)`) — the erased-descriptor computation below needs
+                // it; `ty_subst` with no bindings erases the variable to `Any`.
+                let raw_receiver = mf.generic_sig.as_ref().and_then(|g| g.receiver);
+                let receiver = raw_receiver
+                    .map(|r| match r {
+                        // Keep a type-VARIABLE receiver as the bounded `TyParam`: selection ranks
+                        // it by its BOUND (`<T : Comparable<T>> T.rangeTo` applies to receivers
+                        // whose closure contains `Comparable`), while an unbounded `<T> T.let`
+                        // (bound `Any`) stays the universal extension. Erasing to `Any` here would
+                        // make every BOUNDED extension universal — misapplied to any receiver.
+                        Ty::TyParam(..) => r,
+                        _ => ty_subst(r, &std::collections::HashMap::new()),
+                    })
                     .or_else(|| mf.receiver_class.map(kotlin_type_name_to_ty))
                     .unwrap_or_else(|| Ty::obj("kotlin/Any"));
                 // Emit handle: the JVM method + descriptor on the public facade. Prefer the metadata
@@ -1915,9 +1925,17 @@ impl SymbolSource for JvmLibraries {
                 // (`maxOrNull([I)` vs `maxOrNull([D)`); the return descriptor disambiguates same-receiver
                 // overloads (`maxOrNull(Iterable)Double` vs `…Comparable`). A type-var return has no class,
                 // so `None` selects the generic-bound overload in the fallback.
+                // A type-VARIABLE receiver erases to its declared BOUND in the bytecode
+                // (`<T : Comparable<T>> T.rangeTo` → `rangeTo(Ljava/lang/Comparable;…)`), so the
+                // lookup descriptor must use the bound, not `Object`.
+                let bound_erased = |t: Ty| match t {
+                    Ty::TyParam(_, b) => *b,
+                    other => other,
+                };
                 let recv_desc = type_descriptor(
                     <Self as crate::libraries::SemanticPlatform>::library_value_form(
-                        self, receiver,
+                        self,
+                        bound_erased(raw_receiver.unwrap_or(receiver)),
                     ),
                 );
                 let ret_desc = mf.ret_class.map(|r| {

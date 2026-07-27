@@ -2713,6 +2713,90 @@ pub fn lower_file_at_reporting(
                                 }
                             }
                         }
+                        // Beyond the SAM: a classpath interface method whose type-variable param
+                        // erases to a NON-`Object` reference BOUND (`ClosedRange<T : Comparable<T>>`
+                        // → `contains(Ljava/lang/Comparable;)Z`) overridden with the narrowed type
+                        // (`contains(value: Value)`) needs the same bridge — the shape none of the
+                        // `Object`-erasure paths above produce. STRICTLY that novel shape: only
+                        // OVERRIDE-declared methods (a coincidental name must not shadow a live
+                        // default), only a reference-bound narrowing, never a suspend impl, and
+                        // never a signature slot whose bound failed to decode (nameless).
+                        if !lo.contains_class_name(itf) {
+                            let members: Vec<crate::libraries::LibraryMember> = lo
+                                .syms
+                                .libraries
+                                .resolve_type_name(itf)
+                                .map(|t| {
+                                    t.members
+                                        .iter()
+                                        .filter(|m| {
+                                            c.methods
+                                                .iter()
+                                                .any(|own| own.name == m.name && own.is_override)
+                                        })
+                                        .cloned()
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            for m in members {
+                                let Some((_, _, impl_fid, _)) =
+                                    lo.resolve_method(&internal, &m.name)
+                                else {
+                                    continue;
+                                };
+                                let erase_tp = |t: Ty| match t {
+                                    Ty::TyParam(_, b) => *b,
+                                    other => other,
+                                };
+                                let iface_params: Vec<Ty> =
+                                    m.params.iter().map(|&t| erase_tp(t)).collect();
+                                let iface_ret = erase_tp(m.ret);
+                                let nameless = |t: &Ty| {
+                                    t.non_null()
+                                        .obj_internal()
+                                        .is_some_and(|n| n.render().is_empty())
+                                };
+                                if iface_params.iter().any(nameless) || nameless(&iface_ret) {
+                                    continue;
+                                }
+                                let ip = tys_to_ir(&iface_params);
+                                let ir_ = ty_to_ir(iface_ret);
+                                let cp = lo.ir.functions[impl_fid as usize].params.clone();
+                                let cr = lo.ir.functions[impl_fid as usize].ret;
+                                if ip.len() != cp.len() || ir_ != cr {
+                                    continue;
+                                }
+                                // ONLY the novel narrowing: every param equal or a non-`Object`
+                                // reference the impl narrows to another reference.
+                                let all_admissible = ip.iter().zip(&cp).all(|(&e, &c2)| {
+                                    e == c2
+                                        || (!e.is_erased_top()
+                                            && e.is_reference()
+                                            && c2.is_reference())
+                                });
+                                let any_novel = ip.iter().zip(&cp).any(|(&e, &c2)| {
+                                    e != c2 && !e.is_erased_top() && e.is_reference()
+                                });
+                                if !all_admissible || !any_novel {
+                                    continue;
+                                }
+                                if lo.ir.suspend_funs.contains(&impl_fid) {
+                                    continue;
+                                }
+                                if seen.insert(format!("{}{:?}{:?}", m.name, ip, ir_)) {
+                                    lo.ir.classes[cid as usize].bridges.push(crate::ir::Bridge {
+                                        name: m.name.clone(),
+                                        erased_params: ip,
+                                        erased_ret: ir_,
+                                        concrete_params: cp,
+                                        concrete_ret: cr,
+                                        target_name: None,
+                                        box_ret: None,
+                                        unbox_params: Vec::new(),
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
                 // An interface's abstract methods have no body; its DEFAULT methods (with a body) are
@@ -19251,6 +19335,16 @@ impl<'a> Lower<'a> {
                 use crate::ast::RangeKind;
                 let lt = self.info.ty(lo);
                 let rt = self.info.ty(hi);
+                // A REFERENCE range value (`"a".."c"`, a user `rangeTo`): emit the checker-selected
+                // operator call — the same desugaring the fused `x in a..b` form uses.
+                if lt.is_reference()
+                    && matches!(kind, RangeKind::Through)
+                    && self.info.resolved_operator_call(e, "rangeTo").is_some()
+                {
+                    let recv0 = self.expr(lo)?;
+                    let (range_v, _) = self.lower_op_call(recv0, lt, "rangeTo", &[hi], e)?;
+                    return Some(range_v);
+                }
                 let range = self.runtime.range_construction(lt, rt)?;
                 let lo_v = self.lower_arg(lo, &ty_to_ir(range.elem))?;
                 let hi_v = self.lower_arg(hi, &ty_to_ir(range.elem))?;

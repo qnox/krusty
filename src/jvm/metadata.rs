@@ -28,7 +28,21 @@ fn parse_type_gsig(
     d2: &[String],
     tparams: &HashMap<u64, String>,
 ) -> Option<Ty> {
-    parse_type_gsig_node(body, records, d2, tparams, false)
+    parse_type_gsig_bounded(body, records, d2, tparams, &HashMap::new())
+}
+
+/// [`parse_type_gsig`] with the function's DECLARED type-parameter bounds: a `Type` node
+/// referencing `T` yields `TyParam("T", <bound>)` (`<T : Comparable<T>>` → bound `Comparable`),
+/// so a bound-typed receiver's erased descriptor matches the bytecode (`Ljava/lang/Comparable;`,
+/// not `Object`). The bound-less form keeps `Any` (class type parameters, tests).
+fn parse_type_gsig_bounded(
+    body: &[u8],
+    records: &[Rec],
+    d2: &[String],
+    tparams: &HashMap<u64, String>,
+    bounds: &HashMap<String, Ty>,
+) -> Option<Ty> {
+    parse_type_gsig_node(body, records, d2, tparams, bounds, false)
 }
 
 fn parse_type_gsig_node(
@@ -36,6 +50,7 @@ fn parse_type_gsig_node(
     records: &[Rec],
     d2: &[String],
     tparams: &HashMap<u64, String>,
+    bounds: &HashMap<String, Ty>,
     nested: bool,
 ) -> Option<Ty> {
     let mut pb = Pb { b: body, i: 0 };
@@ -63,7 +78,7 @@ fn parse_type_gsig_node(
                         (2, 2) => {
                             let tn = ap.varint()? as usize;
                             let tb = ap.bytes(tn)?;
-                            arg = parse_type_gsig_node(tb, records, d2, tparams, true);
+                            arg = parse_type_gsig_node(tb, records, d2, tparams, bounds, true);
                         }
                         (_, w) => ap.skip(w)?,
                     }
@@ -77,11 +92,21 @@ fn parse_type_gsig_node(
         let internal = resolve_class_name(records, d2, id as usize)?;
         gsig_from_kotlin_class(&internal, args)
     } else if let Some(id) = tp_id {
-        tparams
-            .get(&id)
-            .map(|n| Ty::ty_param(n, Ty::obj("kotlin/Any")))?
+        tparams.get(&id).map(|n| {
+            let bound = bounds
+                .get(n)
+                .copied()
+                .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+            Ty::ty_param(n, bound)
+        })?
     } else if let Some(id) = tpn_id {
-        resolve_string(records, d2, id as usize).map(|s| Ty::ty_param(&s, Ty::obj("kotlin/Any")))?
+        resolve_string(records, d2, id as usize).map(|s| {
+            let bound = bounds
+                .get(&s)
+                .copied()
+                .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+            Ty::ty_param(&s, bound)
+        })?
     } else {
         return None;
     };
@@ -157,19 +182,29 @@ fn kotlin_canonical_ty(internal: &str) -> Option<crate::types::Ty> {
 }
 
 /// Parse a `TypeParameter` message → `(id, name string-id)`. Proto: `id`=1, `name`=2 (string-table id).
-fn parse_type_param(body: &[u8]) -> Option<(u64, u64)> {
+fn parse_type_param(body: &[u8]) -> Option<(u64, u64, Option<Vec<u8>>)> {
     let mut pb = Pb { b: body, i: 0 };
     let mut id = None;
     let mut name = None;
+    // First `upper_bound` (field 5, repeated `Type`): the DECLARED bound (`<T : Comparable<T>>`).
+    // Kotlin allows several bounds via `where`; the first is the erasure-relevant one here.
+    let mut upper_bound: Option<Vec<u8>> = None;
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
             (1, 0) => id = Some(pb.varint()?),
             (2, 0) => name = Some(pb.varint()?),
+            (5, 2) => {
+                let n = pb.varint()? as usize;
+                let b = pb.bytes(n)?;
+                if upper_bound.is_none() {
+                    upper_bound = Some(b.to_vec());
+                }
+            }
             (_, w) => pb.skip(w)?,
         }
     }
-    Some((id?, name?))
+    Some((id?, name?, upper_bound))
 }
 
 /// Decode the `@Metadata` `d1` string array to raw protobuf bytes. Modern metadata (since Kotlin 1.4)
@@ -623,7 +658,7 @@ struct ParsedFunction {
     value_params: Vec<ParsedValueParam>,
     /// The function's own `type_parameter` table (field 4): `(id, name string-id)` — for resolving a
     /// `Type.type_parameter` reference in a parameter/return type to its name.
-    type_params: Vec<(u64, u64)>,
+    type_params: Vec<(u64, u64, Option<Vec<u8>>)>,
     /// Raw `Function.return_type` (field 3) `Type` body, for the metadata generic signature.
     return_body: Option<Vec<u8>>,
     /// Raw `Function.receiver_type` (field 5) `Type` body (extensions only), for the metadata gsig.
@@ -652,7 +687,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
     let mut has_receiver = false;
     let mut ret_nullable = false;
     let mut value_params: Vec<ParsedValueParam> = Vec::new();
-    let mut type_params: Vec<(u64, u64)> = Vec::new();
+    let mut type_params: Vec<(u64, u64, Option<Vec<u8>>)> = Vec::new();
     let mut return_body: Option<Vec<u8>> = None;
     let mut receiver_body: Option<Vec<u8>> = None;
     let mut annotation_bodies: Vec<Vec<u8>> = Vec::new();
@@ -860,15 +895,29 @@ fn build_generic_sig(
     let class_tparams = class_receiver.map(|(_, tps)| tps).unwrap_or(&[]);
     let mut tparams: HashMap<u64, String> = class_tparams.iter().cloned().collect();
     let mut formals: Vec<String> = class_tparams.iter().map(|(_, n)| n.clone()).collect();
-    for (id, name_id) in &pf.type_params {
+    for (id, name_id, _) in &pf.type_params {
         if let Some(name) = resolve_string(records, d2, *name_id as usize) {
             tparams.insert(*id, name.clone());
             formals.push(name);
         }
     }
+    // DECLARED upper bounds, name → bound type (`<T : Comparable<T>>` → `Comparable`). Parsed
+    // after the name table so a self-referential bound resolves its `T` (to a bound-less
+    // `TyParam` inside the bound — the outer bound is what matters for erasure).
+    let mut bounds: HashMap<String, Ty> = HashMap::new();
+    for (_, name_id, bound_body) in &pf.type_params {
+        if let (Some(name), Some(bb)) = (
+            resolve_string(records, d2, *name_id as usize),
+            bound_body.as_ref(),
+        ) {
+            if let Some(b) = parse_type_gsig(bb, records, d2, &tparams) {
+                bounds.insert(name, b);
+            }
+        }
+    }
     let receiver = if let Some(rb) = &pf.receiver_body {
         // An EXTENSION: its `receiver_type` is the receiver gsig node (`T`, `Ch`, `List<T>`, …).
-        Some(parse_type_gsig(rb, records, d2, &tparams)?)
+        Some(parse_type_gsig_bounded(rb, records, d2, &tparams, &bounds)?)
     } else {
         // A MEMBER: the declaring class parameterized by its own type parameters, so unifying it with the
         // actual receiver binds `T` exactly like an extension. `None` for a top-level function.
@@ -889,9 +938,9 @@ fn build_generic_sig(
             // A `vararg elem: T` param's LOGICAL type is `Array<T>` (the JVM descriptor's array-ness); its
             // element type is `varargElementType`, so wrap it in `Array` to match the JVM `Signature` shape.
             let decoded = if let Some(elem) = &vp.vararg_elem_body {
-                parse_type_gsig(elem, records, d2, &tparams).map(Ty::array)
+                parse_type_gsig_bounded(elem, records, d2, &tparams, &bounds).map(Ty::array)
             } else {
-                parse_type_gsig(&vp.type_body, records, d2, &tparams)
+                parse_type_gsig_bounded(&vp.type_body, records, d2, &tparams, &bounds)
             };
             // An unresolvable param erases to a fresh unbound var (→ `Any` downstream).
             decoded.unwrap_or_else(|| Ty::ty_param("\u{0}", Ty::obj("kotlin/Any")))
@@ -900,7 +949,7 @@ fn build_generic_sig(
     let ret = pf
         .return_body
         .as_ref()
-        .and_then(|rb| parse_type_gsig(rb, records, d2, &tparams))
+        .and_then(|rb| parse_type_gsig_bounded(rb, records, d2, &tparams, &bounds))
         .unwrap_or_else(|| Ty::obj("kotlin/Any"));
     Some(GenericSig {
         formals,
@@ -2386,7 +2435,14 @@ mod module_reader_tests {
         let parameters = HashMap::from([(0, "T".to_string())]);
 
         assert_eq!(
-            parse_type_gsig_node(&type_parameter, &[], &[], &parameters, true),
+            parse_type_gsig_node(
+                &type_parameter,
+                &[],
+                &[],
+                &parameters,
+                &HashMap::new(),
+                true
+            ),
             Some(Ty::nullable(Ty::ty_param("T", Ty::obj("kotlin/Any"))))
         );
         assert_eq!(

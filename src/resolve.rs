@@ -12689,7 +12689,7 @@ impl<'a> Checker<'a> {
                     Ty::Error
                 }
             }
-            Expr::RangeTo { lo, hi, .. } => {
+            Expr::RangeTo { lo, hi, kind } => {
                 let lt = self.expr(lo);
                 let rt = self.expr(hi);
                 // `a..b` / `a..<b` constructs the matching stdlib range object. `Char..Char` is a
@@ -12699,6 +12699,23 @@ impl<'a> Checker<'a> {
                 if let Some(ty) = Ty::range_value_type(lt, rt) {
                     ty
                 } else {
+                    // A REFERENCE range (`"a".."c"`, a user `operator fun rangeTo`): resolve the
+                    // operator — `Comparable<T>.rangeTo` yields `ClosedRange<T>` — and record the
+                    // selection; the lowering emits exactly that call. Same desugaring the fused
+                    // `x in a..b` form already uses. Only the inclusive `..` form: `..<`/`downTo`
+                    // over references stay rejected (their operators aren't modeled in lowering).
+                    if lt.is_reference()
+                        && lt == rt
+                        && matches!(kind, crate::ast::RangeKind::Through)
+                    {
+                        if let Some((range_ty, range_call)) =
+                            self.operator_call_ret(lt, "rangeTo", &[rt], &[hi], self.span(e))
+                        {
+                            self.resolved_operator_calls
+                                .insert((e, SyntheticOperatorCall::RangeTo), range_call);
+                            return self.set(e, range_ty);
+                        }
+                    }
                     self.diags.error(
                         self.span(e),
                         "krusty: range expression is only supported for Int/Long/Char operands"
