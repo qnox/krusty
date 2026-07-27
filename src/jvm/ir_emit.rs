@@ -9866,35 +9866,10 @@ impl<'a> Emitter<'a> {
 
     /// never falls through past it. Used to suppress dead `goto`s and unreachable merge frames.
     fn diverges(&self, e: u32) -> bool {
-        match self.ir.expr(e) {
-            IrExpr::Return(_)
-            | IrExpr::Throw { .. }
-            | IrExpr::Break { .. }
-            | IrExpr::Continue { .. } => true,
-            IrExpr::Block { stmts, value } => match value {
-                Some(v) => self.diverges(*v),
-                None => stmts.last().map_or(false, |s| self.diverges(*s)),
-            },
-            IrExpr::When { branches } => {
-                branches.iter().any(|(c, _)| c.is_none())
-                    && branches.iter().all(|(_, b)| self.diverges(*b))
-            }
-            // A `try` diverges if its `finally` diverges, or if the body and every catch diverge (no
-            // path falls through to the merge).
-            IrExpr::Try {
-                body,
-                catches,
-                finally,
-                ..
-            } => {
-                finally.map_or(false, |f| self.diverges(f))
-                    || (self.diverges(*body) && catches.iter().all(|c| self.diverges(c.body)))
-            }
-            // A `Nothing`-typed call never returns — an inlined `error(...)`/`throw`-helper diverges via
-            // `athrow`, so the branch it ends doesn't fall through to the merge.
-            IrExpr::Call { .. } | IrExpr::MethodCall { .. } => self.value_ty(e) == Ty::Nothing,
-            _ => false,
-        }
+        self.ir.expr_diverges_by(e, &|expression, value| {
+            matches!(value, IrExpr::Call { .. } | IrExpr::MethodCall { .. })
+                && self.value_ty(expression) == Ty::Nothing
+        })
     }
 
     /// The element `Ty` of an array-typed IR expression.
