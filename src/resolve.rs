@@ -14,6 +14,7 @@ use crate::diag::{DiagSink, Span};
 use crate::libraries::{
     required_arity, CallSig, EmptySymbolSource, InlineKind, Origin, ParamList, SemanticPlatform,
 };
+use crate::names::{property_getter_name, property_setter_name};
 use crate::symbol_source::SymbolSource;
 use crate::types::{existing_type_name, type_name, Ty, TypeName, Visibility};
 
@@ -227,9 +228,19 @@ struct AppliedMemberExtFunSig {
 }
 
 #[derive(Clone, Debug)]
+pub struct DeclaredPropertySig {
+    pub ty: Ty,
+    pub visibility: Visibility,
+    pub getter_name: String,
+    pub setter_name: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct ClassSig {
     pub internal: TypeName,
+    pub visibility: Visibility,
     pub props: Vec<(String, Ty, bool)>, // backing-field properties (name, type, is_var)
+    pub declared_props: HashMap<String, DeclaredPropertySig>,
     /// Extension properties declared inside this class/object.
     pub member_ext_props: HashMap<String, Vec<MemberExtPropSig>>,
     /// Member extension functions keyed by source name.
@@ -316,11 +327,6 @@ pub struct ClassSig {
     /// method's own type parameters from the lambda body. Keyed by method name; only methods whose
     /// substitution actually depends on a type parameter are recorded (ordinary methods are absent).
     pub generic_methods: HashMap<String, Vec<GenericMethod>>,
-    /// Visibility of each MEMBER property that is not `public`, keyed by name (a `public`/absent entry
-    /// is the default). Read by the resolver's access check to reject a `private` member read from
-    /// outside the declaring class. Only body properties are recorded; primary-constructor properties
-    /// default to `public`.
-    pub prop_visibility: HashMap<String, Visibility>,
 }
 
 /// The symbolic declaration shape of a generic member method.
@@ -2766,6 +2772,24 @@ pub fn collect_signatures_with_cp(
                             )
                         })
                         .collect();
+                    let mut declared_props = c
+                        .props
+                        .iter()
+                        .filter(|property| property.is_property)
+                        .map(|property| {
+                            (
+                                property.name.clone(),
+                                DeclaredPropertySig {
+                                    ty: ty_of_ref(&property.ty, &class_names, &ctp, diags),
+                                    visibility: property.visibility,
+                                    getter_name: property_getter_name(&property.name),
+                                    setter_name: property
+                                        .is_var
+                                        .then(|| property_setter_name(&property.name)),
+                                },
+                            )
+                        })
+                        .collect::<HashMap<_, _>>();
                     let mut member_ext_props = HashMap::new();
                     let mut member_ext_keys = std::collections::HashSet::new();
                     // Body properties (`class C { val x = … }`) are also fields/accessors. A computed
@@ -2916,6 +2940,15 @@ pub fn collect_signatures_with_cp(
                             continue;
                         }
                         props.push((bp.name.clone(), ty, bp.is_var));
+                        declared_props.insert(
+                            bp.name.clone(),
+                            DeclaredPropertySig {
+                                ty,
+                                visibility: bp.visibility,
+                                getter_name: property_getter_name(&bp.name),
+                                setter_name: bp.is_var.then(|| property_setter_name(&bp.name)),
+                            },
+                        );
                         init_scope.push((bp.name.clone(), ty, bp.is_var));
                     }
                     // An inner class's methods can read the enclosing instance's properties (via
@@ -3533,14 +3566,6 @@ pub fn collect_signatures_with_cp(
                     // registration below), captured before `static_methods`/`internal` are moved into the
                     // main class's `ClassSig`.
                     let companion_methods_sigs = static_methods.clone();
-                    // Non-public member-property visibility, for the resolver's access check. Only body
-                    // properties carry a source modifier; ctor properties default to public.
-                    let prop_visibility: HashMap<String, Visibility> = c
-                        .body_props
-                        .iter()
-                        .filter(|bp| bp.receiver.is_none() && bp.visibility != Visibility::Public)
-                        .map(|bp| (bp.name.clone(), bp.visibility))
-                        .collect();
                     let comp_internal = format!("{internal}$Companion");
                     let has_companion_supertypes =
                         !companion_interfaces.is_empty() || companion_super_internal.is_some();
@@ -3554,7 +3579,9 @@ pub fn collect_signatures_with_cp(
                         c.name.clone(),
                         ClassSig {
                             internal: internal_ref,
+                            visibility: c.visibility,
                             props,
+                            declared_props,
                             member_ext_props,
                             member_ext_funs,
                             has_primary_ctor: c.has_primary_ctor,
@@ -3619,7 +3646,6 @@ pub fn collect_signatures_with_cp(
                             tparam_bounds,
                             generic_props,
                             generic_function_props,
-                            prop_visibility,
                             value_field,
                             generic_methods,
                         },
@@ -3642,7 +3668,9 @@ pub fn collect_signatures_with_cp(
                             comp_internal.clone(),
                             ClassSig {
                                 internal: comp_internal_ref,
+                                visibility: Visibility::Public,
                                 props: Vec::new(),
+                                declared_props: HashMap::new(),
                                 member_ext_props: HashMap::new(),
                                 member_ext_funs: HashMap::new(),
                                 has_primary_ctor: true,
@@ -3679,7 +3707,6 @@ pub fn collect_signatures_with_cp(
                                 generic_function_props: HashMap::new(),
                                 value_field: None,
                                 generic_methods: HashMap::new(),
-                                prop_visibility: HashMap::new(),
                             },
                         );
                     }
@@ -13998,23 +14025,16 @@ impl<'a> Checker<'a> {
                                 return self.set(e, ty);
                             }
                         }
-                        // `ClasspathClass.NestedObject` — a nested singleton object on the classpath
-                        // (`PrimitiveKind.STRING` → `getstatic PrimitiveKind$STRING.INSTANCE`). The value
-                        // type is the nested object's type; lowering reads its `INSTANCE`.
                         if let Some(outer) = self.imported_type_internal(&en) {
                             let nested = format!("{outer}${name}");
                             if self.resolved_type(&nested).is_some_and(|t| t.is_object()) {
-                                // Value = `getstatic Outer$Nested.INSTANCE` (lowering reads `nested`), but
-                                // TYPE it as the OUTER class — the runtime object is-a Outer, and erased
-                                // argument matching wants `Outer` (`PrimitiveSerialDescriptor(_, PrimitiveKind)`
-                                // accepts `PrimitiveKind.STRING`), not the narrower nested type.
                                 self.expr_lowers.insert(
                                     e,
                                     ExprLowering::ObjectValue {
                                         internal: type_name(&nested),
                                     },
                                 );
-                                return self.set(e, Ty::obj(&outer));
+                                return self.set(e, Ty::obj(&nested));
                             }
                         }
                         // `ClassName.NestedObject` on a same-file class.
@@ -16550,13 +16570,8 @@ impl<'a> Checker<'a> {
         let mut cur = Some(receiver);
         while let Some(internal) = cur {
             let cs = self.syms.class_by_type_name(internal)?;
-            if cs.prop(name).is_some() {
-                let vis = cs
-                    .prop_visibility
-                    .get(name)
-                    .copied()
-                    .unwrap_or(Visibility::Public);
-                return Some((vis, internal));
+            if let Some(property) = cs.declared_props.get(name) {
+                return Some((property.visibility, internal));
             }
             cur = cs.super_internal_name();
         }

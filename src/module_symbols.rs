@@ -7,13 +7,15 @@
 //! scattered "user-first, else library" branching. Every callable is stamped [`Origin::Module`] so the
 //! lowerer can pick the same-file / cross-file / library emit form from resolution alone.
 
-use crate::frontend::{pick_overload, FrontendClassSig, FrontendSymbols, Signature};
+use crate::frontend::{
+    pick_overload, FrontendClassSig, FrontendDeclaredPropertySig, FrontendSymbols, Signature,
+};
 use crate::libraries::{
     FnFlags, FnKind, FunctionInfo, FunctionSet, InlineKind, LibraryCallable, LibraryMember,
-    LibraryType, Origin,
+    LibraryType, Origin, PropKind, PropertyInfo, PropertySet,
 };
 use crate::symbol_source::{InheritanceShape, SymbolSource};
-use crate::types::{type_name, Ty, TypeName};
+use crate::types::{type_name, Ty, TypeName, Visibility};
 use std::collections::HashMap;
 
 /// The current module's declarations as a [`SymbolSource`]. Borrows the frontend symbols; cheap.
@@ -95,7 +97,7 @@ impl<'a> ModuleSymbols<'a> {
             crate::libraries::TypeKind::Class
         };
         LibraryType {
-            is_public: true,
+            is_public: c.visibility == Visibility::Public,
             kind,
             supertypes: supertypes.into(),
             constructors,
@@ -292,6 +294,83 @@ impl<'a> ModuleSymbols<'a> {
             self.collect_members(s, name, out, seen, rung);
         }
     }
+
+    fn collect_properties(
+        &self,
+        internal: TypeName,
+        name: &str,
+        out: &mut Vec<PropertyInfo>,
+        seen: &mut std::collections::HashSet<TypeName>,
+        rung: &mut u32,
+    ) {
+        if !seen.insert(internal) {
+            return;
+        }
+        let Some(class) = self.class_by_type_name(internal) else {
+            return;
+        };
+        let here = *rung;
+        *rung += 1;
+        if let Some(property) = class.declared_props.get(name) {
+            out.push(source_property(class.internal_name(), property, here));
+        }
+        for interface in class.interfaces.iter_ids() {
+            self.collect_properties(interface, name, out, seen, rung);
+        }
+        if let Some(superclass) = class.super_internal {
+            self.collect_properties(superclass, name, out, seen, rung);
+        }
+    }
+
+    fn collect_property_accessors(
+        &self,
+        internal: TypeName,
+        name: &str,
+        out: &mut Vec<FunctionInfo>,
+        seen: &mut std::collections::HashSet<TypeName>,
+        rung: &mut u32,
+    ) {
+        if !seen.insert(internal) {
+            return;
+        }
+        let Some(class) = self.class_by_type_name(internal) else {
+            return;
+        };
+        let here = *rung;
+        *rung += 1;
+        for property in class.declared_props.values() {
+            let accessor = if property.getter_name == name {
+                Some(source_accessor(
+                    class.internal_name(),
+                    name,
+                    Vec::new(),
+                    property.ty,
+                    property.visibility,
+                    here,
+                ))
+            } else if property.setter_name.as_deref() == Some(name) {
+                Some(source_accessor(
+                    class.internal_name(),
+                    name,
+                    vec![property.ty],
+                    Ty::Unit,
+                    property.visibility,
+                    here,
+                ))
+            } else {
+                None
+            };
+            if let Some(accessor) = accessor {
+                out.push(accessor);
+            }
+        }
+        for interface in class.interfaces.iter_ids() {
+            self.collect_property_accessors(interface, name, out, seen, rung);
+        }
+        if let Some(superclass) = class.super_internal {
+            self.collect_property_accessors(superclass, name, out, seen, rung);
+        }
+    }
 }
 
 /// A user [`Signature`] as a [`LibraryMember`] — the module-source shape of a class method. Carries the
@@ -357,6 +436,65 @@ fn fn_info(
         },
         visibility: sig.visibility,
         ..FunctionInfo::plain(kind, receiver, callable)
+    }
+}
+
+fn source_callable(owner: TypeName, name: String, params: Vec<Ty>, ret: Ty) -> LibraryCallable {
+    LibraryCallable {
+        owner,
+        name,
+        descriptor: String::new(),
+        params,
+        ret,
+        physical_ret: ret,
+        suspend: false,
+        inline: InlineKind::None,
+        default_call: false,
+        vararg_elem: None,
+        signature: None,
+        origin: Origin::Module { facade: owner },
+        source_receiver: None,
+    }
+}
+
+fn source_accessor(
+    owner: TypeName,
+    name: &str,
+    params: Vec<Ty>,
+    ret: Ty,
+    visibility: Visibility,
+    receiver_rank: u32,
+) -> FunctionInfo {
+    FunctionInfo {
+        visibility,
+        receiver_rank,
+        ..FunctionInfo::plain(
+            FnKind::Member,
+            Some(Ty::obj_name(owner)),
+            source_callable(owner, name.to_string(), params, ret),
+        )
+    }
+}
+
+fn source_property(
+    owner: TypeName,
+    property: &FrontendDeclaredPropertySig,
+    receiver_rank: u32,
+) -> PropertyInfo {
+    PropertyInfo {
+        kind: PropKind::Member,
+        receiver: Some(Ty::obj_name(owner)),
+        formals: Vec::new(),
+        ty: property.ty,
+        getter: source_callable(owner, property.getter_name.clone(), Vec::new(), property.ty),
+        setter: property
+            .setter_name
+            .as_ref()
+            .map(|setter| source_callable(owner, setter.clone(), vec![property.ty], Ty::Unit)),
+        is_const: false,
+        visibility: property.visibility,
+        owner,
+        receiver_rank,
     }
 }
 
@@ -429,8 +567,25 @@ impl SymbolSource for ModuleSymbols<'_> {
             let mut seen = std::collections::HashSet::new();
             let mut rung: u32 = 0;
             self.collect_members(internal, name, &mut overloads, &mut seen, &mut rung);
+            let mut seen = std::collections::HashSet::new();
+            let mut rung = 0;
+            self.collect_property_accessors(internal, name, &mut overloads, &mut seen, &mut rung);
         }
         FunctionSet { overloads }
+    }
+
+    fn property_members(&self, recv: Ty, name: &str) -> PropertySet {
+        let mut overloads = Vec::new();
+        if let Ty::Obj(internal, _) = recv {
+            let mut seen = std::collections::HashSet::new();
+            let mut rung = 0;
+            self.collect_properties(internal, name, &mut overloads, &mut seen, &mut rung);
+        }
+        PropertySet { overloads }
+    }
+
+    fn member_is_property(&self, recv: Ty, name: &str) -> bool {
+        !self.property_members(recv, name).overloads.is_empty()
     }
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
@@ -460,7 +615,7 @@ impl SymbolSource for ModuleSymbols<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolve::CtorDefaultValue;
+    use crate::resolve::{CtorDefaultValue, DeclaredPropertySig};
     use std::collections::{HashMap, HashSet};
 
     fn sig(params: Vec<Ty>, ret: Ty) -> Signature {
@@ -490,7 +645,9 @@ mod tests {
     fn class(internal: &str) -> FrontendClassSig {
         FrontendClassSig {
             internal: internal.into(),
+            visibility: Visibility::Public,
             props: vec![],
+            declared_props: HashMap::new(),
             member_ext_props: HashMap::new(),
             member_ext_funs: HashMap::new(),
             has_primary_ctor: true,
@@ -524,7 +681,6 @@ mod tests {
             generic_function_props: HashMap::new(),
             value_field: None,
             generic_methods: HashMap::new(),
-            prop_visibility: std::collections::HashMap::new(),
         }
     }
 
@@ -620,6 +776,54 @@ mod tests {
     }
 
     #[test]
+    fn member_properties_preserve_declaration_metadata() {
+        let mut symbols = FrontendSymbols::default();
+        let mut base = class("demo/Base");
+        base.declared_props.insert(
+            "state".into(),
+            DeclaredPropertySig {
+                ty: Ty::String,
+                visibility: Visibility::Protected,
+                getter_name: "getState".into(),
+                setter_name: Some("setState".into()),
+            },
+        );
+        let mut sub = class("demo/Sub");
+        sub.super_internal = Some(type_name("demo/Base"));
+        symbols.insert_class("Base".into(), base);
+        symbols.insert_class("Sub".into(), sub);
+        let source = ModuleSymbols::new(&symbols);
+
+        let properties = source.property_members(Ty::obj("demo/Sub"), "state");
+        assert_eq!(properties.overloads.len(), 1);
+        let property = &properties.overloads[0];
+        assert_eq!(property.kind, PropKind::Member);
+        assert_eq!(property.receiver, Some(Ty::obj("demo/Base")));
+        assert_eq!(property.ty, Ty::String);
+        assert_eq!(property.visibility, Visibility::Protected);
+        assert_eq!(property.receiver_rank, 1);
+        assert!(property.owner.matches("demo/Base"));
+        assert_eq!(
+            property
+                .setter
+                .as_ref()
+                .map(|setter| setter.params.as_slice()),
+            Some([Ty::String].as_slice())
+        );
+
+        let getter = source.member_overloads(Ty::obj("demo/Sub"), "getState");
+        assert_eq!(getter.overloads.len(), 1);
+        assert_eq!(getter.overloads[0].receiver_rank, 1);
+        assert_eq!(getter.overloads[0].visibility, Visibility::Protected);
+        assert!(getter.overloads[0].callable.owner.matches("demo/Base"));
+        assert!(matches!(
+            getter.overloads[0].callable.origin,
+            Origin::Module { .. }
+        ));
+        assert!(source.member_is_property(Ty::obj("demo/Sub"), "state"));
+    }
+
+    #[test]
     fn member_inline_flag_flows_through_module_symbols() {
         let mut st = FrontendSymbols::default();
         let mut c = class("demo/Host");
@@ -678,6 +882,21 @@ mod tests {
         assert_eq!(t.members[0].ret, Ty::Int);
         assert_eq!(t.supertypes.to_vec(), vec!["demo/Shape".to_string()]);
         assert!(m.resolve_type("demo/Nope").is_none());
+    }
+
+    #[test]
+    fn resolve_type_preserves_class_visibility() {
+        let mut symbols = FrontendSymbols::default();
+        let mut hidden = class("demo/Hidden");
+        hidden.visibility = Visibility::Private;
+        symbols.insert_class("Hidden".into(), hidden);
+
+        assert!(
+            !ModuleSymbols::new(&symbols)
+                .resolve_type("demo/Hidden")
+                .expect("shape")
+                .is_public
+        );
     }
 
     #[test]
