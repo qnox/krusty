@@ -984,13 +984,18 @@ pub(crate) fn classifier_over_default(name: &str, resolved: Option<TypeName>) ->
 /// A collected TOP-LEVEL extension property: its declared type, mutability, and the source
 /// declaration key (file index, decl id) — how the backend's facade-metadata builder matches a
 /// declaration to its record without guessing by name (same-name properties may differ by receiver).
+#[derive(Clone, Debug)]
 pub struct ExtPropSig {
+    pub receiver: Ty,
     pub ty: Ty,
     pub is_var: bool,
+    pub getter_name: String,
+    pub setter_name: Option<String>,
     pub context_params: Vec<Ty>,
-    /// Whether the declared receiver accepts null.
     pub accepts_nullable_receiver: bool,
     pub source: (u32, u32),
+    pub package: String,
+    pub visibility: Visibility,
 }
 
 pub struct ContextPropSig {
@@ -1032,7 +1037,7 @@ pub struct SymbolTable {
     pub ext_funs: HashMap<(Ty, String), Vec<Signature>>,
     /// Top-level extension properties: (erased receiver, prop_name) → (type, is_var). The
     /// getter/setter are emitted as static `getName(Recv)`/`setName(Recv, T)` methods.
-    pub ext_props: HashMap<(Ty, String), ExtPropSig>,
+    pub ext_props: HashMap<(Ty, String), Vec<ExtPropSig>>,
     /// Simple type name → JVM internal name: every resolvable reference type — user/classpath
     /// classes, classpath `TypeAliasesKt` aliases, and the ported `JavaToKotlinClassMap`
     /// built-ins. The single source of truth for "does this type name resolve, and to what".
@@ -1046,6 +1051,7 @@ pub struct SymbolTable {
     /// Top-level function source declaration → declaring facade. This is the declaration-keyed
     /// equivalent of [`Self::fn_facades`], used once the checker has selected a concrete overload.
     pub fn_facades_by_decl: HashMap<(u32, u32), TypeName>,
+    pub ext_prop_facades_by_decl: HashMap<(u32, u32), TypeName>,
     /// Top-level property name → `(facade_internal, type, is_var)` across the WHOLE multi-file
     /// compilation. Populated only by the multi-file driver. A read of a property from ANOTHER file
     /// lowers to `invokestatic <facade>.getX()` (the field is private), a write to `setX(v)`. Empty for
@@ -1070,6 +1076,7 @@ impl Default for SymbolTable {
             class_names: ClassNames::default(),
             fn_facades: HashMap::new(),
             fn_facades_by_decl: HashMap::new(),
+            ext_prop_facades_by_decl: HashMap::new(),
             prop_facades: HashMap::new(),
         }
     }
@@ -1088,7 +1095,7 @@ impl SymbolTable {
         for signature in self.ext_funs.values_mut().flatten() {
             offset_signature(signature);
         }
-        for property in self.ext_props.values_mut() {
+        for property in self.ext_props.values_mut().flatten() {
             property.source.0 += offset;
         }
         self.context_props = std::mem::take(&mut self.context_props)
@@ -1123,16 +1130,11 @@ impl SymbolTable {
     /// matches a concrete receiver like `String` or `Array<Int>`. Model the type-parameter's implicit
     /// `Any` upper bound by falling back from the exact key to progressively-generalized ones: the
     /// array-element-generalized key, then the bare `Any` receiver. Concrete overloads still win first.
-    pub fn ext_prop(&self, recv: Ty, name: &str) -> Option<(Ty, bool)> {
-        recv.erased_recv_candidates()
-            .into_iter()
-            .find_map(|k| {
-                self.ext_props
-                    .get(&(k, name.to_string()))
-                    .filter(|signature| !recv.is_nullable() || signature.accepts_nullable_receiver)
-                    .filter(|signature| signature.context_params.is_empty())
-            })
-            .map(|s| (s.ty, s.is_var))
+    pub fn source_extension_property(&self, source: (u32, u32)) -> Option<&ExtPropSig> {
+        self.ext_props
+            .values()
+            .flatten()
+            .find(|signature| signature.source == source)
     }
 
     pub fn single_fun(&self, name: &str) -> Option<Signature> {
@@ -4197,23 +4199,38 @@ pub fn collect_signatures_with_cp(
                                 })
                                 .unwrap_or(Ty::Error);
                         if recv_ty != Ty::Error && ty != Ty::Error {
-                            let key = (recv_ty.erased_recv(), p.name.clone());
-                            // Two extension properties that erase to the same `(receiver, name)` (e.g.
-                            // generic overloads `C<T: Any?>.p` and `C<T: Any>.p`) would emit duplicate
-                            // `getName` methods → `ClassFormatError`. Reject (skip), never miscompile.
-                            if table.ext_props.contains_key(&key) {
+                            let receiver = recv_ty.erased_recv();
+                            let declared_receiver = if accepts_nullable_receiver {
+                                Ty::nullable(receiver)
+                            } else {
+                                receiver
+                            };
+                            let key = (receiver, p.name.clone());
+                            // Equal erased signatures conflict only when they share a facade.
+                            let package =
+                                file.package.clone().unwrap_or_default().replace('.', "/");
+                            let overloads = table.ext_props.entry(key).or_default();
+                            if overloads.iter().any(|signature| {
+                                signature.package == package
+                                    && !(signature.visibility.is_private()
+                                        && p.visibility.is_private()
+                                        && signature.source.0 != i as u32)
+                            }) {
                                 diags.error(p.span, format!("krusty: conflicting extension property '{}' (same erased receiver)", p.name));
-                            }
-                            table.ext_props.insert(
-                                key,
-                                ExtPropSig {
+                            } else {
+                                overloads.push(ExtPropSig {
+                                    receiver: declared_receiver,
                                     ty,
                                     is_var: p.is_var,
+                                    getter_name: property_getter_name(&p.name),
+                                    setter_name: p.is_var.then(|| property_setter_name(&p.name)),
                                     context_params,
                                     accepts_nullable_receiver,
                                     source: (i as u32, d.0),
-                                },
-                            );
+                                    package,
+                                    visibility: p.visibility,
+                                });
+                            }
                         }
                         continue;
                     }
@@ -6678,6 +6695,8 @@ pub struct TypeInfo {
     /// [`Self::resolved_top_level`], …).
     pub resolved_calls: HashMap<ExprId, ResolvedCall>,
     resolved_source_calls: HashMap<ExprId, (u32, u32)>,
+    source_extension_properties: HashMap<ExprId, crate::libraries::PropertyInfo>,
+    source_extension_property_writes: HashMap<StmtId, crate::libraries::PropertyInfo>,
     /// Synthetic operator calls selected while checking a source expression that does not itself contain
     /// a call node for every desugared operation. Example: reference `x in a..b` resolves both
     /// `a.rangeTo(b)` and `<range>.contains(x)` from one `Expr::InRange`; lowering reads these selections
@@ -7073,6 +7092,17 @@ impl TypeInfo {
 
     pub fn resolved_source_call(&self, e: ExprId) -> Option<(u32, u32)> {
         self.resolved_source_calls.get(&e).copied()
+    }
+
+    pub fn source_extension_property(&self, e: ExprId) -> Option<&crate::libraries::PropertyInfo> {
+        self.source_extension_properties.get(&e)
+    }
+
+    pub fn source_extension_property_write(
+        &self,
+        statement: StmtId,
+    ) -> Option<&crate::libraries::PropertyInfo> {
+        self.source_extension_property_writes.get(&statement)
     }
 
     /// The resolved classpath instance member at call `e`, if the checker recorded one.
@@ -7551,7 +7581,7 @@ fn make_checker<'a>(
     Checker {
         file,
         syms,
-        module: crate::module_symbols::ModuleSymbols::new(syms),
+        module: crate::module_symbols::ModuleSymbols::for_file(syms, file_index),
         file_index,
         source_files,
         diags,
@@ -7581,6 +7611,8 @@ fn make_checker<'a>(
         narrowed_this_member: HashMap::new(),
         resolved_calls: HashMap::new(),
         resolved_source_calls: HashMap::new(),
+        source_extension_properties: HashMap::new(),
+        source_extension_property_writes: HashMap::new(),
         resolved_operator_calls: HashMap::new(),
         resolved_stmt_operator_calls: HashMap::new(),
         resolved_index_store_get_returns: HashMap::new(),
@@ -8602,12 +8634,9 @@ fn check_file_at_impl(
                     p.ty.as_ref()
                         .map(|r| c.resolve_ty(r))
                         .or_else(|| {
-                            p.receiver.as_ref().map(|r| c.resolve_ty(r)).and_then(|rt| {
-                                c.syms
-                                    .ext_props
-                                    .get(&(rt.erased_recv(), p.name.clone()))
-                                    .map(|s| s.ty)
-                            })
+                            c.syms
+                                .source_extension_property((c.file_index, d.0))
+                                .map(|signature| signature.ty)
                         })
                         .or_else(|| {
                             c.syms
@@ -8707,6 +8736,8 @@ fn check_file_at_impl(
         narrowed_this_member,
         resolved_calls,
         resolved_source_calls,
+        source_extension_properties,
+        source_extension_property_writes,
         resolved_operator_calls,
         resolved_stmt_operator_calls,
         resolved_index_store_get_returns,
@@ -8781,6 +8812,8 @@ fn check_file_at_impl(
         narrowed_this_member,
         resolved_calls,
         resolved_source_calls,
+        source_extension_properties,
+        source_extension_property_writes,
         resolved_operator_calls,
         resolved_stmt_operator_calls,
         resolved_index_store_get_returns,
@@ -8995,6 +9028,8 @@ struct Checker<'a> {
     /// [`ResolvedCall`] for the variants.
     resolved_calls: HashMap<ExprId, ResolvedCall>,
     resolved_source_calls: HashMap<ExprId, (u32, u32)>,
+    source_extension_properties: HashMap<ExprId, crate::libraries::PropertyInfo>,
+    source_extension_property_writes: HashMap<StmtId, crate::libraries::PropertyInfo>,
     resolved_operator_calls: HashMap<(ExprId, SyntheticOperatorCall), ResolvedCall>,
     resolved_stmt_operator_calls: HashMap<(StmtId, SyntheticOperatorCall), ResolvedCall>,
     resolved_index_store_get_returns: HashMap<StmtId, Ty>,
@@ -9849,6 +9884,43 @@ impl<'a> Checker<'a> {
             },
         );
         Some(Ty::fun(params, ret))
+    }
+
+    fn visible_source_extension_property(
+        &self,
+        recv: Ty,
+        name: &str,
+    ) -> Result<
+        Option<crate::libraries::PropertyInfo>,
+        crate::symbol_resolver::AmbiguousExtensionProperty,
+    > {
+        let resolve_in = |packages: &[TypeName], candidate_name: &str| {
+            self.resolver_in_scope(packages)
+                .resolve_extension_property(recv, candidate_name)
+        };
+        let as_source = |property: crate::libraries::PropertyInfo| {
+            (property.source_key.is_some()
+                && matches!(property.getter.origin, Origin::Module { .. }))
+            .then_some(property)
+        };
+
+        if let Some(fqn) = self.imports.get(name) {
+            let (package, imported_name) = fqn.rsplit_once('/').unwrap_or(("", fqn));
+            if let Some(property) = resolve_in(&[type_name(package)], imported_name)? {
+                if let Some(property) = as_source(property) {
+                    return Ok(Some(property));
+                }
+            }
+        }
+
+        for packages in &self.import_levels {
+            if let Some(property) = resolve_in(packages, name)? {
+                if let Some(property) = as_source(property) {
+                    return Ok(Some(property));
+                }
+            }
+        }
+        Ok(None)
     }
     fn resolve_instance_name(
         &self,
@@ -15558,11 +15630,16 @@ impl<'a> Checker<'a> {
                                 // bound EXTENSION property reference `obj::ext` (`val Recv.ext`) — a
                                 // `KProperty0`; the lowerer synthesizes a reference calling the static
                                 // extension getter/setter with the captured receiver.
-                                if let Some((_, is_var)) =
-                                    self.syms.ext_prop(Ty::obj_name(internal), &name)
-                                {
+                                if let Ok(Some(property)) = self.visible_source_extension_property(
+                                    Ty::obj_name(internal),
+                                    &name,
+                                ) {
                                     self.expr(r); // capture the receiver
-                                    if let Some(ty) = self.property_ref_ty(0, is_var) {
+                                    if let Some(ty) =
+                                        self.property_ref_ty(0, property.setter.is_some())
+                                    {
+                                        self.source_extension_properties
+                                            .insert(e, property.clone());
                                         return self.set(e, ty);
                                     }
                                 }
@@ -15628,8 +15705,14 @@ impl<'a> Checker<'a> {
                                 if let Some(ty) = self.source_extension_ref(e, recv_ty, &name) {
                                     return self.set(e, ty);
                                 }
-                                if let Some((_, is_var)) = self.syms.ext_prop(recv_ty, &name) {
-                                    if let Some(ty) = self.property_ref_ty(1, is_var) {
+                                if let Ok(Some(property)) =
+                                    self.visible_source_extension_property(recv_ty, &name)
+                                {
+                                    if let Some(ty) =
+                                        self.property_ref_ty(1, property.setter.is_some())
+                                    {
+                                        self.source_extension_properties
+                                            .insert(e, property.clone());
                                         return self.set(e, ty);
                                     }
                                 }
@@ -15670,6 +15753,19 @@ impl<'a> Checker<'a> {
                                     .find_map(|(n, _, v)| (*n == name).then_some(*v))
                                 {
                                     if let Some(ty) = self.property_ref_ty(0, is_var) {
+                                        return self.set(e, ty);
+                                    }
+                                }
+                                if let Ok(Some(property)) = self.visible_source_extension_property(
+                                    Ty::obj(&cls.internal()),
+                                    &name,
+                                ) {
+                                    if let Some(ty) =
+                                        self.property_ref_ty(0, property.setter.is_some())
+                                    {
+                                        self.expr(r);
+                                        self.source_extension_properties
+                                            .insert(e, property.clone());
                                         return self.set(e, ty);
                                     }
                                 }
@@ -15728,6 +15824,12 @@ impl<'a> Checker<'a> {
                         if min_arity < sig.params.len() && sig.params.len() <= 31 {
                             let adapted: Vec<Ty> = sig.params[..min_arity].to_vec();
                             return self.set(e, Ty::fun(adapted, sig.ret));
+                        }
+                    }
+                    if let Ok(Some(property)) = self.visible_source_extension_property(rty, &name) {
+                        if let Some(ty) = self.property_ref_ty(0, property.setter.is_some()) {
+                            self.source_extension_properties.insert(e, property.clone());
+                            return self.set(e, ty);
                         }
                     }
                     // Bound member on a LIBRARY-type receiver (`"KOTLIN"::get`): resolve the classpath
@@ -18290,7 +18392,7 @@ impl<'a> Checker<'a> {
                 Some(candidate.ret)
             }
             Ok(None) => None,
-            Err(()) => {
+            Err(_) => {
                 self.diags.error(
                     self.call_callee_name_span(call),
                     format!("overload resolution ambiguity for member '{name}'"),
@@ -18382,8 +18484,22 @@ impl<'a> Checker<'a> {
             }
             Ok(None) => {}
         }
-        if let Some((ty, _)) = self.syms.ext_prop(rt, name) {
-            return Some(ty);
+        match self.visible_source_extension_property(rt, name) {
+            Ok(Some(signature)) => {
+                if let Some(e) = mexpr {
+                    self.source_extension_properties
+                        .insert(e, signature.clone());
+                }
+                return Some(signature.ty);
+            }
+            Err(_) => {
+                self.diags.error(
+                    span,
+                    format!("overload resolution ambiguity for extension property '{name}'"),
+                );
+                return Some(Ty::Error);
+            }
+            Ok(None) => {}
         }
         if let Some(getter) = self
             .resolver()
@@ -23678,9 +23794,9 @@ impl<'a> Checker<'a> {
                     Ok(None)
                 };
                 let extension_property = if matches!(member_extension, Ok(None)) {
-                    self.syms.ext_prop(rt, &name)
+                    self.visible_source_extension_property(rt, &name)
                 } else {
-                    None
+                    Ok(None)
                 };
                 let assignment_expected = source_property
                     .map(|(ty, _)| ty)
@@ -23696,7 +23812,12 @@ impl<'a> Checker<'a> {
                             .ok()
                             .and_then(|property| property.as_ref().map(|(ty, ..)| *ty))
                     })
-                    .or_else(|| extension_property.map(|(ty, _)| ty));
+                    .or_else(|| {
+                        extension_property
+                            .as_ref()
+                            .ok()
+                            .and_then(|property| property.as_ref().map(|property| property.ty))
+                    });
                 let vt = match assignment_expected {
                     Some(expected) => self.expr_expected(value, expected),
                     None => self.expr(value),
@@ -23756,19 +23877,30 @@ impl<'a> Checker<'a> {
                     }
                     Ok(None) => {
                         // Top-level extension-property write: `recv.name = value`.
-                        if let Some((lty, is_var)) = extension_property {
-                            if !is_var {
-                                self.diags
-                                    .error(target_span, "'val' cannot be reassigned.".to_string());
+                        match extension_property {
+                            Ok(Some(signature)) => {
+                                if signature.setter.is_none() {
+                                    self.diags.error(
+                                        target_span,
+                                        "'val' cannot be reassigned.".to_string(),
+                                    );
+                                }
+                                self.expect_assignable(
+                                    signature.ty,
+                                    vt,
+                                    self.value_diagnostic_span(value, vt),
+                                    "assignment",
+                                );
+                                self.source_extension_property_writes
+                                    .insert(s, signature.clone());
                             }
-                            self.expect_assignable(
-                                lty,
-                                vt,
-                                self.value_diagnostic_span(value, vt),
-                                "assignment",
-                            );
-                        } else {
-                            match rt {
+                            Err(_) => self.diags.error(
+                                span,
+                                format!(
+                                    "overload resolution ambiguity for extension property '{name}'"
+                                ),
+                            ),
+                            Ok(None) => match rt {
                                 Ty::Error => {}
                                 Ty::Obj(..) => self
                                     .diags
@@ -23777,7 +23909,7 @@ impl<'a> Checker<'a> {
                                     span,
                                     format!("cannot assign to a member of '{}'", rt.name()),
                                 ),
-                            }
+                            },
                         }
                     }
                 }

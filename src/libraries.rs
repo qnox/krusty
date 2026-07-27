@@ -922,6 +922,8 @@ pub struct PropertyInfo {
     /// For an [`PropKind::Extension`], the receiver-MRO rung it was found at (0 = the receiver's own
     /// type); `0` for member/top-level. Mirrors [`FunctionInfo::receiver_rank`].
     pub receiver_rank: u32,
+    /// Source declaration key for a property from the current compilation module.
+    pub source_key: Option<(u32, u32)>,
 }
 
 /// ALL properties of one name applicable to an access — members AND extensions AND top-level, in one
