@@ -18491,6 +18491,12 @@ impl<'a> Lower<'a> {
                         vec![],
                     ));
                 }
+                if let Some(ExprLowering::SourceCompanionPropertyRead { owner }) =
+                    self.info.expr_lowers.get(&e).cloned()
+                {
+                    let descriptor = self.runtime.type_descriptor(self.info.ty(e))?;
+                    return Some(self.emit_external_static_field(owner.render(), &n, &descriptor));
+                }
                 // `this@Label` the checker resolved: `LabeledThisInner` (the current receiver) reads as a
                 // bare `this`; `LabeledThisOuter` (the immediate enclosing class of an `inner class`) reads
                 // the captured outer instance `this.this$0` (field index 0). Any other (unmarked) label
