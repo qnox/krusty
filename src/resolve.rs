@@ -10903,6 +10903,56 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Collect facts established when an `||` chain is false. Reaching an `else` branch or falling
+    /// through a diverging `if (a || b) return` means every leaf was false, so each leaf's negated
+    /// smart-cast is simultaneously valid.
+    fn collect_or_else_narrowings(&self, cond: ExprId, out: &mut Vec<(String, Ty)>) {
+        let mut candidates = Vec::new();
+        self.collect_or_else_narrowing_candidates(cond, &mut candidates);
+        let nonnull: std::collections::HashSet<String> = candidates
+            .iter()
+            .filter_map(|(name, ty)| (!ty.is_nullable()).then_some(name.clone()))
+            .collect();
+        for (name, ty) in candidates {
+            let ty = match ty {
+                Ty::Nullable(inner) if nonnull.contains(name.as_str()) && !inner.is_unsigned() => {
+                    *inner
+                }
+                _ => ty,
+            };
+            if let Some((_, current)) = out.iter_mut().find(|(existing, _)| *existing == name) {
+                let ty_is_narrower = crate::assignable::is_assignable(
+                    &crate::assignable::TyCtx::new(),
+                    self,
+                    ty,
+                    *current,
+                );
+                if ty_is_narrower {
+                    *current = ty;
+                }
+            } else {
+                out.push((name, ty));
+            }
+        }
+    }
+
+    fn collect_or_else_narrowing_candidates(&self, cond: ExprId, out: &mut Vec<(String, Ty)>) {
+        if let Expr::Binary {
+            op: BinOp::Or,
+            lhs,
+            rhs,
+            ..
+        } = self.file.expr(cond).clone()
+        {
+            self.collect_or_else_narrowing_candidates(lhs, out);
+            self.collect_or_else_narrowing_candidates(rhs, out);
+            return;
+        }
+        if let Some(binding) = self.smartcast_binding(cond, true) {
+            out.push(binding);
+        }
+    }
+
     fn check_fun(&mut self, f: &FunDecl, source_decl: Option<DeclId>) {
         // Duplicate parameter names are illegal (kotlinc reports a conflicting declaration). `_` is
         // not a valid function parameter name in Kotlin, so no placeholder exception is needed.
@@ -13960,9 +14010,10 @@ impl<'a> Checker<'a> {
                 self.pop_scope();
                 match else_branch {
                     Some(eb) => {
-                        let else_cast = self.smartcast_binding(cond, true);
+                        let mut else_casts = Vec::new();
+                        self.collect_or_else_narrowings(cond, &mut else_casts);
                         self.push_scope();
-                        if let Some((n, t)) = &else_cast {
+                        for (n, t) in &else_casts {
                             self.declare(n, *t, false);
                         }
                         let et = self.with_this_narrow(self.this_is_narrowing(cond, true), |c| {
@@ -13998,7 +14049,9 @@ impl<'a> Checker<'a> {
                         } = self.file.expr(ie).clone()
                         {
                             if self.expr_diverges(then_branch) {
-                                if let Some((n, t)) = self.smartcast_binding(cond, true) {
+                                let mut fallthrough_casts = Vec::new();
+                                self.collect_or_else_narrowings(cond, &mut fallthrough_casts);
+                                for (n, t) in fallthrough_casts {
                                     self.declare(&n, t, false);
                                 }
                             }
