@@ -111,7 +111,8 @@ pub struct DocumentAdmission {
 }
 
 impl DocumentAdmission {
-    pub fn for_model(model: &crate::project::ProjectModel) -> Self {
+    pub fn for_snapshot(snapshot: &crate::project::model::SourceModuleGraph) -> Self {
+        let model = snapshot.model();
         if matches!(
             model.kind,
             crate::project::ProviderKind::Explicit | crate::project::ProviderKind::None
@@ -132,9 +133,11 @@ impl DocumentAdmission {
                 })
             })
             .collect();
-        let visible_modules = (0..model.modules.len())
-            .map(|module_index| {
-                let mut visible = model.visible_source_module_indices(module_index);
+        let visible_modules = snapshot
+            .iter()
+            .enumerate()
+            .map(|(module_index, relations)| {
+                let mut visible = relations.visible();
                 visible.push(module_index);
                 visible.sort_unstable();
                 visible.dedup();
@@ -146,6 +149,11 @@ impl DocumentAdmission {
             source_roots,
             visible_modules,
         }
+    }
+
+    #[cfg(test)]
+    pub fn for_model(model: &crate::project::ProjectModel) -> Self {
+        Self::for_snapshot(&model.clone().into_source_module_graph())
     }
 
     pub fn accepts(&self, documents: &[(&str, usize)]) -> bool {

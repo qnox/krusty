@@ -1,14 +1,8 @@
 //! Source roots, classpath, module graph, and JDK for one worktree.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-
-pub(super) fn paths_equivalent(left: &Path, right: &Path) -> bool {
-    left == right
-        || std::fs::canonicalize(left)
-            .ok()
-            .zip(std::fs::canonicalize(right).ok())
-            .is_some_and(|(left, right)| left == right)
-}
+use std::sync::Arc;
 
 /// Stable identity of one compilation unit.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -159,6 +153,185 @@ pub struct ProjectModel {
     pub modules: Vec<Module>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SourceModuleRelations {
+    pub dependencies: Vec<usize>,
+    pub friends: Vec<usize>,
+}
+
+impl SourceModuleRelations {
+    pub fn visible(&self) -> Vec<usize> {
+        let mut visible = self.dependencies.clone();
+        visible.extend(self.friends.iter().copied());
+        visible.sort_unstable();
+        visible.dedup();
+        visible
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SourceModuleGraph {
+    model: Arc<ProjectModel>,
+    relations: Arc<[SourceModuleRelations]>,
+    cache_key: SourceModuleGraphKey,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SourceModuleGraphKey(Arc<SourceModuleGraphKeyData>);
+
+#[derive(Debug, PartialEq, Eq)]
+struct SourceModuleGraphKeyData {
+    root: PathBuf,
+    kind: ProviderKind,
+    modules: Vec<SourceModuleGraphModuleKey>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceModuleGraphModuleKey {
+    id: Option<ModuleId>,
+    base_directory: PathBuf,
+    source_roots: Vec<SourceRoot>,
+    outputs: Vec<ModuleOutput>,
+    depends_on: Vec<ModuleId>,
+    friend_paths: Vec<PathBuf>,
+    relations: SourceModuleRelations,
+}
+
+impl SourceModuleGraph {
+    pub fn new(model: ProjectModel) -> Self {
+        Self::new_with(model, &|path| std::fs::canonicalize(path).ok())
+    }
+
+    fn new_with(model: ProjectModel, canonicalize: &dyn Fn(&Path) -> Option<PathBuf>) -> Self {
+        let mut module_ids = HashMap::<&ModuleId, Vec<usize>>::new();
+        let mut outputs = HashMap::<&Path, Vec<usize>>::new();
+        for (index, module) in model.modules.iter().enumerate() {
+            if let Some(id) = module.id.as_ref() {
+                module_ids.entry(id).or_default().push(index);
+            }
+            for output in &module.outputs {
+                outputs.entry(output.path()).or_default().push(index);
+            }
+        }
+
+        let has_friend_paths = model
+            .modules
+            .iter()
+            .any(|module| !module.friend_paths.is_empty());
+        let mut canonical_paths = CanonicalPathCache::new(canonicalize);
+        let mut canonical_outputs = HashMap::<PathBuf, Vec<usize>>::new();
+        if has_friend_paths {
+            for (output, indices) in &outputs {
+                if let Some(canonical) = canonical_paths.get(output) {
+                    canonical_outputs
+                        .entry(canonical.to_path_buf())
+                        .or_default()
+                        .extend(indices.iter().copied());
+                }
+            }
+        }
+
+        let relations: Vec<SourceModuleRelations> = model
+            .modules
+            .iter()
+            .enumerate()
+            .map(|(module_index, module)| {
+                let mut dependencies = module
+                    .depends_on
+                    .iter()
+                    .filter_map(|id| module_ids.get(id))
+                    .flatten()
+                    .copied()
+                    .filter(|index| *index != module_index)
+                    .collect::<Vec<_>>();
+                dependencies.sort_unstable();
+                dependencies.dedup();
+
+                let mut friends = Vec::new();
+                for friend in &module.friend_paths {
+                    if let Some(indices) = outputs.get(friend.as_path()) {
+                        friends.extend(indices.iter().copied());
+                    }
+                    if let Some(indices) = canonical_paths
+                        .get(friend)
+                        .and_then(|friend| canonical_outputs.get(friend))
+                    {
+                        friends.extend(indices.iter().copied());
+                    }
+                }
+                friends.retain(|index| *index != module_index);
+                friends.sort_unstable();
+                friends.dedup();
+                SourceModuleRelations {
+                    dependencies,
+                    friends,
+                }
+            })
+            .collect();
+        let cache_key = SourceModuleGraphKey(Arc::new(SourceModuleGraphKeyData {
+            root: model.root.clone(),
+            kind: model.kind,
+            modules: model
+                .modules
+                .iter()
+                .zip(&relations)
+                .map(|(module, relations)| SourceModuleGraphModuleKey {
+                    id: module.id.clone(),
+                    base_directory: module.base_directory.clone(),
+                    source_roots: module.source_roots.clone(),
+                    outputs: module.outputs.clone(),
+                    depends_on: module.depends_on.clone(),
+                    friend_paths: module.friend_paths.clone(),
+                    relations: relations.clone(),
+                })
+                .collect(),
+        }));
+        Self {
+            model: Arc::new(model),
+            relations: relations.into(),
+            cache_key,
+        }
+    }
+
+    pub fn model(&self) -> &ProjectModel {
+        self.model.as_ref()
+    }
+
+    pub fn get(&self, module_index: usize) -> Option<&SourceModuleRelations> {
+        self.relations.get(module_index)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &SourceModuleRelations> {
+        self.relations.iter()
+    }
+
+    pub(super) fn cache_key(&self) -> &SourceModuleGraphKey {
+        &self.cache_key
+    }
+}
+
+pub(super) struct CanonicalPathCache<'canonicalize> {
+    canonicalize: &'canonicalize dyn Fn(&Path) -> Option<PathBuf>,
+    paths: HashMap<PathBuf, Option<PathBuf>>,
+}
+
+impl<'canonicalize> CanonicalPathCache<'canonicalize> {
+    pub(super) fn new(canonicalize: &'canonicalize dyn Fn(&Path) -> Option<PathBuf>) -> Self {
+        Self {
+            canonicalize,
+            paths: HashMap::new(),
+        }
+    }
+
+    pub(super) fn get(&mut self, path: &Path) -> Option<&Path> {
+        if !self.paths.contains_key(path) {
+            let canonical = (self.canonicalize)(path);
+            self.paths.insert(path.to_path_buf(), canonical);
+        }
+        self.paths.get(path).and_then(Option::as_deref)
+    }
+}
+
 impl ProjectModel {
     pub fn new(root: impl Into<PathBuf>, kind: ProviderKind) -> Self {
         Self {
@@ -202,48 +375,8 @@ impl ProjectModel {
             .and_then(|index| self.modules.get(index))
     }
 
-    pub fn dependency_source_module_indices(&self, module_index: usize) -> Vec<usize> {
-        let Some(module) = self.modules.get(module_index) else {
-            return Vec::new();
-        };
-        self.modules
-            .iter()
-            .enumerate()
-            .filter_map(|(index, candidate)| {
-                let dependency = candidate
-                    .id
-                    .as_ref()
-                    .is_some_and(|id| module.depends_on.contains(id));
-                (index != module_index && dependency).then_some(index)
-            })
-            .collect()
-    }
-
-    pub fn friend_source_module_indices(&self, module_index: usize) -> Vec<usize> {
-        let Some(module) = self.modules.get(module_index) else {
-            return Vec::new();
-        };
-        self.modules
-            .iter()
-            .enumerate()
-            .filter_map(|(index, candidate)| {
-                let associated = candidate.outputs.iter().any(|output| {
-                    module
-                        .friend_paths
-                        .iter()
-                        .any(|friend| paths_equivalent(friend, output.path()))
-                });
-                (index != module_index && associated).then_some(index)
-            })
-            .collect()
-    }
-
-    pub fn visible_source_module_indices(&self, module_index: usize) -> Vec<usize> {
-        let mut visible = self.dependency_source_module_indices(module_index);
-        visible.extend(self.friend_source_module_indices(module_index));
-        visible.sort_unstable();
-        visible.dedup();
-        visible
+    pub fn into_source_module_graph(self) -> SourceModuleGraph {
+        SourceModuleGraph::new(self)
     }
 
     /// Classpath handed to the compiler for `module`, deduplicated in build-tool order.
@@ -353,13 +486,14 @@ mod tests {
         let mut model = model();
         model.modules[1].outputs = vec![ModuleOutput::classes("/p/generated/classes")];
         model.modules[2].friend_paths = vec![PathBuf::from("/p/generated/classes")];
+        let graph = model.into_source_module_graph();
 
-        assert_eq!(model.dependency_source_module_indices(2), [0, 1]);
-        assert_eq!(model.friend_source_module_indices(2), [1]);
-        assert_eq!(model.visible_source_module_indices(2), [0, 1]);
-        assert_eq!(model.dependency_source_module_indices(3), [2]);
-        assert_eq!(model.friend_source_module_indices(3), [2]);
-        assert_eq!(model.visible_source_module_indices(3), [2]);
+        assert_eq!(graph.get(2).unwrap().dependencies, [0, 1]);
+        assert_eq!(graph.get(2).unwrap().friends, [1]);
+        assert_eq!(graph.get(2).unwrap().visible(), [0, 1]);
+        assert_eq!(graph.get(3).unwrap().dependencies, [2]);
+        assert_eq!(graph.get(3).unwrap().friends, [2]);
+        assert_eq!(graph.get(3).unwrap().visible(), [2]);
     }
 
     #[cfg(unix)]
@@ -381,7 +515,62 @@ mod tests {
         consumer.friend_paths = vec![linked_output];
         let model = ProjectModel::new(tree.root(), ProviderKind::Gradle)
             .with_modules(vec![producer, consumer]);
+        let graph = model.into_source_module_graph();
 
-        assert_eq!(model.friend_source_module_indices(1), [0]);
+        assert_eq!(graph.get(1).unwrap().friends, [0]);
+    }
+
+    #[test]
+    fn source_module_graph_memoizes_duplicate_paths() {
+        use std::cell::Cell;
+
+        let mut modules = Vec::new();
+        for index in 0..128 {
+            let mut producer = Module::new(
+                ModuleId::new(&format!(":producer-{index}"), "main"),
+                format!("/workspace/producer-{index}"),
+            );
+            producer.outputs = vec![ModuleOutput::classes(format!("/declared/output-{index}"))];
+            modules.push(producer);
+        }
+        let mut consumer = Module::new(ModuleId::new(":consumer", "test"), "/workspace/consumer");
+        consumer.friend_paths = (0..128)
+            .flat_map(|index| {
+                let path = PathBuf::from(format!("/alias/output-{index}"));
+                [path.clone(), path]
+            })
+            .collect();
+        modules.push(consumer);
+        let model = ProjectModel::new("/workspace", ProviderKind::Gradle).with_modules(modules);
+        let calls = Cell::new(0usize);
+        let graph = SourceModuleGraph::new_with(model, &|path| {
+            calls.set(calls.get() + 1);
+            let name = path.file_name()?.to_str()?;
+            Some(PathBuf::from("/canonical").join(name))
+        });
+
+        assert_eq!(
+            graph.get(128).unwrap().friends,
+            (0..128).collect::<Vec<_>>()
+        );
+        assert_eq!(calls.get(), 256);
+    }
+
+    #[test]
+    fn friend_relations_include_exact_and_canonical_output_matches() {
+        let mut exact = Module::new(ModuleId::new(":exact", "main"), "/workspace/exact");
+        exact.outputs = vec![ModuleOutput::classes("/declared/shared")];
+        let mut alias = Module::new(ModuleId::new(":alias", "main"), "/workspace/alias");
+        alias.outputs = vec![ModuleOutput::classes("/alias/shared")];
+        let mut consumer = Module::new(ModuleId::new(":consumer", "test"), "/workspace/consumer");
+        consumer.friend_paths = vec![PathBuf::from("/declared/shared")];
+        let model = ProjectModel::new("/workspace", ProviderKind::Gradle)
+            .with_modules(vec![exact, alias, consumer]);
+
+        let graph = SourceModuleGraph::new_with(model, &|path| {
+            (path.file_name()?.to_str()? == "shared").then(|| PathBuf::from("/canonical/shared"))
+        });
+
+        assert_eq!(graph.get(2).unwrap().friends, [0, 1]);
     }
 }

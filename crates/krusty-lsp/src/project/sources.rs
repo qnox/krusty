@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::model::ProjectModel;
+use super::model::{SourceModuleGraph, SourceModuleGraphKey};
 
 const MAX_INVENTORY_ENTRIES: usize = 32 * 1024;
 const MAX_CACHED_SOURCE_BYTES: usize = 32 * 1024 * 1024;
@@ -14,17 +14,22 @@ pub type LoadedProjectSources<'a> = (&'a [(String, String)], usize, Vec<String>)
 #[derive(Default)]
 pub struct ProjectSources {
     excluded_paths: Vec<PathBuf>,
+    model_key: Option<SourceModuleGraphKey>,
     caches: Vec<Cache>,
 }
 
 struct Cache {
-    module_indices: Vec<usize>,
-    /// Imports seed dependency-source selection and therefore the cache key.
-    import_seed: Vec<String>,
+    key: CacheKey,
     documents: Vec<(String, String)>,
     java_documents: Vec<(String, String)>,
     inferred_count: usize,
     kotlin_bytes: usize,
+}
+
+#[derive(PartialEq, Eq)]
+struct CacheKey {
+    module_indices: Vec<usize>,
+    import_seed: Vec<String>,
     max_bytes: usize,
 }
 
@@ -45,23 +50,37 @@ impl Cache {
     }
 
     fn retained_module_keys(&self) -> usize {
-        self.module_indices.len()
+        self.key.retained_module_keys()
+    }
+}
+
+impl CacheKey {
+    fn retained_module_keys(&self) -> usize {
+        1usize
+            .saturating_add(self.module_indices.len())
+            .saturating_add(self.import_seed.len())
     }
 }
 
 impl ProjectSources {
     pub fn invalidate(&mut self) {
         self.excluded_paths.clear();
+        self.model_key = None;
         self.caches.clear();
     }
 
     pub fn load(
         &mut self,
-        model: &ProjectModel,
+        module_relations: &SourceModuleGraph,
         documents: &[(&str, &str)],
         open_uris: &[&str],
         max_bytes: usize,
     ) -> Result<LoadedProjectSources<'_>, String> {
+        let model = module_relations.model();
+        if self.model_key.as_ref() != Some(module_relations.cache_key()) {
+            self.model_key = Some(module_relations.cache_key().clone());
+            self.caches.clear();
+        }
         let source_paths = documents
             .iter()
             .filter_map(|(uri, _)| url::Url::parse(uri).ok()?.to_file_path().ok())
@@ -94,8 +113,11 @@ impl ProjectSources {
                         .and_modify(|broad| *broad |= broad_root)
                         .or_insert(broad_root);
                 }
-                inferred_module_indices.extend(model.friend_source_module_indices(module_index));
-                let visible = model.visible_source_module_indices(module_index);
+                let Some(relations) = module_relations.get(module_index) else {
+                    continue;
+                };
+                inferred_module_indices.extend(relations.friends.iter().copied());
+                let visible = relations.visible();
                 visible_module_indices.extend(visible.iter().copied());
                 for dependency in visible.iter().filter_map(|&index| model.modules.get(index)) {
                     for root in &dependency.source_roots {
@@ -121,6 +143,15 @@ impl ProjectSources {
             .collect::<Vec<_>>();
         excluded_source_roots.sort();
         excluded_source_roots.dedup();
+        let import_seed = open_dependency_seed(documents);
+        let cache_key = CacheKey {
+            module_indices,
+            import_seed,
+            max_bytes,
+        };
+        if cache_key.retained_module_keys() > MAX_CACHED_MODULE_KEYS {
+            return Err(cache_limit_message());
+        }
 
         let mut excluded_paths = excluded_paths.into_iter().collect::<Vec<_>>();
         excluded_paths.sort();
@@ -128,12 +159,7 @@ impl ProjectSources {
             self.excluded_paths = excluded_paths;
             self.caches.clear();
         }
-        let import_seed = open_dependency_seed(documents);
-        let cached = self.caches.iter().position(|cache| {
-            cache.module_indices == module_indices
-                && cache.max_bytes == max_bytes
-                && cache.import_seed == import_seed
-        });
+        let cached = self.caches.iter().position(|cache| cache.key == cache_key);
         if let Some(index) = cached {
             let cache = self.caches.remove(index);
             self.caches.push(cache);
@@ -217,19 +243,17 @@ impl ProjectSources {
         let (documents, kotlin_bytes) = load_documents(inferred_paths, remaining, max_bytes)?;
         let java_documents = load_java_documents_by_import_closure(
             java_paths,
-            &import_seed,
+            &cache_key.import_seed,
             max_bytes - kotlin_bytes,
         );
         let cache = Cache {
-            module_indices,
-            import_seed,
+            key: cache_key,
             documents,
             java_documents,
             inferred_count,
             kotlin_bytes,
-            max_bytes,
         };
-        retain_cache_budget(
+        if !retain_cache_budget(
             &mut self.caches,
             cache.retained_bytes(),
             cache.retained_entries(),
@@ -237,12 +261,26 @@ impl ProjectSources {
             MAX_CACHED_SOURCE_BYTES,
             MAX_INVENTORY_ENTRIES,
             MAX_CACHED_MODULE_KEYS,
-        );
+        ) {
+            return Err(cache_limit_message());
+        }
         self.caches.push(cache);
         let cache = self.caches.last().unwrap();
         let java_sources =
             sources_within_budget(&cache.java_documents, remaining - cache.kotlin_bytes);
         Ok((&cache.documents, cache.inferred_count, java_sources))
+    }
+
+    #[cfg(test)]
+    fn load_model(
+        &mut self,
+        model: &super::model::ProjectModel,
+        documents: &[(&str, &str)],
+        open_uris: &[&str],
+        max_bytes: usize,
+    ) -> Result<LoadedProjectSources<'_>, String> {
+        let snapshot = model.clone().into_source_module_graph();
+        self.load(&snapshot, documents, open_uris, max_bytes)
     }
 }
 
@@ -309,7 +347,13 @@ fn retain_cache_budget(
     max_bytes: usize,
     max_entries: usize,
     max_module_keys: usize,
-) {
+) -> bool {
+    if incoming_bytes > max_bytes
+        || incoming_entries > max_entries
+        || incoming_module_keys > max_module_keys
+    {
+        return false;
+    }
     let mut retained_bytes = caches.iter().map(Cache::retained_bytes).sum::<usize>();
     let mut retained_entries = caches.iter().map(Cache::retained_entries).sum::<usize>();
     let mut retained_module_keys = caches
@@ -326,6 +370,7 @@ fn retain_cache_budget(
         retained_entries = retained_entries.saturating_sub(evicted.retained_entries());
         retained_module_keys = retained_module_keys.saturating_sub(evicted.retained_module_keys());
     }
+    true
 }
 
 fn load_documents(
@@ -621,6 +666,11 @@ fn read_error_message() -> String {
     "module source set contains an unreadable source; semantic diagnostics suppressed".to_string()
 }
 
+fn cache_limit_message() -> String {
+    "module source cache metadata exceeds analysis limit; semantic diagnostics suppressed"
+        .to_string()
+}
+
 fn find_sources(
     root: &Path,
     ignore_workspace_directories: bool,
@@ -727,7 +777,7 @@ mod tests {
         let mut sources = ProjectSources::default();
 
         let (loaded, inferred_count, _java) = sources
-            .load(&model, &documents, &open_uris, MAX_BYTES)
+            .load_model(&model, &documents, &open_uris, MAX_BYTES)
             .unwrap();
         let loaded = loaded.to_vec();
 
@@ -756,7 +806,7 @@ mod tests {
         let mut sources = ProjectSources::default();
 
         let (loaded, _inferred, _java) = sources
-            .load(&model, &documents, &open_uris, MAX_BYTES)
+            .load_model(&model, &documents, &open_uris, MAX_BYTES)
             .unwrap();
         let loaded = loaded.to_vec();
 
@@ -787,7 +837,7 @@ mod tests {
         let mut sources = ProjectSources::default();
 
         let (loaded, _, _) = sources
-            .load(&model, &documents, &open_uris, MAX_BYTES)
+            .load_model(&model, &documents, &open_uris, MAX_BYTES)
             .unwrap();
         let loaded = loaded.to_vec();
 
@@ -805,7 +855,7 @@ mod tests {
         let mut sources = ProjectSources::default();
 
         let (loaded, _inferred, _java) = sources
-            .load(&model, &documents, &open_uris, MAX_BYTES)
+            .load_model(&model, &documents, &open_uris, MAX_BYTES)
             .unwrap();
         let loaded = loaded.to_vec();
 
@@ -831,7 +881,7 @@ mod tests {
         let mut sources = ProjectSources::default();
 
         let (_loaded, _inferred, java_docs) = sources
-            .load(&model, &documents, &open_uris, MAX_BYTES)
+            .load_model(&model, &documents, &open_uris, MAX_BYTES)
             .unwrap();
 
         fs::remove_dir_all(directory).ok();
@@ -860,7 +910,7 @@ mod tests {
 
         let max_bytes = 18;
         let (loaded, inferred_count, java_docs) = sources
-            .load(&model, &documents, &open_uris, max_bytes)
+            .load_model(&model, &documents, &open_uris, max_bytes)
             .unwrap();
 
         fs::remove_dir_all(directory).ok();
@@ -907,7 +957,7 @@ mod tests {
             + "package p.q.other; public class Star {}".len();
         let max_bytes = open_text.len() + imported_bytes;
         let (_, _, java_docs) = sources
-            .load(&model, &documents, &open_uris, max_bytes)
+            .load_model(&model, &documents, &open_uris, max_bytes)
             .unwrap();
 
         fs::remove_dir_all(directory).ok();
@@ -946,7 +996,7 @@ mod tests {
         let open_uris = [uri.as_str()];
         let mut sources = ProjectSources::default();
         let (_, _, java_docs) = sources
-            .load(
+            .load_model(
                 &model,
                 &documents,
                 &open_uris,
@@ -988,7 +1038,7 @@ mod tests {
 
         let max_bytes = open_text.len() + widget.len() + widget_base.len() + base.len();
         let (_, _, java_docs) = sources
-            .load(&model, &documents, &open_uris, max_bytes)
+            .load_model(&model, &documents, &open_uris, max_bytes)
             .unwrap();
 
         fs::remove_dir_all(directory).ok();
@@ -1020,11 +1070,15 @@ mod tests {
 
         let long_source = "fun use() = \"123456789012345678\"";
         let documents = [(uri.as_str(), long_source)];
-        let (_, _, java_docs) = sources.load(&model, &documents, &open_uris, 64).unwrap();
+        let (_, _, java_docs) = sources
+            .load_model(&model, &documents, &open_uris, 64)
+            .unwrap();
         assert_eq!(java_docs, ["class A{}"]);
 
         let documents = [(uri.as_str(), "fun u()=0")];
-        let (_, _, java_docs) = sources.load(&model, &documents, &open_uris, 64).unwrap();
+        let (_, _, java_docs) = sources
+            .load_model(&model, &documents, &open_uris, 64)
+            .unwrap();
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(java_docs.len(), 2);
@@ -1059,24 +1113,24 @@ mod tests {
         let mut sources = ProjectSources::default();
 
         let first_loaded = sources
-            .load(&model, &first_documents, &open_uris, MAX_BYTES)
+            .load_model(&model, &first_documents, &open_uris, MAX_BYTES)
             .unwrap()
             .0
             .to_vec();
         let second_loaded = sources
-            .load(&model, &second_documents, &open_uris, MAX_BYTES)
+            .load_model(&model, &second_documents, &open_uris, MAX_BYTES)
             .unwrap()
             .0
             .to_vec();
         assert_eq!(sources.caches.len(), 2);
         let first_only = [first_uri.as_str()];
         sources
-            .load(&model, &first_documents, &first_only, MAX_BYTES)
+            .load_model(&model, &first_documents, &first_only, MAX_BYTES)
             .unwrap();
         assert_eq!(sources.caches.len(), 1);
         fs::remove_file(&first_support).unwrap();
         let first_cached = sources
-            .load(&model, &first_documents, &first_only, MAX_BYTES)
+            .load_model(&model, &first_documents, &first_only, MAX_BYTES)
             .unwrap()
             .0
             .to_vec();
@@ -1091,6 +1145,114 @@ mod tests {
             [(file_uri(&second_support), "fun second() {}".to_string())]
         );
         assert_eq!(first_cached, first_loaded);
+    }
+
+    #[test]
+    fn cache_key_tracks_model_relation_changes() {
+        let directory = temp_path("relation-cache");
+        let consumer_root = directory.join("consumer");
+        let dependency_root = directory.join("dependency");
+        fs::create_dir_all(&consumer_root).unwrap();
+        fs::create_dir_all(&dependency_root).unwrap();
+        let open = consumer_root.join("Open.kt");
+        let support = dependency_root.join("Support.kt");
+        fs::write(&open, "fun open() {}").unwrap();
+        fs::write(&support, "fun support() {}").unwrap();
+
+        let dependency_id = ModuleId::new(":dependency", "main");
+        let model = |has_dependency| {
+            let mut consumer = Module::new(ModuleId::new(":consumer", "main"), &consumer_root);
+            consumer.source_roots = vec![SourceRoot::source(&consumer_root)];
+            if has_dependency {
+                consumer.depends_on = vec![dependency_id.clone()];
+            }
+            let mut dependency = Module::new(dependency_id.clone(), &dependency_root);
+            dependency.source_roots = vec![SourceRoot::source(&dependency_root)];
+            ProjectModel::new(&directory, ProviderKind::Gradle)
+                .with_modules(vec![consumer, dependency])
+        };
+        let open_uri = file_uri(&open);
+        let documents = [(open_uri.as_str(), "fun open() {}")];
+        let open_uris = [open_uri.as_str()];
+        let mut sources = ProjectSources::default();
+
+        let with_dependency = sources
+            .load_model(&model(true), &documents, &open_uris, MAX_BYTES)
+            .unwrap()
+            .0
+            .to_vec();
+        let without_dependency = sources
+            .load_model(&model(false), &documents, &open_uris, MAX_BYTES)
+            .unwrap()
+            .0
+            .to_vec();
+
+        fs::remove_dir_all(directory).ok();
+        assert_eq!(
+            with_dependency,
+            [(file_uri(&support), "fun support() {}".to_string())]
+        );
+        assert!(without_dependency.is_empty());
+    }
+
+    #[test]
+    fn cache_key_tracks_source_root_ownership_changes() {
+        let directory = temp_path("root-ownership-cache");
+        let consumer_root = directory.join("consumer");
+        let first_root = directory.join("first");
+        let second_root = directory.join("second");
+        fs::create_dir_all(&consumer_root).unwrap();
+        fs::create_dir_all(&first_root).unwrap();
+        fs::create_dir_all(&second_root).unwrap();
+        let open = consumer_root.join("Open.kt");
+        let first = first_root.join("Support.kt");
+        let second = second_root.join("Support.kt");
+        fs::write(&open, "fun open() {}").unwrap();
+        fs::write(&first, "fun first() {}").unwrap();
+        fs::write(&second, "fun second() {}").unwrap();
+
+        let friend_output = directory.join("friend-classes");
+        let dependency_id = ModuleId::new(":dependency", "main");
+        let model = |swap_roots| {
+            let mut consumer = Module::new(ModuleId::new(":consumer", "main"), &consumer_root);
+            consumer.source_roots = vec![SourceRoot::source(&consumer_root)];
+            consumer.depends_on = vec![dependency_id.clone()];
+            consumer.friend_paths = vec![friend_output.clone()];
+
+            let mut friend = Module::new(ModuleId::new(":friend", "main"), &directory);
+            friend.source_roots = vec![SourceRoot::source(if swap_roots {
+                &second_root
+            } else {
+                &first_root
+            })];
+            friend.outputs = vec![ModuleOutput::classes(&friend_output)];
+
+            let mut dependency = Module::new(dependency_id.clone(), &directory);
+            dependency.source_roots = vec![SourceRoot::source(if swap_roots {
+                &first_root
+            } else {
+                &second_root
+            })];
+            ProjectModel::new(&directory, ProviderKind::Gradle)
+                .with_modules(vec![consumer, friend, dependency])
+        };
+        let open_uri = file_uri(&open);
+        let documents = [(open_uri.as_str(), "fun open() {}")];
+        let open_uris = [open_uri.as_str()];
+        let mut sources = ProjectSources::default();
+
+        let before = sources
+            .load_model(&model(false), &documents, &open_uris, MAX_BYTES)
+            .unwrap();
+        assert_eq!(before.1, 1);
+        assert_eq!(before.0[0].0, file_uri(&first));
+        let after = sources
+            .load_model(&model(true), &documents, &open_uris, MAX_BYTES)
+            .unwrap();
+        assert_eq!(after.1, 1);
+        assert_eq!(after.0[0].0, file_uri(&second));
+
+        fs::remove_dir_all(directory).ok();
     }
 
     #[test]
@@ -1110,7 +1272,9 @@ mod tests {
         let open_uris = [uri.as_str()];
         let mut sources = ProjectSources::default();
 
-        let (_, _, java_docs) = sources.load(&model, &documents, &open_uris, 128).unwrap();
+        let (_, _, java_docs) = sources
+            .load_model(&model, &documents, &open_uris, 128)
+            .unwrap();
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(java_docs.len(), 1);
@@ -1138,7 +1302,7 @@ mod tests {
         let mut sources = ProjectSources::default();
 
         let (loaded, inferred_count, java_docs) = sources
-            .load(&model, &documents, &open_uris, MAX_BYTES)
+            .load_model(&model, &documents, &open_uris, MAX_BYTES)
             .unwrap();
 
         fs::remove_dir_all(directory).ok();
@@ -1210,7 +1374,7 @@ mod tests {
         let mut sources = ProjectSources::default();
 
         let (loaded, inferred_count, java_docs) = sources
-            .load(&model, &documents, &open_uris, MAX_BYTES)
+            .load_model(&model, &documents, &open_uris, MAX_BYTES)
             .unwrap();
 
         fs::remove_dir_all(directory).ok();
@@ -1265,7 +1429,7 @@ mod tests {
         let mut sources = ProjectSources::default();
 
         let (loaded, inferred_count, java_docs) = sources
-            .load(&model, &documents, &open_uris, MAX_BYTES)
+            .load_model(&model, &documents, &open_uris, MAX_BYTES)
             .unwrap();
 
         fs::remove_dir_all(directory).ok();
@@ -1283,8 +1447,11 @@ mod tests {
     #[test]
     fn source_cache_eviction_is_byte_entry_and_metadata_bounded() {
         let cache = |module_index: usize, bytes: usize, entries: usize| Cache {
-            module_indices: vec![module_index],
-            import_seed: Vec::new(),
+            key: CacheKey {
+                module_indices: vec![module_index],
+                import_seed: Vec::new(),
+                max_bytes: bytes,
+            },
             documents: (0..entries)
                 .map(|index| {
                     (
@@ -1296,14 +1463,16 @@ mod tests {
             java_documents: Vec::new(),
             inferred_count: entries,
             kotlin_bytes: bytes,
-            max_bytes: bytes,
         };
         let mut caches = vec![cache(0, 4, 1), cache(1, 4, 1)];
 
-        retain_cache_budget(&mut caches, 4, 1, 1, 8, 2, 2);
+        assert!(!retain_cache_budget(&mut caches, 4, 1, 5, 8, 2, 4));
+        assert_eq!(caches.len(), 2);
+        assert!(retain_cache_budget(&mut caches, 4, 1, 2, 8, 2, 4));
 
         assert_eq!(caches.len(), 1);
-        assert_eq!(caches[0].module_indices, [1]);
+        assert_eq!(caches[0].key.module_indices, [1]);
+        assert_eq!(caches[0].retained_module_keys(), 2);
     }
 
     #[test]
