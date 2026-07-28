@@ -2,12 +2,14 @@
 
 use std::collections::VecDeque;
 use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::super::{DocumentAnalysis, MaterializedDefinition};
-use super::implementation::{Analysis, AnalysisBackend, Incoming, ProjectFeedback};
+use super::implementation::{
+    Analysis, AnalysisBackend, DocumentAdmission, Incoming, ProjectFeedback,
+};
 use crate::compiler_analysis::LibraryRef;
 
 const MAX_PENDING_WATCHED_FILES: usize = 1024;
@@ -60,6 +62,7 @@ pub(crate) enum EngineEvent {
 pub(crate) struct AnalysisEngine {
     commands: Option<CommandSender>,
     handle: Option<JoinHandle<()>>,
+    admission: Arc<RwLock<DocumentAdmission>>,
 }
 
 impl AnalysisEngine {
@@ -68,10 +71,13 @@ impl AnalysisEngine {
         events: SyncSender<Incoming>,
     ) -> AnalysisEngine {
         let (commands, command_rx) = command_queue();
-        let handle = std::thread::spawn(move || run(analyze, command_rx, events));
+        let admission = Arc::new(RwLock::new(DocumentAdmission::default()));
+        let engine_admission = admission.clone();
+        let handle = std::thread::spawn(move || run(analyze, command_rx, events, engine_admission));
         AnalysisEngine {
             commands: Some(commands),
             handle: Some(handle),
+            admission,
         }
     }
 
@@ -96,6 +102,13 @@ impl AnalysisEngine {
 
     pub(crate) fn is_finished(&self) -> bool {
         self.handle.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    fn accepts_document_set(&self, documents: &[(&str, usize)]) -> bool {
+        self.admission
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .accepts(documents)
     }
 }
 
@@ -355,6 +368,10 @@ impl AnalysisBackend for EngineBackend {
         self.ready
     }
 
+    fn accepts_document_set(&self, documents: &[(&str, usize)]) -> bool {
+        self.engine.accepts_document_set(documents)
+    }
+
     fn submit(&mut self, job: AnalysisJob) -> Option<AnalysisBatch> {
         debug_assert!(self.ready);
         self.engine.submit(EngineCommand::Analyze(job));
@@ -414,7 +431,13 @@ impl AnalysisBackend for EngineBackend {
     }
 }
 
-fn run<A: Analysis>(mut analyze: A, commands: CommandReceiver, events: SyncSender<Incoming>) {
+fn run<A: Analysis>(
+    mut analyze: A,
+    commands: CommandReceiver,
+    events: SyncSender<Incoming>,
+    admission: Arc<RwLock<DocumentAdmission>>,
+) {
+    update_admission(&admission, analyze.document_admission());
     let mut last_ready = analyze.analysis_ready();
     let _ = events.send(Incoming::Engine(EngineEvent::ReadyState(last_ready)));
     // Reconfiguration and analysis must remain ordered on this thread.
@@ -427,12 +450,14 @@ fn run<A: Analysis>(mut analyze: A, commands: CommandReceiver, events: SyncSende
         match command {
             None => {
                 let feedback = analyze_refresh(&mut analyze);
+                update_admission(&admission, analyze.document_admission());
                 if emit_project(&events, &mut analyze, feedback, &mut last_ready).is_err() {
                     break;
                 }
             }
             Some(EngineCommand::SetWorkspaceRoot(root)) => {
                 let feedback = analyze.set_workspace_root(root);
+                update_admission(&admission, analyze.document_admission());
                 let globs = analyze.watched_globs();
                 if events
                     .send(Incoming::Engine(EngineEvent::WatchedGlobs(globs)))
@@ -505,6 +530,12 @@ fn run<A: Analysis>(mut analyze: A, commands: CommandReceiver, events: SyncSende
             }
         }
     }
+}
+
+fn update_admission(admission: &RwLock<DocumentAdmission>, document_admission: DocumentAdmission) {
+    *admission
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = document_admission;
 }
 
 fn analyze_refresh<A: Analysis>(analyze: &mut A) -> ProjectFeedback {
@@ -871,6 +902,66 @@ mod tests {
             }
         }
         assert!(found, "expected AnalysisComplete event");
+        backend.into_engine().join();
+    }
+
+    #[test]
+    fn engine_backend_reads_the_latest_document_admission_snapshot() {
+        use crate::project::{Module, ModuleId, ProjectModel, ProviderKind, SourceRoot};
+        use crate::server::implementation::DocumentAdmission;
+        use std::sync::mpsc::sync_channel;
+
+        struct Mock {
+            admission: DocumentAdmission,
+        }
+        impl crate::server::implementation::Analysis for Mock {
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+
+            fn document_admission(&self) -> DocumentAdmission {
+                self.admission.clone()
+            }
+
+            fn set_workspace_root(
+                &mut self,
+                _root: Option<std::path::PathBuf>,
+            ) -> crate::server::implementation::ProjectFeedback {
+                let mut first = Module::new(ModuleId::new(":first", "main"), "/workspace/first");
+                first.source_roots = vec![SourceRoot::source("/workspace/first/src")];
+                let mut second = Module::new(ModuleId::new(":second", "main"), "/workspace/second");
+                second.source_roots = vec![SourceRoot::source("/workspace/second/src")];
+                let model = ProjectModel::new("/workspace", ProviderKind::Gradle)
+                    .with_modules(vec![first, second]);
+                self.admission = DocumentAdmission::for_model(&model);
+                crate::server::implementation::ProjectFeedback::default()
+            }
+        }
+
+        let (tx, rx) = sync_channel(8);
+        let mut backend = EngineBackend::new(
+            AnalysisEngine::spawn(
+                Mock {
+                    admission: DocumentAdmission::default(),
+                },
+                tx,
+            ),
+            true,
+        );
+        backend.set_workspace_root(None);
+        loop {
+            if matches!(
+                rx.recv_timeout(std::time::Duration::from_secs(1)),
+                Ok(Incoming::Engine(EngineEvent::Project(_)))
+            ) {
+                break;
+            }
+        }
+        let large = crate::worker::MAX_SOURCE_SET_BYTES / 2 + 1;
+        assert!(backend.accepts_document_set(&[
+            ("file:///workspace/first/src/First.kt", large),
+            ("file:///workspace/second/src/Second.kt", large),
+        ]));
         backend.into_engine().join();
     }
 

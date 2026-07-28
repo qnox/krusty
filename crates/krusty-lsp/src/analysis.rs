@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 type HoverEntry = [u32; 3];
 
 /// Compact semantic snapshot retained for hover queries after full compiler analysis is dropped.
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct HoverIndex {
     entries: Vec<HoverEntry>,
     values: Vec<String>,
@@ -44,6 +44,7 @@ const MAX_SOURCE_SET_FOLDING_RANGE_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const FOLDING_RANGE_WIRE_FIXED_BYTES: usize = 192;
 const MAX_SOURCE_SET_SIGNATURE_HELP_CALLS: usize = 32 * 1024;
 const MAX_SOURCE_SET_SIGNATURE_HELP_WIRE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_RETAINED_ANALYSIS_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Default)]
 pub(crate) struct HoverBudget {
@@ -231,7 +232,7 @@ type CompletionEntry = [u32; 6];
 type CompletionMemberEntry = [u32; 4];
 
 /// Compact completion catalog retained after compiler analysis is dropped.
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct CompletionIndex {
     entries: Vec<CompletionEntry>,
     members: Vec<CompletionMemberEntry>,
@@ -248,7 +249,7 @@ pub struct Completion<'a> {
 /// `(source lo, source hi, target file, target lo, target hi)`.
 type DefinitionEntry = [u32; 5];
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct DefinitionIndex {
     entries: Vec<DefinitionEntry>,
 }
@@ -317,7 +318,7 @@ impl LibraryDefinitionIndex {
 /// kind + collapsed-text style, summary source byte lo, summary source byte hi)`.
 type FoldingRangeEntry = [u32; 7];
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct FoldingRangeIndex {
     entries: Vec<FoldingRangeEntry>,
 }
@@ -327,7 +328,7 @@ pub struct FoldingRangeIndex {
 type DocumentSymbolEntry = [u32; 10];
 
 /// Compact pre-positioned hierarchy retained after compiler analysis is dropped.
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct DocumentSymbolIndex {
     entries: Vec<DocumentSymbolEntry>,
     names: Vec<String>,
@@ -345,7 +346,7 @@ type SignatureHelpArgumentEntry = [u32; 2];
 const SIGNATURE_HELP_VARARG_BIT: u32 = 1 << 31;
 
 /// Compact call ranges and signature labels retained after compiler analysis is dropped.
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct SignatureHelpIndex {
     calls: Vec<SignatureHelpCallEntry>,
     signatures: Vec<SignatureHelpSignatureEntry>,
@@ -909,6 +910,19 @@ impl DefinitionIndex {
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
+
+    fn remap_files(&mut self, remaps: &[(u32, u32)]) {
+        if remaps.is_empty() {
+            return;
+        }
+        for entry in &mut self.entries {
+            if let Ok(index) = remaps.binary_search_by_key(&entry[2], |(file, _)| *file) {
+                entry[2] = remaps[index].1;
+            }
+        }
+        self.entries.sort_unstable();
+        self.entries.dedup();
+    }
 }
 
 impl CompletionIndex {
@@ -1257,7 +1271,7 @@ pub struct SemanticTokenRange {
 ///
 /// Positions are converted to UTF-16 once in the compiler worker. Full and range requests then
 /// encode directly from this array without retaining the AST or rescanning source text.
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct SemanticTokenIndex {
     entries: Vec<SemanticTokenEntry>,
 }
@@ -1456,6 +1470,7 @@ pub struct MaterializedDefinition {
     pub hi: u32,
 }
 
+#[derive(Clone)]
 pub struct DocumentAnalysis {
     pub diagnostics: Vec<Diagnostic>,
     pub hover: HoverIndex,
@@ -1468,6 +1483,7 @@ pub struct DocumentAnalysis {
     pub library_definitions: LibraryDefinitionIndex,
     pub document_symbols: DocumentSymbolIndex,
     pub folding_ranges: FoldingRangeIndex,
+    pub implementation_relations: Vec<[u32; 6]>,
 }
 
 pub(crate) struct SourceSetIndexes<'a> {
@@ -1625,6 +1641,7 @@ impl DocumentAnalysis {
                 implementations: DefinitionIndex::default(),
                 document_symbols,
                 folding_ranges,
+                implementation_relations: Vec::new(),
             },
             semantic.type_definitions,
             semantic.implementations,
@@ -1644,11 +1661,188 @@ impl DocumentAnalysis {
             library_definitions: LibraryDefinitionIndex::default(),
             document_symbols: DocumentSymbolIndex::default(),
             folding_ranges: FoldingRangeIndex::default(),
+            implementation_relations: Vec::new(),
         }
     }
 
     pub fn empty() -> Self {
         Self::with_diagnostics(Vec::new())
+    }
+
+    pub fn remap_navigation_files(&mut self, remaps: &[(u32, u32)]) {
+        self.definitions.remap_files(remaps);
+        self.type_definitions.remap_files(remaps);
+        self.implementations.remap_files(remaps);
+        for relation in &mut self.implementation_relations {
+            for file in [0, 3] {
+                if let Ok(index) =
+                    remaps.binary_search_by_key(&relation[file], |(candidate, _)| *candidate)
+                {
+                    relation[file] = remaps[index].1;
+                }
+            }
+        }
+        self.implementation_relations.sort_unstable();
+        self.implementation_relations.dedup();
+    }
+
+    pub fn retained_wire_bytes(&self) -> usize {
+        self.diagnostic_wire_bytes()
+            .saturating_add(self.semantic_wire_bytes())
+    }
+
+    fn diagnostic_wire_bytes(&self) -> usize {
+        self.diagnostics.iter().fold(0usize, |bytes, diagnostic| {
+            bytes
+                .saturating_add(96)
+                .saturating_add(diagnostic.msg.len().saturating_mul(6))
+        })
+    }
+
+    fn semantic_wire_bytes(&self) -> usize {
+        serde_json::to_vec(&(
+            &self.hover,
+            &self.completion,
+            &self.signature_help,
+            &self.semantic_tokens,
+            &self.definitions,
+            &self.type_definitions,
+            &self.implementations,
+            &self.library_definitions,
+            &self.document_symbols,
+            &self.folding_ranges,
+            &self.implementation_relations,
+        ))
+        .map_or(usize::MAX, |wire| wire.len())
+    }
+
+    fn clear_semantic_indexes(&mut self) {
+        self.hover = HoverIndex::default();
+        self.completion = CompletionIndex::default();
+        self.signature_help = SignatureHelpIndex::default();
+        self.semantic_tokens = SemanticTokenIndex::default();
+        self.definitions = DefinitionIndex::default();
+        self.type_definitions = DefinitionIndex::default();
+        self.implementations = DefinitionIndex::default();
+        self.library_definitions = LibraryDefinitionIndex::default();
+        self.document_symbols = DocumentSymbolIndex::default();
+        self.folding_ranges = FoldingRangeIndex::default();
+        self.implementation_relations.clear();
+    }
+}
+
+pub fn merge_cross_document_implementations(analyses: &mut [DocumentAnalysis]) {
+    merge_cross_document_implementations_with_limits(
+        analyses,
+        MAX_SOURCE_SET_NAVIGATION_ENTRIES,
+        MAX_RETAINED_ANALYSIS_BYTES,
+    );
+}
+
+fn merge_cross_document_implementations_with_limits(
+    analyses: &mut [DocumentAnalysis],
+    max_entries: usize,
+    max_wire_bytes: usize,
+) {
+    const DEFINITION_ENTRY_MAX_WIRE_BYTES: usize = 64;
+
+    let mut relation_pairs = HashSet::new();
+    'relations: for analysis in analyses.iter_mut() {
+        for relation in analysis.implementation_relations.drain(..) {
+            if relation_pairs.len() >= max_entries {
+                break 'relations;
+            }
+            relation_pairs.insert((
+                DefinitionTarget {
+                    file: relation[0],
+                    span: Span::new(relation[1], relation[2]),
+                },
+                DefinitionTarget {
+                    file: relation[3],
+                    span: Span::new(relation[4], relation[5]),
+                },
+            ));
+        }
+    }
+    for analysis in analyses.iter_mut() {
+        analysis.implementation_relations.clear();
+    }
+
+    let mut relations = HashMap::<DefinitionTarget, Vec<DefinitionTarget>>::new();
+    for (declaration, implementation) in relation_pairs {
+        relations
+            .entry(declaration)
+            .or_default()
+            .push(implementation);
+    }
+    for targets in relations.values_mut() {
+        targets.sort_unstable_by_key(|target| (target.file, target.span.lo, target.span.hi));
+        targets.dedup();
+    }
+
+    let retained_entries = analyses.iter().fold(0usize, |total, analysis| {
+        total
+            .saturating_add(analysis.definitions.entries.len())
+            .saturating_add(analysis.type_definitions.entries.len())
+            .saturating_add(analysis.implementations.entries.len())
+    });
+    let mut remaining_entries = max_entries.saturating_sub(retained_entries);
+    let retained_wire_bytes = analyses.iter().fold(0usize, |total, analysis| {
+        total.saturating_add(analysis.retained_wire_bytes())
+    });
+    let mut remaining_wire_bytes = max_wire_bytes.saturating_sub(retained_wire_bytes);
+    for analysis in analyses {
+        let mut additions = Vec::new();
+        for definition in &analysis.definitions.entries {
+            let target = DefinitionTarget {
+                file: definition[2],
+                span: Span::new(definition[3], definition[4]),
+            };
+            let Some(implementations) = relations.get(&target) else {
+                continue;
+            };
+            for implementation in implementations {
+                if remaining_entries == 0 || remaining_wire_bytes < DEFINITION_ENTRY_MAX_WIRE_BYTES
+                {
+                    break;
+                }
+                additions.push([
+                    definition[0],
+                    definition[1],
+                    implementation.file,
+                    implementation.span.lo,
+                    implementation.span.hi,
+                ]);
+                remaining_entries -= 1;
+                remaining_wire_bytes -= DEFINITION_ENTRY_MAX_WIRE_BYTES;
+            }
+            if remaining_entries == 0 || remaining_wire_bytes < DEFINITION_ENTRY_MAX_WIRE_BYTES {
+                break;
+            }
+        }
+        analysis.implementations.entries.extend(additions);
+        analysis.implementations.entries.sort_unstable();
+        analysis.implementations.entries.dedup();
+    }
+}
+
+pub fn retain_analysis_wire_budget(analyses: &mut [DocumentAnalysis], max_bytes: usize) {
+    let mut remaining = max_bytes;
+    for analysis in analyses {
+        let mut diagnostic_bytes = analysis.diagnostic_wire_bytes();
+        while diagnostic_bytes > remaining && !analysis.diagnostics.is_empty() {
+            let diagnostic = analysis.diagnostics.pop().unwrap();
+            diagnostic_bytes = diagnostic_bytes
+                .saturating_sub(96usize.saturating_add(diagnostic.msg.len().saturating_mul(6)));
+        }
+        remaining = remaining.saturating_sub(diagnostic_bytes);
+        let semantic_bytes = analysis.semantic_wire_bytes();
+        if semantic_bytes <= remaining {
+            remaining -= semantic_bytes;
+        } else {
+            analysis.clear_semantic_indexes();
+            remaining = remaining.saturating_sub(analysis.semantic_wire_bytes());
+        }
     }
 }
 
@@ -2576,6 +2770,196 @@ mod tests {
 
         assert_eq!(index.entry_count(), 1);
         assert_eq!(budget.entries, MAX_SOURCE_SET_NAVIGATION_ENTRIES);
+    }
+
+    #[test]
+    fn navigation_file_remaps_canonicalize_duplicate_support_targets() {
+        let occurrence = |file| DefinitionOccurrence {
+            span: Span::new(0, 1),
+            target: DefinitionTarget {
+                file,
+                span: Span::new(10, 11),
+            },
+        };
+        let mut analysis = DocumentAnalysis::empty();
+        analysis.definitions =
+            DefinitionIndex::build(vec![occurrence(2), occurrence(7)], usize::MAX);
+        analysis.type_definitions = DefinitionIndex::build(vec![occurrence(7)], usize::MAX);
+        analysis.implementations = DefinitionIndex::build(vec![occurrence(7)], usize::MAX);
+
+        analysis.remap_navigation_files(&[(7, 2)]);
+
+        let expected = vec![DefinitionTarget {
+            file: 2,
+            span: Span::new(10, 11),
+        }];
+        assert_eq!(analysis.definitions.get(0).collect::<Vec<_>>(), expected);
+        assert_eq!(
+            analysis.type_definitions.get(0).collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            analysis.implementations.get(0).collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
+    fn implementation_relations_merge_back_to_dependency_declarations() {
+        let base = DefinitionTarget {
+            file: 0,
+            span: Span::new(4, 8),
+        };
+        let child = DefinitionTarget {
+            file: 1,
+            span: Span::new(10, 15),
+        };
+        let mut dependency = DocumentAnalysis::empty();
+        dependency.definitions = DefinitionIndex::build(
+            vec![DefinitionOccurrence {
+                span: base.span,
+                target: base,
+            }],
+            usize::MAX,
+        );
+        let mut consumer = DocumentAnalysis::empty();
+        consumer.definitions = DefinitionIndex::build(
+            vec![DefinitionOccurrence {
+                span: Span::new(20, 24),
+                target: base,
+            }],
+            usize::MAX,
+        );
+        consumer.implementation_relations = vec![[
+            base.file,
+            base.span.lo,
+            base.span.hi,
+            child.file,
+            child.span.lo,
+            child.span.hi,
+        ]];
+        let mut analyses = [dependency, consumer];
+
+        merge_cross_document_implementations(&mut analyses);
+
+        assert_eq!(
+            analyses[0]
+                .implementations
+                .get(base.span.lo)
+                .collect::<Vec<_>>(),
+            [child]
+        );
+    }
+
+    #[test]
+    fn implementation_relation_expansion_respects_the_global_entry_budget() {
+        let base = DefinitionTarget {
+            file: 0,
+            span: Span::new(4, 8),
+        };
+        let mut dependency = DocumentAnalysis::empty();
+        dependency.definitions = DefinitionIndex::build(
+            vec![DefinitionOccurrence {
+                span: base.span,
+                target: base,
+            }],
+            usize::MAX,
+        );
+        let mut consumer = DocumentAnalysis::empty();
+        consumer.definitions = DefinitionIndex::build(
+            vec![DefinitionOccurrence {
+                span: Span::new(20, 24),
+                target: base,
+            }],
+            usize::MAX,
+        );
+        consumer.implementation_relations = vec![
+            [base.file, base.span.lo, base.span.hi, 1, 10, 15],
+            [base.file, base.span.lo, base.span.hi, 2, 30, 35],
+        ];
+        let mut analyses = [dependency, consumer];
+
+        merge_cross_document_implementations_with_limits(&mut analyses, 3, usize::MAX);
+
+        assert_eq!(
+            analyses
+                .iter()
+                .map(|analysis| analysis.implementations.entry_count())
+                .sum::<usize>(),
+            1
+        );
+        assert!(analyses
+            .iter()
+            .all(|analysis| analysis.implementation_relations.is_empty()));
+    }
+
+    #[test]
+    fn retained_analysis_budget_drops_semantics_globally() {
+        let target = DefinitionTarget {
+            file: 0,
+            span: Span::new(10, 11),
+        };
+        let mut analyses = [DocumentAnalysis::empty(), DocumentAnalysis::empty()];
+        for analysis in &mut analyses {
+            analysis.definitions = DefinitionIndex::build(
+                vec![DefinitionOccurrence {
+                    span: Span::new(0, 1),
+                    target,
+                }],
+                usize::MAX,
+            );
+        }
+
+        retain_analysis_wire_budget(&mut analyses, 1);
+
+        assert!(analyses
+            .iter()
+            .all(|analysis| analysis.definitions.entry_count() == 0));
+    }
+
+    #[test]
+    fn retained_analysis_budget_debits_cleared_index_wire_bytes() {
+        let target = DefinitionTarget {
+            file: 0,
+            span: Span::new(10, 11),
+        };
+        let occurrence = |lo| DefinitionOccurrence {
+            span: Span::new(lo, lo + 1),
+            target,
+        };
+        let mut first = DocumentAnalysis::empty();
+        first.definitions = DefinitionIndex::build(vec![occurrence(0), occurrence(2)], usize::MAX);
+        let mut second = DocumentAnalysis::empty();
+        second.definitions = DefinitionIndex::build(vec![occurrence(0)], usize::MAX);
+        let budget = second.retained_wire_bytes();
+        let mut analyses = [first, second];
+
+        retain_analysis_wire_budget(&mut analyses, budget);
+
+        assert!(analyses
+            .iter()
+            .all(|analysis| analysis.definitions.entry_count() == 0));
+    }
+
+    #[test]
+    fn retained_analysis_budget_counts_and_clears_library_definitions() {
+        let mut analysis = DocumentAnalysis::empty();
+        analysis.library_definitions = LibraryDefinitionIndex {
+            entries: vec![[0, 1, 0]],
+            references: vec![LibraryRef {
+                fqn: "sample/".to_string() + &"X".repeat(1024),
+                member_name: "value".into(),
+                member_desc: "()I".into(),
+            }],
+        };
+        let retained = analysis.retained_wire_bytes();
+        let empty = DocumentAnalysis::empty().retained_wire_bytes();
+        assert!(retained > empty);
+
+        retain_analysis_wire_budget(std::slice::from_mut(&mut analysis), empty);
+
+        assert!(analysis.library_definitions.is_empty());
+        assert!(analysis.retained_wire_bytes() <= empty);
     }
 
     #[test]

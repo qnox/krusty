@@ -22,6 +22,12 @@ impl SourceFallbackPlatform {
     fn source(&self) -> ModuleSymbols<'_> {
         ModuleSymbols::new(&self.symbols)
     }
+
+    fn public_source_type_name(&self, internal: TypeName) -> Option<Rc<LibraryType>> {
+        self.source()
+            .resolve_type_name(internal)
+            .filter(|shape| shape.is_public)
+    }
 }
 
 fn same_member(left: &LibraryMember, right: &LibraryMember) -> bool {
@@ -169,7 +175,7 @@ impl SymbolSource for SourceFallbackPlatform {
     fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
         if ty
             .obj_internal()
-            .is_some_and(|internal| self.symbols.class_by_type_name(internal).is_some())
+            .is_some_and(|internal| self.public_source_type_name(internal).is_some())
         {
             self.source().direct_supertypes(ty)
         } else {
@@ -185,10 +191,11 @@ impl SymbolSource for SourceFallbackPlatform {
     }
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
-        match (
-            self.platform.resolve_type(internal),
-            self.source().resolve_type(internal),
-        ) {
+        let fallback = self
+            .source()
+            .resolve_type(internal)
+            .filter(|shape| shape.is_public);
+        match (self.platform.resolve_type(internal), fallback) {
             (Some(primary), Some(fallback)) => Some(merge_type(primary, fallback)),
             (Some(primary), None) => Some(primary),
             (None, Some(fallback)) => Some(fallback),
@@ -197,10 +204,8 @@ impl SymbolSource for SourceFallbackPlatform {
     }
 
     fn resolve_type_name(&self, internal: TypeName) -> Option<Rc<LibraryType>> {
-        match (
-            self.platform.resolve_type_name(internal),
-            self.source().resolve_type_name(internal),
-        ) {
+        let fallback = self.public_source_type_name(internal);
+        match (self.platform.resolve_type_name(internal), fallback) {
             (Some(primary), Some(fallback)) => {
                 Some(Rc::new(merge_type((*primary).clone(), (*fallback).clone())))
             }
@@ -217,7 +222,11 @@ impl SymbolSource for SourceFallbackPlatform {
     fn resolve_symbols_name(&self, fqn: TypeName) -> Rc<ResolvedSymbols> {
         let primary = self.platform.resolve_symbols_name(fqn);
         let fallback = self.source().resolve_symbols_name(fqn);
-        let classifier = match (&primary.classifier, &fallback.classifier) {
+        let fallback_classifier = fallback
+            .classifier
+            .as_ref()
+            .filter(|classifier| classifier.is_public);
+        let classifier = match (&primary.classifier, fallback_classifier) {
             (Some(primary), Some(fallback)) => Some(Rc::new(merge_type(
                 (**primary).clone(),
                 (**fallback).clone(),
@@ -250,13 +259,17 @@ impl SymbolSource for SourceFallbackPlatform {
     }
 
     fn member_is_property(&self, recv: Ty, name: &str) -> bool {
-        self.platform.member_is_property(recv, name) || self.source().member_is_property(recv, name)
+        self.platform.member_is_property(recv, name)
+            || !public_properties(self.source().property_members(recv, name))
+                .overloads
+                .is_empty()
     }
 
     fn inheritance_shape_name(&self, internal: TypeName) -> Option<InheritanceShape> {
-        self.platform
-            .inheritance_shape_name(internal)
-            .or_else(|| self.source().inheritance_shape_name(internal))
+        self.platform.inheritance_shape_name(internal).or_else(|| {
+            self.public_source_type_name(internal)
+                .and_then(|_| self.source().inheritance_shape_name(internal))
+        })
     }
 }
 

@@ -43,6 +43,7 @@ struct AnalysisRequest<'a> {
     inferred_count: usize,
     language_features: &'a [&'a str],
     java_sources: &'a [String],
+    classpath: Option<&'a [PathBuf]>,
 }
 
 #[derive(Deserialize)]
@@ -57,6 +58,8 @@ struct OwnedAnalysisRequest {
     language_features: Vec<String>,
     #[serde(default)]
     java_sources: Vec<String>,
+    #[serde(default)]
+    classpath: Option<Vec<PathBuf>>,
 }
 
 #[derive(Deserialize)]
@@ -104,6 +107,8 @@ struct AnalysisResponse {
     library_definitions: LibraryDefinitionIndex,
     document_symbols: DocumentSymbolIndex,
     folding_ranges: FoldingRangeIndex,
+    #[serde(default)]
+    implementation_relations: Vec<[u32; 6]>,
 }
 
 impl From<DocumentAnalysis> for AnalysisResponse {
@@ -137,6 +142,7 @@ impl From<DocumentAnalysis> for AnalysisResponse {
             library_definitions: analysis.library_definitions,
             document_symbols: analysis.document_symbols,
             folding_ranges: analysis.folding_ranges,
+            implementation_relations: analysis.implementation_relations,
         }
     }
 }
@@ -174,6 +180,7 @@ impl AnalysisResponse {
             library_definitions: self.library_definitions,
             document_symbols: self.document_symbols,
             folding_ranges: self.folding_ranges,
+            implementation_relations: self.implementation_relations,
         }
     }
 }
@@ -215,7 +222,7 @@ impl Write for BoundedVec {
     }
 }
 
-pub(crate) fn source_set_fits(lengths: impl IntoIterator<Item = usize>) -> bool {
+pub fn source_set_fits(lengths: impl IntoIterator<Item = usize>) -> bool {
     lengths
         .into_iter()
         .try_fold(0usize, usize::checked_add)
@@ -228,6 +235,7 @@ fn encode_request(
     inferred_count: usize,
     features: &LangFeatures,
     java_sources: &[String],
+    classpath: Option<&[PathBuf]>,
 ) -> io::Result<Vec<u8>> {
     if !source_set_fits(
         inputs
@@ -263,6 +271,7 @@ fn encode_request(
             inferred_count,
             language_features: &language_features,
             java_sources,
+            classpath,
         },
     )
     .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
@@ -413,6 +422,7 @@ impl WorkerProcess {
         inferred_count: usize,
         language_features: &LangFeatures,
         java_sources: &[String],
+        classpath: Option<&[PathBuf]>,
     ) -> io::Result<Vec<DocumentAnalysis>> {
         let request = encode_request(
             inputs,
@@ -420,6 +430,7 @@ impl WorkerProcess {
             inferred_count,
             language_features,
             java_sources,
+            classpath,
         )?;
         write_framed(&mut self.stdin, &request)?;
         drop(request);
@@ -541,6 +552,32 @@ impl AnalysisWorker {
                 inferred_count,
                 &features,
                 java_sources,
+                None,
+            )
+        })
+    }
+
+    pub fn analyze_inputs_prefix_with_config(
+        &mut self,
+        inputs: &[SourceInput<'_>],
+        result_count: usize,
+        inferred_count: usize,
+        java_sources: &[String],
+        language_arguments: &[String],
+        classpath: Option<&[PathBuf]>,
+    ) -> io::Result<Vec<DocumentAnalysis>> {
+        let mut features = LangFeatures::new();
+        for argument in language_arguments {
+            features.apply_cli_arg(argument);
+        }
+        self.request(|process| {
+            process.analyze(
+                inputs,
+                result_count,
+                inferred_count,
+                &features,
+                java_sources,
+                classpath,
             )
         })
     }
@@ -594,13 +631,73 @@ impl AnalysisWorker {
     }
 }
 
+fn compact_implementation_relations(
+    relations: impl IntoIterator<
+        Item = (
+            crate::compiler_analysis::DefinitionTarget,
+            crate::compiler_analysis::DefinitionTarget,
+        ),
+    >,
+) -> Vec<[u32; 6]> {
+    let mut compact = relations
+        .into_iter()
+        .map(|(declaration, implementation)| {
+            [
+                declaration.file,
+                declaration.span.lo,
+                declaration.span.hi,
+                implementation.file,
+                implementation.span.lo,
+                implementation.span.hi,
+            ]
+        })
+        .collect::<Vec<_>>();
+    compact.sort_unstable();
+    compact.dedup();
+    compact
+}
+
+fn retain_implementation_relations_for_response(
+    analyses: &mut [AnalysisResponse],
+    mut relations: Vec<[u32; 6]>,
+    max_navigation_entries: usize,
+    max_wire_bytes: usize,
+) -> io::Result<()> {
+    let retained_navigation_entries = analyses.iter().fold(0usize, |total, analysis| {
+        total
+            .saturating_add(analysis.definitions.entry_count())
+            .saturating_add(analysis.type_definitions.entry_count())
+            .saturating_add(analysis.implementations.entry_count())
+    });
+    relations.truncate(max_navigation_entries.saturating_sub(retained_navigation_entries));
+    if analyses.is_empty() || relations.is_empty() {
+        return Ok(());
+    }
+
+    let baseline_bytes = encode_response(analyses)?.len();
+    let mut remaining_wire_bytes = max_wire_bytes.saturating_sub(baseline_bytes);
+    let mut retained = 0usize;
+    for relation in &relations {
+        let encoded = serde_json::to_vec(relation).map_err(json_io)?;
+        let wire_bytes = encoded.len().saturating_add(usize::from(retained > 0));
+        if wire_bytes > remaining_wire_bytes {
+            break;
+        }
+        remaining_wire_bytes -= wire_bytes;
+        retained += 1;
+    }
+    relations.truncate(retained);
+    analyses[0].implementation_relations = relations;
+    Ok(())
+}
+
 pub fn run_analysis_worker<R: BufRead, W: Write>(
     reader: &mut R,
     writer: &mut W,
     classpath: Vec<PathBuf>,
 ) -> io::Result<()> {
-    let classpath = Rc::new(Classpath::new(classpath));
-    classpath.prepare_for_source_analysis();
+    let default_classpath = Rc::new(Classpath::new(classpath));
+    default_classpath.prepare_for_source_analysis();
     write_framed(writer, WORKER_READY)?;
     while let Some(body) = read_framed(reader, MAX_WORKER_MESSAGE_BYTES)? {
         let request: OwnedWorkerRequest = serde_json::from_slice(&body).map_err(json_io)?;
@@ -609,7 +706,7 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             OwnedWorkerRequest::Analyze(request) => request,
             OwnedWorkerRequest::Materialize { materialize } => {
                 let response = crate::dependency_sources::render::materialize(
-                    &classpath,
+                    &default_classpath,
                     &materialize.reference.fqn,
                     materialize.use_sources,
                 )
@@ -674,6 +771,14 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
         for feature in &request.language_features {
             language_features.enable(feature);
         }
+        let classpath = request.classpath.as_ref().map_or_else(
+            || default_classpath.clone(),
+            |entries| {
+                let classpath = Rc::new(Classpath::new(entries.clone()));
+                classpath.prepare_for_source_analysis();
+                classpath
+            },
+        );
         let stub_overlay_set = if !request.java_sources.is_empty() {
             let java: Vec<(String, String)> = request
                 .java_sources
@@ -741,10 +846,19 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
                 )
             })
             .collect();
-        let analyses = finalize_navigation(pending, &mut budgets)
+        let implementation_relations =
+            compact_implementation_relations(definition_symbols.implementation_relations());
+        let analyses = finalize_navigation(pending, &mut budgets);
+        let mut analyses = analyses
             .into_iter()
             .map(AnalysisResponse::from)
             .collect::<Vec<_>>();
+        retain_implementation_relations_for_response(
+            &mut analyses,
+            implementation_relations,
+            crate::analysis::MAX_SOURCE_SET_NAVIGATION_ENTRIES,
+            MAX_WORKER_MESSAGE_BYTES,
+        )?;
         if stub_overlay_set {
             classpath.clear_stub_overlay();
         }
@@ -893,7 +1007,31 @@ mod tests {
             library_definitions: LibraryDefinitionIndex::default(),
             document_symbols: DocumentSymbolIndex::default(),
             folding_ranges: FoldingRangeIndex::default(),
+            implementation_relations: Vec::new(),
         }
+    }
+
+    #[test]
+    fn implementation_relation_wire_order_is_stable_before_global_saturation() {
+        let target = |file, lo| crate::compiler_analysis::DefinitionTarget {
+            file,
+            span: krusty::diag::Span::new(lo, lo + 1),
+        };
+        let base = target(0, 4);
+        let first = target(1, 10);
+        let second = target(2, 20);
+
+        let forward = compact_implementation_relations([(base, first), (base, second)]);
+        let reverse = compact_implementation_relations([(base, second), (base, first)]);
+
+        assert_eq!(forward, reverse);
+        assert_eq!(
+            forward,
+            [
+                [base.file, base.span.lo, base.span.hi, 1, 10, 11],
+                [base.file, base.span.lo, base.span.hi, 2, 20, 21],
+            ]
+        );
     }
 
     #[test]
@@ -902,13 +1040,13 @@ mod tests {
         assert!(!source_set_fits([MAX_SOURCE_SET_BYTES, 1]));
         let inputs = [SourceInput::kotlin("fun use() = 1")];
         assert_eq!(
-            encode_request(&inputs, 1, 0, &LangFeatures::new(), &[])
+            encode_request(&inputs, 1, 0, &LangFeatures::new(), &[], None)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidInput
         );
         assert_eq!(
-            encode_request(&inputs, 0, 2, &LangFeatures::new(), &[])
+            encode_request(&inputs, 0, 2, &LangFeatures::new(), &[], None)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidInput
@@ -920,6 +1058,7 @@ mod tests {
                 1,
                 &LangFeatures::new(),
                 &[String::from_utf8(vec![b'x'; MAX_SOURCE_SET_BYTES]).unwrap()],
+                None,
             )
             .unwrap_err()
             .kind(),
@@ -946,7 +1085,7 @@ mod tests {
         std::fs::create_dir(&directory).expect("create classpath directory");
 
         let inputs = [SourceInput::kotlin("fun use() = 1")];
-        let request = encode_request(&inputs, 1, 1, &LangFeatures::new(), &[]).unwrap();
+        let request = encode_request(&inputs, 1, 1, &LangFeatures::new(), &[], None).unwrap();
         let mut framed = Vec::new();
         write_framed(&mut framed, &request).unwrap();
         let generated = directory.join("generated");
@@ -1020,6 +1159,44 @@ mod tests {
         assert!(
             encoded.len() <= baseline.len(),
             "type-definition and implementation entries must share the prior navigation frame"
+        );
+    }
+
+    #[test]
+    fn implementation_relations_share_navigation_and_response_wire_budgets() {
+        let relations = vec![[u32::MAX; 6], [u32::MAX - 1; 6]];
+        let mut navigation_saturated = vec![navigation_saturation_response(
+            MAX_SOURCE_SET_NAVIGATION_ENTRIES - 1,
+            0,
+            0,
+        )];
+
+        retain_implementation_relations_for_response(
+            &mut navigation_saturated,
+            relations.clone(),
+            MAX_SOURCE_SET_NAVIGATION_ENTRIES,
+            MAX_WORKER_MESSAGE_BYTES,
+        )
+        .unwrap();
+
+        assert_eq!(navigation_saturated[0].implementation_relations.len(), 1);
+        assert!(encode_response(&navigation_saturated).is_ok());
+
+        let mut wire_saturated = vec![navigation_saturation_response(0, 0, 0)];
+        let baseline = encode_response(&wire_saturated).unwrap().len();
+        let first_relation_wire = serde_json::to_vec(&relations[0]).unwrap().len();
+        retain_implementation_relations_for_response(
+            &mut wire_saturated,
+            relations,
+            usize::MAX,
+            baseline + first_relation_wire,
+        )
+        .unwrap();
+
+        assert_eq!(wire_saturated[0].implementation_relations.len(), 1);
+        assert_eq!(
+            encode_response(&wire_saturated).unwrap().len(),
+            baseline + first_relation_wire
         );
     }
 
@@ -1145,6 +1322,7 @@ mod tests {
             inferred_count: sources.len(),
             language_features: &[],
             java_sources: &[],
+            classpath: None,
         })
         .unwrap();
         let mut input = Vec::new();
@@ -1168,6 +1346,49 @@ mod tests {
         assert!(analysis.implementations.entry_count() > 0);
         assert!(analysis.document_symbols.entry_count() > 0);
         assert!(analysis.folding_ranges.entry_count() > 0);
+    }
+
+    #[test]
+    fn worker_request_classpath_overrides_the_session_classpath() {
+        let directory = std::env::temp_dir().join(format!(
+            "krusty-worker-module-classpath-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        let package = directory.join("hidden");
+        std::fs::create_dir_all(&package).unwrap();
+        let class =
+            krusty::jvm::classfile::ClassWriter::new("hidden/Only", "java/lang/Object").finish();
+        std::fs::write(package.join("Only.class"), class).unwrap();
+
+        let sources = ["fun use(value: hidden.Only) {}"];
+        let request = serde_json::to_vec(&AnalysisRequest {
+            sources: &sources,
+            source_kinds: &[0],
+            result_count: 1,
+            inferred_count: 1,
+            language_features: &[],
+            java_sources: &[],
+            classpath: Some(&[]),
+        })
+        .unwrap();
+        let mut input = Vec::new();
+        write_framed(&mut input, &request).unwrap();
+        let mut output = Vec::new();
+
+        run_analysis_worker(
+            &mut Cursor::new(input),
+            &mut output,
+            vec![directory.clone()],
+        )
+        .unwrap();
+
+        let analyses = decode_worker_output(output);
+        assert!(analyses[0]
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("Only")));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -1207,6 +1428,7 @@ fun combine(entries: Array<Entry>): String {
             inferred_count: sources.len(),
             language_features: &["NameBasedDestructuring"],
             java_sources: &[],
+            classpath: None,
         })
         .unwrap();
         let mut input = Vec::new();
@@ -1230,6 +1452,7 @@ fun combine(entries: Array<Entry>): String {
             inferred_count: 1,
             language_features: &[],
             java_sources: &[],
+            classpath: None,
         })
         .unwrap();
         let mut input = Vec::new();

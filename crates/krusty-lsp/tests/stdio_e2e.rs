@@ -114,6 +114,33 @@ impl ServerProcess {
             .unwrap_or_default()
     }
 
+    fn await_diagnostics_for(
+        &mut self,
+        uris: &[&str],
+    ) -> std::collections::HashMap<String, Vec<Value>> {
+        let mut diagnostics = std::collections::HashMap::new();
+        while diagnostics.len() < uris.len() {
+            let message = self.receive().expect("LSP response");
+            if message["method"] != "textDocument/publishDiagnostics" {
+                continue;
+            }
+            let Some(uri) = message["params"]["uri"].as_str() else {
+                continue;
+            };
+            if !uris.contains(&uri) {
+                continue;
+            }
+            diagnostics.insert(
+                uri.to_string(),
+                message["params"]["diagnostics"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+        }
+        diagnostics
+    }
+
     fn shutdown_and_exit(mut self) {
         let _ = self.request(i64::MAX, "shutdown", Value::Null);
         self.notify("exit", Value::Null);
@@ -498,6 +525,250 @@ fn stdio_server_indexes_unopened_project_sources() {
     );
     assert_eq!(rename["result"], Value::Null);
 
+    server.shutdown_and_exit();
+}
+
+#[test]
+fn stdio_server_merges_navigation_across_dependent_modules() {
+    let project = TempProject::new("module-navigation");
+    project.write(
+        ".idea/modules.xml",
+        r#"<project><component name="ProjectModuleManager"><modules>
+             <module filepath="$PROJECT_DIR$/base/base.iml" />
+             <module filepath="$PROJECT_DIR$/first/first.iml" />
+             <module filepath="$PROJECT_DIR$/second/second.iml" />
+             <module filepath="$PROJECT_DIR$/empty/empty.iml" />
+           </modules></component></project>"#,
+    );
+    project.write(
+        "base/base.iml",
+        r#"<module><component name="NewModuleRootManager">
+             <content url="file://$MODULE_DIR$">
+               <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+             </content>
+           </component></module>"#,
+    );
+    for module in ["first", "second", "empty"] {
+        project.write(
+            &format!("{module}/{module}.iml"),
+            r#"<module><component name="NewModuleRootManager">
+                 <content url="file://$MODULE_DIR$">
+                   <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+                 </content>
+                 <orderEntry type="module" module-name="base" />
+               </component></module>"#,
+        );
+    }
+    let base_source = "package sample\nopen class Base\nfun token(): Int = 1\n";
+    let first_source = "package sample\nclass First : Base()\nfun firstUse(): Int = token()\n";
+    let second_source = "package sample\nclass Second : Base()\nfun secondUse(): Int = token()\n";
+    let empty_source = "";
+    let hidden_source = "package sample\nclass Hidden : Base()\n";
+    let base_uri = project.uri("base/src/Base.kt");
+    let first_uri = project.uri("first/src/First.kt");
+    let second_uri = project.uri("second/src/Second.kt");
+    let empty_uri = project.uri("empty/src/Open.kt");
+    let hidden_uri = project.uri("empty/src/Hidden.kt");
+    project.write("base/src/Base.kt", base_source);
+    project.write("first/src/First.kt", first_source);
+    project.write("second/src/Second.kt", second_source);
+    project.write("empty/src/Open.kt", empty_source);
+    project.write("empty/src/Hidden.kt", hidden_source);
+    let root_uri: String = url::Url::from_directory_path(project.path())
+        .expect("temporary project root is a file URI")
+        .into();
+    let mut server = ServerProcess::start(&[]);
+    server.request(1, "initialize", json!({"rootUri": root_uri}));
+    server.notify("initialized", json!({}));
+    server.receive_until(|message| message["method"] == "client/registerCapability");
+    for (uri, text) in [
+        (&base_uri, base_source),
+        (&first_uri, first_source),
+        (&second_uri, second_source),
+        (&empty_uri, empty_source),
+    ] {
+        server.notify(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": text
+                }
+            }),
+        );
+        let diagnostics = server.await_diagnostics(uri);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+    let implementation = server.request(
+        2,
+        "textDocument/implementation",
+        json!({
+            "textDocument": {"uri": base_uri},
+            "position": {"line": 1, "character": 12}
+        }),
+    );
+    let references = server.request(
+        3,
+        "textDocument/references",
+        json!({
+            "textDocument": {"uri": base_uri},
+            "position": {"line": 2, "character": 5},
+            "context": {"includeDeclaration": true}
+        }),
+    );
+    let rename = server.request(
+        4,
+        "textDocument/rename",
+        json!({
+            "textDocument": {"uri": second_uri},
+            "position": {"line": 2, "character": 24},
+            "newName": "renamed"
+        }),
+    );
+    let response_uris = |response: &Value| {
+        response["result"]
+            .as_array()
+            .unwrap_or_else(|| panic!("response: {response}"))
+            .iter()
+            .map(|location| location["uri"].as_str().unwrap().to_string())
+            .collect::<std::collections::HashSet<_>>()
+    };
+    assert_eq!(
+        response_uris(&implementation),
+        std::collections::HashSet::from([
+            first_uri.clone(),
+            second_uri.clone(),
+            hidden_uri.clone()
+        ])
+    );
+    assert_eq!(
+        response_uris(&references),
+        std::collections::HashSet::from([base_uri.clone(), first_uri.clone(), second_uri.clone()])
+    );
+    let changed_uris = rename["result"]["documentChanges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|change| change["textDocument"]["uri"].as_str().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        changed_uris,
+        std::collections::HashSet::from([
+            base_uri.as_str(),
+            first_uri.as_str(),
+            second_uri.as_str()
+        ])
+    );
+    server.shutdown_and_exit();
+}
+
+#[test]
+fn stdio_server_keeps_dependency_and_friend_visibility_distinct() {
+    let project = TempProject::new("module-visibility");
+    project.write(
+        ".idea/modules.xml",
+        r#"<project><component name="ProjectModuleManager"><modules>
+             <module filepath="$PROJECT_DIR$/producer/producer.iml" />
+             <module filepath="$PROJECT_DIR$/consumer/consumer.iml" />
+           </modules></component></project>"#,
+    );
+    project.write(
+        ".idea/misc.xml",
+        r#"<project><component name="ProjectRootManager">
+             <output url="file://$PROJECT_DIR$/out" />
+           </component></project>"#,
+    );
+    project.write(
+        "producer/producer.iml",
+        r#"<module><component name="NewModuleRootManager" inherit-compiler-output="true">
+             <content url="file://$MODULE_DIR$">
+               <sourceFolder url="file://$MODULE_DIR$/src/main" isTestSource="false" />
+               <sourceFolder url="file://$MODULE_DIR$/src/test" isTestSource="true" />
+             </content>
+           </component></module>"#,
+    );
+    project.write(
+        "consumer/consumer.iml",
+        r#"<module><component name="NewModuleRootManager" inherit-compiler-output="true">
+             <content url="file://$MODULE_DIR$">
+               <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+             </content>
+             <orderEntry type="module" module-name="producer" />
+           </component></module>"#,
+    );
+    let open_internal = "package fixture\ninternal class OpenInternal\n";
+    let friend_use = "package fixture\n\
+                      fun openFriend(): Any = OpenInternal()\n\
+                      fun diskFriend(): Any = DiskInternal()\n";
+    let dependency_use = "package fixture\n\
+                          fun openDependency(): Any = OpenInternal()\n\
+                          fun diskDependency(): Any = DiskInternal()\n";
+    project.write(
+        "producer/src/main/DiskInternal.kt",
+        "package fixture\ninternal class DiskInternal\n",
+    );
+    let open_internal_uri = project.uri("producer/src/main/OpenInternal.kt");
+    let friend_uri = project.uri("producer/src/test/FriendUse.kt");
+    let dependency_uri = project.uri("consumer/src/DependencyUse.kt");
+    let root_uri: String = url::Url::from_directory_path(project.path())
+        .expect("temporary project root is a file URI")
+        .into();
+    let mut server = ServerProcess::start(&[]);
+    server.request(1, "initialize", json!({"rootUri": root_uri}));
+    server.notify("initialized", json!({}));
+    server.receive_until(|message| message["method"] == "client/registerCapability");
+    for (uri, text) in [
+        (&open_internal_uri, open_internal),
+        (&friend_uri, friend_use),
+    ] {
+        server.notify(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": text
+                }
+            }),
+        );
+        let diagnostics = server.await_diagnostics(uri);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": dependency_uri,
+                "languageId": "kotlin",
+                "version": 1,
+                "text": dependency_use
+            }
+        }),
+    );
+    let mut diagnostics =
+        server.await_diagnostics_for(&[friend_uri.as_str(), dependency_uri.as_str()]);
+    let friend_diagnostics = diagnostics.remove(&friend_uri).unwrap();
+    assert!(friend_diagnostics.is_empty(), "{friend_diagnostics:?}");
+    let dependency_diagnostics = diagnostics.remove(&dependency_uri).unwrap();
+    assert!(
+        dependency_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("'OpenInternal'"))),
+        "{dependency_diagnostics:?}"
+    );
+    assert!(
+        dependency_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("'DiskInternal'"))),
+        "{dependency_diagnostics:?}"
+    );
     server.shutdown_and_exit();
 }
 
