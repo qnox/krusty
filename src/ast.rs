@@ -393,11 +393,7 @@ pub struct ForRange {
     pub kind: RangeKind,
 }
 
-/// A syntactic type reference. v0: just a simple name (`Int`, `String`, ...).
-/// Bit-packed boolean flags for a [`TypeRef`], collapsing `nullable`/`definitely_non_null`/
-/// `fun_has_receiver`/`fun_suspend` into one byte. Read through the `TypeRef` accessors of the same
-/// names; `nullable` is also mutated through `set_nullable`; built with the `with_*` chain. Headroom
-/// for four more flags.
+/// Bit-packed [`TypeRef`] flags.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TrFlags(u8);
 
@@ -406,6 +402,8 @@ impl TrFlags {
     const DEFINITELY_NON_NULL: u8 = 1 << 1;
     const FUN_HAS_RECEIVER: u8 = 1 << 2;
     const FUN_SUSPEND: u8 = 1 << 3;
+    const IN_PROJECTION: u8 = 1 << 4;
+    const OUT_PROJECTION: u8 = 1 << 5;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -437,15 +435,20 @@ impl TrFlags {
     pub const fn with_fun_suspend(self, on: bool) -> Self {
         self.with(Self::FUN_SUSPEND, on)
     }
+    #[inline]
+    pub const fn with_in_projection(self, on: bool) -> Self {
+        self.with(Self::IN_PROJECTION, on)
+    }
+    #[inline]
+    pub const fn with_out_projection(self, on: bool) -> Self {
+        self.with(Self::OUT_PROJECTION, on)
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct TypeRef {
     pub name: String,
-    /// Bit-packed `nullable`/`definitely_non_null`/`fun_has_receiver`/`fun_suspend` (read via the
-    /// accessors below; `nullable` set via `set_nullable`). `nullable` — trailing `?`.
-    /// `definitely_non_null` — a trailing `& Any` on a type parameter (`T & Any`). `fun_has_receiver` —
-    /// a receiver function type `Recv.(A) -> R`. `fun_suspend` — a `suspend` function type.
+    /// Nullability, function-type shape, and use-site projection flags.
     pub flags: TrFlags,
     /// The first generic type argument, captured for `Array<T>` (element) and function types
     /// (the return type). General class type arguments live in `targs`.
@@ -479,12 +482,27 @@ impl TypeRef {
         self.flags.has(TrFlags::FUN_SUSPEND)
     }
     #[inline]
+    pub fn in_projection(&self) -> bool {
+        self.flags.has(TrFlags::IN_PROJECTION)
+    }
+    #[inline]
+    pub fn out_projection(&self) -> bool {
+        self.flags.has(TrFlags::OUT_PROJECTION)
+    }
+    #[inline]
     pub fn set_nullable(&mut self, on: bool) {
         self.flags = self.flags.with_nullable(on);
     }
     #[inline]
     pub fn set_definitely_non_null(&mut self, on: bool) {
         self.flags = self.flags.with_definitely_non_null(on);
+    }
+    #[inline]
+    pub fn set_projection(&mut self, in_projection: bool, out_projection: bool) {
+        self.flags = self
+            .flags
+            .with_in_projection(in_projection)
+            .with_out_projection(out_projection);
     }
 }
 
@@ -1087,12 +1105,16 @@ pub struct File {
     /// backticked members and safe calls with argument lists. Kept sparse rather than widening every
     /// expression node.
     pub exact_member_name_spans: std::collections::HashMap<u32, Span>,
+    /// Dot spans for member expressions with trivia between `.` and the member name.
+    pub non_adjacent_member_dot_spans: Vec<(u32, Span)>,
     /// `ExprId`s of `Expr::Call`s whose LAST argument is a SYNTACTIC trailing lambda (`f(a) { … }` /
     /// `f { … }`). A trailing lambda always binds to the callee's LAST parameter — preceding parameters
     /// without a positional argument take their defaults — so default-omission lowering must place it in
     /// the last slot, not the next free positional one (`f("x") { }` on `f(a, m = d, builder)` ⇒ `m`
     /// defaults, the lambda fills `builder`).
     pub call_has_trailing_lambda: std::collections::HashSet<u32>,
+    /// End offset of the parenthesized portion of calls with trailing lambdas.
+    pub trailing_call_close_paren_ends: std::collections::HashMap<u32, u32>,
     /// `ExprId`s of `Expr::Call`s produced from infix-call syntax (`a foo b`). The callee is still the
     /// ordinary `Member { receiver: a, name: "foo" }`, but resolver/lowering need the source form for
     /// primitive builtin names where Kotlin treats `a rem b` differently from `a.rem(b)`.
@@ -1145,6 +1167,8 @@ pub struct File {
     /// records the simple names here; a plugin recovers them via the type's span (e.g. to detect a
     /// composable function type) without bloating every `TypeRef`. Absent ⇒ the type had no annotations.
     pub type_annotations: std::collections::HashMap<u32, Vec<String>>,
+    /// Original projected argument keyed by the enclosing type's start offset.
+    pub type_projection_args: std::collections::HashMap<u32, TypeRef>,
     /// `// ASSERTIONS_MODE: always-enable` — `assert(...)` is emitted UNGUARDED (always checks + throws),
     /// not behind the per-class `desiredAssertionStatus()` guard. From the test directive / `-Xassertions`.
     pub assert_always_enabled: bool,

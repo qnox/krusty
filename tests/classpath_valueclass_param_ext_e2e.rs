@@ -45,7 +45,7 @@ fn valueclass_param_extension_no_explicit_type_arg() {
     let Some(diags) = common::checker_diags_against(
         "ee1_noexpl",
         LIB,
-        "import lib.Reg\nimport lib.Id\n\
+        "import lib.Reg\nimport lib.Id\nimport lib.mk\n\
          fun f(r: Reg, id: Id): String = r.mk(id)\nfun box(): String = \"OK\"\n",
     ) else {
         return;

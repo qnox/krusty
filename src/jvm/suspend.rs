@@ -959,6 +959,11 @@ fn hoist_expr(
             };
             e
         }
+        IrExpr::PrimitiveNeg { operand, ty } => {
+            let operand = hoist_expr(ir, operand, suspend_set, orig_rets, prelude);
+            ir.exprs[e as usize] = IrExpr::PrimitiveNeg { operand, ty };
+            e
+        }
         // A string template / `+=` concat: parts evaluate unconditionally left-to-right, so a
         // suspension inside one (`"a ${susp()} b"`, `result += susp()`) hoists to a preceding temp.
         IrExpr::StringConcat(parts) => {
@@ -5146,6 +5151,7 @@ fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
         IrExpr::Throw { operand } => box_returns(ir, operand),
         IrExpr::StringConcat(parts) => parts.into_iter().all(|p| box_returns(ir, p)),
         IrExpr::PrimitiveBinOp { lhs, rhs, .. } => box_returns(ir, lhs) && box_returns(ir, rhs),
+        IrExpr::PrimitiveNeg { operand, .. } => box_returns(ir, operand),
         IrExpr::SetValue { value, .. } => box_returns(ir, value),
         IrExpr::SetField { value, .. } => box_returns(ir, value),
         // A top-level `var` write (`saved = c` inside an intrinsic block) — traverse the value.

@@ -11,16 +11,35 @@ fn run_ok(stem: &str, body: &str) {
 
 #[test]
 fn char_operator_methods() {
-    // `Char.plus(Int): Char`, `Char.minus(Int): Char`, `Char.minus(Char): Int` — the checker maps
-    // these named methods to the operator form. (`Int.unaryMinus()`/`unaryPlus()` as explicit methods
-    // are NOT covered here: krusty types them but emits a call to a nonexistent `Integer.unaryMinus`,
-    // a known emit gap — the operator syntax `-x` works, the method form does not.)
     run_ok(
         "CharOps",
         "fun box(): String {\n\
          if ('a'.plus(1) != 'b') return \"cp\"\n\
          if ('b'.minus(1) != 'a') return \"cm\"\n\
          if ('c'.minus('a') != 2) return \"cc\"\n\
+         return \"OK\"\n\
+         }\n",
+    );
+}
+
+#[test]
+fn zero_argument_primitive_operator_methods() {
+    run_ok(
+        "PrimitiveUnaryMethods",
+        "fun <T> T.id() = this\n\
+         fun box(): String {\n\
+         if (true.not().id() != false) return \"not\"\n\
+         if (true.compareTo(false).id() != 1) return \"bool compare\"\n\
+         val bytePlus: Int = (1.toByte()).unaryPlus()\n\
+         val shortMinus: Int = (1.toShort()).unaryMinus()\n\
+         if (bytePlus.id() != 1) return \"byte+\"\n\
+         if (shortMinus.id() != -1) return \"short-\"\n\
+         if (2.unaryPlus().id() != 2) return \"int+\"\n\
+         if (2L.unaryMinus().id() != -2L) return \"long-\"\n\
+         if (2.0f.unaryMinus().id() != -2.0f) return \"float-\"\n\
+         if (2.0.unaryPlus().id() != 2.0) return \"double+\"\n\
+         if (java.lang.Float.floatToRawIntBits(0.0f.unaryMinus()) != -2147483648) return \"float zero\"\n\
+         if (java.lang.Double.doubleToRawLongBits(0.0.unaryMinus()) != Long.MIN_VALUE) return \"double zero\"\n\
          return \"OK\"\n\
          }\n",
     );

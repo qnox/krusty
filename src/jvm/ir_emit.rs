@@ -4037,9 +4037,30 @@ fn finish_bridge(
     finish_code::<{ 0x0001 | 0x0040 | 0x1000 }>(cw, name, desc, code, locals);
 }
 
+fn emit_bridge_barrier_outcome(
+    outcome: crate::jvm::backend::BridgeBarrierOutcome,
+    cw: &mut ClassWriter,
+    code: &mut CodeBuilder,
+) {
+    match outcome {
+        crate::jvm::backend::BridgeBarrierOutcome::False => {
+            code.push_int(0, cw);
+            code.ireturn();
+        }
+        crate::jvm::backend::BridgeBarrierOutcome::NotFound => {
+            code.push_int(-1, cw);
+            code.ireturn();
+        }
+        crate::jvm::backend::BridgeBarrierOutcome::Null => {
+            code.aconst_null();
+            code.areturn();
+        }
+    }
+}
+
 /// Emit `ACC_BRIDGE|ACC_SYNTHETIC` methods: each has the supertype's erased descriptor, adapts its
-/// arguments (checkcast / unbox / numeric convert), delegates to the concrete override, and adapts
-/// the return value back (box / numeric convert). Bridges are straight-line — no frames.
+/// arguments (type barrier / checkcast / unbox / numeric convert), delegates to the concrete override,
+/// and adapts the return value back (box / numeric convert).
 fn emit_bridges(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     for b in &c.bridges {
         let ep = jvm_tys(&b.erased_params);
@@ -4056,6 +4077,27 @@ fn emit_bridges(c: &crate::ir::IrClass, cw: &mut ClassWriter) {
         }
         let pw: u16 = ep.iter().map(|t| slot_words(*t)).sum();
         let mut code = CodeBuilder::new(1 + pw);
+        if let Some(barrier) = crate::jvm::backend::bridge_barrier(b) {
+            let dispatch = code.new_label();
+            let parameter_slot = 1 + ep[..barrier.parameter]
+                .iter()
+                .map(|ty| slot_words(*ty))
+                .sum::<u16>();
+            if b.concrete_params[barrier.parameter].is_nullable() {
+                code.aload(parameter_slot);
+                code.ifnull(dispatch);
+            }
+            code.aload(parameter_slot);
+            let concrete = ref_internal(cp[barrier.parameter]);
+            let concrete_class = cw.class_ref(&concrete);
+            code.instance_of(concrete_class);
+            code.ifne(dispatch);
+            emit_bridge_barrier_outcome(barrier.outcome, cw, &mut code);
+            let mut locals = vec![VerifType::ObjectName(c.fq_name())];
+            locals.extend(ep.iter().map(|ty| verif_for_jvm_free(cw, *ty)));
+            code.add_frame_if_new(dispatch, locals, vec![]);
+            code.bind(dispatch);
+        }
         code.aload(0);
         let mut slot = 1u16;
         for (k, (et, ct)) in ep.iter().zip(&cp).enumerate() {
@@ -8145,6 +8187,15 @@ impl<'a> Emitter<'a> {
                 }
             }
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.emit_binop(*op, *lhs, *rhs, code),
+            IrExpr::PrimitiveNeg { operand, ty } => {
+                self.emit_value(*operand, code);
+                match ir_ty_to_jvm(ty) {
+                    Ty::Long => code.lneg(),
+                    Ty::Float => code.fneg(),
+                    Ty::Double => code.dneg(),
+                    _ => code.ineg(),
+                }
+            }
             IrExpr::StringConcat(parts) => {
                 let parts = parts.clone();
                 if parts.len() == 1 {
@@ -10232,6 +10283,7 @@ impl<'a> Emitter<'a> {
                     boxed_prim_of(t).unwrap_or(t)
                 }
             },
+            IrExpr::PrimitiveNeg { ty, .. } => ir_ty_to_jvm(ty),
             IrExpr::When { branches } => self.value_ty_of_when(branches),
             IrExpr::EnumEntry { class, .. } | IrExpr::EnumValueOf { class, .. } => {
                 Ty::obj(&self.ir.classes[*class as usize].fq_name())

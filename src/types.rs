@@ -693,6 +693,23 @@ impl Ty {
         }
     }
 
+    /// Semantic extension receiver key preserving nullability and generic receiver shape.
+    pub fn extension_recv_key(self) -> Ty {
+        match self {
+            Ty::Nullable(inner) => Ty::nullable(inner.extension_recv_key()),
+            Ty::TyParam(_, bound) => Ty::ty_param("\u{0}", bound.extension_recv_key()),
+            Ty::Obj(n, args) if n.matches("kotlin/Array") => {
+                let element = args
+                    .first()
+                    .copied()
+                    .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                Ty::obj_args("kotlin/Array", &[element.extension_recv_key()])
+            }
+            Ty::Obj(n, _) => Ty::Obj(n, &[]),
+            _ => self,
+        }
+    }
+
     /// Candidate extension-receiver lookup keys, most-specific first. Generic receivers such as
     /// `val <T> T.p` or `val <T> Array<T>.p` register under `Any`/`Array<Any>`, while concrete receivers
     /// keep their precise erased key first so concrete overloads still win.
@@ -902,6 +919,64 @@ impl Ty {
         })
     }
 
+    /// Render a Kotlin source type.
+    pub fn source_name(self) -> String {
+        match self {
+            Ty::Int => "Int".to_string(),
+            Ty::Byte => "Byte".to_string(),
+            Ty::Short => "Short".to_string(),
+            Ty::Long => "Long".to_string(),
+            Ty::Float => "Float".to_string(),
+            Ty::Double => "Double".to_string(),
+            Ty::Boolean => "Boolean".to_string(),
+            Ty::Char => "Char".to_string(),
+            Ty::UInt => "UInt".to_string(),
+            Ty::ULong => "ULong".to_string(),
+            Ty::String => "String".to_string(),
+            Ty::Unit => "Unit".to_string(),
+            Ty::Obj(n, args) => {
+                let internal = n.render();
+                let base = internal
+                    .strip_prefix("kotlin/collections/")
+                    .or_else(|| internal.strip_prefix("kotlin/"))
+                    .unwrap_or(&internal)
+                    .replace(['/', '$'], ".");
+                if args.is_empty() {
+                    base
+                } else {
+                    let arguments = args
+                        .iter()
+                        .map(|argument| argument.source_name())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{base}<{arguments}>")
+                }
+            }
+            Ty::Null => "Null".to_string(),
+            Ty::Nothing => "Nothing".to_string(),
+            Ty::Error => "<error>".to_string(),
+            Ty::Fun(signature) => {
+                let parameters = signature
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.source_name())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let suspend = if signature.suspend { "suspend " } else { "" };
+                format!("{suspend}({parameters}) -> {}", signature.ret.source_name())
+            }
+            Ty::Nullable(inner) => {
+                let rendered = inner.source_name();
+                if matches!(*inner, Ty::Fun(_)) {
+                    format!("({rendered})?")
+                } else {
+                    format!("{rendered}?")
+                }
+            }
+            Ty::TyParam(n, _) => n.to_string(),
+        }
+    }
+
     pub fn name(self) -> String {
         match self {
             Ty::Int => "Int".to_string(),
@@ -916,13 +991,13 @@ impl Ty {
             Ty::ULong => "ULong".to_string(),
             Ty::String => "String".to_string(),
             Ty::Unit => "Unit".to_string(),
-            Ty::Obj(n, _) => n.render(),
+            Ty::Obj(name, _) => name.render(),
             Ty::Null => "Null".to_string(),
             Ty::Nothing => "Nothing".to_string(),
             Ty::Error => "<error>".to_string(),
             Ty::Fun(_) => "Function".to_string(),
             Ty::Nullable(inner) => format!("{}?", inner.name()),
-            Ty::TyParam(n, _) => n.to_string(),
+            Ty::TyParam(name, _) => name.to_string(),
         }
     }
 
@@ -1237,6 +1312,34 @@ mod tests {
     }
 
     #[test]
+    fn extension_receiver_key_retains_nullability_and_generic_identity() {
+        assert_ne!(
+            Ty::nullable(Ty::String).extension_recv_key(),
+            Ty::String.extension_recv_key()
+        );
+        assert_eq!(
+            Ty::obj_args("kotlin/collections/List", &[Ty::Int]).extension_recv_key(),
+            Ty::obj_args("kotlin/collections/List", &[Ty::String]).extension_recv_key()
+        );
+        assert!(Ty::ty_param("T", Ty::obj("kotlin/Any"))
+            .extension_recv_key()
+            .is_ty_param());
+        assert_eq!(
+            Ty::ty_param("T", Ty::obj("kotlin/Any")).extension_recv_key(),
+            Ty::ty_param("R", Ty::obj("kotlin/Any")).extension_recv_key()
+        );
+        let array_key = Ty::obj_args(
+            "kotlin/Array",
+            &[Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")))],
+        )
+        .extension_recv_key();
+        assert!(array_key
+            .type_args()
+            .first()
+            .is_some_and(|element| element.is_ty_param()));
+    }
+
+    #[test]
     fn nullable_wraps_inner_and_reports_nullable() {
         let t = Ty::nullable(Ty::Int);
         assert!(t.is_nullable());
@@ -1312,5 +1415,17 @@ mod tests {
         );
         assert_eq!(Ty::Int.nullable_non_ref(), Some(Ty::nullable(Ty::Int)));
         assert_eq!(Ty::String.nullable_non_ref(), None);
+    }
+
+    #[test]
+    fn source_name_renders_qualified_generic_nullable_types() {
+        let ty = Ty::nullable(Ty::obj_args(
+            "demo/Outer$Holder",
+            &[
+                Ty::String,
+                Ty::obj_args("kotlin/collections/List", &[Ty::Int]),
+            ],
+        ));
+        assert_eq!(ty.source_name(), "demo.Outer.Holder<String, List<Int>>?");
     }
 }

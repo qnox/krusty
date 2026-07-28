@@ -225,6 +225,7 @@ impl<'a> ModuleSymbols<'a> {
                 params: fi.callable.params.clone(),
                 ret: fi.callable.ret,
                 generic_sig: fi.generic_sig.clone(),
+                projected_return_hazard: fi.projected_return_hazard,
                 flags: SigFlags::default()
                     .with_vararg(fi.call_sig.vararg)
                     .with_is_inline(fi.flags.inline.can_inline())
@@ -469,6 +470,7 @@ fn fn_info(
     FunctionInfo {
         receiver_rank: rank,
         generic_sig: sig.generic_sig.clone(),
+        projected_return_hazard: sig.projected_return_hazard,
         call_sig: sig.call_sig(),
         context_count: sig.context_count,
         source_key: sig
@@ -605,9 +607,13 @@ impl SymbolSource for ModuleSymbols<'_> {
         };
         // Receiver applicability is selected above this package-scoped source boundary.
         let any = Ty::obj("kotlin/Any");
-        for ((recv, en), sigs) in &self.syms.ext_funs {
-            if en == &name {
-                let rank = if *recv == any { 1 } else { 0 };
+        if let Some(families) = self.syms.ext_funs.get(&name) {
+            for (recv, sigs) in families {
+                let rank = if recv.non_null().is_ty_param() || recv.non_null() == any {
+                    1
+                } else {
+                    0
+                };
                 // Surface EVERY overload registered for this (receiver, name) so the resolver's
                 // overload picker can choose by arity/argument types (`fun R.f()` vs `fun R.f(x)`).
                 for sig in sigs {
@@ -761,6 +767,7 @@ mod tests {
             params,
             ret,
             generic_sig: None,
+            projected_return_hazard: false,
             flags: SigFlags::default()
                 .with_vararg(false)
                 .with_is_inline(false)
@@ -1013,13 +1020,13 @@ mod tests {
     }
 
     #[test]
-    fn extension_prepends_receiver_and_keys_by_erased_receiver() {
+    fn extension_prepends_receiver_and_keeps_source_receiver_identity() {
         let mut st = FrontendSymbols::default();
-        let recv = Ty::obj("demo/Point");
-        st.ext_funs.insert(
-            (recv.erased_recv(), "shifted".into()),
-            vec![sig(vec![Ty::Int], recv)],
-        );
+        let recv = Ty::nullable(Ty::obj("demo/Point"));
+        st.ext_funs
+            .entry("shifted".into())
+            .or_default()
+            .insert(recv.extension_recv_key(), vec![sig(vec![Ty::Int], recv)]);
         let m = ModuleSymbols::new(&st);
         // A module extension is surfaced through `resolve_symbols` by fqn, with the receiver as an attribute.
         let fs = match m.resolve_symbols("shifted").callables {
@@ -1029,8 +1036,8 @@ mod tests {
         assert_eq!(fs.len(), 1);
         let o = &fs[0];
         assert_eq!(o.kind, FnKind::Extension);
-        // receiver prepended → params = [Point, Int]
         assert_eq!(o.callable.params, vec![recv, Ty::Int]);
+        assert_eq!(o.receiver, Some(recv));
         assert_eq!(o.receiver_rank, 0);
     }
 
@@ -1051,10 +1058,11 @@ mod tests {
             receiver,
         );
         signature.generic_sig = Some(generic_sig.clone());
-        symbols.ext_funs.insert(
-            (receiver.erased_recv(), "transform".into()),
-            vec![signature],
-        );
+        symbols
+            .ext_funs
+            .entry("transform".into())
+            .or_default()
+            .insert(receiver.extension_recv_key(), vec![signature]);
 
         let functions = match ModuleSymbols::new(&symbols)
             .resolve_symbols("transform")
@@ -1147,11 +1155,12 @@ mod tests {
     fn extension_preserves_declared_source_receiver() {
         let mut st = FrontendSymbols::default();
         let declared = Ty::nullable(Ty::obj("demo/Token"));
-        let erased = declared.erased_recv();
         let mut extension = sig(vec![], Ty::String);
         extension.source_receiver = Some(declared);
         st.ext_funs
-            .insert((erased, "render".into()), vec![extension]);
+            .entry("render".into())
+            .or_default()
+            .insert(declared.extension_recv_key(), vec![extension]);
 
         let m = ModuleSymbols::new(&st);
         let fs = match m.resolve_symbols("render").callables {
@@ -1159,7 +1168,7 @@ mod tests {
             _ => Vec::new(),
         };
         assert_eq!(fs.len(), 1);
-        assert_eq!(fs[0].callable.params, vec![erased]);
+        assert_eq!(fs[0].callable.params, vec![declared]);
         assert_eq!(fs[0].callable.source_receiver, Some(declared));
     }
 

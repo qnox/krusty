@@ -20,8 +20,9 @@ use std::collections::HashMap;
 /// Proto (`ProtoBuf.Type`): `nullable`=3, `argument`=2 (repeated `Argument{projection=1, type=2}`),
 /// `class_name`=6, `type_parameter`=8 (id), `type_parameter_name`=9 (string id). A `kotlin/FunctionN`
 /// class becomes a [`Ty::Fun`] (its args are `[P1..Pn, R]`); a Kotlin primitive class collapses to its
-/// dedicated [`Ty`] variant so it matches the rest of the pipeline. A type variable is a [`Ty::TyParam`]
-/// (`kotlin/Any` bound). A `*`/unresolved argument erases to `Any`.
+/// dedicated [`Ty`] variant so it matches the rest of the pipeline. An unbounded type variable is a
+/// [`Ty::TyParam`] with Kotlin's implicit nullable `kotlin/Any?` upper bound. A `*`/unresolved argument
+/// erases to `Any`.
 fn parse_type_gsig(
     body: &[u8],
     records: &[Rec],
@@ -57,7 +58,7 @@ fn primary_erasure_bounds(formals: &[String], formal_bounds: &[Vec<Ty>]) -> Hash
         let bound = match direct.get(name).copied() {
             Some(Ty::TyParam(other, _)) => resolve(other, direct, resolved, visiting),
             Some(bound) => bound,
-            None => Ty::obj("kotlin/Any"),
+            None => Ty::nullable(Ty::obj("kotlin/Any")),
         };
         visiting.remove(name);
         resolved.insert(name.to_string(), bound);
@@ -79,6 +80,37 @@ fn primary_erasure_bounds(formals: &[String], formal_bounds: &[Vec<Ty>]) -> Hash
         );
     }
     resolved
+}
+
+/// Decode an extension receiver with its top-level nullability.
+#[cfg(test)]
+fn parse_receiver_type_gsig(
+    body: &[u8],
+    records: &[Rec],
+    d2: &[String],
+    tparams: &HashMap<u64, String>,
+) -> Option<Ty> {
+    let ty = parse_type_gsig(body, records, d2, tparams)?;
+    Some(if parse_type_nullable(body) {
+        Ty::nullable(ty)
+    } else {
+        ty
+    })
+}
+
+fn parse_receiver_type_gsig_bounded(
+    body: &[u8],
+    records: &[Rec],
+    d2: &[String],
+    tparams: &HashMap<u64, String>,
+    bounds: &HashMap<String, Ty>,
+) -> Option<Ty> {
+    let ty = parse_type_gsig_bounded(body, records, d2, tparams, bounds)?;
+    Some(if parse_type_nullable(body) {
+        Ty::nullable(ty)
+    } else {
+        ty
+    })
 }
 
 fn parse_type_gsig_node(
@@ -132,7 +164,7 @@ fn parse_type_gsig_node(
             let bound = bounds
                 .get(n)
                 .copied()
-                .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
             Ty::ty_param(n, bound)
         })?
     } else {
@@ -141,7 +173,7 @@ fn parse_type_gsig_node(
             let bound = bounds
                 .get(&s)
                 .copied()
-                .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
             Ty::ty_param(&s, bound)
         })?
     };
@@ -216,7 +248,6 @@ fn kotlin_canonical_ty(internal: &str) -> Option<crate::types::Ty> {
     })
 }
 
-/// A metadata type parameter with inline upper bounds.
 struct ParsedTypeParam {
     id: u64,
     name_id: u64,
@@ -977,7 +1008,7 @@ fn build_generic_sig(
     let context = type_parameter_context(class_tparams, &pf.type_params, records, d2)?;
     let receiver = if let Some(rb) = &pf.receiver_body {
         // An EXTENSION: its `receiver_type` is the receiver gsig node (`T`, `Ch`, `List<T>`, …).
-        Some(parse_type_gsig_bounded(
+        Some(parse_receiver_type_gsig_bounded(
             rb,
             records,
             d2,
@@ -992,7 +1023,7 @@ fn build_generic_sig(
                 internal,
                 &ctps
                     .iter()
-                    .map(|(_, n)| Ty::ty_param(n, Ty::obj("kotlin/Any")))
+                    .map(|(_, n)| Ty::ty_param(n, Ty::nullable(Ty::obj("kotlin/Any"))))
                     .collect::<Vec<_>>(),
             )
         })
@@ -1016,7 +1047,7 @@ fn build_generic_sig(
                 )
             };
             // An unresolvable param erases to a fresh unbound var (→ `Any` downstream).
-            decoded.unwrap_or_else(|| Ty::ty_param("\u{0}", Ty::obj("kotlin/Any")))
+            decoded.unwrap_or_else(|| Ty::ty_param("\u{0}", Ty::nullable(Ty::obj("kotlin/Any"))))
         })
         .collect();
     let ret = pf
@@ -2738,8 +2769,8 @@ fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<
 #[cfg(test)]
 mod module_reader_tests {
     use super::{
-        decode_properties, parse_type_alias, parse_type_gsig, parse_type_gsig_node,
-        primary_erasure_bounds, read_kotlin_module, MetaCtx,
+        decode_properties, parse_receiver_type_gsig, parse_type_alias, parse_type_gsig,
+        parse_type_gsig_node, primary_erasure_bounds, read_kotlin_module, MetaCtx,
     };
     use crate::metadata::module::build_kotlin_module;
     use crate::types::Ty;
@@ -2759,11 +2790,38 @@ mod module_reader_tests {
                 &HashMap::new(),
                 true
             ),
-            Some(Ty::nullable(Ty::ty_param("T", Ty::obj("kotlin/Any"))))
+            Some(Ty::nullable(Ty::ty_param(
+                "T",
+                Ty::nullable(Ty::obj("kotlin/Any"))
+            )))
         );
         assert_eq!(
             parse_type_gsig(&type_parameter, &[], &[], &parameters),
-            Some(Ty::ty_param("T", Ty::obj("kotlin/Any")))
+            Some(Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any"))))
+        );
+    }
+
+    #[test]
+    fn extension_receiver_signature_preserves_top_level_nullability() {
+        let nullable_string = [0x30, 0x00, 0x18, 0x01];
+        assert_eq!(
+            parse_receiver_type_gsig(
+                &nullable_string,
+                &[],
+                &["kotlin/String".to_string()],
+                &HashMap::new(),
+            ),
+            Some(Ty::nullable(Ty::String))
+        );
+        assert_eq!(
+            parse_type_gsig(
+                &nullable_string,
+                &[],
+                &["kotlin/String".to_string()],
+                &HashMap::new(),
+            ),
+            Some(Ty::String),
+            "ordinary generic-signature decoding keeps its existing top-level policy"
         );
     }
 
