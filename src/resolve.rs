@@ -7665,12 +7665,27 @@ pub enum InlineCall {
     ReceiverLambda(ReceiverLambda),
 }
 
+enum BoundSourceExtensionRef<'a> {
+    None,
+    Selected {
+        signature: &'a Signature,
+        target: Box<crate::libraries::LibraryCallable>,
+        owner: Option<TypeName>,
+    },
+    Ambiguous(Vec<(Ty, &'a Signature)>),
+    Inaccessible,
+}
+
 #[derive(Clone, Debug)]
 pub enum ExprLowering {
     /// A call or function reference resolved to a local function declaration.
     LocalFunction { stmt_id: StmtId },
     /// A source-module function reference selected by the checker.
     ModuleFunctionRef {
+        target: Box<crate::libraries::LibraryCallable>,
+        owner: Option<TypeName>,
+    },
+    ModuleBoundExtensionRef {
         target: Box<crate::libraries::LibraryCallable>,
         owner: Option<TypeName>,
     },
@@ -9862,6 +9877,357 @@ impl<'a> Checker<'a> {
         self.syms
             .source_extension_signature(name, file, DeclId(declaration))
             .map(|(_, signature)| signature)
+    }
+
+    fn callable_ref_is_compatible(
+        &self,
+        params: &[Ty],
+        ret: Ty,
+        expected: &'static crate::types::FnSig,
+        allow_unit_coercion: bool,
+    ) -> bool {
+        if expected.suspend || params.len() != expected.params.len() {
+            return false;
+        }
+        let context = crate::assignable::TyCtx::new();
+        expected
+            .params
+            .iter()
+            .zip(params)
+            .all(|(expected, actual)| {
+                crate::assignable::is_subtype(&context, self, *expected, *actual)
+            })
+            && ((allow_unit_coercion && expected.ret == Ty::Unit)
+                || crate::assignable::is_subtype(&context, self, ret, expected.ret))
+    }
+
+    fn callable_ref_shape_at_least_as_specific(
+        &self,
+        left_params: &[Ty],
+        left_ret: Ty,
+        right_params: &[Ty],
+        right_ret: Ty,
+    ) -> bool {
+        if left_params.len() != right_params.len() {
+            return false;
+        }
+        let context = crate::assignable::TyCtx::new();
+        left_params
+            .iter()
+            .zip(right_params)
+            .all(|(left, right)| crate::assignable::is_subtype(&context, self, *left, *right))
+            && crate::assignable::is_subtype(&context, self, left_ret, right_ret)
+    }
+
+    fn selected_bound_source_extension_ref(
+        &self,
+        receiver: Ty,
+        name: &str,
+        expected: Option<&'static crate::types::FnSig>,
+    ) -> BoundSourceExtensionRef<'_> {
+        let mut inaccessible = false;
+        let mut candidates = self
+            .resolver()
+            .resolve_symbol(
+                crate::symbol_resolver::SymRecv::Value(receiver),
+                name,
+                &[],
+                &[],
+            )
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|function| {
+                if !function.is_extension() {
+                    return None;
+                }
+                let (file, declaration) = function.source_key?;
+                let accessible = matches!(
+                    function.visibility,
+                    Visibility::Public | Visibility::Internal
+                ) || file == self.file_index;
+                if !accessible {
+                    inaccessible = true;
+                    return None;
+                }
+                let (_, signature) =
+                    self.syms
+                        .source_extension_signature(name, file, DeclId(declaration))?;
+                if signature.is_suspend() || signature.ret == Ty::Nothing {
+                    return None;
+                }
+                match expected {
+                    Some(expected)
+                        if self.callable_ref_is_compatible(
+                            &signature.params,
+                            signature.ret,
+                            expected,
+                            true,
+                        ) => {}
+                    Some(_) => return None,
+                    None if signature.requires_all_args() => {}
+                    None => return None,
+                }
+                let facade = self
+                    .syms
+                    .fn_facades_by_decl
+                    .get(&(file, declaration))
+                    .copied()
+                    .or(match function.callable.origin {
+                        crate::libraries::Origin::Module { facade } => Some(facade),
+                        _ => None,
+                    });
+                let owner = if file == self.file_index {
+                    None
+                } else {
+                    Some(facade?)
+                };
+                let mut target = function.callable.clone();
+                if let Some(facade) = facade {
+                    target.owner = facade;
+                    target.origin = crate::libraries::Origin::Module { facade };
+                }
+                Some((function.receiver?, signature, target, owner))
+            })
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return if inaccessible {
+                BoundSourceExtensionRef::Inaccessible
+            } else {
+                BoundSourceExtensionRef::None
+            };
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        candidates.retain(|(_, signature, _, _)| {
+            seen.insert((signature.source_file, signature.source_decl))
+        });
+        let context = crate::assignable::TyCtx::new();
+        let maximal = candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (declared, _, _, _))| {
+                let (_, current, _, _) = &candidates[index];
+                let dominated = candidates.iter().enumerate().any(
+                    |(other_index, (other_declared, other, _, _))| {
+                        if index == other_index {
+                            return false;
+                        }
+                        let receiver_at_least = crate::assignable::is_subtype(
+                            &context,
+                            self,
+                            *other_declared,
+                            *declared,
+                        );
+                        let receiver_reverse = crate::assignable::is_subtype(
+                            &context,
+                            self,
+                            *declared,
+                            *other_declared,
+                        );
+                        let (shape_at_least, shape_reverse) = if expected.is_some() {
+                            (
+                                self.callable_ref_shape_at_least_as_specific(
+                                    &other.params,
+                                    other.ret,
+                                    &current.params,
+                                    current.ret,
+                                ),
+                                self.callable_ref_shape_at_least_as_specific(
+                                    &current.params,
+                                    current.ret,
+                                    &other.params,
+                                    other.ret,
+                                ),
+                            )
+                        } else {
+                            let same_parameters = other.params == current.params;
+                            (same_parameters, same_parameters)
+                        };
+                        receiver_at_least && shape_at_least && !(receiver_reverse && shape_reverse)
+                    },
+                );
+                (!dominated).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        match maximal.as_slice() {
+            [selected] => {
+                let (_, signature, target, owner) = &candidates[*selected];
+                BoundSourceExtensionRef::Selected {
+                    signature,
+                    target: Box::new(target.clone()),
+                    owner: *owner,
+                }
+            }
+            _ => BoundSourceExtensionRef::Ambiguous(
+                maximal
+                    .into_iter()
+                    .map(|index| (candidates[index].0, candidates[index].1))
+                    .collect(),
+            ),
+        }
+    }
+
+    fn callable_ref_parameters(params: &[Ty], names: &[String]) -> String {
+        params
+            .iter()
+            .enumerate()
+            .map(|(index, parameter)| {
+                let name = names
+                    .get(index)
+                    .filter(|name| !name.is_empty())
+                    .map_or("_", String::as_str);
+                format!("{name}: {}", parameter.source_name())
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn source_extension_ref_candidate(name: &str, receiver: Ty, signature: &Signature) -> String {
+        let parameters = Self::callable_ref_parameters(&signature.params, &signature.param_names);
+        format!(
+            "fun {}.{name}({parameters}): {}",
+            receiver.source_name(),
+            signature.ret.source_name()
+        )
+    }
+
+    fn toplevel_source_ref_candidate(
+        name: &str,
+        function: &crate::libraries::FunctionInfo,
+    ) -> String {
+        let parameters = Self::callable_ref_parameters(
+            &function.callable.params,
+            &function.call_sig.param_names,
+        );
+        format!(
+            "fun {name}({parameters}): {}",
+            function.callable.ret.source_name()
+        )
+    }
+
+    fn selected_toplevel_source_ref(
+        &mut self,
+        expression: ExprId,
+        name: &str,
+        expected: &'static crate::types::FnSig,
+    ) -> Option<Ty> {
+        if expected.suspend {
+            return None;
+        }
+        let mut inaccessible = false;
+        let mut accessible_source = false;
+        let mut candidates = self
+            .resolver()
+            .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|function| {
+                let (file, _) = function.source_key?;
+                if function.kind != crate::libraries::FnKind::TopLevel || function.flags.suspend {
+                    return None;
+                }
+                let accessible = matches!(
+                    function.visibility,
+                    Visibility::Public | Visibility::Internal
+                ) || file == self.file_index;
+                if !accessible {
+                    inaccessible = true;
+                    return None;
+                }
+                accessible_source = true;
+                if function.call_sig.vararg
+                    || !function
+                        .call_sig
+                        .requires_all_args(function.callable.params.len())
+                {
+                    return None;
+                }
+                if function.callable.ret == Ty::Nothing
+                    || !self.callable_ref_is_compatible(
+                        &function.callable.params,
+                        function.callable.ret,
+                        expected,
+                        true,
+                    )
+                {
+                    return None;
+                }
+                Some(function)
+            })
+            .collect::<Vec<_>>();
+        if candidates.is_empty() && inaccessible && !accessible_source {
+            self.diags.error(
+                self.member_name_span(expression, name),
+                format!("cannot access '{name}': it is private in its file"),
+            );
+            return Some(Ty::Error);
+        }
+        let mut seen = std::collections::HashSet::new();
+        candidates.retain(|candidate| seen.insert(candidate.source_key));
+        let maximal = candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(index, current)| {
+                let dominated = candidates.iter().enumerate().any(|(other_index, other)| {
+                    index != other_index
+                        && self.callable_ref_shape_at_least_as_specific(
+                            &other.callable.params,
+                            other.callable.ret,
+                            &current.callable.params,
+                            current.callable.ret,
+                        )
+                        && !self.callable_ref_shape_at_least_as_specific(
+                            &current.callable.params,
+                            current.callable.ret,
+                            &other.callable.params,
+                            other.callable.ret,
+                        )
+                });
+                (!dominated).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let [selected_index] = maximal.as_slice() else {
+            if maximal.is_empty() {
+                return None;
+            }
+            let mut message = "overload resolution ambiguity between candidates:".to_string();
+            for index in maximal {
+                message.push('\n');
+                message.push_str(&Self::toplevel_source_ref_candidate(
+                    name,
+                    &candidates[index],
+                ));
+            }
+            self.diags
+                .error(self.member_name_span(expression, name), message);
+            return Some(Ty::Error);
+        };
+        let selected = &candidates[*selected_index];
+        let (source_file, source_declaration) = selected.source_key?;
+        let owner = if source_file == self.file_index {
+            None
+        } else {
+            Some(
+                self.syms
+                    .fn_facades_by_decl
+                    .get(&(source_file, source_declaration))
+                    .copied()
+                    .or(match selected.callable.origin {
+                        crate::libraries::Origin::Module { facade } => Some(facade),
+                        _ => None,
+                    })?,
+            )
+        };
+        self.expr_lowers.insert(
+            expression,
+            ExprLowering::ModuleFunctionRef {
+                target: Box::new(selected.callable.clone()),
+                owner,
+            },
+        );
+        Some(Ty::fun(expected.params.clone(), expected.ret))
     }
 
     fn resolver_in_scope<'s>(
@@ -16350,9 +16716,7 @@ impl<'a> Checker<'a> {
                     let arity = if bound { margs } else { margs + 1 };
                     return self.set(e, Ty::fun(vec![obj; arity as usize], ret));
                 }
-                // Top-level function reference `::foo` → `Fun(params, ret)` of that function. Only an
-                // UNAMBIGUOUS (single-overload) name resolves here; an overloaded `::foo` needs an
-                // expected function type to disambiguate, which krusty doesn't model.
+                // A top-level reference without an expected type requires a unique overload.
                 if receiver.is_none() {
                     // Local function reference `::localFun` (shadows a same-named top-level fn). Map the
                     // ref to the local fun's decl — the SAME map a local-fun CALL uses — so lowering can
@@ -16380,6 +16744,11 @@ impl<'a> Checker<'a> {
                     // `name`) while the provider marks it callable-like for function-typed positions.
                     if let Some((_, is_var, _)) = self.syms.props.get(&name) {
                         if let Some(ty) = self.property_ref_ty(0, *is_var) {
+                            return self.set(e, ty);
+                        }
+                    }
+                    if let Some(Ty::Fun(expected)) = expected {
+                        if let Some(ty) = self.selected_toplevel_source_ref(e, &name, expected) {
                             return self.set(e, ty);
                         }
                     }
@@ -16678,18 +17047,50 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    if let Some(sig) = self.unique_visible_source_extension(rty, &name).cloned() {
-                        if sig.requires_all_args() {
-                            return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
+                    let expected_function = match expected {
+                        Some(Ty::Fun(function)) => Some(function),
+                        _ => None,
+                    };
+                    match self.selected_bound_source_extension_ref(rty, &name, expected_function) {
+                        BoundSourceExtensionRef::Selected {
+                            signature,
+                            target,
+                            owner,
+                        } => {
+                            let function_ty = expected_function.map_or_else(
+                                || Ty::fun(signature.params.clone(), signature.ret),
+                                Ty::Fun,
+                            );
+                            self.expr_lowers
+                                .insert(e, ExprLowering::ModuleBoundExtensionRef { target, owner });
+                            return self.set(e, function_ty);
                         }
-                        // ADAPTED bound extension reference (`C(..)::extensionVararg` → `(Int) -> Unit`):
-                        // expose the minimum-arity prefix; the lowerer synthesizes an adapter that fills
-                        // the omitted default/vararg parameters via the extension's `$default` stub.
+                        BoundSourceExtensionRef::Ambiguous(candidates) => {
+                            let mut message =
+                                "overload resolution ambiguity between candidates:".to_string();
+                            for (receiver, candidate) in candidates {
+                                message.push('\n');
+                                message.push_str(&Self::source_extension_ref_candidate(
+                                    &name, receiver, candidate,
+                                ));
+                            }
+                            self.diags.error(self.member_name_span(e, &name), message);
+                            return self.set(e, Ty::Error);
+                        }
+                        BoundSourceExtensionRef::Inaccessible => {
+                            self.diags.error(
+                                self.member_name_span(e, &name),
+                                format!("cannot access '{name}': it is private in its file"),
+                            );
+                            return self.set(e, Ty::Error);
+                        }
+                        BoundSourceExtensionRef::None => {}
+                    }
+                    if let Some(sig) = self.unique_visible_source_extension(rty, &name).cloned() {
                         let min_arity =
                             adapted_ref_arity(sig.vararg(), sig.required, sig.params.len());
                         if min_arity < sig.params.len() && sig.params.len() <= 31 {
-                            let adapted: Vec<Ty> = sig.params[..min_arity].to_vec();
-                            return self.set(e, Ty::fun(adapted, sig.ret));
+                            return self.set(e, Ty::fun(sig.params[..min_arity].to_vec(), sig.ret));
                         }
                     }
                     if let Ok(Some(property)) = self.visible_source_extension_property(rty, &name) {

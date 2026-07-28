@@ -926,6 +926,22 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
             "inline fun <T> T.acceptsNullable(block: () -> Unit): Boolean { block(); return this == null }\n\
              fun unboundedGenericNullableReceiver(value: String?): Boolean = value.acceptsNullable { }\n",
         ),
+        (
+            "BoundExtensionOverloadReference.kt",
+            "interface Parser\n\
+             interface JsonParser : Parser\n\
+             fun JsonParser.decode(source: String): Any = source\n\
+             fun Parser.decode(source: String): Any = source\n\
+             fun Parser.decode(value: Int): Any = value\n\
+             fun consume(decode: (String) -> Any) {}\n\
+             fun validBoundReference(parser: JsonParser) { consume(parser::decode) }\n",
+        ),
+        (
+            "TopLevelOverloadReference.kt",
+            "fun select(value: Int, marker: Any): Int = value\n\
+             fun select(value: Any, marker: Int): Int = marker\n\
+             fun validTopLevelReference(): (Int, Any) -> Unit = ::select\n",
+        ),
     ];
     let token_cases = [
         (

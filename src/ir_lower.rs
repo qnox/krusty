@@ -18893,6 +18893,38 @@ impl<'a> Lower<'a> {
                         );
                     }
                 }
+                if let Some(ExprLowering::ModuleBoundExtensionRef { target, owner }) =
+                    self.info.expr_lowers.get(&e).cloned()
+                {
+                    let (Some(recv), Ty::Fun(signature)) = (receiver, self.info.ty(e)) else {
+                        return None;
+                    };
+                    if target.params.len() != signature.params.len() + 1
+                        || signature.ret == Ty::Nothing
+                    {
+                        return None;
+                    }
+                    let receiver_ty = self.info.ty(recv);
+                    let capture = self.expr(recv)?;
+                    let capture =
+                        self.coerce_argument_value(capture, receiver_ty, Ty::obj("kotlin/Any"))?;
+                    return self.make_func_ref(
+                        e.0,
+                        true,
+                        signature.params.len() as u8,
+                        owner,
+                        name.clone(),
+                        1,
+                        crate::ir::FrDispatch::StaticBound,
+                        owner,
+                        target.name,
+                        false,
+                        tys_to_ir(&signature.params),
+                        ty_to_ir(signature.ret),
+                        Some(capture),
+                        Some((tys_to_ir(&target.params), ty_to_ir(target.physical_ret))),
+                    );
+                }
                 if let Some(ExprLowering::ModuleFunctionRef { target, owner }) =
                     self.info.expr_lowers.get(&e).cloned()
                 {
