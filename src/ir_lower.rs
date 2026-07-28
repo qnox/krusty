@@ -11456,6 +11456,7 @@ impl<'a> Lower<'a> {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
+        self.ir.lambda_own_params_from.insert(adapter_fid, 0);
         Some(self.ir.add_expr(IrExpr::Lambda {
             impl_fn: adapter_fid,
             arity: n as u8,
@@ -11469,41 +11470,62 @@ impl<'a> Lower<'a> {
     fn lower_adapted_ref(
         &mut self,
         e: AstExprId,
-        name: &str,
-        target_params: &[Ty],
+        target: &crate::libraries::LibraryCallable,
+        owner: Option<TypeName>,
+        target_default_values: &[Option<CtorDefaultValue>],
         adapted_params: &[Ty],
         ret: Ty,
         vararg_tail: bool,
         target_vararg: bool,
     ) -> Option<u32> {
+        let name = target.name.as_str();
+        let target_params = target.params.as_slice();
         let (n, m) = (adapted_params.len(), target_params.len());
-        let fid = *self
-            .fun_ids
-            .get(&(name.to_string(), target_params.to_vec()))?;
-        // The adapter's own N params fill the retained slots (`GetValue(0..N-1)`).
+        let fid = owner
+            .is_none()
+            .then(|| {
+                self.fun_ids
+                    .get(&(name.to_string(), target_params.to_vec()))
+                    .copied()
+            })
+            .flatten();
         let mut a: Vec<u32> = Vec::with_capacity(m + 2);
         for k in 0..n {
-            a.push(self.emit_get_value(k as u32));
+            let value = self.emit_get_value(k as u32);
+            a.push(self.coerce_argument_value(value, adapted_params[k], target_params[k])?);
         }
         let dcall = if n == m {
-            // No dropped parameters (a pure return coercion): a plain full-arity call.
-            self.emit_local_call(fid, a)
+            match (fid, owner) {
+                (Some(fid), _) => self.emit_local_call(fid, a),
+                (None, Some(facade)) => self.emit_cross_file_call(
+                    facade,
+                    name.to_string(),
+                    target_params.to_vec(),
+                    target.physical_ret,
+                    a,
+                ),
+                _ => return None,
+            }
         } else if vararg_tail {
-            // A single dropped trailing `vararg`: pass an EMPTY array of its element type and call the
-            // target directly (no `$default`). `target_params[m-1]` is the vararg's ARRAY type.
             a.push(self.empty_array(ty_to_ir(target_params[m - 1])));
-            self.emit_local_call(fid, a)
-        } else {
-            // Trailing DEFAULTS: `foo$default(retained…, <placeholder>…, mask, null)` — each dropped slot
-            // gets a zero placeholder and its mask bit; the marker is null.
+            match (fid, owner) {
+                (Some(fid), _) => self.emit_local_call(fid, a),
+                (None, Some(facade)) => self.emit_cross_file_call(
+                    facade,
+                    name.to_string(),
+                    target_params.to_vec(),
+                    target.physical_ret,
+                    a,
+                ),
+                _ => return None,
+            }
+        } else if let Some(fid) = fid {
             if !crate::ir::toplevel_default_stub_safe(&self.ir, fid) {
                 return None;
             }
             let mut omitted = Vec::new();
             for (k, &pt) in target_params.iter().enumerate().skip(n) {
                 if k == m - 1 && target_vararg {
-                    // The dropped trailing vararg gets an EMPTY array and NO mask bit (passed through by
-                    // `$default`, not filled from the mask).
                     a.push(self.empty_array(ty_to_ir(pt)));
                 } else {
                     omitted.push(k);
@@ -11512,19 +11534,45 @@ impl<'a> Lower<'a> {
             }
             self.append_default_masks_marker(&mut a, m, omitted);
             self.emit_local_default_call(fid, a)
+        } else if let Some(facade) = owner {
+            for (k, &pt) in target_params.iter().enumerate().skip(n) {
+                if k == m - 1 && target_vararg {
+                    a.push(self.empty_array(ty_to_ir(pt)));
+                    continue;
+                }
+                let default = target_default_values.get(k)?.as_ref()?;
+                if !default.fills_param_ty(pt) {
+                    return None;
+                }
+                a.push(ctor_default_to_ir(&mut self.ir, self.runtime, default)?);
+            }
+            self.emit_cross_file_call(
+                facade,
+                name.to_string(),
+                target_params.to_vec(),
+                target.physical_ret,
+                a,
+            )
+        } else {
+            return None;
         };
-        // A `Unit`-returning invoke (a coercion, or the target itself returns `Unit`) yields the `Unit`
-        // SINGLETON — a `kotlin/Unit` object, not `void` — to match the `FunctionN.invoke` SAM: run the
-        // call as a statement (its value, if any, discarded) and return `Unit.INSTANCE`. Otherwise return
-        // the call's result directly. `coerce_unit` ⇒ `ret == Unit`; a target that already returns `Unit`
-        // takes the same singleton path.
         let unit_return = ret == Ty::Unit;
         let body = if unit_return {
             let unit = self.emit_unit();
             let ret_e = self.emit_return(Some(unit));
             self.emit_block(vec![dcall, ret_e], None)
         } else {
-            let ret_e = self.emit_return(Some(dcall));
+            let value = if self.value_class_underlying(target.ret.non_null()).is_some()
+                && ir_type_is_reference(&ret)
+            {
+                let boxed_ty = Ty::nullable(target.ret);
+                let boxed =
+                    self.emit_type_op(IrTypeOp::ImplicitCoercion, dcall, ty_to_ir(boxed_ty));
+                self.coerce_argument_value(boxed, boxed_ty, ret)?
+            } else {
+                self.coerce_argument_value(dcall, target.ret, ret)?
+            };
+            let ret_e = self.emit_return(Some(value));
             self.emit_block(vec![ret_e], None)
         };
         let adapter_ret = ty_to_ir(stored_value_ty(ret));
@@ -11537,6 +11585,7 @@ impl<'a> Lower<'a> {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
+        self.ir.lambda_own_params_from.insert(adapter_fid, 0);
         Some(self.ir.add_expr(IrExpr::Lambda {
             impl_fn: adapter_fid,
             arity: n as u8,
@@ -18907,23 +18956,21 @@ impl<'a> Lower<'a> {
                         object_internal,
                     );
                 }
-                // An ADAPTED same-file top-level function reference (`::foo` with trailing defaults passed
-                // where a shorter function type is expected): synthesize an arity-matching adapter that
-                // calls `foo`'s `$default` stub.
                 if let Some(ExprLowering::AdaptedRef {
-                    name: tname,
-                    target_params,
+                    target,
+                    owner,
+                    target_default_values,
                     adapted_params,
                     ret,
                     vararg_tail,
                     target_vararg,
-                    coerce_unit: _,
                 }) = self.info.expr_lowers.get(&e).cloned()
                 {
                     return self.lower_adapted_ref(
                         e,
-                        &tname,
-                        &target_params,
+                        &target,
+                        owner,
+                        &target_default_values,
                         &adapted_params,
                         ret,
                         vararg_tail,

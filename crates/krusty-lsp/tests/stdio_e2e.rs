@@ -357,6 +357,41 @@ fn stdio_server_accepts_expected_type_selected_callable_reference_overloads() {
 }
 
 #[test]
+fn stdio_server_accepts_adapted_callable_reference_during_generic_inference() {
+    let diagnostics = diagnostics_after_open(
+        &[],
+        "file:///generic-adapted-callable.kt",
+        "fun foo(x: String, y: Char = 'K'): String = x + y\n\
+         fun <T, U> call(f: (T) -> U, x: T): U = f(x)\n\
+         fun value(): String = call(::foo, \"O\")",
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn stdio_server_reports_inapplicable_generic_adapted_reference_on_the_name() {
+    let diagnostics = diagnostics_after_open(
+        &[],
+        "file:///inapplicable-generic-adapted-callable.kt",
+        "fun <T> applySame(block: (T) -> T, value: T): T = block(value)\n\
+         fun mismatched(x: String, suffix: Char = 'K'): Int = x.length + suffix.code\n\
+         fun bad(): Any = applySame(::mismatched, \"O\")",
+    );
+    assert_eq!(
+        diagnostics,
+        vec![json!({
+            "range": {
+                "start": {"line": 2, "character": 29},
+                "end": {"line": 2, "character": 39}
+            },
+            "severity": 1,
+            "source": "Kotlin",
+            "message": "Inapplicable candidate(s): fun mismatched(x: String, suffix: Char = ...): Int"
+        })]
+    );
+}
+
+#[test]
 fn stdio_server_reports_official_callable_reference_ambiguity_on_the_name() {
     let diagnostics = diagnostics_after_open(
         &[],

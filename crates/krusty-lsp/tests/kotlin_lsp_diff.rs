@@ -942,6 +942,12 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
              fun select(value: Any, marker: Int): Int = marker\n\
              fun validTopLevelReference(): (Int, Any) -> Unit = ::select\n",
         ),
+        (
+            "GenericExpectedTypeAdaptedReference.kt",
+            "fun adaptedTarget(x: String, y: Char = 'K'): String = x + y\n\
+             fun <T, U> applyAdapted(block: (T) -> U, value: T): U = block(value)\n\
+             fun validGenericAdaptedReference(): String = applyAdapted(::adaptedTarget, \"O\")\n",
+        ),
     ];
     let token_cases = [
         (
