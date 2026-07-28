@@ -135,7 +135,8 @@ fn parse_type_gsig_node(
                 .unwrap_or_else(|| Ty::obj("kotlin/Any"));
             Ty::ty_param(n, bound)
         })?
-    } else if let Some(id) = tpn_id {
+    } else {
+        let id = tpn_id?;
         resolve_string(records, d2, id as usize).map(|s| {
             let bound = bounds
                 .get(&s)
@@ -143,8 +144,6 @@ fn parse_type_gsig_node(
                 .unwrap_or_else(|| Ty::obj("kotlin/Any"));
             Ty::ty_param(&s, bound)
         })?
-    } else {
-        return None;
     };
     Some(if nested && nullable && matches!(ty, Ty::TyParam(..)) {
         Ty::nullable(ty)

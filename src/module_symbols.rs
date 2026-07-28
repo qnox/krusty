@@ -118,10 +118,11 @@ impl<'a> ModuleSymbols<'a> {
             crate::libraries::TypeKind::Class
         };
         let enum_entries = enum_entries.unwrap_or_default();
-        let sealed_subclasses = c
-            .is_sealed()
-            .then(|| self.syms.subclass_names_of(c.internal_name()).into())
-            .unwrap_or_default();
+        let sealed_subclasses = if c.is_sealed() {
+            self.syms.subclass_names_of(c.internal_name()).into()
+        } else {
+            Default::default()
+        };
         LibraryType {
             is_public: c.visibility == Visibility::Public,
             kind,

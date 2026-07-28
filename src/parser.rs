@@ -776,7 +776,8 @@ fn scope_local_classes(file: &mut File, script_scope: Option<u64>) {
     // untouched (so its type-annotation references keep resolving). Only a name declared more than once
     // (across bodies) collides — those were already rejected ("conflicting declarations"), so renaming
     // them is safe: a construction-only use now compiles, a type-annotation use still skips.
-    let mut body_subtrees: Vec<(Vec<String>, Vec<ExprId>, Vec<StmtId>, bool)> = Vec::new();
+    type BodySubtree = (Vec<String>, Vec<ExprId>, Vec<StmtId>, bool);
+    let mut body_subtrees: Vec<BodySubtree> = Vec::new();
     let mut file_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     for (root, params, force_unique) in roots {

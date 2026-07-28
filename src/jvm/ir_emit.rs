@@ -3338,7 +3338,7 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str, opts: &EmitOptions)
     let (getter_params, getter_ret) =
         parse_physical_method_desc(&getter_desc).expect("validated property getter descriptor");
     let getter_ret = ir_ty_to_jvm(&getter_ret);
-    let signature = format!("{}{}", pr.getter_name, &getter_desc);
+    let signature = format!("{}{}", pr.getter_name, getter_desc);
     let reflection_owner = ext.as_deref().unwrap_or(&owner_internal);
 
     // `<init>()V`: super(owner.class, "name", "getName()desc", 0).
@@ -3443,7 +3443,7 @@ fn emit_bound_prop_ref_class(
     let (getter_params, getter_ret) =
         parse_physical_method_desc(&getter_desc).expect("validated property getter descriptor");
     let getter_ret = ir_ty_to_jvm(&getter_ret);
-    let signature = format!("{}{}", pr.getter_name, &getter_desc);
+    let signature = format!("{}{}", pr.getter_name, getter_desc);
     let reflection_owner = ext.as_deref().unwrap_or(&owner_internal);
 
     // `<init>(Object)V`: super(receiver, owner.class, name, "getName()desc", 0).

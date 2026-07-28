@@ -867,10 +867,8 @@ impl Resolver<'_> {
                 if (self.resolve)(&cand) {
                     return Some(cand);
                 }
-                match cand.rfind('/') {
-                    Some(i) => cand.replace_range(i..=i, "$"),
-                    None => return None,
-                }
+                let i = cand.rfind('/')?;
+                cand.replace_range(i..=i, "$");
             }
         }
         if let Some((_, full)) = self.ctx.imports.iter().find(|(s, _)| s == name) {
