@@ -19,6 +19,14 @@ pub enum Severity {
     Warning,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DiagnosticKind {
+    #[default]
+    Compiler,
+    IncompatibleEquality,
+    Inspection,
+}
+
 #[derive(Clone, Debug)]
 pub struct Diagnostic {
     /// Compiler-facing source range.
@@ -26,6 +34,7 @@ pub struct Diagnostic {
     /// Optional editor-facing source range.
     pub editor_span: Option<Span>,
     pub severity: Severity,
+    pub kind: DiagnosticKind,
     pub msg: String,
     /// Index of the source file this diagnostic belongs to (into the driver's `files`/`sources`
     /// lists). Diagnostics are produced one file at a time, so the sink stamps each with the file
@@ -61,10 +70,15 @@ impl DiagSink {
     }
 
     pub fn error(&mut self, span: Span, msg: impl Into<String>) {
+        self.error_kind(span, DiagnosticKind::Compiler, msg);
+    }
+
+    pub fn error_kind(&mut self, span: Span, kind: DiagnosticKind, msg: impl Into<String>) {
         self.diags.push(Diagnostic {
             span,
             editor_span: None,
             severity: Severity::Error,
+            kind,
             msg: msg.into(),
             file: self.current_file,
         });
@@ -80,6 +94,7 @@ impl DiagSink {
             span,
             editor_span: Some(editor_span),
             severity: Severity::Error,
+            kind: DiagnosticKind::Compiler,
             msg: msg.into(),
             file: self.current_file,
         });

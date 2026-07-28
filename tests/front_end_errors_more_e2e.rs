@@ -231,8 +231,22 @@ fn integer_literal_out_of_int_range() {
 
 #[test]
 fn equality_between_incompatible_types() {
-    let d = diags("fun box(): Int { val b = 1 == \"s\"; return 0 }");
+    let d = diags("fun result(): Boolean = 1 == \"text\"");
     assert_rejected(&d, "== between an Int and a String");
+    assert_eq!(
+        d,
+        vec!["operator '==' cannot be applied to 'Int' and 'String'.".to_string()]
+    );
+}
+
+#[test]
+fn inequality_between_incompatible_types() {
+    let d = diags("fun result(): Boolean = 1 != \"text\"");
+    assert_rejected(&d, "!= between an Int and a String");
+    assert_eq!(
+        d,
+        vec!["operator '!=' cannot be applied to 'Int' and 'String'.".to_string()]
+    );
 }
 
 #[test]

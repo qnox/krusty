@@ -4020,6 +4020,7 @@ mod tests {
                             span: Span::new(0, source.len() as u32),
                             editor_span: None,
                             severity: Severity::Error,
+                            kind: krusty::diag::DiagnosticKind::Compiler,
                             msg: "bad document".to_string(),
                             file: 0,
                         }]
@@ -4110,6 +4111,7 @@ mod tests {
                             span: Span::new(5, 8),
                             editor_span: None,
                             severity: Severity::Error,
+                            kind: krusty::diag::DiagnosticKind::Compiler,
                             msg: "bad document".to_string(),
                             file: 0,
                         }]
