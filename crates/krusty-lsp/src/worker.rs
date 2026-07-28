@@ -708,11 +708,12 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
                 let response = crate::dependency_sources::render::materialize(
                     &default_classpath,
                     &materialize.reference.fqn,
+                    &materialize.reference.member_name,
+                    &materialize.reference.member_desc,
                     materialize.use_sources,
                 )
                 .map(|source| {
                     let (text, span) = source.into_text_and_span(
-                        &materialize.reference.fqn,
                         &materialize.reference.member_name,
                         &materialize.reference.member_desc,
                     );
