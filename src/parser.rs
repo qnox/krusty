@@ -317,7 +317,7 @@ fn modality_from_modifiers(modifiers: &[String]) -> crate::ast::Modality {
     )
 }
 
-/// A non-nullable, non-generic type reference to a simple type name (for a literal-inferred local).
+/// A non-nullable, non-generic type reference.
 fn simple_type_ref(name: &str, span: crate::diag::Span) -> TypeRef {
     TypeRef {
         name: name.to_string(),
@@ -953,6 +953,7 @@ fn fixup_parenless_base_classes(file: &mut File) {
             _ => None,
         })
         .collect();
+    let mut detached = Vec::new();
     for d in file.decl_arena.iter_mut() {
         if let Decl::Class(c) = d {
             if c.has_primary_ctor || c.base_class.is_some() {
@@ -973,11 +974,13 @@ fn fixup_parenless_base_classes(file: &mut File) {
                 .position(|s| base_candidates.contains(&s.name))
             {
                 let base = c.supertypes.remove(pos);
+                detached.push(base.clone());
                 c.base_class = Some(base.name);
                 c.base_type_args = base.targs;
             }
         }
     }
+    file.detached_type_refs.extend(detached);
 }
 
 /// Expand the file's FUNCTION-type aliases (`typealias L = (A) -> R`) structurally: every `TypeRef`
@@ -1431,6 +1434,7 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::KwImport => {
                     self.bump(); // 'import'
+                    let import_span = self.tok().span;
                     let mut fq = self.parse_qualified_name();
                     // `import a.b.*` — `parse_qualified_name` consumes the trailing `.` (it only keeps a
                     // segment when an `Ident` follows), leaving us at `*`. Recover the wildcard so it is
@@ -1448,6 +1452,11 @@ impl<'a> Parser<'a> {
                         }
                     }
                     if !fq.is_empty() {
+                        if !fq.ends_with(".*") {
+                            self.file
+                                .detached_type_refs
+                                .push(simple_type_ref(&fq, import_span));
+                        }
                         if let Some(alias) = alias {
                             self.file.import_aliases.push((alias, fq.clone()));
                         }
@@ -1975,7 +1984,13 @@ impl<'a> Parser<'a> {
             self.bump(); // ':'
             use_site = true;
         }
+        let annotation_span = self.tok().span;
         let qname = self.parse_qualified_name();
+        if !qname.is_empty() {
+            self.file
+                .detached_type_refs
+                .push(simple_type_ref(&qname, annotation_span));
+        }
         self.parse_type_args(); // `@Foo<Bar>` (rare) — real type-arg parse
         let args = self.parse_annotation_args();
         // A `@file:Foo(args)` annotation applies to the file, not the next declaration — record it for
@@ -2499,6 +2514,7 @@ impl<'a> Parser<'a> {
             self.parse_supertypes();
         *base = b;
         *base_args = b_args;
+        self.file.detached_type_refs.extend(ifaces.iter().cloned());
         // The companion's supertype list keeps bare names (it has no generic-signature needs yet).
         *supertypes = ifaces.into_iter().map(|t| t.name).collect();
         self.skip_newlines();
@@ -3862,6 +3878,9 @@ impl<'a> Parser<'a> {
                         self.skip_newlines();
                     }
                     self.expect(TokenKind::RParen, "')'");
+                    let mut reference = simple_type_ref(&name, sup_span);
+                    reference.targs = targs.clone();
+                    self.file.detached_type_refs.push(reference);
                     base = Some(effective.clone());
                     base_type_args = targs;
                     if arg_names.iter().any(|n| n.is_some()) {
@@ -4454,7 +4473,13 @@ impl<'a> Parser<'a> {
         let mut type_anns = Vec::new();
         while self.at(TokenKind::At) {
             self.bump(); // '@'
+            let annotation_span = self.tok().span;
             let qname = self.parse_qualified_name();
+            if !qname.is_empty() {
+                self.file
+                    .detached_type_refs
+                    .push(simple_type_ref(&qname, annotation_span));
+            }
             self.parse_type_args(); // `@Foo<Bar>` — type arguments on the annotation
                                     // An argument-bearing type annotation `@Ann("a") String`. A following `(` is annotation
                                     // args ONLY if it is NOT the parameter list of a function type — `@Composable () -> Unit`

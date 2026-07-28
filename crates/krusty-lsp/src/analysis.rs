@@ -1964,7 +1964,7 @@ mod tests {
 
     #[test]
     fn classpath_types_constructors_and_members_have_library_targets() {
-        let classpath = std::rc::Rc::new(krusty::toolchain::stdlib_classpath());
+        let classpath = krusty::toolchain::stdlib_classpath();
         if classpath.scan_types().is_empty() {
             return;
         }
@@ -1972,6 +1972,29 @@ mod tests {
             "import kotlin.text.Regex\n",
             "fun use(input: Regex): Regex = Regex(input.pattern)\n",
         );
+        let analysis = document_analysis_for(source);
+
+        let type_offset = source.find("input: Regex").unwrap() as u32 + "input: ".len() as u32;
+        let constructor_offset = source.rfind("Regex(").unwrap() as u32;
+        let member_offset = source.find("pattern").unwrap() as u32;
+        for offset in [type_offset, constructor_offset] {
+            let reference = analysis
+                .library_definitions
+                .get(offset)
+                .expect("classpath type target");
+            assert_eq!(reference.fqn, "kotlin/text/Regex");
+            assert!(reference.member_name.is_empty());
+        }
+        let member = analysis
+            .library_definitions
+            .get(member_offset)
+            .expect("classpath member target");
+        assert_eq!(member.fqn, "kotlin/text/Regex");
+        assert!(!member.member_name.is_empty());
+    }
+
+    fn document_analysis_for(source: &str) -> DocumentAnalysis {
+        let classpath = std::rc::Rc::new(krusty::toolchain::stdlib_classpath());
         let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
         let mut frontend = crate::compiler_analysis::analyze_source_set(&[source], platform);
         let highlights = HighlightSymbols::from_source_set(&frontend.files, &frontend.symbols);
@@ -1992,32 +2015,124 @@ mod tests {
             &signatures,
         );
         let file = frontend.files.remove(0);
-        let analysis = DocumentAnalysis::from_file_analysis(
-            source,
-            file,
-            0,
-            &indexes,
-            &mut AnalysisBudgets::new(),
-        )
-        .0;
+        DocumentAnalysis::from_file_analysis(source, file, 0, &indexes, &mut AnalysisBudgets::new())
+            .0
+    }
 
-        let type_offset = source.find("input: Regex").unwrap() as u32 + "input: ".len() as u32;
-        let constructor_offset = source.rfind("Regex(").unwrap() as u32;
-        let member_offset = source.find("pattern").unwrap() as u32;
-        for offset in [type_offset, constructor_offset] {
-            let reference = analysis
-                .library_definitions
-                .get(offset)
-                .expect("classpath type target");
-            assert_eq!(reference.fqn, "kotlin/text/Regex");
-            assert!(reference.member_name.is_empty());
+    #[test]
+    fn a_parenthesized_base_class_navigates_to_its_source_declaration() {
+        let source = concat!("open class Base\n", "class Derived : Base()\n");
+        let analysis = document_analysis_for(source);
+
+        let use_offset = source.rfind("Base").unwrap() as u32;
+        let target = analysis
+            .definitions
+            .get(use_offset)
+            .next()
+            .expect("parenthesized base class resolves to its declaration");
+        let declaration = source.find("Base").unwrap() as u32;
+        assert_eq!(target.span.lo, declaration);
+        assert_eq!(target.span.hi, declaration + "Base".len() as u32);
+    }
+
+    #[test]
+    fn a_parenless_base_class_navigates_to_its_source_declaration() {
+        let source = concat!(
+            "open class Base\n",
+            "class Derived : Base {\n",
+            "    constructor() : super()\n",
+            "}\n",
+        );
+        let analysis = document_analysis_for(source);
+
+        let use_offset = source.rfind("Base").unwrap() as u32;
+        let target = analysis
+            .definitions
+            .get(use_offset)
+            .next()
+            .expect("parenless base class resolves to its declaration");
+        assert_eq!(target.span.lo, source.find("Base").unwrap() as u32);
+    }
+
+    #[test]
+    fn a_classpath_base_class_has_a_library_target() {
+        let classpath = krusty::toolchain::stdlib_classpath();
+        if classpath.scan_types().is_empty() {
+            return;
         }
-        let member = analysis
+        let source = concat!(
+            "import kotlin.collections.AbstractMutableList\n",
+            "class Numbers : AbstractMutableList<Int>()\n",
+        );
+        let analysis = document_analysis_for(source);
+
+        let use_offset = source.rfind("AbstractMutableList").unwrap() as u32;
+        let reference = analysis
             .library_definitions
-            .get(member_offset)
-            .expect("classpath member target");
-        assert_eq!(member.fqn, "kotlin/text/Regex");
-        assert!(!member.member_name.is_empty());
+            .get(use_offset)
+            .expect("classpath base class target");
+        assert_eq!(reference.fqn, "kotlin/collections/AbstractMutableList");
+    }
+
+    #[test]
+    fn a_classpath_annotation_reference_has_a_library_target() {
+        let classpath = krusty::toolchain::stdlib_classpath();
+        if classpath.scan_types().is_empty() {
+            return;
+        }
+        let source = "@Deprecated(\"old\")\nfun stale(): Int = 1\n";
+        let analysis = document_analysis_for(source);
+
+        let use_offset = source.find("Deprecated").unwrap() as u32;
+        let reference = analysis
+            .library_definitions
+            .get(use_offset)
+            .expect("classpath annotation target");
+        assert_eq!(reference.fqn, "kotlin/Deprecated");
+    }
+
+    #[test]
+    fn a_classpath_import_name_has_a_library_target() {
+        let classpath = krusty::toolchain::stdlib_classpath();
+        if classpath.scan_types().is_empty() {
+            return;
+        }
+        let source = concat!(
+            "import kotlin.text.Regex\n",
+            "fun use(input: Regex): Int = input.pattern.length\n",
+        );
+        let analysis = document_analysis_for(source);
+
+        let use_offset = source.find("Regex").unwrap() as u32;
+        let reference = analysis
+            .library_definitions
+            .get(use_offset)
+            .expect("imported classpath type target");
+        assert_eq!(reference.fqn, "kotlin/text/Regex");
+    }
+
+    #[test]
+    fn unrelated_identifiers_do_not_inherit_classpath_type_targets() {
+        let classpath = krusty::toolchain::stdlib_classpath();
+        if classpath.scan_types().is_empty() {
+            return;
+        }
+        let source = concat!(
+            "import unrelated.Regex\n",
+            "fun consume(value: Int): Int = value\n",
+            "fun use(): Int = consume(Regex = 1)\n",
+        );
+        let analysis = document_analysis_for(source);
+
+        for offset in [
+            source.find("Regex").unwrap() as u32,
+            source.rfind("Regex").unwrap() as u32,
+        ] {
+            assert!(
+                analysis.library_definitions.get(offset).is_none(),
+                "an unrelated identifier must not resolve to kotlin.text.Regex"
+            );
+        }
     }
 
     fn decoded_tokens(index: &SemanticTokenIndex) -> Vec<(u32, u32, u32, u32, u32)> {

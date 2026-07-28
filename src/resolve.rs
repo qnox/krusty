@@ -9171,6 +9171,9 @@ fn check_file_at_impl(
         c.in_script_body = false;
         c.pop_local_funs();
     }
+    for reference in &file.detached_type_refs {
+        c.resolve_ty(reference);
+    }
     let Checker {
         expr_types,
         resolved_type_refs,
