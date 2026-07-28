@@ -231,6 +231,7 @@ impl<'a> ModuleSymbols<'a> {
                     .with_is_override(false)
                     .with_is_final(true)
                     .with_is_suspend(fi.flags.suspend),
+                vararg_index: fi.call_sig.vararg_index,
                 required: fi.call_sig.required,
                 param_defaults: fi.call_sig.param_defaults.clone(),
                 param_default_values: Vec::new(),
@@ -766,6 +767,7 @@ mod tests {
                 .with_is_override(false)
                 .with_is_final(false)
                 .with_is_suspend(false),
+            vararg_index: None,
             required: 0,
             param_defaults: vec![],
             param_default_values: vec![],
@@ -793,6 +795,7 @@ mod tests {
             ctor_params: vec![],
             ctor_param_shapes: vec![],
             ctor_param_names: vec![],
+            ctor_vararg: None,
             methods: HashMap::new(),
             flags: crate::resolve::ClassFlags::default(),
             inner_of: None,

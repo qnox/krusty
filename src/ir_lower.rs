@@ -21,7 +21,7 @@ use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
     IrEnumEntry, IrExpr, IrField, IrFile, IrFunction, IrTypeOp, IrfFlags,
 };
-use crate::libraries::{InlineKind, SemanticPlatform};
+use crate::libraries::{map_call_args, InlineKind, SemanticPlatform};
 use crate::names::{property_getter_name, property_setter_name};
 use crate::runtime::{
     CountedLoopInfo, PlatformAccessor, PlatformCtor, PlatformField, RuntimeCtor, RuntimeOp,
@@ -9889,13 +9889,7 @@ impl<'a> Lower<'a> {
         params
     }
 
-    /// Lower a (possibly named / defaulted) call's arguments into parameter-slot order. Returns
-    /// `(args, prelude)` where `prelude` is a list of temp-declaration statements that MUST run before the
-    /// call — non-empty only for a REORDERED named call with side-effecting arguments, whose Kotlin
-    /// source-order evaluation is realized by spilling each argument to a temp in source order and loading
-    /// the temps in slot order. The caller wraps the built call expression in `Block { stmts: prelude,
-    /// value: call }` so the temps live in the enclosing scope (a temp declared in a value-position
-    /// `Block` used AS an argument would be scoped away before a later argument reads it).
+    /// Lowers named and defaulted arguments in parameter order while preserving evaluation order.
     fn lower_args_defaulted(
         &mut self,
         call: AstExprId,
@@ -9907,73 +9901,33 @@ impl<'a> Lower<'a> {
         if args.len() > n {
             return None;
         }
-        // Place each argument into its parameter slot: a positional arg fills the next free position;
-        // a named arg (`x = …`) fills its named parameter. Unfilled slots take constant-literal
-        // defaults. (Arguments are evaluated in slot order — fine for the side-effect-free common case.)
         let names = self
             .afile
             .call_arg_names
             .get(&call.0)
             .cloned()
             .unwrap_or_default();
-        let mut slot: Vec<Option<AstExprId>> = vec![None; n];
-        let mut pos = 0;
-        // The slot each SOURCE-order argument lands in. Kotlin evaluates arguments in source order; this
-        // helper lowers them in slot order, so a named-argument call that REORDERS evaluation
-        // (`f(b = …, a = …)`) would run side effects out of order. Detect a non-monotonic placement and,
-        // if any reordered argument may have side effects, skip (proper source-order temp-spilling isn't
-        // modeled yet) — pure reordered arguments (const/name reads) are order-independent and proceed.
-        let mut arg_slot: Vec<usize> = Vec::with_capacity(args.len());
-        let mut seen_named = false;
-        for (i, &arg) in args.iter().enumerate() {
-            match names.get(i).and_then(|o| o.as_ref()) {
-                None => {
-                    if seen_named {
-                        // A TRAILING LAMBDA is the one positional argument allowed after named args — it
-                        // fills the LAST parameter. Only the final argument may be such.
-                        if i == args.len() - 1 && n > 0 && slot[n - 1].is_none() {
-                            slot[n - 1] = Some(arg);
-                            arg_slot.push(n - 1);
-                        } else {
-                            return None;
-                        }
-                    } else if i == args.len() - 1
-                        && n > 0
-                        && slot[n - 1].is_none()
-                        && self.afile.call_has_trailing_lambda.contains(&call.0)
-                    {
-                        // A SYNTACTIC trailing lambda always binds to the LAST parameter; any preceding
-                        // parameter left without a positional argument takes its default. So `host("x") {}`
-                        // on `host(a, modifier = d, builder)` fills `builder` (not `modifier`) and defaults
-                        // `modifier`. Without this, the lambda lands in the next free slot (`modifier`) and
-                        // the required `builder` is left unfilled → lowering bails.
-                        slot[n - 1] = Some(arg);
-                        arg_slot.push(n - 1);
-                    } else {
-                        if pos >= n {
-                            return None;
-                        }
-                        slot[pos] = Some(arg);
-                        arg_slot.push(pos);
-                        pos += 1;
-                    }
-                }
-                Some(nm) => {
-                    seen_named = true;
-                    let idx = param_meta.iter().position(|(name, _)| name == nm)?;
-                    if idx >= n || slot[idx].is_some() {
-                        return None;
-                    }
-                    slot[idx] = Some(arg);
-                    arg_slot.push(idx);
-                }
-            }
-        }
+        let param_names: Vec<String> = param_meta.iter().map(|(name, _)| name.clone()).collect();
+        let param_defaults: Vec<bool> = param_meta
+            .iter()
+            .map(|(_, default)| default.is_some())
+            .collect();
+        let slot = map_call_args(
+            args,
+            Some(&names),
+            &param_names,
+            n,
+            n,
+            &param_defaults,
+            None,
+            self.afile.call_has_trailing_lambda.contains(&call.0),
+        )
+        .ok()?;
+        let arg_slot: Vec<usize> = args
+            .iter()
+            .map(|argument| slot.iter().position(|slot| slot.as_ref() == Some(argument)))
+            .collect::<Option<_>>()?;
         let reordered = arg_slot.windows(2).any(|w| w[0] > w[1]);
-        // Whether the reordering moves a SIDE-EFFECTING argument out of source order. A pure argument
-        // (const literal / bare name read) is order-independent, so slot-order lowering is still correct
-        // (and byte-identical to before). The TRAILING LAMBDA is excluded: it is the last source argument
-        // AND fills the last slot, so it is never evaluated out of order.
         let needs_source_order = reordered
             && args.iter().enumerate().any(|(i, &a)| {
                 let is_trailing_lambda =
@@ -9998,8 +9952,7 @@ impl<'a> Lower<'a> {
             }
             return Some((a, Vec::new()));
         }
-        // Source-order spill: lower each source argument into a fresh temp in SOURCE order (the prelude),
-        // then load the temps in SLOT order for the call. The caller runs the prelude before the call.
+        // Spill reordered expressions before assembling arguments in parameter order.
         let mut slot_temp: Vec<Option<u32>> = vec![None; n];
         let mut prelude: Vec<u32> = Vec::new();
         for (i, &arg) in args.iter().enumerate() {
@@ -15737,6 +15690,7 @@ impl<'a> Lower<'a> {
                                     .with_is_override(false)
                                     .with_is_final(true)
                                     .with_is_suspend(false),
+                                vararg_index: None,
                                 required: params.len(),
                                 param_defaults: Vec::new(),
                                 param_default_values: Vec::new(),

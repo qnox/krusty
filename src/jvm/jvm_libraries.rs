@@ -764,7 +764,10 @@ impl JvmLibraries {
                 member_meta(jvm_name, value_arity)
                     .map(metadata::MetaFn::member_call_sig)
                     .unwrap_or_else(|| {
-                        CallSig::metadata_member(value_arity, Vec::new(), Vec::new(), jvm_vararg)
+                        let vararg_index = jvm_vararg
+                            .then_some(value_arity)
+                            .and_then(|arity| arity.checked_sub(1));
+                        CallSig::metadata_member(value_arity, Vec::new(), Vec::new(), vararg_index)
                     })
             };
             for m in &ci.methods {

@@ -1267,13 +1267,14 @@ impl MetaFn {
             self.value_params.len(),
             self.value_params.iter().map(|p| p.name.clone()).collect(),
             self.value_params.iter().map(|p| p.has_default()).collect(),
-            self.last_param_vararg(),
+            self.vararg_index(),
         )
     }
 
-    /// Only the LAST value parameter can be `vararg` in Kotlin.
-    pub fn last_param_vararg(&self) -> bool {
-        self.value_params.last().is_some_and(|p| p.vararg())
+    pub fn vararg_index(&self) -> Option<usize> {
+        self.value_params
+            .iter()
+            .position(|parameter| parameter.vararg())
     }
 
     pub fn extension_call_sig(&self) -> CallSig {
@@ -1281,7 +1282,7 @@ impl MetaFn {
             self.value_params.len() + 1,
             self.value_params.iter().map(|p| p.name.clone()).collect(),
             self.value_params.iter().map(|p| p.has_default()).collect(),
-            self.last_param_vararg(),
+            self.vararg_index(),
         )
     }
 }
@@ -1702,6 +1703,7 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<ParamList> {
                 let mut cp = Pb { b: cbody, i: 0 };
                 let mut names = Vec::new();
                 let mut defaults = Vec::new();
+                let mut vararg = None;
                 while !cp.at_end() {
                     let Some(ct) = cp.varint() else { break };
                     match (ct >> 3, ct & 7) {
@@ -1714,11 +1716,19 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<ParamList> {
                             let mut vp = Pb { b: vbody, i: 0 };
                             let mut nid = 0u64;
                             let mut vflags = 0u64;
+                            let mut is_vararg = false;
                             while !vp.at_end() {
                                 let Some(vt) = vp.varint() else { break };
                                 match (vt >> 3, vt & 7) {
                                     (1, 0) => vflags = vp.varint().unwrap_or(0), // ValueParameter.flags
                                     (2, 0) => nid = vp.varint().unwrap_or(0), // ValueParameter.name
+                                    (4, 2) => {
+                                        let Some(len) = vp.varint() else { break };
+                                        is_vararg = true;
+                                        if vp.bytes(len as usize).is_none() {
+                                            break;
+                                        }
+                                    }
                                     (_, w) => {
                                         if vp.skip(w).is_none() {
                                             break;
@@ -1730,6 +1740,9 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<ParamList> {
                                 resolve_string(records, d2, nid as usize).unwrap_or_default(),
                             );
                             defaults.push(vflags & DECLARES_DEFAULT_VALUE_BIT != 0);
+                            if is_vararg {
+                                vararg = Some(names.len() - 1);
+                            }
                         }
                         (_, w) => {
                             if cp.skip(w).is_none() {
@@ -1738,7 +1751,11 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<ParamList> {
                         }
                     }
                 }
-                out.push(ParamList { names, defaults });
+                out.push(ParamList {
+                    names,
+                    defaults,
+                    vararg,
+                });
             }
             (_, w) => {
                 if pb.skip(w).is_none() {

@@ -512,14 +512,198 @@ pub struct CallSig {
     pub platform_nullable_params: Vec<bool>,
     /// Minimum arguments a caller must supply (params beyond this have defaults). 0 by default.
     pub required: usize,
-    /// True if the last logical param is `vararg` (callers pack trailing args into its array).
+    /// True if a logical param is `vararg` (callers pack values into its array).
     pub vararg: bool,
+    pub vararg_index: Option<usize>,
 }
 
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct ParamList {
     pub names: Vec<String>,
     pub defaults: Vec<bool>,
+    pub vararg: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallArgMappingFailure {
+    pub errors: Vec<CallArgMappingError>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CallArgMappingError {
+    NoParameterNamed { name: String, argument: usize },
+    AlreadyPassed { argument: usize },
+    PositionalAfterNamed { argument: usize },
+    TooManyArguments { argument: usize, expected: usize },
+    TrailingLambdaOnVararg { argument: usize },
+    MissingRequired { name: String },
+}
+
+impl CallArgMappingError {
+    pub(crate) fn highlights_callee(&self) -> bool {
+        matches!(self, Self::MissingRequired { .. })
+    }
+}
+
+impl std::fmt::Display for CallArgMappingError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoParameterNamed { name, .. } => {
+                write!(formatter, "no parameter with name '{name}' found.")
+            }
+            Self::AlreadyPassed { .. } => {
+                formatter.write_str("argument already passed for this parameter.")
+            }
+            Self::PositionalAfterNamed { .. } => {
+                formatter.write_str(
+                    "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.",
+                )
+            }
+            Self::TooManyArguments { expected, .. } => {
+                write!(formatter, "too many arguments: expected at most {expected}")
+            }
+            Self::TrailingLambdaOnVararg { .. } => formatter.write_str(
+                "passing value as a vararg is allowed only inside a parenthesized argument list.",
+            ),
+            Self::MissingRequired { name } => {
+                write!(formatter, "no value passed for parameter '{name}'.")
+            }
+        }
+    }
+}
+
+pub fn map_call_args<T: Copy>(
+    args: &[T],
+    names: Option<&[Option<String>]>,
+    param_names: &[String],
+    parameter_count: usize,
+    required: usize,
+    param_defaults: &[bool],
+    vararg: Option<usize>,
+    trailing_lambda: bool,
+) -> Result<Vec<Option<T>>, CallArgMappingFailure> {
+    let mut slots = vec![None; parameter_count];
+    let mut positional = 0usize;
+    let mut seen_named = false;
+    let mut named_order_matches = true;
+    let mut errors = Vec::new();
+
+    for (argument_index, &argument) in args.iter().enumerate() {
+        match names
+            .and_then(|names| names.get(argument_index))
+            .and_then(Option::as_ref)
+        {
+            Some(name) => {
+                seen_named = true;
+                let Some(parameter_index) = param_names
+                    .iter()
+                    .take(parameter_count)
+                    .position(|parameter| parameter == name)
+                else {
+                    errors.push(CallArgMappingError::NoParameterNamed {
+                        name: name.clone(),
+                        argument: argument_index,
+                    });
+                    continue;
+                };
+                named_order_matches &= parameter_index == argument_index;
+                if slots[parameter_index].is_some() {
+                    errors.push(CallArgMappingError::AlreadyPassed {
+                        argument: argument_index,
+                    });
+                    continue;
+                }
+                slots[parameter_index] = Some(argument);
+            }
+            None => {
+                let is_trailing_lambda = trailing_lambda && argument_index + 1 == args.len();
+                if is_trailing_lambda {
+                    let last = parameter_count.checked_sub(1);
+                    if vararg == last {
+                        errors.push(CallArgMappingError::TrailingLambdaOnVararg {
+                            argument: argument_index,
+                        });
+                    } else if let Some(parameter_index) =
+                        last.filter(|&index| slots[index].is_none())
+                    {
+                        slots[parameter_index] = Some(argument);
+                    } else {
+                        errors.push(CallArgMappingError::TooManyArguments {
+                            argument: argument_index,
+                            expected: parameter_count,
+                        });
+                    }
+                    continue;
+                }
+
+                if seen_named {
+                    let slot = if named_order_matches
+                        && argument_index < parameter_count
+                        && slots[argument_index].is_none()
+                    {
+                        Some(argument_index)
+                    } else {
+                        None
+                    };
+                    if let Some(parameter_index) = slot {
+                        slots[parameter_index] = Some(argument);
+                        named_order_matches &= parameter_index == argument_index;
+                    } else {
+                        errors.push(CallArgMappingError::PositionalAfterNamed {
+                            argument: argument_index,
+                        });
+                    }
+                } else {
+                    if vararg == Some(positional) {
+                        if slots[positional].is_none() {
+                            slots[positional] = Some(argument);
+                        }
+                        continue;
+                    }
+                    if positional >= parameter_count {
+                        errors.push(CallArgMappingError::TooManyArguments {
+                            argument: argument_index,
+                            expected: parameter_count,
+                        });
+                        continue;
+                    }
+                    slots[positional] = Some(argument);
+                    positional += 1;
+                }
+            }
+        }
+    }
+
+    if errors
+        .iter()
+        .all(|error| matches!(error, CallArgMappingError::PositionalAfterNamed { .. }))
+    {
+        for (parameter_index, slot) in slots.iter().enumerate() {
+            let has_default = vararg == Some(parameter_index)
+                || if param_defaults.is_empty() {
+                    parameter_index >= required
+                } else {
+                    param_defaults
+                        .get(parameter_index)
+                        .copied()
+                        .unwrap_or(false)
+                };
+            if slot.is_none() && !has_default {
+                errors.push(CallArgMappingError::MissingRequired {
+                    name: param_names
+                        .get(parameter_index)
+                        .cloned()
+                        .unwrap_or_else(|| "?".to_string()),
+                });
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(slots)
+    } else {
+        Err(CallArgMappingFailure { errors })
+    }
 }
 
 impl CallSig {
@@ -536,7 +720,7 @@ impl CallSig {
     }
 
     pub fn can_map_omitted_args(&self, param_count: usize) -> bool {
-        self.required < param_count && self.has_param_names()
+        (self.required < param_count || self.vararg_index.is_some()) && self.has_param_names()
     }
 
     pub fn requires_all_args(&self, param_count: usize) -> bool {
@@ -550,7 +734,7 @@ impl CallSig {
         lambda_recv: Vec<bool>,
         lambda_context_counts: Vec<usize>,
         required: usize,
-        vararg: bool,
+        vararg_index: Option<usize>,
     ) -> Self {
         let lambda_receivers = lambda_recv
             .iter()
@@ -577,7 +761,8 @@ impl CallSig {
             lambda_receiver_params: lambda_recv,
             lambda_context_counts,
             required,
-            vararg,
+            vararg: vararg_index.is_some(),
+            vararg_index,
             ..Default::default()
         }
     }
@@ -586,13 +771,13 @@ impl CallSig {
         param_count: usize,
         names: Vec<String>,
         defaults: Vec<bool>,
-        vararg: bool,
+        vararg_index: Option<usize>,
     ) -> Self {
-        CallSig::metadata_base(param_count, names, defaults, vararg)
+        CallSig::metadata_base(param_count, names, defaults, vararg_index)
     }
 
     pub fn metadata_plain(param_count: usize) -> Self {
-        CallSig::metadata_base(param_count, Vec::new(), Vec::new(), false)
+        CallSig::metadata_base(param_count, Vec::new(), Vec::new(), None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -603,9 +788,9 @@ impl CallSig {
         lambda_receivers: Vec<Option<Ty>>,
         lambda_receiver_params: Vec<bool>,
         lambda_materialized: Vec<bool>,
-        vararg: bool,
+        vararg_index: Option<usize>,
     ) -> Self {
-        let mut sig = CallSig::metadata_base(param_count, names, defaults, vararg);
+        let mut sig = CallSig::metadata_base(param_count, names, defaults, vararg_index);
         sig.lambda_receivers = vec_for_arity(lambda_receivers, param_count);
         sig.lambda_receiver_params = vec_for_arity(lambda_receiver_params, param_count);
         sig.lambda_materialized = vec_for_arity(lambda_materialized, param_count);
@@ -616,14 +801,14 @@ impl CallSig {
         physical_param_count: usize,
         names: Vec<String>,
         defaults: Vec<bool>,
-        vararg: bool,
+        vararg_index: Option<usize>,
     ) -> Self {
         // The physical param count includes the extension receiver; the source VALUE params (with their
         // default flags — an `inline fun Mutex.withLock(owner: Any? = null, action)` needs them so an
         // omitted-default trailing-lambda call resolves) follow it.
         physical_param_count
             .checked_sub(1)
-            .map(|param_count| CallSig::metadata_base(param_count, names, defaults, vararg))
+            .map(|param_count| CallSig::metadata_base(param_count, names, defaults, vararg_index))
             .unwrap_or_default()
     }
 
@@ -631,7 +816,7 @@ impl CallSig {
         param_count: usize,
         names: Vec<String>,
         defaults: Vec<bool>,
-        vararg: bool,
+        vararg_index: Option<usize>,
     ) -> Self {
         let mut names = vec_for_arity(names, param_count);
         if names.iter().any(String::is_empty) {
@@ -647,7 +832,8 @@ impl CallSig {
             required: required_arity(param_count, &defaults),
             param_names: names,
             param_defaults: defaults,
-            vararg,
+            vararg: vararg_index.is_some(),
+            vararg_index,
             ..Default::default()
         }
     }
@@ -1193,7 +1379,7 @@ impl SemanticPlatform for EmptySymbolSource {}
 
 #[cfg(test)]
 mod tests {
-    use super::{InlineKind, ParamList, Visibility};
+    use super::{map_call_args, CallSig, InlineKind, ParamList, Visibility};
 
     #[test]
     fn visibility_from_metadata_maps_the_kotlin_enum() {
@@ -1286,6 +1472,7 @@ mod tests {
         let expected = ParamList {
             names: vec!["host".into(), "port".into()],
             defaults: vec![false, true],
+            vararg: None,
         };
         let t = ty_with(|t| {
             t.ctor_named_params = vec![expected.clone()];
@@ -1297,9 +1484,33 @@ mod tests {
             t.ctor_named_params = vec![ParamList {
                 names: vec!["".into()],
                 defaults: vec![false],
+                vararg: None,
             }];
         });
         assert!(bad.constructor_named_params(0).is_none());
+    }
+
+    #[test]
+    fn metadata_call_signature_retains_vararg_position() {
+        let signature = CallSig::metadata_member(
+            3,
+            ["first", "values", "tail"].map(str::to_string).to_vec(),
+            vec![false; 3],
+            Some(1),
+        );
+
+        assert!(signature.vararg);
+        assert_eq!(signature.vararg_index, Some(1));
+    }
+
+    #[test]
+    fn positional_argument_mapping_does_not_require_parameter_names() {
+        let arguments = [7u8];
+
+        assert_eq!(
+            map_call_args(&arguments, None, &[], 1, 1, &[], None, false),
+            Ok(vec![Some(arguments[0])])
+        );
     }
 
     #[test]

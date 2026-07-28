@@ -224,6 +224,60 @@ fn stdio_server_reports_official_duplicate_named_argument_diagnostic() {
 }
 
 #[test]
+fn stdio_server_reports_mixed_and_missing_argument_diagnostics() {
+    let messages = [
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": "file:///mixed.kt",
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "fun combine(first: Int, second: Int): Int = first + second\n\
+                             fun use(): Int = combine(second = 2, 1)"
+                }
+            }
+        }),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": null}),
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    ];
+    let output = run_server(&[], &messages);
+    let diagnostics = output
+        .iter()
+        .find(|message| message["method"] == "textDocument/publishDiagnostics")
+        .and_then(|message| message["params"]["diagnostics"].as_array())
+        .expect("published diagnostics");
+    let messages: Vec<_> = diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic["message"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(
+        messages,
+        [
+            "Mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.",
+            "No value passed for parameter 'first'.",
+        ]
+    );
+    assert_eq!(
+        diagnostics[0]["range"],
+        json!({
+            "start": {"line": 1, "character": 37},
+            "end": {"line": 1, "character": 38}
+        })
+    );
+    assert_eq!(
+        diagnostics[1]["range"],
+        json!({
+            "start": {"line": 1, "character": 17},
+            "end": {"line": 1, "character": 24}
+        })
+    );
+}
+
+#[test]
 fn stdio_server_reports_bare_return_type_mismatch() {
     let messages = [
         json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),

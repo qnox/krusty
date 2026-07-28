@@ -214,6 +214,64 @@ fn duplicate_named_argument() {
 }
 
 #[test]
+fn mixed_argument_diagnostics_are_shared_across_source_callables() {
+    let cases = [
+        "fun combine(first: Int, second: Int): Int = first + second\n\
+         fun use(): Int = combine(second = 2, 1)",
+        "class Calculator { fun combine(first: Int, second: Int): Int = first + second }\n\
+         fun use(value: Calculator): Int = value.combine(second = 2, 1)",
+        "fun use(): Int {\n\
+             fun combine(first: Int, second: Int): Int = first + second\n\
+             return combine(second = 2, 1)\n\
+         }",
+        "class Coordinate(val first: Int, val second: Int)\n\
+         fun use(): Coordinate = Coordinate(second = 2, 1)",
+    ];
+    let expected = vec![
+        "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.".to_string(),
+        "no value passed for parameter 'first'.".to_string(),
+    ];
+
+    for source in cases {
+        assert_eq!(diags(source), expected, "{source}");
+    }
+}
+
+#[test]
+fn trailing_lambda_vararg_diagnostic_is_shared_across_source_callables() {
+    let cases = [
+        "fun invokeActions(prefix: Int, vararg actions: () -> Unit) {}\n\
+         fun use() { invokeActions(1) {} }",
+        "class Runner { fun invokeActions(prefix: Int, vararg actions: () -> Unit) {} }\n\
+         fun use(value: Runner) { value.invokeActions(1) {} }",
+        "fun use() {\n\
+             fun invokeActions(prefix: Int, vararg actions: () -> Unit) {}\n\
+             invokeActions(1) {}\n\
+         }",
+        "class Runner(val prefix: Int, vararg val actions: () -> Unit)\n\
+         fun use(): Runner = Runner(1) {}",
+    ];
+    let expected = vec![
+        "passing value as a vararg is allowed only inside a parenthesized argument list."
+            .to_string(),
+    ];
+
+    for source in cases {
+        assert_eq!(diags(source), expected, "{source}");
+    }
+}
+
+#[test]
+fn non_final_vararg_is_not_reported_as_missing() {
+    let diagnostics = diags(
+        "fun select(vararg values: Int, tail: Int): Int = tail\n\
+         fun use(): Int = select(unknown = 1)",
+    );
+
+    assert_eq!(diagnostics, ["no parameter with name 'unknown' found."]);
+}
+
+#[test]
 fn return_without_a_value_from_non_unit() {
     let d = diags("fun value(): Int { return }");
     assert_rejected(&d, "value-less return from a non-Unit function");

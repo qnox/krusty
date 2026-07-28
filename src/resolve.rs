@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use crate::ast::*;
 use crate::diag::{DiagSink, DiagnosticKind, Span};
 use crate::libraries::{
-    required_arity, CallSig, EmptySymbolSource, GenericSig, InlineKind, Origin, ParamList,
-    SemanticPlatform,
+    map_call_args, required_arity, CallArgMappingError, CallArgMappingFailure, CallSig,
+    EmptySymbolSource, GenericSig, InlineKind, Origin, ParamList, SemanticPlatform,
 };
 use crate::names::{property_getter_name, property_setter_name};
 use crate::symbol_source::SymbolSource;
@@ -86,9 +86,10 @@ pub struct Signature {
     /// Declared generic callable shape retained for call-site inference.
     pub generic_sig: Option<GenericSig>,
     /// Bit-packed `vararg`/`is_inline`/`is_operator`/`is_override`/`is_final`/`is_suspend` (read via the
-    /// accessors below; `vararg` set via `set_vararg`). `vararg` — the last parameter is `vararg`.
+    /// accessors below; `vararg` set via `set_vararg`). `vararg` marks a variadic signature.
     /// `is_final` — a `final` member a subclass cannot override. `is_suspend` — a `suspend fun`.
     pub flags: SigFlags,
+    pub vararg_index: Option<usize>,
     /// Minimum number of arguments a caller must supply — params beyond this have default values
     /// that the caller fills in. Equals `params.len()` when there are no defaults.
     pub required: usize,
@@ -165,6 +166,9 @@ impl Signature {
     #[inline]
     pub fn set_vararg(&mut self, on: bool) {
         self.flags = self.flags.with_vararg(on);
+        if !on {
+            self.vararg_index = None;
+        }
     }
     #[inline]
     pub fn set_is_operator(&mut self, on: bool) {
@@ -197,7 +201,7 @@ impl Signature {
                 })
                 .collect(),
             self.required,
-            self.vararg(),
+            self.vararg_index,
         )
     }
 }
@@ -410,6 +414,7 @@ pub struct ClassSig {
     /// map a named-argument call (`C(b = 9)`) onto positions from ANY file in the module — the AST
     /// declaration is only reachable from the file that declares it.
     pub ctor_param_names: Vec<(String, bool)>,
+    pub ctor_vararg: Option<usize>,
     pub methods: MethodMap,
     /// Bit-packed class modifiers (`interface`, `object`, `abstract`, `fun interface`, `sealed`,
     /// `final`, `has_abstract_members`, `annotation`). Read via the `is_*`/`has_*` accessors; the
@@ -853,6 +858,7 @@ fn local_function_candidate_score(
     args: &[ExprId],
     arg_tys: &[Ty],
     arg_names: Option<&[Option<String>]>,
+    trailing_lambda: bool,
 ) -> Option<(usize, std::cmp::Reverse<usize>, bool)> {
     let context_count = signature.context_count.min(signature.params.len());
     let params = &signature.params[context_count..];
@@ -864,16 +870,18 @@ fn local_function_candidate_score(
         .param_defaults
         .get(context_count..)
         .unwrap_or_default();
-    if let Some(arg_names) = arg_names {
-        if signature.vararg() {
-            return None;
-        }
+    if arg_names.is_some() || trailing_lambda {
         let Ok(slots) = map_call_args(
             args,
-            Some(arg_names),
+            arg_names,
             names,
+            params.len(),
             signature.required.saturating_sub(context_count),
             defaults,
+            signature
+                .vararg_index
+                .and_then(|index| index.checked_sub(context_count)),
+            trailing_lambda,
         ) else {
             return None;
         };
@@ -2846,7 +2854,8 @@ pub fn collect_signatures_with_cp(
                             }
                         }
                     };
-                    let vararg = f.params.last().map_or(false, |p| p.is_vararg);
+                    let vararg_index = f.params.iter().position(|p| p.is_vararg);
+                    let vararg = vararg_index.is_some();
                     // Trailing params with defaults may be omitted by callers (positional only).
                     let trailing_defaults = if vararg {
                         0
@@ -2913,6 +2922,7 @@ pub fn collect_signatures_with_cp(
                             .with_is_override(f.is_override())
                             .with_is_final(f.is_final())
                             .with_is_suspend(f.is_suspend()),
+                        vararg_index,
                         required,
                         param_defaults: f.params.iter().map(|p| p.default.is_some()).collect(),
                         param_default_values: f
@@ -3727,6 +3737,7 @@ pub fn collect_signatures_with_cp(
                                         .with_is_override(false)
                                         .with_is_final(true)
                                         .with_is_suspend(false),
+                                    vararg_index: None,
                                     required: 0,
                                     param_defaults: Vec::new(),
                                     param_default_values: Vec::new(),
@@ -3751,6 +3762,7 @@ pub fn collect_signatures_with_cp(
                                 ret: self_ty,
                                 generic_sig: None,
                                 flags: SigFlags::default(),
+                                vararg_index: None,
                                 required: 0,
                                 param_defaults: vec![true; props.len()],
                                 param_default_values: Vec::new(),
@@ -3912,6 +3924,7 @@ pub fn collect_signatures_with_cp(
                                     .with_is_override(false)
                                     .with_is_final(true)
                                     .with_is_suspend(false),
+                                vararg_index: None,
                                 required: n_tp,
                                 param_defaults: vec![],
                                 param_default_values: Vec::new(),
@@ -4120,6 +4133,7 @@ pub fn collect_signatures_with_cp(
                                 .collect(),
                             super_ctor_params: Vec::new(),
                             ctor_param_names,
+                            ctor_vararg: c.props.iter().position(|p| p.is_vararg),
                             ctor_defaults,
                             secondary_ctors,
                             tparam_names,
@@ -4172,6 +4186,7 @@ pub fn collect_signatures_with_cp(
                                 super_type_args: Vec::new(),
                                 super_ctor_params: Vec::new(),
                                 ctor_param_names: Vec::new(),
+                                ctor_vararg: None,
                                 ctor_defaults: Vec::new(),
                                 secondary_ctors: Vec::new(),
                                 tparam_names: Vec::new(),
@@ -4401,50 +4416,6 @@ pub fn collect_signatures_with_cp(
     table
 }
 
-/// Light type inference for an unannotated computed-property getter body (`val x get() = expr`),
-/// against the class's already-collected properties (`locals`). Handles literals, property/`this.x`
-/// references, `.size`/`.length`, unary, and binary ops; anything else is `Error` (the file skips).
-/// Map a call's source-order arguments (with optional `name =` labels) onto positional parameter
-/// slots. Returns a vector of length `param_names.len()`: each slot holds the supplied argument or
-/// `None` (the parameter falls back to its default). Errors describe the first problem found
-/// (unknown/duplicate name, positional-after-named, arity, or a missing required argument).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CallArgMappingError {
-    NoParameterNamed { name: String, argument: usize },
-    AlreadyPassed { argument: usize },
-    PositionalAfterNamed,
-    TooManyArguments { expected: usize },
-    MissingRequired(String),
-}
-
-impl CallArgMappingError {
-    fn highlights_callee(&self) -> bool {
-        matches!(self, Self::MissingRequired(_))
-    }
-}
-
-impl std::fmt::Display for CallArgMappingError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoParameterNamed { name, .. } => {
-                write!(formatter, "no parameter with name '{name}' found.")
-            }
-            Self::AlreadyPassed { .. } => {
-                formatter.write_str("argument already passed for this parameter.")
-            }
-            Self::PositionalAfterNamed => {
-                formatter.write_str("a positional argument cannot follow a named argument")
-            }
-            Self::TooManyArguments { expected } => {
-                write!(formatter, "too many arguments: expected at most {expected}")
-            }
-            Self::MissingRequired(name) => {
-                write!(formatter, "no value passed for parameter '{name}'.")
-            }
-        }
-    }
-}
-
 /// Tracks structural argument-mapping results while probing an overload set. A mapping error is
 /// reportable only when every candidate rejects the call for the same reason; one successfully mapped
 /// candidate (even if its argument types later fail) or conflicting mapping errors must fall through to
@@ -4452,12 +4423,12 @@ impl std::fmt::Display for CallArgMappingError {
 #[derive(Default)]
 struct CallArgMappingProbe {
     mapped_candidate: bool,
-    unanimous_error: Option<CallArgMappingError>,
+    unanimous_error: Option<CallArgMappingFailure>,
     conflicting_errors: bool,
 }
 
 impl CallArgMappingProbe {
-    fn observe<T>(&mut self, result: Result<T, CallArgMappingError>) -> Option<T> {
+    fn observe<T>(&mut self, result: Result<T, CallArgMappingFailure>) -> Option<T> {
         match result {
             Ok(mapped) => {
                 self.mapped_candidate = true;
@@ -4474,108 +4445,37 @@ impl CallArgMappingProbe {
         }
     }
 
-    fn into_unanimous_error(self) -> Option<CallArgMappingError> {
+    fn into_unanimous_error(self) -> Option<CallArgMappingFailure> {
         (!self.mapped_candidate && !self.conflicting_errors)
             .then_some(self.unanimous_error)
             .flatten()
     }
 }
 
-pub fn map_call_args(
-    args: &[ExprId],
-    names: Option<&[Option<String>]>,
-    param_names: &[String],
-    required: usize,
-    param_defaults: &[bool],
-) -> Result<Vec<Option<ExprId>>, CallArgMappingError> {
-    let n = param_names.len();
-    let mut slots: Vec<Option<ExprId>> = vec![None; n];
-    let mut pos = 0usize;
-    let mut seen_named = false;
-    for (i, &a) in args.iter().enumerate() {
-        match names.and_then(|ns| ns.get(i)).and_then(|o| o.as_ref()) {
-            Some(nm) => {
-                seen_named = true;
-                let idx = param_names.iter().position(|p| p == nm).ok_or_else(|| {
-                    CallArgMappingError::NoParameterNamed {
-                        name: nm.clone(),
-                        argument: i,
-                    }
-                })?;
-                if slots[idx].is_some() {
-                    return Err(CallArgMappingError::AlreadyPassed { argument: i });
-                }
-                slots[idx] = Some(a);
-            }
-            None => {
-                if seen_named {
-                    // A TRAILING LAMBDA is the one positional argument Kotlin allows after named args —
-                    // it fills the LAST parameter (a function type). Only the FINAL argument may be such;
-                    // any other positional-after-named is an error.
-                    if i == args.len() - 1 && n > 0 && slots[n - 1].is_none() {
-                        slots[n - 1] = Some(a);
-                    } else {
-                        return Err(CallArgMappingError::PositionalAfterNamed);
-                    }
-                } else {
-                    if pos >= n {
-                        return Err(CallArgMappingError::TooManyArguments { expected: n });
-                    }
-                    slots[pos] = Some(a);
-                    pos += 1;
-                }
-            }
-        }
-    }
-    // A parameter must be supplied unless it has a default. With per-parameter default info, check each
-    // slot individually (so a required parameter that FOLLOWS a defaulted one is validated correctly);
-    // otherwise fall back to the `required`-prefix count (defaults assumed trailing).
-    for (i, slot) in slots.iter().enumerate() {
-        let has_default = if param_defaults.is_empty() {
-            i >= required
-        } else {
-            param_defaults.get(i).copied().unwrap_or(false)
-        };
-        if slot.is_none() && !has_default {
-            return Err(CallArgMappingError::MissingRequired(
-                param_names
-                    .get(i)
-                    .cloned()
-                    .unwrap_or_else(|| "?".to_string()),
-            ));
-        }
-    }
-    Ok(slots)
-}
-
 pub fn map_call_sig_args(
     args: &[ExprId],
     names: Option<&[Option<String>]>,
     sig: &CallSig,
-) -> Result<Vec<Option<ExprId>>, CallArgMappingError> {
+) -> Result<Vec<Option<ExprId>>, CallArgMappingFailure> {
+    map_call_sig_args_with_trailing(args, names, sig, false)
+}
+
+fn map_call_sig_args_with_trailing(
+    args: &[ExprId],
+    names: Option<&[Option<String>]>,
+    sig: &CallSig,
+    trailing_lambda: bool,
+) -> Result<Vec<Option<ExprId>>, CallArgMappingFailure> {
     map_call_args(
         args,
         names,
         &sig.param_names,
+        sig.param_names.len(),
         sig.required,
         &sig.param_defaults,
+        sig.vararg_index,
+        trailing_lambda,
     )
-}
-
-fn mapped_call_arg_names(
-    args: &[ExprId],
-    names: Option<&[Option<String>]>,
-    trailing_lambda: bool,
-    sig: &CallSig,
-) -> Option<Vec<Option<String>>> {
-    let mut mapped = names.map(<[Option<String>]>::to_vec);
-    if trailing_lambda && !args.is_empty() && !sig.vararg {
-        let names = mapped.get_or_insert_with(|| vec![None; args.len()]);
-        if let (Some(argument), Some(parameter)) = (names.last_mut(), sig.param_names.last()) {
-            *argument = Some(parameter.clone());
-        }
-    }
-    mapped
 }
 
 fn call_argument_parameter_indices(
@@ -4584,13 +4484,13 @@ fn call_argument_parameter_indices(
     trailing_lambda: bool,
     sig: &CallSig,
 ) -> Option<Vec<usize>> {
-    let mapped_names = mapped_call_arg_names(args, names, trailing_lambda, sig);
-    let slots = map_call_sig_args(args, mapped_names.as_deref(), sig).ok()?;
+    let slots = map_call_sig_args_with_trailing(args, names, sig, trailing_lambda).ok()?;
     args.iter()
         .map(|argument| {
             slots
                 .iter()
                 .position(|slot| slot.as_ref() == Some(argument))
+                .or(sig.vararg_index)
         })
         .collect()
 }
@@ -4665,20 +4565,27 @@ fn call_sig_without_context(sig: &CallSig, context_count: usize) -> CallSig {
             .to_vec(),
         required: sig.required.saturating_sub(context_count),
         vararg: sig.vararg,
+        vararg_index: sig
+            .vararg_index
+            .and_then(|index| index.checked_sub(context_count)),
     }
 }
 
-pub fn map_param_list_args(
+fn map_param_list_args(
     args: &[ExprId],
     names: Option<&[Option<String>]>,
     params: &ParamList,
-) -> Result<Vec<Option<ExprId>>, CallArgMappingError> {
+    trailing_lambda: bool,
+) -> Result<Vec<Option<ExprId>>, CallArgMappingFailure> {
     map_call_args(
         args,
         names,
         &params.names,
+        params.names.len(),
         required_arity(params.names.len(), &params.defaults),
         &params.defaults,
+        params.vararg,
+        trailing_lambda,
     )
 }
 
@@ -6501,12 +6408,13 @@ fn member_signature(
         ret,
         generic_sig: None,
         flags: SigFlags::default()
-            .with_vararg(m.params.last().is_some_and(|p| p.is_vararg))
+            .with_vararg(m.params.iter().any(|p| p.is_vararg))
             .with_is_inline(m.is_inline())
             .with_is_operator(m.is_operator())
             .with_is_override(m.is_override())
             .with_is_final(m.is_final())
             .with_is_suspend(m.is_suspend()),
+        vararg_index: m.params.iter().position(|p| p.is_vararg),
         required: m.params.iter().take_while(|p| p.default.is_none()).count(),
         param_defaults: m.params.iter().map(|p| p.default.is_some()).collect(),
         param_default_values: Vec::new(),
@@ -10438,22 +10346,34 @@ impl<'a> Checker<'a> {
         &mut self,
         call: ExprId,
         args: &[ExprId],
-        error: CallArgMappingError,
+        failure: CallArgMappingFailure,
     ) {
-        let message = error.to_string();
-        let compiler_span = match &error {
-            CallArgMappingError::NoParameterNamed { argument, .. }
-            | CallArgMappingError::AlreadyPassed { argument } => self
-                .call_argument_name_span(call, *argument)
-                .unwrap_or_else(|| self.call_argument_list_span(call, args)),
-            _ => self.call_argument_list_span(call, args),
-        };
-        if error.highlights_callee() {
-            let editor_span = self.call_callee_name_span(call);
-            self.diags
-                .error_with_editor_span(compiler_span, editor_span, message);
-        } else {
-            self.diags.error(compiler_span, message);
+        for error in failure.errors {
+            let message = error.to_string();
+            let compiler_span = match &error {
+                CallArgMappingError::NoParameterNamed { argument, .. }
+                | CallArgMappingError::AlreadyPassed { argument } => self
+                    .call_argument_name_span(call, *argument)
+                    .unwrap_or_else(|| self.call_argument_list_span(call, args)),
+                CallArgMappingError::PositionalAfterNamed { argument }
+                | CallArgMappingError::TooManyArguments { argument, .. }
+                | CallArgMappingError::TrailingLambdaOnVararg { argument } => args
+                    .get(*argument)
+                    .map(|argument| self.span(*argument))
+                    .unwrap_or_else(|| self.call_argument_list_span(call, args)),
+                CallArgMappingError::MissingRequired { .. } => {
+                    self.call_argument_list_span(call, args)
+                }
+            };
+            if error.highlights_callee() {
+                self.diags.error_with_editor_span(
+                    compiler_span,
+                    self.call_callee_name_span(call),
+                    message,
+                );
+            } else {
+                self.diags.error(compiler_span, message);
+            }
         }
     }
 
@@ -17052,8 +16972,12 @@ impl<'a> Checker<'a> {
             .filter(|o| o.call_sig.has_param_names())
             .filter_map(|o| {
                 let params = o.extension_value_params().to_vec();
-                let slots =
-                    mapping_probe.observe(map_call_sig_args(args, Some(&names), &o.call_sig))?;
+                let slots = mapping_probe.observe(map_call_sig_args_with_trailing(
+                    args,
+                    Some(&names),
+                    &o.call_sig,
+                    self.file.call_has_trailing_lambda.contains(&call.0),
+                ))?;
                 let mut score = self.call_slot_score(&params, &slots)?;
                 if matches!(o.callable.origin, Origin::Module { .. }) {
                     score += 1_000_000;
@@ -17782,15 +17706,20 @@ impl<'a> Checker<'a> {
         call: ExprId,
         internal: TypeName,
         args: &[ExprId],
-        arg_names: &[Option<String>],
-    ) -> Result<Option<ResolvedConstructor>, CallArgMappingError> {
+        arg_names: Option<&[Option<String>]>,
+    ) -> Result<Option<ResolvedConstructor>, CallArgMappingFailure> {
         let Some(ctor_params) = self
             .resolved_type_name(internal)
             .and_then(|t| t.constructor_named_params(args.len()))
         else {
             return Ok(None);
         };
-        let slots = map_param_list_args(args, Some(arg_names), &ctor_params)?;
+        let slots = map_param_list_args(
+            args,
+            arg_names,
+            &ctor_params,
+            self.file.call_has_trailing_lambda.contains(&call.0),
+        )?;
         for &a in slots.iter().flatten() {
             self.expr(a);
         }
@@ -18584,7 +18513,12 @@ impl<'a> Checker<'a> {
                     );
                 }
                 if let Some(names) = arg_names.as_deref() {
-                    if let Ok(slots) = map_call_sig_args(args, Some(names), &candidate.call_sig) {
+                    if let Ok(slots) = map_call_sig_args_with_trailing(
+                        args,
+                        Some(names),
+                        &candidate.call_sig,
+                        self.file.call_has_trailing_lambda.contains(&call.0),
+                    ) {
                         self.resolved_call_arg_slots.insert(call, slots);
                     }
                 }
@@ -18900,10 +18834,11 @@ impl<'a> Checker<'a> {
                 if !needs_slot_map {
                     return None;
                 }
-                let slots = mapping_probe.observe(map_call_sig_args(
+                let slots = mapping_probe.observe(map_call_sig_args_with_trailing(
                     args,
                     arg_names.as_deref(),
                     &o.call_sig,
+                    self.file.call_has_trailing_lambda.contains(&call.0),
                 ))?;
                 let score = self.call_slot_score(&params, &slots)?;
                 Some((score, o, params, slots))
@@ -19085,6 +19020,7 @@ impl<'a> Checker<'a> {
                 Decl::Class(c) if c.name == class_name && c.has_primary_ctor => Some(ParamList {
                     names: c.props.iter().map(|p| p.name.clone()).collect(),
                     defaults: c.props.iter().map(|p| p.default.is_some()).collect(),
+                    vararg: c.props.iter().position(|p| p.is_vararg),
                 }),
                 _ => None,
             })
@@ -19099,6 +19035,7 @@ impl<'a> Checker<'a> {
                         .map(|(n, _)| n.clone())
                         .collect(),
                     defaults: sig.ctor_param_names.iter().map(|(_, d)| *d).collect(),
+                    vararg: sig.ctor_vararg,
                 })
             })
     }
@@ -19148,9 +19085,7 @@ impl<'a> Checker<'a> {
                 None
             }
         };
-        let mapped_names =
-            mapped_call_arg_names(args, arg_names, trailing_lambda, &member.call_sig);
-        if mapped_names.is_none() {
+        if arg_names.is_none() && !trailing_lambda {
             if !member.call_sig.vararg {
                 if args
                     .iter()
@@ -19214,7 +19149,9 @@ impl<'a> Checker<'a> {
                 false,
             ));
         }
-        let slots = map_call_sig_args(args, mapped_names.as_deref(), &member.call_sig).ok()?;
+        let slots =
+            map_call_sig_args_with_trailing(args, arg_names, &member.call_sig, trailing_lambda)
+                .ok()?;
         let mut type_score = 0;
         for (parameter_index, argument) in slots.iter().enumerate() {
             let Some(argument) = argument else {
@@ -19396,12 +19333,7 @@ impl<'a> Checker<'a> {
         let fi = module_member?;
         let params = fi.params.clone();
         let cs = &fi.call_sig;
-        let mapped_names = mapped_call_arg_names(
-            args,
-            arg_names,
-            self.file.call_has_trailing_lambda.contains(&call.0),
-            cs,
-        );
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         let mut mapped_slots: Option<Vec<Option<ExprId>>> = None;
         if !cs.vararg && arg_tys.len() > params.len() {
             let source_display =
@@ -19426,10 +19358,11 @@ impl<'a> Checker<'a> {
         // (`z.test(b = …, a = …)`), so a positional check would pair each argument with the wrong
         // parameter. Fires for any named call, and for an omitted-argument call to a method with defaults.
         } else if cs.has_param_names()
-            && (mapped_names.is_some()
+            && (arg_names.is_some()
+                || trailing_lambda
                 || (!cs.vararg && arg_tys.len() != params.len() && cs.required < params.len()))
         {
-            match map_call_sig_args(args, mapped_names.as_deref(), cs) {
+            match map_call_sig_args_with_trailing(args, arg_names, cs, trailing_lambda) {
                 Ok(slots) => {
                     for (i, slot) in slots.iter().enumerate() {
                         if let Some(a) = slot {
@@ -19788,9 +19721,16 @@ impl<'a> Checker<'a> {
                 // Nested-class construction `Outer.Inner(args)`.
                 if let Some(qname) = self.same_file_nested_class_qname(receiver, &name) {
                     if let Some(cls) = self.syms.classes.get(&qname).cloned() {
-                        if arg_names.is_some() {
+                        if arg_names.is_some()
+                            || self.file.call_has_trailing_lambda.contains(&call.0)
+                        {
                             if let Some(param_list) = self.primary_ctor_param_list(&qname) {
-                                match map_param_list_args(args, arg_names.as_deref(), &param_list) {
+                                match map_param_list_args(
+                                    args,
+                                    arg_names.as_deref(),
+                                    &param_list,
+                                    self.file.call_has_trailing_lambda.contains(&call.0),
+                                ) {
                                     Ok(slots) => {
                                         for &a in slots.iter().flatten() {
                                             self.expr(a);
@@ -19905,10 +19845,15 @@ impl<'a> Checker<'a> {
                         let qualified = internal.render();
                         // Named classpath constructors use metadata names/defaults; lowering selects
                         // either the plain constructor or the default-argument synthetic.
-                        if let Some(names) = arg_names.as_deref() {
-                            match self
-                                .record_named_library_constructor_name(call, internal, args, names)
-                            {
+                        if arg_names.is_some()
+                            || self.file.call_has_trailing_lambda.contains(&call.0)
+                        {
+                            match self.record_named_library_constructor_name(
+                                call,
+                                internal,
+                                args,
+                                arg_names.as_deref(),
+                            ) {
                                 Ok(Some(_)) => return Ty::obj_name(internal),
                                 Ok(None) => {}
                                 Err(error) => {
@@ -21025,7 +20970,12 @@ impl<'a> Checker<'a> {
                             && cs.can_map_omitted_args(logical.len())
                         {
                             // Omitted/named extension arguments filled by parameter defaults.
-                            match map_call_sig_args(args, arg_names.as_deref(), cs) {
+                            match map_call_sig_args_with_trailing(
+                                args,
+                                arg_names.as_deref(),
+                                cs,
+                                self.file.call_has_trailing_lambda.contains(&call.0),
+                            ) {
                                 Ok(slots) => {
                                     for (i, slot) in slots.iter().enumerate() {
                                         if let Some(a) = slot {
@@ -21208,7 +21158,6 @@ impl<'a> Checker<'a> {
                     let expected_receiver = self.resolve_ty(receiver_ref);
                     if !self.receiver_is_assignable(rt, expected_receiver)
                         || signature.context_count != 0
-                        || signature.vararg()
                     {
                         continue;
                     }
@@ -21217,6 +21166,7 @@ impl<'a> Checker<'a> {
                         args,
                         &arg_tys,
                         arg_names.as_deref(),
+                        self.file.call_has_trailing_lambda.contains(&call.0),
                     ) {
                         applicable_local_extensions.push((score, stmt_id, signature));
                     }
@@ -21386,6 +21336,7 @@ impl<'a> Checker<'a> {
                                     args,
                                     arg_tys,
                                     arg_names.as_deref(),
+                                    self.file.call_has_trailing_lambda.contains(&call.0),
                                 )?;
                                 let context_count =
                                     signature.context_count.min(signature.params.len());
@@ -21507,23 +21458,25 @@ impl<'a> Checker<'a> {
                                 );
                                 return sig.ret;
                             }
-                            let mapped_slots = if !sig.vararg() {
-                                if let Some(names) = arg_names.as_deref() {
-                                    match map_call_args(
-                                        args,
-                                        Some(names),
-                                        &sig.param_names[ctx_count..],
-                                        sig.required.saturating_sub(ctx_count),
-                                        sig.param_defaults.get(ctx_count..).unwrap_or_default(),
-                                    ) {
-                                        Ok(slots) => Some(slots),
-                                        Err(error) => {
-                                            self.report_call_arg_mapping_error(call, args, error);
-                                            return sig.ret;
-                                        }
+                            let trailing_lambda =
+                                self.file.call_has_trailing_lambda.contains(&call.0);
+                            let mapped_slots = if arg_names.is_some() || trailing_lambda {
+                                match map_call_args(
+                                    args,
+                                    arg_names.as_deref(),
+                                    &sig.param_names[ctx_count..],
+                                    sig.params.len().saturating_sub(ctx_count),
+                                    sig.required.saturating_sub(ctx_count),
+                                    sig.param_defaults.get(ctx_count..).unwrap_or_default(),
+                                    sig.vararg_index
+                                        .and_then(|index| index.checked_sub(ctx_count)),
+                                    trailing_lambda,
+                                ) {
+                                    Ok(slots) => Some(slots),
+                                    Err(error) => {
+                                        self.report_call_arg_mapping_error(call, args, error);
+                                        return sig.ret;
                                     }
-                                } else {
-                                    None
                                 }
                             } else {
                                 None
@@ -21619,14 +21572,18 @@ impl<'a> Checker<'a> {
                             return sig.ret;
                         }
                     }
-                    if ctx_count == 0 && !sig.vararg() {
-                        if let Some(names) = arg_names.as_deref() {
+                    if ctx_count == 0 {
+                        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+                        if arg_names.is_some() || trailing_lambda {
                             let slots = match map_call_args(
                                 args,
-                                Some(names),
+                                arg_names.as_deref(),
                                 &sig.param_names,
+                                sig.params.len(),
                                 sig.required,
                                 &sig.param_defaults,
+                                sig.vararg_index,
+                                trailing_lambda,
                             ) {
                                 Ok(slots) => slots,
                                 Err(error) => {
@@ -22454,9 +22411,16 @@ impl<'a> Checker<'a> {
                         // primary ctor's parameter names + per-parameter defaults, the same path a
                         // top-level function uses. An omitted parameter falls back to its default (the
                         // lowering fills a simple-literal default, or skips the file — never miscompiles).
-                        if arg_names.is_some() {
+                        if arg_names.is_some()
+                            || self.file.call_has_trailing_lambda.contains(&call.0)
+                        {
                             if let Some(param_list) = self.primary_ctor_param_list(&fname) {
-                                match map_param_list_args(args, arg_names.as_deref(), &param_list) {
+                                match map_param_list_args(
+                                    args,
+                                    arg_names.as_deref(),
+                                    &param_list,
+                                    self.file.call_has_trailing_lambda.contains(&call.0),
+                                ) {
                                     Ok(slots) => {
                                         let inferred = self.expect_source_constructor_args(
                                             call,
@@ -22582,11 +22546,14 @@ impl<'a> Checker<'a> {
                     }
                     // Named classpath constructors use metadata names/defaults; lowering selects
                     // either the plain constructor or the default-argument synthetic.
-                    if let Some(names) = arg_names.as_deref() {
+                    if arg_names.is_some() || self.file.call_has_trailing_lambda.contains(&call.0) {
                         if let Some(internal) = self.classpath_class_internal_name(&fname) {
-                            match self
-                                .record_named_library_constructor_name(call, internal, args, names)
-                            {
+                            match self.record_named_library_constructor_name(
+                                call,
+                                internal,
+                                args,
+                                arg_names.as_deref(),
+                            ) {
                                 Ok(Some(target)) => {
                                     if let ResolvedConstructor::Plain { member, args } = target {
                                         for (p, a) in member.params.iter().zip(&args) {
@@ -22764,7 +22731,12 @@ impl<'a> Checker<'a> {
                         );
                         let mapped_slots = if let Some(names) = arg_names.as_deref() {
                             let value_sig = call_sig_without_context(&fi.call_sig, ctx_count);
-                            match map_call_sig_args(args, Some(names), &value_sig) {
+                            match map_call_sig_args_with_trailing(
+                                args,
+                                Some(names),
+                                &value_sig,
+                                self.file.call_has_trailing_lambda.contains(&call.0),
+                            ) {
                                 Ok(slots) => Some(slots),
                                 Err(error) => {
                                     self.report_call_arg_mapping_error(call, args, error);
@@ -22861,7 +22833,12 @@ impl<'a> Checker<'a> {
                             let mapped_slots = if !cs.vararg {
                                 if let Some(names) = arg_names.as_deref() {
                                     let value_sig = call_sig_without_context(cs, ctx_count);
-                                    match map_call_sig_args(args, Some(names), &value_sig) {
+                                    match map_call_sig_args_with_trailing(
+                                        args,
+                                        Some(names),
+                                        &value_sig,
+                                        self.file.call_has_trailing_lambda.contains(&call.0),
+                                    ) {
                                         Ok(slots) => Some(slots),
                                         Err(error) => {
                                             self.report_call_arg_mapping_error(call, args, error);
@@ -22917,6 +22894,25 @@ impl<'a> Checker<'a> {
                             return ret_ty;
                         }
                     }
+                    let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+                    let mapped_slots =
+                        if (arg_names.is_some() || trailing_lambda) && cs.has_param_names() {
+                            let value_sig = call_sig_without_context(cs, ctx_count);
+                            match map_call_sig_args_with_trailing(
+                                args,
+                                arg_names.as_deref(),
+                                &value_sig,
+                                trailing_lambda,
+                            ) {
+                                Ok(slots) => Some(slots),
+                                Err(error) => {
+                                    self.report_call_arg_mapping_error(call, args, error);
+                                    return ret_ty;
+                                }
+                            }
+                        } else {
+                            None
+                        };
                     let source_mapping = self.source_function_decl(&fi).and_then(|function| {
                         self.source_positional_vararg_mapping(call, function, args.len())
                             .map(|(vararg, mapping)| (vararg, function.params.len(), mapping))
@@ -23020,32 +23016,19 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
-                    } else if let Some(names) = mapped_call_arg_names(
-                        args,
-                        arg_names.as_deref(),
-                        self.file.call_has_trailing_lambda.contains(&call.0)
-                            && arg_tys.len() <= params.len(),
-                        cs,
-                    ) {
-                        match map_call_sig_args(args, Some(&names), cs) {
-                            Ok(slots) => {
-                                for (i, slot) in slots.iter().enumerate() {
-                                    if let Some(a) = slot {
-                                        let aty = self.expr_types[a.0 as usize];
-                                        self.expect_assignable(
-                                            generic_expectations
-                                                .get(a)
-                                                .copied()
-                                                .unwrap_or(params[i]),
-                                            aty,
-                                            self.span(*a),
-                                            "argument",
-                                        );
-                                    }
-                                }
+                    } else if let Some(slots) = mapped_slots {
+                        for (i, slot) in slots.iter().enumerate() {
+                            if let Some(a) = slot {
+                                let aty = self.expr_types[a.0 as usize];
+                                self.expect_assignable(
+                                    generic_expectations.get(a).copied().unwrap_or(params[i]),
+                                    aty,
+                                    self.span(*a),
+                                    "argument",
+                                );
                             }
-                            Err(error) => self.report_call_arg_mapping_error(call, args, error),
                         }
+                        self.resolved_call_arg_slots.insert(call, slots);
                     } else if arg_tys.len() < cs.required.saturating_sub(ctx_count)
                         || arg_tys.len() > value_count
                     {
@@ -23117,10 +23100,11 @@ impl<'a> Checker<'a> {
                             let mappings: Vec<_> = signatures
                                 .iter()
                                 .filter_map(|signature| {
-                                    mapping_probe.observe(map_call_sig_args(
+                                    mapping_probe.observe(map_call_sig_args_with_trailing(
                                         args,
                                         Some(names),
                                         signature,
+                                        self.file.call_has_trailing_lambda.contains(&call.0),
                                     ))
                                 })
                                 .collect();
@@ -24476,12 +24460,13 @@ impl<'a> Checker<'a> {
             ret: ret_ty,
             generic_sig: None,
             flags: SigFlags::default()
-                .with_vararg(f.params.last().map_or(false, |p| p.is_vararg))
+                .with_vararg(f.params.iter().any(|p| p.is_vararg))
                 .with_is_inline(false)
                 .with_is_operator(f.is_operator())
                 .with_is_override(f.is_override())
                 .with_is_final(false)
                 .with_is_suspend(f.is_suspend()),
+            vararg_index: f.params.iter().position(|p| p.is_vararg),
             required: params.len(),
             param_defaults: f.params.iter().map(|p| p.default.is_some()).collect(),
             param_default_values: Vec::new(),
@@ -27143,6 +27128,92 @@ fun box(): String {
         err_contains(
             "fun f(a: Int): Int = a\nfun g(): Int = f(a = 1, a = 2)",
             "argument already passed for this parameter.",
+        );
+    }
+
+    #[test]
+    fn call_argument_mapping_collects_structural_and_missing_errors() {
+        let args = [ExprId(0), ExprId(1), ExprId(2)];
+        let names = [Some("third".to_string()), None, Some("unknown".to_string())];
+        let params = ["first", "second", "third"].map(str::to_string);
+
+        let failure = map_call_args(
+            &args,
+            Some(&names),
+            &params,
+            params.len(),
+            3,
+            &[],
+            None,
+            false,
+        )
+        .expect_err("reordered named argument followed by a positional argument");
+
+        assert_eq!(
+            failure.errors,
+            vec![
+                CallArgMappingError::PositionalAfterNamed { argument: 1 },
+                CallArgMappingError::NoParameterNamed {
+                    name: "unknown".to_string(),
+                    argument: 2,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn call_argument_mapping_accepts_matching_positional_order() {
+        let args = [ExprId(0), ExprId(1)];
+        let names = [Some("first".to_string()), None];
+        let params = ["first", "second"].map(str::to_string);
+
+        assert_eq!(
+            map_call_args(
+                &args,
+                Some(&names),
+                &params,
+                params.len(),
+                2,
+                &[],
+                None,
+                false,
+            ),
+            Ok(vec![Some(args[0]), Some(args[1])])
+        );
+    }
+
+    #[test]
+    fn call_argument_mapping_rejects_trailing_lambda_for_final_vararg() {
+        let args = [ExprId(0), ExprId(1)];
+        let params = ["prefix", "actions"].map(str::to_string);
+
+        let failure = map_call_args(&args, None, &params, params.len(), 2, &[], Some(1), true)
+            .expect_err("a trailing lambda cannot supply a final vararg");
+
+        assert_eq!(
+            failure.errors,
+            vec![CallArgMappingError::TrailingLambdaOnVararg { argument: 1 }]
+        );
+    }
+
+    #[test]
+    fn call_argument_mapping_treats_non_final_vararg_as_optional() {
+        let args = [ExprId(0)];
+        let names = [Some("tail".to_string())];
+        let params = ["values", "tail"].map(str::to_string);
+
+        assert_eq!(
+            map_call_args(
+                &args,
+                Some(&names),
+                &params,
+                params.len(),
+                2,
+                &[],
+                Some(0),
+                false,
+            ),
+            Ok(vec![None, Some(args[0])])
         );
     }
 
