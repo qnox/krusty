@@ -561,6 +561,9 @@ impl<'a> SemanticClassifier<'a> {
                 self.mark_type(argument);
             }
         }
+        for reference in &self.file.detached_type_refs {
+            self.mark_type_navigation(reference);
+        }
     }
 
     fn finish(self) -> SemanticOccurrences {
@@ -2613,38 +2616,14 @@ impl<'a> SemanticClassifier<'a> {
         }
         let leaf = ty.name.rsplit('.').next().unwrap_or(&ty.name);
         let (kind, modifiers) = self.type_token(leaf, ty.span.lo);
-        if let Some(mut index) = self.token_by_span.get(&(ty.span.lo, ty.span.hi)).copied() {
-            let components = ty.name.split('.').count();
-            for _ in 1..components {
-                self.mark_index(index, HighlightKind::Namespace, 0);
-                let Some(next) = self.tokens.get(index + 2) else {
-                    break;
-                };
-                if self.tokens.get(index + 1).map(|token| token.kind)
-                    != Some(FrontendNameTokenKind::Dot)
-                    || next.kind != FrontendNameTokenKind::Ident
-                {
-                    break;
-                }
-                index += 2;
+        if let Some((first, index)) = self.type_name_token_range(ty) {
+            let mut namespace = first;
+            while namespace < index {
+                self.mark_index(namespace, HighlightKind::Namespace, 0);
+                namespace += 2;
             }
             self.mark_index(index, kind, modifiers);
-            let source_span = self.tokens[index].span;
-            if let Some(target) = self.type_reference_target(ty, source_span.lo) {
-                self.push_definition(source_span, target);
-                self.push_type_definition_for_type_ref(source_span, ty);
-            } else if let Some(internal) =
-                self.type_info.and_then(|types| types.resolved_type_ref(ty))
-            {
-                self.push_library_definition(
-                    source_span,
-                    LibraryRef {
-                        fqn: internal.render(),
-                        member_name: String::new(),
-                        member_desc: String::new(),
-                    },
-                );
-            }
+            self.attach_type_navigation(ty, index);
         }
         if let Some(argument) = &ty.arg {
             self.mark_type(argument);
@@ -2654,6 +2633,65 @@ impl<'a> SemanticClassifier<'a> {
         }
         for parameter in &ty.fun_params {
             self.mark_type(parameter);
+        }
+    }
+
+    fn mark_type_navigation(&mut self, ty: &TypeRef) {
+        if let Some((_, index)) = self.type_name_token_range(ty) {
+            self.attach_type_navigation(ty, index);
+        }
+        if let Some(argument) = &ty.arg {
+            self.mark_type_navigation(argument);
+        }
+        for argument in &ty.targs {
+            self.mark_type_navigation(argument);
+        }
+        for parameter in &ty.fun_params {
+            self.mark_type_navigation(parameter);
+        }
+    }
+
+    fn type_name_token_range(&self, ty: &TypeRef) -> Option<(usize, usize)> {
+        let first = self.token_by_span.get(&(ty.span.lo, ty.span.hi)).copied()?;
+        let mut index = first;
+        for _ in 1..ty.name.split('.').count() {
+            let Some(next) = self.tokens.get(index + 2) else {
+                break;
+            };
+            if self.tokens.get(index + 1).map(|token| token.kind)
+                != Some(FrontendNameTokenKind::Dot)
+                || next.kind != FrontendNameTokenKind::Ident
+            {
+                break;
+            }
+            index += 2;
+        }
+        Some((first, index))
+    }
+
+    fn attach_type_navigation(&mut self, ty: &TypeRef, index: usize) {
+        let source_span = self.tokens[index].span;
+        if let Some(target) = self.type_reference_target(ty, source_span.lo) {
+            self.push_definition(source_span, target);
+            self.push_type_definition_for_type_ref(source_span, ty);
+        } else if let Some(internal) = self
+            .type_info
+            .and_then(|types| types.resolved_type_ref(ty))
+            .filter(|internal| {
+                self.symbols
+                    .libraries
+                    .resolve_type_name(*internal)
+                    .is_some()
+            })
+        {
+            self.push_library_definition(
+                source_span,
+                LibraryRef {
+                    fqn: internal.render(),
+                    member_name: String::new(),
+                    member_desc: String::new(),
+                },
+            );
         }
     }
 

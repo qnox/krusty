@@ -1060,6 +1060,9 @@ pub struct File {
     pub imports: Vec<String>,
     /// Aliased imports as `(source alias, fully-qualified target)`.
     pub import_aliases: Vec<(String, String)>,
+    /// Classifier references that are not retained by another AST node. Import entries are candidates
+    /// until semantic resolution confirms that the imported declaration is a type.
+    pub detached_type_refs: Vec<TypeRef>,
     /// Number of source lines, including a final empty line after a trailing newline.
     pub source_line_count: u32,
     pub decls: Vec<DeclId>,
