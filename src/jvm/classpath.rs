@@ -2238,6 +2238,29 @@ impl Classpath {
         }
     }
 
+    /// The class or builtins jar whose attached sources declare `internal`.
+    pub fn declaring_jar(&self, internal: &str) -> Option<PathBuf> {
+        let name = type_name(internal);
+        if self.builtin_is_interface_name(name).is_none() {
+            return self.owning_jar(internal);
+        }
+        let package = Self::builtins_package_for(name);
+        let path = Self::builtins_path_for_package(package);
+        let tree = self.package_tree();
+        let mut indices = tree
+            .node_for(&package.render())
+            .map_or_else(Vec::new, |node| node.builtins_jars.clone());
+        indices.extend(tree.incomplete_entries.iter().copied());
+        indices.sort_unstable();
+        indices.dedup();
+        indices
+            .into_iter()
+            .find_map(|index| match self.entries.get(index) {
+                Some(Entry::Jar(jar)) if self.jar_entry(jar, &path).is_some() => Some(jar.clone()),
+                _ => None,
+            })
+    }
+
     /// The raw `.class` bytes for an internal name (Kotlin built-in names mapped to JVM first), or
     /// `None` if absent. Unlike `find`, this keeps the bytes (the inline expander needs the body).
     fn class_bytes(&self, internal: &str) -> Option<Vec<u8>> {
