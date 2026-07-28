@@ -304,8 +304,22 @@ impl CopyExpr {
 
 /// Lex and parse one source string with an explicit feature set.
 pub fn parse_source(src: &str, features: &LangFeatures, diags: &mut DiagSink) -> File {
+    parse_source_kind(src, SourceKind::Kotlin, features, diags)
+}
+
+fn parse_source_kind(
+    src: &str,
+    kind: SourceKind,
+    features: &LangFeatures,
+    diags: &mut DiagSink,
+) -> File {
     let tokens = crate::lexer::lex(src, diags);
-    crate::parser::parse_with_features(src, &tokens, diags, features)
+    match kind {
+        SourceKind::Kotlin => crate::parser::parse_with_features(src, &tokens, diags, features),
+        SourceKind::KotlinScript => {
+            crate::parser::parse_script_with_features(src, &tokens, diags, features)
+        }
+    }
 }
 
 /// Tokenize only source names and the separators needed to interpret their declaration/reference
@@ -398,11 +412,7 @@ where
         features.apply_source_directives(source.text);
         multiplatform |= features.has("MultiPlatformProjects");
         let diagnostics_before = diags.diags.len();
-        let file = match source.kind {
-            SourceKind::Kotlin | SourceKind::KotlinScript => {
-                parse_source(source.text, &features, diags)
-            }
-        };
+        let file = parse_source_kind(source.text, source.kind, &features, diags);
         parse_errors.push(
             diags.diags[diagnostics_before..]
                 .iter()
@@ -636,6 +646,84 @@ mod tests {
         assert!(diags.has_errors());
         assert!(syms.is_some());
         assert!(info.is_some());
+    }
+
+    #[test]
+    fn script_analysis_respects_declaration_order() {
+        let mut diags = DiagSink::new();
+        let inputs = [SourceInput::new(
+            SourceKind::KotlinScript,
+            "fun read(): Int = value\nval value = 1",
+        )];
+        analyze_source_set_with_features(
+            &inputs,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diags,
+        );
+        assert!(diags.has_errors());
+
+        let mut diags = DiagSink::new();
+        let inputs = [SourceInput::new(
+            SourceKind::KotlinScript,
+            "val value = 1\nfun read(): Int = value\nread()",
+        )];
+        analyze_source_set_with_features(
+            &inputs,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diags,
+        );
+        assert!(!diags.has_errors(), "{:?}", diags.diags);
+    }
+
+    #[test]
+    fn script_declarations_do_not_enter_module_scope() {
+        let mut diags = DiagSink::new();
+        let inputs = [
+            SourceInput::new(
+                SourceKind::KotlinScript,
+                "fun scriptFunction(): Int = 1\n\
+                 class ScriptClass\n\
+                 ScriptClass()\n\
+                 scriptFunction()",
+            ),
+            SourceInput::kotlin(
+                "fun useFunction(): Int = scriptFunction()\n\
+                 fun useClass(): ScriptClass = ScriptClass()",
+            ),
+            SourceInput::new(
+                SourceKind::KotlinScript,
+                "class ScriptClass\nval instance = ScriptClass()",
+            ),
+        ];
+        analyze_source_set_with_features(
+            &inputs,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diags,
+        );
+
+        assert!(diags.diags.iter().any(|diagnostic| diagnostic.file == 1));
+        assert!(!diags.diags.iter().any(|diagnostic| diagnostic.file == 0));
+        assert!(!diags.diags.iter().any(|diagnostic| diagnostic.file == 2));
+    }
+
+    #[test]
+    fn script_analysis_rejects_jumps_without_an_enclosing_target() {
+        let mut diags = DiagSink::new();
+        let inputs = [SourceInput::new(
+            SourceKind::KotlinScript,
+            "return\nbreak\ncontinue",
+        )];
+        analyze_source_set_with_features(
+            &inputs,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diags,
+        );
+
+        assert_eq!(diags.diags.len(), 3);
     }
 
     #[test]

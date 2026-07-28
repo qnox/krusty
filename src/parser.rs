@@ -21,6 +21,26 @@ pub fn parse_with_features(
     diags: &mut DiagSink,
     features: &LangFeatures,
 ) -> File {
+    parse_with_features_and_script(src, tokens, diags, features, false)
+}
+
+/// Parse a Kotlin script.
+pub fn parse_script_with_features(
+    src: &str,
+    tokens: &[Token],
+    diags: &mut DiagSink,
+    features: &LangFeatures,
+) -> File {
+    parse_with_features_and_script(src, tokens, diags, features, true)
+}
+
+fn parse_with_features_and_script(
+    src: &str,
+    tokens: &[Token],
+    diags: &mut DiagSink,
+    features: &LangFeatures,
+    is_script: bool,
+) -> File {
     let mut p = Parser {
         src,
         t: tokens,
@@ -37,11 +57,33 @@ pub fn parse_with_features(
         pending_annotations: Vec::new(),
         pending_annotation_args: Vec::new(),
         pending_context_params: Vec::new(),
+        is_script,
+        script_stmts: Vec::new(),
     };
+    p.file.is_script = is_script;
     p.parse_file();
+    if !p.script_stmts.is_empty() {
+        let first = p.file.stmt_spans[p.script_stmts[0].0 as usize];
+        let last = p.file.stmt_spans[p.script_stmts[p.script_stmts.len() - 1].0 as usize];
+        let stmts = std::mem::take(&mut p.script_stmts);
+        let body = p.file.add_expr(
+            Expr::Block {
+                stmts,
+                trailing: None,
+            },
+            Span::new(first.lo, last.hi),
+        );
+        p.file.script_body = Some(body);
+    }
     p.file.assert_always_enabled = features.has("AssertionsAlwaysEnable");
     p.file.assert_always_disabled = features.has("AssertionsAlwaysDisable");
-    scope_local_classes(&mut p.file);
+    let script_scope = is_script.then(|| {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        src.hash(&mut hasher);
+        hasher.finish()
+    });
+    scope_local_classes(&mut p.file, script_scope);
     hoist_local_classes(&mut p.file);
     fixup_parenless_base_classes(&mut p.file);
     rewrite_anon_captures(&mut p.file);
@@ -592,6 +634,9 @@ fn rewrite_anon_captures(file: &mut File) {
             _ => {}
         }
     }
+    if let Some(root) = file.script_body {
+        push_body(Vec::new(), std::collections::HashSet::new(), root);
+    }
 
     let mut class_caps: Vec<(DeclId, Vec<(String, TypeRef)>)> = Vec::new();
     let mut call_args: Vec<(ExprId, Vec<String>)> = Vec::new();
@@ -687,16 +732,17 @@ fn rewrite_anon_captures(file: &mut File) {
 /// each function/method body, a local class whose name is unique within that body is renamed and its
 /// construction references (`Expr::Name`) in that body are rewritten to match; a name USED as a type
 /// annotation that isn't rewritten then resolves to nothing (the file skips — never a miscompile).
-fn scope_local_classes(file: &mut File) {
+fn scope_local_classes(file: &mut File, script_scope: Option<u64>) {
     use crate::ast::{Decl, Expr, FunBody, Stmt};
     // Every function/method body root, with the enclosing declaration's parameter names (a param that
     // shadows a local class name makes the syntactic `Name` rewrite unsafe).
-    let mut roots: Vec<(ExprId, Vec<String>)> = Vec::new();
-    let push_body = |b: &FunBody, params: Vec<String>, roots: &mut Vec<(ExprId, Vec<String>)>| {
-        if let FunBody::Expr(e) | FunBody::Block(e) = b {
-            roots.push((*e, params));
-        }
-    };
+    let mut roots: Vec<(ExprId, Vec<String>, bool)> = Vec::new();
+    let push_body =
+        |b: &FunBody, params: Vec<String>, roots: &mut Vec<(ExprId, Vec<String>, bool)>| {
+            if let FunBody::Expr(e) | FunBody::Block(e) = b {
+                roots.push((*e, params, false));
+            }
+        };
     // Top-level declaration names: a local class sharing a top-level name can't be safely rewritten (an
     // un-rewritten reference would resolve to the top-level declaration → miscompile).
     let mut top_names: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -723,14 +769,17 @@ fn scope_local_classes(file: &mut File) {
             _ => {}
         }
     }
+    if let Some(root) = file.script_body {
+        roots.push((root, Vec::new(), true));
+    }
     // File-wide local-class name counts: a name declared in only ONE body has no collision and is left
     // untouched (so its type-annotation references keep resolving). Only a name declared more than once
     // (across bodies) collides — those were already rejected ("conflicting declarations"), so renaming
     // them is safe: a construction-only use now compiles, a type-annotation use still skips.
-    let mut body_subtrees: Vec<(Vec<String>, Vec<ExprId>, Vec<StmtId>)> = Vec::new();
+    let mut body_subtrees: Vec<(Vec<String>, Vec<ExprId>, Vec<StmtId>, bool)> = Vec::new();
     let mut file_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
-    for (root, params) in roots {
+    for (root, params, force_unique) in roots {
         let mut exprs: Vec<ExprId> = Vec::new();
         let mut stmts: Vec<StmtId> = Vec::new();
         collect_subtree(file, root, &mut exprs, &mut stmts);
@@ -739,10 +788,10 @@ fn scope_local_classes(file: &mut File) {
                 *file_counts.entry(c.name.clone()).or_default() += 1;
             }
         }
-        body_subtrees.push((params, exprs, stmts));
+        body_subtrees.push((params, exprs, stmts, force_unique));
     }
     let mut counter = 0u32;
-    for (params, exprs, stmts) in &body_subtrees {
+    for (params, exprs, stmts, force_unique) in &body_subtrees {
         // Names BOUND in this body (a local `val`/`var`, a `Stmt::LocalFun`/lambda parameter, or an
         // enclosing parameter) shadow a local class of the same name — rewriting `Name` for such a name
         // would clobber the shadowing binding's reads, so those names are excluded from renaming.
@@ -785,7 +834,21 @@ fn scope_local_classes(file: &mut File) {
         let mut rename: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         for (name, decls) in &here {
-            if file_counts.get(name).copied().unwrap_or(0) > 1
+            if *force_unique {
+                let new = format!(
+                    "{name}$script${:x}$loc${counter}",
+                    script_scope.unwrap_or_default()
+                );
+                counter += 1;
+                for declaration in decls {
+                    if let Stmt::LocalClass(c) = &mut file.stmt_arena[declaration.0 as usize] {
+                        c.name = new.clone();
+                    }
+                }
+                if !top_names.contains(name) && !bound.contains(name) {
+                    rename.insert(name.clone(), new);
+                }
+            } else if file_counts.get(name).copied().unwrap_or(0) > 1
                 && decls.len() == 1
                 && !top_names.contains(name)
                 && !bound.contains(name)
@@ -1131,6 +1194,8 @@ struct Parser<'a> {
     /// Context parameters parsed at a declaration prefix (`context(a: A)`), consumed by the next
     /// `parse_fun` (mirrors `pending_annotations`). Cleared when taken.
     pending_context_params: Vec<Param>,
+    is_script: bool,
+    script_stmts: Vec<StmtId>,
 }
 
 impl<'a> Parser<'a> {
@@ -1309,6 +1374,30 @@ impl<'a> Parser<'a> {
                 break;
             }
             self.pending_context_params.clear();
+            if self.is_script && self.at_file_annotation() {
+                if !self.script_stmts.is_empty() {
+                    self.diags.error(
+                        self.tok().span,
+                        "file annotations must precede script statements",
+                    );
+                }
+                self.skip_annotation();
+                continue;
+            }
+            let script_file_item =
+                matches!(self.kind(), TokenKind::KwPackage | TokenKind::KwImport)
+                    || (self.at(TokenKind::Ident) && self.text() == "typealias");
+            if self.is_script && script_file_item && !self.script_stmts.is_empty() {
+                self.diags.error(
+                    self.tok().span,
+                    "package, import, and typealias directives must precede script statements",
+                );
+            }
+            if self.is_script && !script_file_item {
+                let stmt = self.parse_stmt();
+                self.script_stmts.push(stmt);
+                continue;
+            }
             // Consume leading annotations + declaration modifiers. `open`/`abstract` are applied to
             // the following class; the rest are ignored (krusty treats everything as public).
             let mut mods = if self.at(TokenKind::At)
@@ -1582,10 +1671,6 @@ impl<'a> Parser<'a> {
                 _ => {
                     self.diags
                         .error(self.tok().span, "expected a top-level declaration");
-                    // Skip the whole unparseable construct to the next declaration, rather than one
-                    // token at a time — else an unsupported construct (a context receiver, an exotic
-                    // modifier) mis-tokens keyword-by-keyword and can drift INTO a sibling declaration,
-                    // poisoning its type (the reported `unresolved reference 'private'/'suspend'` cascade).
                     self.recover_to_decl_boundary();
                 }
             }
@@ -1618,6 +1703,97 @@ impl<'a> Parser<'a> {
                     )
             }
             _ => false,
+        }
+    }
+
+    fn at_file_annotation(&self) -> bool {
+        self.at(TokenKind::At)
+            && self.t.get(self.i + 1).is_some_and(|token| {
+                token.kind == TokenKind::Ident && token.text(self.src) == "file"
+            })
+            && self
+                .t
+                .get(self.i + 2)
+                .is_some_and(|token| token.kind == TokenKind::Colon)
+    }
+
+    /// Return the token after a context parameter list, or `None` for a `context(...)` call.
+    fn context_parameter_list_end_at(&self, open: usize) -> Option<usize> {
+        if self.t.get(open)?.kind != TokenKind::LParen {
+            return None;
+        }
+        let mut j = open + 1;
+        loop {
+            while self
+                .t
+                .get(j)
+                .is_some_and(|token| token.kind == TokenKind::Newline)
+            {
+                if self.t[j].text(self.src) == ";" {
+                    return None;
+                }
+                j += 1;
+            }
+            if self.t.get(j)?.kind == TokenKind::RParen {
+                return Some(j + 1);
+            }
+            loop {
+                let token = self.t.get(j)?;
+                if token.kind == TokenKind::At {
+                    j = self.annotation_end_at(j)?;
+                    continue;
+                }
+                if token.kind == TokenKind::Ident
+                    && is_modifier(token.text(self.src))
+                    && self.t.get(j + 1).map(|next| next.kind) != Some(TokenKind::Colon)
+                {
+                    j += 1;
+                    continue;
+                }
+                break;
+            }
+            if self.t.get(j)?.kind != TokenKind::Ident
+                || self.t.get(j + 1)?.kind != TokenKind::Colon
+            {
+                return None;
+            }
+            j += 2;
+
+            let mut parens = 0usize;
+            let mut brackets = 0usize;
+            let mut braces = 0usize;
+            let mut angles = 0usize;
+            let mut saw_type = false;
+            loop {
+                let token = self.t.get(j)?;
+                match token.kind {
+                    TokenKind::LParen => parens += 1,
+                    TokenKind::RParen if parens > 0 => parens -= 1,
+                    TokenKind::LBracket => brackets += 1,
+                    TokenKind::RBracket if brackets > 0 => brackets -= 1,
+                    TokenKind::LBrace => braces += 1,
+                    TokenKind::RBrace if braces > 0 => braces -= 1,
+                    TokenKind::Lt => angles += 1,
+                    TokenKind::Gt if angles > 0 => angles -= 1,
+                    TokenKind::Comma
+                        if parens == 0 && brackets == 0 && braces == 0 && angles == 0 =>
+                    {
+                        if !saw_type {
+                            return None;
+                        }
+                        j += 1;
+                        break;
+                    }
+                    TokenKind::RParen if brackets == 0 && braces == 0 && angles == 0 => {
+                        return saw_type.then_some(j + 1);
+                    }
+                    TokenKind::Eof => return None,
+                    TokenKind::Newline if token.text(self.src) == ";" => return None,
+                    _ => {}
+                }
+                saw_type |= !matches!(token.kind, TokenKind::Newline);
+                j += 1;
+            }
         }
     }
 
@@ -2982,6 +3158,57 @@ impl<'a> Parser<'a> {
         modifiers
     }
 
+    fn local_declaration_after_prefix(&self) -> Option<TokenKind> {
+        let mut i = self.i;
+        let mut saw_context = false;
+        loop {
+            while self.t.get(i).is_some_and(|token| {
+                token.kind == TokenKind::Newline && token.text(self.src) != ";"
+            }) {
+                i += 1;
+            }
+            let token = self.t.get(i)?;
+            if token.kind == TokenKind::At {
+                i = self.annotation_end_at(i)?;
+                continue;
+            }
+            if token.kind == TokenKind::Ident
+                && is_modifier(token.text(self.src))
+                && self
+                    .t
+                    .get(i + 1)
+                    .is_none_or(|next| next.kind != TokenKind::Colon)
+            {
+                i += 1;
+                continue;
+            }
+            if !saw_context
+                && token.kind == TokenKind::Ident
+                && token.text(self.src) == "context"
+                && self
+                    .t
+                    .get(i + 1)
+                    .is_some_and(|next| next.kind == TokenKind::LParen)
+            {
+                i = self.context_parameter_list_end_at(i + 1)?;
+                saw_context = true;
+                continue;
+            }
+            return match token.kind {
+                TokenKind::KwFun
+                    if !self
+                        .t
+                        .get(i + 1)
+                        .is_some_and(|next| next.kind == TokenKind::LParen) =>
+                {
+                    Some(TokenKind::KwFun)
+                }
+                TokenKind::KwVal | TokenKind::KwVar => Some(token.kind),
+                _ => None,
+            };
+        }
+    }
+
     /// Buffer a `context(...)` clause for the following function or property.
     fn maybe_parse_context_receivers(&mut self) -> Vec<String> {
         if !(self.at(TokenKind::Ident)
@@ -3005,55 +3232,6 @@ impl<'a> Parser<'a> {
             m
         } else {
             Vec::new()
-        }
-    }
-
-    /// True when the cursor sits on a `context(a: A, …)` prefix that precedes a local `fun`
-    /// declaration (`context(s: String) fun f() = s`). `context` is a soft keyword, so a bare call
-    /// to a function *named* `context` must NOT be mistaken for a context-receiver prefix: we scan
-    /// past the balanced parens and any following modifiers/newlines and require a `fun` keyword.
-    fn context_prefix_precedes_fun(&self) -> bool {
-        if !(self.at(TokenKind::Ident)
-            && self.text() == "context"
-            && self
-                .t
-                .get(self.i + 1)
-                .is_some_and(|t| t.kind == TokenKind::LParen))
-        {
-            return false;
-        }
-        // Skip the balanced `( … )` group starting at i+1.
-        let mut j = self.i + 1;
-        let mut depth = 0usize;
-        loop {
-            match self.t.get(j).map(|t| t.kind) {
-                Some(TokenKind::LParen) => depth += 1,
-                Some(TokenKind::RParen) => {
-                    depth -= 1;
-                    if depth == 0 {
-                        j += 1;
-                        break;
-                    }
-                }
-                Some(TokenKind::Eof) | None => return false,
-                _ => {}
-            }
-            j += 1;
-        }
-        // Skip trailing newlines / declaration modifiers / annotations, then require `fun`.
-        loop {
-            match self.t.get(j) {
-                Some(t) if t.kind == TokenKind::Newline => j += 1,
-                Some(t) if t.kind == TokenKind::At => {
-                    let Some(end) = self.annotation_end_at(j) else {
-                        return false;
-                    };
-                    j = end;
-                }
-                Some(t) if t.kind == TokenKind::Ident && is_modifier(t.text(self.src)) => j += 1,
-                Some(t) => return t.kind == TokenKind::KwFun,
-                None => return false,
-            }
         }
     }
 
@@ -5131,6 +5309,46 @@ impl<'a> Parser<'a> {
                 self.bump(); // '@'
             }
         }
+        if self.is_script {
+            if let Some(kind) = self.local_declaration_after_prefix() {
+                let start = self.tok().span;
+                if kind == TokenKind::KwFun {
+                    let mods = self.parse_member_decl_prefix();
+                    let mut function = self.parse_fun(
+                        mods.iter().any(|modifier| modifier == "inline"),
+                        mods.iter().any(|modifier| modifier == "final"),
+                        mods.iter().any(|modifier| modifier == "suspend"),
+                        mods.iter().any(|modifier| modifier == "tailrec"),
+                        false,
+                    );
+                    function.visibility = visibility_of(&mods);
+                    function.set_is_operator(mods.iter().any(|modifier| modifier == "operator"));
+                    return self.finish_stmt(Stmt::LocalFun(function), start);
+                }
+                if self.kind() != kind {
+                    let mods = self.parse_member_decl_prefix();
+                    if !self.pending_context_params.is_empty() {
+                        self.diags.error(
+                            start,
+                            "context receivers on local properties are not supported",
+                        );
+                        self.pending_context_params.clear();
+                    }
+                    self.pending_annotations.clear();
+                    self.pending_annotation_args.clear();
+                    if kind == TokenKind::KwVar
+                        && mods.iter().any(|modifier| modifier == "lateinit")
+                    {
+                        self.bump();
+                        let name = self.ident_or_error("variable name");
+                        self.expect(TokenKind::Colon, "':'");
+                        let ty = self.parse_type();
+                        return self.finish_stmt(Stmt::LocalLateinit { name, ty }, start);
+                    }
+                    return self.parse_stmt();
+                }
+            }
+        }
         // Leading annotations on a statement (`@Suppress("…") val x = …`) carry no codegen
         // meaning here — skip them and parse the statement they decorate.
         if self.at(TokenKind::At) {
@@ -5140,34 +5358,35 @@ impl<'a> Parser<'a> {
             }
             return self.parse_stmt();
         }
-        // `lateinit var x: T` local — a mutable slot defaulting to `null`; a read while still null throws
-        // `UninitializedPropertyAccessException` (the lowering wraps each read in the guard). Requires an
-        // explicit non-null reference type (enforced downstream — the lowering bails otherwise).
         if self.at(TokenKind::Ident)
             && self.text() == "lateinit"
             && self
                 .t
                 .get(self.i + 1)
-                .map_or(false, |t| t.kind == TokenKind::KwVar)
+                .is_some_and(|token| token.kind == TokenKind::KwVar)
         {
             let start = self.tok().span;
-            self.bump(); // 'lateinit'
-            self.bump(); // 'var'
+            self.bump();
+            self.bump();
             let name = self.ident_or_error("variable name");
             self.expect(TokenKind::Colon, "':'");
             let ty = self.parse_type();
             return self.finish_stmt(Stmt::LocalLateinit { name, ty }, start);
         }
-        // Local function with context receivers: `context(s: String) fun f() = s`. Consume the
-        // context-parameter prefix (buffered into `pending_context_params`, prepended as leading
-        // value params by `parse_fun`) then parse the local declaration. Guarded so a plain call to
-        // a function named `context` is never misread as a prefix.
-        if self.context_prefix_precedes_fun() {
+        if self.at(TokenKind::Ident)
+            && self.text() == "context"
+            && self.local_declaration_after_prefix() == Some(TokenKind::KwFun)
+        {
             let start = self.tok().span;
-            let mods = self.maybe_parse_context_receivers();
-            let is_suspend = mods.iter().any(|m| m == "suspend");
-            let f = self.parse_fun(false, false, is_suspend, false, false);
-            return self.finish_stmt(Stmt::LocalFun(f), start);
+            let mods = self.parse_member_decl_prefix();
+            let function = self.parse_fun(
+                false,
+                false,
+                mods.iter().any(|modifier| modifier == "suspend"),
+                false,
+                false,
+            );
+            return self.finish_stmt(Stmt::LocalFun(function), start);
         }
         let start = self.tok().span;
         match self.kind() {
@@ -5378,21 +5597,14 @@ impl<'a> Parser<'a> {
                 )
             }
             TokenKind::KwFor => self.parse_for(start, loop_label),
-            // Local function declaration: `fun name(params): Ret { body }` inside a function body.
-            // A `fun` directly followed by `(` (`fun () …`) is an ANONYMOUS-function EXPRESSION used in
-            // statement position (`for (…) fun () {}`), not a local declaration — fall through to the
-            // expression path (which parses it via `parse_anon_fun`). A named/generic/receiver local fun
-            // (`fun name`, `fun <T> name`, `fun Recv.name`) keeps the declaration path unchanged.
             TokenKind::KwFun
                 if !self
                     .t
                     .get(self.i + 1)
-                    .is_some_and(|t| t.kind == TokenKind::LParen) =>
+                    .is_some_and(|token| token.kind == TokenKind::LParen) =>
             {
-                // Local functions don't carry a `suspend` modifier through this path; a local
-                // `suspend fun` is handled (skipped) downstream via the suspend guard in lowering.
-                let f = self.parse_fun(false, false, false, false, false);
-                self.finish_stmt(Stmt::LocalFun(f), start)
+                let function = self.parse_fun(false, false, false, false, false);
+                self.finish_stmt(Stmt::LocalFun(function), start)
             }
             // Local class declaration inside a function body (`class`/`data class`/`enum class`/
             // `sealed class`/`annotation class`/`interface Name`, optionally `open`/`abstract`/… prefixed).
@@ -8061,6 +8273,90 @@ mod tests {
             d.render("test", src)
         );
         file.debug_tree()
+    }
+
+    fn script(src: &str) -> File {
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(src, &mut diagnostics);
+        let file = parse_script_with_features(src, &tokens, &mut diagnostics, &LangFeatures::new());
+        assert!(
+            !diagnostics.has_errors(),
+            "{}",
+            diagnostics.render("test", src)
+        );
+        file
+    }
+
+    #[test]
+    fn script_parses_declarations_and_modifier_shaped_calls_in_order() {
+        let source = "fun context(value: String): String = value\n\
+                      fun suspend(block: () -> Unit) = block()\n\
+                      context(\"first\")\n\
+                      context(\"second\"); fun after(): Unit {}\n\
+                      suspend {}";
+        let file = script(source);
+        let Some(Expr::Block { stmts, .. }) = file.script_body.map(|body| file.expr(body)) else {
+            panic!("script body");
+        };
+        let declaration_names = stmts
+            .iter()
+            .filter_map(|statement| match file.stmt(*statement) {
+                Stmt::LocalFun(function) => Some(function.name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(file.decls.is_empty());
+        assert_eq!(declaration_names, ["context", "suspend", "after"]);
+        assert_eq!(stmts.len(), 6);
+    }
+
+    #[test]
+    fn script_parses_prefixed_declarations_as_local_statements() {
+        let source = "@Deprecated(\"test\")\n\
+                      private fun hidden(): Unit {}\n\
+                      context(value: String)\n\
+                      private fun scoped(): String = value\n\
+                      scoped()";
+        let file = script(source);
+
+        let Some(Expr::Block { stmts, .. }) = file.script_body.map(|body| file.expr(body)) else {
+            panic!("script body");
+        };
+        let functions = stmts
+            .iter()
+            .filter_map(|statement| match file.stmt(*statement) {
+                Stmt::LocalFun(function) => Some(function),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(file.decls.is_empty());
+        assert_eq!(functions.len(), 2);
+        assert_eq!(functions[0].visibility, Visibility::Private);
+        assert_eq!(functions[1].context_count, 1);
+        assert_eq!(stmts.len(), 3);
+    }
+
+    #[test]
+    fn script_distinguishes_context_declarations_from_calls() {
+        let source = "fun context(value: String) = value\n\
+                      context(\"call\")\n\
+                      context(value: String,)\n\
+                      private fun declared() = value\n\
+                      fun () {}";
+        let file = script(source);
+        let Some(Expr::Block { stmts, .. }) = file.script_body.map(|body| file.expr(body)) else {
+            panic!("script body");
+        };
+
+        assert_eq!(stmts.len(), 4);
+        assert!(matches!(file.stmt(stmts[1]), Stmt::Expr(_)));
+        assert!(matches!(
+            file.stmt(stmts[2]),
+            Stmt::LocalFun(function) if function.context_count == 1
+        ));
+        assert!(matches!(file.stmt(stmts[3]), Stmt::Expr(_)));
     }
 
     #[test]

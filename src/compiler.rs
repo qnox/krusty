@@ -35,6 +35,14 @@ pub fn emit_checked<B: Backend>(
         );
         return Vec::new();
     }
+    if let Some(index) = files.iter().position(|file| file.is_script) {
+        diags.set_file(index as u32);
+        diags.error(
+            Span::new(0, 0),
+            "Kotlin scripts can be analyzed but cannot be emitted",
+        );
+        return Vec::new();
+    }
     let mut outputs = Vec::new();
     let mut state = B::State::default();
     for (i, ((file, stem), info)) in files.iter().zip(stems).zip(types).enumerate() {
@@ -68,7 +76,10 @@ pub fn emit_checked<B: Backend>(
 mod tests {
     use super::*;
     use crate::backend::Artifact;
+    use crate::features::LangFeatures;
     use crate::frontend::{collect_signatures, parse_source_with_detected_features};
+    use crate::lexer::lex;
+    use crate::parser::parse_script_with_features;
 
     struct RecordingBackend;
 
@@ -135,6 +146,35 @@ mod tests {
 
         assert!(diags.has_errors());
         assert!(outputs.is_empty());
+    }
+
+    #[test]
+    fn compiler_does_not_emit_kotlin_scripts() {
+        let source = "val value = 1";
+        let mut diags = DiagSink::new();
+        let tokens = lex(source, &mut diags);
+        let files = vec![parse_script_with_features(
+            source,
+            &tokens,
+            &mut diags,
+            &LangFeatures::new(),
+        )];
+        let stems = vec!["Script".to_string()];
+        let mut syms = collect_signatures(&files, &mut diags);
+        let outputs = compile(
+            &files,
+            &stems,
+            &mut syms,
+            &RecordingBackend,
+            "main",
+            &mut diags,
+        );
+
+        assert!(outputs.is_empty());
+        assert!(diags
+            .diags
+            .iter()
+            .any(|diagnostic| diagnostic.msg.contains("cannot be emitted")));
     }
 
     #[test]
