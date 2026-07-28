@@ -254,6 +254,12 @@ enum Entry {
     Jimage(PathBuf),
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct EntryKey {
+    path: PathBuf,
+    stamp: Option<EntryStamp>,
+}
+
 impl Entry {
     fn path(&self) -> &Path {
         match self {
@@ -264,10 +270,10 @@ impl Entry {
 
 /// Process-global `scan_types` results keyed by the entry path set. The JDK jimage and stdlib jars
 /// are identical across every compiled file, so this collapses N re-scans into one.
-fn global_type_cache() -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<TypeIndex>>>
-{
+fn global_type_cache(
+) -> &'static std::sync::Mutex<HashMap<Vec<EntryKey>, std::sync::Arc<TypeIndex>>> {
     static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<TypeIndex>>>,
+        std::sync::Mutex<HashMap<Vec<EntryKey>, std::sync::Arc<TypeIndex>>>,
     > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
@@ -378,20 +384,26 @@ struct JimageIndex {
 
 /// Process-global jimage index (name id → file offset/size), keyed by the jimage path. The jimage is
 /// identical for every compiled file, so parsing its 146 MB happens once per process, not per thread.
-fn global_jimage_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<JimageIndex>>>
+fn global_jimage_cache() -> &'static std::sync::Mutex<HashMap<EntryKey, std::sync::Arc<JimageIndex>>>
 {
     static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<JimageIndex>>>,
+        std::sync::Mutex<HashMap<EntryKey, std::sync::Arc<JimageIndex>>>,
     > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-fn cached_jimage_index(path: &Path) -> std::sync::Arc<JimageIndex> {
+fn cached_jimage_index(path: &Path) -> Option<std::sync::Arc<JimageIndex>> {
+    let key = EntryKey {
+        path: path.to_path_buf(),
+        stamp: entry_stamp(path),
+    };
     let mut cache = global_jimage_cache().lock().unwrap();
-    cache
-        .entry(path.to_path_buf())
-        .or_insert_with(|| std::sync::Arc::new(build_jimage_index(path).unwrap_or_default()))
-        .clone()
+    if let Some(index) = cache.get(&key) {
+        return Some(index.clone());
+    }
+    let index = std::sync::Arc::new(build_jimage_index(path)?);
+    cache.insert(key, index.clone());
+    Some(index)
 }
 
 /// A process-global cache of a value derived from a SINGLE classpath entry (jar / dir / jimage), keyed
@@ -401,7 +413,7 @@ fn cached_jimage_index(path: &Path) -> std::sync::Arc<JimageIndex> {
 /// the new one. This is the composable layer UNDER the whole-classpath indexes: compose an index per cp
 /// from these per-entry parts instead of rescanning every jar when the cp differs by a single entry.
 struct EntryCache<T> {
-    map: std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<T>>>,
+    map: std::sync::Mutex<HashMap<EntryKey, std::sync::Arc<T>>>,
 }
 
 impl<T> EntryCache<T> {
@@ -413,13 +425,24 @@ impl<T> EntryCache<T> {
     /// The entry's cached value, built once via `build` on first request. The map lock is held across
     /// the build so worker threads starting together build each entry exactly once, not N times (this
     /// subsumes the ad-hoc per-index build locks).
-    fn get_or_build(&self, path: &Path, build: impl FnOnce() -> T) -> std::sync::Arc<T> {
+    fn get_or_build(&self, key: &EntryKey, build: impl FnOnce() -> T) -> std::sync::Arc<T> {
+        self.get_or_build_if(key, build, |_| true)
+    }
+
+    fn get_or_build_if(
+        &self,
+        key: &EntryKey,
+        build: impl FnOnce() -> T,
+        cacheable: impl FnOnce(&T) -> bool,
+    ) -> std::sync::Arc<T> {
         let mut map = self.map.lock().unwrap();
-        if let Some(v) = map.get(path) {
+        if let Some(v) = map.get(key) {
             return v.clone();
         }
         let v = std::sync::Arc::new(build());
-        map.insert(path.to_path_buf(), v.clone());
+        if cacheable(&v) {
+            map.insert(key.clone(), v.clone());
+        }
         v
     }
 }
@@ -486,10 +509,10 @@ impl PkgMembers {
 }
 
 type JarPkgMembers = std::sync::Arc<PkgMembers>;
-fn global_jar_pkg_members() -> &'static std::sync::Mutex<HashMap<(PathBuf, TypeName), JarPkgMembers>>
-{
+fn global_jar_pkg_members(
+) -> &'static std::sync::Mutex<HashMap<(EntryKey, TypeName), JarPkgMembers>> {
     static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<(PathBuf, TypeName), JarPkgMembers>>,
+        std::sync::Mutex<HashMap<(EntryKey, TypeName), JarPkgMembers>>,
     > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
@@ -497,9 +520,9 @@ fn global_jar_pkg_members() -> &'static std::sync::Mutex<HashMap<(PathBuf, TypeN
 /// Process-global composed package table, keyed by the classpath entry set — like [`global_type_cache`],
 /// the stdlib/JDK entries are identical across every compiled file, so the compose runs once per process.
 fn global_pkg_tree_cache(
-) -> &'static std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<PackageTree>>> {
+) -> &'static std::sync::Mutex<HashMap<Vec<EntryKey>, std::sync::Arc<PackageTree>>> {
     static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<Vec<PathBuf>, std::sync::Arc<PackageTree>>>,
+        std::sync::Mutex<HashMap<Vec<EntryKey>, std::sync::Arc<PackageTree>>>,
     > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
@@ -570,8 +593,8 @@ impl ExtCandidateRecord {
 /// the per-call-site `find_extensions` O(1). `RwLock` because hits (reads) dominate; a miss takes the write
 /// lock briefly. Bounded by the DISTINCT QUERIED names (the working set), not the whole classpath.
 type ExtCandCache = std::sync::Arc<std::sync::RwLock<HashMap<String, std::sync::Arc<ExtByName>>>>;
-fn global_ext_candidates(key: &[PathBuf]) -> ExtCandCache {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Vec<PathBuf>, ExtCandCache>>> =
+fn global_ext_candidates(key: &[EntryKey]) -> ExtCandCache {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Vec<EntryKey>, ExtCandCache>>> =
         std::sync::OnceLock::new();
     CACHE
         .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
@@ -608,12 +631,12 @@ impl ClassCacheData {
 }
 
 type ClassCache = std::sync::Arc<ClassCacheData>;
-fn global_entry_class_cache(path: &Path) -> ClassCache {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, ClassCache>>> =
+fn global_entry_class_cache(key: &EntryKey) -> ClassCache {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<EntryKey, ClassCache>>> =
         std::sync::OnceLock::new();
     let m = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     let mut g = m.lock().unwrap();
-    g.entry(path.to_path_buf())
+    g.entry(key.clone())
         .or_insert_with(|| std::sync::Arc::new(ClassCacheData::default()))
         .clone()
 }
@@ -989,6 +1012,8 @@ const OPEN_ARCHIVE_CAP: usize = 16;
 #[derive(Default)]
 pub struct Classpath {
     entries: Vec<Entry>,
+    snapshot: Vec<Option<EntryStamp>>,
+    cache_key: Vec<EntryKey>,
     // Two-level parsed-class cache: `local_cache` is a per-thread L1 (cheap `RefCell`, no lock —
     // serves the hot repeated lookups) holding the whole-classpath search result. Backing it,
     // `entry_caches` (parallel to `entries`) are process-global PER-ENTRY L2 caches (`RwLock`), so a
@@ -1096,7 +1121,18 @@ impl Classpath {
                 }
             })
             .collect();
-        let cache_key: Vec<PathBuf> = entries.iter().map(|e| e.path().to_path_buf()).collect();
+        let snapshot = entries
+            .iter()
+            .map(|entry| entry_stamp(entry.path()))
+            .collect::<Vec<_>>();
+        let cache_key = entries
+            .iter()
+            .zip(&snapshot)
+            .map(|(entry, &stamp)| EntryKey {
+                path: entry.path().to_path_buf(),
+                stamp,
+            })
+            .collect::<Vec<_>>();
         // Per-cache LRU caps (entry counts). Sized ABOVE the conformance working set: entries are
         // Rc-shared records, so the practical bound is the queried vocabulary, and an undersized cap
         // thrashes (every eviction re-composes a type/namespace record or re-decodes metadata). The
@@ -1108,11 +1144,10 @@ impl Classpath {
         const BODY_CAP: usize = 2048;
         Classpath {
             entries,
+            snapshot,
+            cache_key: cache_key.clone(),
             local_cache: RefCell::new(crate::lru::LruCache::new(CLASS_CAP)),
-            entry_caches: cache_key
-                .iter()
-                .map(|p| global_entry_class_cache(p))
-                .collect(),
+            entry_caches: cache_key.iter().map(global_entry_class_cache).collect(),
             archives: RefCell::new(crate::lru::LruCache::new_fixed(OPEN_ARCHIVE_CAP)),
             ext: RefCell::new(None),
             types: RefCell::new(None),
@@ -1138,6 +1173,18 @@ impl Classpath {
         let _ = self.package_tree();
         let _ = self.scan_types();
         let _ = self.ext_parts();
+    }
+
+    fn catalog_complete(&self) -> bool {
+        self.package_tree().incomplete_entries.is_empty()
+    }
+
+    /// Whether all entries still match the snapshot captured at construction.
+    pub fn snapshot_is_current(&self) -> bool {
+        self.entries
+            .iter()
+            .zip(&self.snapshot)
+            .all(|(entry, stamp)| entry_stamp(entry.path()) == *stamp)
     }
 
     /// Process-unique identity assigned at construction — a stable cache key for per-classpath caches
@@ -1199,11 +1246,7 @@ impl Classpath {
         if let Some(t) = self.pkg_tree.borrow().as_ref() {
             return t.clone();
         }
-        let key: Vec<PathBuf> = self
-            .entries
-            .iter()
-            .map(|e| e.path().to_path_buf())
-            .collect();
+        let key = self.cache_key.clone();
         if let Some(t) = global_pkg_tree_cache().lock().unwrap().get(&key) {
             *self.pkg_tree.borrow_mut() = Some(t.clone());
             return t.clone();
@@ -1211,14 +1254,23 @@ impl Classpath {
         let parts: Vec<std::sync::Arc<JarPackages>> = self
             .entries
             .iter()
-            .map(|e| global_jar_packages().get_or_build(e.path(), || build_jar_packages(e)))
+            .zip(&self.cache_key)
+            .map(|(e, entry_key)| {
+                global_jar_packages().get_or_build_if(
+                    entry_key,
+                    || build_jar_packages(e),
+                    |jp| jp.complete,
+                )
+            })
             .collect();
         let tree = std::sync::Arc::new(compose_package_tree(&parts));
-        global_pkg_tree_cache()
-            .lock()
-            .unwrap()
-            .insert(key, tree.clone());
-        *self.pkg_tree.borrow_mut() = Some(tree.clone());
+        if tree.incomplete_entries.is_empty() {
+            global_pkg_tree_cache()
+                .lock()
+                .unwrap()
+                .insert(key, tree.clone());
+            *self.pkg_tree.borrow_mut() = Some(tree.clone());
+        }
         tree
     }
 
@@ -1235,6 +1287,10 @@ impl Classpath {
         &self,
         internal: TypeName,
     ) -> Option<Option<std::rc::Rc<crate::libraries::LibraryType>>> {
+        if !self.package_tree().incomplete_entries.is_empty() {
+            cache_stat!(resolved_types, false);
+            return None;
+        }
         let hit = self.resolved_types.borrow_mut().get(&internal).cloned();
         cache_stat!(resolved_types, hit.is_some());
         hit
@@ -1253,6 +1309,9 @@ impl Classpath {
         internal: TypeName,
         ty: Option<std::rc::Rc<crate::libraries::LibraryType>>,
     ) {
+        if !self.package_tree().incomplete_entries.is_empty() {
+            return;
+        }
         self.resolved_types.borrow_mut().insert(internal, ty);
     }
 
@@ -1263,9 +1322,12 @@ impl Classpath {
     }
 
     fn class_meta_name(&self, internal_id: TypeName) -> std::rc::Rc<ClassMeta> {
-        if let Some(m) = self.meta_fns.borrow_mut().get(&internal_id) {
-            cache_stat!(meta_fns, true);
-            return m.clone();
+        let catalog_complete = self.catalog_complete();
+        if catalog_complete {
+            if let Some(m) = self.meta_fns.borrow_mut().get(&internal_id) {
+                cache_stat!(meta_fns, true);
+                return m.clone();
+            }
         }
         cache_stat!(meta_fns, false);
         let ci = self.find_name(internal_id);
@@ -1335,7 +1397,9 @@ impl Classpath {
             fn_segments,
             prop_segments,
         });
-        self.meta_fns.borrow_mut().insert(internal_id, meta.clone());
+        if catalog_complete {
+            self.meta_fns.borrow_mut().insert(internal_id, meta.clone());
+        }
         meta
     }
 
@@ -1476,8 +1540,11 @@ impl Classpath {
     /// A facade class's lambda-return-overload Kotlin names, cached (part-merged for a multifile facade).
     pub fn lambda_return_overloads(&self, internal: &str) -> std::rc::Rc<LambdaReturnOverloads> {
         let internal_id = type_name(internal);
-        if let Some(m) = self.meta_overloads.borrow_mut().get(&internal_id) {
-            return m.clone();
+        let catalog_complete = self.catalog_complete();
+        if catalog_complete {
+            if let Some(m) = self.meta_overloads.borrow_mut().get(&internal_id) {
+                return m.clone();
+            }
         }
         // Overloads of one Kotlin name are split across the multifile facade's PART classes (the
         // `Int`/`Long`/`Double` `sumOf` in one part, `UInt`/`ULong` in another). The facade EXTENDS its
@@ -1499,9 +1566,11 @@ impl Classpath {
             cur = ci.super_class;
         }
         let rc = std::rc::Rc::new(names);
-        self.meta_overloads
-            .borrow_mut()
-            .insert(internal_id, rc.clone());
+        if catalog_complete {
+            self.meta_overloads
+                .borrow_mut()
+                .insert(internal_id, rc.clone());
+        }
         rc
     }
 
@@ -1581,8 +1650,11 @@ impl Classpath {
     /// read once and cached. The single builtins entry point — both the collection hierarchy and a
     /// type's member API derive from it.
     fn builtins_file_for_package(&self, package: TypeName) -> std::rc::Rc<BuiltinsFile> {
-        if let Some(m) = self.builtins.borrow().get(&package) {
-            return m.clone();
+        let catalog_complete = self.catalog_complete();
+        if catalog_complete {
+            if let Some(m) = self.builtins.borrow().get(&package) {
+                return m.clone();
+            }
         }
         let path = Self::builtins_path_for_package(package);
         let mut map = HashMap::new();
@@ -1595,7 +1667,9 @@ impl Classpath {
             }
         }
         let rc = std::rc::Rc::new(BuiltinsFile::from_classes(map));
-        self.builtins.borrow_mut().insert(package, rc.clone());
+        if catalog_complete {
+            self.builtins.borrow_mut().insert(package, rc.clone());
+        }
         rc
     }
 
@@ -1628,9 +1702,12 @@ impl Classpath {
         &self,
         internal_id: TypeName,
     ) -> Vec<crate::libraries::LibraryMember> {
-        if let Some(members) = self.builtin_members.borrow_mut().get(&internal_id) {
-            cache_stat!(builtin_members, true);
-            return members.as_ref().clone();
+        let catalog_complete = self.catalog_complete();
+        if catalog_complete {
+            if let Some(members) = self.builtin_members.borrow_mut().get(&internal_id) {
+                cache_stat!(builtin_members, true);
+                return members.as_ref().clone();
+            }
         }
         cache_stat!(builtin_members, false);
         let f = self.builtins_file_for_package(Self::builtins_package_for(internal_id));
@@ -1702,9 +1779,11 @@ impl Classpath {
             .into_iter()
             .flatten()
             .collect();
-        self.builtin_members
-            .borrow_mut()
-            .insert(internal_id, std::rc::Rc::new(members.clone()));
+        if catalog_complete {
+            self.builtin_members
+                .borrow_mut()
+                .insert(internal_id, std::rc::Rc::new(members.clone()));
+        }
         members
     }
 
@@ -1829,17 +1908,19 @@ impl Classpath {
     /// The classpath's type index, shared via `Arc` so per-file callers pay a pointer bump, not a
     /// deep clone of the (large) class-name/alias maps. Cached per-instance and process-globally.
     pub fn scan_types(&self) -> std::sync::Arc<TypeIndex> {
-        if let Some(idx) = self.types.borrow().as_ref() {
-            return idx.clone();
+        let tree = self.package_tree();
+        let catalog_complete = tree.incomplete_entries.is_empty();
+        if catalog_complete {
+            if let Some(idx) = self.types.borrow().as_ref() {
+                return idx.clone();
+            }
         }
-        let key: Vec<PathBuf> = self
-            .entries
-            .iter()
-            .map(|e| e.path().to_path_buf())
-            .collect();
-        if let Some(idx) = global_type_cache().lock().unwrap().get(&key) {
-            *self.types.borrow_mut() = Some(idx.clone());
-            return idx.clone();
+        let key = self.cache_key.clone();
+        if catalog_complete {
+            if let Some(idx) = global_type_cache().lock().unwrap().get(&key) {
+                *self.types.borrow_mut() = Some(idx.clone());
+                return idx.clone();
+            }
         }
         // Compose from per-ENTRY alias tables. Each entry's scan (parse every `*Kt` facade for type
         // aliases) is built ONCE via `EntryCache` — which holds its map lock across the build — and shared
@@ -1848,8 +1929,13 @@ impl Classpath {
         // `type_alias_target`); only the cheap map merge runs per classpath. This mirrors the ext index's
         // per-entry composition (d8bbc91).
         let mut idx = TypeIndex::default();
-        for e in &self.entries {
-            let part = global_entry_types().get_or_build(e.path(), || build_entry_types(e));
+        for (entry_id, e) in self.entries.iter().enumerate() {
+            let part = if tree.incomplete_entries.contains(&entry_id) {
+                std::sync::Arc::new(build_entry_types(e))
+            } else {
+                global_entry_types()
+                    .get_or_build(&self.cache_key[entry_id], || build_entry_types(e))
+            };
             for (&alias, &target) in &part.type_aliases {
                 // First entry on the classpath wins — kotlinc/java class-resolution order (and this doc's
                 // "first hit" invariant). The old inline scan `insert`ed in entry order, so a LATER jar
@@ -1859,8 +1945,10 @@ impl Classpath {
             }
         }
         let idx = std::sync::Arc::new(idx);
-        global_type_cache().lock().unwrap().insert(key, idx.clone());
-        *self.types.borrow_mut() = Some(idx.clone());
+        if catalog_complete {
+            global_type_cache().lock().unwrap().insert(key, idx.clone());
+            *self.types.borrow_mut() = Some(idx.clone());
+        }
         idx
     }
 
@@ -1911,13 +1999,12 @@ impl Classpath {
             }
         });
         let entry = match path {
-            Some(p) => {
-                let index = cached_jimage_index(&p);
-                (p, index)
-            }
-            None => (PathBuf::new(), std::sync::Arc::new(JimageIndex::default())),
+            Some(p) => cached_jimage_index(&p).map(|index| (p, index)),
+            None => Some((PathBuf::new(), std::sync::Arc::new(JimageIndex::default()))),
         };
-        *self.jimage.borrow_mut() = Some(entry);
+        if let Some(entry) = entry {
+            *self.jimage.borrow_mut() = Some(entry);
+        }
     }
 
     fn jar_entry(&self, jar: &Path, name: &str) -> Option<Vec<u8>> {
@@ -1944,10 +2031,16 @@ impl Classpath {
         // class is shared behind an `Arc`: L1↔L2 and every caller clone is a refcount bump, never a deep
         // copy of the (large) `ClassInfo`.
         let internal_id = super::jvm_class_map::to_jvm_type_name(internal);
+        let tree = self.package_tree();
+        let catalog_complete = tree.incomplete_entries.is_empty();
         // L1: per-thread, no lock.
-        if let Some(hit) = self.local_cache.borrow_mut().get(&internal_id) {
-            cache_stat!(l1_class, true);
-            return hit.clone();
+        let l1_hit = self.local_cache.borrow_mut().get(&internal_id).cloned();
+        if let Some(hit) = l1_hit {
+            // A recovered earlier entry may shadow a cached hit from a later entry.
+            if catalog_complete {
+                cache_stat!(l1_class, true);
+                return hit;
+            }
         }
         cache_stat!(l1_class, false);
         let internal = internal_id.render();
@@ -1958,28 +2051,30 @@ impl Classpath {
         // (the spec's qualified-name step: search `node.jars`). The tree lists EVERY jar/dir/jimage that
         // declares the package, so the result is identical to scanning all entries — just fewer reads
         // (a probe for an absent class touches the one jar that owns the package, not every entry + the
-        // jimage). Fall back to all entries when the package isn't cataloged (defensive).
+        // jimage). Incomplete entries remain fallback probes.
         let pkg = internal.rsplit_once('/').map_or("", |(p, _)| p);
-        let scoped = self
-            .package_tree()
+        let mut indices = tree
             .node_for(pkg)
             .filter(|n| !n.jars.is_empty())
-            .map(|n| n.jars.clone());
-        let indices = scoped.unwrap_or_else(|| (0..self.entries.len()).collect());
+            .map_or_else(Vec::new, |node| node.jars.clone());
+        indices.extend(tree.incomplete_entries.iter().copied());
+        indices.sort_unstable();
+        indices.dedup();
         for i in indices {
             let (Some(e), Some(l2)) = (self.entries.get(i), self.entry_caches.get(i)) else {
                 continue;
             };
+            let incomplete = tree.incomplete_entries.contains(&i);
             // L2: process-global per-entry cache — a class parsed from this jar/dir by ANY thread
             // (under ANY classpath that includes it) is reused; `None` records "absent from this
             // entry", so the classpath-order walk still stops at the first entry that owns the class.
             match l2.classes.read().unwrap().get(&internal_id).cloned() {
-                Some(Some(hit)) => {
+                Some(Some(hit)) if !incomplete => {
                     found = Some(hit);
                     break;
                 }
-                Some(None) => continue,
-                None => {}
+                Some(None) if !incomplete => continue,
+                None | Some(_) => {}
             }
             all_cached = false;
             let bytes = match e {
@@ -1996,19 +2091,23 @@ impl Classpath {
                 .and_then(|b| parse_class(&b).ok())
                 .filter(|ci| ci.this_class_matches(&internal))
                 .map(std::sync::Arc::new);
-            l2.classes
-                .write()
-                .unwrap()
-                .insert(internal_id, parsed.clone());
+            if parsed.is_some() || !incomplete {
+                l2.classes
+                    .write()
+                    .unwrap()
+                    .insert(internal_id, parsed.clone());
+            }
             if let Some(ci) = parsed {
                 found = Some(ci);
                 break;
             }
         }
         cache_stat!(l2_class, all_cached);
-        self.local_cache
-            .borrow_mut()
-            .insert(internal_id, found.clone());
+        if catalog_complete {
+            self.local_cache
+                .borrow_mut()
+                .insert(internal_id, found.clone());
+        }
         found
     }
 
@@ -2039,9 +2138,12 @@ impl Classpath {
     pub fn method_code(&self, internal: &str, name: &str, descriptor: &str) -> Option<MethodCode> {
         let internal_id = type_name(internal);
         let key = (internal_id, name.to_string(), descriptor.to_string());
-        if let Some(hit) = self.bodies.borrow_mut().get(&key) {
-            cache_stat!(bodies, true);
-            return hit.clone();
+        let catalog_complete = self.catalog_complete();
+        if catalog_complete {
+            if let Some(hit) = self.bodies.borrow_mut().get(&key) {
+                cache_stat!(bodies, true);
+                return hit.clone();
+            }
         }
         cache_stat!(bodies, false);
         let mut code = self
@@ -2065,7 +2167,9 @@ impl Classpath {
                 cur = self.find(&s).and_then(|ci| ci.super_class());
             }
         }
-        self.bodies.borrow_mut().insert(key, code.clone());
+        if catalog_complete {
+            self.bodies.borrow_mut().insert(key, code.clone());
+        }
         code
     }
 
@@ -2218,13 +2322,18 @@ impl Classpath {
     /// and rebuilding the candidate vec re-interned every owner name and re-split every descriptor.
     fn facade_statics(&self, root: &str) -> std::rc::Rc<Vec<ExtCandidate>> {
         let root_id = type_name(root);
-        if let Some(hit) = self.facade_statics_memo.borrow_mut().get(&root_id) {
-            return hit.clone();
+        let catalog_complete = self.package_tree().incomplete_entries.is_empty();
+        if catalog_complete {
+            if let Some(hit) = self.facade_statics_memo.borrow_mut().get(&root_id) {
+                return hit.clone();
+            }
         }
         let rc = std::rc::Rc::new(self.build_facade_statics(root));
-        self.facade_statics_memo
-            .borrow_mut()
-            .insert(root_id, rc.clone());
+        if catalog_complete {
+            self.facade_statics_memo
+                .borrow_mut()
+                .insert(root_id, rc.clone());
+        }
         rc
     }
 
@@ -2271,13 +2380,21 @@ impl Classpath {
     /// (`CollectionsKt`), not the package-private multifile PART (`CollectionsKt__…`) `kotlin_module`
     /// lists — the callable public statics live on the facade, and `facade_statics` drops a non-public
     /// root's public statics (the `@InlineOnly` rule).
-    fn jar_pkg_members_name(&self, entry: &Entry, pkg: TypeName) -> JarPkgMembers {
-        let key = (entry.path().to_path_buf(), pkg);
-        let mut g = global_jar_pkg_members().lock().unwrap();
-        if let Some(m) = g.get(&key) {
-            return m.clone();
+    fn jar_pkg_members_name(&self, entry_id: usize, pkg: TypeName) -> JarPkgMembers {
+        let entry = &self.entries[entry_id];
+        let entry_key = &self.cache_key[entry_id];
+        let key = (entry_key.clone(), pkg);
+        let jp = global_jar_packages().get_or_build_if(
+            entry_key,
+            || build_jar_packages(entry),
+            |jp| jp.complete,
+        );
+        if jp.complete {
+            let g = global_jar_pkg_members().lock().unwrap();
+            if let Some(m) = g.get(&key) {
+                return m.clone();
+            }
         }
-        let jp = global_jar_packages().get_or_build(entry.path(), || build_jar_packages(entry));
         let pkg_rendered = pkg.render();
         let mut m = PkgMembers::default();
         if let Some(pe) = jp.entry(&pkg_rendered) {
@@ -2334,7 +2451,12 @@ impl Classpath {
             }
         }
         let rc = std::sync::Arc::new(m);
-        g.insert(key, rc.clone());
+        if jp.complete {
+            global_jar_pkg_members()
+                .lock()
+                .unwrap()
+                .insert(key, rc.clone());
+        }
         rc
     }
 
@@ -2357,7 +2479,11 @@ impl Classpath {
             let Some(entry) = self.entries.get(jar_id) else {
                 continue;
             };
-            let jp = global_jar_packages().get_or_build(entry.path(), || build_jar_packages(entry));
+            let jp = global_jar_packages().get_or_build_if(
+                &self.cache_key[jar_id],
+                || build_jar_packages(entry),
+                |jp| jp.complete,
+            );
             if let Some(pe) = jp.entry(&pkg_rendered) {
                 for &part_id in &pe.facades {
                     let part = jp.names.render(part_id);
@@ -2397,10 +2523,10 @@ impl Classpath {
                 continue;
             };
             for &jar_id in &node.jars {
-                let Some(entry) = self.entries.get(jar_id) else {
+                if self.entries.get(jar_id).is_none() {
                     continue;
-                };
-                let members = self.jar_pkg_members_name(entry, pkg);
+                }
+                let members = self.jar_pkg_members_name(jar_id, pkg);
                 if let Some(indices) = members.by_jvm.get(jvm_name) {
                     for &idx in indices {
                         let Some(c) = members.candidates.get(idx) else {
@@ -2441,10 +2567,10 @@ impl Classpath {
                 continue;
             };
             for &jar_id in &node.jars {
-                let Some(entry) = self.entries.get(jar_id) else {
+                if self.entries.get(jar_id).is_none() {
                     continue;
-                };
-                let members = self.jar_pkg_members_name(entry, pkg);
+                }
+                let members = self.jar_pkg_members_name(jar_id, pkg);
                 if let Some(owners) = members.owners_by_recv.get(recv_desc) {
                     for &id in owners {
                         let o = type_name_from(&members.owner_names, id);
@@ -2503,10 +2629,10 @@ impl Classpath {
                 continue;
             };
             for &jar_id in &node.jars {
-                let Some(entry) = self.entries.get(jar_id) else {
+                if self.entries.get(jar_id).is_none() {
                     continue;
-                };
-                let members = self.jar_pkg_members_name(entry, pkg);
+                }
+                let members = self.jar_pkg_members_name(jar_id, pkg);
                 if let Some(indices) = members.by_source.get(name) {
                     out.extend(members.render_indices(indices));
                 }
@@ -2530,6 +2656,10 @@ impl Classpath {
         &self,
         fqn: TypeName,
     ) -> Option<std::rc::Rc<crate::libraries::ResolvedSymbols>> {
+        if !self.package_tree().incomplete_entries.is_empty() {
+            cache_stat!(symbols_memo, false);
+            return None;
+        }
         let hit = self.symbols_memo.borrow_mut().get(&fqn).cloned();
         cache_stat!(symbols_memo, hit.is_some());
         hit
@@ -2551,7 +2681,9 @@ impl Classpath {
         symbols: crate::libraries::ResolvedSymbols,
     ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
         let rc = std::rc::Rc::new(symbols);
-        self.symbols_memo.borrow_mut().insert(fqn, rc.clone());
+        if self.package_tree().incomplete_entries.is_empty() {
+            self.symbols_memo.borrow_mut().insert(fqn, rc.clone());
+        }
         rc
     }
 
@@ -2560,25 +2692,30 @@ impl Classpath {
     /// are then O(1) reads. This is what makes the lazy index perform: the WHERE map is tiny + retained;
     /// candidate records are rebuilt on first use and kept only for queried names.
     fn ext_by_name(&self, method_name: &str) -> std::sync::Arc<ExtByName> {
+        let catalog_complete = self.package_tree().incomplete_entries.is_empty();
         // L1: per-thread, no lock — the hot resolver path.
-        if let Some(hit) = self.ext_l1.borrow_mut().get(method_name).cloned() {
-            cache_stat!(ext_l1, true);
-            return hit;
+        if catalog_complete {
+            if let Some(hit) = self.ext_l1.borrow_mut().get(method_name).cloned() {
+                cache_stat!(ext_l1, true);
+                return hit;
+            }
         }
         cache_stat!(ext_l1, false);
         // L2: process-global, shared across threads (the rebuild happens once here).
-        if let Some(hit) = self
-            .ext_candidates
-            .read()
-            .unwrap()
-            .get(method_name)
-            .cloned()
-        {
-            cache_stat!(ext_l2, true);
-            self.ext_l1
-                .borrow_mut()
-                .insert(method_name.to_string(), hit.clone());
-            return hit;
+        if catalog_complete {
+            if let Some(hit) = self
+                .ext_candidates
+                .read()
+                .unwrap()
+                .get(method_name)
+                .cloned()
+            {
+                cache_stat!(ext_l2, true);
+                self.ext_l1
+                    .borrow_mut()
+                    .insert(method_name.to_string(), hit.clone());
+                return hit;
+            }
         }
         cache_stat!(ext_l2, false);
         // Union the per-entry root lists for THIS name (entry order, dedup by rendered root — the same
@@ -2607,29 +2744,45 @@ impl Classpath {
             }
         }
         let rc = std::sync::Arc::new(grouped);
-        self.ext_candidates
-            .write()
-            .unwrap()
-            .insert(method_name.to_string(), rc.clone());
-        self.ext_l1
-            .borrow_mut()
-            .insert(method_name.to_string(), rc.clone());
+        if catalog_complete {
+            self.ext_candidates
+                .write()
+                .unwrap()
+                .insert(method_name.to_string(), rc.clone());
+            self.ext_l1
+                .borrow_mut()
+                .insert(method_name.to_string(), rc.clone());
+        }
         rc
     }
 
     /// The per-entry ext contributions, each scanned once per process (cached by entry path via
     /// `global_entry_ext`) and fetched once per instance.
     fn ext_parts(&self) -> std::rc::Rc<Vec<std::sync::Arc<EntryExt>>> {
-        if let Some(parts) = self.ext.borrow().as_ref() {
-            return parts.clone();
+        let tree = self.package_tree();
+        let catalog_complete = tree.incomplete_entries.is_empty();
+        if catalog_complete {
+            if let Some(parts) = self.ext.borrow().as_ref() {
+                return parts.clone();
+            }
         }
         let parts: std::rc::Rc<Vec<std::sync::Arc<EntryExt>>> = std::rc::Rc::new(
             self.entries
                 .iter()
-                .map(|e| global_entry_ext().get_or_build(e.path(), || build_entry_ext(e)))
+                .enumerate()
+                .map(|(entry_id, e)| {
+                    if tree.incomplete_entries.contains(&entry_id) {
+                        std::sync::Arc::new(build_entry_ext(e))
+                    } else {
+                        global_entry_ext()
+                            .get_or_build(&self.cache_key[entry_id], || build_entry_ext(e))
+                    }
+                })
                 .collect(),
         );
-        *self.ext.borrow_mut() = Some(parts.clone());
+        if catalog_complete {
+            *self.ext.borrow_mut() = Some(parts.clone());
+        }
         parts
     }
 
@@ -2705,6 +2858,156 @@ fn build_entry_ext(entry: &Entry) -> EntryExt {
 /// used only to order `find`/facade lookups by classpath declaration order.
 type JarId = usize;
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct EntryStamp {
+    len: u64,
+    modified_ns: Option<u128>,
+    path_identity: u64,
+}
+
+fn entry_stamp(path: &Path) -> Option<EntryStamp> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if metadata.is_dir() {
+        return Some(directory_stamp(path));
+    }
+    Some(EntryStamp {
+        len: metadata.len(),
+        modified_ns: modified_ns(&metadata),
+        path_identity: path_identity(path),
+    })
+}
+
+fn modified_ns(metadata: &std::fs::Metadata) -> Option<u128> {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+}
+
+fn hash_stamp(hash: &mut u64, bytes: &[u8]) {
+    const FNV_PRIME: u64 = 0x100000001b3;
+    for &byte in bytes {
+        *hash ^= u64::from(byte);
+        *hash = hash.wrapping_mul(FNV_PRIME);
+    }
+}
+
+fn enter_directory(
+    path: &Path,
+    ancestors: &mut HashSet<PathBuf>,
+) -> std::io::Result<Option<PathBuf>> {
+    let canonical = std::fs::canonicalize(path)?;
+    Ok(ancestors.insert(canonical.clone()).then_some(canonical))
+}
+
+fn path_identity(path: &Path) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const SYMLINK: &[u8] = b"\0symlink";
+    const SYMLINK_METADATA_FAILED: &[u8] = b"\0symlink-metadata-failed";
+    const READ_LINK_FAILED: &[u8] = b"\0read-link-failed";
+    let mut hash = FNV_OFFSET;
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        hash_stamp(&mut hash, SYMLINK_METADATA_FAILED);
+        return hash;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        hash_stamp(&mut hash, &metadata.dev().to_le_bytes());
+        hash_stamp(&mut hash, &metadata.ino().to_le_bytes());
+        hash_stamp(&mut hash, &metadata.ctime().to_le_bytes());
+        hash_stamp(&mut hash, &metadata.ctime_nsec().to_le_bytes());
+    }
+    #[cfg(not(unix))]
+    {
+        let created_ns = metadata
+            .created()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_nanos());
+        hash_stamp(&mut hash, &created_ns.to_le_bytes());
+    }
+    if !metadata.file_type().is_symlink() {
+        return hash;
+    }
+    hash_stamp(&mut hash, SYMLINK);
+    hash_stamp(&mut hash, &metadata.len().to_le_bytes());
+    hash_stamp(
+        &mut hash,
+        &modified_ns(&metadata).unwrap_or_default().to_le_bytes(),
+    );
+    match std::fs::read_link(path) {
+        Ok(target) => hash_stamp(&mut hash, target.as_os_str().as_encoded_bytes()),
+        Err(_) => hash_stamp(&mut hash, READ_LINK_FAILED),
+    }
+    hash
+}
+
+fn directory_stamp(root: &Path) -> EntryStamp {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const CANONICALIZE_FAILED: &[u8] = b"\0canonicalize-failed";
+    const READ_DIR_FAILED: &[u8] = b"\0read-dir-failed";
+    const READ_ENTRY_FAILED: &[u8] = b"\0read-entry-failed";
+    const METADATA_FAILED: &[u8] = b"\0metadata-failed";
+    let mut hash = FNV_OFFSET;
+    let mut total_len = 0u64;
+    let mut stack = vec![(root.to_path_buf(), HashSet::new())];
+    while let Some((directory, mut ancestors)) = stack.pop() {
+        match enter_directory(&directory, &mut ancestors) {
+            Ok(Some(_)) => {}
+            Ok(None) => continue,
+            Err(_) => {
+                hash_stamp(&mut hash, CANONICALIZE_FAILED);
+                hash_stamp(&mut hash, directory.as_os_str().as_encoded_bytes());
+                continue;
+            }
+        }
+        let Ok(read_dir) = std::fs::read_dir(&directory) else {
+            hash_stamp(&mut hash, READ_DIR_FAILED);
+            hash_stamp(&mut hash, directory.as_os_str().as_encoded_bytes());
+            continue;
+        };
+        let mut paths = Vec::new();
+        let mut failed_entries = 0u64;
+        for entry in read_dir {
+            match entry {
+                Ok(entry) => paths.push(entry.path()),
+                Err(_) => failed_entries += 1,
+            }
+        }
+        if failed_entries != 0 {
+            hash_stamp(&mut hash, READ_ENTRY_FAILED);
+            hash_stamp(&mut hash, &failed_entries.to_le_bytes());
+        }
+        paths.sort_unstable();
+        for path in paths {
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            hash_stamp(&mut hash, relative.as_os_str().as_encoded_bytes());
+            hash_stamp(&mut hash, &path_identity(&path).to_le_bytes());
+            let Ok(metadata) = std::fs::metadata(&path) else {
+                hash_stamp(&mut hash, METADATA_FAILED);
+                continue;
+            };
+            hash_stamp(&mut hash, &metadata.len().to_le_bytes());
+            hash_stamp(
+                &mut hash,
+                &modified_ns(&metadata).unwrap_or_default().to_le_bytes(),
+            );
+            if metadata.file_type().is_dir() {
+                stack.push((path, ancestors.clone()));
+            } else {
+                total_len = total_len.wrapping_add(metadata.len());
+            }
+        }
+    }
+    EntryStamp {
+        len: total_len,
+        modified_ns: Some(u128::from(hash)),
+        path_identity: path_identity(root),
+    }
+}
+
 /// One package's facts within a single jar/dir. Built from the central-directory name pass plus the
 /// jar's `kotlin_module`; the members (facade statics, builtins) are parsed lazily elsewhere. The fields
 /// are the payload the later rollout steps consume (lazy facade/builtin resolution) — populated and
@@ -2729,6 +3032,8 @@ struct JarPackages {
     names: NameTree,
     /// slashed package name ID (`kotlin/collections`, `""` for the default package) → its facts.
     packages: HashMap<NameId, PkgEntry>,
+    /// Whether the entire entry was catalogued successfully.
+    complete: bool,
 }
 
 impl JarPackages {
@@ -2753,6 +3058,7 @@ pub struct PackageNode {
 pub struct PackageTree {
     names: NameTree,
     packages: HashMap<NameId, PackageNode>,
+    incomplete_entries: Vec<JarId>,
 }
 
 impl PackageTree {
@@ -2806,10 +3112,12 @@ fn record_kotlin_module(bytes: &[u8], jp: &mut JarPackages) {
 fn build_jar_packages(entry: &Entry) -> JarPackages {
     let mut jp = JarPackages::default();
     match entry {
-        Entry::Jar(j) => build_jar_packages_jar(j, &mut jp),
-        Entry::Dir(d) => build_jar_packages_dir(d, d, &mut jp),
+        Entry::Jar(j) => jp.complete = build_jar_packages_jar(j, &mut jp),
+        Entry::Dir(d) => jp.complete = build_jar_packages_dir(d, d, &mut jp),
         Entry::Jimage(p) => {
-            let idx = cached_jimage_index(p);
+            let Some(idx) = cached_jimage_index(p) else {
+                return jp;
+            };
             for &internal in idx.by_name.keys() {
                 let Some(pkg) = idx.names.parent(internal) else {
                     continue;
@@ -2820,20 +3128,27 @@ fn build_jar_packages(entry: &Entry) -> JarPackages {
                 let pkg = jp.names.insert_from(&idx.names, pkg);
                 jp.packages.entry(pkg).or_default().has_classes = true;
             }
+            jp.complete = !idx.by_name.is_empty();
         }
     }
     jp
 }
 
-fn build_jar_packages_jar(jar: &Path, jp: &mut JarPackages) {
-    let Ok(f) = File::open(jar) else { return };
+fn build_jar_packages_jar(jar: &Path, jp: &mut JarPackages) -> bool {
+    let Ok(f) = File::open(jar) else {
+        return false;
+    };
     let Ok(mut archive) = zip::ZipArchive::new(f) else {
-        return;
+        return false;
     };
     // Name pass over the central directory — no decompression. Defer reading `kotlin_module` bytes.
     let mut module_indices = Vec::new();
+    let mut complete = true;
     for i in 0..archive.len() {
-        let Ok(e) = archive.by_index(i) else { continue };
+        let Ok(e) = archive.by_index(i) else {
+            complete = false;
+            continue;
+        };
         let name = e.name();
         if name.starts_with("META-INF/") && name.ends_with(".kotlin_module") {
             module_indices.push(i);
@@ -2843,32 +3158,61 @@ fn build_jar_packages_jar(jar: &Path, jp: &mut JarPackages) {
     }
     for i in module_indices {
         let Ok(mut e) = archive.by_index(i) else {
+            complete = false;
             continue;
         };
         let mut buf = Vec::new();
         if e.read_to_end(&mut buf).is_ok() {
             record_kotlin_module(&buf, jp);
+        } else {
+            complete = false;
         }
     }
+    complete
 }
 
-fn build_jar_packages_dir(root: &Path, dir: &Path, jp: &mut JarPackages) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
+fn build_jar_packages_dir(root: &Path, dir: &Path, jp: &mut JarPackages) -> bool {
+    let mut ancestors = HashSet::new();
+    build_jar_packages_dir_visited(root, dir, jp, &mut ancestors)
+}
+
+fn build_jar_packages_dir_visited(
+    root: &Path,
+    dir: &Path,
+    jp: &mut JarPackages,
+    ancestors: &mut HashSet<PathBuf>,
+) -> bool {
+    let canonical = match enter_directory(dir, ancestors) {
+        Ok(Some(canonical)) => canonical,
+        // A cycle leaves the catalog incomplete because alias paths remain directly addressable.
+        Ok(None) => return false,
+        Err(_) => return false,
     };
-    for e in rd.flatten() {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        ancestors.remove(&canonical);
+        return false;
+    };
+    let mut complete = true;
+    for entry in rd {
+        let Ok(e) = entry else {
+            complete = false;
+            continue;
+        };
         let p = e.path();
         if p.is_dir() {
-            build_jar_packages_dir(root, &p, jp);
+            complete &= build_jar_packages_dir_visited(root, &p, jp, ancestors);
             continue;
         }
         let Ok(rel) = p.strip_prefix(root) else {
+            complete = false;
             continue;
         };
         let rel = rel.to_string_lossy().replace('\\', "/");
         if rel.ends_with(".kotlin_module") {
             if let Ok(b) = std::fs::read(&p) {
                 record_kotlin_module(&b, jp);
+            } else {
+                complete = false;
             }
         } else {
             record_pkg_entry_name(&rel, jp);
@@ -2894,10 +3238,14 @@ fn build_jar_packages_dir(root: &Path, dir: &Path, jp: &mut JarPackages) {
                             entry.facades.push(facade_id);
                         }
                     }
+                } else {
+                    complete = false;
                 }
             }
         }
     }
+    ancestors.remove(&canonical);
+    complete
 }
 
 /// Compose per-jar [`JarPackages`] into the merged [`PackageTree`] — a cheap union: every package a jar
@@ -2905,6 +3253,9 @@ fn build_jar_packages_dir(root: &Path, dir: &Path, jp: &mut JarPackages) {
 fn compose_package_tree(parts: &[std::sync::Arc<JarPackages>]) -> PackageTree {
     let mut tree = PackageTree::default();
     for (jar_id, jp) in parts.iter().enumerate() {
+        if !jp.complete {
+            tree.incomplete_entries.push(jar_id);
+        }
         for &pkg_id in jp.packages.keys() {
             let pkg = tree.names.insert_from(&jp.names, pkg_id);
             let node = tree.packages.entry(pkg).or_default();
@@ -2994,19 +3345,34 @@ fn collect_class_bytes(bytes: &[u8], names: &mut NameTree, all: &mut HashMap<Nam
 }
 
 fn collect_dir(dir: &Path, names: &mut NameTree, all: &mut HashMap<NameId, ClassLite>) {
+    let mut ancestors = HashSet::new();
+    collect_dir_visited(dir, names, all, &mut ancestors);
+}
+
+fn collect_dir_visited(
+    dir: &Path,
+    names: &mut NameTree,
+    all: &mut HashMap<NameId, ClassLite>,
+    ancestors: &mut HashSet<PathBuf>,
+) {
+    let Ok(Some(canonical)) = enter_directory(dir, ancestors) else {
+        return;
+    };
     let Ok(rd) = std::fs::read_dir(dir) else {
+        ancestors.remove(&canonical);
         return;
     };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
-            collect_dir(&p, names, all);
+            collect_dir_visited(&p, names, all, ancestors);
         } else if p.extension().map_or(false, |x| x == "class") {
             if let Ok(b) = std::fs::read(&p) {
                 collect_class_bytes(&b, names, all);
             }
         }
     }
+    ancestors.remove(&canonical);
 }
 
 fn collect_jar(jar: &Path, names: &mut NameTree, all: &mut HashMap<NameId, ClassLite>) {
@@ -3115,20 +3481,30 @@ fn build_entry_types(entry: &Entry) -> TypeIndex {
 }
 
 fn scan_types_dir(dir: &Path, idx: &mut TypeIndex) {
-    scan_types_dir_rooted(dir, dir, idx);
+    let mut ancestors = HashSet::new();
+    scan_types_dir_rooted(dir, dir, idx, &mut ancestors);
 }
 
 /// Walk `dir` for `*TypeAliasesKt.class` files and decode their Kotlin type aliases. Other classes are
 /// skipped — the classpath no longer builds a name → internal map (it was dead; import-driven resolution
 /// goes through `resolve_type` / the ext index).
-fn scan_types_dir_rooted(root: &Path, dir: &Path, idx: &mut TypeIndex) {
+fn scan_types_dir_rooted(
+    root: &Path,
+    dir: &Path,
+    idx: &mut TypeIndex,
+    ancestors: &mut HashSet<PathBuf>,
+) {
+    let Ok(Some(canonical)) = enter_directory(dir, ancestors) else {
+        return;
+    };
     let Ok(rd) = std::fs::read_dir(dir) else {
+        ancestors.remove(&canonical);
         return;
     };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
-            scan_types_dir_rooted(root, &p, idx);
+            scan_types_dir_rooted(root, &p, idx, ancestors);
         } else if p.extension().map_or(false, |x| x == "class") {
             let Ok(rel) = p.strip_prefix(root) else {
                 continue;
@@ -3144,6 +3520,7 @@ fn scan_types_dir_rooted(root: &Path, dir: &Path, idx: &mut TypeIndex) {
             }
         }
     }
+    ancestors.remove(&canonical);
 }
 
 fn scan_types_jar(jar: &Path, idx: &mut TypeIndex) {
@@ -3489,14 +3866,14 @@ mod fq_tests {
         crate::toolchain::stdlib_jar()
     }
 
-    fn write_test_jar(path: &Path, contents: &[u8]) {
+    fn write_test_jar_entry(path: &Path, name: &str, contents: &[u8]) {
         use std::io::Write;
 
         let file = File::create(path).expect("create test jar");
         let mut archive = zip::ZipWriter::new(file);
         archive
             .start_file(
-                "sample.txt",
+                name,
                 zip::write::SimpleFileOptions::default()
                     .compression_method(zip::CompressionMethod::Stored),
             )
@@ -3505,34 +3882,367 @@ mod fq_tests {
         archive.finish().expect("finish test jar");
     }
 
-    #[test]
-    fn open_jar_cache_is_bounded() {
+    fn write_test_jar(path: &Path, contents: &[u8]) {
+        write_test_jar_entry(path, "sample.txt", contents);
+    }
+
+    fn test_temp_dir(tag: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "krusty-open-jar-cache-{}-{unique}",
-            std::process::id()
-        ));
-        std::fs::create_dir(&directory).expect("create jar cache directory");
-        let classpath = Classpath::new(Vec::new());
+        let directory =
+            std::env::temp_dir().join(format!("krusty-{tag}-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&directory).expect("create test directory");
+        directory
+    }
+
+    #[test]
+    fn open_jar_cache_is_bounded_and_skips_unknown_packages() {
+        let directory = test_temp_dir("open-jar-cache");
         let mut paths = Vec::new();
         for index in 0..(OPEN_ARCHIVE_CAP * 4) {
             let path = directory.join(format!("{index}.jar"));
             write_test_jar(&path, b"entry");
+            paths.push(path);
+        }
+        let unresolved = Classpath::new(paths.clone());
+        assert!(unresolved.find("late/Added").is_none());
+        assert!(unresolved.archives.borrow().is_empty());
+        assert!(unresolved.snapshot_is_current());
+        let added =
+            crate::jvm::classfile::ClassWriter::new("late/Added", "java/lang/Object").finish();
+        write_test_jar_entry(&paths[0], "late/Added.class", &added);
+        assert!(!unresolved.snapshot_is_current());
+
+        let classpath = Classpath::new(Vec::new());
+        for path in paths.iter().skip(1) {
             assert_eq!(
-                classpath.jar_entry(&path, "sample.txt").as_deref(),
+                classpath.jar_entry(path, "sample.txt").as_deref(),
                 Some(b"entry".as_slice())
             );
             assert!(classpath.archives.borrow().len() <= OPEN_ARCHIVE_CAP);
-            paths.push(path);
         }
         drop(classpath);
+        drop(unresolved);
         for path in paths {
             std::fs::remove_file(path).expect("archive closes when evicted or dropped");
         }
         std::fs::remove_dir(directory).expect("remove jar cache directory");
+    }
+
+    #[test]
+    fn warmed_directory_catalog_detects_a_generated_package() {
+        let directory = test_temp_dir("live-class-dir");
+        let classpath = Classpath::new(vec![directory.clone()]);
+        assert!(classpath.package_tree().node_for("generated").is_none());
+        assert!(classpath.find("generated/Later").is_none());
+        assert!(classpath.snapshot_is_current());
+
+        let package = directory.join("generated");
+        std::fs::create_dir(&package).expect("create generated package");
+        let bytes =
+            crate::jvm::classfile::ClassWriter::new("generated/Later", "java/lang/Object").finish();
+        std::fs::write(package.join("Later.class"), bytes).expect("write generated class");
+
+        assert!(!classpath.snapshot_is_current());
+        let refreshed = Classpath::new(vec![directory.clone()]);
+        assert!(refreshed.find("generated/Later").is_some());
+        drop(refreshed);
+        drop(classpath);
+        std::fs::remove_dir_all(&directory).expect("remove class directory");
+    }
+
+    #[test]
+    fn incomplete_entry_retries_a_negative_class_probe() {
+        let directory = test_temp_dir("incomplete-entry-recovery");
+        let package = directory.join("recovered");
+        std::fs::create_dir(&package).expect("create package");
+        let class_file = package.join("Later.class");
+        let valid =
+            crate::jvm::classfile::ClassWriter::new("recovered/Later", "java/lang/Object").finish();
+        let mut invalid = valid.clone();
+        invalid[0] = 0;
+        std::fs::write(&class_file, invalid).expect("write temporarily unreadable class");
+
+        let classpath = Classpath::new(vec![directory.clone()]);
+        assert!(classpath.find("recovered/Later").is_none());
+        std::fs::write(&class_file, valid).expect("recover class");
+        assert!(classpath.find("recovered/Later").is_some());
+
+        drop(classpath);
+        std::fs::remove_dir_all(directory).expect("remove class directory");
+    }
+
+    #[test]
+    fn incomplete_entry_reloads_a_positive_class_probe() {
+        let directory = test_temp_dir("incomplete-positive-recovery");
+        let broken_package = directory.join("broken");
+        let changed_package = directory.join("changed");
+        std::fs::create_dir(&broken_package).expect("create broken package");
+        std::fs::create_dir(&changed_package).expect("create changed package");
+        std::fs::write(broken_package.join("Broken.class"), b"not a class")
+            .expect("write malformed class");
+        let class_file = changed_package.join("Value.class");
+        let original =
+            crate::jvm::classfile::ClassWriter::new("changed/Value", "java/lang/Object").finish();
+        std::fs::write(&class_file, original).expect("write original class");
+
+        let classpath = Classpath::new(vec![directory.clone()]);
+        assert_eq!(
+            classpath
+                .find("changed/Value")
+                .and_then(|class| class.super_class()),
+            Some("java/lang/Object".to_string())
+        );
+        let replacement =
+            crate::jvm::classfile::ClassWriter::new("changed/Value", "java/lang/Number").finish();
+        std::fs::write(&class_file, replacement).expect("write replacement class");
+        assert_eq!(
+            classpath
+                .find("changed/Value")
+                .and_then(|class| class.super_class()),
+            Some("java/lang/Number".to_string())
+        );
+
+        drop(classpath);
+        std::fs::remove_dir_all(directory).expect("remove class directory");
+    }
+
+    #[test]
+    fn incomplete_entry_does_not_cache_a_later_shadow() {
+        let directory = test_temp_dir("incomplete-shadow");
+        let earlier = directory.join("earlier/shadow");
+        let later = directory.join("later/shadow");
+        std::fs::create_dir_all(&earlier).expect("create earlier package");
+        std::fs::create_dir_all(&later).expect("create later package");
+        let earlier_file = earlier.join("Chosen.class");
+        let recovered =
+            crate::jvm::classfile::ClassWriter::new("shadow/Chosen", "java/lang/Number").finish();
+        let mut invalid = recovered.clone();
+        invalid[0] = 0;
+        std::fs::write(&earlier_file, invalid).expect("write incomplete earlier class");
+        let fallback =
+            crate::jvm::classfile::ClassWriter::new("shadow/Chosen", "java/lang/Object").finish();
+        std::fs::write(later.join("Chosen.class"), fallback).expect("write later class");
+
+        let classpath = Classpath::new(vec![directory.join("earlier"), directory.join("later")]);
+        assert_eq!(
+            classpath
+                .find("shadow/Chosen")
+                .and_then(|ci| ci.super_class()),
+            Some("java/lang/Object".to_string())
+        );
+        std::fs::write(&earlier_file, recovered).expect("recover earlier class");
+        assert_eq!(
+            classpath
+                .find("shadow/Chosen")
+                .and_then(|ci| ci.super_class()),
+            Some("java/lang/Number".to_string())
+        );
+
+        drop(classpath);
+        std::fs::remove_dir_all(directory).expect("remove class directory");
+    }
+
+    #[test]
+    fn semantic_resolution_retries_an_incomplete_entry() {
+        use crate::symbol_source::SymbolSource;
+
+        let directory = test_temp_dir("incomplete-semantic-recovery");
+        let package = directory.join("recovered");
+        std::fs::create_dir(&package).expect("create package");
+        let class_file = package.join("Later.class");
+        let valid =
+            crate::jvm::classfile::ClassWriter::new("recovered/Later", "java/lang/Object").finish();
+        let mut invalid = valid.clone();
+        invalid[0] = 0;
+        std::fs::write(&class_file, invalid).expect("write incomplete class");
+        let classpath = std::rc::Rc::new(Classpath::new(vec![directory.clone()]));
+        let libraries = crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone());
+
+        assert!(libraries
+            .resolve_symbols("recovered/Later")
+            .classifier
+            .is_none());
+        std::fs::write(&class_file, valid).expect("recover class");
+        assert!(libraries
+            .resolve_symbols("recovered/Later")
+            .classifier
+            .is_some());
+
+        drop(libraries);
+        drop(classpath);
+        std::fs::remove_dir_all(directory).expect("remove class directory");
+    }
+
+    #[test]
+    fn classpath_snapshot_detects_a_nested_class_overwrite() {
+        use std::io::Write;
+
+        let directory = test_temp_dir("nested-class-revision");
+        let package = directory.join("existing/package");
+        std::fs::create_dir_all(&package).expect("create existing package");
+        let class_file = package.join("Changed.class");
+        let bytes =
+            crate::jvm::classfile::ClassWriter::new("existing/package/Changed", "java/lang/Object")
+                .finish();
+        std::fs::write(&class_file, bytes).expect("write initial class");
+        let classpath = Classpath::new(vec![directory.clone()]);
+        assert!(classpath.snapshot_is_current());
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&class_file)
+            .expect("open nested class")
+            .write_all(&[0])
+            .expect("overwrite nested class");
+
+        assert!(!classpath.snapshot_is_current());
+        drop(classpath);
+        std::fs::remove_dir_all(directory).expect("remove class directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classpath_snapshot_follows_symlinks_without_cycles() {
+        use std::io::Write;
+        use std::os::unix::fs::symlink;
+
+        let directory = test_temp_dir("symlink-class-revision");
+        let targets = test_temp_dir("symlink-class-targets");
+        let linked_file = targets.join("Linked.class");
+        let linked_bytes =
+            crate::jvm::classfile::ClassWriter::new("Linked", "java/lang/Object").finish();
+        std::fs::write(&linked_file, linked_bytes).expect("write linked class");
+        symlink(&linked_file, directory.join("Linked.class")).expect("link class file");
+
+        let linked_directory = targets.join("package");
+        std::fs::create_dir(&linked_directory).expect("create linked package");
+        let nested_file = linked_directory.join("Nested.class");
+        let nested_bytes =
+            crate::jvm::classfile::ClassWriter::new("package/Nested", "java/lang/Object").finish();
+        std::fs::write(&nested_file, nested_bytes).expect("write nested linked class");
+        symlink(&linked_directory, directory.join("package")).expect("link package directory");
+        symlink(&directory, directory.join("loop")).expect("link directory cycle");
+
+        let file_snapshot = Classpath::new(vec![directory.clone()]);
+        file_snapshot.prepare_for_source_analysis();
+        assert!(file_snapshot.snapshot_is_current());
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&linked_file)
+            .expect("open linked class target")
+            .write_all(b"-changed")
+            .expect("change linked class target");
+        assert!(!file_snapshot.snapshot_is_current());
+
+        let directory_snapshot = Classpath::new(vec![directory.clone()]);
+        assert!(directory_snapshot.snapshot_is_current());
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&nested_file)
+            .expect("open linked directory target")
+            .write_all(b"-changed")
+            .expect("change linked directory target");
+        assert!(!directory_snapshot.snapshot_is_current());
+
+        drop(directory_snapshot);
+        drop(file_snapshot);
+        std::fs::remove_dir_all(directory).expect("remove symlink directory");
+        std::fs::remove_dir_all(targets).expect("remove symlink targets");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classpath_catalogs_each_symlink_alias() {
+        use std::os::unix::fs::symlink;
+
+        let directory = test_temp_dir("symlink-aliases");
+        let target = test_temp_dir("symlink-alias-target");
+        let left_package = target.join("left");
+        let right_package = target.join("right");
+        std::fs::create_dir(&left_package).expect("create left package");
+        std::fs::create_dir(&right_package).expect("create right package");
+        let through_left =
+            crate::jvm::classfile::ClassWriter::new("left/right/Shared", "java/lang/Object")
+                .finish();
+        let through_right =
+            crate::jvm::classfile::ClassWriter::new("right/left/Shared", "java/lang/Object")
+                .finish();
+        std::fs::write(right_package.join("Shared.class"), through_left)
+            .expect("write class reached through left alias");
+        std::fs::write(left_package.join("Shared.class"), through_right)
+            .expect("write class reached through right alias");
+        symlink(&target, directory.join("left")).expect("create left alias");
+        symlink(&target, directory.join("right")).expect("create right alias");
+
+        let classpath = Classpath::new(vec![directory.clone()]);
+        assert!(classpath.find("left/right/Shared").is_some());
+        assert!(classpath.find("right/left/Shared").is_some());
+
+        drop(classpath);
+        std::fs::remove_dir_all(directory).expect("remove alias directory");
+        std::fs::remove_dir_all(target).expect("remove alias target");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classpath_snapshot_detects_symlink_retargeting() {
+        use std::os::unix::fs::symlink;
+
+        let directory = test_temp_dir("symlink-retarget");
+        let targets = test_temp_dir("symlink-retarget-targets");
+        let first = targets.join("first.class");
+        let second = targets.join("second.class");
+        let bytes = crate::jvm::classfile::ClassWriter::new("Linked", "java/lang/Object").finish();
+        std::fs::write(&first, bytes).expect("write first target");
+        std::fs::hard_link(&first, &second).expect("create equal-metadata target");
+        let linked = directory.join("Linked.class");
+        symlink(&first, &linked).expect("create initial symlink");
+
+        let classpath = Classpath::new(vec![directory.clone()]);
+        assert!(classpath.snapshot_is_current());
+        std::fs::remove_file(&linked).expect("remove initial symlink");
+        symlink(&second, &linked).expect("retarget symlink");
+        assert!(!classpath.snapshot_is_current());
+
+        drop(classpath);
+        std::fs::remove_dir_all(directory).expect("remove symlink directory");
+        std::fs::remove_dir_all(targets).expect("remove symlink targets");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_symlink_does_not_hide_a_class_change() {
+        use std::io::Write;
+        use std::os::unix::fs::symlink;
+
+        let directory = test_temp_dir("broken-symlink-revision");
+        symlink(
+            directory.join("permanently-missing"),
+            directory.join("broken"),
+        )
+        .expect("create broken symlink");
+        let package = directory.join("existing");
+        std::fs::create_dir(&package).expect("create package");
+        let class_file = package.join("Changed.class");
+        let bytes = crate::jvm::classfile::ClassWriter::new("existing/Changed", "java/lang/Object")
+            .finish();
+        std::fs::write(&class_file, bytes).expect("write class");
+
+        let classpath = Classpath::new(vec![directory.clone()]);
+        assert!(classpath.snapshot_is_current());
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&class_file)
+            .expect("open class")
+            .write_all(&[0])
+            .expect("change class");
+        assert!(!classpath.snapshot_is_current());
+
+        drop(classpath);
+        std::fs::remove_dir_all(directory).expect("remove class directory");
     }
 
     // Every `Classpath` gets a distinct process-unique `id`, EVEN when an earlier instance has been
@@ -3694,7 +4404,7 @@ mod fq_tests {
         // An absent class in a REAL package resolves to None (the negative probe, now scoped to the one
         // jar that owns the package) — and is cached.
         assert!(cp.find("kotlin/collections/DoesNotExistXyz").is_none());
-        // An absent class in a package no jar declares also misses (falls back cleanly).
+        // An absent class in a package no jar declares also misses.
         assert!(cp.find("no/such/pkg/Nope").is_none());
     }
 
@@ -3888,7 +4598,7 @@ mod fq_tests {
 
     #[test]
     fn builtin_member_misses_are_cached() {
-        let cp = Classpath::new(vec![PathBuf::from("/nonexistent/stdlib.jar")]);
+        let cp = Classpath::empty();
         assert!(cp.builtin_members.borrow().is_empty());
         assert!(cp.builtin_members("kotlin/String").is_empty());
         let string = type_name("kotlin/String");
