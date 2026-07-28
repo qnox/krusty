@@ -99,15 +99,29 @@ impl<'a> ModuleSymbols<'a> {
         if let Some(s) = c.super_internal {
             supertypes.push(s);
         }
-        // Module objects resolve as values via the existing user-object path (StaticInstance), not the
-        // classpath ExternalStaticField path, so this needn't distinguish `Object`.
+        let enum_entries = self.syms.enums.iter().find_map(|(name, entries)| {
+            self.syms
+                .classes
+                .get(name)
+                .is_some_and(|class| class.internal_name() == c.internal_name())
+                .then(|| entries.clone())
+        });
         let kind = if c.is_annotation() {
             crate::libraries::TypeKind::Annotation
+        } else if c.is_object() {
+            crate::libraries::TypeKind::Object
+        } else if enum_entries.is_some() {
+            crate::libraries::TypeKind::Enum
         } else if c.is_interface() {
             crate::libraries::TypeKind::Interface
         } else {
             crate::libraries::TypeKind::Class
         };
+        let enum_entries = enum_entries.unwrap_or_default();
+        let sealed_subclasses = c
+            .is_sealed()
+            .then(|| self.syms.subclass_names_of(c.internal_name()).into())
+            .unwrap_or_default();
         LibraryType {
             is_public: c.visibility == Visibility::Public,
             kind,
@@ -124,13 +138,8 @@ impl<'a> ModuleSymbols<'a> {
             value_underlying: None,
             alias_target: None,
             type_params: Vec::new(),
-            sealed_subclasses: crate::types::TypeNameList::new(),
-            enum_entries: self
-                .syms
-                .class_simple_name(c.internal_name())
-                .and_then(|name| self.syms.enums.get(name))
-                .cloned()
-                .unwrap_or_default(),
+            sealed_subclasses,
+            enum_entries,
             value_ctor_has_default: false,
             ctor_named_params: Vec::new(),
             value_class_properties: Vec::new(),
@@ -805,6 +814,37 @@ mod tests {
             value_field: None,
             generic_methods: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn type_shapes_include_finite_domain_metadata() {
+        let mut symbols = FrontendSymbols::default();
+
+        let mut state = class("sample/State");
+        state.flags = state.flags.with_sealed(true);
+        let mut complete = class("sample/Complete");
+        complete.super_internal = Some(type_name("sample/State"));
+        symbols.classes.insert("State".to_string(), state);
+        symbols.classes.insert("Complete".to_string(), complete);
+
+        symbols
+            .classes
+            .insert("Phase".to_string(), class("sample/Phase"));
+        symbols.enums.insert(
+            "Phase".to_string(),
+            vec!["FIRST".to_string(), "SECOND".to_string()],
+        );
+
+        let source = ModuleSymbols::new(&symbols);
+        let state = source.resolve_type("sample/State").unwrap();
+        assert_eq!(
+            state.sealed_subclasses.iter_ids().collect::<Vec<_>>(),
+            vec![type_name("sample/Complete")]
+        );
+
+        let phase = source.resolve_type("sample/Phase").unwrap();
+        assert!(phase.is_enum());
+        assert_eq!(phase.enum_entries, ["FIRST", "SECOND"]);
     }
 
     #[test]

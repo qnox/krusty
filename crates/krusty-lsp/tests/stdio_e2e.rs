@@ -332,6 +332,46 @@ fn stdio_server_reports_incompatible_equality_diagnostics() {
 }
 
 #[test]
+fn stdio_server_reports_non_exhaustive_when_keyword_range() {
+    let messages = [
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": "file:///when.kt",
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "enum class Phase { FIRST, SECOND }\n\
+                             fun value(phase: Phase): Int = when (phase) { Phase.FIRST -> 1 }"
+                }
+            }
+        }),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": null}),
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    ];
+    let output = run_server(&[], &messages);
+    let diagnostics = output
+        .iter()
+        .find(|message| message["method"] == "textDocument/publishDiagnostics")
+        .and_then(|message| message["params"]["diagnostics"].as_array())
+        .expect("published diagnostics");
+    assert_eq!(
+        diagnostics,
+        &[json!({
+            "range": {
+                "start": {"line": 1, "character": 31},
+                "end": {"line": 1, "character": 35}
+            },
+            "severity": 1,
+            "source": "Kotlin",
+            "message": "'when' expression must be exhaustive. Add the 'SECOND' branch or an 'else' branch."
+        })]
+    );
+}
+
+#[test]
 fn stdio_server_applies_configured_language_features() {
     let source = "\
 data class Entry(val first: String, val second: String)
