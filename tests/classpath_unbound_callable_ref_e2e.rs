@@ -283,6 +283,247 @@ fn sibling_source_extension_reference_uses_its_declaring_facade() {
 }
 
 #[test]
+fn cross_file_internal_bound_extension_keeps_facade_and_declared_supertype() {
+    let library = r#"
+        package fixtures
+
+        open class Base(val text: String)
+        class Derived(text: String) : Base(text)
+    "#;
+    let declaration = r#"
+        package app
+
+        import fixtures.Base
+
+        internal fun Base.label(): String = text
+    "#;
+    let use_site = r#"
+        package app
+
+        import fixtures.Derived
+
+        fun box(): String {
+            val label = Derived("OK")::label
+            return label()
+        }
+    "#;
+
+    let output = run_source_files_against(
+        "bound_internal_extension_sibling_facade",
+        library,
+        &[("Extensions.kt", declaration), ("Use.kt", use_site)],
+    );
+    assert_eq!(output.as_deref(), Some("OK"));
+}
+
+#[test]
+fn cross_file_primitive_bound_extension_boxes_and_unboxes_the_receiver() {
+    let library = r#"
+        package fixtures
+
+        class Marker
+    "#;
+    let declaration = r#"
+        package app
+
+        internal fun Int.plusFour(): Int = this + 4
+    "#;
+    let use_site = r#"
+        package app
+
+        fun box(): String {
+            val plusFour: () -> Int = 1::plusFour
+            return if (plusFour() == 5) "OK" else "FAIL"
+        }
+    "#;
+
+    let output = run_source_files_against(
+        "bound_primitive_extension_sibling_facade",
+        library,
+        &[("Extensions.kt", declaration), ("Use.kt", use_site)],
+    );
+    assert_eq!(output.as_deref(), Some("OK"));
+}
+
+#[test]
+fn cross_file_callable_references_coerce_value_returns_to_unit() {
+    let library = r#"
+        package fixtures
+
+        class Record(var text: String)
+    "#;
+    let declaration = r#"
+        package app
+
+        import fixtures.Record
+
+        internal fun Record.update(value: String): String {
+            text = value
+            return value
+        }
+        internal fun updateTop(record: Record, value: String): String {
+            record.text = value
+            return value
+        }
+    "#;
+    let use_site = r#"
+        package app
+
+        import fixtures.Record
+
+        fun box(): String {
+            val first = Record("FAIL")
+            val bound: (String) -> Unit = first::update
+            bound("O")
+
+            val second = Record("FAIL")
+            val topLevel: (Record, String) -> Unit = ::updateTop
+            topLevel(second, "K")
+            return first.text + second.text
+        }
+    "#;
+
+    let output = run_source_files_against(
+        "cross_file_callable_ref_unit_coercion",
+        library,
+        &[("Functions.kt", declaration), ("Use.kt", use_site)],
+    );
+    assert_eq!(output.as_deref(), Some("OK"));
+}
+
+#[test]
+fn imported_public_cross_file_bound_extension_uses_declaring_facade() {
+    let library = r#"
+        package fixtures
+
+        class Record(val text: String)
+    "#;
+    let declaration = r#"
+        package extensions
+
+        import fixtures.Record
+
+        fun Record.label(): String = text
+    "#;
+    let use_site = r#"
+        package use
+
+        import extensions.label
+        import fixtures.Record
+
+        fun box(): String {
+            val label = Record("OK")::label
+            return label()
+        }
+    "#;
+
+    let output = run_source_files_against(
+        "bound_public_extension_sibling_facade",
+        library,
+        &[("Extensions.kt", declaration), ("Use.kt", use_site)],
+    );
+    assert_eq!(output.as_deref(), Some("OK"));
+}
+
+#[test]
+fn cross_file_internal_toplevel_overload_uses_expected_variance_and_facade() {
+    let library = r#"
+        package fixtures
+
+        class Marker
+    "#;
+    let declaration = r#"
+        package app
+
+        internal fun convert(value: Any): String = value as String
+        internal fun convert(value: Int): Int = value
+    "#;
+    let use_site = r#"
+        package app
+
+        fun box(): String {
+            val convert: (String) -> Any = ::convert
+            return convert("OK") as String
+        }
+    "#;
+
+    let output = run_source_files_against(
+        "internal_toplevel_ref_sibling_facade",
+        library,
+        &[("Functions.kt", declaration), ("Use.kt", use_site)],
+    );
+    assert_eq!(output.as_deref(), Some("OK"));
+}
+
+#[test]
+fn private_cross_file_bound_extension_reports_inaccessible() {
+    let library = r#"
+        package fixtures
+
+        class Record
+    "#;
+    let declaration = r#"
+        package app
+
+        import fixtures.Record
+
+        private fun Record.label(): String = "private"
+    "#;
+    let use_site = r#"
+        package app
+
+        import fixtures.Record
+
+        fun expose(record: Record): () -> String = record::label
+    "#;
+    let Some(diagnostics) = source_file_diagnostics_against(
+        "bound_private_extension_visibility",
+        library,
+        &[declaration, use_site],
+    ) else {
+        return;
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("cannot access 'label'")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn private_cross_file_toplevel_reference_reports_inaccessible() {
+    let library = r#"
+        package fixtures
+
+        class Marker
+    "#;
+    let declaration = r#"
+        package app
+
+        private fun hidden(value: String): String = value
+    "#;
+    let use_site = r#"
+        package app
+
+        fun expose(): (String) -> String = ::hidden
+    "#;
+    let Some(diagnostics) = source_file_diagnostics_against(
+        "private_toplevel_ref_visibility",
+        library,
+        &[declaration, use_site],
+    ) else {
+        return;
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("cannot access 'hidden'")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
 fn unimported_source_extension_reference_is_not_visible() {
     let library = r#"
         package fixtures

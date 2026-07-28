@@ -7358,6 +7358,8 @@ impl<'a> Parser<'a> {
             // `::name` — top-level callable reference / class literal without a receiver.
             TokenKind::ColonColon => {
                 self.bump(); // '::'
+                let name_token = self.tok();
+                let name_span = self.syntactic_ident_span(name_token);
                 let name = if self.at(TokenKind::Ident) {
                     let n = self.text().to_string();
                     self.bump();
@@ -7368,13 +7370,18 @@ impl<'a> Parser<'a> {
                 } else {
                     "<error>".to_string()
                 };
-                self.file.add_expr(
+                let end = self.t[self.i.saturating_sub(1)].span;
+                let reference = self.file.add_expr(
                     Expr::CallableRef {
                         receiver: None,
                         name,
                     },
-                    span,
-                )
+                    Span::new(span.lo, end.hi),
+                );
+                self.file
+                    .exact_member_name_spans
+                    .insert(reference.0, name_span);
+                reference
             }
             _ => {
                 self.diags.error(span, "expected an expression");

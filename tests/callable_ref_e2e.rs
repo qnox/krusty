@@ -18,6 +18,63 @@ return \"OK\"\n\
 }
 
 #[test]
+fn expected_type_selects_an_overloaded_toplevel_reference_and_coerces_unit() {
+    const SRC: &str = "var result = \"FAIL\"\n\
+fun choose(x: Int, y: Any): Int { result = \"OK\"; return x }\n\
+fun choose(x: Any, y: Int): Int { result = \"wrong\"; return y }\n\
+fun box(): String {\n\
+    val selected: (Int, Any) -> Unit = ::choose\n\
+    selected(1, \"\")\n\
+    return result\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "OverloadedTopLevelRef");
+}
+
+#[test]
+fn expected_type_uses_function_parameter_contravariance_and_return_covariance() {
+    const SRC: &str = "fun convert(value: Any): String = value as String\n\
+fun convert(value: Int): Int = value\n\
+fun box(): String {\n\
+    val selected: (String) -> Any = ::convert\n\
+    return selected(\"OK\") as String\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "VariantTopLevelRef");
+}
+
+#[test]
+fn expected_type_boxes_a_primitive_for_a_reference_supertype_parameter() {
+    const SRC: &str =
+        "fun convert(value: Number): String = if (value.toInt() == 1) \"OK\" else \"FAIL\"\n\
+fun box(): String {\n\
+    val selected: (Int) -> String = ::convert\n\
+    return selected(1)\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "BoxedVariantTopLevelRef");
+}
+
+#[test]
+fn expected_type_selects_the_most_specific_compatible_parameter_overload() {
+    const SRC: &str = "fun convert(value: Any): Any = \"wrong\"\n\
+fun convert(value: CharSequence): Any = value\n\
+fun box(): String {\n\
+    val selected: (String) -> Any = ::convert\n\
+    return selected(\"OK\") as String\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "SpecificTopLevelRef");
+}
+
+#[test]
+fn return_exactness_does_not_hide_a_more_specific_parameter_overload() {
+    const SRC: &str = "fun pick(value: Any): Any = \"wrong\"\n\
+fun pick(value: CharSequence): String = value.toString()\n\
+fun box(): String {\n\
+    val selected: (String) -> Any = ::pick\n\
+    return selected(\"OK\") as String\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "ReturnBiasedTopLevelRef");
+}
+
+#[test]
 fn bound_member_ref_flows_to_classpath_map() {
     const SRC: &str = "class C(val base: Int) {\n\
 fun inc(x: Int) = x + 1\n\
