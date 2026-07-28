@@ -409,6 +409,30 @@ fn generic_extension_chain_preserves_non_null_element_type() {
 }
 
 #[test]
+fn member_extension_property_root_types_collection_lambda() {
+    const SOURCE: &str = r#"
+        interface Record {
+            val payload: String
+            val category: Int
+        }
+
+        interface RecordSet {
+            val records: List<Record>
+        }
+
+        abstract class Processor {
+            fun RecordSet.payloads(): List<String> =
+                records.filter { it.category > 0 }.map { it.payload }
+        }
+    "#;
+
+    common::expect_front_end_ok_files_with_stdlib(
+        &[SOURCE],
+        "member extension property root collection lambda",
+    );
+}
+
+#[test]
 fn safe_call_member_extensions_run() {
     const SOURCE: &str = r##"
         class Entry(val text: String)

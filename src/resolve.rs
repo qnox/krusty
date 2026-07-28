@@ -11228,6 +11228,12 @@ impl<'a> Checker<'a> {
             || self.syms.props.contains_key(name)
             || self.syms.context_prop_names.contains(name)
             || self.syms.prop_facades.contains_key(name)
+            || self.implicit_receiver_types().into_iter().any(|receiver| {
+                receiver
+                    .obj_internal()
+                    .is_some_and(|internal| self.lookup_prop_name(internal, name).is_some())
+                    || self.resolve_property_member(receiver, name).is_some()
+            })
     }
     fn register_local_fun(&mut self, name: &str, stmt_id: StmtId, sig: Signature) {
         if let Some(frame) = self.local_funs.last_mut() {
