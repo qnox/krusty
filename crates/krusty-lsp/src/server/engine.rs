@@ -1,0 +1,851 @@
+//! Analysis worker for the LSP request loop.
+
+use std::collections::VecDeque;
+use std::sync::mpsc::SyncSender;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use super::super::DocumentAnalysis;
+use super::implementation::{Analysis, AnalysisBackend, Incoming, ProjectFeedback};
+
+const MAX_PENDING_WATCHED_FILES: usize = 1024;
+
+#[derive(Debug)]
+pub struct AnalysisJob {
+    pub documents: Vec<(String, String, i64)>,
+    pub open_uris: Vec<String>,
+}
+
+pub struct AnalysisBatch {
+    pub analyzed: Vec<(String, i64)>,
+    pub analyses: Vec<DocumentAnalysis>,
+    pub support_documents: Vec<(String, String)>,
+    pub pending: bool,
+}
+
+#[derive(Debug)]
+pub(crate) enum EngineCommand {
+    SetWorkspaceRoot(Option<std::path::PathBuf>),
+    Analyze(AnalysisJob),
+    ProjectChange {
+        refresh: bool,
+        reanalyze: bool,
+        uris: Vec<String>,
+    },
+}
+
+pub(crate) enum EngineEvent {
+    ReadyState(bool),
+    WatchedGlobs(Vec<String>),
+    Project(ProjectFeedback),
+    ReanalyzeRequested,
+    AnalysisComplete(AnalysisBatch),
+}
+
+pub(crate) struct AnalysisEngine {
+    commands: Option<CommandSender>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl AnalysisEngine {
+    pub(crate) fn spawn<A: Analysis + Send + 'static>(
+        analyze: A,
+        events: SyncSender<Incoming>,
+    ) -> AnalysisEngine {
+        let (commands, command_rx) = command_queue();
+        let handle = std::thread::spawn(move || run(analyze, command_rx, events));
+        AnalysisEngine {
+            commands: Some(commands),
+            handle: Some(handle),
+        }
+    }
+
+    pub(crate) fn submit(&self, command: EngineCommand) {
+        if let Some(commands) = self.commands.as_ref() {
+            commands.send(command);
+        }
+    }
+
+    pub(crate) fn disconnect(&mut self) {
+        if let Some(commands) = self.commands.take() {
+            commands.disconnect();
+        }
+    }
+
+    pub(crate) fn join(mut self) {
+        self.disconnect();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.handle.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+}
+
+struct CommandSender {
+    queue: Arc<CommandQueue>,
+}
+
+struct CommandReceiver {
+    queue: Arc<CommandQueue>,
+}
+
+struct CommandQueue {
+    state: Mutex<CommandState>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct CommandState {
+    pending: VecDeque<EngineCommand>,
+    disconnected: bool,
+}
+
+enum CommandReceive {
+    Command(EngineCommand),
+    Timeout,
+    Disconnected,
+}
+
+fn command_queue() -> (CommandSender, CommandReceiver) {
+    let queue = Arc::new(CommandQueue {
+        state: Mutex::new(CommandState::default()),
+        ready: Condvar::new(),
+    });
+    (
+        CommandSender {
+            queue: queue.clone(),
+        },
+        CommandReceiver { queue },
+    )
+}
+
+impl CommandSender {
+    fn send(&self, command: EngineCommand) {
+        let mut state = self
+            .queue
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.disconnected {
+            return;
+        }
+        state.enqueue(command);
+        self.queue.ready.notify_one();
+    }
+
+    fn disconnect(self) {
+        let mut state = self
+            .queue
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.disconnected = true;
+        self.queue.ready.notify_one();
+    }
+}
+
+impl CommandState {
+    fn enqueue(&mut self, command: EngineCommand) {
+        match command {
+            EngineCommand::Analyze(job) => {
+                if let Some(index) = self
+                    .pending
+                    .iter()
+                    .rposition(|command| matches!(command, EngineCommand::Analyze(_)))
+                {
+                    self.pending.remove(index);
+                }
+                self.compact_project_changes();
+                self.pending.push_back(EngineCommand::Analyze(job));
+            }
+            EngineCommand::SetWorkspaceRoot(root) => {
+                let analysis = self
+                    .pending
+                    .iter()
+                    .rposition(|command| matches!(command, EngineCommand::Analyze(_)))
+                    .and_then(|index| self.pending.remove(index));
+                if let Some(index) = self
+                    .pending
+                    .iter()
+                    .rposition(|command| matches!(command, EngineCommand::SetWorkspaceRoot(_)))
+                {
+                    self.pending.remove(index);
+                }
+                self.compact_project_changes();
+                self.pending
+                    .push_back(EngineCommand::SetWorkspaceRoot(root));
+                if let Some(analysis) = analysis {
+                    self.pending.push_back(analysis);
+                }
+            }
+            EngineCommand::ProjectChange {
+                mut refresh,
+                mut reanalyze,
+                mut uris,
+            } => {
+                if uris.len() > MAX_PENDING_WATCHED_FILES {
+                    refresh = true;
+                    reanalyze = true;
+                    uris.clear();
+                }
+                if let Some(EngineCommand::ProjectChange {
+                    refresh: pending_refresh,
+                    reanalyze: pending_reanalyze,
+                    uris: pending_uris,
+                }) = self.pending.back_mut()
+                {
+                    Self::merge_project_change(
+                        pending_refresh,
+                        pending_reanalyze,
+                        pending_uris,
+                        refresh,
+                        reanalyze,
+                        uris,
+                    );
+                } else {
+                    self.pending.push_back(EngineCommand::ProjectChange {
+                        refresh,
+                        reanalyze,
+                        uris,
+                    });
+                }
+            }
+        }
+    }
+
+    fn compact_project_changes(&mut self) {
+        let mut compacted = VecDeque::with_capacity(self.pending.len());
+        while let Some(command) = self.pending.pop_front() {
+            if let EngineCommand::ProjectChange {
+                refresh,
+                reanalyze,
+                uris,
+            } = command
+            {
+                if let Some(EngineCommand::ProjectChange {
+                    refresh: pending_refresh,
+                    reanalyze: pending_reanalyze,
+                    uris: pending_uris,
+                }) = compacted.back_mut()
+                {
+                    Self::merge_project_change(
+                        pending_refresh,
+                        pending_reanalyze,
+                        pending_uris,
+                        refresh,
+                        reanalyze,
+                        uris,
+                    );
+                } else {
+                    compacted.push_back(EngineCommand::ProjectChange {
+                        refresh,
+                        reanalyze,
+                        uris,
+                    });
+                }
+            } else {
+                compacted.push_back(command);
+            }
+        }
+        self.pending = compacted;
+    }
+
+    fn merge_project_change(
+        pending_refresh: &mut bool,
+        pending_reanalyze: &mut bool,
+        pending_uris: &mut Vec<String>,
+        refresh: bool,
+        reanalyze: bool,
+        uris: Vec<String>,
+    ) {
+        *pending_refresh |= refresh;
+        *pending_reanalyze |= reanalyze;
+        if !*pending_reanalyze || !pending_uris.is_empty() {
+            if uris.len() > MAX_PENDING_WATCHED_FILES.saturating_sub(pending_uris.len()) {
+                *pending_refresh = true;
+                *pending_reanalyze = true;
+                pending_uris.clear();
+            } else {
+                pending_uris.extend(uris);
+                pending_uris.sort_unstable();
+                pending_uris.dedup();
+            }
+        }
+    }
+}
+
+impl CommandReceiver {
+    fn recv(&self, timeout: Option<Duration>) -> CommandReceive {
+        let mut state = self
+            .queue
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let deadline = timeout.map(|timeout| Instant::now() + timeout);
+        loop {
+            if let Some(command) = state.pending.pop_front() {
+                return CommandReceive::Command(command);
+            }
+            if state.disconnected {
+                return CommandReceive::Disconnected;
+            }
+            if let Some(deadline) = deadline {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return CommandReceive::Timeout;
+                }
+                let (next, result) = self
+                    .queue
+                    .ready
+                    .wait_timeout(state, remaining)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state = next;
+                if result.timed_out() && state.pending.is_empty() {
+                    return CommandReceive::Timeout;
+                }
+            } else {
+                state = self
+                    .queue
+                    .ready
+                    .wait(state)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+        }
+    }
+}
+
+pub(crate) struct EngineBackend {
+    engine: AnalysisEngine,
+    ready: bool,
+}
+
+impl EngineBackend {
+    pub(crate) fn new(engine: AnalysisEngine, ready: bool) -> Self {
+        EngineBackend { engine, ready }
+    }
+
+    pub(crate) fn into_engine(self) -> AnalysisEngine {
+        self.engine
+    }
+}
+
+impl AnalysisBackend for EngineBackend {
+    fn analysis_ready(&self) -> bool {
+        self.ready
+    }
+
+    fn submit(&mut self, job: AnalysisJob) -> Option<AnalysisBatch> {
+        debug_assert!(self.ready);
+        self.engine.submit(EngineCommand::Analyze(job));
+        None
+    }
+
+    fn set_workspace_root(&mut self, root: Option<std::path::PathBuf>) -> Option<ProjectFeedback> {
+        self.engine.submit(EngineCommand::SetWorkspaceRoot(root));
+        None
+    }
+
+    fn watched_globs(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn note_project_change(&mut self) {
+        self.engine.submit(EngineCommand::ProjectChange {
+            refresh: true,
+            reanalyze: false,
+            uris: Vec::new(),
+        });
+    }
+
+    fn note_watched_file_change(&mut self, uri: &str) -> bool {
+        self.engine.submit(EngineCommand::ProjectChange {
+            refresh: false,
+            reanalyze: false,
+            uris: vec![uri.to_string()],
+        });
+        false
+    }
+
+    fn note_watched_file_changes(&mut self, uris: &[String]) -> bool {
+        self.engine.submit(EngineCommand::ProjectChange {
+            refresh: false,
+            reanalyze: false,
+            uris: uris.to_vec(),
+        });
+        false
+    }
+
+    fn project_refresh_due_in(&self) -> Option<std::time::Duration> {
+        None
+    }
+
+    fn refresh_project(&mut self) -> Option<ProjectFeedback> {
+        None
+    }
+
+    fn set_ready(&mut self, ready: bool) {
+        self.ready = ready;
+    }
+}
+
+fn run<A: Analysis>(mut analyze: A, commands: CommandReceiver, events: SyncSender<Incoming>) {
+    let mut last_ready = analyze.analysis_ready();
+    let _ = events.send(Incoming::Engine(EngineEvent::ReadyState(last_ready)));
+    // Reconfiguration and analysis must remain ordered on this thread.
+    loop {
+        let command = match commands.recv(analyze.project_refresh_due_in()) {
+            CommandReceive::Command(command) => Some(command),
+            CommandReceive::Timeout => None,
+            CommandReceive::Disconnected => break,
+        };
+        match command {
+            None => {
+                let feedback = analyze_refresh(&mut analyze);
+                if emit_project(&events, &mut analyze, feedback, &mut last_ready).is_err() {
+                    break;
+                }
+            }
+            Some(EngineCommand::SetWorkspaceRoot(root)) => {
+                let feedback = analyze.set_workspace_root(root);
+                let globs = analyze.watched_globs();
+                if events
+                    .send(Incoming::Engine(EngineEvent::WatchedGlobs(globs)))
+                    .is_err()
+                {
+                    break;
+                }
+                if emit_project(&events, &mut analyze, feedback, &mut last_ready).is_err() {
+                    break;
+                }
+            }
+            Some(EngineCommand::Analyze(job)) => {
+                let docs: Vec<(&str, &str)> = job
+                    .documents
+                    .iter()
+                    .map(|(uri, text, _)| (uri.as_str(), text.as_str()))
+                    .collect();
+                let open: Vec<&str> = job.open_uris.iter().map(String::as_str).collect();
+                let (analyses, support_documents) = analyze.analyze_open_documents(&docs, &open);
+                let analyzed = job
+                    .documents
+                    .iter()
+                    .map(|(uri, _, version)| (uri.clone(), *version))
+                    .collect();
+                let batch = AnalysisBatch {
+                    analyzed,
+                    analyses,
+                    support_documents,
+                    pending: analyze.analysis_pending(),
+                };
+                if events
+                    .send(Incoming::Engine(EngineEvent::AnalysisComplete(batch)))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Some(EngineCommand::ProjectChange {
+                refresh,
+                mut reanalyze,
+                uris,
+            }) => {
+                if refresh {
+                    analyze.note_project_change();
+                }
+                for uri in &uris {
+                    reanalyze |= analyze.note_watched_file_change(uri);
+                }
+                if reanalyze
+                    && events
+                        .send(Incoming::Engine(EngineEvent::ReanalyzeRequested))
+                        .is_err()
+                {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn analyze_refresh<A: Analysis>(analyze: &mut A) -> ProjectFeedback {
+    analyze.refresh_project()
+}
+
+fn emit_project<A: Analysis>(
+    events: &SyncSender<Incoming>,
+    analyze: &mut A,
+    feedback: ProjectFeedback,
+    last_ready: &mut bool,
+) -> Result<(), ()> {
+    events
+        .send(Incoming::Engine(EngineEvent::Project(feedback)))
+        .map_err(|_| ())?;
+    let ready = analyze.analysis_ready();
+    if ready != *last_ready {
+        *last_ready = ready;
+        events
+            .send(Incoming::Engine(EngineEvent::ReadyState(ready)))
+            .map_err(|_| ())?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_queue_bounds_project_change_bursts() {
+        let mut state = CommandState::default();
+        for index in 0..(MAX_PENDING_WATCHED_FILES + 1) {
+            state.enqueue(EngineCommand::ProjectChange {
+                refresh: false,
+                reanalyze: false,
+                uris: vec![format!("file:///{index}.kt")],
+            });
+        }
+
+        assert_eq!(state.pending.len(), 1);
+        let EngineCommand::ProjectChange {
+            refresh,
+            reanalyze,
+            uris,
+        } = state.pending.pop_front().unwrap()
+        else {
+            panic!("expected a coalesced project change");
+        };
+        assert!(refresh);
+        assert!(reanalyze);
+        assert!(uris.is_empty());
+    }
+
+    #[test]
+    fn workspace_reconfiguration_stays_before_pending_analysis() {
+        let mut state = CommandState::default();
+        state.enqueue(EngineCommand::Analyze(AnalysisJob {
+            documents: vec![("file:///old.kt".into(), String::new(), 1)],
+            open_uris: Vec::new(),
+        }));
+        state.enqueue(EngineCommand::SetWorkspaceRoot(Some("/workspace".into())));
+
+        assert!(matches!(
+            state.pending.pop_front(),
+            Some(EngineCommand::SetWorkspaceRoot(_))
+        ));
+        assert!(matches!(
+            state.pending.pop_front(),
+            Some(EngineCommand::Analyze(_))
+        ));
+    }
+
+    #[test]
+    fn command_queue_replaces_obsolete_analysis_without_growing() {
+        let mut state = CommandState::default();
+        for index in 0..100 {
+            state.enqueue(EngineCommand::ProjectChange {
+                refresh: false,
+                reanalyze: false,
+                uris: vec![format!("file:///{index}.kt")],
+            });
+            state.enqueue(EngineCommand::Analyze(AnalysisJob {
+                documents: vec![(format!("file:///{index}.kt"), String::new(), 1)],
+                open_uris: Vec::new(),
+            }));
+        }
+
+        assert_eq!(state.pending.len(), 2);
+        assert!(matches!(
+            state.pending.pop_front(),
+            Some(EngineCommand::ProjectChange { .. })
+        ));
+        assert!(matches!(
+            state.pending.pop_front(),
+            Some(EngineCommand::Analyze(_))
+        ));
+    }
+
+    #[test]
+    fn join_terminates_the_thread_without_a_prior_shutdown_command() {
+        use std::sync::mpsc::sync_channel;
+
+        struct Mock;
+        impl Analysis for Mock {
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+        }
+
+        let (tx, _rx) = sync_channel(4);
+        let engine = AnalysisEngine::spawn(Mock, tx);
+        engine.join();
+    }
+
+    #[test]
+    fn job_and_batch_round_trip_fields() {
+        let job = AnalysisJob {
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 3)],
+            open_uris: vec!["file:///a.kt".into()],
+        };
+        assert_eq!(job.documents[0].2, 3);
+
+        let batch = AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), 3)],
+            analyses: vec![DocumentAnalysis::empty()],
+            support_documents: Vec::new(),
+            pending: false,
+        };
+        assert_eq!(batch.analyzed[0].1, 3);
+        assert_eq!(batch.analyses.len(), 1);
+    }
+
+    #[test]
+    fn analyze_command_produces_completion_event() {
+        use std::sync::mpsc::sync_channel;
+
+        struct Mock;
+        impl Analysis for Mock {
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+        }
+
+        let (tx, rx) = sync_channel(4);
+        let engine = AnalysisEngine::spawn(Mock, tx);
+        engine.submit(EngineCommand::Analyze(AnalysisJob {
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 2)],
+            open_uris: vec!["file:///a.kt".into()],
+        }));
+        let mut found = false;
+        for _ in 0..2 {
+            match rx.recv().unwrap() {
+                Incoming::Engine(EngineEvent::AnalysisComplete(batch)) => {
+                    assert_eq!(batch.analyzed, vec![("file:///a.kt".to_string(), 2)]);
+                    assert_eq!(batch.analyses.len(), 1);
+                    found = true;
+                    break;
+                }
+                Incoming::Engine(EngineEvent::ReadyState(_)) => {}
+                _ => panic!("unexpected event"),
+            }
+        }
+        assert!(found, "expected AnalysisComplete event");
+        engine.join();
+    }
+
+    #[test]
+    fn analyze_after_reconfigure_reflects_the_reconfigured_worker() {
+        use std::sync::mpsc::sync_channel;
+
+        struct ReconfigureMock {
+            reconfigured: bool,
+        }
+        impl Analysis for ReconfigureMock {
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+            fn set_workspace_root(
+                &mut self,
+                _root: Option<std::path::PathBuf>,
+            ) -> crate::server::implementation::ProjectFeedback {
+                self.reconfigured = true;
+                crate::server::implementation::ProjectFeedback::default()
+            }
+            fn analyze_open_documents(
+                &mut self,
+                documents: &[(&str, &str)],
+                _open_uris: &[&str],
+            ) -> (Vec<DocumentAnalysis>, Vec<(String, String)>) {
+                let state = if self.reconfigured {
+                    "reconfigured"
+                } else {
+                    "stale"
+                };
+                (
+                    documents
+                        .iter()
+                        .map(|_| DocumentAnalysis::empty())
+                        .collect(),
+                    vec![("state".to_string(), state.to_string())],
+                )
+            }
+        }
+
+        let (tx, rx) = sync_channel(8);
+        let engine = AnalysisEngine::spawn(
+            ReconfigureMock {
+                reconfigured: false,
+            },
+            tx,
+        );
+        engine.submit(EngineCommand::SetWorkspaceRoot(None));
+        engine.submit(EngineCommand::Analyze(AnalysisJob {
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 1)],
+            open_uris: vec!["file:///a.kt".into()],
+        }));
+
+        let mut support = None;
+        for _ in 0..8 {
+            match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                Ok(Incoming::Engine(EngineEvent::AnalysisComplete(batch))) => {
+                    support = Some(batch.support_documents);
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        assert_eq!(
+            support,
+            Some(vec![("state".to_string(), "reconfigured".to_string())]),
+            "analysis published after a reconfigure must reflect the reconfigured worker"
+        );
+        engine.join();
+    }
+
+    #[test]
+    fn set_workspace_root_emits_globs_ready_and_project() {
+        use std::sync::mpsc::sync_channel;
+        struct Mock {
+            ready: bool,
+        }
+        impl crate::server::implementation::Analysis for Mock {
+            fn analyze(&mut self, s: &[&str]) -> Vec<DocumentAnalysis> {
+                s.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+            fn analysis_ready(&self) -> bool {
+                self.ready
+            }
+            fn set_workspace_root(
+                &mut self,
+                _root: Option<std::path::PathBuf>,
+            ) -> crate::server::implementation::ProjectFeedback {
+                self.ready = true;
+                crate::server::implementation::ProjectFeedback {
+                    reanalyze: true,
+                    message: None,
+                    logs: vec!["loaded".into()],
+                }
+            }
+            fn watched_globs(&mut self) -> Vec<String> {
+                vec!["**/*.kt".into()]
+            }
+        }
+        let (tx, rx) = sync_channel(8);
+        let engine = AnalysisEngine::spawn(Mock { ready: false }, tx);
+        engine.submit(EngineCommand::SetWorkspaceRoot(None));
+
+        let mut saw_globs = false;
+        let mut saw_ready = false;
+        let mut saw_project = false;
+        for _ in 0..4 {
+            match rx.recv_timeout(std::time::Duration::from_secs(1)) {
+                Ok(Incoming::Engine(EngineEvent::WatchedGlobs(g))) => {
+                    assert_eq!(g, vec!["**/*.kt".to_string()]);
+                    saw_globs = true;
+                }
+                Ok(Incoming::Engine(EngineEvent::ReadyState(true))) => saw_ready = true,
+                Ok(Incoming::Engine(EngineEvent::Project(f))) => {
+                    assert!(f.reanalyze);
+                    saw_project = true;
+                }
+                _ => {}
+            }
+            if saw_globs && saw_ready && saw_project {
+                break;
+            }
+        }
+        assert!(saw_globs && saw_ready && saw_project);
+        engine.join();
+    }
+
+    #[test]
+    fn engine_backend_submit_is_async() {
+        use std::sync::mpsc::sync_channel;
+        struct Mock;
+        impl crate::server::implementation::Analysis for Mock {
+            fn analyze(&mut self, s: &[&str]) -> Vec<DocumentAnalysis> {
+                s.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+        }
+        let (tx, rx) = sync_channel(4);
+        let mut backend = EngineBackend::new(AnalysisEngine::spawn(Mock, tx), false);
+        backend.set_ready(true);
+        let now = backend.submit(AnalysisJob {
+            documents: vec![("file:///a.kt".into(), "x".into(), 1)],
+            open_uris: vec!["file:///a.kt".into()],
+        });
+        assert!(now.is_none(), "engine backend is asynchronous");
+        let mut found = false;
+        for _ in 0..2 {
+            match rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap() {
+                Incoming::Engine(EngineEvent::AnalysisComplete(_)) => {
+                    found = true;
+                    break;
+                }
+                Incoming::Engine(EngineEvent::ReadyState(_)) => {}
+                _ => panic!("unexpected event"),
+            }
+        }
+        assert!(found, "expected AnalysisComplete event");
+        backend.into_engine().join();
+    }
+
+    #[test]
+    fn watched_file_change_batch_folds_into_at_most_one_reanalyze() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc::sync_channel;
+        use std::sync::Arc;
+
+        struct Mock {
+            per_uri_calls: Arc<AtomicUsize>,
+        }
+        impl crate::server::implementation::Analysis for Mock {
+            fn analyze(&mut self, s: &[&str]) -> Vec<DocumentAnalysis> {
+                s.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+            fn note_watched_file_change(&mut self, uri: &str) -> bool {
+                self.per_uri_calls.fetch_add(1, Ordering::SeqCst);
+                uri.ends_with(".kt")
+            }
+        }
+
+        let per_uri_calls = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = sync_channel(64);
+        let mut backend = EngineBackend::new(
+            AnalysisEngine::spawn(
+                Mock {
+                    per_uri_calls: per_uri_calls.clone(),
+                },
+                tx,
+            ),
+            false,
+        );
+
+        let uris: Vec<String> = (0..20).map(|i| format!("file:///p/File{i}.kt")).collect();
+        let now = backend.note_watched_file_changes(&uris);
+        assert!(!now, "the async backend defers the reanalyze decision");
+
+        let mut reanalyze = 0;
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_millis(300)) {
+                Ok(Incoming::Engine(EngineEvent::ReanalyzeRequested)) => reanalyze += 1,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        assert_eq!(
+            per_uri_calls.load(Ordering::SeqCst),
+            20,
+            "the engine folds every change in the batch"
+        );
+        assert_eq!(
+            reanalyze, 1,
+            "at most one ReanalyzeRequested is emitted per notification"
+        );
+        backend.into_engine().join();
+    }
+}

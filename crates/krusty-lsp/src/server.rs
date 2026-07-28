@@ -1,4 +1,6 @@
+mod engine;
 mod implementation;
+pub use engine::{AnalysisBatch, AnalysisJob};
 pub use implementation::*;
 
 #[cfg(test)]
