@@ -36,3 +36,25 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run(SRC).expect("three-arity overloaded extension"), "OK");
 }
+
+#[test]
+fn bounded_receiver_overloads_keep_distinct_erasure() {
+    const MEMBER_SRC: &str = "\
+interface Alpha\n\
+interface Beta\n\
+interface Catalog {\n\
+    fun <T : Alpha> T.label(): String\n\
+    fun <T : Beta> T.label(): String\n\
+}\n";
+    common::expect_front_end_ok_files_with_stdlib(&[MEMBER_SRC], "BoundedMemberReceiverOverloads");
+
+    const SRC: &str = "\
+interface Alpha\n\
+interface Beta\n\
+class First : Alpha\n\
+class Second : Beta\n\
+fun <T : Alpha> T.label(): String = \"A\"\n\
+fun <T : Beta> T.label(): String = \"B\"\n\
+fun box(): String = if (First().label() + Second().label() == \"AB\") \"OK\" else \"FAIL\"\n";
+    common::expect_box_ok_with_stdlib(SRC, "BoundedReceiverOverloads");
+}
