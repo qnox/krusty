@@ -24189,9 +24189,11 @@ impl<'a> Checker<'a> {
                     }
                     None => {
                         if rt != Ty::Unit {
-                            self.diags.error(
+                            self.report_assignability_error(
+                                rt,
+                                Ty::Unit,
                                 self.file.stmt_spans[s.0 as usize],
-                                format!("missing return value: expected {}", rt.name()),
+                                "return",
                             );
                         }
                     }
