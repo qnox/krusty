@@ -14,13 +14,25 @@ use crate::jvm::names::{
     method_descriptor, property_getter_name, property_setter_name, reference_array_element,
     type_descriptor,
 };
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TypeName, Visibility};
 
 struct InlineStaticTarget<'a> {
     owner: &'a str,
     name: &'a str,
     descriptor: &'a str,
     splice_desc: &'a str,
+}
+
+fn property_visibility(ir: &IrFile, owner: &str, name: &str) -> Visibility {
+    ir.prop_visibilities
+        .get(&(owner.to_string(), name.to_string()))
+        .copied()
+        .unwrap_or_default()
+}
+
+fn has_ctor_marker_accessor(ir: &IrFile, class: &IrClass) -> bool {
+    class.has_primary_ctor
+        && (class.is_sealed || class.is_companion || ir.has_value_param_ctor(&class.fq_name()))
 }
 
 /// Mutable per-emit-run accumulators, owned by the caller and shared (by `&`, via interior mutability)
@@ -269,8 +281,7 @@ fn build_class_metadata(
             d2: vec![],
         });
     }
-    if c.is_companion
-        || c.is_annotation
+    if c.is_annotation
         || c.enum_entry_of.is_some()
         || c.prop_ref.is_some()
         || c.func_ref.is_some()
@@ -348,34 +359,55 @@ fn build_class_metadata(
         .collect();
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
     let const_fields = init_body_constant_fields(ir, c);
-    let props: Vec<PropMeta> = c
+    let mut props: Vec<PropMeta> = c
         .fields
         .iter()
         .enumerate()
-        .map(|(i, f)| PropMeta {
-            name: f.name.clone(),
-            ty: f.ty,
-            is_var: !f.is_final(),
-            // Only a BODY property (past the ctor params) carries a compile-time constant; a ctor
-            // parameter's default is the PARAMETER's, not the property's. A body property's
-            // initializer is not on `IrField::default` either — it lives in the class `init_body`.
-            // Only a `val`: a `var` can be reassigned, so kotlinc gives it no constant.
-            is_abstract: c.is_interface,
-            tparam: ir.field_signatures(&c.fq_name()).and_then(|fs| {
-                fs.iter()
-                    .find(|(fname, _)| fname == &f.name)
-                    .and_then(|(_, tp)| c.type_params.iter().position(|t| t == tp))
-                    .map(|i| i as u32)
-            }),
-            has_constant: f.is_final()
-                && i >= c.ctor_param_count as usize
-                && const_fields.contains(&(i as u32)),
-            getter: (!ir.private_props.contains(&(c.fq_name(), f.name.clone())))
-                .then(|| (format!("get{}", cap(&f.name)), format!("(){}", desc(f.ty)))),
-            setter: (!f.is_final())
-                .then(|| (format!("set{}", cap(&f.name)), format!("({})V", desc(f.ty)))),
+        .map(|(i, f)| {
+            let visibility = property_visibility(ir, &c.fq_name(), &f.name);
+            PropMeta {
+                name: f.name.clone(),
+                ty: f.ty,
+                is_var: !f.is_final(),
+                visibility,
+                has_constant: f.is_final()
+                    && i >= c.ctor_param_count as usize
+                    && const_fields.contains(&(i as u32)),
+                is_const: false,
+                is_abstract: c.is_interface,
+                tparam: ir.field_signatures(&c.fq_name()).and_then(|fs| {
+                    fs.iter()
+                        .find(|(fname, _)| fname == &f.name)
+                        .and_then(|(_, tp)| c.type_params.iter().position(|t| t == tp))
+                        .map(|i| i as u32)
+                }),
+                getter: (!visibility.is_private())
+                    .then(|| (format!("get{}", cap(&f.name)), format!("(){}", desc(f.ty)))),
+                setter: (!visibility.is_private() && !f.is_final())
+                    .then(|| (format!("set{}", cap(&f.name)), format!("({})V", desc(f.ty)))),
+            }
         })
         .collect();
+    for &static_id in ir
+        .declared_class_statics
+        .get(&c.fq_name_id())
+        .into_iter()
+        .flatten()
+    {
+        let prop = &ir.statics[static_id as usize];
+        props.push(PropMeta {
+            name: prop.name.clone(),
+            ty: prop.ty,
+            is_var: prop.is_var,
+            visibility: prop.visibility,
+            has_constant: true,
+            is_const: true,
+            is_abstract: false,
+            tparam: None,
+            getter: None,
+            setter: None,
+        });
+    }
     let named_ctor_args: Vec<(String, Ty, bool, Option<u32>)> = c
         .ctor_args
         .iter()
@@ -647,7 +679,7 @@ fn build_class_metadata(
             // An `enum class`'s primary ctor is private too — entries are the only instances.
             primary_ctor_flags: if c.is_sealed {
                 SEALED_CTOR_FLAGS
-            } else if c.is_object || !c.enum_entries.is_empty() {
+            } else if c.is_singleton() || !c.enum_entries.is_empty() {
                 OBJECT_CTOR_FLAGS
             } else {
                 0
@@ -737,10 +769,11 @@ fn seed_plain_class_pool(
     let mut accessors: Vec<(String, String, u8)> = Vec::new();
     // A property declared `private` has NO accessor methods — seeding their names would intern pool
     // entries for methods that are never emitted.
-    for f in c.fields.iter().filter(|f| {
-        !ir.private_props
-            .contains(&(fq_name.to_string(), f.name.clone()))
-    }) {
+    for f in c
+        .fields
+        .iter()
+        .filter(|f| !property_visibility(ir, fq_name, &f.name).is_private())
+    {
         accessors.push((
             format!("get{}", cap(&f.name)),
             format!("(){}", desc(f.ty)),
@@ -984,10 +1017,8 @@ fn attach_synth_debug_tables(
         entries.dedup_by_key(|(_, l)| *l);
         cw.set_method_lines("<init>", &ctor_desc, &entries);
     }
-    // A SEALED class's primary ctor is private; kotlinc pairs it with a PUBLIC|SYNTHETIC
-    // `(…args, DefaultConstructorMarker)` accessor carrying `this`, the ctor params, and the marker
-    // (named `$constructor_marker`). It gets a LocalVariableTable but no LineNumberTable.
-    if c.is_sealed {
+    // A marker accessor gets the same locals as the primary constructor plus its synthetic marker.
+    if has_ctor_marker_accessor(ir, c) {
         const MARKER: &str = "Lkotlin/jvm/internal/DefaultConstructorMarker;";
         let mut acc_locals = ctor_locals.clone();
         let marker_slot = c
@@ -2690,17 +2721,14 @@ fn emit_class(
         let value_param_ctor = ir.has_value_param_ctor(&fq_name);
         // A SEALED class's primary ctor is private too — subclasses (and Java/reflection) construct
         // through the PUBLIC|SYNTHETIC `(…args, DefaultConstructorMarker)` accessor (kotlinc's shape).
-        let ctor_access =
-            if c.is_object || c.is_value || value_param_ctor || c.is_companion || c.is_sealed {
-                // A companion's real ctor is PRIVATE too — the outer `<clinit>` constructs it through the
-                // PUBLIC|SYNTHETIC `(DefaultConstructorMarker)` accessor emitted below (kotlinc's shape).
-                0x0002
-            } else if is_continuation {
-                // A continuation class's ctor is package-private (constructed only by its own file).
-                0x0000
-            } else {
-                0x0001
-            };
+        let ctor_access = if c.is_singleton() || c.is_value || value_param_ctor || c.is_sealed {
+            0x0002
+        } else if is_continuation {
+            // A continuation class's ctor is package-private (constructed only by its own file).
+            0x0000
+        } else {
+            0x0001
+        };
         cw.add_method_sig(
             ctor_access,
             "<init>",
@@ -2753,10 +2781,7 @@ fn emit_class(
                 cw.add_method(0x0001, "<init>", "()V", &z);
             }
         }
-        // A value-class-param primary ctor is private (above); kotlinc exposes a PUBLIC|SYNTHETIC accessor
-        // `<init>(…args, DefaultConstructorMarker)` that simply delegates to it, so Java/reflection can
-        // still construct the class.
-        if value_param_ctor || c.is_companion || c.is_sealed {
+        if has_ctor_marker_accessor(ir, c) {
             emit_ctor_marker_accessor(&fq_name, &param_tys, &mut cw);
         }
     } // end `if c.has_primary_ctor`

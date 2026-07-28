@@ -984,6 +984,10 @@ impl IrClass {
         self.companion_class
             .is_some_and(|name| name.matches(internal))
     }
+
+    pub fn is_singleton(&self) -> bool {
+        self.is_object || self.is_companion
+    }
 }
 
 /// A secondary constructor: `<init>(params)` evaluates `delegate_args`, calls the delegate target
@@ -1235,10 +1239,11 @@ pub struct IrFile {
     /// `FunId` → the backend-agnostic generic-signature SHAPE of a type-parameterized function. The JVM
     /// backend formats this into a `Signature` attribute; the IR itself holds no target descriptors.
     pub signatures: std::collections::HashMap<u32, IrGenericSig>,
-    /// (class internal name, property name) for a property DECLARED `private` in Kotlin. Distinct
-    /// from `IrField::is_private`, which is the backing FIELD's visibility — private for every normal
-    /// property. A private property has no accessor, so `@Metadata` names none.
-    pub private_props: std::collections::HashSet<(String, String)>,
+    /// Kotlin declaration visibility by `(class internal name, property name)`. This is distinct from
+    /// the backing field's JVM visibility.
+    pub prop_visibilities: std::collections::HashMap<(String, String), crate::types::Visibility>,
+    /// Declaring class to indices in `statics` for class properties whose JVM field is static.
+    pub declared_class_statics: std::collections::HashMap<TypeName, Vec<u32>>,
     /// (class internal name, property name) → 1-based source line of a BODY property's declaration.
     /// kotlinc attributes both the property's getter and its constructor-side initializer to this line.
     pub prop_decl_lines: std::collections::HashMap<(String, String), u32>,

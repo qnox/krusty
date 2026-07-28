@@ -584,22 +584,15 @@ pub fn lower_file_at_reporting(
             // Constructor-parameter fields, then class-body-property fields (initialized in `init_body`).
             // Field types come from the resolver's ClassSig so nested/imported/user classifier decisions
             // are made in the front end and lowering only consumes resolved semantic types.
-            // A property declared `private` has no accessor, so `@Metadata` records no getter name.
-            // Captured here from the DECLARATION — `IrField::is_private` is the backing field's own
-            // visibility, which is private for every normal property and so cannot answer this.
             for p in c.props.iter().filter(|p| p.is_property) {
-                if p.visibility == crate::types::Visibility::Private {
-                    lo.ir
-                        .private_props
-                        .insert((internal.clone(), p.name.clone()));
-                }
+                lo.ir
+                    .prop_visibilities
+                    .insert((internal.clone(), p.name.clone()), p.visibility);
             }
             for p in c.body_props.iter().filter(|p| is_backing_field_prop(p)) {
-                if p.visibility == crate::types::Visibility::Private {
-                    lo.ir
-                        .private_props
-                        .insert((internal.clone(), p.name.clone()));
-                }
+                lo.ir
+                    .prop_visibilities
+                    .insert((internal.clone(), p.name.clone()), p.visibility);
             }
             let mut ctor_fields: Vec<(String, Ty)> = c
                 .props
@@ -1599,6 +1592,7 @@ pub fn lower_file_at_reporting(
                 // A `const val` becomes a `ConstantValue` static; a plain non-const companion `val`
                 // becomes a static field initialized in the outer class's `<clinit>`. Both are read as
                 // `getstatic C.X` (registered in `companion_consts`).
+                let static_id = lo.ir.statics.len() as u32;
                 lo.ir.statics.push(crate::ir::IrStatic {
                     visibility: cp.visibility,
                     name: cp.name.clone(),
@@ -1609,6 +1603,13 @@ pub fn lower_file_at_reporting(
                     owner: Some(type_name(&internal)),
                     custom_accessor: false,
                 });
+                if cp.is_const {
+                    lo.ir
+                        .declared_class_statics
+                        .entry(type_name(&format!("{internal}$Companion")))
+                        .or_default()
+                        .push(static_id);
+                }
                 lo.companion_consts
                     .insert((type_name(&internal), cp.name.clone()), cty);
             }
@@ -1624,6 +1625,7 @@ pub fn lower_file_at_reporting(
                     lo.next_value = 0;
                     if let (Some(initx), false) = (bp.init, cty == Ty::Error) {
                         if let Some(init) = lo.lower_arg(initx, &ty_to_ir(cty)) {
+                            let static_id = lo.ir.statics.len() as u32;
                             lo.ir.statics.push(crate::ir::IrStatic {
                                 visibility: bp.visibility,
                                 name: bp.name.clone(),
@@ -1634,6 +1636,11 @@ pub fn lower_file_at_reporting(
                                 owner: Some(type_name(&internal)),
                                 custom_accessor: false,
                             });
+                            lo.ir
+                                .declared_class_statics
+                                .entry(type_name(&internal))
+                                .or_default()
+                                .push(static_id);
                         }
                     }
                 }
@@ -1744,7 +1751,7 @@ pub fn lower_file_at_reporting(
                     fq_name: type_name(&comp_fq),
                     is_value: false,
                     is_data: false,
-                    decl_line: 0,
+                    decl_line: c.companion_decl_line,
                     type_param_bounds: vec![],
                     type_params: Vec::new(),
                     supertypes: vec![],

@@ -12,16 +12,18 @@
 //! builtin types use `predefined_index` (Record.f2); everything else is a verbatim d2 entry.
 
 use crate::metadata::protobuf::Pb;
-use crate::types::Ty;
+use crate::types::{Ty, Visibility};
 
 /// Property descriptor for class metadata: name, type, mutability, and JVM accessor signatures.
 pub struct PropMeta {
     pub name: String,
     pub ty: Ty,
     pub is_var: bool,
-    /// The property has a compile-time CONSTANT initializer (`val y: Int = 2` in the class body) —
-    /// kotlinc records `hasConstant` in `Property.flags`.
+    pub visibility: Visibility,
+    /// The property has a compile-time constant initializer.
     pub has_constant: bool,
+    /// Whether the property is declared `const`.
+    pub is_const: bool,
     /// An ABSTRACT property (an interface member, or `abstract val`): kotlinc records the abstract
     /// modality in `Property.flags` and, since there is no backing field, omits the
     /// `JvmPropertySignature.field` entry entirely.
@@ -29,10 +31,9 @@ pub struct PropMeta {
     /// Index of the class type parameter this property is declared as (`class C<T>(val a: T)` → 0).
     /// `None` for an ordinary type.
     pub tparam: Option<u32>,
-    /// `(jvm name, jvm descriptor)` of the accessor. `None` for a property declared `private`: it is
-    /// read straight from the field, so there is no accessor for the signature to name.
+    /// `(jvm name, jvm descriptor)` of the accessor, when one is emitted.
     pub getter: Option<(String, String)>,
-    pub setter: Option<(String, String)>, // present iff `var`
+    pub setter: Option<(String, String)>,
 }
 
 /// Member-function descriptor for class metadata (`Class.function` = f9). The JVM signature is usually
@@ -126,16 +127,41 @@ const ENUM_PREDEFINED: u64 = 16;
 /// → 6), bit8 isVar, bit9 hasGetter, bit10 hasSetter, bit13 hasConstant. It self-checks: the `var`
 /// value kotlinc emits (1798) is exactly 518 + isVar(256) + hasSetter(1024).
 const DEFAULT_PROPERTY_FLAGS: u64 = 518;
-/// Visibility bits 1-3 of `Property.flags`: PUBLIC = 3 (the default, folded into
-/// [`DEFAULT_PROPERTY_FLAGS`]) and PRIVATE = 1. Swapping one for the other is the whole difference a
-/// `private` property makes to the bitfield — it keeps `hasGetter`, since the getter is still declared.
-const PROP_VISIBILITY_PUBLIC: u64 = 6;
-const PROP_VISIBILITY_PRIVATE: u64 = 2;
+const PROP_VISIBILITY_MASK: u64 = 0b1110;
 const PROP_IS_VAR: u64 = 256;
 const PROP_HAS_SETTER: u64 = 1024;
 const PROP_HAS_CONSTANT: u64 = 8192;
+/// `Property.flags` bit 11 — `IS_CONST` (`const val`). Set alongside `hasConstant`.
+const PROP_IS_CONST: u64 = 2048;
 /// `Property.flags` modality bits (4-5): ABSTRACT = 2.
 const PROP_MODALITY_ABSTRACT: u64 = 32;
+
+fn property_flags(prop: &PropMeta) -> u64 {
+    let visibility = match prop.visibility {
+        Visibility::Internal => 0,
+        Visibility::Private => 2,
+        Visibility::Protected => 4,
+        Visibility::Public => 6,
+    };
+    (DEFAULT_PROPERTY_FLAGS & !PROP_VISIBILITY_MASK)
+        | visibility
+        | if prop.is_var {
+            PROP_IS_VAR | PROP_HAS_SETTER
+        } else {
+            0
+        }
+        | if prop.has_constant {
+            PROP_HAS_CONSTANT
+        } else {
+            0
+        }
+        | if prop.is_const { PROP_IS_CONST } else { 0 }
+        | if prop.is_abstract {
+            PROP_MODALITY_ABSTRACT
+        } else {
+            0
+        }
+}
 
 #[derive(Default)]
 struct StringTable {
@@ -480,24 +506,7 @@ pub fn build_class(
             prop.field_varint(2, st.local(&p.name) as u64); // Property.name = 2
             let ty = type_pb_tp(&mut st, p.ty, p.tparam);
             prop.field_message(3, &ty); // Property.return_type = 3
-                                        // No accessor ⇒ the property is `private` (see [`PropMeta::getter`]), which shows up in the
-                                        // bitfield as the visibility bits alone.
-            let base = if p.getter.is_some() {
-                DEFAULT_PROPERTY_FLAGS
-            } else {
-                DEFAULT_PROPERTY_FLAGS - PROP_VISIBILITY_PUBLIC + PROP_VISIBILITY_PRIVATE
-            };
-            let pflags =
-                base | if p.is_var {
-                    PROP_IS_VAR | PROP_HAS_SETTER
-                } else {
-                    0
-                } | if p.has_constant { PROP_HAS_CONSTANT } else { 0 }
-                    | if p.is_abstract {
-                        PROP_MODALITY_ABSTRACT
-                    } else {
-                        0
-                    };
+            let pflags = property_flags(p);
             if pflags != DEFAULT_PROPERTY_FLAGS {
                 prop.field_varint(11, pflags); // Property.flags = 11
             }
@@ -691,6 +700,29 @@ pub fn build_class(
 mod tests {
     use super::*;
 
+    #[test]
+    fn const_property_flags_preserve_visibility() {
+        let flags = |visibility| {
+            property_flags(&PropMeta {
+                name: "x".into(),
+                ty: Ty::Int,
+                is_var: false,
+                visibility,
+                has_constant: true,
+                is_const: true,
+                is_abstract: false,
+                tparam: None,
+                getter: None,
+                setter: None,
+            })
+        };
+
+        assert_eq!(flags(Visibility::Internal), 10752);
+        assert_eq!(flags(Visibility::Private), 10754);
+        assert_eq!(flags(Visibility::Protected), 10756);
+        assert_eq!(flags(Visibility::Public), 10758);
+    }
+
     // Ground truth: kotlinc 2.4.0 `package demo; class E` → @Metadata mv=[2,4,0] k=1 xi=48, and this
     // exact d1 protobuf (mUTF-8-decoded to raw bytes) + d2 string table. Drives byte-for-byte parity.
     #[test]
@@ -729,6 +761,8 @@ mod tests {
                 ty: Ty::Int,
                 is_var: false,
                 has_constant: false,
+                is_const: false,
+                visibility: Visibility::Public,
                 is_abstract: false,
                 tparam: None,
                 getter: Some(("getX".into(), "()I".into())),
@@ -826,6 +860,8 @@ mod tests {
                 ty: Ty::Int,
                 is_var: false,
                 has_constant: false,
+                is_const: false,
+                visibility: Visibility::Public,
                 is_abstract: false,
                 tparam: None,
                 getter: Some(("getX".into(), "()I".into())),
@@ -836,6 +872,8 @@ mod tests {
                 ty: Ty::String,
                 is_var: true,
                 has_constant: false,
+                is_const: false,
+                visibility: Visibility::Public,
                 is_abstract: false,
                 tparam: None,
                 getter: Some(("getY".into(), "()Ljava/lang/String;".into())),
@@ -895,6 +933,8 @@ mod tests {
                 ty: list_string,
                 is_var: false,
                 has_constant: false,
+                is_const: false,
+                visibility: Visibility::Public,
                 is_abstract: false,
                 tparam: None,
                 getter: Some(("getR".into(), "()Ljava/util/List;".into())),
@@ -1000,6 +1040,8 @@ mod tests {
                 ty: Ty::Int,
                 is_var: false,
                 has_constant: false,
+                is_const: false,
+                visibility: Visibility::Public,
                 is_abstract: false,
                 tparam: None,
                 getter: Some(("getX".into(), "()I".into())),
@@ -1046,6 +1088,8 @@ mod tests {
                 ty: Ty::Int,
                 is_var: false,
                 has_constant: false,
+                is_const: false,
+                visibility: Visibility::Public,
                 is_abstract: false,
                 tparam: None,
                 getter: Some(("getX".into(), "()I".into())),
@@ -1096,6 +1140,8 @@ mod tests {
                     ty: Ty::Int,
                     is_var: false,
                     has_constant: false,
+                    is_const: false,
+                    visibility: Visibility::Public,
                     is_abstract: false,
                     tparam: None,
                     getter: Some(("getX".into(), "()I".into())),
@@ -1106,6 +1152,8 @@ mod tests {
                     ty: Ty::String,
                     is_var: true,
                     has_constant: false,
+                    is_const: false,
+                    visibility: Visibility::Public,
                     is_abstract: false,
                     tparam: None,
                     getter: Some(("getY".into(), "()Ljava/lang/String;".into())),

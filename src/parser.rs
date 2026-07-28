@@ -202,6 +202,9 @@ fn fill_class_decl_lines(file: &mut File, src: &str) {
         match decl {
             Decl::Class(c) => {
                 c.decl_line = line_at(c.span.lo);
+                if c.companion_decl_line != 0 {
+                    c.companion_decl_line = line_at(c.companion_decl_line);
+                }
                 // A class's methods live INSIDE the class decl, not in `decl_arena` — walk them too,
                 // or every member method keeps line 0 and gets no `LineNumberTable`.
                 for m in &mut c.methods {
@@ -2501,7 +2504,9 @@ impl<'a> Parser<'a> {
         base: &mut Option<String>,
         base_args: &mut Vec<ExprId>,
         supertypes: &mut Vec<String>,
+        decl_line_lo: &mut u32,
     ) {
+        *decl_line_lo = self.tok().span.lo;
         self.bump(); // 'companion'
         self.bump(); // 'object'
         if self.at(TokenKind::Ident) {
@@ -2652,6 +2657,7 @@ impl<'a> Parser<'a> {
         let mut companion_base: Option<String> = None;
         let mut companion_base_args: Vec<ExprId> = Vec::new();
         let mut companion_supertypes: Vec<String> = Vec::new();
+        let mut companion_decl_line: u32 = 0;
         self.skip_newlines();
         if self.eat(TokenKind::LBrace) {
             self.skip_newlines();
@@ -2833,6 +2839,7 @@ impl<'a> Parser<'a> {
                             &mut companion_base,
                             &mut companion_base_args,
                             &mut companion_supertypes,
+                            &mut companion_decl_line,
                         );
                     }
                     _ => break,
@@ -2863,6 +2870,7 @@ impl<'a> Parser<'a> {
             companion_base,
             companion_base_args,
             companion_supertypes,
+            companion_decl_line,
             body_props,
             init_order,
             is_data: false,
@@ -3477,6 +3485,7 @@ impl<'a> Parser<'a> {
         let mut companion_base: Option<String> = None;
         let mut companion_base_args: Vec<ExprId> = Vec::new();
         let mut companion_supertypes: Vec<String> = Vec::new();
+        let mut companion_decl_line: u32 = 0;
         let mut secondary_ctors: Vec<SecondaryCtor> = Vec::new();
         self.skip_newlines();
         if self.at(TokenKind::LBrace) {
@@ -3547,6 +3556,7 @@ impl<'a> Parser<'a> {
                             &mut companion_base,
                             &mut companion_base_args,
                             &mut companion_supertypes,
+                            &mut companion_decl_line,
                         );
                     }
                     // Silently skip nested type declarations (inner/nested class, object,
@@ -3732,6 +3742,7 @@ impl<'a> Parser<'a> {
             companion_base,
             companion_base_args,
             companion_supertypes,
+            companion_decl_line,
             body_props,
             init_order,
             is_data: false,
@@ -3978,6 +3989,7 @@ impl<'a> Parser<'a> {
         let mut companion_base: Option<String> = None;
         let mut companion_base_args: Vec<ExprId> = Vec::new();
         let mut companion_supertypes: Vec<String> = Vec::new();
+        let mut companion_decl_line: u32 = 0;
         self.skip_newlines();
         if self.at(TokenKind::LBrace) {
             self.bump();
@@ -4052,6 +4064,7 @@ impl<'a> Parser<'a> {
                             &mut companion_base,
                             &mut companion_base_args,
                             &mut companion_supertypes,
+                            &mut companion_decl_line,
                         );
                     }
                     _ => {
@@ -4077,6 +4090,7 @@ impl<'a> Parser<'a> {
             companion_base,
             companion_base_args,
             companion_supertypes,
+            companion_decl_line,
             body_props,
             init_order: Vec::new(),
             is_data: false,
@@ -4217,6 +4231,7 @@ impl<'a> Parser<'a> {
             companion_base: None,
             companion_base_args: Vec::new(),
             companion_supertypes: Vec::new(),
+            companion_decl_line: 0,
             body_props,
             init_order,
             is_data: false,
@@ -4391,6 +4406,7 @@ impl<'a> Parser<'a> {
             companion_base: None,
             companion_base_args: Vec::new(),
             companion_supertypes: Vec::new(),
+            companion_decl_line: 0,
             body_props,
             init_order,
             is_data: false,
