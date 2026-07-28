@@ -1191,14 +1191,6 @@ impl SymbolTable {
         })
     }
 
-    fn fun_ret_by_erased_params(&self, name: &str, params: &[ErasedTypeKey]) -> Option<Ty> {
-        let overloads = self.funs.get(name)?;
-        overloads
-            .iter()
-            .find(|sig| overloads.len() == 1 || erased_params_semantic_key(sig) == params)
-            .map(|sig| sig.ret)
-    }
-
     /// Resolve a class reference type `Ty::Obj` back to its declaration (by internal name).
     pub fn class_by_internal(&self, internal: &str) -> Option<&ClassSig> {
         existing_type_name(internal).and_then(|internal| self.class_by_type_name(internal))
@@ -12326,14 +12318,15 @@ impl<'a> Checker<'a> {
                 .or_else(|| f.ret.as_ref().map(|r| self.resolve_ty(r)))
                 .unwrap_or(Ty::Unit);
         } else {
-            // Use this declaration's own collected return type; companion methods fall back to the
-            // declared return type because they are not stored in `funs`.
-            let want: Vec<ErasedTypeKey> = f
-                .params
-                .iter()
-                .map(|p| erased_type_key(self.resolve_ty(&p.ty)))
-                .collect();
-            let own_ret = self.syms.fun_ret_by_erased_params(&f.name, &want);
+            // Select by source declaration identity: same-name/same-parameter functions in different
+            // packages are distinct declarations and may have different return types. Companion methods
+            // have no top-level source signature and fall back to their declared type.
+            let own_ret = source_decl
+                .and_then(|declaration| {
+                    self.syms
+                        .source_function_signature(&f.name, self.file_index, declaration)
+                })
+                .map(|signature| signature.ret);
             self.ret_ty = own_ret
                 .or_else(|| f.ret.as_ref().map(|r| self.resolve_ty(r)))
                 .unwrap_or(Ty::Unit);

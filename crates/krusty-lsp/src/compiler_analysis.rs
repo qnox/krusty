@@ -220,6 +220,22 @@ mod tests {
     }
 
     #[test]
+    fn source_set_checks_a_function_against_its_own_signature() {
+        let value_function = "package first\nfun sharedName(): String = \"value\"";
+        let unit_function = "package second\nfun sharedName() {}";
+
+        for sources in [
+            [value_function, unit_function],
+            [unit_function, value_function],
+        ] {
+            let analysis = analyze_standalone_source_set(&sources);
+            for file in analysis.files {
+                assert!(file.diagnostics.is_empty(), "{:?}", file.diagnostics);
+            }
+        }
+    }
+
+    #[test]
     fn kotlin_script_accepts_and_checks_a_top_level_call() {
         let source = "fun render(value: String): String = value\n\
                       fun suspend(block: () -> Unit) = block()\n\
