@@ -930,6 +930,9 @@ impl ClassNames {
         self.get(k)
             .filter(|internal| !internal.starts_with("__ty/"))
     }
+    pub fn classifier_over_default(&self, name: &str) -> Option<TypeName> {
+        classifier_over_default(name, self.get_class(name))
+    }
     pub fn contains_key(&self, k: &str) -> bool {
         self.user.contains_key(k) || self.base.contains_key(k)
     }
@@ -958,6 +961,24 @@ impl ClassNames {
     pub fn insert_name(&mut self, k: String, v: TypeName) -> Option<TypeName> {
         self.user.insert(k, v)
     }
+}
+
+fn default_classifier_internal(name: &str) -> Option<TypeName> {
+    if Ty::from_name(name).is_some()
+        || Ty::primitive_array_element(name).is_some()
+        || name == "Array"
+    {
+        return Some(type_name(&format!("kotlin/{name}")));
+    }
+    let arity = name.strip_prefix("Function")?.parse::<usize>().ok()?;
+    (arity <= 22).then(|| type_name(&format!("kotlin/Function{arity}")))
+}
+
+pub(crate) fn classifier_over_default(name: &str, resolved: Option<TypeName>) -> Option<TypeName> {
+    let resolved = resolved?;
+    default_classifier_internal(name)
+        .filter(|&default| default != resolved)
+        .map(|_| resolved)
 }
 
 /// A collected TOP-LEVEL extension property: its declared type, mutability, and the source
@@ -2526,6 +2547,20 @@ fn validate_explicit_backing_field(property: &PropDecl, diags: &mut DiagSink) {
     }
 }
 
+fn source_classifier_from_path(
+    path: &str,
+    declarations: &std::collections::HashSet<String>,
+) -> Option<TypeName> {
+    let mut candidate = path.to_string();
+    loop {
+        if declarations.contains(&candidate) {
+            return Some(type_name(&candidate));
+        }
+        let separator = candidate.rfind('/')?;
+        candidate.replace_range(separator..=separator, "$");
+    }
+}
+
 /// Like `collect_signatures` but also seeds class names and type aliases from the target's
 /// libraries (a JVM classpath, a klib), eliminating the need for any hardcoded type lists.
 pub fn collect_signatures_with_cp(
@@ -2582,13 +2617,18 @@ pub fn collect_signatures_with_cp(
             collect_file_type_names(file, &mut names);
             names.extend(imap.keys().cloned());
             for name in names {
-                if class_names.contains_key(name.as_str()) || user_defined.contains(&name) {
-                    continue;
-                }
-                // Resolve the name to an FQN against the file's import set (explicit import, then the
-                // implicit FQN candidates by kotlinc precedence) — the SAME resolver the checker uses.
-                // Fall back to a dotted FQ / nested-under-prefix.
-                let full = resolve_name_against_imports_name(&name, &imap, &levels, &*libraries)
+                let explicit = imap.get(&name);
+                let explicit_source =
+                    explicit.and_then(|path| source_classifier_from_path(path, &user_defined));
+                let same_package_source = explicit
+                    .is_none()
+                    .then(|| type_name(&class_internal(file, &name)))
+                    .filter(|candidate| user_defined.contains(&candidate.render()));
+                let full = explicit_source
+                    .or(same_package_source)
+                    .or_else(|| {
+                        resolve_name_against_imports_name(&name, &imap, &levels, &*libraries)
+                    })
                     .or_else(|| {
                         // A dotted type name (`lib.Thing`, `Wrap.Box`) — resolve the FQ package path
                         // or a nested type under a resolvable outer prefix.
@@ -2600,26 +2640,6 @@ pub fn collect_signatures_with_cp(
                             &*libraries,
                         )
                         .map(|internal| type_name(&internal))
-                    })
-                    .or_else(|| {
-                        // A SAME-MODULE nested-type import (`import demo.Outer.Inner` → the hoisted
-                        // class `demo/Outer$Inner`). The classpath-only `resolve_nested_internal_name`
-                        // can't see a module-local nested class, so match the import path's `$`-flattened
-                        // form (from the right, kotlinc's nesting separator) against a user-declared
-                        // internal — nested classes are hoisted to top-level decls and recorded in
-                        // `user_defined` during the class-name seed above.
-                        imap.get(&name).and_then(|fq| {
-                            let mut cand = fq.clone();
-                            loop {
-                                if user_defined.contains(&cand) {
-                                    return Some(type_name(&cand));
-                                }
-                                match cand.rfind('/') {
-                                    Some(pos) => cand.replace_range(pos..=pos, "$"),
-                                    None => return None,
-                                }
-                            }
-                        })
                     });
                 let full = full.map(|full| libraries.canonical_source_type_name(full));
                 match consensus.get_mut(&name) {
@@ -6556,10 +6576,27 @@ fn ty_of_ref_with(
         );
         return Ty::Error;
     }
-    // Function type, builtin scalar, or primitive array — the leaf shared by every type resolver. A
-    // function type is reference-typed, so the nullability handling below is a no-op for it.
-    let base = if let Some(t) = typeref_leaf(r, &mut |x| ty_of_ref_with(x, classes, tparams, diags))
-    {
+    let scoped = if tparams.contains(&r.name) {
+        Some(tparams.erase(&r.name))
+    } else {
+        classes.classifier_over_default(&r.name).map(|internal| {
+            if r.targs.is_empty() {
+                Ty::obj_name(internal)
+            } else {
+                let args: Vec<Ty> = r
+                    .targs
+                    .iter()
+                    .map(|arg| ty_of_ref_with(arg, classes, tparams, diags))
+                    .collect();
+                Ty::obj_args_name(internal, &args)
+            }
+        })
+    };
+    // Lexical classifiers and type parameters precede default imports. Function syntax has no
+    // classifier name and remains phase-independent.
+    let base = if let Some(t) = scoped {
+        t
+    } else if let Some(t) = typeref_leaf(r, &mut |x| ty_of_ref_with(x, classes, tparams, diags)) {
         t
     } else if r.name == "Array" {
         match &r.arg {
@@ -6588,8 +6625,6 @@ fn ty_of_ref_with(
                 Ty::Error
             }
         }
-    } else if tparams.contains(&r.name) {
-        tparams.erase(&r.name) // erased generic type parameter (primitive if `<T: Int>`)
     } else if let Some(internal) = classes.get(&r.name) {
         // `"__ty/<PrimName>"` encodes a type-alias → primitive/builtin mapping.
         if let Some(prim) = internal.strip_prefix("__ty/") {
@@ -11282,6 +11317,13 @@ impl<'a> Checker<'a> {
         resolve_name_against_imports_name(name, &self.imports, &self.import_levels, &source)
     }
 
+    fn scoped_classifier_name(&self, name: &str) -> Option<TypeName> {
+        self.enclosing_nested_type_name(name)
+            .or_else(|| self.imported_type_name(name))
+            .or_else(|| self.syms.classes.get(name).map(ClassSig::internal_name))
+            .or_else(|| self.syms.class_names.get_class(name))
+    }
+
     /// Resolve a dotted import flattened to slashes (`import lib.Scope.Ws` → `lib/Scope/Ws`) to the
     /// internal name that actually EXISTS on the classpath, treating trailing path segments as NESTED
     /// classes (`lib/Scope$Ws`). A nested-type import can't be told apart from a package path
@@ -11346,7 +11388,10 @@ impl<'a> Checker<'a> {
         if self.lookup(n).is_some() {
             return None;
         }
-        let ty = Ty::from_name(n)
+        let scoped = self.scoped_classifier_name(n);
+        let ty = classifier_over_default(n, scoped)
+            .map(Ty::obj_name)
+            .or_else(|| Ty::from_name(n))
             .or_else(|| {
                 self.syms
                     .classes
@@ -11384,8 +11429,16 @@ impl<'a> Checker<'a> {
 
     /// Resolve a syntactic type without erasing source nullability.
     fn resolve_ty(&mut self, r: &TypeRef) -> Ty {
-        // Function type, builtin scalar, or primitive array — the leaf shared by every type resolver.
-        let base = if let Some(t) = typeref_leaf(r, &mut |x| self.resolve_ty(x)) {
+        let scoped = if self.tparams.contains(&r.name) {
+            Some(self.tparams.erase(&r.name))
+        } else {
+            let internal = self.scoped_classifier_name(&r.name);
+            classifier_over_default(&r.name, internal)
+                .map(|internal| self.obj_with_targs_name(internal, r))
+        };
+        let base = if let Some(t) = scoped {
+            t
+        } else if let Some(t) = typeref_leaf(r, &mut |x| self.resolve_ty(x)) {
             t
         } else if r.name == "Array" {
             match &r.arg {
@@ -11403,8 +11456,6 @@ impl<'a> Checker<'a> {
                 }
                 None => Ty::Error,
             }
-        } else if self.tparams.contains(&r.name) {
-            self.tparams.erase(&r.name) // erased generic type parameter (primitive if `<T: Int>`)
         } else if let Some(internal) = self.enclosing_nested_type_name(&r.name) {
             // Kotlin nested-type scoping: an UNQUALIFIED name that names one of the ENCLOSING class's own
             // nested types SHADOWS a same-named top-level/imported type — so resolve the nested form FIRST
@@ -11446,14 +11497,19 @@ impl<'a> Checker<'a> {
         let extra: std::collections::HashSet<&str> =
             f.type_params.iter().map(|s| s.as_str()).collect();
         let key = |name: &str| -> ErasedTypeKey {
-            if let Some(t) = Ty::from_name(name) {
-                erased_type_key(t)
-            } else if self.tparams.contains(name) || extra.contains(name) {
+            if self.tparams.contains(name) || extra.contains(name) {
                 erased_type_key(Ty::obj("kotlin/Any"))
-            } else if let Some(cs) = self.syms.classes.get(name) {
-                erased_type_key(Ty::obj(&cs.internal()))
             } else {
-                ErasedTypeKey::Unresolved(name.to_string())
+                let internal = self.scoped_classifier_name(name);
+                if let Some(internal) = classifier_over_default(name, internal) {
+                    erased_type_key(Ty::obj_name(internal))
+                } else if let Some(t) = Ty::from_name(name) {
+                    erased_type_key(t)
+                } else if let Some(internal) = internal {
+                    erased_type_key(Ty::obj_name(internal))
+                } else {
+                    ErasedTypeKey::Unresolved(name.to_string())
+                }
             }
         };
         ErasedSigKey {
@@ -11789,10 +11845,13 @@ impl<'a> Checker<'a> {
                 base
             };
         }
-        let base = if let Some(t) = Ty::from_name(&r.name) {
-            t
-        } else if self.tparams.contains(&r.name) {
+        let internal = self.scoped_classifier_name(&r.name);
+        let base = if self.tparams.contains(&r.name) {
             self.tparams.erase(&r.name)
+        } else if let Some(internal) = classifier_over_default(&r.name, internal) {
+            Ty::obj_name(internal)
+        } else if let Some(t) = Ty::from_name(&r.name) {
+            t
         } else if let Some(internal) = self.enclosing_nested_type_name(&r.name) {
             Ty::obj_name(internal)
         } else if let Some(cs) = self.syms.classes.get(&r.name) {
@@ -13949,6 +14008,31 @@ impl<'a> Checker<'a> {
             } => {
                 let ot = self.expr(operand);
                 let tt = self.resolve_ty(&ty);
+                if ty.nullable()
+                    && !nullable
+                    && ty
+                        .targs
+                        .iter()
+                        .any(|argument| self.tparams.contains(&argument.name))
+                    && tt.non_null().obj_internal().is_some_and(|internal| {
+                        self.syms.class_by_type_name(internal).is_some_and(|class| {
+                            class.value_field.as_ref().is_some_and(|(name, _)| {
+                                class.generic_props.get(name).is_some_and(|&(index, _)| {
+                                    class
+                                        .tparam_bounds
+                                        .get(index)
+                                        .is_some_and(|bound| !bound.is_reference())
+                                })
+                            })
+                        })
+                    })
+                {
+                    self.diags.error(
+                        self.span(e),
+                        "krusty: cast to a nullable value class with a primitive generic representation is not supported",
+                    );
+                    return Ty::Error;
+                }
                 let unit_cast = ot == Ty::Unit || tt == Ty::Unit;
                 // `checkcast` needs a reference operand. The target is either a *known* reference type (an
                 // unresolved one erases to a no-op `Object` cast — rejected), or a non-unsigned primitive:
@@ -23785,7 +23869,13 @@ impl<'a> Checker<'a> {
                 // the function's return type. Type-check the expression for its own errors and move on.
                 if label.is_some() {
                     if let Some(ex) = e {
-                        self.expr(ex);
+                        let ty = self.expr(ex);
+                        if self.ty_is_value_class(ty.non_null()) {
+                            self.diags.error(
+                                self.span(ex),
+                                "krusty: labeled value-class return is not supported",
+                            );
+                        }
                     }
                     return;
                 }

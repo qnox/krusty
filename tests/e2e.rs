@@ -114,6 +114,8 @@ mod class_metadata_roundtrip;
 mod class_tparam_cast_e2e;
 #[path = "classfile_e2e.rs"]
 mod classfile_e2e;
+#[path = "classifier_precedence_e2e.rs"]
+mod classifier_precedence_e2e;
 #[path = "classpath_abstract_subclass_e2e.rs"]
 mod classpath_abstract_subclass_e2e;
 #[path = "classpath_annotation_emit_e2e.rs"]
@@ -938,6 +940,8 @@ mod unsigned_toplevel_e2e;
 mod use_site_variance_e2e;
 #[path = "val_backing_field_getter_e2e.rs"]
 mod val_backing_field_getter_e2e;
+#[path = "value_class_branch_repr_e2e.rs"]
+mod value_class_branch_repr_e2e;
 #[path = "value_class_classpath_ctor_e2e.rs"]
 mod value_class_classpath_ctor_e2e;
 #[path = "value_class_e2e.rs"]

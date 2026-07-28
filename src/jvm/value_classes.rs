@@ -2539,17 +2539,27 @@ pub fn lower_value_classes(
                         });
                 match repr_ctx.repr(a) {
                     Repr::Unboxed(x) if supertype_box => {
-                        // A possibly-null operand (`X?` over a reference) boxes null-safely so the
-                        // value class's non-null ctor check isn't hit on `null`.
-                        ops.push((a, repr_ctx.box_op(a, x)));
+                        let mut tails = Vec::new();
+                        value_tails(&ir.exprs, a, &mut tails);
+                        for tail in tails {
+                            if matches!(repr_ctx.repr(tail), Repr::Unboxed(tx) if tx == x) {
+                                ops.push((tail, repr_ctx.box_op(tail, x)));
+                            }
+                        }
                     }
                     Repr::Boxed(x) if matches!(&tgt, Target::UnboxedX(tx) if *tx == x) => {
-                        let op = if p.is_nullable() {
-                            BoxOp::UnboxNull(x)
-                        } else {
-                            BoxOp::Unbox(x)
-                        };
-                        ops.push((a, op));
+                        let mut tails = Vec::new();
+                        value_tails(&ir.exprs, a, &mut tails);
+                        for tail in tails {
+                            if matches!(repr_ctx.repr(tail), Repr::Boxed(tx) if tx == x) {
+                                let op = if p.is_nullable() {
+                                    BoxOp::UnboxNull(x)
+                                } else {
+                                    BoxOp::Unbox(x)
+                                };
+                                ops.push((tail, op));
+                            }
+                        }
                     }
                     // A boxed element read from a stdlib reference array (`arr[i]` → `Object`/boxed `X`)
                     // flowing into an unboxed value-class slot must `unbox-impl`.
@@ -2860,6 +2870,25 @@ enum BoxOp {
     BoxNull(TypeName),
     Unbox(TypeName),
     UnboxNull(TypeName),
+}
+
+fn value_tails(exprs: &[IrExpr], id: ExprId, out: &mut Vec<ExprId>) {
+    match &exprs[id as usize] {
+        IrExpr::When { branches } => {
+            for &(_, result) in branches {
+                value_tails(exprs, result, out);
+            }
+        }
+        IrExpr::Block {
+            value: Some(value), ..
+        } => value_tails(exprs, *value, out),
+        IrExpr::Block { value: None, stmts } => {
+            if let Some(&last) = stmts.last() {
+                value_tails(exprs, last, out);
+            }
+        }
+        _ => out.push(id),
+    }
 }
 
 /// The representation a value-class value currently has.
