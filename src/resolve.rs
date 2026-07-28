@@ -20998,11 +20998,13 @@ impl<'a> Checker<'a> {
                 if self.value_root_shadows_classifier(root) {
                     return None;
                 }
-                // Resolve the outer classifier, then apply the shared nested-name recovery.
-                let fq = self
-                    .imported_type_internal(root)
-                    .map(|outer| format!("{outer}{}", &path[root.len()..]))
-                    .unwrap_or(path);
+                let fq = match self.scoped_classifier_name(root) {
+                    InheritedNestedClassifier::Found(outer) => {
+                        format!("{}{}", outer.render(), &path[root.len()..])
+                    }
+                    InheritedNestedClassifier::Ambiguous => return None,
+                    InheritedNestedClassifier::NotFound => path,
+                };
                 self.nested_internal_name(&fq)
             }
             _ => None,
@@ -22109,30 +22111,27 @@ impl<'a> Checker<'a> {
                         .error(span, format!("krusty: unresolved super method '{name}'"));
                     return Ty::Error;
                 }
-                // Fully-qualified static call `pkg.Type.method(args)`.
                 if let Expr::Member { .. } = self.file.expr(receiver) {
-                    if let Some(fq) = qualified_path(self.file, receiver) {
-                        let leftmost = fq.split('/').next().unwrap_or("");
-                        if self.lookup(leftmost).is_none() && self.resolved_type(&fq).is_some() {
-                            let arg_tys = self.classpath_sam_arg_tys(
-                                crate::symbol_resolver::SymRecv::Type(&fq),
-                                &name,
-                                args,
-                            );
-                            let integer_literals = self.integer_literal_args(args);
-                            let lambda_literals = self.lambda_literal_args(args);
-                            if let Some(m) = self.resolve_companion_with_literal_args(
-                                &fq,
-                                &name,
-                                &arg_tys,
-                                &integer_literals,
-                                &lambda_literals,
-                            ) {
-                                self.set(receiver, Ty::obj(&fq));
-                                let ret = m.ret;
-                                self.resolved_calls.insert(call, ResolvedCall::Companion(m));
-                                return ret;
-                            }
+                    if let Some(internal) = self.classpath_type_receiver_internal(receiver) {
+                        let fq = internal.render();
+                        let arg_tys = self.classpath_sam_arg_tys(
+                            crate::symbol_resolver::SymRecv::Type(&fq),
+                            &name,
+                            args,
+                        );
+                        let integer_literals = self.integer_literal_args(args);
+                        let lambda_literals = self.lambda_literal_args(args);
+                        if let Some(m) = self.resolve_companion_with_literal_args(
+                            &fq,
+                            &name,
+                            &arg_tys,
+                            &integer_literals,
+                            &lambda_literals,
+                        ) {
+                            self.set(receiver, Ty::obj(&fq));
+                            let ret = m.ret;
+                            self.resolved_calls.insert(call, ResolvedCall::Companion(m));
+                            return ret;
                         }
                     }
                 }
@@ -22245,10 +22244,8 @@ impl<'a> Checker<'a> {
                         // defaults), so `J.greet()` on a same-package Java class resolves exactly like
                         // a type-position `J`.
                         let receiver_class = self
-                            .imports
-                            .get(&cls)
-                            .cloned()
-                            .or_else(|| self.imported_type_internal(&cls));
+                            .imported_type_internal(&cls)
+                            .or_else(|| self.imports.get(&cls).cloned());
                         if let Some(internal) = receiver_class {
                             let arg_tys = self.classpath_sam_arg_tys(
                                 crate::symbol_resolver::SymRecv::Type(&internal),
