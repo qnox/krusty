@@ -766,6 +766,9 @@ fn next_worker_reconfigure_retry(now_ms: u64, previous_backoff_ms: u64) -> (u64,
 }
 
 fn source_kind_from_uri(uri: &str) -> krusty::source::SourceKind {
+    if uri.ends_with(".java") {
+        return krusty::source::SourceKind::Java;
+    }
     url::Url::parse(uri)
         .ok()
         .and_then(|uri| uri.to_file_path().ok())

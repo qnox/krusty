@@ -120,6 +120,12 @@ pub struct DefinitionSymbols {
 }
 
 impl DefinitionSymbols {
+    /// Declared classes by internal name (`pkg/Outer$Inner`). Java navigation resolves against the
+    /// same keys the Kotlin frontend and the classpath already agree on.
+    pub fn class_targets(&self) -> &HashMap<String, DefinitionTarget> {
+        &self.classes
+    }
+
     pub fn from_source_set(
         sources: &[&str],
         files: &[FileAnalysis],
@@ -941,6 +947,13 @@ impl DefinitionSymbols {
     pub(crate) fn class_target(&self, file: &File, name: &str) -> Option<DefinitionTarget> {
         self.class_owner(file, name)
             .and_then(|owner| self.class_target_for_owner(&owner))
+    }
+
+    /// Register a class declared in a Java source. Kotlin resolves such a class through the Java
+    /// stub overlay on the classpath, which would otherwise navigate to a synthesized stub; this
+    /// points it at the real `.java` file instead.
+    pub(crate) fn insert_class_target(&mut self, owner: String, target: DefinitionTarget) {
+        self.classes.insert(owner, target);
     }
 
     pub(crate) fn class_target_for_owner(&self, owner: &str) -> Option<DefinitionTarget> {

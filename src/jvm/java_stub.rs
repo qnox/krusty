@@ -23,11 +23,14 @@ use super::classfile::{
     ClassWriter, CodeBuilder, ACC_ABSTRACT, ACC_ANNOTATION, ACC_ENUM, ACC_FINAL, ACC_INTERFACE,
     ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, ACC_SUPER,
 };
+use crate::java_source::{
+    lex_java, parse_raw_file, primitive_desc, resolve_internal_name, DeclKind, FileCtx, Member,
+    RawDecl, SrcType, STUB_DEFAULT,
+};
 use std::collections::{HashMap, HashSet};
 
-/// Internal-only marker bit for a `default` interface method (cleared before emission — it shares
-/// no bit with a real JVM class-file flag we emit).
-const STUB_DEFAULT: u16 = 0x8000;
+#[cfg(test)]
+use crate::java_source::parse_source_file;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StubMode {
@@ -53,7 +56,7 @@ pub fn stub_classes(
     let mut declared: Vec<String> = Vec::new();
     for (_, src) in sources {
         let toks = lex_java(src);
-        let (ctx, decls) = match parse_file(&toks) {
+        let (ctx, decls, _) = match parse_raw_file(&toks) {
             Some(parsed) => parsed,
             None if mode.is_lenient() => continue,
             None => return None,
@@ -103,752 +106,6 @@ pub fn stub_classes(
     Some(out)
 }
 
-// --- Tokenizer -------------------------------------------------------------
-
-#[derive(Clone, Debug, PartialEq)]
-enum Tok {
-    Ident(String),
-    Punct(char),
-}
-
-/// Tokenize Java source into identifiers and single-char punctuation. Comments and string/char
-/// literal contents are dropped (literals only ever appear inside bodies, which are skipped).
-fn lex_java(src: &str) -> Vec<Tok> {
-    let b: Vec<char> = src.chars().collect();
-    let mut i = 0;
-    let mut out = Vec::new();
-    while i < b.len() {
-        let c = b[i];
-        if c.is_whitespace() {
-            i += 1;
-        } else if c == '/' && b.get(i + 1) == Some(&'/') {
-            while i < b.len() && b[i] != '\n' {
-                i += 1;
-            }
-        } else if c == '/' && b.get(i + 1) == Some(&'*') {
-            i += 2;
-            while i + 1 < b.len() && !(b[i] == '*' && b[i + 1] == '/') {
-                i += 1;
-            }
-            i = (i + 2).min(b.len());
-        } else if c == '"' || c == '\'' {
-            let quote = c;
-            i += 1;
-            while i < b.len() && b[i] != quote {
-                i += if b[i] == '\\' { 2 } else { 1 };
-            }
-            i += 1;
-        } else if c.is_alphanumeric() || c == '_' || c == '$' {
-            let start = i;
-            while i < b.len() && (b[i].is_alphanumeric() || b[i] == '_' || b[i] == '$') {
-                i += 1;
-            }
-            out.push(Tok::Ident(b[start..i].iter().collect()));
-        } else {
-            out.push(Tok::Punct(c));
-            i += 1;
-        }
-    }
-    out
-}
-
-// --- Parsed shapes ----------------------------------------------------------
-
-/// Per-file context: package (internal form, `""` = root) and imports.
-struct FileCtx {
-    package: String,
-    /// Explicit imports: simple name → internal name.
-    imports: Vec<(String, String)>,
-    /// Wildcard import packages (internal form).
-    wildcards: Vec<String>,
-}
-
-/// A source-level type reference: base name (dotted as written), generic args, array depth.
-#[derive(Clone, Debug)]
-struct SrcType {
-    name: String,
-    args: Vec<SrcType>,
-    array: u32,
-}
-
-/// A member signature: name, params, return (`None` for a constructor), flags, own type params.
-struct Member {
-    name: String,
-    tparams: Vec<(String, Option<SrcType>)>,
-    params: Vec<SrcType>,
-    ret: Option<SrcType>,
-    access: u16,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DeclKind {
-    Class,
-    Interface,
-    Enum,
-    Record,
-    Annotation,
-}
-
-/// A parsed type declaration with unresolved source types.
-struct RawDecl {
-    /// Internal name (`pkg/Outer$Inner`).
-    internal: String,
-    access: u16,
-    kind: DeclKind,
-    is_abstract: bool,
-    tparams: Vec<(String, Option<SrcType>)>,
-    /// `extends` for a class (`None` = `java/lang/Object`); an interface's `extends` list is in
-    /// `interfaces`.
-    superclass: Option<SrcType>,
-    interfaces: Vec<SrcType>,
-    ctors: Vec<Member>,
-    methods: Vec<Member>,
-    fields: Vec<(String, SrcType, u16)>,
-    enum_constants: Vec<String>,
-    record_components: Vec<(String, SrcType)>,
-}
-
-impl RawDecl {
-    fn is_interface(&self) -> bool {
-        matches!(self.kind, DeclKind::Interface | DeclKind::Annotation)
-    }
-}
-
-// --- Parser ----------------------------------------------------------------
-
-struct P<'a> {
-    t: &'a [Tok],
-    i: usize,
-}
-
-impl P<'_> {
-    fn peek(&self) -> Option<&Tok> {
-        self.t.get(self.i)
-    }
-    fn bump(&mut self) -> Option<&Tok> {
-        let t = self.t.get(self.i);
-        self.i += 1;
-        t
-    }
-    fn eat_punct(&mut self, c: char) -> bool {
-        if self.peek() == Some(&Tok::Punct(c)) {
-            self.i += 1;
-            true
-        } else {
-            false
-        }
-    }
-    fn eat_ident(&mut self, s: &str) -> bool {
-        if matches!(self.peek(), Some(Tok::Ident(x)) if x == s) {
-            self.i += 1;
-            true
-        } else {
-            false
-        }
-    }
-    fn ident(&mut self) -> Option<String> {
-        match self.t.get(self.i) {
-            Some(Tok::Ident(s)) => {
-                self.i += 1;
-                Some(s.clone())
-            }
-            _ => None,
-        }
-    }
-    /// Dotted name `a.b.C` as written. A `.` is consumed only when an identifier FOLLOWS it, so a
-    /// trailing `...` (varargs) or `.*` (wildcard import) is left for the caller.
-    fn dotted(&mut self) -> Option<String> {
-        let mut s = self.ident()?;
-        while self.peek() == Some(&Tok::Punct('.'))
-            && matches!(self.t.get(self.i + 1), Some(Tok::Ident(_)))
-        {
-            self.i += 1;
-            s.push('.');
-            s.push_str(&self.ident()?);
-        }
-        Some(s)
-    }
-    /// Skip a balanced `{ ... }` (opening brace already consumed).
-    fn skip_braces(&mut self) {
-        let mut depth = 1;
-        while depth > 0 {
-            match self.bump() {
-                Some(Tok::Punct('{')) => depth += 1,
-                Some(Tok::Punct('}')) => depth -= 1,
-                Some(_) => {}
-                None => return,
-            }
-        }
-    }
-    /// Skip an annotation use: `@Name` or `@Name(...)` (`@` already consumed).
-    fn skip_annotation(&mut self) -> Option<()> {
-        self.dotted()?;
-        if self.eat_punct('(') {
-            let mut depth = 1;
-            while depth > 0 {
-                match self.bump() {
-                    Some(Tok::Punct('(')) => depth += 1,
-                    Some(Tok::Punct(')')) => depth -= 1,
-                    Some(_) => {}
-                    None => return None,
-                }
-            }
-        }
-        Some(())
-    }
-    fn skip_default_value(&mut self) -> Option<()> {
-        if self.eat_punct('{') {
-            self.skip_braces();
-            return Some(());
-        }
-        if self.eat_punct('@') {
-            return self.skip_annotation();
-        }
-        let mut depth = 0i32;
-        loop {
-            match self.peek() {
-                Some(Tok::Punct(';')) if depth == 0 => return Some(()),
-                Some(Tok::Punct('(' | '[')) => {
-                    depth += 1;
-                    self.i += 1;
-                }
-                Some(Tok::Punct(')' | ']')) => {
-                    depth -= 1;
-                    self.i += 1;
-                }
-                Some(_) => self.i += 1,
-                None => return None,
-            }
-        }
-    }
-}
-
-const MODIFIERS: &[&str] = &[
-    "public",
-    "protected",
-    "private",
-    "static",
-    "final",
-    "abstract",
-    "strictfp",
-    "native",
-    "synchronized",
-    "transient",
-    "volatile",
-    "default",
-    "sealed",
-    "non",
-];
-
-/// Collect modifiers + annotation uses, returning the access bits we model (plus the internal
-/// [`STUB_DEFAULT`] marker for `default`).
-fn modifiers(p: &mut P) -> Option<u16> {
-    let mut acc = 0u16;
-    loop {
-        if p.peek() == Some(&Tok::Punct('@')) {
-            // `@interface` is a declaration kind, not an annotation use — leave it to the caller.
-            if matches!(p.t.get(p.i + 1), Some(Tok::Ident(s)) if s == "interface") {
-                return Some(acc);
-            }
-            p.i += 1;
-            p.skip_annotation()?;
-            continue;
-        }
-        match p.peek() {
-            Some(Tok::Ident(s)) if MODIFIERS.contains(&s.as_str()) => {
-                match s.as_str() {
-                    "public" => acc |= ACC_PUBLIC,
-                    "protected" => acc |= ACC_PROTECTED,
-                    "private" => acc |= ACC_PRIVATE,
-                    "static" => acc |= ACC_STATIC,
-                    "final" => acc |= ACC_FINAL,
-                    "abstract" => acc |= ACC_ABSTRACT,
-                    "default" => acc |= STUB_DEFAULT,
-                    // `non-sealed` arrives as `non`, `-`, `sealed`; eat the tail.
-                    "non" => {
-                        p.i += 1;
-                        p.eat_punct('-').then_some(())?;
-                        p.eat_ident("sealed").then_some(())?;
-                        continue;
-                    }
-                    _ => {}
-                }
-                p.i += 1;
-            }
-            _ => return Some(acc),
-        }
-    }
-}
-
-/// `<E extends A & B, F>` — type-parameter list (leading `<` already consumed). Erasure uses the
-/// FIRST bound; extra `& Bound`s are validated but dropped.
-fn tparam_list(p: &mut P) -> Option<Vec<(String, Option<SrcType>)>> {
-    let mut out = Vec::new();
-    loop {
-        let name = p.ident()?;
-        let mut bound = None;
-        if p.eat_ident("extends") {
-            bound = Some(src_type(p)?);
-            while p.eat_punct('&') {
-                let _ = src_type(p)?;
-            }
-        }
-        out.push((name, bound));
-        if p.eat_punct(',') {
-            continue;
-        }
-        if p.eat_punct('>') {
-            return Some(out);
-        }
-        return None;
-    }
-}
-
-/// A source type: `int`, `java.util.List<String>[]`, `E`, `Map.Entry<K,V>`, `?`, `? extends X`.
-fn src_type(p: &mut P) -> Option<SrcType> {
-    if p.eat_punct('?') {
-        // A wildcard is modeled as its bound (or Object) — sound for a stub's erasure/signature.
-        if p.eat_ident("extends") || p.eat_ident("super") {
-            return src_type(p);
-        }
-        return Some(SrcType {
-            name: "java.lang.Object".into(),
-            args: Vec::new(),
-            array: 0,
-        });
-    }
-    let name = p.dotted()?;
-    let mut args = Vec::new();
-    if p.eat_punct('<') && !p.eat_punct('>') {
-        loop {
-            args.push(src_type(p)?);
-            if p.eat_punct(',') {
-                continue;
-            }
-            if p.eat_punct('>') {
-                break;
-            }
-            return None;
-        }
-    }
-    let mut array = 0;
-    while p.eat_punct('[') {
-        if !p.eat_punct(']') {
-            return None;
-        }
-        array += 1;
-    }
-    Some(SrcType { name, args, array })
-}
-
-/// Parse one file: package/imports, then top-level type declarations.
-fn parse_file(toks: &[Tok]) -> Option<(FileCtx, Vec<RawDecl>)> {
-    let mut p = P { t: toks, i: 0 };
-    let mut ctx = FileCtx {
-        package: String::new(),
-        imports: Vec::new(),
-        wildcards: Vec::new(),
-    };
-    let mut decls = Vec::new();
-    while let Some(tok) = p.peek() {
-        match tok {
-            Tok::Ident(s) if s == "package" => {
-                p.i += 1;
-                ctx.package = p.dotted()?.replace('.', "/");
-                p.eat_punct(';').then_some(())?;
-            }
-            Tok::Ident(s) if s == "import" => {
-                p.i += 1;
-                if p.eat_ident("static") {
-                    let _ = p.dotted()?;
-                    let _ = p.eat_punct('.');
-                    let _ = p.eat_punct('*');
-                    p.eat_punct(';').then_some(())?;
-                    continue;
-                }
-                let path = p.dotted()?;
-                if p.eat_punct('.') {
-                    p.eat_punct('*').then_some(())?;
-                    ctx.wildcards.push(path.replace('.', "/"));
-                } else {
-                    let simple = path.rsplit('.').next()?.to_string();
-                    ctx.imports.push((simple, path.replace('.', "/")));
-                }
-                p.eat_punct(';').then_some(())?;
-            }
-            _ => {
-                type_decl(&mut p, &ctx.package, None, &mut decls)?;
-            }
-        }
-    }
-    Some((ctx, decls))
-}
-
-fn type_decl(p: &mut P, package: &str, outer: Option<&str>, out: &mut Vec<RawDecl>) -> Option<()> {
-    let acc = modifiers(p)?;
-    type_decl_with_access(p, package, outer, out, acc)
-}
-
-fn type_decl_with_access(
-    p: &mut P,
-    package: &str,
-    outer: Option<&str>,
-    out: &mut Vec<RawDecl>,
-    acc: u16,
-) -> Option<()> {
-    if p.peek() == Some(&Tok::Punct('@')) {
-        p.i += 1;
-        p.eat_ident("interface").then_some(())?;
-        return annotation_type_decl(p, package, outer, out, acc);
-    }
-    let kind = if p.eat_ident("class") {
-        DeclKind::Class
-    } else if p.eat_ident("interface") {
-        DeclKind::Interface
-    } else if p.eat_ident("enum") {
-        DeclKind::Enum
-    } else if p.eat_ident("record") {
-        DeclKind::Record
-    } else {
-        return None;
-    };
-    let is_interface = matches!(kind, DeclKind::Interface | DeclKind::Annotation);
-    let simple = p.ident()?;
-    let internal = match outer {
-        Some(o) => format!("{o}${simple}"),
-        None if package.is_empty() => simple.clone(),
-        None => format!("{package}/{simple}"),
-    };
-    let tparams = if p.eat_punct('<') {
-        tparam_list(p)?
-    } else {
-        Vec::new()
-    };
-    let record_components = if kind == DeclKind::Record {
-        p.eat_punct('(').then_some(())?;
-        record_component_list(p)?
-    } else {
-        Vec::new()
-    };
-    let mut superclass = None;
-    let mut interfaces = Vec::new();
-    if p.eat_ident("extends") {
-        if is_interface {
-            loop {
-                interfaces.push(src_type(p)?);
-                if !p.eat_punct(',') {
-                    break;
-                }
-            }
-        } else {
-            superclass = Some(src_type(p)?);
-        }
-    }
-    if p.eat_ident("implements") {
-        loop {
-            interfaces.push(src_type(p)?);
-            if !p.eat_punct(',') {
-                break;
-            }
-        }
-    }
-    if p.eat_ident("permits") {
-        loop {
-            let _ = src_type(p)?;
-            if !p.eat_punct(',') {
-                break;
-            }
-        }
-    }
-    p.eat_punct('{').then_some(())?;
-
-    let mut decl = RawDecl {
-        internal: internal.clone(),
-        access: acc,
-        kind,
-        is_abstract: acc & ACC_ABSTRACT != 0,
-        tparams,
-        superclass,
-        interfaces,
-        ctors: Vec::new(),
-        methods: Vec::new(),
-        fields: Vec::new(),
-        enum_constants: Vec::new(),
-        record_components,
-    };
-
-    if kind == DeclKind::Enum {
-        loop {
-            if p.eat_punct(';') {
-                break;
-            }
-            if p.peek() == Some(&Tok::Punct('}')) {
-                break;
-            }
-            let cname = p.ident()?;
-            if p.eat_punct('(') {
-                let mut d = 1;
-                while d > 0 {
-                    match p.bump()? {
-                        Tok::Punct('(') => d += 1,
-                        Tok::Punct(')') => d -= 1,
-                        _ => {}
-                    }
-                }
-            }
-            if p.eat_punct('{') {
-                p.skip_braces();
-            }
-            decl.enum_constants.push(cname);
-            if p.eat_punct(',') {
-                continue;
-            }
-            if p.eat_punct(';') {
-                break;
-            }
-            if p.peek() == Some(&Tok::Punct('}')) {
-                break;
-            }
-            return None;
-        }
-    }
-
-    // Members until the closing `}`.
-    loop {
-        if p.eat_punct('}') {
-            break;
-        }
-        if p.eat_punct(';') {
-            continue;
-        }
-        let macc = modifiers(p)?;
-        if matches!(p.peek(), Some(Tok::Ident(s)) if s == "class" || s == "interface" || s == "enum" || s == "record")
-            || (p.peek() == Some(&Tok::Punct('@'))
-                && matches!(p.t.get(p.i + 1), Some(Tok::Ident(s)) if s == "interface"))
-        {
-            type_decl_with_access(p, package, Some(&internal), out, macc)?;
-            continue;
-        }
-        // Initializer block: `static { … }` (its `static` was eaten by `modifiers`) or `{ … }`.
-        if p.eat_punct('{') {
-            p.skip_braces();
-            continue;
-        }
-        if kind == DeclKind::Record
-            && matches!(p.peek(), Some(Tok::Ident(s)) if *s == simple)
-            && p.t.get(p.i + 1) == Some(&Tok::Punct('{'))
-        {
-            p.i += 1;
-            p.eat_punct('{').then_some(())?;
-            p.skip_braces();
-            continue;
-        }
-        // Method-level type params.
-        let mtparams = if p.eat_punct('<') {
-            tparam_list(p)?
-        } else {
-            Vec::new()
-        };
-        // Constructor: `Simple (` with no return type.
-        if matches!(p.peek(), Some(Tok::Ident(s)) if *s == simple)
-            && p.t.get(p.i + 1) == Some(&Tok::Punct('('))
-        {
-            p.i += 1;
-            p.eat_punct('(').then_some(())?;
-            let params = param_list(p)?;
-            skip_throws_and_body(p)?;
-            decl.ctors.push(Member {
-                name: "<init>".into(),
-                tparams: mtparams,
-                params,
-                ret: None,
-                access: macc & (ACC_PUBLIC | ACC_PROTECTED | ACC_PRIVATE),
-            });
-            continue;
-        }
-        // Field or method: `Type name (` → method; `Type name [;=,]` → field.
-        let ty = src_type(p)?;
-        let name = p.ident()?;
-        if p.eat_punct('(') {
-            let params = param_list(p)?;
-            skip_throws_and_body(p)?;
-            decl.methods.push(Member {
-                name,
-                tparams: mtparams,
-                params,
-                ret: Some(ty),
-                access: macc,
-            });
-        } else {
-            // Field, possibly a list (`int a, b = 1;`); initializers are skipped balancedly.
-            decl.fields.push((name, ty.clone(), macc));
-            loop {
-                if p.eat_punct(',') {
-                    let n = p.ident()?;
-                    decl.fields.push((n, ty.clone(), macc));
-                    continue;
-                }
-                if p.eat_punct(';') {
-                    break;
-                }
-                match p.bump()? {
-                    Tok::Punct('{') => p.skip_braces(),
-                    Tok::Punct('(') => {
-                        let mut d = 1;
-                        while d > 0 {
-                            match p.bump()? {
-                                Tok::Punct('(') => d += 1,
-                                Tok::Punct(')') => d -= 1,
-                                _ => {}
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-    out.push(decl);
-    Some(())
-}
-
-fn annotation_type_decl(
-    p: &mut P,
-    package: &str,
-    outer: Option<&str>,
-    out: &mut Vec<RawDecl>,
-    acc: u16,
-) -> Option<()> {
-    let simple = p.ident()?;
-    let internal = match outer {
-        Some(o) => format!("{o}${simple}"),
-        None if package.is_empty() => simple.clone(),
-        None => format!("{package}/{simple}"),
-    };
-    p.eat_punct('{').then_some(())?;
-
-    let mut decl = RawDecl {
-        internal: internal.clone(),
-        access: acc,
-        kind: DeclKind::Annotation,
-        is_abstract: acc & ACC_ABSTRACT != 0,
-        tparams: Vec::new(),
-        superclass: None,
-        interfaces: Vec::new(),
-        ctors: Vec::new(),
-        methods: Vec::new(),
-        fields: Vec::new(),
-        enum_constants: Vec::new(),
-        record_components: Vec::new(),
-    };
-
-    loop {
-        if p.eat_punct('}') {
-            break;
-        }
-        if p.eat_punct(';') {
-            continue;
-        }
-        let macc = modifiers(p)?;
-        if matches!(p.peek(), Some(Tok::Ident(s)) if s == "class" || s == "interface" || s == "enum" || s == "record")
-            || (p.peek() == Some(&Tok::Punct('@'))
-                && matches!(p.t.get(p.i + 1), Some(Tok::Ident(s)) if s == "interface"))
-        {
-            type_decl_with_access(p, package, Some(&internal), out, macc)?;
-            continue;
-        }
-        let ty = src_type(p)?;
-        let name = p.ident()?;
-        p.eat_punct('(').then_some(())?;
-        p.eat_punct(')').then_some(())?;
-        if p.eat_ident("default") {
-            p.skip_default_value()?;
-        }
-        p.eat_punct(';').then_some(())?;
-        decl.methods.push(Member {
-            name,
-            tparams: Vec::new(),
-            params: Vec::new(),
-            ret: Some(ty),
-            access: macc,
-        });
-    }
-    out.push(decl);
-    Some(())
-}
-
-/// `( Type name, Type... name )` — parameter list (opening paren consumed). Varargs `...` maps to
-/// an array, exactly as javac compiles it.
-fn param_list(p: &mut P) -> Option<Vec<SrcType>> {
-    let mut out = Vec::new();
-    if p.eat_punct(')') {
-        return Some(out);
-    }
-    loop {
-        let _ = modifiers(p)?; // `final`, annotations
-        let mut ty = src_type(p)?;
-        if p.eat_punct('.') {
-            p.eat_punct('.').then_some(())?;
-            p.eat_punct('.').then_some(())?;
-            ty.array += 1;
-        }
-        let _name = p.ident()?;
-        // C-style array suffix on the NAME (`int a[]`).
-        while p.eat_punct('[') {
-            p.eat_punct(']').then_some(())?;
-            ty.array += 1;
-        }
-        out.push(ty);
-        if p.eat_punct(',') {
-            continue;
-        }
-        p.eat_punct(')').then_some(())?;
-        return Some(out);
-    }
-}
-
-fn record_component_list(p: &mut P) -> Option<Vec<(String, SrcType)>> {
-    let mut out = Vec::new();
-    if p.eat_punct(')') {
-        return Some(out);
-    }
-    loop {
-        let _ = modifiers(p)?;
-        let mut ty = src_type(p)?;
-        if p.eat_punct('.') {
-            p.eat_punct('.').then_some(())?;
-            p.eat_punct('.').then_some(())?;
-            ty.array += 1;
-        }
-        let name = p.ident()?;
-        out.push((name, ty));
-        if p.eat_punct(',') {
-            continue;
-        }
-        p.eat_punct(')').then_some(())?;
-        return Some(out);
-    }
-}
-
-/// After a method/ctor parameter list: optional `throws A, B`, then `{ body }` or `;`.
-fn skip_throws_and_body(p: &mut P) -> Option<()> {
-    if p.eat_ident("throws") {
-        loop {
-            let _ = src_type(p)?;
-            if !p.eat_punct(',') {
-                break;
-            }
-        }
-    }
-    if p.eat_punct('{') {
-        p.skip_braces();
-        return Some(());
-    }
-    p.eat_punct(';').then_some(())
-}
-
-// --- Resolution + emission -------------------------------------------------
-
 struct Resolver<'a> {
     ctx: &'a FileCtx,
     resolve: &'a dyn Fn(&str) -> bool,
@@ -856,36 +113,8 @@ struct Resolver<'a> {
 }
 
 impl Resolver<'_> {
-    /// The internal name a source type name resolves to, or `None`. Candidate order mirrors the
-    /// Java language: explicit import, own package, wildcard imports, root package, `java.lang`.
     fn internal_of(&self, name: &str) -> Option<String> {
-        if name.contains('.') {
-            // Fully-qualified as written, or a nested `Outer.Inner` — convert `/`→`$` from the
-            // right until the candidate exists (krusty's own nested-import recovery).
-            let mut cand = name.replace('.', "/");
-            loop {
-                if (self.resolve)(&cand) {
-                    return Some(cand);
-                }
-                let i = cand.rfind('/')?;
-                cand.replace_range(i..=i, "$");
-            }
-        }
-        if let Some((_, full)) = self.ctx.imports.iter().find(|(s, _)| s == name) {
-            return Some(full.clone());
-        }
-        let mut cands: Vec<String> = Vec::new();
-        if self.ctx.package.is_empty() {
-            cands.push(name.to_string());
-        } else {
-            cands.push(format!("{}/{name}", self.ctx.package));
-        }
-        for w in &self.ctx.wildcards {
-            cands.push(format!("{w}/{name}"));
-        }
-        cands.push(name.to_string());
-        cands.push(format!("java/lang/{name}"));
-        cands.into_iter().find(|c| (self.resolve)(c))
+        resolve_internal_name(&self.ctx.package, &self.ctx.imports, name, self.resolve)
     }
 
     /// Erased JVM descriptor of a source type. `None` if a reference type doesn't resolve.
@@ -1106,6 +335,7 @@ impl Resolver<'_> {
             tparams: Vec::new(),
             params: Vec::new(),
             ret: None,
+            throws: Vec::new(),
             access: ACC_PUBLIC,
         };
         let enum_default_ctor = Member {
@@ -1113,6 +343,7 @@ impl Resolver<'_> {
             tparams: Vec::new(),
             params: Vec::new(),
             ret: None,
+            throws: Vec::new(),
             access: ACC_PRIVATE,
         };
         let record_canonical_ctor = Member {
@@ -1120,6 +351,7 @@ impl Resolver<'_> {
             tparams: Vec::new(),
             params: d.record_components.iter().map(|(_, t)| t.clone()).collect(),
             ret: None,
+            throws: Vec::new(),
             access: ACC_PUBLIC,
         };
         let ctors: Vec<&Member> = if is_record {
@@ -1159,6 +391,7 @@ impl Resolver<'_> {
                         tparams: Vec::new(),
                         params: Vec::new(),
                         ret: Some(ty.clone()),
+                        throws: Vec::new(),
                         access: ACC_PUBLIC,
                     });
                 }
@@ -1277,21 +510,6 @@ fn slot_width(t: &SrcType) -> u16 {
     } else {
         1
     }
-}
-
-fn primitive_desc(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "void" => "V",
-        "boolean" => "Z",
-        "byte" => "B",
-        "short" => "S",
-        "char" => "C",
-        "int" => "I",
-        "long" => "J",
-        "float" => "F",
-        "double" => "D",
-        _ => return None,
-    })
 }
 
 #[cfg(test)]
@@ -1624,5 +842,35 @@ mod tests {
             .and_then(|(_, bytes)| parse_class(bytes).ok())
             .expect("Holder");
         assert!(holder.method("value", "()Ljava/lang/Object;").is_some());
+    }
+
+    #[test]
+    fn source_model_uses_exact_byte_spans_for_declarations_and_types() {
+        let source = "package demo;\nclass Üse { java.util.List<String> values; }\n";
+        let file = parse_source_file(source).expect("Java source");
+        assert_eq!(file.declarations.len(), 1);
+        let declaration = &file.declarations[0];
+        assert_eq!(
+            &source[declaration.name_span.lo as usize..declaration.name_span.hi as usize],
+            "Üse"
+        );
+        let referenced = file
+            .references
+            .iter()
+            .map(|reference| &source[reference.span.lo as usize..reference.span.hi as usize])
+            .collect::<Vec<_>>();
+        assert_eq!(referenced, ["java.util.List", "String"]);
+    }
+
+    #[test]
+    fn source_model_collects_only_grammar_backed_body_types() {
+        let source = "class Use<T> { T value; void f() { int Greeter = 1; consume(Greeter); new Actual(); } }";
+        let file = parse_source_file(source).expect("Java source");
+        let referenced = file
+            .references
+            .iter()
+            .map(|reference| reference.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(referenced, ["Actual"]);
     }
 }
