@@ -2345,9 +2345,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `LibraryType` plus its `@Metadata`: package, declaration keyword, type parameters, supertypes,
   member functions (with `suspend`/`inline`, extension receiver, source parameter names, return type),
   properties (`val`/`var`/`const`), enum entries, and a companion marker. Classes without Kotlin
-  metadata render their resolved bytecode members. Materialized text is cached under a content key in
-  a format-versioned directory (`$XDG_CACHE_HOME/krusty/deps/v<N>/`) and garbage-collected by access
-  age and total size. Tests:
+  metadata render their resolved bytecode members. Attached sources may sit beside the classes jar
+  or in a sibling Gradle checksum directory. Entries are matched by package and declaration, so
+  source-set prefixes, multi-declaration files, nested classes, and facade callables resolve to the
+  declaration span; `expect` declarations are fallbacks for `actual` declarations. Kotlin builtins
+  use the jar containing their `.kotlin_builtins` fragment rather than the mapped JVM class jar.
+  Materialized text is cached under a content key in a format-versioned directory
+  (`$XDG_CACHE_HOME/krusty/deps/v<N>/`) and garbage-collected by access age and total size. Tests:
   `crates/krusty-lsp/tests/deps_render.rs`, `crates/krusty-lsp/src/server.rs`
   (`definition_into_a_library_returns_a_materialized_file_location`),
   `crates/krusty-lsp/src/deps_cache.rs`.
