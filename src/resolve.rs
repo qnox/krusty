@@ -120,6 +120,8 @@ pub struct Signature {
     pub source_decl: Option<DeclId>,
     /// Source file index for an AST-backed top-level or member signature.
     pub source_file: Option<u32>,
+    /// Declared extension receiver before lookup-key erasure.
+    pub source_receiver: Option<Ty>,
     /// Declaring package in internal slash form (`pkg/sub`) for source top-level declarations.
     pub package: String,
 }
@@ -1319,6 +1321,27 @@ impl SymbolTable {
     /// first. A site that must pick by argument arity iterates [`Self::ext_fun_overloads`].
     pub fn ext_fun(&self, recv: Ty, name: &str) -> Option<&Signature> {
         self.ext_fun_overloads(recv, name).first()
+    }
+
+    /// Find an extension signature by source declaration identity.
+    pub fn source_extension_function(
+        &self,
+        file: u32,
+        declaration: DeclId,
+    ) -> Option<(Ty, &Signature)> {
+        self.ext_funs.values().find_map(|overloads| {
+            overloads
+                .iter()
+                .find(|signature| {
+                    signature.source_file == Some(file)
+                        && signature.source_decl == Some(declaration)
+                })
+                .and_then(|signature| {
+                    signature
+                        .source_receiver
+                        .map(|receiver| (receiver, signature))
+                })
+        })
     }
 
     pub fn class_by_internal_mut(&mut self, internal: &str) -> Option<&mut ClassSig> {
@@ -2875,6 +2898,10 @@ pub fn collect_signatures_with_cp(
                         })
                         .collect();
                     let generic_sig = source_generic_signature(f, &class_names, ret, diags);
+                    let source_receiver = f
+                        .receiver
+                        .as_ref()
+                        .map(|receiver| ty_of_ref(receiver, &class_names, &tp, diags));
                     let sig = Signature {
                         params,
                         ret,
@@ -2904,6 +2931,7 @@ pub fn collect_signatures_with_cp(
                         context_count: f.context_count,
                         source_decl: Some(d),
                         source_file: Some(i as u32),
+                        source_receiver,
                         package: file
                             .package
                             .as_deref()
@@ -2912,7 +2940,9 @@ pub fn collect_signatures_with_cp(
                     };
                     if let Some(recv_ref) = &f.receiver {
                         // Extension function: index by (erased receiver, method_name).
-                        let recv_ty = ty_of_ref(recv_ref, &class_names, &tp, diags);
+                        let recv_ty = sig
+                            .source_receiver
+                            .expect("extension signature has a resolved source receiver");
                         // A nullable reference receiver (`fun String?.foo()`) shares its
                         // [`Ty::erased_recv`] key with the non-null form, so krusty can't pick between a
                         // `String.foo` and a `String?.foo` at the call site (receiver nullability is
@@ -3707,6 +3737,7 @@ pub fn collect_signatures_with_cp(
                                     context_count: 0,
                                     source_decl: None,
                                     source_file: None,
+                                    source_receiver: None,
                                     package: String::new(),
                                 }],
                             );
@@ -3730,6 +3761,7 @@ pub fn collect_signatures_with_cp(
                                 context_count: 0,
                                 source_decl: None,
                                 source_file: None,
+                                source_receiver: None,
                                 package: String::new(),
                             }],
                         );
@@ -3890,6 +3922,7 @@ pub fn collect_signatures_with_cp(
                                 context_count: 0,
                                 source_decl: None,
                                 source_file: None,
+                                source_receiver: None,
                                 package: String::new(),
                             },
                         );
@@ -6484,6 +6517,7 @@ fn member_signature(
         context_count: 0,
         source_decl: None,
         source_file: Some(source_file),
+        source_receiver: None,
         package: String::new(),
     }
 }
@@ -11622,11 +11656,13 @@ impl<'a> Checker<'a> {
     /// plus the function's own. This is a semantic key, not a JVM descriptor string; JVM descriptor
     /// formatting belongs in the backend.
     fn erased_sig_key(&self, f: &FunDecl) -> ErasedSigKey {
-        let extra: std::collections::HashSet<&str> =
-            f.type_params.iter().map(|s| s.as_str()).collect();
+        let resolve = class_internal_resolver(self.syms);
+        let tparams = self
+            .tparams
+            .extended_with(&f.type_params, &f.type_param_bounds, &resolve);
         let key = |name: &str| -> ErasedTypeKey {
-            if self.tparams.contains(name) || extra.contains(name) {
-                erased_type_key(Ty::obj("kotlin/Any"))
+            if tparams.contains(name) {
+                erased_type_key(tparams.erase(name))
             } else {
                 let internal = self.scoped_classifier_name(name);
                 if let Some(internal) = classifier_over_default(name, internal) {
@@ -24398,6 +24434,7 @@ impl<'a> Checker<'a> {
             context_count: f.context_count,
             source_decl: None,
             source_file: None,
+            source_receiver: None,
             package: String::new(),
         };
 
