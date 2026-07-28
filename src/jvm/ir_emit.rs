@@ -3675,14 +3675,15 @@ fn emit_func_ref_class(
         _ => 0,
     };
     let target_ret_jvm = ir_ty_to_jvm(&fr.target_ret_ty);
-    let returns_void = matches!(fr.ret_ty, Ty::Unit | Ty::Nothing);
+    let target_returns_void = matches!(fr.target_ret_ty, Ty::Unit | Ty::Nothing);
+    let coerce_unit = fr.ret_ty == Ty::Unit && !target_returns_void;
     // Reflection records the physical target descriptor without an unbound receiver.
     let mut signature_desc = String::from("(");
     for pt in fr.target_param_tys.iter().skip(first_arg) {
         signature_desc.push_str(&ir_type_desc(pt));
     }
     signature_desc.push(')');
-    let signature_ret = if returns_void {
+    let signature_ret = if target_returns_void {
         "V".to_string()
     } else {
         type_descriptor(target_ret_jvm)
@@ -3714,7 +3715,7 @@ fn emit_func_ref_class(
             d.push_str(&ir_type_desc(pt));
         }
         d.push(')');
-        let ret_desc = if returns_void {
+        let ret_desc = if target_returns_void {
             "V".to_string()
         } else {
             type_descriptor(target_ret_jvm)
@@ -3816,6 +3817,13 @@ fn emit_func_ref_class(
                 );
                 let m = cw.methodref(&vc, "unbox-impl", &format!("(){}", type_descriptor(under)));
                 inv.invokevirtual(m, 0, slot_words(under) as i32);
+            } else if let Some(primitive) = fr
+                .target_param_tys
+                .first()
+                .map(ir_ty_to_jvm)
+                .filter(|ty| ty.is_jvm_scalar())
+            {
+                unbox_prim(&mut cw, &mut inv, primitive);
             } else if let Some(internal) = fr
                 .target_param_tys
                 .first()
@@ -3871,11 +3879,13 @@ fn emit_func_ref_class(
                 Some(locals),
                 stack_prefix,
             );
+        } else if jt.is_jvm_scalar() && target_jt.is_reference() {
+            box_prim_free(&mut cw, &mut inv, jt);
         }
         call_arg_words += slot_words(target_jt) as i32;
     }
     // Dispatch to the target.
-    let ret_words = if returns_void {
+    let ret_words = if target_returns_void {
         0
     } else {
         slot_words(target_ret_jvm) as i32
@@ -3910,7 +3920,11 @@ fn emit_func_ref_class(
     }
     // Adapt the result to `Object`: a `void` target yields the `Unit` singleton; a value-class-returning
     // reference boxes the erased underlying back to the value class; a plain primitive is wrapper-boxed.
-    if returns_void {
+    if target_returns_void {
+        let unit = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
+        inv.getstatic(unit, 1);
+    } else if coerce_unit {
+        discard(target_ret_jvm, &mut inv);
         let unit = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
         inv.getstatic(unit, 1);
     } else if let Some(owner) = &fr.box_ret {
@@ -6791,10 +6805,27 @@ impl<'a> Emitter<'a> {
                 load(jt, slot, scratch);
             }
             crate::ir::FrDispatch::StaticBound => {
-                // The captured receiver is the first static argument: push it, cast to the receiver type.
+                // Restore the captured receiver's physical type before the static call.
                 let [capture] = captures else { return None };
                 self.emit_value(*capture, scratch);
-                if let Some(internal) = target_param_tys
+                if let Some(vc) = &fr.staticbound_recv_unbox {
+                    let vc = vc.render();
+                    let cref = self.cw.class_ref(&vc);
+                    scratch.checkcast(cref);
+                    let under = target_param_tys.first().copied().unwrap_or(Ty::Error);
+                    let method = self.cw.methodref(
+                        &vc,
+                        "unbox-impl",
+                        &format!("(){}", type_descriptor(under)),
+                    );
+                    scratch.invokevirtual(method, 0, slot_words(under) as i32);
+                } else if let Some(primitive) = target_param_tys
+                    .first()
+                    .copied()
+                    .filter(|ty| ty.is_jvm_scalar())
+                {
+                    unbox_prim(self.cw, scratch, primitive);
+                } else if let Some(internal) = target_param_tys
                     .first()
                     .copied()
                     .and_then(checkcast_internal)
@@ -6834,19 +6865,22 @@ impl<'a> Emitter<'a> {
                     Some(locals),
                     stack_prefix,
                 );
+            } else if jt.is_jvm_scalar() && target_jt.is_reference() {
+                box_prim_free(self.cw, scratch, *jt);
             }
             call_desc.push_str(&type_descriptor(target_jt));
             call_arg_words += slot_words(target_jt) as i32;
         }
         call_desc.push(')');
         let ret_jvm = ir_ty_to_jvm(&fr.target_ret_ty);
-        let returns_void = matches!(fr.ret_ty, Ty::Unit | Ty::Nothing);
-        if returns_void {
+        let target_returns_void = matches!(fr.target_ret_ty, Ty::Unit | Ty::Nothing);
+        let coerce_unit = fr.ret_ty == Ty::Unit && !target_returns_void;
+        if target_returns_void {
             call_desc.push('V');
         } else {
             call_desc.push_str(&type_descriptor(ret_jvm));
         }
-        let ret_words = if returns_void {
+        let ret_words = if target_returns_void {
             0
         } else {
             slot_words(ret_jvm) as i32
@@ -6869,7 +6903,11 @@ impl<'a> Emitter<'a> {
                 scratch.invokevirtual(m, call_arg_words, ret_words);
             }
         }
-        if returns_void {
+        if target_returns_void {
+            let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
+            scratch.getstatic(unit, 1);
+        } else if coerce_unit {
+            discard(ret_jvm, scratch);
             let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
             scratch.getstatic(unit, 1);
         } else if let Some(owner) = &fr.box_ret {

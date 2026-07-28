@@ -340,6 +340,77 @@ fn stdio_server_reports_official_nullable_receiver_diagnostic_with_utf16_range()
 }
 
 #[test]
+fn stdio_server_accepts_expected_type_selected_callable_reference_overloads() {
+    let diagnostics = diagnostics_after_open(
+        &[],
+        "file:///callable-reference.kt",
+        "interface Parser\n\
+         interface JsonParser : Parser\n\
+         fun JsonParser.decode(source: String): Any = source\n\
+         fun Parser.decode(source: String): Any = source\n\
+         fun Parser.decode(value: Int): Any = value\n\
+         fun consume(decode: (String) -> Any) {}\n\
+         fun valid(parser: JsonParser) { consume(parser::decode) }\n",
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn stdio_server_reports_official_callable_reference_ambiguity_on_the_name() {
+    let diagnostics = diagnostics_after_open(
+        &[],
+        "file:///ambiguous-reference.kt",
+        "class Parser\n\
+         fun Parser.decode(source: String): String = source\n\
+         fun Parser.decode(value: Int): String = value.toString()\n\
+         fun bad() {\n\
+             val parser = Parser()\n\
+             val reference = parser::decode\n\
+         }\n",
+    );
+
+    assert_eq!(
+        diagnostics,
+        vec![json!({
+            "range": {
+                "start": {"line": 5, "character": 24},
+                "end": {"line": 5, "character": 30}
+            },
+            "severity": 1,
+            "source": "Kotlin",
+            "message": "Overload resolution ambiguity between candidates:\nfun Parser.decode(source: String): String\nfun Parser.decode(value: Int): String"
+        })]
+    );
+}
+
+#[test]
+fn stdio_server_reports_official_toplevel_callable_reference_ambiguity_on_the_name() {
+    let diagnostics = diagnostics_after_open(
+        &[],
+        "file:///ambiguous-toplevel-reference.kt",
+        "interface Text\n\
+         class Narrow : Text\n\
+         fun cross(x: Narrow, y: Any): String = \"A\"\n\
+         fun cross(x: Text, y: Text): String = \"B\"\n\
+         fun bad() { val reference: (Narrow, Narrow) -> String = ::cross }\n",
+    );
+
+    assert_eq!(
+        diagnostics,
+        vec![json!({
+            "range": {
+                "start": {"line": 4, "character": 58},
+                "end": {"line": 4, "character": 63}
+            },
+            "severity": 1,
+            "source": "Kotlin",
+            "message": "Overload resolution ambiguity between candidates:\nfun cross(x: Narrow, y: Any): String\nfun cross(x: Text, y: Text): String"
+        })]
+    );
+}
+
+#[test]
 fn stdio_server_reports_mixed_and_missing_argument_diagnostics() {
     let diagnostics = diagnostics_after_open(
         &[],
