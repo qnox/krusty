@@ -976,6 +976,8 @@ type LambdaReturnOverloads = std::collections::HashSet<String>;
 type MetaOverloadCache =
     RefCell<crate::lru::LruCache<TypeName, std::rc::Rc<LambdaReturnOverloads>>>;
 
+const OPEN_ARCHIVE_CAP: usize = 16;
+
 #[derive(Default)]
 pub struct Classpath {
     entries: Vec<Entry>,
@@ -986,12 +988,8 @@ pub struct Classpath {
     // include the same jar. L1 miss → per-entry L2 walk in classpath order → parse.
     local_cache: RefCell<crate::lru::LruCache<TypeName, Option<std::sync::Arc<ClassInfo>>>>,
     entry_caches: Vec<ClassCache>,
-    /// Open `ZipArchive` per jar path, so reading an entry is a central-directory hash lookup + inflate
-    /// — NOT a re-parse of the whole central directory (which `zip::ZipArchive::new` does, thousands of
-    /// entries for kotlin-stdlib). This is the classloader/javac strategy: parse each jar's directory
-    /// once, then read class bytes lazily on demand. Profiling showed the per-read re-parse dominated
-    /// type checking. Lives behind a `RefCell` (one `Classpath` per thread; never shared across threads).
-    archives: RefCell<HashMap<PathBuf, zip::ZipArchive<File>>>,
+    /// Open archives are hard-capped because each entry owns a file descriptor.
+    archives: RefCell<crate::lru::LruCache<PathBuf, zip::ZipArchive<File>>>,
     /// Per-entry ext contributions (each cached process-globally by its path), fetched once per
     /// instance. The ext lookups union these per queried name — no composed whole-cp index.
     ext: RefCell<Option<std::rc::Rc<Vec<std::sync::Arc<EntryExt>>>>>,
@@ -1107,7 +1105,7 @@ impl Classpath {
                 .iter()
                 .map(|p| global_entry_class_cache(p))
                 .collect(),
-            archives: RefCell::new(HashMap::new()),
+            archives: RefCell::new(crate::lru::LruCache::new_fixed(OPEN_ARCHIVE_CAP)),
             ext: RefCell::new(None),
             types: RefCell::new(None),
             pkg_tree: RefCell::new(None),
@@ -1914,19 +1912,14 @@ impl Classpath {
         *self.jimage.borrow_mut() = Some(entry);
     }
 
-    /// Read one entry's bytes from `jar`, reusing a cached open `ZipArchive` so the central directory is
-    /// parsed once per jar rather than per read. Returns `None` if the jar or entry is absent (an absent
-    /// entry is a cheap hash miss on the already-parsed directory).
     fn jar_entry(&self, jar: &Path, name: &str) -> Option<Vec<u8>> {
         let mut archives = self.archives.borrow_mut();
-        let archive = match archives.get_mut(jar) {
-            Some(a) => a,
-            None => {
-                let f = File::open(jar).ok()?;
-                let a = zip::ZipArchive::new(f).ok()?;
-                archives.entry(jar.to_path_buf()).or_insert(a)
-            }
-        };
+        if !archives.contains_key(jar) {
+            let file = File::open(jar).ok()?;
+            let archive = zip::ZipArchive::new(file).ok()?;
+            archives.insert(jar.to_path_buf(), archive);
+        }
+        let archive = archives.get_mut(jar)?;
         let mut entry = archive.by_name(name).ok()?;
         let mut buf = Vec::with_capacity(entry.size() as usize);
         entry.read_to_end(&mut buf).ok()?;
@@ -3471,6 +3464,52 @@ mod fq_tests {
     /// never fails on CI regardless of where the stdlib lives.
     fn test_stdlib_jar() -> Option<PathBuf> {
         crate::toolchain::stdlib_jar()
+    }
+
+    fn write_test_jar(path: &Path, contents: &[u8]) {
+        use std::io::Write;
+
+        let file = File::create(path).expect("create test jar");
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file(
+                "sample.txt",
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )
+            .expect("start test jar entry");
+        archive.write_all(contents).expect("write test jar entry");
+        archive.finish().expect("finish test jar");
+    }
+
+    #[test]
+    fn open_jar_cache_is_bounded() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "krusty-open-jar-cache-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).expect("create jar cache directory");
+        let classpath = Classpath::new(Vec::new());
+        let mut paths = Vec::new();
+        for index in 0..(OPEN_ARCHIVE_CAP * 4) {
+            let path = directory.join(format!("{index}.jar"));
+            write_test_jar(&path, b"entry");
+            assert_eq!(
+                classpath.jar_entry(&path, "sample.txt").as_deref(),
+                Some(b"entry".as_slice())
+            );
+            assert!(classpath.archives.borrow().len() <= OPEN_ARCHIVE_CAP);
+            paths.push(path);
+        }
+        drop(classpath);
+        for path in paths {
+            std::fs::remove_file(path).expect("archive closes when evicted or dropped");
+        }
+        std::fs::remove_dir(directory).expect("remove jar cache directory");
     }
 
     // Every `Classpath` gets a distinct process-unique `id`, EVEN when an earlier instance has been
