@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use krusty_lsp::{
     detect, resolve_jdk, AnalysisWorker, DocumentAnalysis, JdkRequest, LibraryRef,
     LoadedProjectSources, LspOptions, MaterializedDefinition, ProcessRunner, ProjectFeedback,
-    ProjectMessageKind, ProjectSources, ProjectSync, ProviderKind, RefreshOutcome,
+    ProjectMessageKind, ProjectModel, ProjectSources, ProjectSync, ProviderKind, RefreshOutcome,
     SystemEnvironment,
 };
 
@@ -384,35 +384,21 @@ impl krusty_lsp::Analysis for WorkerHost {
         documents: &[(&str, &str)],
         open_uris: &[&str],
     ) -> (Vec<DocumentAnalysis>, Vec<(String, String)>) {
+        let project_sources =
+            project_source_mask(self.sync.as_ref().and_then(ProjectSync::model), documents);
+        let modeled_documents = modeled_documents(documents, &project_sources);
         let (support_documents, inferred_support_count, java_sources) =
-            match self.project_support_sources(documents, open_uris) {
+            match self.project_support_sources(&modeled_documents, open_uris) {
                 Ok((sources, inferred_count, java_docs)) => {
                     (sources.to_vec(), inferred_count, java_docs)
                 }
                 Err(message) => {
                     self.analysis_pending = false;
-                    let analyses = documents
-                        .iter()
-                        .map(|_| {
-                            DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
-                                span: krusty::diag::Span::new(0, 0),
-                                editor_span: None,
-                                severity: krusty::diag::Severity::Error,
-                                kind: krusty::diag::DiagnosticKind::Compiler,
-                                msg: message.clone(),
-                                file: 0,
-                            }])
-                        })
-                        .collect();
+                    let analyses = project_source_error_analyses(&project_sources, &message);
                     return (analyses, Vec::new());
                 }
             };
-        let mut inputs = documents
-            .iter()
-            .map(|(uri, source)| {
-                krusty::source::SourceInput::new(source_kind_from_uri(uri), source)
-            })
-            .collect::<Vec<_>>();
+        let mut inputs = project_analysis_inputs(documents, &project_sources);
         inputs.extend(support_documents.iter().map(|(uri, source)| {
             krusty::source::SourceInput::new(source_kind_from_uri(uri), source)
         }));
@@ -422,7 +408,8 @@ impl krusty_lsp::Analysis for WorkerHost {
             documents.len() + inferred_support_count,
             &java_sources,
         );
-        let analyses = self.finish_analysis(analyses, documents.len());
+        let mut analyses = self.finish_analysis(analyses, documents.len());
+        suppress_unowned_analyses(&mut analyses, &project_sources);
         (analyses, support_documents)
     }
 
@@ -574,6 +561,86 @@ fn source_kind_from_uri(uri: &str) -> krusty::source::SourceKind {
         .unwrap_or(krusty::source::SourceKind::Kotlin)
 }
 
+fn document_is_project_source(model: &ProjectModel, uri: &str) -> bool {
+    url::Url::parse(uri)
+        .ok()
+        .and_then(|uri| uri.to_file_path().ok())
+        .is_some_and(|path| model.module_for_source(&path).is_some())
+}
+
+fn project_source_mask(model: Option<&ProjectModel>, documents: &[(&str, &str)]) -> Vec<bool> {
+    model.map_or_else(
+        || vec![true; documents.len()],
+        |model| {
+            if matches!(model.kind, ProviderKind::Explicit | ProviderKind::None) {
+                return vec![true; documents.len()];
+            }
+            documents
+                .iter()
+                .map(|(uri, _)| document_is_project_source(model, uri))
+                .collect()
+        },
+    )
+}
+
+fn modeled_documents<'a>(
+    documents: &[(&'a str, &'a str)],
+    project_sources: &[bool],
+) -> Vec<(&'a str, &'a str)> {
+    documents
+        .iter()
+        .zip(project_sources)
+        .filter_map(|(document, is_project_source)| is_project_source.then_some(*document))
+        .collect()
+}
+
+fn project_analysis_inputs<'a>(
+    documents: &[(&'a str, &'a str)],
+    project_sources: &[bool],
+) -> Vec<krusty::source::SourceInput<'a>> {
+    documents
+        .iter()
+        .zip(project_sources)
+        .map(|((uri, source), is_project_source)| {
+            krusty::source::SourceInput::new(
+                source_kind_from_uri(uri),
+                if *is_project_source { source } else { "" },
+            )
+        })
+        .collect()
+}
+
+fn project_source_error_analyses(project_sources: &[bool], message: &str) -> Vec<DocumentAnalysis> {
+    project_sources
+        .iter()
+        .map(|is_project_source| {
+            if *is_project_source {
+                DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
+                    span: krusty::diag::Span::new(0, 0),
+                    editor_span: None,
+                    severity: krusty::diag::Severity::Error,
+                    kind: krusty::diag::DiagnosticKind::Compiler,
+                    msg: message.to_string(),
+                    file: 0,
+                }])
+            } else {
+                DocumentAnalysis::empty()
+            }
+        })
+        .collect()
+}
+
+fn suppress_unowned_analyses(analyses: &mut [DocumentAnalysis], project_sources: &[bool]) {
+    if analyses.len() != project_sources.len() {
+        return;
+    }
+    for (analysis, is_project_source) in analyses.iter_mut().zip(project_sources) {
+        if !is_project_source {
+            *analysis = DocumentAnalysis::empty();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,6 +677,86 @@ mod tests {
         assert!(logs[2].contains("/classpath/59.jar"));
         assert!(!logs[2].contains("/classpath/60.jar"));
         assert!(logs[2].ends_with("… 1 more"));
+    }
+
+    #[test]
+    fn project_analysis_preserves_owned_document_slots() {
+        let mut module = krusty_lsp::project::Module::new(
+            krusty_lsp::project::ModuleId::new(":", "main"),
+            "/workspace",
+        );
+        module.source_roots = vec![krusty_lsp::project::SourceRoot::source(
+            "/workspace/src/main/kotlin",
+        )];
+        let model =
+            ProjectModel::new("/workspace", ProviderKind::Gradle).with_modules(vec![module]);
+        let source = url::Url::from_file_path("/workspace/src/main/kotlin/Source.kt")
+            .unwrap()
+            .to_string();
+        let second_source = url::Url::from_file_path("/workspace/src/main/kotlin/Second.kt")
+            .unwrap()
+            .to_string();
+        let resource = url::Url::from_file_path("/workspace/src/main/resources/Fixture.kt")
+            .unwrap()
+            .to_string();
+        let documents = [
+            (source.as_str(), "fun first() {}"),
+            (resource.as_str(), "fun first() {}"),
+            (second_source.as_str(), "fun second() {}"),
+        ];
+        let project_sources = project_source_mask(Some(&model), &documents);
+
+        assert!(document_is_project_source(&model, &source));
+        assert!(!document_is_project_source(&model, &resource));
+        assert!(!document_is_project_source(&model, "untitled:Scratch.kt"));
+        assert_eq!(project_sources, [true, false, true]);
+        assert_eq!(
+            modeled_documents(&documents, &project_sources),
+            [documents[0], documents[2]]
+        );
+
+        let inputs = project_analysis_inputs(&documents, &project_sources);
+        assert_eq!(inputs.len(), documents.len());
+        assert_eq!(inputs[0].text, documents[0].1);
+        assert_eq!(inputs[1].text, "");
+        assert_eq!(inputs[2].text, documents[2].1);
+
+        let diagnostic = |message: &str| krusty::diag::Diagnostic {
+            span: krusty::diag::Span::new(0, 0),
+            editor_span: None,
+            severity: krusty::diag::Severity::Error,
+            kind: krusty::diag::DiagnosticKind::Compiler,
+            msg: message.to_string(),
+            file: 0,
+        };
+        let mut analyses = vec![
+            DocumentAnalysis::with_diagnostics(vec![diagnostic("first")]),
+            DocumentAnalysis::with_diagnostics(vec![diagnostic("unowned")]),
+            DocumentAnalysis::with_diagnostics(vec![diagnostic("second")]),
+        ];
+        suppress_unowned_analyses(&mut analyses, &project_sources);
+        assert_eq!(analyses[0].diagnostics[0].msg, "first");
+        assert!(analyses[1].diagnostics.is_empty());
+        assert_eq!(analyses[2].diagnostics[0].msg, "second");
+
+        let failures = project_source_error_analyses(&project_sources, "failed");
+        assert_eq!(failures.len(), documents.len());
+        assert_eq!(failures[0].diagnostics[0].msg, "failed");
+        assert!(failures[1].diagnostics.is_empty());
+        assert_eq!(failures[2].diagnostics[0].msg, "failed");
+
+        let mut pending = Vec::new();
+        suppress_unowned_analyses(&mut pending, &project_sources);
+        assert!(pending.is_empty());
+
+        for kind in [ProviderKind::Explicit, ProviderKind::None] {
+            let standalone =
+                ProjectModel::new("/workspace", kind).with_modules(model.modules.clone());
+            assert_eq!(
+                project_source_mask(Some(&standalone), &documents),
+                [true, true, true]
+            );
+        }
     }
 
     #[test]

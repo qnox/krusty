@@ -11,7 +11,7 @@ use super::model::{
 use super::provider::{ProbeError, ProjectProvider};
 use super::runner::{Command, CommandRunner, GRADLE};
 
-const PROBE_VERSION: &str = "4";
+const PROBE_VERSION: &str = "5";
 const SENTINEL: &str = "KRUSTY_MODEL_JSON ";
 const TASK: &str = "krustyModel";
 const MAX_FAILURE_DETAILS: usize = 8;
@@ -34,7 +34,11 @@ allprojects { project ->
             def sourceSets = []
             project.extensions.findByName("sourceSets")?.each { set ->
                 def roots = [] as Set
-                set.allSource?.srcDirs?.each { roots << it.absolutePath }
+                set.allJava?.srcDirs?.each { roots << it.absolutePath }
+                try {
+                    set.extensions.findByName("kotlin")?.srcDirs?.each { roots << it.absolutePath }
+                } catch (ignored) {
+                }
                 def compilerArgs = []
                 try {
                     def compileTask = project.tasks.findByName(set.getCompileTaskName("kotlin"))
@@ -62,6 +66,12 @@ allprojects { project ->
                             def roots = [] as Set
                             compilation.allKotlinSourceSets.each { ss ->
                                 ss.kotlin?.srcDirs?.each { roots << it.absolutePath }
+                            }
+                            try {
+                                def javaSourceSet = project.extensions.findByName("sourceSets")
+                                    ?.findByName(compilation.defaultSourceSet?.name)
+                                javaSourceSet?.allJava?.srcDirs?.each { roots << it.absolutePath }
+                            } catch (ignored) {
                             }
                             def associates = []
                             try { associates = compilation.associateWith.collect { it.output?.classesDirs?.files }.flatten().findAll { it != null }.collect { it.absolutePath } } catch (ignored) {}
@@ -615,6 +625,16 @@ mod tests {
         let script = std::fs::read_to_string(&command.args[4]).unwrap();
         assert!(script.contains("lenient = true"), "{script}");
         assert!(script.contains("compileTask?.compilerOptions"), "{script}");
+        assert!(script.contains("set.allJava?.srcDirs"), "{script}");
+        assert!(
+            script.contains("set.extensions.findByName(\"kotlin\")?.srcDirs"),
+            "{script}"
+        );
+        assert!(
+            script.contains("compilation.defaultSourceSet?.name"),
+            "{script}"
+        );
+        assert!(!script.contains("set.allSource?.srcDirs"), "{script}");
         assert!(!tree.path(".krusty").exists());
     }
 
@@ -734,7 +754,7 @@ Execution failed for task ':app:krustyModel'.
     fn a_multiplatform_project_includes_only_jvm_compilations() {
         let shared = concat!(
             r#"{"path":":shared","name":"shared","projectDir":"/p/shared","javaHome":"/jdk21","jvmTarget":null,"kotlincArgs":[],"sourceSets":[],"kotlinCompilations":["#,
-            r#"{"target":"jvm","name":"main","platform":"jvm","roots":["/p/shared/src/commonMain/kotlin","/p/shared/src/jvmMain/kotlin"],"classpath":["/m2/kotlin-stdlib.jar"],"output":["/p/shared/build/classes/kotlin/jvm/main"],"isTest":false,"associates":[],"jvmTarget":"17","kotlincArgs":["-XXLanguage:+ContextParameters"]},"#,
+            r#"{"target":"jvm","name":"main","platform":"jvm","roots":["/p/shared/src/commonMain/kotlin","/p/shared/src/jvmMain/java","/p/shared/src/jvmMain/kotlin"],"classpath":["/m2/kotlin-stdlib.jar"],"output":["/p/shared/build/classes/kotlin/jvm/main"],"isTest":false,"associates":[],"jvmTarget":"17","kotlincArgs":["-XXLanguage:+ContextParameters"]},"#,
             r#"{"target":"jvm","name":"test","platform":"jvm","roots":["/p/shared/src/jvmTest/kotlin"],"classpath":["/m2/kotlin-test.jar"],"output":["/p/shared/build/classes/kotlin/jvm/test"],"isTest":true,"associates":["/p/shared/build/classes/kotlin/jvm/main"],"jvmTarget":"17"},"#,
             r#"{"target":"linuxX64","name":"main","platform":"native","roots":["/p/shared/src/linuxMain/kotlin"],"classpath":["/m2/native.klib"],"output":["/p/shared/build/classes/kotlin/linux/main"],"isTest":false,"associates":[],"jvmTarget":null}"#,
             r#"],"androidVariants":[],"projectDeps":[]}"#,
@@ -743,7 +763,11 @@ Execution failed for task ':app:krustyModel'.
         let model = parse_model(Path::new("/p"), &output).unwrap();
 
         let main = model.module(&ModuleId::new(":shared", "jvm/main")).unwrap();
-        assert_eq!(main.source_roots.len(), 2);
+        assert_eq!(main.source_roots.len(), 3);
+        assert!(main
+            .source_roots
+            .iter()
+            .any(|root| root.path == Path::new("/p/shared/src/jvmMain/java")));
         assert_eq!(main.jvm_target.as_deref(), Some("17"));
         assert_eq!(
             main.outputs,
