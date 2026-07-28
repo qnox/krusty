@@ -1708,6 +1708,44 @@ pub fn lower_file_at_reporting(
                         dispatch_receiver: Some(type_name(&comp_fq)),
                         param_checks,
                     });
+                    if m.params.iter().any(|parameter| parameter.default.is_some())
+                        && m.params.iter().all(|parameter| {
+                            parameter
+                                .default
+                                .is_none_or(|default| is_const_literal(file, default))
+                        })
+                    {
+                        let defaults = m
+                            .params
+                            .iter()
+                            .zip(&sig.params)
+                            .map(|(parameter, ty)| {
+                                parameter
+                                    .default
+                                    .and_then(|default| lo.lower_arg(default, &ty_to_ir(*ty)))
+                            })
+                            .collect();
+                        lo.ir.fn_params.insert(
+                            fid,
+                            FnParamInfo::defaults(
+                                m.params
+                                    .iter()
+                                    .map(|parameter| parameter.name.clone())
+                                    .collect(),
+                                defaults,
+                            ),
+                        );
+                    } else if !m.params.iter().any(|parameter| parameter.is_vararg) {
+                        lo.ir.fn_params.insert(
+                            fid,
+                            FnParamInfo::names(
+                                m.params
+                                    .iter()
+                                    .map(|parameter| parameter.name.clone())
+                                    .collect(),
+                            ),
+                        );
+                    }
                     cmethods
                         .entry(m.name.clone())
                         .or_default()
@@ -6613,55 +6651,14 @@ impl<'a> Lower<'a> {
             );
             return Some(self.coerce_generic_read(call, call_expr, sig.ret));
         }
-        // A SIBLING-file (same-module, other-file) COMPANION function: `Outer.fn(args)` recorded as an
-        // `ObjectMemberCall` on `<outer>$Companion`. The companion's OWN `ClassSig` is registered only
-        // when it has supertypes, so source the function `Signature` from the OUTER class's
-        // `static_methods`. Emit `getstatic <outer>.Companion:L<outer>$Companion; invokevirtual
-        // <outer>$Companion.fn(...)` — the cross-file analog of the same-file companion path above.
         if let Some(outer) = internal_name.strip_suffix("$Companion") {
-            let comp_sig = self
-                .syms
-                .class_by_internal(outer)
-                .and_then(|cs| cs.static_methods.get(name).cloned());
-            // Same value-class / suspend guard as the object sibling branch: those shapes mangle the
-            // name or erase the descriptor, so a `Virtual` built from LOGICAL types would mismatch —
-            // leave them to the existing paths.
-            let comp_ok = comp_sig.as_ref().is_some_and(|s| {
-                s.params.len() == args.len()
-                    && !s.is_suspend()
-                    && !std::iter::once(&s.ret).chain(s.params.iter()).any(|t| {
-                        t.obj_internal().is_some_and(|n| {
-                            self.syms
-                                .class_by_type_name(n)
-                                .is_some_and(|c| c.value_field.is_some())
-                                || self.syms.libraries.value_underlying_name(n).is_some()
-                        })
-                    })
-            });
-            if let Some(sig) = comp_sig.filter(|_| comp_ok) {
-                let params = tys_to_ir(&sig.params);
-                let ret_ir = ty_to_ir(sig.ret);
+            if let Some(target) = module_target.as_ref() {
                 let recv = self.emit_external_static_field(
                     outer.to_string(),
                     "Companion",
                     format!("L{internal_name};"),
                 );
-                let mut a = Vec::with_capacity(args.len());
-                for (arg, pt) in args.iter().zip(&sig.params) {
-                    a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
-                }
-                let call = self.emit_call(
-                    Callee::Virtual {
-                        owner: internal,
-                        name: name.to_string(),
-                        descriptor: String::new(),
-                        params: Some((params, ret_ir)),
-                        interface: false,
-                    },
-                    Some(recv),
-                    a,
-                );
-                return Some(self.coerce_generic_read(call, call_expr, sig.ret));
+                return self.lower_module_member_call(recv, target, args, call_expr);
             }
         }
         let resolved = self.info.resolved_member(call_expr).cloned()?;
@@ -21825,30 +21822,6 @@ impl<'a> Lower<'a> {
                         self.info.expr_lowers.get(&e)
                     {
                         return self.lower_object_member_call(*internal, member, &args, e);
-                    }
-                    // `ClassName.companionFun(args)` — a call to a module class's `companion object`
-                    // function. `class_names` gives the class's real (package-correct) internal and
-                    // `companion_fun_names` its SOURCE companion functions (module-wide, so file location
-                    // is irrelevant); route through `lower_object_member_call` on `<internal>$Companion`,
-                    // which emits `getstatic <internal>.Companion; invokevirtual <internal>$Companion.fn`.
-                    // (Gating on `companion_fun_names` — not `static_methods` — excludes a plugin-synthesized
-                    // `serializer()`, which the serialization plugin places itself.)
-                    if let Expr::Name(cls) = self.afile.expr(receiver) {
-                        if self
-                            .syms
-                            .classes
-                            .get(cls)
-                            .is_some_and(|c| c.companion_fun_names.contains(name.as_str()))
-                        {
-                            if let Some(internal) = self.syms.class_names.get(cls) {
-                                let comp = type_name(&format!("{}$Companion", internal.render()));
-                                if let Some(v) =
-                                    self.lower_object_member_call(comp, &name, &args, e)
-                                {
-                                    return Some(v);
-                                }
-                            }
-                        }
                     }
                     // `"""…""".trimIndent()` / `.trimMargin()` on a compile-time-constant string receiver:
                     // fold the stdlib transform to a string constant (kotlinc special-cases a constant
