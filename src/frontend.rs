@@ -17,11 +17,12 @@ pub use crate::resolve::{
     SourceConstructorMatcher,
 };
 pub(crate) use crate::resolve::{
-    classifier_over_default, pick_overload, qualified_path, typeref_leaf, ClassNames,
-    CtorDefaultValue, DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, InlineCall,
-    InvokeKind, IteratorDispatchTarget, LambdaCapture, LambdaInfo, ReceiverFnValueOrigin,
-    ReceiverLambda, ResolvedCall, ResolvedConstructor, ResolvedLocalFunctionCall, ResolvedMember,
-    ResolvedModuleTopLevelCall, SigFlags, Signature, StmtLowering,
+    classifier_over_default, function_import_scope, pick_overload, qualified_path, typeref_leaf,
+    ClassNames, CtorDefaultValue, DelegateGetValueTarget, DestructureComponentTarget, ExprLowering,
+    FunctionImportScope, InlineCall, InvokeKind, IteratorDispatchTarget, LambdaCapture, LambdaInfo,
+    ReceiverFnValueOrigin, ReceiverLambda, ResolvedCall, ResolvedConstructor,
+    ResolvedLocalFunctionCall, ResolvedMember, ResolvedModuleTopLevelCall, SigFlags, Signature,
+    StmtLowering,
 };
 use crate::source::{SourceInput, SourceKind};
 

@@ -303,6 +303,9 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 emit_expr(ir, *rhs, inst)
             )
         }
+        IrExpr::PrimitiveNeg { operand, .. } => {
+            format!("(-{})", emit_expr(ir, *operand, inst))
+        }
         IrExpr::Call {
             callee,
             dispatch_receiver,

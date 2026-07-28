@@ -23,6 +23,7 @@ mod source_fallback;
 pub(crate) use source_fallback::SourceFallbackPlatform;
 
 pub type ResolvedMember = crate::symbol_resolver::ResolvedMember;
+pub(crate) use crate::symbol_resolver::FunctionImportScope;
 
 /// Bit-packed boolean flags for a [`Signature`], collapsing `vararg`/`is_inline`/`is_operator`/
 /// `is_override`/`is_final`/`is_suspend` into one byte. Read through the `Signature` accessors of the
@@ -85,6 +86,7 @@ pub struct Signature {
     pub ret: Ty,
     /// Declared generic callable shape retained for call-site inference.
     pub generic_sig: Option<GenericSig>,
+    pub projected_return_hazard: bool,
     /// Bit-packed `vararg`/`is_inline`/`is_operator`/`is_override`/`is_final`/`is_suspend` (read via the
     /// accessors below; `vararg` set via `set_vararg`). `vararg` marks a variadic signature.
     /// `is_final` — a `final` member a subclass cannot override. `is_suspend` — a `suspend fun`.
@@ -204,6 +206,92 @@ impl Signature {
             self.vararg_index,
         )
     }
+}
+
+/// Source extension overloads applicable to one receiver.
+pub struct ExtensionOverloads<'symbols, 'package> {
+    exact: Option<&'symbols [Signature]>,
+    ranked: Vec<(u32, &'symbols Signature)>,
+    package: Option<&'package str>,
+    packages: Option<&'package [TypeName]>,
+    import_scope: Option<&'package crate::symbol_resolver::FunctionImportScope>,
+    scope_name: Option<&'package str>,
+}
+
+enum PropertyReadProbe {
+    Found {
+        ty: Ty,
+        access: Option<(Visibility, TypeName)>,
+    },
+    Ambiguous,
+}
+
+impl<'symbols, 'package> ExtensionOverloads<'symbols, 'package> {
+    pub fn iter(&self) -> impl Iterator<Item = &'symbols Signature> + '_ {
+        let package = self.package;
+        let packages = self.packages;
+        let import_scope = self.import_scope;
+        let scope_name = self.scope_name;
+        let selected_import_level = import_scope.and_then(|scope| {
+            let name = scope_name?;
+            if scope.explicit_package(name).is_some() {
+                return None;
+            }
+            scope.levels().iter().position(|level| {
+                self.exact
+                    .unwrap_or(&[])
+                    .iter()
+                    .chain(self.ranked.iter().map(|(_, signature)| *signature))
+                    .any(|signature| {
+                        level
+                            .iter()
+                            .any(|candidate| candidate.matches(&signature.package))
+                    })
+            })
+        });
+        self.exact
+            .unwrap_or(&[])
+            .iter()
+            .chain(self.ranked.iter().map(|(_, signature)| *signature))
+            .filter(move |signature| {
+                import_scope.is_some_and(|scope| {
+                    let name = scope_name.expect("an import-scoped overload view has a name");
+                    if let Some(explicit) = scope.explicit_package(name) {
+                        return explicit.matches(&signature.package);
+                    }
+                    selected_import_level.is_some_and(|level| {
+                        scope.levels()[level]
+                            .iter()
+                            .any(|candidate| candidate.matches(&signature.package))
+                    })
+                }) || (import_scope.is_none()
+                    && packages.is_some_and(|packages| {
+                        packages
+                            .iter()
+                            .any(|package| package.matches(&signature.package))
+                    }))
+                    || (import_scope.is_none()
+                        && packages.is_none()
+                        && package
+                            .is_none_or(|package| package_path_eq(&signature.package, package)))
+            })
+    }
+
+    pub fn first(&self) -> Option<&'symbols Signature> {
+        self.iter().next()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.iter().next().is_none()
+    }
+}
+
+fn package_path_eq(left: &str, right: &str) -> bool {
+    left.bytes()
+        .map(|byte| if byte == b'.' { b'/' } else { byte })
+        .eq(right
+            .bytes()
+            .map(|byte| if byte == b'.' { b'/' } else { byte }))
 }
 
 /// A primary-constructor parameter's default value, captured in a FILE-INDEPENDENT form — NOT an
@@ -1035,6 +1123,10 @@ pub struct ContextPropSig {
     pub context_params: Vec<Ty>,
 }
 
+type GenericMemberValueOperandShape = (Option<Ty>, Vec<Ty>, Vec<u32>);
+type GenericMemberValueOperandSlots =
+    HashMap<TypeName, HashMap<String, Vec<GenericMemberValueOperandShape>>>;
+
 pub struct SymbolTable {
     /// Top-level functions by name. A name maps to ALL its overloads (Kotlin allows same-name functions
     /// distinguished by parameter signature); a call selects one via [`pick_overload`]. Most names have
@@ -1059,12 +1151,9 @@ pub struct SymbolTable {
     /// The target's compiled library set — a JVM classpath or a klib (empty unless the driver
     /// supplies one). The front end resolves external references only through this abstraction.
     pub libraries: Box<dyn SemanticPlatform>,
-    /// Top-level extension functions: (erased receiver, method_name) → its overloads. The receiver is
-    /// its [`Ty::erased_recv`] key (nullability/generics/type-params folded). Used to resolve
-    /// `recv.method(args)` when no instance method matches. A `(recv, name)` may carry SEVERAL
-    /// overloads that differ by parameter list (`fun IntArray.f()` and `fun IntArray.f(i: Int)`); only
-    /// a true erased-parameter duplicate is a real JVM collision (rejected at collection).
-    pub ext_funs: HashMap<(Ty, String), Vec<Signature>>,
+    /// Top-level extension overloads keyed by name and semantic receiver.
+    pub ext_funs: HashMap<String, HashMap<Ty, Vec<Signature>>>,
+    source_ext_funs: HashMap<(u32, u32), (String, Ty, usize)>,
     /// Top-level extension properties: (erased receiver, prop_name) → (type, is_var). The
     /// getter/setter are emitted as static `getName(Recv)`/`setName(Recv, T)` methods.
     pub ext_props: HashMap<(Ty, String), Vec<ExtPropSig>>,
@@ -1081,6 +1170,11 @@ pub struct SymbolTable {
     /// Top-level function source declaration → declaring facade. This is the declaration-keyed
     /// equivalent of [`Self::fn_facades`], used once the checker has selected a concrete overload.
     pub fn_facades_by_decl: HashMap<(u32, u32), TypeName>,
+    /// Bare generic value operands keyed by source declaration.
+    pub source_generic_value_operand_slots: HashMap<(u32, u32), Vec<u32>>,
+    /// Bare generic value operands for source members.
+    pub(crate) source_generic_member_value_operand_slots: GenericMemberValueOperandSlots,
+    pub source_projected_return_hazards: std::collections::HashSet<(u32, u32)>,
     pub ext_prop_facades_by_decl: HashMap<(u32, u32), TypeName>,
     /// Top-level property name → `(facade_internal, type, is_var)` across the WHOLE multi-file
     /// compilation. Populated only by the multi-file driver. A read of a property from ANOTHER file
@@ -1102,10 +1196,14 @@ impl Default for SymbolTable {
             enums: HashMap::new(),
             libraries: Box::new(EmptySymbolSource),
             ext_funs: HashMap::new(),
+            source_ext_funs: HashMap::new(),
             ext_props: HashMap::new(),
             class_names: ClassNames::default(),
             fn_facades: HashMap::new(),
             fn_facades_by_decl: HashMap::new(),
+            source_generic_value_operand_slots: HashMap::new(),
+            source_generic_member_value_operand_slots: HashMap::new(),
+            source_projected_return_hazards: std::collections::HashSet::new(),
             ext_prop_facades_by_decl: HashMap::new(),
             prop_facades: HashMap::new(),
         }
@@ -1122,7 +1220,12 @@ impl SymbolTable {
         for signature in self.funs.values_mut().flatten() {
             offset_signature(signature);
         }
-        for signature in self.ext_funs.values_mut().flatten() {
+        for signature in self
+            .ext_funs
+            .values_mut()
+            .flat_map(HashMap::values_mut)
+            .flatten()
+        {
             offset_signature(signature);
         }
         for property in self.ext_props.values_mut().flatten() {
@@ -1131,6 +1234,20 @@ impl SymbolTable {
         self.context_props = std::mem::take(&mut self.context_props)
             .into_iter()
             .map(|((file, declaration), property)| ((file + offset, declaration), property))
+            .collect();
+        self.source_generic_value_operand_slots =
+            std::mem::take(&mut self.source_generic_value_operand_slots)
+                .into_iter()
+                .map(|((file, declaration), slots)| ((file + offset, declaration), slots))
+                .collect();
+        self.source_projected_return_hazards =
+            std::mem::take(&mut self.source_projected_return_hazards)
+                .into_iter()
+                .map(|(file, declaration)| (file + offset, declaration))
+                .collect();
+        self.source_ext_funs = std::mem::take(&mut self.source_ext_funs)
+            .into_iter()
+            .map(|((file, declaration), target)| ((file + offset, declaration), target))
             .collect();
         for class in self.classes.values_mut() {
             for signature in class.methods.values_mut().flatten() {
@@ -1153,13 +1270,25 @@ impl SymbolTable {
         self.classes.insert(name, sig)
     }
 
-    /// Resolve an extension-property read/write `recv.name` to its `(type, is_var)`.
-    ///
-    /// A property whose receiver is a free type parameter — `val <T> T.p` or `val <T> Array<T>.p` —
-    /// erases its receiver (or array element) to `kotlin/Any`, so an exact `erased_recv` key never
-    /// matches a concrete receiver like `String` or `Array<Int>`. Model the type-parameter's implicit
-    /// `Any` upper bound by falling back from the exact key to progressively-generalized ones: the
-    /// array-element-generalized key, then the bare `Any` receiver. Concrete overloads still win first.
+    pub fn ext_prop(&self, recv: Ty, name: &str) -> Option<(Ty, bool)> {
+        for key in recv.erased_recv_candidates() {
+            let mut applicable = self
+                .ext_props
+                .get(&(key, name.to_string()))
+                .into_iter()
+                .flatten()
+                .filter(|signature| !recv.is_nullable() || signature.accepts_nullable_receiver);
+            let selected = applicable.next();
+            if applicable.next().is_some() {
+                return None;
+            }
+            if let Some(signature) = selected {
+                return Some((signature.ty, signature.is_var));
+            }
+        }
+        None
+    }
+
     pub fn source_extension_property(&self, source: (u32, u32)) -> Option<&ExtPropSig> {
         self.ext_props
             .values()
@@ -1315,12 +1444,104 @@ impl SymbolTable {
             .find_map(|(name, sig)| (sig.internal == internal).then_some(name.as_str()))
     }
 
-    /// The extension-function overloads registered for a receiver + name (empty if none). The receiver
-    /// is folded to its [`Ty::erased_recv`] key, matching how they are stored at collection.
-    pub fn ext_fun_overloads(&self, recv: Ty, name: &str) -> &[Signature] {
-        self.ext_funs
-            .get(&(recv.erased_recv(), name.to_string()))
-            .map_or(&[], |v| v.as_slice())
+    /// Source extension overloads applicable to `recv`, most-specific first.
+    pub fn ext_fun_overloads(&self, recv: Ty, name: &str) -> ExtensionOverloads<'_, 'static> {
+        self.ext_fun_overloads_filtered(recv, name, None, None, None, None)
+    }
+
+    pub fn ext_fun_overloads_in_package<'symbols, 'package>(
+        &'symbols self,
+        recv: Ty,
+        name: &str,
+        package: &'package str,
+    ) -> ExtensionOverloads<'symbols, 'package> {
+        self.ext_fun_overloads_filtered(recv, name, Some(package), None, None, None)
+    }
+
+    pub fn ext_fun_overloads_in_scope<'symbols, 'scope>(
+        &'symbols self,
+        recv: Ty,
+        name: &str,
+        packages: &'scope [TypeName],
+    ) -> ExtensionOverloads<'symbols, 'scope> {
+        self.ext_fun_overloads_filtered(recv, name, None, Some(packages), None, None)
+    }
+
+    pub(crate) fn ext_fun_overloads_in_import_scope<'symbols, 'scope>(
+        &'symbols self,
+        recv: Ty,
+        name: &'scope str,
+        scope: &'scope crate::symbol_resolver::FunctionImportScope,
+    ) -> ExtensionOverloads<'symbols, 'scope> {
+        self.ext_fun_overloads_filtered(recv, name, None, None, Some(scope), Some(name))
+    }
+
+    fn ext_fun_overloads_filtered<'symbols, 'package>(
+        &'symbols self,
+        recv: Ty,
+        name: &str,
+        package: Option<&'package str>,
+        packages: Option<&'package [TypeName]>,
+        import_scope: Option<&'package crate::symbol_resolver::FunctionImportScope>,
+        scope_name: Option<&'package str>,
+    ) -> ExtensionOverloads<'symbols, 'package> {
+        let Some(families) = self.ext_funs.get(name) else {
+            return ExtensionOverloads {
+                exact: None,
+                ranked: Vec::new(),
+                package,
+                packages,
+                import_scope,
+                scope_name,
+            };
+        };
+        let key = recv.extension_recv_key();
+        let exact = families.get(&key).map(Vec::as_slice);
+        if exact.is_some() && families.len() == 1 {
+            return ExtensionOverloads {
+                exact,
+                ranked: Vec::new(),
+                package,
+                packages,
+                import_scope,
+                scope_name,
+            };
+        }
+        let mut ranked = Vec::new();
+        let module = crate::module_symbols::ModuleSymbols::new(self);
+        let source = crate::symbol_source::CompositeSource::new(vec![
+            &module as &dyn SymbolSource,
+            &*self.libraries as &dyn SymbolSource,
+        ]);
+        let mro = crate::symbol_resolver::ReceiverMro::new(&source, recv);
+        for (candidate, overloads) in families {
+            if *candidate == key {
+                continue;
+            }
+            let Some(rank) = mro.rank(&source, *candidate) else {
+                continue;
+            };
+            ranked.extend(overloads.iter().map(|signature| (rank, signature)));
+        }
+
+        ranked.sort_by_key(|(rank, signature)| {
+            (
+                *rank,
+                signature.source_file.unwrap_or(u32::MAX),
+                signature
+                    .source_decl
+                    .map_or(u32::MAX, |declaration| declaration.0),
+                signature.params.len(),
+            )
+        });
+        ExtensionOverloads {
+            exact,
+            ranked,
+            package,
+            packages,
+            import_scope,
+            scope_name,
+        }
     }
 
     /// The first extension overload for `(recv, name)`, or `None`. Most direct-read sites resolve a
@@ -1337,19 +1558,44 @@ impl SymbolTable {
         file: u32,
         declaration: DeclId,
     ) -> Option<(Ty, &Signature)> {
-        self.ext_funs.values().find_map(|overloads| {
-            overloads
-                .iter()
-                .find(|signature| {
-                    signature.source_file == Some(file)
-                        && signature.source_decl == Some(declaration)
-                })
-                .and_then(|signature| {
-                    signature
-                        .source_receiver
-                        .map(|receiver| (receiver, signature))
-                })
-        })
+        let (name, receiver, index) = self.source_ext_funs.get(&(file, declaration.0))?;
+        let signature = self.ext_funs.get(name)?.get(receiver)?.get(*index)?;
+        signature
+            .source_receiver
+            .map(|declared_receiver| (declared_receiver, signature))
+    }
+
+    pub fn ext_fun_in_package(&self, recv: Ty, name: &str, package: &str) -> Option<&Signature> {
+        self.ext_fun_overloads_in_package(recv, name, package)
+            .first()
+    }
+
+    pub fn ext_fun_in_scope(
+        &self,
+        recv: Ty,
+        name: &str,
+        packages: &[TypeName],
+    ) -> Option<&Signature> {
+        self.ext_fun_overloads_in_scope(recv, name, packages)
+            .first()
+    }
+
+    pub fn source_extension_signature(
+        &self,
+        name: &str,
+        file: u32,
+        declaration: DeclId,
+    ) -> Option<(Ty, &Signature)> {
+        let (declared_name, receiver, index) = self.source_ext_funs.get(&(file, declaration.0))?;
+        (declared_name == name)
+            .then(|| {
+                self.ext_funs
+                    .get(declared_name)?
+                    .get(receiver)?
+                    .get(*index)
+                    .map(|signature| (*receiver, signature))
+            })
+            .flatten()
     }
 
     pub fn class_by_internal_mut(&mut self, internal: &str) -> Option<&mut ClassSig> {
@@ -2032,6 +2278,43 @@ fn erased_params_semantic_key(sig: &Signature) -> Vec<ErasedTypeKey> {
     sig.params.iter().copied().map(erased_type_key).collect()
 }
 
+/// JVM-erased extension receiver identity used for signature collision checks.
+fn extension_receiver_physical_key(t: Ty) -> ErasedTypeKey {
+    extension_receiver_physical_key_inner(t, false)
+}
+
+fn extension_receiver_physical_key_inner(t: Ty, boxed_array_element: bool) -> ErasedTypeKey {
+    match t {
+        Ty::UInt if !boxed_array_element => ErasedTypeKey::Ty(Ty::Int),
+        Ty::ULong if !boxed_array_element => ErasedTypeKey::Ty(Ty::Long),
+        Ty::Fun(signature) => {
+            ErasedTypeKey::Function(signature.params.len() + usize::from(signature.suspend))
+        }
+        Ty::Nullable(inner) => match *inner {
+            Ty::UInt => ErasedTypeKey::Ty(Ty::obj("kotlin/UInt")),
+            Ty::ULong => ErasedTypeKey::Ty(Ty::obj("kotlin/ULong")),
+            primitive if primitive.boxed_ref().is_some() => {
+                ErasedTypeKey::Ty(primitive.boxed_ref().unwrap_or(primitive))
+            }
+            other => extension_receiver_physical_key_inner(other, boxed_array_element),
+        },
+        Ty::TyParam(_, bound) => extension_receiver_physical_key_inner(*bound, boxed_array_element),
+        Ty::Obj(name, args) if name.matches("kotlin/Array") => {
+            let element = args
+                .first()
+                .copied()
+                .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+            ErasedTypeKey::Ty(Ty::obj_args(
+                "kotlin/Array",
+                &[erased_key_ty(extension_receiver_physical_key_inner(
+                    element, true,
+                ))],
+            ))
+        }
+        other => ErasedTypeKey::Ty(other.erased_recv()),
+    }
+}
+
 /// A loose, `self`-free argument-fit test for overload disambiguation: is a value of type `a` plausibly
 /// passable where `p` is expected? Exact match, `Error`/`Nothing`/`null`→reference, numeric→numeric, and
 /// any value→reference (boxing/upcast) fit; a reference is NOT passable to a primitive. Intentionally
@@ -2613,6 +2896,85 @@ fn source_classifier_from_path(
     }
 }
 
+fn type_ref_formal_occurrences(
+    file: &File,
+    ty: &TypeRef,
+    name: &str,
+    projected: bool,
+) -> (bool, bool) {
+    let projected = projected || ty.in_projection() || ty.out_projection();
+    let mut occurrences = (projected && ty.name == name, !projected && ty.name == name);
+    let mut merge = |child: &TypeRef, child_projected: bool| {
+        let child = type_ref_formal_occurrences(file, child, name, child_projected);
+        occurrences.0 |= child.0;
+        occurrences.1 |= child.1;
+    };
+    if let Some(original) = file.type_projection_args.get(&ty.span.lo) {
+        merge(original, true);
+    }
+    if let Some(argument) = ty.arg.as_deref() {
+        merge(argument, projected);
+    }
+    for argument in &ty.targs {
+        merge(argument, projected);
+    }
+    for argument in &ty.fun_params {
+        merge(argument, projected);
+    }
+    occurrences
+}
+
+fn has_projected_generic_return_hazard(file: &File, function: &FunDecl) -> bool {
+    let Some(ret) = function.ret.as_ref() else {
+        return false;
+    };
+    if !function
+        .type_params
+        .iter()
+        .any(|parameter| parameter == &ret.name)
+    {
+        return false;
+    }
+    let mut occurrences = (false, false);
+    for ty in function
+        .receiver
+        .iter()
+        .chain(function.params.iter().map(|parameter| &parameter.ty))
+    {
+        let here = type_ref_formal_occurrences(file, ty, &ret.name, false);
+        occurrences.0 |= here.0;
+        occurrences.1 |= here.1;
+    }
+    occurrences.0 && !occurrences.1
+}
+
+fn generic_value_operand_slots(function: &FunDecl, owner_type_params: &[String]) -> Vec<u32> {
+    let is_bare_formal = |ty: &TypeRef| {
+        !ty.nullable()
+            && ty.arg.is_none()
+            && ty.targs.is_empty()
+            && ty.fun_params.is_empty()
+            && function
+                .type_params
+                .iter()
+                .chain(owner_type_params)
+                .any(|parameter| parameter == &ty.name)
+    };
+    let mut slots = Vec::new();
+    if function.receiver.as_ref().is_some_and(is_bare_formal) {
+        slots.push(0);
+    }
+    slots.extend(
+        function
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, parameter)| !parameter.is_vararg && is_bare_formal(&parameter.ty))
+            .map(|(index, _)| index as u32 + 1),
+    );
+    slots
+}
+
 /// Like `collect_signatures` but also seeds class names and type aliases from the target's
 /// libraries (a JVM classpath, a klib), eliminating the need for any hardcoded type lists.
 pub fn collect_signatures_with_cp(
@@ -2783,15 +3145,33 @@ pub fn collect_signatures_with_cp(
     // cross-package homonym (a star-imported function shadowed by a local one) is not a conflict.
     let mut seen_fun_keys: std::collections::HashSet<(String, String, Vec<ErasedTypeKey>)> =
         std::collections::HashSet::new();
+    let mut seen_ext_fun_keys: std::collections::HashSet<(
+        String,
+        ErasedTypeKey,
+        String,
+        Vec<ErasedTypeKey>,
+    )> = std::collections::HashSet::new();
     for (i, file) in files.iter().enumerate() {
         diags.set_file(i as u32);
         let class_names = file_class_names[i].clone();
         for &d in &file.decls {
             match file.decl(d) {
                 Decl::Fun(f) => {
+                    let source_key = (i as u32, d.0);
+                    let value_operand_slots = generic_value_operand_slots(f, &[]);
+                    if !value_operand_slots.is_empty() {
+                        table
+                            .source_generic_value_operand_slots
+                            .insert(source_key, value_operand_slots);
+                    }
                     let tp = TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &|n| {
                         class_names.get(n)
                     });
+                    let semantic_tp = TParams::symbolic_from_decl_with(
+                        &f.type_params,
+                        &f.type_param_bounds,
+                        &|n| class_names.get(n),
+                    );
                     // A `vararg` parameter's runtime type is `Array<elem>`.
                     let params: Vec<Ty> = f
                         .params
@@ -2908,11 +3288,16 @@ pub fn collect_signatures_with_cp(
                     let source_receiver = f
                         .receiver
                         .as_ref()
-                        .map(|receiver| ty_of_ref(receiver, &class_names, &tp, diags));
+                        .map(|receiver| ty_of_ref(receiver, &class_names, &semantic_tp, diags));
+                    let projected_return_hazard = has_projected_generic_return_hazard(file, f);
+                    if projected_return_hazard {
+                        table.source_projected_return_hazards.insert(source_key);
+                    }
                     let sig = Signature {
                         params,
                         ret,
                         generic_sig,
+                        projected_return_hazard,
                         flags: SigFlags::default()
                             .with_vararg(vararg)
                             .with_is_inline(f.is_inline())
@@ -2946,21 +3331,12 @@ pub fn collect_signatures_with_cp(
                             .map(|p| p.replace('.', "/"))
                             .unwrap_or_default(),
                     };
+                    let package = sig.package.clone();
                     if let Some(recv_ref) = &f.receiver {
-                        // Extension function: index by (erased receiver, method_name).
                         let recv_ty = sig
                             .source_receiver
                             .expect("extension signature has a resolved source receiver");
-                        // A nullable reference receiver (`fun String?.foo()`) shares its
-                        // [`Ty::erased_recv`] key with the non-null form, so krusty can't pick between a
-                        // `String.foo` and a `String?.foo` at the call site (receiver nullability is
-                        // folded). An ordinary-named lone overload is unambiguous and supported. But an
-                        // *operator*
-                        // name (`String?.plus`) shadows the builtin/member operator: with nullability
-                        // erased, krusty would route every `String + …` (even a non-null one) to the
-                        // extension, recursing infinitely when the body uses the same operator. kotlinc
-                        // resolves member-over-extension by static nullability, which krusty can't — so
-                        // reject nullable-reference operator extensions (and any null/non-null collision).
+                        // Nullable-reference operator extensions still conflict with builtin dispatch.
                         let is_operator = is_builtin_operator_method(&f.name)
                             || matches!(
                                 f.name.as_str(),
@@ -3013,30 +3389,32 @@ pub fn collect_signatures_with_cp(
                         {
                             diags.error(f.span, "krusty: an operator extension on a nullable reference receiver is not supported".to_string());
                         } else {
-                            // Exact opAssign handoff supports same-arity overloads.
-                            let overloads = table
-                                .ext_funs
-                                .entry((recv_ty.erased_recv(), f.name.clone()))
-                                .or_default();
                             let erased_params = erased_params_semantic_key(&sig);
-                            let erased_clash = overloads.iter().any(|existing| {
-                                erased_params_semantic_key(existing) == erased_params
-                            });
-                            let same_arity = overloads
-                                .iter()
-                                .any(|existing| existing.params.len() == sig.params.len());
-                            let exact_op_assign = matches!(
-                                f.name.as_str(),
-                                "plusAssign"
-                                    | "minusAssign"
-                                    | "timesAssign"
-                                    | "divAssign"
-                                    | "remAssign"
+                            let erased_receiver = extension_receiver_physical_key(recv_ty);
+                            let source_receiver = recv_ty.extension_recv_key();
+                            let physical_key = (
+                                package,
+                                erased_receiver.clone(),
+                                f.name.clone(),
+                                erased_params,
                             );
-                            if erased_clash || (same_arity && !exact_op_assign) {
+                            let erased_clash = seen_ext_fun_keys.contains(&physical_key);
+                            if erased_clash {
                                 diags.error(f.span, "krusty: conflicting extension functions with the same erased receiver and name".to_string());
                             } else {
+                                seen_ext_fun_keys.insert(physical_key);
+                                let overloads = table
+                                    .ext_funs
+                                    .entry(f.name.clone())
+                                    .or_default()
+                                    .entry(source_receiver)
+                                    .or_default();
+                                let overload_index = overloads.len();
                                 overloads.push(sig);
+                                table.source_ext_funs.insert(
+                                    source_key,
+                                    (f.name.clone(), source_receiver, overload_index),
+                                );
                             }
                         }
                     } else {
@@ -3047,9 +3425,8 @@ pub fn collect_signatures_with_cp(
                         // distinct declaration, not a clash. Use a Kotlin-level erasure key here
                         // instead of formatting JVM descriptors in the checker.
                         let key = erased_params_semantic_key(&sig);
-                        let pkg = file.package.clone().unwrap_or_default();
                         let overloads = table.funs.entry(f.name.clone()).or_default();
-                        if !seen_fun_keys.insert((pkg, f.name.clone(), key)) {
+                        if !seen_fun_keys.insert((package, f.name.clone(), key)) {
                             diags.error(f.span, format!("conflicting declarations: {}", f.name));
                         } else {
                             overloads.push(sig);
@@ -3635,7 +4012,25 @@ pub fn collect_signatures_with_cp(
                                 Ty::Unit
                             });
                         let signature =
-                            member_signature(m, ret, &class_names, &mtp, i as u32, diags);
+                            member_signature(file, m, ret, &class_names, &mtp, i as u32, diags);
+                        let value_operand_slots = generic_value_operand_slots(m, &c.type_params);
+                        if !value_operand_slots.is_empty() {
+                            let physical_receiver = method
+                                .receiver
+                                .as_ref()
+                                .map(|receiver| ty_of_ref(receiver, &class_names, &mtp, diags));
+                            table
+                                .source_generic_member_value_operand_slots
+                                .entry(type_name(&internal))
+                                .or_default()
+                                .entry(method.name.clone())
+                                .or_default()
+                                .push((
+                                    physical_receiver,
+                                    signature.params.clone(),
+                                    value_operand_slots,
+                                ));
+                        }
                         if let Some(receiver) = &method.receiver {
                             member_ext_funs
                                 .entry(method.name.clone())
@@ -3728,6 +4123,7 @@ pub fn collect_signatures_with_cp(
                                     params: vec![],
                                     ret: *ty,
                                     generic_sig: None,
+                                    projected_return_hazard: false,
                                     flags: SigFlags::default()
                                         .with_vararg(false)
                                         .with_is_inline(false)
@@ -3759,6 +4155,7 @@ pub fn collect_signatures_with_cp(
                                 params: props.iter().map(|(_, t, _)| *t).collect(),
                                 ret: self_ty,
                                 generic_sig: None,
+                                projected_return_hazard: false,
                                 flags: SigFlags::default(),
                                 vararg_index: None,
                                 required: 0,
@@ -3889,7 +4286,7 @@ pub fn collect_signatures_with_cp(
                                 });
                             (
                                 m.name.clone(),
-                                member_signature(m, ret, &class_names, &mtp, i as u32, diags),
+                                member_signature(file, m, ret, &class_names, &mtp, i as u32, diags),
                             )
                         })
                         .collect();
@@ -3915,6 +4312,7 @@ pub fn collect_signatures_with_cp(
                                     &[Ty::obj(&internal)],
                                 ),
                                 generic_sig: None,
+                                projected_return_hazard: false,
                                 flags: SigFlags::default()
                                     .with_vararg(false)
                                     .with_is_inline(false)
@@ -4414,42 +4812,6 @@ pub fn collect_signatures_with_cp(
     table
 }
 
-/// Tracks structural argument-mapping results while probing an overload set. A mapping error is
-/// reportable only when every candidate rejects the call for the same reason; one successfully mapped
-/// candidate (even if its argument types later fail) or conflicting mapping errors must fall through to
-/// ordinary overload diagnostics.
-#[derive(Default)]
-struct CallArgMappingProbe {
-    mapped_candidate: bool,
-    unanimous_error: Option<CallArgMappingFailure>,
-    conflicting_errors: bool,
-}
-
-impl CallArgMappingProbe {
-    fn observe<T>(&mut self, result: Result<T, CallArgMappingFailure>) -> Option<T> {
-        match result {
-            Ok(mapped) => {
-                self.mapped_candidate = true;
-                Some(mapped)
-            }
-            Err(error) => {
-                match &self.unanimous_error {
-                    None => self.unanimous_error = Some(error),
-                    Some(first) if first == &error => {}
-                    Some(_) => self.conflicting_errors = true,
-                }
-                None
-            }
-        }
-    }
-
-    fn into_unanimous_error(self) -> Option<CallArgMappingFailure> {
-        (!self.mapped_candidate && !self.conflicting_errors)
-            .then_some(self.unanimous_error)
-            .flatten()
-    }
-}
-
 pub fn map_call_sig_args(
     args: &[ExprId],
     names: Option<&[Option<String>]>,
@@ -4474,6 +4836,16 @@ fn map_call_sig_args_with_trailing(
         sig.vararg_index,
         trailing_lambda,
     )
+}
+
+fn take_unanimous_mapping_error<T>(
+    failures: &mut Vec<(CallArgMappingFailure, T)>,
+) -> Option<(CallArgMappingFailure, T)> {
+    let first = failures.first()?.0.clone();
+    failures
+        .iter()
+        .all(|(failure, _)| *failure == first)
+        .then(|| failures.swap_remove(0))
 }
 
 fn call_argument_parameter_indices(
@@ -5276,16 +5648,18 @@ fn delegated_getvalue_ret_for_signature(
         return Some(sig.ret);
     }
     let module = crate::module_symbols::ModuleSymbols::new(table);
-    let scope = function_scope_packages_with(file, libraries.platform_default_import_packages());
-    crate::symbol_resolver::SymbolResolver::new_scoped_with_module(libraries, &module, &scope)
-        .resolve_symbol(
-            crate::symbol_resolver::SymRecv::Value(delegate_ty),
-            "getValue",
-            &[Ty::obj("kotlin/Any"), Ty::obj("kotlin/reflect/KProperty")],
-            &[],
-        )
-        .and_then(crate::symbol_resolver::Symbol::extension_call)
-        .map(|c| c.ret)
+    let scope = function_import_scope_with(file, libraries.platform_default_import_packages());
+    crate::symbol_resolver::SymbolResolver::new_import_scoped_with_module(
+        libraries, &module, &scope,
+    )
+    .resolve_symbol(
+        crate::symbol_resolver::SymRecv::Value(delegate_ty),
+        "getValue",
+        &[Ty::obj("kotlin/Any"), Ty::obj("kotlin/reflect/KProperty")],
+        &[],
+    )
+    .and_then(crate::symbol_resolver::Symbol::extension_call)
+    .map(|c| c.ret)
 }
 
 /// The array type produced by a creation-builtin call in the lightweight inferer: a primitive
@@ -5448,8 +5822,8 @@ fn infer_lit_ty_p(
             _ => None,
         }
     }
-    let scope = function_scope_packages_with(file, src.platform_default_import_packages());
-    let resolver = crate::symbol_resolver::SymbolResolver::new_scoped(src, &scope);
+    let scope = function_import_scope_with(file, src.platform_default_import_packages());
+    let resolver = crate::symbol_resolver::SymbolResolver::new_import_scoped(src, &scope);
     match file.expr(e) {
         Expr::IntLit(_) => Ty::Int,
         Expr::LongLit(_) => Ty::Long,
@@ -5974,12 +6348,12 @@ impl TParams {
         bounds: &[(String, TypeRef)],
         resolve: &dyn Fn(&str) -> Option<TypeName>,
     ) -> Self {
-        let declared = TParams::from_decl_with(names, bounds, resolve);
         TParams {
             erasure: names
                 .iter()
                 .map(|name| {
-                    let bound = declared.erase(name);
+                    let bound = declared_tparam_semantic_bound(name, names, bounds, resolve)
+                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
                     (name.clone(), Ty::ty_param(name, bound))
                 })
                 .collect(),
@@ -6353,7 +6727,7 @@ fn source_function_display(file: &File, function: &FunDecl, resolved_ret: Ty) ->
                 .find(|parameter| parameter.name == *name)
                 .map(|parameter| source_type_display(&parameter.ty))
         })
-        .unwrap_or_else(|| resolved_ret.name());
+        .unwrap_or_else(|| resolved_ret.source_name());
     let suspend = if function.is_suspend() {
         "suspend "
     } else {
@@ -6375,6 +6749,7 @@ fn source_function_display(file: &File, function: &FunDecl, resolved_ret: Ty) ->
 /// is its `Array<elem>`; the `vararg` flag, defaults, names, and lambda-parameter shapes follow the
 /// declaration.
 fn member_signature(
+    file: &File,
     m: &FunDecl,
     ret: Ty,
     classes: &ClassNames,
@@ -6412,6 +6787,7 @@ fn member_signature(
         params,
         ret,
         generic_sig: None,
+        projected_return_hazard: has_projected_generic_return_hazard(file, m),
         flags: SigFlags::default()
             .with_vararg(m.params.iter().any(|p| p.is_vararg))
             .with_is_inline(m.is_inline())
@@ -6635,6 +7011,7 @@ pub struct TypeInfo {
     pub expr_lowers: HashMap<ExprId, ExprLowering>,
     /// Selected statement lowerings that differ from the parser's generic statement shape.
     pub stmt_lowers: HashMap<StmtId, StmtLowering>,
+    discarded_exprs: std::collections::HashSet<ExprId>,
     /// The RESOLVED type of a `val`/`var` local that carries an explicit type annotation, keyed by the
     /// `Stmt::Local`. The lowerer reuses this instead of re-resolving the annotation — so a library type
     /// the checker resolves through imports (`var res: Result<T>? = null`) keeps its (value-)class type
@@ -6747,6 +7124,7 @@ pub enum ResolvedCall {
         interface: bool,
         vararg: bool,
         suspend: bool,
+        projected_return_hazard: bool,
     },
     /// A class-body extension emitted as an instance method with a leading receiver parameter.
     ModuleMemberExtension {
@@ -6768,6 +7146,7 @@ pub enum ResolvedCall {
         params: Vec<Ty>,
         ret: Ty,
         owner: Option<TypeName>,
+        source: Option<(u32, u32)>,
     },
     /// A same-module receiver-less top-level call selected by the checker. The lowerer maps this
     /// semantic target to the current file's lifted IR function or sibling facade; it must not
@@ -6940,6 +7319,7 @@ pub enum SyntheticOperatorCall {
     Not,
     Inc,
     Dec,
+    CompareTo,
 }
 
 impl SyntheticOperatorCall {
@@ -6959,6 +7339,7 @@ impl SyntheticOperatorCall {
             "not" => Self::Not,
             "inc" => Self::Inc,
             "dec" => Self::Dec,
+            "compareTo" => Self::CompareTo,
             _ => return None,
         })
     }
@@ -6990,6 +7371,7 @@ pub struct ResolvedModuleTopLevelCall {
     pub param_meta: Vec<(String, Option<ExprId>)>,
     pub param_default_values: Vec<Option<CtorDefaultValue>>,
     pub ret_is_tparam: bool,
+    pub projected_return_hazard: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -7057,8 +7439,54 @@ impl TypeInfo {
         }
     }
 
+    pub fn resolved_source_member_signature(
+        &self,
+        e: ExprId,
+    ) -> Option<(TypeName, &str, Option<Ty>, &[Ty])> {
+        match self.resolved_calls.get(&e) {
+            Some(ResolvedCall::ModuleMember {
+                owner,
+                name,
+                params,
+                ..
+            }) => Some((*owner, name, None, params)),
+            Some(ResolvedCall::ModuleMemberExtension {
+                owner,
+                name,
+                physical_receiver,
+                physical_params,
+                ..
+            }) => Some((*owner, name, Some(*physical_receiver), physical_params)),
+            Some(ResolvedCall::Member(member)) => Some((
+                member.member.owner?,
+                &member.member.name,
+                None,
+                &member.member.params,
+            )),
+            Some(ResolvedCall::Companion(member)) => {
+                Some((member.owner?, &member.name, None, &member.params))
+            }
+            _ => None,
+        }
+    }
+
     pub fn resolved_source_call(&self, e: ExprId) -> Option<(u32, u32)> {
         self.resolved_source_calls.get(&e).copied()
+    }
+
+    pub fn is_discarded_expression(&self, e: ExprId) -> bool {
+        self.discarded_exprs.contains(&e)
+    }
+
+    pub fn resolved_member_has_projected_return_hazard(&self, e: ExprId) -> bool {
+        match self.resolved_calls.get(&e) {
+            Some(ResolvedCall::Member(member)) => member.projected_return_hazard,
+            Some(ResolvedCall::ModuleMember {
+                projected_return_hazard,
+                ..
+            }) => *projected_return_hazard,
+            _ => false,
+        }
     }
 
     pub fn source_extension_property(&self, e: ExprId) -> Option<&crate::libraries::PropertyInfo> {
@@ -7428,6 +7856,7 @@ pub enum CompoundAssignmentTarget {
         receiver: Ty,
         parameter: Ty,
         owner: Option<TypeName>,
+        source: Option<(u32, u32)>,
     },
     LibraryExtension(Box<crate::libraries::LibraryCallable>),
 }
@@ -7500,6 +7929,37 @@ pub(crate) fn function_scope_packages(file: &File, syms: &SymbolTable) -> Vec<Ty
     function_scope_packages_with(file, syms.libraries.platform_default_import_packages())
 }
 
+pub(crate) fn function_import_scope(
+    file: &File,
+    syms: &SymbolTable,
+) -> crate::symbol_resolver::FunctionImportScope {
+    function_import_scope_with(file, syms.libraries.platform_default_import_packages())
+}
+
+fn function_import_scope_with(
+    file: &File,
+    platform_defaults: &[&str],
+) -> crate::symbol_resolver::FunctionImportScope {
+    let explicit = import_map(file)
+        .into_iter()
+        .filter_map(|(name, fqn)| {
+            fqn.rsplit_once('/').map(|(package, declared_name)| {
+                (
+                    name,
+                    crate::symbol_resolver::CallableImport::new(
+                        type_name(package),
+                        declared_name.to_string(),
+                    ),
+                )
+            })
+        })
+        .collect();
+    crate::symbol_resolver::FunctionImportScope::new(
+        explicit,
+        import_levels(file, platform_defaults),
+    )
+}
+
 /// [`function_scope_packages`] with only a platform default-import list, for pre-check contexts that do
 /// not yet have a full `SymbolTable`.
 pub(crate) fn function_scope_packages_with(
@@ -7545,6 +8005,7 @@ fn make_checker<'a>(
     let imports = import_map(file);
     let import_levels = import_levels(file, syms.libraries.platform_default_import_packages());
     let fn_scope = function_scope_packages(file, syms);
+    let function_import_scope = function_import_scope(file, syms);
     Checker {
         file,
         syms,
@@ -7560,6 +8021,7 @@ fn make_checker<'a>(
         imports,
         import_levels,
         fn_scope,
+        function_import_scope,
         tparams: Default::default(),
         reified_tparams: std::collections::HashSet::new(),
         this_ty: None,
@@ -7575,6 +8037,7 @@ fn make_checker<'a>(
         inferred_method_rets: HashMap::new(),
         inferred_member_ext_fun_rets: HashMap::new(),
         stmt_lowers: HashMap::new(),
+        discarded_exprs: std::collections::HashSet::new(),
         local_decl_types: HashMap::new(),
         resolved_call_type_args: HashMap::new(),
         narrowed_this_member: HashMap::new(),
@@ -7729,12 +8192,15 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
             sig.ret = ret;
         }
     }
-    for ((recv, name, params), ret) in ext_rets {
-        if let Some(sig) = syms
-            .ext_funs
-            .get_mut(&(recv, name))
-            .and_then(|ov| ov.iter_mut().find(|s| s.params == params))
-        {
+    for ((file, decl, name), ret) in ext_rets {
+        if let Some(sig) = syms.ext_funs.get_mut(&name).and_then(|families| {
+            families.values_mut().find_map(|overloads| {
+                overloads.iter_mut().find(|signature| {
+                    signature.source_file == Some(file)
+                        && signature.source_decl == Some(DeclId(decl))
+                })
+            })
+        }) {
             changed |= sig.ret != ret;
             sig.ret = ret;
         }
@@ -8714,6 +9180,7 @@ fn check_file_at_impl(
         inferred_method_rets,
         inferred_member_ext_fun_rets,
         stmt_lowers,
+        discarded_exprs,
         local_decl_types,
         resolved_call_type_args,
         narrowed_this_member,
@@ -8755,12 +9222,15 @@ fn check_file_at_impl(
             sig.ret = ret;
         }
     }
-    for ((recv, name, params), ret) in inferred_ext_fun_rets {
-        if let Some(sig) = syms
-            .ext_funs
-            .get_mut(&(recv, name))
-            .and_then(|ov| ov.iter_mut().find(|s| s.params == params))
-        {
+    for ((file, decl, name), ret) in inferred_ext_fun_rets {
+        if let Some(sig) = syms.ext_funs.get_mut(&name).and_then(|families| {
+            families.values_mut().find_map(|overloads| {
+                overloads.iter_mut().find(|signature| {
+                    signature.source_file == Some(file)
+                        && signature.source_decl == Some(DeclId(decl))
+                })
+            })
+        }) {
             sig.ret = ret;
         }
     }
@@ -8791,6 +9261,7 @@ fn check_file_at_impl(
         resolved_type_refs,
         expr_lowers,
         stmt_lowers,
+        discarded_exprs,
         local_decl_types,
         resolved_call_type_args,
         narrowed_this_member,
@@ -8842,6 +9313,7 @@ pub fn check_file_in_source_set(
     check_file_at_impl(file, file_index, Some(files), syms, diags)
 }
 
+#[derive(Clone)]
 struct DiagnosticFunction<'a> {
     name: &'a str,
     params: &'a [Ty],
@@ -8964,6 +9436,7 @@ struct Checker<'a> {
     /// package of each explicit import (`import a.b.foo` scopes `a/b`). A top-level call resolves only to
     /// a function whose facade is in this set (kotlinc), passed to the [`SymbolResolver`].
     fn_scope: Vec<TypeName>,
+    function_import_scope: crate::symbol_resolver::FunctionImportScope,
     /// Generic type parameters in scope (erased to `java/lang/Object`).
     tparams: TParams,
     /// The `reified` type parameters in scope (a subset of `tparams`, from the enclosing `inline fun`).
@@ -8999,7 +9472,7 @@ struct Checker<'a> {
     /// Accumulated output maps (moved into TypeInfo at the end of `check_file`).
     expr_lowers: HashMap<ExprId, ExprLowering>,
     inferred_fun_rets: HashMap<(u32, u32), Ty>,
-    inferred_ext_fun_rets: HashMap<(Ty, String, Vec<Ty>), Ty>,
+    inferred_ext_fun_rets: HashMap<(u32, u32, String), Ty>,
     inferred_method_rets: HashMap<(TypeName, String, Vec<Ty>), Ty>,
     inferred_member_ext_fun_rets: HashMap<(TypeName, String, Ty, Vec<Ty>), Ty>,
     /// A class internal name → the base-constructor parameter types its `super(args)` resolved to
@@ -9007,6 +9480,7 @@ struct Checker<'a> {
     /// known) and applied to the `ClassSig` after, since `syms` is borrowed immutably while checking.
     super_ctor_params: HashMap<String, Vec<Ty>>,
     stmt_lowers: HashMap<StmtId, StmtLowering>,
+    discarded_exprs: std::collections::HashSet<ExprId>,
     local_decl_types: HashMap<StmtId, Ty>,
     resolved_call_type_args: HashMap<ExprId, Vec<Option<Ty>>>,
     narrowed_this_member: HashMap<ExprId, TypeName>,
@@ -9321,17 +9795,72 @@ impl<'a> Checker<'a> {
 
     /// The arg-binding call-resolution layer over this checker's [`SymbolSource`]. Cheap to construct.
     fn resolver(&self) -> crate::symbol_resolver::SymbolResolver<'_> {
-        crate::symbol_resolver::SymbolResolver::new_scoped_with_module(
+        crate::symbol_resolver::SymbolResolver::new_import_scoped_with_module(
             &*self.syms.libraries,
             &self.module,
-            &self.fn_scope,
+            &self.function_import_scope,
         )
     }
 
-    /// A resolver whose top-level scope is an EXPLICIT package `scope`, for a fully-qualified reference
-    /// (`kotlinx.coroutines.runBlocking`): the package is resolution SCOPE, not part of the name — a dotted
-    /// name can't be split into package/class by inspection (a package segment may be capitalized), so the
-    /// caller, which already resolved which prefix is the package, supplies it here.
+    fn selected_source_extension(
+        &self,
+        receiver: Ty,
+        name: &str,
+        args: &[Ty],
+    ) -> Option<(crate::libraries::FunctionInfo, Signature)> {
+        self.selected_source_extension_with_lambda_args(receiver, name, args, &[])
+    }
+
+    fn selected_source_extension_with_lambda_args(
+        &self,
+        receiver: Ty,
+        name: &str,
+        args: &[Ty],
+        lambda_literals: &[bool],
+    ) -> Option<(crate::libraries::FunctionInfo, Signature)> {
+        let selected = self.resolver().resolve_extension_info(
+            receiver,
+            name,
+            args,
+            lambda_literals,
+            Some(self.file_index),
+        )?;
+        let (file, declaration) = selected.source_key?;
+        let (_, signature) = self
+            .syms
+            .source_extension_function(file, DeclId(declaration))?;
+        Some((selected, signature.clone()))
+    }
+
+    fn unique_visible_source_extension(&self, receiver: Ty, name: &str) -> Option<&Signature> {
+        let mut candidates = self
+            .resolver()
+            .resolve_symbol(
+                crate::symbol_resolver::SymRecv::Value(receiver),
+                name,
+                &[],
+                &[],
+            )
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|function| {
+                function.is_extension()
+                    && (function.public()
+                        || function
+                            .source_key
+                            .is_some_and(|(file, _)| file == self.file_index))
+            });
+        let selected = candidates.next()?;
+        if candidates.next().is_some() {
+            return None;
+        }
+        let (file, declaration) = selected.source_key?;
+        self.syms
+            .source_extension_signature(name, file, DeclId(declaration))
+            .map(|(_, signature)| signature)
+    }
+
     fn resolver_in_scope<'s>(
         &'s self,
         scope: &'s [TypeName],
@@ -9343,8 +9872,7 @@ impl<'a> Checker<'a> {
         )
     }
 
-    /// The federated symbol source (this module SHADOWING the classpath) — the source the resolver's
-    /// receiver-rank / extension-ranking helpers key on. Cheap to build (borrows the two child sources).
+    /// Module-first symbol source used for receiver and extension ranking.
     fn fed_source(&self) -> crate::symbol_source::CompositeSource<'_> {
         crate::symbol_source::CompositeSource::new(vec![
             &self.module as &dyn SymbolSource,
@@ -9435,9 +9963,21 @@ impl<'a> Checker<'a> {
         name: &str,
         arg_tys: &[Option<Ty>],
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
+        self.top_level_lambda_shape_in_scope(name, arg_tys, None)
+    }
+
+    fn top_level_lambda_shape_in_scope(
+        &self,
+        name: &str,
+        arg_tys: &[Option<Ty>],
+        scope: Option<&[TypeName]>,
+    ) -> Option<crate::symbol_resolver::LambdaCallShape> {
+        let resolver = match scope {
+            Some(scope) => self.resolver_in_scope(scope),
+            None => self.resolver(),
+        };
         let fs = crate::libraries::FunctionSet {
-            overloads: self
-                .resolver()
+            overloads: resolver
                 .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
                 .map(crate::symbol_resolver::Symbol::overloads)
                 .unwrap_or_default(),
@@ -10135,6 +10675,7 @@ impl<'a> Checker<'a> {
                                     .is_some_and(|class| class.is_interface()),
                                 vararg: sig.vararg(),
                                 suspend: sig.is_suspend(),
+                                projected_return_hazard: sig.projected_return_hazard,
                             },
                         ));
                     }
@@ -10156,51 +10697,43 @@ impl<'a> Checker<'a> {
                             interface,
                             vararg: sig.vararg(),
                             suspend: sig.is_suspend(),
+                            projected_return_hazard: sig.projected_return_hazard,
                         },
                     ));
                 }
             }
         }
+        let lambda_literals = self.lambda_literal_args(arg_exprs);
+        if let Some((selected, sig)) = self
+            .selected_source_extension_with_lambda_args(receiver, name, arg_tys, &lambda_literals)
+            .filter(|(_, signature)| signature.is_operator() && !signature.vararg())
+        {
+            self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
+            let owner = sig
+                .source_file
+                .zip(sig.source_decl)
+                .and_then(|(file, declaration)| {
+                    self.syms
+                        .fn_facades_by_decl
+                        .get(&(file, declaration.0))
+                        .copied()
+                });
+            return Some((
+                sig.ret,
+                ResolvedCall::ModuleExtension {
+                    receiver,
+                    name: name.to_string(),
+                    params: sig.params.clone(),
+                    ret: sig.ret,
+                    owner,
+                    source: selected.source_key,
+                },
+            ));
+        }
         (!receiver.is_nullable())
             .then(|| self.resolve_instance_member(receiver, name, arg_tys))
             .flatten()
             .map(|m| (m.ret, ResolvedCall::Member(m)))
-            .or_else(|| {
-                let candidates = self
-                    .syms
-                    .ext_fun_overloads(receiver, name)
-                    .iter()
-                    .filter(|s| {
-                        s.is_operator()
-                            && !s.vararg()
-                            && !(s.visibility.is_private()
-                                && s.source_file != Some(self.file_index))
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let sig = pick_overload(&candidates, arg_tys)
-                    .and_then(|index| candidates.into_iter().nth(index))?;
-                self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
-                let owner = sig
-                    .source_file
-                    .zip(sig.source_decl)
-                    .and_then(|(file, declaration)| {
-                        self.syms
-                            .fn_facades_by_decl
-                            .get(&(file, declaration.0))
-                            .copied()
-                    });
-                Some((
-                    sig.ret,
-                    ResolvedCall::ModuleExtension {
-                        receiver,
-                        name: name.to_string(),
-                        params: sig.params.clone(),
-                        ret: sig.ret,
-                        owner,
-                    },
-                ))
-            })
             .or_else(|| {
                 self.library_extension_callable(name, receiver, arg_tys, &[])
                     .map(|callable| (callable.ret, ResolvedCall::Extension(callable)))
@@ -10271,6 +10804,18 @@ impl<'a> Checker<'a> {
             }
             if let Some(r) = self.explicit_generic_return(call, function) {
                 ret_ty = r;
+            }
+        }
+        if selected.projected_return_hazard
+            && ret_ty.is_erased_top()
+            && !self
+                .file
+                .call_type_args
+                .get(&call.0)
+                .is_some_and(|arguments| !arguments.is_empty())
+        {
+            if let Some(expected) = expected.filter(|expected| *expected != Ty::Error) {
+                ret_ty = expected;
             }
         }
         ret_ty
@@ -10374,6 +10919,31 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn nullable_receiver_call_span(&self, call: ExprId) -> Span {
+        if let Expr::Call { callee, .. } = self.file.expr(call) {
+            if let Some((_, span)) = self
+                .file
+                .non_adjacent_member_dot_spans
+                .iter()
+                .find(|(member, _)| *member == callee.0)
+            {
+                return *span;
+            }
+        }
+        let name = self.call_callee_name_span(call);
+        Span::new(name.lo.saturating_sub(1), name.lo)
+    }
+
+    fn report_nullable_receiver_call(&mut self, call: ExprId, receiver: Ty) {
+        self.diags.error(
+            self.nullable_receiver_call_span(call),
+            format!(
+                "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type '{}'.",
+                receiver.source_name()
+            ),
+        );
+    }
+
     fn call_open_paren_span(&self, call: ExprId) -> Span {
         if let Some(span) = self.file.empty_call_open_paren_spans.get(&call.0) {
             return *span;
@@ -10404,12 +10974,38 @@ impl<'a> Checker<'a> {
             .flatten()
     }
 
+    fn call_recovery_span(&self, call: ExprId, args: &[ExprId], fallback: Span) -> Span {
+        let trailing = self.file.call_has_trailing_lambda.contains(&call.0);
+        let last_index = args.len().checked_sub(1 + usize::from(trailing));
+        let Some(last_index) = last_index else {
+            return fallback;
+        };
+        let start = self
+            .call_argument_name_span(call, last_index)
+            .unwrap_or_else(|| self.span(args[last_index]))
+            .lo;
+        let end = self
+            .file
+            .trailing_call_close_paren_ends
+            .get(&call.0)
+            .copied()
+            .unwrap_or_else(|| self.span(call).hi);
+        Span::new(start, end)
+    }
+
     fn report_call_arg_mapping_error(
         &mut self,
         call: ExprId,
         args: &[ExprId],
         failure: CallArgMappingFailure,
     ) {
+        let recovery_span = failure.recovery_argument.map(|argument| {
+            let fallback = args
+                .get(argument)
+                .map(|argument| self.span(*argument))
+                .unwrap_or_else(|| self.call_argument_list_span(call, args));
+            self.call_recovery_span(call, args, fallback)
+        });
         for error in failure.errors {
             let message = error.to_string();
             let compiler_span = match &error {
@@ -10424,7 +11020,7 @@ impl<'a> Checker<'a> {
                     .map(|argument| self.span(*argument))
                     .unwrap_or_else(|| self.call_argument_list_span(call, args)),
                 CallArgMappingError::MissingRequired { .. } => {
-                    self.call_argument_list_span(call, args)
+                    recovery_span.unwrap_or_else(|| self.call_argument_list_span(call, args))
                 }
             };
             if error.highlights_callee() {
@@ -10436,6 +11032,23 @@ impl<'a> Checker<'a> {
             } else {
                 self.diags.error(compiler_span, message);
             }
+        }
+    }
+
+    fn report_callable_arg_mapping_error(
+        &mut self,
+        call: ExprId,
+        args: &[ExprId],
+        function: DiagnosticFunction<'_>,
+        failure: CallArgMappingFailure,
+    ) {
+        if matches!(
+            failure.errors.as_slice(),
+            [CallArgMappingError::TooManyArguments { .. }]
+        ) {
+            self.report_function_arity(call, function, args);
+        } else {
+            self.report_call_arg_mapping_error(call, args, failure);
         }
     }
 
@@ -10511,7 +11124,6 @@ impl<'a> Checker<'a> {
     fn mark_module_top_level_call(
         &mut self,
         call: ExprId,
-        name: &str,
         selected: &crate::libraries::FunctionInfo,
         ret: Ty,
         context_args: Vec<String>,
@@ -10560,10 +11172,17 @@ impl<'a> Checker<'a> {
                     && f.type_params.iter().any(|tp| tp == &r.name)
             })
         });
+        let projected_return_hazard = selected.projected_return_hazard
+            && ret.is_erased_top()
+            && !self
+                .file
+                .call_type_args
+                .get(&call.0)
+                .is_some_and(|arguments| !arguments.is_empty());
         self.resolved_calls.insert(
             call,
             ResolvedCall::ModuleTopLevel(Box::new(ResolvedModuleTopLevelCall {
-                name: name.to_string(),
+                name: selected.callable.name.clone(),
                 params: selected.callable.params.clone(),
                 physical_ret: selected.callable.physical_ret,
                 ret,
@@ -10577,6 +11196,7 @@ impl<'a> Checker<'a> {
                 param_meta,
                 param_default_values,
                 ret_is_tparam,
+                projected_return_hazard,
             })),
         );
     }
@@ -12343,11 +12963,22 @@ impl<'a> Checker<'a> {
                     }
                 })
                 .collect();
-            self.ret_ty = self
-                .syms
-                .ext_fun_overloads(recv_ty, &f.name)
-                .iter()
-                .find(|s| s.params == want)
+            self.ret_ty = source_decl
+                .and_then(|declaration| {
+                    self.syms
+                        .source_extension_signature(&f.name, self.file_index, declaration)
+                })
+                .map(|(_, signature)| signature)
+                .or_else(|| {
+                    self.syms
+                        .ext_fun_overloads_in_import_scope(
+                            recv_ty,
+                            &f.name,
+                            &self.function_import_scope,
+                        )
+                        .iter()
+                        .find(|signature| signature.params == want)
+                })
                 .map(|s| s.ret)
                 .or_else(|| f.ret.as_ref().map(|r| self.resolve_ty(r)))
                 .unwrap_or(Ty::Unit);
@@ -12398,12 +13029,11 @@ impl<'a> Checker<'a> {
                 let inferred = self.expr(*e);
                 if inferred != Ty::Unit && inferred != Ty::Error {
                     self.ret_ty = inferred;
-                    if let Some(recv_ref) = &f.receiver {
-                        let recv_ty = self.resolve_ty(recv_ref);
-                        self.inferred_ext_fun_rets.insert(
-                            (recv_ty.erased_recv(), f.name.clone(), ptys.clone()),
-                            inferred,
-                        );
+                    if f.receiver.is_some() {
+                        if let Some(declaration) = source_decl {
+                            self.inferred_ext_fun_rets
+                                .insert((self.file_index, declaration.0, f.name.clone()), inferred);
+                        }
                     } else {
                         if let Some(decl) = source_decl {
                             self.inferred_fun_rets
@@ -12891,7 +13521,7 @@ impl<'a> Checker<'a> {
                         } else {
                             ""
                         };
-                        format!("{vararg}{parameter}: {}{default}", ty.name())
+                        format!("{vararg}{parameter}: {}{default}", ty.source_name())
                     })
                     .collect::<Vec<_>>()
                     .join(", ")
@@ -12906,7 +13536,7 @@ impl<'a> Checker<'a> {
                 span,
                 format!(
                     "too many arguments for '{context}fun {name}({values}): {}'.",
-                    ret.name()
+                    ret.source_name()
                 ),
             );
             return;
@@ -12947,7 +13577,7 @@ impl<'a> Checker<'a> {
                 .zip(params)
                 .map(|((parameter, has_default), ty)| {
                     let default = if *has_default { " = ..." } else { "" };
-                    format!("{parameter}: {}{default}", ty.name())
+                    format!("{parameter}: {}{default}", ty.source_name())
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -13281,7 +13911,7 @@ impl<'a> Checker<'a> {
                 span,
                 format!(
                     "null cannot be a value of a non-null type '{}'.",
-                    expected.name()
+                    expected.source_name()
                 ),
             );
             return;
@@ -13415,8 +14045,8 @@ impl<'a> Checker<'a> {
     }
 
     fn report_assignability_error(&mut self, expected: Ty, actual: Ty, span: Span, ctx: &str) {
-        let expected = expected.name();
-        let actual = actual.name();
+        let expected = expected.source_name();
+        let actual = actual.source_name();
         let msg = match ctx {
             "function body" | "getter body" | "local function body" | "return" => {
                 format!("return type mismatch: expected '{expected}', actual '{actual}'.")
@@ -13451,6 +14081,7 @@ impl<'a> Checker<'a> {
     }
 
     fn expr_statement(&mut self, e: ExprId) -> Ty {
+        self.discarded_exprs.insert(e);
         self.expr_with_context(e, false)
     }
 
@@ -14050,23 +14681,22 @@ impl<'a> Checker<'a> {
                                     interface,
                                     vararg: sig.vararg(),
                                     suspend: sig.is_suspend(),
+                                    projected_return_hazard: sig.projected_return_hazard,
                                 },
                             );
                             return self.set(e, sig.ret);
                         }
                     }
                 }
-                // A same-module extension `operator fun Recv.get(i, j, …)`.
-                if let Some(sig) = self
-                    .syms
-                    .ext_fun_overloads(at, "get")
-                    .iter()
-                    .find(|s| s.params.len() == its.len())
-                    .cloned()
+                let lambda_literals = self.lambda_literal_args(&indices);
+                if let Some((selected, sig)) = self
+                    .selected_source_extension_with_lambda_args(at, "get", &its, &lambda_literals)
+                    .filter(|(_, signature)| signature.is_operator())
                 {
                     for (i, &pt) in sig.params.iter().enumerate() {
                         self.expect_assignable(pt, its[i], self.span(indices[i]), "index");
                     }
+                    self.mark_source_call(e, selected.source_key);
                     let owner =
                         sig.source_file
                             .zip(sig.source_decl)
@@ -14084,6 +14714,7 @@ impl<'a> Checker<'a> {
                             params: sig.params.clone(),
                             ret: sig.ret,
                             owner,
+                            source: selected.source_key,
                         },
                     );
                     return self.set(e, sig.ret);
@@ -14094,15 +14725,19 @@ impl<'a> Checker<'a> {
                     self.resolved_calls.insert(e, ResolvedCall::Member(m));
                     return self.set(e, ret);
                 }
+                if let Some(ret) = self.record_library_extension_call(Some(e), "get", at, &its, &[])
+                {
+                    return self.set(e, ret);
+                }
                 self.diags.error(
                     self.span(e),
                     if indices.len() == 1 {
-                        format!("'{}' is not an array (cannot index)", at.name())
+                        format!("'{}' is not an array (cannot index)", at.source_name())
                     } else {
                         format!(
                             "no 'get' operator taking {} indices on '{}'",
                             its.len(),
-                            at.name()
+                            at.source_name()
                         )
                     },
                 );
@@ -14707,6 +15342,7 @@ impl<'a> Checker<'a> {
                                                         crate::symbol_resolver::ResolvedMember {
                                                             member: m,
                                                             ret,
+                                                            projected_return_hazard: false,
                                                             suspend,
                                                         },
                                                     ),
@@ -14756,23 +15392,41 @@ impl<'a> Checker<'a> {
                 // this module): the member/classpath/library lookups above don't see module extensions, so
                 // resolve it here on the non-null receiver. The lowerer emits the static extension call.
                 let result = if result == Ty::Error {
-                    let arg_tys = args.as_deref().map_or_else(Vec::new, |a| self.arg_tys(a));
-                    self.resolver()
-                        .resolve_symbol(
-                            crate::symbol_resolver::SymRecv::Value(rt.non_null()),
-                            &name,
-                            &[],
-                            &[],
-                        )
-                        .map(crate::symbol_resolver::Symbol::overloads)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(crate::libraries::FunctionInfo::is_extension)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .find(|o| o.extension_value_params().len() == arg_tys.len())
-                        .map(|fi| fi.callable.ret)
-                        .unwrap_or(Ty::Error)
+                    let arg_exprs = args.as_deref().unwrap_or_default();
+                    let arg_tys = self.arg_tys(arg_exprs);
+                    let lambda_literals = self.lambda_literal_args(arg_exprs);
+                    if let Some((selected, sig)) = self.selected_source_extension_with_lambda_args(
+                        rt.non_null(),
+                        &name,
+                        &arg_tys,
+                        &lambda_literals,
+                    ) {
+                        self.expect_call_args(&sig.params, false, arg_exprs, &arg_tys);
+                        self.mark_source_call(e, selected.source_key);
+                        let owner =
+                            sig.source_file
+                                .zip(sig.source_decl)
+                                .and_then(|(file, declaration)| {
+                                    self.syms
+                                        .fn_facades_by_decl
+                                        .get(&(file, declaration.0))
+                                        .copied()
+                                });
+                        self.resolved_calls.insert(
+                            e,
+                            ResolvedCall::ModuleExtension {
+                                receiver: rt.non_null(),
+                                name: name.clone(),
+                                params: sig.params.clone(),
+                                ret: sig.ret,
+                                owner,
+                                source: selected.source_key,
+                            },
+                        );
+                        sig.ret
+                    } else {
+                        Ty::Error
+                    }
                 } else {
                     result
                 };
@@ -15224,14 +15878,41 @@ impl<'a> Checker<'a> {
                     && lt.nullable_primitive().is_some()
                     && rt != Ty::Error
                 {
-                    if let Some(param) = self
-                        .syms
-                        .ext_fun_overloads(lt, "compareTo")
-                        .iter()
-                        .find(|s| s.ret == Ty::Int)
-                        .and_then(|s| s.single_param())
+                    let lambda_literals = self.lambda_literal_args(&[rhs]);
+                    if let Some((selected, signature)) = self
+                        .selected_source_extension_with_lambda_args(
+                            lt,
+                            "compareTo",
+                            &[rt],
+                            &lambda_literals,
+                        )
+                        .filter(|(_, signature)| {
+                            signature.is_operator() && signature.ret == Ty::Int
+                        })
                     {
+                        let Some(param) = signature.single_param() else {
+                            return self.check_binary(op, lt, rt, self.span(e));
+                        };
                         self.expect_assignable(param, rt, self.span(rhs), "operator argument");
+                        let owner = signature.source_file.zip(signature.source_decl).and_then(
+                            |(file, declaration)| {
+                                self.syms
+                                    .fn_facades_by_decl
+                                    .get(&(file, declaration.0))
+                                    .copied()
+                            },
+                        );
+                        self.resolved_operator_calls.insert(
+                            (e, SyntheticOperatorCall::CompareTo),
+                            ResolvedCall::ModuleExtension {
+                                receiver: lt,
+                                name: "compareTo".to_string(),
+                                params: signature.params.clone(),
+                                ret: signature.ret,
+                                owner,
+                                source: selected.source_key,
+                            },
+                        );
                         return self.set(e, Ty::Boolean);
                     }
                 }
@@ -15536,7 +16217,7 @@ impl<'a> Checker<'a> {
                                     && ct != Ty::Error
                                     && !self.when_values_comparable(st, ct) =>
                             {
-                                self.diags.error(self.span(cnd), format!("when condition type '{}' is not comparable to subject '{}'", ct.name(), st.name()));
+                                self.diags.error(self.span(cnd), format!("when condition type '{}' is not comparable to subject '{}'", ct.source_name(), st.source_name()));
                             }
                             // subjectless form: condition must be Boolean
                             None => self.expect_assignable(
@@ -15994,7 +16675,7 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    if let Some(sig) = self.syms.ext_fun(rty, &name).cloned() {
+                    if let Some(sig) = self.unique_visible_source_extension(rty, &name).cloned() {
                         if sig.requires_all_args() {
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                         }
@@ -16066,9 +16747,10 @@ impl<'a> Checker<'a> {
             .or_else(|| self.syms.libraries.boxed_primitive(ot))
             .unwrap_or(ot);
         match op {
-            UnOp::Neg if builtin_ty.is_numeric() => builtin_ty,
-            // Unary `+` is identity on the numeric types (`+x : typeof x`).
-            UnOp::Plus if builtin_ty.is_numeric() => builtin_ty,
+            UnOp::Neg | UnOp::Plus if builtin_ty.is_numeric() => match builtin_ty {
+                Ty::Byte | Ty::Short => Ty::Int,
+                _ => builtin_ty,
+            },
             UnOp::Not if builtin_ty == Ty::Boolean => Ty::Boolean,
             _ if ot == Ty::Error => Ty::Error,
             _ => {
@@ -16083,7 +16765,7 @@ impl<'a> Checker<'a> {
                 }
                 self.diags.error(
                     span,
-                    format!("operator cannot be applied to '{}'", ot.name()),
+                    format!("operator cannot be applied to '{}'", ot.source_name()),
                 );
                 Ty::Error
             }
@@ -16216,13 +16898,13 @@ impl<'a> Checker<'a> {
             BinOp::Eq | BinOp::Ne => format!(
                 "operator '{}' cannot be applied to '{}' and '{}'.",
                 if op == BinOp::Eq { "==" } else { "!=" },
-                lt.name(),
-                rt.name()
+                lt.source_name(),
+                rt.source_name()
             ),
             _ => format!(
                 "operator cannot be applied to '{}' and '{}'",
-                lt.name(),
-                rt.name()
+                lt.source_name(),
+                rt.source_name()
             ),
         };
         if matches!(op, BinOp::Eq | BinOp::Ne) {
@@ -16549,19 +17231,12 @@ impl<'a> Checker<'a> {
         // A MODULE extension on the receiver (`fun Recv.name(args)` declared in this compilation) — keyed
         // by the receiver's erased key, exactly as a qualified `recv.name(args)` extension call
         // resolves. Lets a bare call inside a receiver lambda reach a same-module extension on `this`.
-        if let Some(sig) = self
-            .syms
-            .ext_fun_overloads(rt, name)
-            .iter()
-            .find(|s| !s.vararg() && s.params.len() == arg_tys.len())
-            .cloned()
+        let lambda_literals = self.lambda_literal_args(args);
+        if let Some((selected, sig)) = self
+            .selected_source_extension_with_lambda_args(rt, name, arg_tys, &lambda_literals)
+            .filter(|(_, signature)| !signature.vararg())
         {
-            self.mark_source_call(
-                call,
-                sig.source_file
-                    .zip(sig.source_decl)
-                    .map(|(file, decl)| (file, decl.0)),
-            );
+            self.mark_source_call(call, selected.source_key);
             for (i, (p, a)) in sig.params.iter().zip(arg_tys).enumerate() {
                 self.expect_assignable(*p, *a, self.span(args[i]), "argument");
             }
@@ -16968,13 +17643,24 @@ impl<'a> Checker<'a> {
             "resolve",
             "record_library_extension_call {name} recv={receiver:?} args={arg_tys:?} targs={type_args:?}"
         );
+        let lambda_literals = call
+            .and_then(|call| match self.file.expr(call) {
+                Expr::Call { args, .. } => Some(self.lambda_literal_args(args)),
+                Expr::SafeCall {
+                    args: Some(args), ..
+                } => Some(self.lambda_literal_args(args)),
+                _ => None,
+            })
+            .filter(|literals| literals.len() == arg_tys.len())
+            .unwrap_or_default();
         let c = self
             .resolver()
-            .resolve_symbol_with_literal_args(
+            .resolve_symbol_with_literal_and_lambda_args(
                 crate::symbol_resolver::SymRecv::Value(receiver),
                 name,
                 arg_tys,
                 integer_literals,
+                &lambda_literals,
                 type_args,
             )
             .and_then(crate::symbol_resolver::Symbol::extension_call)?;
@@ -17050,7 +17736,8 @@ impl<'a> Checker<'a> {
             .get(&call.0)
             .cloned()
             .filter(|ns| ns.iter().any(Option::is_some))?;
-        let mut mapping_probe = CallArgMappingProbe::default();
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let mut mapping_errors = Vec::new();
         let mut candidates: Vec<_> = self
             .resolver()
             .resolve_symbol(
@@ -17066,19 +17753,76 @@ impl<'a> Checker<'a> {
             .filter(|o| o.call_sig.has_param_names())
             .filter_map(|o| {
                 let params = o.extension_value_params().to_vec();
-                let slots = mapping_probe.observe(map_call_sig_args_with_trailing(
+                let slots = match map_call_sig_args_with_trailing(
                     args,
                     Some(&names),
                     &o.call_sig,
-                    self.file.call_has_trailing_lambda.contains(&call.0),
-                ))?;
-                let mut score = self.call_slot_score(&params, &slots)?;
+                    trailing_lambda,
+                ) {
+                    Ok(slots) => slots,
+                    Err(error) => {
+                        mapping_errors.push((error, o));
+                        return None;
+                    }
+                };
+                let mut score = self.call_slot_score(&params, &slots);
                 if matches!(o.callable.origin, Origin::Module { .. }) {
-                    score += 1_000_000;
+                    score = score.map(|score| score + 1_000_000);
                 }
                 Some((score, o, params, slots))
             })
             .collect();
+        if candidates.is_empty() {
+            if let Some((error, candidate)) = take_unanimous_mapping_error(&mut mapping_errors) {
+                self.report_callable_arg_mapping_error(
+                    call,
+                    args,
+                    DiagnosticFunction {
+                        name,
+                        params: candidate.extension_value_params(),
+                        param_names: &candidate.call_sig.param_names,
+                        param_defaults: &candidate.call_sig.param_defaults,
+                        required: candidate.call_sig.required,
+                        vararg: candidate.call_sig.vararg,
+                        context_count: 0,
+                        ret: candidate.callable.ret,
+                        source_display: None,
+                    },
+                    error,
+                );
+                return Some(Ty::Error);
+            }
+            if !mapping_errors.is_empty() {
+                self.diags.error(
+                    self.call_callee_name_span(call),
+                    "none of the following candidates is applicable:".to_string(),
+                );
+                return Some(Ty::Error);
+            }
+            return None;
+        }
+        if candidates.iter().all(|(score, _, _, _)| score.is_none()) {
+            if candidates.len() == 1 && mapping_errors.is_empty() {
+                let (_, _, params, slots) = candidates.pop().unwrap();
+                for (parameter, argument) in params.iter().zip(&slots) {
+                    if let Some(argument) = argument {
+                        self.expect_assignable(
+                            *parameter,
+                            self.expr_types[argument.0 as usize],
+                            self.span(*argument),
+                            "argument",
+                        );
+                    }
+                }
+            } else {
+                self.diags.error(
+                    self.span(call),
+                    "none of the following candidates is applicable:".to_string(),
+                );
+            }
+            return Some(Ty::Error);
+        }
+        candidates.retain(|(score, _, _, _)| score.is_some());
         candidates.sort_by_key(|(score, _, _, _)| std::cmp::Reverse(*score));
         if candidates
             .get(1)
@@ -17087,13 +17831,10 @@ impl<'a> Checker<'a> {
         {
             return None;
         }
-        let Some((_, fi, params, slots)) = candidates.into_iter().next() else {
-            if let Some(error) = mapping_probe.into_unanimous_error() {
-                self.report_call_arg_mapping_error(call, args, error);
-                return Some(Ty::Error);
-            }
+        let (_, fi, params, slots) = candidates.into_iter().next()?;
+        if matches!(fi.callable.origin, Origin::Module { .. }) {
             return None;
-        };
+        }
         let slot_tys: Vec<Option<Ty>> = slots
             .iter()
             .map(|slot| slot.map(|arg| self.expr_types[arg.0 as usize]))
@@ -17220,11 +17961,11 @@ impl<'a> Checker<'a> {
         name: &str,
         params: &[Ty],
     ) -> Option<DestructureComponentTarget> {
-        let sig = self
-            .syms
-            .ext_fun_overloads(recv, name)
-            .iter()
-            .find(|sig| !sig.vararg() && sig.params.as_slice() == params)?;
+        let (_, sig) =
+            self.selected_source_extension(recv, name, params)
+                .filter(|(_, signature)| {
+                    !signature.vararg() && signature.params.as_slice() == params
+                })?;
         Some(DestructureComponentTarget::ModuleExtension {
             receiver: recv,
             name: name.to_string(),
@@ -18755,6 +19496,82 @@ impl<'a> Checker<'a> {
         None
     }
 
+    fn probe_property_read(&self, rt: Ty, name: &str) -> Option<PropertyReadProbe> {
+        if let Ty::Obj(internal_name, _) = rt {
+            if let Some((owner, mut ty, _)) = self.lookup_prop_with_owner_name(internal_name, name)
+            {
+                if let Some(cs) = self.syms.class_by_type_name(owner) {
+                    if let Some(&(i, definitely_non_null)) = cs.generic_props.get(name) {
+                        let applied = if owner == internal_name {
+                            Some(rt)
+                        } else {
+                            self.applied_source_supertype(rt, owner)
+                        };
+                        if let Some(&arg) = applied.and_then(|ty| ty.type_args().get(i)) {
+                            ty = if definitely_non_null {
+                                arg.non_null()
+                            } else {
+                                arg
+                            };
+                        } else if let Some(bound) = cs.tparam_bounds.get(i) {
+                            if *bound != Ty::Error && *bound != Ty::obj("kotlin/Any") {
+                                ty = *bound;
+                            }
+                        }
+                    } else if let Some(&shape) = cs.generic_function_props.get(name) {
+                        let applied = if owner == internal_name {
+                            rt
+                        } else {
+                            self.applied_source_supertype(rt, owner).unwrap_or(rt)
+                        };
+                        ty = crate::symbol_resolver::ty_subst(
+                            shape,
+                            &cs.type_parameter_bindings(applied),
+                        );
+                    }
+                }
+                return Some(PropertyReadProbe::Found {
+                    ty,
+                    access: self.effective_property_visibility(internal_name, name),
+                });
+            }
+            if let Some(member) = self.resolve_external_inherited_property(internal_name, name) {
+                return Some(PropertyReadProbe::Found {
+                    ty: member.ret,
+                    access: None,
+                });
+            }
+        }
+        if !rt.is_nullable() {
+            if let Some(member) = self.resolve_property_member(rt, name) {
+                return Some(PropertyReadProbe::Found {
+                    ty: member.ret,
+                    access: None,
+                });
+            }
+        }
+        match self.member_extension_property(rt, name) {
+            Ok(Some((ty, _, visibility, owner))) => {
+                return Some(PropertyReadProbe::Found {
+                    ty,
+                    access: Some((visibility, owner)),
+                });
+            }
+            Err(()) => return Some(PropertyReadProbe::Ambiguous),
+            Ok(None) => {}
+        }
+        if let Some((ty, _)) = self.syms.ext_prop(rt, name) {
+            return Some(PropertyReadProbe::Found { ty, access: None });
+        }
+        self.resolver()
+            .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
+            .and_then(crate::symbol_resolver::Symbol::extension_property_getter)
+            .map(|getter| PropertyReadProbe::Found {
+                ty: getter.ret,
+                access: None,
+            })
+    }
+
     fn resolve_external_inherited_property(
         &self,
         receiver: TypeName,
@@ -18852,7 +19669,7 @@ impl<'a> Checker<'a> {
                     nullable_member_span,
                     format!(
                         "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type '{}'.",
-                        rt.name()
+                        rt.source_name()
                     ),
                 );
                 return Ty::Error;
@@ -18919,7 +19736,9 @@ impl<'a> Checker<'a> {
     ) -> ClasspathMemberSlotCall {
         let arg_names = self.file.call_arg_names.get(&call.0).cloned();
         let needs_slot_map = arg_names.is_some();
-        let mut mapping_probe = CallArgMappingProbe::default();
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let mut mapping_errors = Vec::new();
+        let mut direct_candidate = false;
         let mut candidates: Vec<_> = self
             .resolver()
             .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
@@ -18930,20 +19749,118 @@ impl<'a> Checker<'a> {
             .filter(|o| o.call_sig.has_param_names())
             .filter_map(|o| {
                 let params = o.callable.params.clone();
-                let needs_slot_map = needs_slot_map || args.len() != params.len();
+                let needs_slot_map = needs_slot_map
+                    || args.len() != params.len()
+                    || (trailing_lambda && o.call_sig.vararg_index == params.len().checked_sub(1));
                 if !needs_slot_map {
+                    direct_candidate = true;
                     return None;
                 }
-                let slots = mapping_probe.observe(map_call_sig_args_with_trailing(
+                let slots = match map_call_sig_args_with_trailing(
                     args,
                     arg_names.as_deref(),
                     &o.call_sig,
-                    self.file.call_has_trailing_lambda.contains(&call.0),
-                ))?;
-                let score = self.call_slot_score(&params, &slots)?;
+                    trailing_lambda,
+                ) {
+                    Ok(slots) => slots,
+                    Err(error) => {
+                        mapping_errors.push((error, o));
+                        return None;
+                    }
+                };
+                let score = self.call_slot_score(&params, &slots);
                 Some((score, o, params, slots))
             })
             .collect();
+        if direct_candidate {
+            return ClasspathMemberSlotCall::NoMatch;
+        }
+        if candidates.iter().all(|(score, _, _, _)| score.is_none()) {
+            let arg_tys: Vec<Ty> = args
+                .iter()
+                .map(|argument| self.expr_types[argument.0 as usize])
+                .collect();
+            let integer_literals = self.integer_literal_args(args);
+            let lambda_literals = self.lambda_literal_args(args);
+            let type_args = self.resolved_explicit_type_args(call);
+            let extension_applies = self
+                .resolver()
+                .resolve_symbol_with_literal_and_lambda_args(
+                    crate::symbol_resolver::SymRecv::Value(rt),
+                    name,
+                    &arg_tys,
+                    &integer_literals,
+                    &lambda_literals,
+                    &type_args,
+                )
+                .and_then(crate::symbol_resolver::Symbol::extension_call)
+                .is_some();
+            if extension_applies {
+                return ClasspathMemberSlotCall::NoMatch;
+            }
+        }
+        if candidates.is_empty() {
+            let unanimous = mapping_errors
+                .first()
+                .is_some_and(|(first, _)| mapping_errors.iter().all(|(error, _)| error == first));
+            if unanimous {
+                let (error, candidate) = mapping_errors.remove(0);
+                self.report_callable_arg_mapping_error(
+                    call,
+                    args,
+                    DiagnosticFunction {
+                        name,
+                        params: &candidate.callable.params,
+                        param_names: &candidate.call_sig.param_names,
+                        param_defaults: &candidate.call_sig.param_defaults,
+                        required: candidate.call_sig.required,
+                        vararg: candidate.call_sig.vararg,
+                        context_count: 0,
+                        ret: candidate.callable.ret,
+                        source_display: matches!(candidate.callable.origin, Origin::Module { .. })
+                            .then(|| {
+                                self.member_source_display(
+                                    candidate.callable.owner,
+                                    name,
+                                    candidate.callable.ret,
+                                )
+                            })
+                            .flatten(),
+                    },
+                    error,
+                );
+                return ClasspathMemberSlotCall::Rejected;
+            }
+            if !mapping_errors.is_empty() {
+                self.diags.error(
+                    self.call_callee_name_span(call),
+                    "none of the following candidates is applicable:".to_string(),
+                );
+                return ClasspathMemberSlotCall::Rejected;
+            }
+        }
+        if !candidates.is_empty() && candidates.iter().all(|(score, _, _, _)| score.is_none()) {
+            if candidates.len() == 1 && mapping_errors.is_empty() {
+                let (_, _, params, slots) = candidates.pop().unwrap();
+                for (parameter, argument) in params.iter().zip(&slots) {
+                    if let Some(argument) = argument {
+                        self.expect_assignable(
+                            *parameter,
+                            self.expr_types[argument.0 as usize],
+                            self.span(*argument),
+                            "argument",
+                        );
+                    }
+                }
+            } else {
+                self.diags.error(
+                    self.call_callee_name_span(call),
+                    "none of the following candidates is applicable:".to_string(),
+                );
+            }
+            return ClasspathMemberSlotCall::Rejected;
+        }
+        candidates.retain(|(score, _, _, _)| score.is_some());
         candidates
             .sort_by_key(|(score, member, _, _)| (std::cmp::Reverse(*score), member.receiver_rank));
         if candidates.get(1).zip(candidates.first()).is_some_and(
@@ -18958,12 +19875,6 @@ impl<'a> Checker<'a> {
             return ClasspathMemberSlotCall::Ambiguous;
         }
         let Some((_, fi, params, slots)) = candidates.into_iter().next() else {
-            if arg_names.is_some() {
-                if let Some(error) = mapping_probe.into_unanimous_error() {
-                    self.report_call_arg_mapping_error(call, args, error);
-                    return ClasspathMemberSlotCall::Rejected;
-                }
-            }
             return ClasspathMemberSlotCall::NoMatch;
         };
         for (i, slot) in slots.iter().enumerate() {
@@ -18996,6 +19907,7 @@ impl<'a> Checker<'a> {
                     interface,
                     vararg: fi.call_sig.vararg,
                     suspend: fi.callable.suspend,
+                    projected_return_hazard: fi.projected_return_hazard,
                 },
             );
         } else {
@@ -19008,6 +19920,7 @@ impl<'a> Checker<'a> {
                 ResolvedCall::Member(crate::symbol_resolver::ResolvedMember {
                     member,
                     ret,
+                    projected_return_hazard: fi.projected_return_hazard,
                     suspend: fi.flags.suspend,
                 }),
             );
@@ -19526,6 +20439,22 @@ impl<'a> Checker<'a> {
                 .unwrap_or(fi.ret)
         };
         let owner = fi.owner.unwrap_or(internal_name);
+        let projected_return_hazard = self
+            .syms
+            .class_by_type_name(owner)
+            .and_then(|class| {
+                class
+                    .methods_named(name)
+                    .iter()
+                    .find(|signature| signature.params == params && signature.ret == fi.ret)
+            })
+            .is_some_and(|signature| signature.projected_return_hazard)
+            && ret.is_erased_top()
+            && !self
+                .file
+                .call_type_args
+                .get(&call.0)
+                .is_some_and(|arguments| !arguments.is_empty());
         if fi.visibility != Visibility::Public {
             self.reject_if_inaccessible(
                 fi.visibility,
@@ -19547,6 +20476,7 @@ impl<'a> Checker<'a> {
                 interface: fi.is_interface(),
                 vararg: cs.vararg,
                 suspend: fi.suspend(),
+                projected_return_hazard,
             },
         );
         if let Some(slots) = mapped_slots {
@@ -19763,7 +20693,11 @@ impl<'a> Checker<'a> {
                                 let mut partial: Vec<Option<Ty>> =
                                     arg_tys.iter().map(|t| Some(*t)).collect();
                                 partial[last] = None;
-                                let shape = self.top_level_lambda_shape(&name, &partial);
+                                let shape = self.top_level_lambda_shape_in_scope(
+                                    &name,
+                                    &partial,
+                                    Some(&pkg_scope),
+                                );
                                 if let Some(pt) = shape
                                     .as_ref()
                                     .and_then(|s| s.param_types.as_ref())
@@ -20703,11 +21637,12 @@ impl<'a> Checker<'a> {
                         .collect()
                 });
                 let integer_literals = self.integer_literal_args(args);
+                let extension_lambda_literals = self.lambda_literal_args(args);
                 let has_classpath_sam = classpath_sam_pts
                     .as_ref()
                     .is_some_and(|params| params.iter().any(Option::is_some));
                 let lambda_literals = if has_classpath_sam {
-                    self.lambda_literal_args(args)
+                    extension_lambda_literals.clone()
                 } else {
                     Vec::new()
                 };
@@ -20806,62 +21741,6 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
-                // A CLASSPATH member call with NAMED or OMITTED defaulted arguments
-                // (`workspace.copy(owner = o)` on a classpath data class): the argument-fit
-                // resolution above can't match (1 supplied arg vs 7 parameters). Map the labels
-                // onto positions via the `@Metadata` parameter names + default flags, type-check
-                // each SUPPLIED argument against its mapped parameter, and leave emission to the
-                // lowerer's `name$default` synthetic path (`lower_library_default_member_call`).
-                {
-                    use crate::symbol_resolver::{SymRecv, Symbol};
-                    let member = self
-                        .resolver()
-                        .resolve_symbol(SymRecv::Value(rt), &name, &[], &[])
-                        .map(Symbol::overloads)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|o| o.kind == crate::libraries::FnKind::Member)
-                        .filter(|o| matches!(o.callable.origin, Origin::Library))
-                        .find(|o| {
-                            (arg_names.is_some() || arg_tys.len() != o.callable.params.len())
-                                && o.call_sig.can_map_omitted_args(o.callable.params.len())
-                        });
-                    if let Some(fi) = member {
-                        if let Ok(slots) =
-                            map_call_sig_args(args, arg_names.as_deref(), &fi.call_sig)
-                        {
-                            let logical = &fi.callable.params;
-                            for (i, slot) in slots.iter().enumerate() {
-                                if let Some(a) = slot {
-                                    self.expect_assignable(
-                                        logical[i],
-                                        self.expr_types[a.0 as usize],
-                                        self.span(*a),
-                                        "argument",
-                                    );
-                                }
-                            }
-                            // Record the resolved member AND the argument→slot mapping so the lowerer
-                            // emits this through the member's `name$default` synthetic — without the
-                            // slot record it would see fewer args than parameters and bail.
-                            let ret = fi.callable.ret;
-                            let member = fi.member_with_return(ret);
-                            if slots.iter().any(Option::is_none) {
-                                self.record_default_member_call(call, rt, &member, slots.len());
-                            }
-                            self.resolved_calls.insert(
-                                call,
-                                ResolvedCall::Member(crate::symbol_resolver::ResolvedMember {
-                                    member,
-                                    ret,
-                                    suspend: fi.flags.suspend,
-                                }),
-                            );
-                            self.resolved_call_arg_slots.insert(call, slots);
-                            return ret;
-                        }
-                    }
-                }
                 // Instance method call on a class value: `p.method(args)` (own or inherited).
                 if matches!(rt, Ty::Obj(..)) {
                     // Runs after direct resolution, so the receiver's own override wins.
@@ -20923,10 +21802,12 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
-                        // Unary `a.unaryMinus()` / `a.unaryPlus()` → the receiver's numeric type.
                         if matches!(name.as_str(), "unaryMinus" | "unaryPlus") && arg_tys.is_empty()
                         {
-                            return rt;
+                            return match rt {
+                                Ty::Byte | Ty::Short => Ty::Int,
+                                _ => rt,
+                            };
                         }
                     }
                     // `Char` arithmetic methods: `c.plus(n): Char`, `c.minus(n): Char`, `c.minus(c2): Int`.
@@ -21012,6 +21893,10 @@ impl<'a> Checker<'a> {
                     if let Some((c, is_member)) =
                         self.lambda_return_overload(rt, &name, lam_ret, &arg_tys)
                     {
+                        if is_member && rt.is_nullable() {
+                            self.report_nullable_receiver_call(call, rt);
+                            return Ty::Error;
+                        }
                         let ret = c.ret;
                         // An instance member has no other lowerer resolution path (records as a member);
                         // an extension flows through the general extension-emit branch (records as one).
@@ -21035,134 +21920,106 @@ impl<'a> Checker<'a> {
                 // (`@InlineOnly` extensions — scope fns `takeIf`/`let`/… — are resolved and recorded by
                 // `record_library_extension_call` above: one extension resolution admits inline, and the
                 // lowerer splices via the callable's `inline` flag. No separate inline path here.)
-                // User-defined extension function in this file (invokestatic on the file facade), resolved
-                // through the current module as a `SymbolSource`. The exact-receiver overload is rung 0;
-                // its `callable.params` prepend the receiver and `callable.descriptor` is the full static
-                // `(recv + params)ret` the emitter wants.
-                {
-                    // Select the overload matching this call's arguments (an extension may be
-                    // overloaded by arity — `fun R.f()` and `fun R.f(x)`); fall back to the first when
-                    // none fits exactly, preserving the omitted-default / named-argument handling below.
-                    let exts: Vec<_> = self
-                        .resolver()
-                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
-                        .map(crate::symbol_resolver::Symbol::overloads)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|o| o.is_extension() && o.receiver_rank == 0)
-                        .collect();
-                    let module_ext = exts
-                        .iter()
-                        .find(|fi| {
-                            let lp = fi.extension_value_params();
-                            lp.len() == arg_tys.len()
-                                && lp
-                                    .iter()
-                                    .zip(&arg_tys)
-                                    .all(|(p, a)| crate::symbol_resolver::arg_fits(p, a))
-                        })
-                        .or_else(|| exts.first())
-                        .cloned();
-                    if let Some(fi) = module_ext {
-                        self.mark_source_call(call, fi.source_key);
-                        let logical = fi.extension_value_params().to_vec();
-                        let cs = &fi.call_sig;
-                        if (arg_names.is_some() || arg_tys.len() != logical.len())
-                            && cs.can_map_omitted_args(logical.len())
-                        {
-                            // Omitted/named extension arguments filled by parameter defaults.
-                            match map_call_sig_args_with_trailing(
-                                args,
-                                arg_names.as_deref(),
-                                cs,
-                                self.file.call_has_trailing_lambda.contains(&call.0),
-                            ) {
-                                Ok(slots) => {
-                                    for (i, slot) in slots.iter().enumerate() {
-                                        if let Some(a) = slot {
-                                            self.expect_assignable(
-                                                logical[i],
-                                                self.expr_types[a.0 as usize],
-                                                self.span(*a),
-                                                "argument",
-                                            );
-                                        }
+                if let Some((fi, sig)) = self.selected_source_extension_with_lambda_args(
+                    rt,
+                    &name,
+                    &arg_tys,
+                    &extension_lambda_literals,
+                ) {
+                    self.mark_source_call(call, fi.source_key);
+                    let owner =
+                        sig.source_file
+                            .zip(sig.source_decl)
+                            .and_then(|(file, declaration)| {
+                                self.syms
+                                    .fn_facades_by_decl
+                                    .get(&(file, declaration.0))
+                                    .copied()
+                            });
+                    self.resolved_calls.insert(
+                        call,
+                        ResolvedCall::ModuleExtension {
+                            receiver: rt,
+                            name: name.clone(),
+                            params: sig.params.clone(),
+                            ret: sig.ret,
+                            owner,
+                            source: fi.source_key,
+                        },
+                    );
+                    let logical = fi.extension_value_params().to_vec();
+                    let cs = &fi.call_sig;
+                    if (arg_names.is_some() || arg_tys.len() != logical.len())
+                        && cs.can_map_omitted_args(logical.len())
+                    {
+                        match map_call_sig_args_with_trailing(
+                            args,
+                            arg_names.as_deref(),
+                            cs,
+                            self.file.call_has_trailing_lambda.contains(&call.0),
+                        ) {
+                            Ok(slots) => {
+                                for (i, slot) in slots.iter().enumerate() {
+                                    if let Some(a) = slot {
+                                        self.expect_assignable(
+                                            logical[i],
+                                            self.expr_types[a.0 as usize],
+                                            self.span(*a),
+                                            "argument",
+                                        );
                                     }
                                 }
-                                Err(error) => self.report_call_arg_mapping_error(call, args, error),
                             }
-                        } else if logical.len() != arg_tys.len() {
-                            self.diags.error(
-                                span,
-                                format!(
-                                    "extension '{name}' expects {} args, got {}",
-                                    logical.len(),
-                                    arg_tys.len()
-                                ),
-                            );
-                        } else {
-                            self.expect_call_args(&logical, false, args, &arg_tys);
+                            Err(error) => self.report_call_arg_mapping_error(call, args, error),
                         }
-                        return fi.callable.ret;
+                    } else if logical.len() != arg_tys.len() {
+                        self.diags.error(
+                            span,
+                            format!(
+                                "extension '{name}' expects {} args, got {}",
+                                logical.len(),
+                                arg_tys.len()
+                            ),
+                        );
+                    } else {
+                        self.expect_call_args(&logical, false, args, &arg_tys);
                     }
-                }
-                if erased_type_key(rt) != erased_type_key(Ty::obj("kotlin/Any")) {
-                    let module_ext = self
-                        .resolver()
-                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
-                        .map(crate::symbol_resolver::Symbol::overloads)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .find(|o| {
-                            let params = o.extension_value_params();
-                            o.is_extension()
-                                && o.receiver_rank == 1
-                                && params.len() == arg_tys.len()
-                                && params.iter().zip(&arg_tys).all(|(param, arg)| {
-                                    crate::symbol_resolver::arg_fits(param, arg)
-                                })
-                        });
-                    if let Some(fi) = module_ext {
-                        self.mark_source_call(call, fi.source_key);
-                        let logical = fi.extension_value_params().to_vec();
-                        if logical.len() == arg_tys.len() {
-                            if let Some(decl) =
-                                self.file
-                                    .decls
-                                    .iter()
-                                    .find_map(|&d| match self.file.decl(d) {
-                                        // Only INLINE generic-receiver extensions are handled here (the body
-                                        // is spliced with `this` specialized to the actual type). A NON-inline
-                                        // generic extension needs erased-`Object` boxing at the real call,
-                                        // which this path doesn't model — leave it unresolved (skip).
-                                        Decl::Fun(fd)
-                                            if fd.name == name
-                                                && fd.is_inline()
-                                                && fd.receiver.as_ref().is_some_and(|r| {
-                                                    fd.type_params.iter().any(|tp| tp == &r.name)
-                                                }) =>
-                                        {
-                                            Some(fd.clone())
-                                        }
-                                        _ => None,
-                                    })
-                            {
-                                self.expect_call_args(&logical, false, args, &arg_tys);
-                                let recv_tp = decl.receiver.as_ref().map(|r| r.name.clone());
-                                let ret = match &decl.ret {
-                                    Some(r) if Some(&r.name) == recv_tp.as_ref() => rt,
-                                    Some(r) => decl
-                                        .params
+                    if erased_type_key(rt) != erased_type_key(Ty::obj("kotlin/Any")) {
+                        if let Some(decl) = self.source_function_decl(&fi).filter(|function| {
+                            function.is_inline()
+                                && function.receiver.as_ref().is_some_and(|receiver| {
+                                    function
+                                        .type_params
                                         .iter()
-                                        .zip(&arg_tys)
-                                        .find_map(|(p, a)| (p.ty.name == r.name).then_some(*a))
-                                        .unwrap_or(fi.callable.ret),
-                                    None => Ty::Unit,
-                                };
-                                // Inline only (the body is spliced — no `ext_call` to emit).
-                                return ret;
-                            }
+                                        .any(|parameter| parameter == &receiver.name)
+                                })
+                        }) {
+                            let recv_tp = decl.receiver.as_ref().map(|r| r.name.clone());
+                            return match &decl.ret {
+                                Some(r) if Some(&r.name) == recv_tp.as_ref() => rt,
+                                Some(r) => decl
+                                    .params
+                                    .iter()
+                                    .zip(&arg_tys)
+                                    .find_map(|(p, a)| (p.ty.name == r.name).then_some(*a))
+                                    .unwrap_or(sig.ret),
+                                None => Ty::Unit,
+                            };
                         }
+                    }
+                    return sig.ret;
+                }
+                if let Some(sig) = self.unique_visible_source_extension(rt, &name) {
+                    if sig.params.len() != arg_tys.len() {
+                        self.diags.error(
+                            span,
+                            format!(
+                                "extension '{name}' expects {} args, got {}",
+                                sig.params.len(),
+                                arg_tys.len()
+                            ),
+                        );
+                        return Ty::Error;
                     }
                 }
                 // `hashCode`/`toString`/`equals` are inherited from `Object` by every reference type.
@@ -21172,7 +22029,7 @@ impl<'a> Checker<'a> {
                     match (name.as_str(), arg_tys.len()) {
                         ("hashCode", 0) => return Ty::Int,
                         ("toString", 0) => return Ty::String,
-                        ("equals", 1) => return Ty::Boolean,
+                        ("equals", 1) if !rt.is_nullable() => return Ty::Boolean,
                         _ => {}
                     }
                 }
@@ -21345,6 +22202,61 @@ impl<'a> Checker<'a> {
                         self.check_module_member_call(call, rt, &name, args, &arg_tys)
                     {
                         return ret;
+                    }
+                }
+                if rt.is_nullable() {
+                    let non_null = rt.non_null();
+                    let callable_property_exists = match self.probe_property_read(non_null, &name) {
+                        Some(PropertyReadProbe::Found { ty, access })
+                            if is_function_property_shape(ty) =>
+                        {
+                            if let Some((visibility, owner)) = access {
+                                if visibility != Visibility::Public
+                                    && !self.member_accessible(visibility, owner)
+                                {
+                                    self.reject_if_inaccessible(
+                                        visibility,
+                                        &name,
+                                        owner,
+                                        self.call_callee_name_span(call),
+                                    );
+                                    return Ty::Error;
+                                }
+                            }
+                            true
+                        }
+                        Some(PropertyReadProbe::Ambiguous) => {
+                            self.diags.error(
+                                self.call_callee_name_span(call),
+                                format!("overload resolution ambiguity for member '{name}'"),
+                            );
+                            return Ty::Error;
+                        }
+                        _ => false,
+                    };
+                    let exists_on_non_null = self
+                        .resolver()
+                        .resolve_symbol(
+                            crate::symbol_resolver::SymRecv::Value(non_null),
+                            &name,
+                            &[],
+                            &[],
+                        )
+                        .map(crate::symbol_resolver::Symbol::overloads)
+                        .is_some_and(|overloads| !overloads.is_empty())
+                        || matches!(
+                            (non_null, name.as_str(), arg_tys.as_slice()),
+                            (Ty::String, "substring", [Ty::Int])
+                                | (Ty::String, "substring", [Ty::Int, Ty::Int])
+                                | (Ty::String, "indexOf", [Ty::String])
+                                | (Ty::String, "concat", [Ty::String])
+                        )
+                        || (name == CALLABLE_INVOKE_OPERATOR && matches!(non_null, Ty::Fun(_)))
+                        || (name == "equals" && arg_tys.len() == 1 && non_null.is_reference())
+                        || callable_property_exists;
+                    if exists_on_non_null {
+                        self.report_nullable_receiver_call(call, rt);
+                        return Ty::Error;
                     }
                 }
                 let has_inapplicable_candidate = self
@@ -22767,9 +23679,21 @@ impl<'a> Checker<'a> {
                 // the classpath set — the federation precedence (module > implicit-receiver > library) made
                 // explicit, replacing the scattered `syms.funs.contains_key` guards.
                 let user_shadows = self.module_declares(&fname);
-                let module_top: Option<crate::libraries::FunctionInfo> =
-                    crate::module_symbols::ModuleSymbols::new(self.syms)
-                        .resolve_top_level_in_scope(&fname, &arg_tys, &self.fn_scope);
+                let module = crate::module_symbols::ModuleSymbols::new(self.syms);
+                let module_top = self
+                    .imports
+                    .get(&fname)
+                    .and_then(|target| target.rsplit_once('/'))
+                    .and_then(|(package, declared_name)| {
+                        module.resolve_top_level_in_scope(
+                            declared_name,
+                            &arg_tys,
+                            &[type_name(package)],
+                        )
+                    })
+                    .or_else(|| {
+                        module.resolve_top_level_in_scope(&fname, &arg_tys, &self.fn_scope)
+                    });
                 // A member of the nearest implicit receiver (a receiver-lambda body / `with` block —
                 // `"ab".run { uppercase() }`, `with(scope) { test1() }`) shadows a top-level function of
                 // the same name: the receiver is a closer scope, so kotlinc binds the member. Attempt it
@@ -22877,7 +23801,7 @@ impl<'a> Checker<'a> {
                         if let Some(slots) = mapped_slots {
                             self.resolved_call_arg_slots.insert(call, slots);
                         }
-                        self.mark_module_top_level_call(call, &fname, &fi, ret_ty, sources);
+                        self.mark_module_top_level_call(call, &fi, ret_ty, sources);
                         return ret_ty;
                     }
                 }
@@ -22886,7 +23810,7 @@ impl<'a> Checker<'a> {
                         && fi
                             .source_key
                             .is_some_and(|(source_file, _)| source_file != self.file_index))
-                    .then(|| self.diags.diags.len());
+                    .then_some(self.diags.diags.len());
                     let params = &fi.callable.params;
                     let cs = &fi.call_sig;
                     let ret_ty = self.module_top_level_return(call, &fi, &arg_tys, expected);
@@ -23004,7 +23928,7 @@ impl<'a> Checker<'a> {
                             if let Some(slots) = mapped_slots {
                                 self.resolved_call_arg_slots.insert(call, slots);
                             }
-                            self.mark_module_top_level_call(call, &fname, &fi, ret_ty, sources);
+                            self.mark_module_top_level_call(call, &fi, ret_ty, sources);
                             return self.finish_script_host_candidate(
                                 call,
                                 host_checkpoint,
@@ -23183,7 +24107,7 @@ impl<'a> Checker<'a> {
                             );
                         }
                     }
-                    self.mark_module_top_level_call(call, &fname, &fi, ret_ty, Vec::new());
+                    self.mark_module_top_level_call(call, &fi, ret_ty, Vec::new());
                     return self.finish_script_host_candidate(call, host_checkpoint, ret_ty);
                 }
                 // A receiver-less top-level library function (`listOf(…)`): resolve it through the
@@ -23203,7 +24127,7 @@ impl<'a> Checker<'a> {
                         .filter(|ns| ns.iter().any(Option::is_some))
                     {
                         Some(names) => {
-                            let signatures: Vec<CallSig> = crate::libraries::FunctionSet {
+                            let overloads: Vec<_> = crate::libraries::FunctionSet {
                                 overloads: self
                                     .resolver()
                                     .resolve_symbol(
@@ -23216,35 +24140,90 @@ impl<'a> Checker<'a> {
                                     .unwrap_or_default(),
                             }
                             .into_top_level_with_param_names()
-                            .map(|o| o.call_sig)
                             .collect();
-                            let mut mapping_probe = CallArgMappingProbe::default();
-                            let mappings: Vec<_> = signatures
-                                .iter()
-                                .filter_map(|signature| {
-                                    mapping_probe.observe(map_call_sig_args_with_trailing(
-                                        args,
-                                        Some(names),
-                                        signature,
-                                        self.file.call_has_trailing_lambda.contains(&call.0),
-                                    ))
-                                })
-                                .collect();
-                            match mappings.as_slice() {
-                                [slots] if slots.iter().all(Option::is_some) => {
-                                    let sa: Vec<ExprId> = slots.iter().copied().flatten().collect();
-                                    let at =
-                                        sa.iter().map(|a| self.expr_types[a.0 as usize]).collect();
-                                    (sa, at, Some(slots.clone()))
-                                }
-                                [] => {
-                                    if let Some(error) = mapping_probe.into_unanimous_error() {
-                                        self.report_call_arg_mapping_error(call, args, error);
-                                        return Ty::Error;
+                            let trailing_lambda =
+                                self.file.call_has_trailing_lambda.contains(&call.0);
+                            let mut mapped = Vec::new();
+                            let mut mapping_errors = Vec::new();
+                            for overload in overloads {
+                                match map_call_sig_args_with_trailing(
+                                    args,
+                                    Some(names),
+                                    &overload.call_sig,
+                                    trailing_lambda,
+                                ) {
+                                    Ok(slots) => {
+                                        let score =
+                                            self.call_slot_score(&overload.callable.params, &slots);
+                                        mapped.push((score, slots, overload));
                                     }
-                                    (args.to_vec(), arg_tys.clone(), None)
+                                    Err(error) => mapping_errors.push((error, overload)),
                                 }
-                                _ => (args.to_vec(), arg_tys.clone(), None),
+                            }
+                            if !mapped.is_empty()
+                                && mapped.iter().all(|(score, _, _)| score.is_none())
+                            {
+                                if mapped.len() == 1 {
+                                    let (_, slots, candidate) = mapped.pop().unwrap();
+                                    for (parameter, argument) in
+                                        candidate.callable.params.iter().zip(&slots)
+                                    {
+                                        if let Some(argument) = argument {
+                                            self.expect_assignable(
+                                                *parameter,
+                                                self.expr_types[argument.0 as usize],
+                                                self.span(*argument),
+                                                "argument",
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    self.diags.error(
+                                        self.span(call),
+                                        "none of the following candidates is applicable:"
+                                            .to_string(),
+                                    );
+                                }
+                                return Ty::Error;
+                            }
+                            mapped.retain(|(score, _, _)| score.is_some());
+                            mapped.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
+                            if let Some((_, slots, _)) = mapped.into_iter().next() {
+                                let selected_args: Vec<ExprId> =
+                                    slots.iter().copied().flatten().collect();
+                                let selected_types = selected_args
+                                    .iter()
+                                    .map(|argument| self.expr_types[argument.0 as usize])
+                                    .collect();
+                                (selected_args, selected_types, Some(slots))
+                            } else if let Some((error, candidate)) =
+                                take_unanimous_mapping_error(&mut mapping_errors)
+                            {
+                                self.report_callable_arg_mapping_error(
+                                    call,
+                                    args,
+                                    DiagnosticFunction {
+                                        name: &fname,
+                                        params: &candidate.callable.params,
+                                        param_names: &candidate.call_sig.param_names,
+                                        param_defaults: &candidate.call_sig.param_defaults,
+                                        required: candidate.call_sig.required,
+                                        vararg: candidate.call_sig.vararg,
+                                        context_count: 0,
+                                        ret: candidate.callable.ret,
+                                        source_display: None,
+                                    },
+                                    error,
+                                );
+                                return Ty::Error;
+                            } else if !mapping_errors.is_empty() {
+                                self.diags.error(
+                                    self.call_callee_name_span(call),
+                                    "none of the following candidates is applicable:".to_string(),
+                                );
+                                return Ty::Error;
+                            } else {
+                                (args.to_vec(), arg_tys.clone(), None)
                             }
                         }
                         None => (args.to_vec(), arg_tys.clone(), None),
@@ -23269,7 +24248,13 @@ impl<'a> Checker<'a> {
                             )
                             .and_then(crate::symbol_resolver::Symbol::top_level_call),
                     };
-                    if let Some(c) = resolved {
+                    if let Some(mut c) = resolved {
+                        if matches!(c.origin, Origin::Module { .. }) && c.owner.matches("") {
+                            if let Some(owner) = self.syms.fn_facades.get(&c.name).copied() {
+                                c.owner = owner;
+                                c.origin = Origin::Module { facade: owner };
+                            }
+                        }
                         // Record the resolved callable so the lowerer emits it without re-resolving
                         // (see [`TypeInfo::resolved_top_level`]).
                         self.resolved_calls
@@ -23609,8 +24594,8 @@ impl<'a> Checker<'a> {
             span,
             format!(
                 "incompatible if branches: '{}' and '{}'",
-                a.name(),
-                b.name()
+                a.source_name(),
+                b.source_name()
             ),
         );
         Ty::Error
@@ -23658,6 +24643,7 @@ impl<'a> Checker<'a> {
                 receiver,
                 params,
                 owner,
+                source,
                 ..
             } => {
                 let [parameter] = params.as_slice() else {
@@ -23667,6 +24653,7 @@ impl<'a> Checker<'a> {
                     receiver,
                     parameter: *parameter,
                     owner,
+                    source,
                 }
             }
             ResolvedCall::Extension(callable) => {
@@ -24236,7 +25223,7 @@ impl<'a> Checker<'a> {
                                     .error(span, format!("unresolved reference '{name}'.")),
                                 _ => self.diags.error(
                                     span,
-                                    format!("cannot assign to a member of '{}'", rt.name()),
+                                    format!("cannot assign to a member of '{}'", rt.source_name()),
                                 ),
                             },
                         }
@@ -24301,12 +25288,15 @@ impl<'a> Checker<'a> {
                     self.diags.error(
                         span,
                         if single_index {
-                            format!("'{}' is not an array (cannot index-assign)", at.name())
+                            format!(
+                                "'{}' is not an array (cannot index-assign)",
+                                at.source_name()
+                            )
                         } else {
                             format!(
                                 "no 'set' operator taking {} indices on '{}'",
                                 its.len(),
-                                at.name()
+                                at.source_name()
                             )
                         },
                     );
@@ -24424,12 +25414,12 @@ impl<'a> Checker<'a> {
                         Ty::Obj(_, _) => match self.record_iterator_protocol(iterable, it) {
                             Some(elem) => elem,
                             None => {
-                                self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays, String, and Iterables)", it.name()));
+                                self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays, String, and Iterables)", it.source_name()));
                                 Ty::Error
                             }
                         },
                         _ => {
-                            self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays, String, and Iterables)", it.name()));
+                            self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays, String, and Iterables)", it.source_name()));
                             Ty::Error
                         }
                     }
@@ -24571,6 +25561,7 @@ impl<'a> Checker<'a> {
             params: params.clone(),
             ret: ret_ty,
             generic_sig: None,
+            projected_return_hazard: false,
             flags: SigFlags::default()
                 .with_vararg(f.params.iter().any(|p| p.is_vararg))
                 .with_is_inline(false)
@@ -24740,6 +25731,284 @@ class Child : Base() {
                 ("Base".to_string(), vec![Ty::Int]),
                 ("Base".to_string(), vec![Ty::String]),
             ]
+        );
+    }
+
+    #[test]
+    fn implicit_source_extensions_preserve_lambda_literal_unit_coercion() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "class Scope {\n\
+                 fun choose(): String {\n\
+                     val stored: () -> String = { \"value\" }\n\
+                     return pick { \"value\" } + pick(stored)\n\
+                 }\n\
+             }\n\
+             fun Scope.pick(block: () -> Unit): String = \"unit\"\n\
+             fun Scope.pick(value: Any): String = \"any\"",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+
+        let declarations = files[0]
+            .decls
+            .iter()
+            .copied()
+            .filter(|declaration| {
+                matches!(files[0].decl(*declaration), Decl::Fun(function) if function.name == "pick")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(declarations.len(), 2);
+
+        let mut literal_call = None;
+        let mut stored_call = None;
+        for (index, expression) in files[0].expr_arena.iter().enumerate() {
+            let Expr::Call { callee, args } = expression else {
+                continue;
+            };
+            if !matches!(files[0].expr(*callee), Expr::Name(name) if name == "pick") {
+                continue;
+            }
+            let call = ExprId(index as u32);
+            if args
+                .first()
+                .is_some_and(|argument| matches!(files[0].expr(*argument), Expr::Lambda { .. }))
+            {
+                literal_call = Some(call);
+            } else {
+                stored_call = Some(call);
+            }
+        }
+
+        assert_eq!(
+            info.resolved_source_call(literal_call.expect("literal pick call")),
+            Some((0, declarations[0].0))
+        );
+        assert_eq!(
+            info.resolved_source_call(stored_call.expect("stored pick call")),
+            Some((0, declarations[1].0))
+        );
+    }
+
+    #[test]
+    fn indexed_source_extensions_preserve_lambda_literal_unit_coercion() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "class Scope\n\
+             operator fun Scope.get(block: () -> Unit): String = \"unit\"\n\
+             operator fun Scope.get(value: Any): String = \"any\"\n\
+             fun literal(scope: Scope): String = scope[{ \"value\" }]\n\
+             fun stored(scope: Scope, block: () -> String): String = scope[block]",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+
+        let declarations = files[0]
+            .decls
+            .iter()
+            .copied()
+            .filter(|declaration| {
+                matches!(files[0].decl(*declaration), Decl::Fun(function) if function.name == "get")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(declarations.len(), 2);
+
+        let mut literal_index = None;
+        let mut stored_index = None;
+        for (index, expression) in files[0].expr_arena.iter().enumerate() {
+            let Expr::Index { indices, .. } = expression else {
+                continue;
+            };
+            let indexed = ExprId(index as u32);
+            if indices
+                .first()
+                .is_some_and(|argument| matches!(files[0].expr(*argument), Expr::Lambda { .. }))
+            {
+                literal_index = Some(indexed);
+            } else {
+                stored_index = Some(indexed);
+            }
+        }
+
+        assert_eq!(
+            info.resolved_source_call(literal_index.expect("literal index call")),
+            Some((0, declarations[0].0))
+        );
+        assert_eq!(
+            info.resolved_source_call(stored_index.expect("stored index call")),
+            Some((0, declarations[1].0))
+        );
+    }
+
+    #[test]
+    fn safe_call_source_extensions_preserve_lambda_literal_unit_coercion() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "class Scope\n\
+             fun Scope.pick(block: () -> Unit): String = \"unit\"\n\
+             fun Scope.pick(value: Any): String = \"any\"\n\
+             fun literal(scope: Scope?): String? = scope?.pick { \"value\" }\n\
+             fun stored(scope: Scope?, block: () -> String): String? = scope?.pick(block)",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+
+        let declarations = files[0]
+            .decls
+            .iter()
+            .copied()
+            .filter(|declaration| {
+                matches!(files[0].decl(*declaration), Decl::Fun(function) if function.name == "pick")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(declarations.len(), 2);
+
+        let mut literal_call = None;
+        let mut stored_call = None;
+        for (index, expression) in files[0].expr_arena.iter().enumerate() {
+            let Expr::SafeCall {
+                name,
+                args: Some(args),
+                ..
+            } = expression
+            else {
+                continue;
+            };
+            if name != "pick" {
+                continue;
+            }
+            let call = ExprId(index as u32);
+            if args
+                .first()
+                .is_some_and(|argument| matches!(files[0].expr(*argument), Expr::Lambda { .. }))
+            {
+                literal_call = Some(call);
+            } else {
+                stored_call = Some(call);
+            }
+        }
+
+        assert_eq!(
+            info.resolved_source_call(literal_call.expect("literal safe call")),
+            Some((0, declarations[0].0))
+        );
+        assert_eq!(
+            info.resolved_source_call(stored_call.expect("stored safe call")),
+            Some((0, declarations[1].0))
+        );
+    }
+
+    #[test]
+    fn binary_source_extensions_preserve_lambda_literal_unit_coercion() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "class Scope\n\
+             operator fun Scope.plus(block: () -> Unit): String = \"unit\"\n\
+             operator fun Scope.plus(value: Any): String = \"any\"\n\
+             fun literal(scope: Scope): String = scope + ({ \"value\" })\n\
+             fun stored(scope: Scope, block: () -> String): String = scope + block",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+
+        let mut literal_binary = None;
+        let mut stored_binary = None;
+        for (index, expression) in files[0].expr_arena.iter().enumerate() {
+            let Expr::Binary {
+                op: BinOp::Add,
+                rhs,
+                ..
+            } = expression
+            else {
+                continue;
+            };
+            let binary = ExprId(index as u32);
+            if matches!(files[0].expr(*rhs), Expr::Lambda { .. }) {
+                literal_binary = Some(binary);
+            } else {
+                stored_binary = Some(binary);
+            }
+        }
+
+        let selected_params = |expression| {
+            let Some(ResolvedCall::ModuleExtension { params, .. }) = info
+                .resolved_operator_calls
+                .get(&(expression, SyntheticOperatorCall::Plus))
+            else {
+                panic!("checker must record source plus selected for operator lowering");
+            };
+            params.clone()
+        };
+        assert_eq!(
+            selected_params(literal_binary.expect("literal plus expression")),
+            vec![Ty::fun(Vec::new(), Ty::Unit)]
+        );
+        assert_eq!(
+            selected_params(stored_binary.expect("stored plus expression")),
+            vec![Ty::obj("kotlin/Any")]
+        );
+    }
+
+    #[test]
+    fn nullable_compare_to_extensions_preserve_lambda_literal_unit_coercion() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "operator fun Long?.compareTo(block: () -> Unit): Int = -1\n\
+             operator fun Long?.compareTo(value: Any): Int = 1\n\
+             fun literal(value: Long?): Boolean = value < ({ \"value\" })\n\
+             fun stored(value: Long?, block: () -> String): Boolean = value < block",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+
+        let mut literal_binary = None;
+        let mut stored_binary = None;
+        for (index, expression) in files[0].expr_arena.iter().enumerate() {
+            let Expr::Binary {
+                op: BinOp::Lt, rhs, ..
+            } = expression
+            else {
+                continue;
+            };
+            let binary = ExprId(index as u32);
+            if matches!(files[0].expr(*rhs), Expr::Lambda { .. }) {
+                literal_binary = Some(binary);
+            } else {
+                stored_binary = Some(binary);
+            }
+        }
+
+        let selected_params = |expression| {
+            let Some(ResolvedCall::ModuleExtension { params, .. }) = info
+                .resolved_operator_calls
+                .get(&(expression, SyntheticOperatorCall::CompareTo))
+            else {
+                panic!("checker must record source compareTo selected for operator lowering");
+            };
+            params.clone()
+        };
+        assert_eq!(
+            selected_params(literal_binary.expect("literal comparison")),
+            vec![Ty::fun(Vec::new(), Ty::Unit)]
+        );
+        assert_eq!(
+            selected_params(stored_binary.expect("stored comparison")),
+            vec![Ty::obj("kotlin/Any")]
         );
     }
 
@@ -25064,6 +26333,74 @@ fun box(): String {
                     callables: crate::libraries::Callables::None,
                 };
             }
+            if matches!(
+                fqn,
+                "conflictingNames"
+                    | "test/conflictingNames"
+                    | "conflictingNamesExt"
+                    | "test/conflictingNamesExt"
+            ) {
+                let extension = fqn.ends_with("Ext");
+                let make = |params: Vec<Ty>, names: [&str; 2], descriptor: &'static str| {
+                    let mut physical = params.clone();
+                    if extension {
+                        physical.insert(0, Ty::String);
+                    }
+                    let mut info = crate::libraries::FunctionInfo::plain(
+                        if extension {
+                            crate::libraries::FnKind::Extension
+                        } else {
+                            crate::libraries::FnKind::TopLevel
+                        },
+                        extension.then_some(Ty::String),
+                        crate::libraries::LibraryCallable::library(
+                            "test/ConflictingKt",
+                            if extension {
+                                "conflictingNamesExt"
+                            } else {
+                                "conflictingNames"
+                            },
+                            physical,
+                            Ty::Int,
+                            Ty::Int,
+                            descriptor,
+                        ),
+                    );
+                    info.call_sig = CallSig {
+                        param_names: names.into_iter().map(str::to_string).collect(),
+                        required: 2,
+                        ..Default::default()
+                    };
+                    info
+                };
+                return crate::libraries::ResolvedSymbols {
+                    classifier: None,
+                    callables: crate::libraries::Callables::Functions(
+                        crate::libraries::FunctionSet {
+                            overloads: vec![
+                                make(
+                                    vec![Ty::Int, Ty::Int],
+                                    ["a", "c"],
+                                    if extension {
+                                        "(Ljava/lang/String;II)I"
+                                    } else {
+                                        "(II)I"
+                                    },
+                                ),
+                                make(
+                                    vec![Ty::String, Ty::String],
+                                    ["b", "d"],
+                                    if extension {
+                                        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I"
+                                    } else {
+                                        "(Ljava/lang/String;Ljava/lang/String;)I"
+                                    },
+                                ),
+                            ],
+                        },
+                    ),
+                };
+            }
             let (kind, receiver, owner, name, params, ret, descriptor) = match fqn {
                 "withLock" | "kotlinx/coroutines/sync/withLock" => (
                     crate::libraries::FnKind::Extension,
@@ -25086,6 +26423,42 @@ fun box(): String {
                     vec![Ty::String, Ty::Int],
                     Ty::String,
                     "(Ljava/lang/String;I)Ljava/lang/String;",
+                ),
+                "knownPair" => (
+                    crate::libraries::FnKind::TopLevel,
+                    None,
+                    "test/TopKt",
+                    "knownPair",
+                    vec![Ty::Int, Ty::Int],
+                    Ty::Int,
+                    "(II)I",
+                ),
+                "mixExt" | "test/mixExt" => (
+                    crate::libraries::FnKind::Extension,
+                    Some(Ty::String),
+                    "test/TextKt",
+                    "mixExt",
+                    vec![Ty::String, Ty::Int, Ty::Int],
+                    Ty::Int,
+                    "(Ljava/lang/String;II)I",
+                ),
+                "typedExt" | "test/typedExt" => (
+                    crate::libraries::FnKind::Extension,
+                    Some(Ty::String),
+                    "test/TextKt",
+                    "typedExt",
+                    vec![Ty::String, Ty::String, Ty::Int],
+                    Ty::Int,
+                    "(Ljava/lang/String;Ljava/lang/String;I)I",
+                ),
+                "literalChoice" | "test/literalChoice" => (
+                    crate::libraries::FnKind::Extension,
+                    Some(Ty::String),
+                    "test/TextKt",
+                    "literalChoice",
+                    vec![Ty::String, Ty::fun(Vec::new(), Ty::Unit)],
+                    Ty::String,
+                    "(Ljava/lang/String;Lkotlin/jvm/functions/Function0;)Ljava/lang/String;",
                 ),
                 "Foo" => (
                     crate::libraries::FnKind::TopLevel,
@@ -25149,13 +26522,13 @@ fun box(): String {
                 info.callable.suspend = true;
             }
             info.call_sig = CallSig {
-                param_names: if name == "knownTop" {
+                param_names: if matches!(name, "knownTop" | "knownPair" | "mixExt" | "typedExt") {
                     vec!["a".to_string(), "b".to_string()]
                 } else if name == "getValue" {
                     vec!["thisRef".to_string(), "property".to_string()]
                 } else if name == "withLock" {
                     vec!["owner".to_string(), "action".to_string()]
-                } else if name == "tag" {
+                } else if matches!(name, "tag" | "literalChoice") {
                     vec!["a".to_string()]
                 } else {
                     vec!["s".to_string()]
@@ -25171,7 +26544,7 @@ fun box(): String {
                     Vec::new()
                 },
                 required: match name {
-                    "knownTop" | "getValue" => 2,
+                    "knownTop" | "knownPair" | "mixExt" | "typedExt" | "getValue" => 2,
                     _ => 1,
                 },
                 ..Default::default()
@@ -25394,7 +26767,12 @@ fun box(): String {
                     )],
                 };
             }
-            if recv != Ty::String || !matches!(name, "known" | "choose" | "tie") {
+            if recv != Ty::String
+                || !matches!(
+                    name,
+                    "known" | "typedKnown" | "choose" | "tie" | "literalChoice"
+                )
+            {
                 return crate::libraries::FunctionSet::default();
             }
             let member = |params: Vec<Ty>, descriptor: &'static str, defaults: Vec<bool>| {
@@ -25429,6 +26807,11 @@ fun box(): String {
                     "(II)Ljava/lang/String;",
                     vec![false, true],
                 )],
+                "typedKnown" => vec![member(
+                    vec![Ty::String, Ty::Int],
+                    "(Ljava/lang/String;I)Ljava/lang/String;",
+                    vec![false, false],
+                )],
                 "choose" => vec![
                     member(vec![Ty::Boolean], "(Z)Ljava/lang/String;", vec![false]),
                     member(vec![Ty::Int], "(I)Ljava/lang/String;", vec![false]),
@@ -25437,6 +26820,9 @@ fun box(): String {
                     member(vec![Ty::Long], "(J)Ljava/lang/String;", vec![false]),
                     member(vec![Ty::Byte], "(B)Ljava/lang/String;", vec![false]),
                 ],
+                "literalChoice" => {
+                    vec![member(vec![Ty::Int], "(I)Ljava/lang/String;", vec![false])]
+                }
                 _ => Vec::new(),
             };
             crate::libraries::FunctionSet { overloads }
@@ -25612,17 +26998,43 @@ fun box(): String {
         // injected alongside a box test that redeclares `EmptyContinuation` / `runBlocking` in the
         // root package. The dedup keys are package-qualified, so this collects without error.
         let mut d = DiagSink::new();
-        let a = parse_file("class EmptyContinuation\nfun runBlocking() {}", &mut d);
+        let a = parse_file(
+            "class EmptyContinuation\n\
+             fun runBlocking() {}\n\
+             fun String.packageScopedExtension(): Int = 1",
+            &mut d,
+        );
         let b = parse_file(
-            "package helpers\nclass EmptyContinuation\nfun runBlocking() {}",
+            "package helpers\n\
+             class EmptyContinuation\n\
+             fun runBlocking() {}\n\
+             fun String.packageScopedExtension(): String = \"helpers\"",
             &mut d,
         );
         let files = vec![a, b];
-        let _ = collect_signatures(&files, &mut d);
+        let symbols = collect_signatures(&files, &mut d);
         let errs: Vec<String> = d.diags.iter().map(|x| x.msg.clone()).collect();
         assert!(
             errs.is_empty(),
             "cross-package homonyms wrongly flagged: {errs:?}"
+        );
+        assert_eq!(
+            symbols
+                .ext_fun_overloads_in_scope(Ty::String, "packageScopedExtension", &[type_name("")],)
+                .first()
+                .map(|signature| signature.ret),
+            Some(Ty::Int)
+        );
+        assert_eq!(
+            symbols
+                .ext_fun_overloads_in_scope(
+                    Ty::String,
+                    "packageScopedExtension",
+                    &[type_name("helpers")],
+                )
+                .first()
+                .map(|signature| signature.ret),
+            Some(Ty::String)
         );
     }
 
@@ -25877,6 +27289,221 @@ fun box(): String {
             panic!("checker must record overloaded classpath member calls for lowering");
         };
         assert_eq!(selected.member.params, vec![Ty::Int]);
+    }
+
+    #[test]
+    fn lambda_literal_extension_defers_an_inapplicable_member_family() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "import test.literalChoice\n\
+             fun choose(): String = \"\".literalChoice(a = { \"value\" })",
+            &mut diagnostics,
+        );
+        let call = file
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| match expression {
+                Expr::Call { callee, .. } => match file.expr(*callee) {
+                    Expr::Member { name, .. } if name == "literalChoice" => {
+                        Some(ExprId(index as u32))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("source should contain literalChoice call");
+        let files = vec![file];
+        let mut symbols =
+            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+        let selected = info.resolved_extension(call).unwrap_or_else(|| {
+            panic!(
+                "lambda-literal Unit coercion must select the extension, got {:?}",
+                info.resolved_calls.get(&call)
+            )
+        });
+        assert_eq!(selected.owner, "test/TextKt");
+        assert_eq!(selected.name, "literalChoice");
+    }
+
+    #[test]
+    fn classpath_named_calls_report_invalid_mixing_without_positional_fallback() {
+        let source = "import test.mixExt\n\
+            fun top(): Int = knownPair(b = 2, 1)\n\
+            fun member(): String = \"\".known(b = 2, 1)\n\
+            fun extension(): Int = \"\".mixExt(b = 2, 1)";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols =
+            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let expected = "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.";
+        let matching = diagnostics
+            .diags
+            .iter()
+            .filter(|diagnostic| diagnostic.msg == expected)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matching.len(),
+            3,
+            "expected one canonical error per call, got: {:?}",
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
+        );
+        for diagnostic in matching {
+            assert_eq!(
+                &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
+                "1"
+            );
+        }
+        let missing = diagnostics
+            .diags
+            .iter()
+            .filter(|diagnostic| diagnostic.msg == "no value passed for parameter 'a'.")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            missing.len(),
+            3,
+            "expected one recovered missing-parameter error per call, got: {:?}",
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
+        );
+        for diagnostic in missing {
+            assert_eq!(
+                &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
+                "1)"
+            );
+        }
+    }
+
+    #[test]
+    fn classpath_named_calls_reject_conflicting_overload_mappings() {
+        let source = "import test.conflictingNamesExt\n\
+            fun top(): Int = conflictingNames(a = 1, a = 2)\n\
+            fun extension(): Int = \"\".conflictingNamesExt(a = 1, a = 2)";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols =
+            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        let matching = diagnostics
+            .diags
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.msg == "none of the following candidates is applicable:"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matching.len(),
+            2,
+            "conflicting mapping failures must reject instead of falling back positionally: {:?}",
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            matching
+                .iter()
+                .map(|diagnostic| {
+                    &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize]
+                })
+                .collect::<Vec<_>>(),
+            vec!["conflictingNames", "conflictingNamesExt"]
+        );
+    }
+
+    #[test]
+    fn classpath_named_calls_report_mapped_type_errors_without_positional_fallback() {
+        let source = "import test.typedExt\n\
+            fun top(): String = knownTop(b = \"x\", a = 1)\n\
+            fun member(): String = \"\".typedKnown(b = \"x\", a = 1)\n\
+            fun extension(): Int = \"\".typedExt(b = \"x\", a = 1)";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols =
+            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let type_errors = diagnostics
+            .diags
+            .iter()
+            .filter(|diagnostic| diagnostic.msg.starts_with("argument type mismatch:"))
+            .count();
+        assert_eq!(
+            type_errors,
+            6,
+            "top-level, member, and explicitly imported extension calls should reject both wrong bindings: {:?}",
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            diagnostics
+                .diags
+                .iter()
+                .all(|diagnostic| diagnostic.msg
+                    != "none of the following candidates is applicable:"),
+            "a uniquely imported extension should report its mapped argument errors directly: {:?}",
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn classpath_named_calls_render_aligned_excess_as_callable_arity_errors() {
+        let source = "import test.mixExt\n\
+            fun top(): Int = knownPair(a = 1, 2, 3)\n\
+            fun member(): String = \"\".known(a = 1, 2, 3)\n\
+            fun extension(): Int = \"\".mixExt(a = 1, 2, 3)";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols =
+            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let expected = [
+            "too many arguments for 'fun knownPair(a: Int, b: Int): Int'.",
+            "too many arguments for 'fun known(a: Int, b: Int = ...): String'.",
+            "too many arguments for 'fun mixExt(a: Int, b: Int): Int'.",
+        ];
+        for message in expected {
+            let diagnostic = diagnostics
+                .diags
+                .iter()
+                .find(|diagnostic| diagnostic.msg == message)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "missing {message:?}; got {:?}",
+                        diagnostics
+                            .diags
+                            .iter()
+                            .map(|diagnostic| &diagnostic.msg)
+                            .collect::<Vec<_>>()
+                    )
+                });
+            assert_eq!(
+                &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
+                "3"
+            );
+        }
     }
 
     #[test]
@@ -27274,6 +28901,34 @@ fun box(): String {
     }
 
     #[test]
+    fn call_argument_mapping_recovery_requires_overload_unanimity() {
+        let duplicate = CallArgMappingFailure {
+            errors: vec![CallArgMappingError::AlreadyPassed { argument: 1 }],
+            recovery_argument: None,
+        };
+        let unknown = CallArgMappingFailure {
+            errors: vec![CallArgMappingError::NoParameterNamed {
+                name: "a".to_string(),
+                argument: 0,
+            }],
+            recovery_argument: None,
+        };
+
+        for mut conflicts in [
+            vec![(duplicate.clone(), 0), (unknown.clone(), 1)],
+            vec![(unknown.clone(), 0), (duplicate.clone(), 1)],
+        ] {
+            assert_eq!(take_unanimous_mapping_error(&mut conflicts), None);
+        }
+
+        let mut unanimous = vec![(duplicate.clone(), 0), (duplicate.clone(), 1)];
+        assert_eq!(
+            take_unanimous_mapping_error(&mut unanimous).map(|(failure, _)| failure),
+            Some(duplicate)
+        );
+    }
+
+    #[test]
     fn call_argument_mapping_accepts_matching_positional_order() {
         let args = [ExprId(0), ExprId(1)];
         let names = [Some("first".to_string()), None];
@@ -27494,6 +29149,141 @@ fun box(): String {
     }
 
     #[test]
+    fn nullable_receiver_calls_use_the_safe_call_diagnostic_and_dot_span() {
+        let source = "class C { fun member(value: Int): Int = value }\n\
+                      class Holder(val block: () -> Int)\n\
+                      fun sourceMember(value: C?): Int = value.member(1)\n\
+                      fun classpathMember(value: String?): String = value.substring(1)\n\
+                      fun spacedClasspathMember(value: String?): String = value. /* gap */ substring(1)\n\
+                      fun String.nonNullExtension(): Int = length\n\
+                      fun sourceExtension(value: String?): Int = value.nonNullExtension()\n\
+                      fun callableProperty(value: Holder?): Int = value.block()\n\
+                      fun nullableInvoke(block: (() -> Int)?): Int = block.invoke()\n\
+                      fun nullableEquals(value: Any?): Boolean = value.equals(null)";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        assert_eq!(
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'C?'.",
+                "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'.",
+                "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'.",
+                "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'.",
+                "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Holder?'.",
+                "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type '(() -> Int)?'.",
+                "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Any?'.",
+            ]
+        );
+        for diagnostic in &diagnostics.diags {
+            assert_eq!(
+                &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
+                "."
+            );
+        }
+    }
+
+    #[test]
+    fn nullable_receiver_extensions_safe_calls_assertions_and_smart_casts_remain_valid() {
+        ok("fun String?.nullableExtension(): Int = this?.length ?: 0\n\
+             fun valid(value: String?): Int {\n\
+             \u{20}\u{20}val extension = value.nullableExtension()\n\
+             \u{20}\u{20}val safe = value?.substring(1)\n\
+             \u{20}\u{20}val asserted = value!!.substring(1)\n\
+             \u{20}\u{20}if (value != null) return value.substring(1).length\n\
+             \u{20}\u{20}return extension + (safe?.length ?: 0) + asserted.length\n\
+             }");
+        ok("class C { fun call(): Int = 1 }\n\
+             fun C?.call(): Int = 2\n\
+             fun choose(value: C?): Int = value.call()");
+        ok(
+            "inline fun <T> T.acceptsNullable(block: () -> Unit): Boolean { block(); return this == null }\n\
+             fun valid(value: String?): Boolean = value.acceptsNullable { }",
+        );
+    }
+
+    #[test]
+    fn explicit_non_null_generic_extension_rejects_nullable_receiver() {
+        let source = "fun <T : Any> T.rejectsNullable(): Int = 1\n\
+                      fun invalid(value: String?): Int = value.rejectsNullable()";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
+        assert_eq!(
+            diagnostics.diags[0].msg,
+            "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'."
+        );
+        assert_eq!(
+            &source[diagnostics.diags[0].span.lo as usize..diagnostics.diags[0].span.hi as usize],
+            "."
+        );
+    }
+
+    #[test]
+    fn generic_extension_registry_filters_by_bound_and_has_stable_families() {
+        let source = "open class Text\n\
+                      class TextValue : Text()\n\
+                      open class Numeric\n\
+                      class NumericValue : Numeric()\n\
+                      fun <T : Text> T.pick(): Int = 1\n\
+                      fun <R : Text> R.pick(value: Int): Int = value\n\
+                      fun <N : Numeric> N.pick(value: Int, other: Int): Int = value + other";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let symbols = collect_signatures(&[file], &mut diagnostics);
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+
+        let string_overloads = symbols.ext_fun_overloads(Ty::obj("TextValue"), "pick");
+        assert_eq!(
+            string_overloads
+                .iter()
+                .map(|signature| signature.params.len())
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        let int_overloads = symbols.ext_fun_overloads(Ty::obj("NumericValue"), "pick");
+        assert_eq!(
+            int_overloads
+                .iter()
+                .map(|signature| signature.params.len())
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+    }
+
+    #[test]
+    fn exact_extension_family_keeps_applicable_concrete_supertype_overloads() {
+        let source = "open class Base\n\
+                      class Derived : Base()\n\
+                      fun Derived.pick(): Int = 1\n\
+                      fun Base.pick(value: Int): Int = value";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let symbols = collect_signatures(&[file], &mut diagnostics);
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+
+        assert_eq!(
+            symbols
+                .ext_fun_overloads(Ty::obj("Derived"), "pick")
+                .iter()
+                .map(|signature| signature.params.len())
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
     fn reference_types_resolve() {
         // class-typed param + property read + construction + instance call all typecheck.
         ok("class Point(val x: Int, val y: Int)\nfun ox(p: Point): Int = p.x");
@@ -27526,6 +29316,45 @@ fun box(): String {
             "operator fun String.plusAssign(value: List<String>) {}\n\
              operator fun String.plusAssign(value: List<Int>) {}",
             "conflicting extension functions with the same erased receiver and name",
+        );
+        err_contains(
+            "fun <T> Array<T>.nestedClash(): Int = 1\n\
+             fun Array<Any?>.nestedClash(): Int = 2",
+            "conflicting extension functions with the same erased receiver and name",
+        );
+        err_contains(
+            "fun ((Int) -> Int).functionReceiverClash(): Int = 1\n\
+             fun ((String) -> String).functionReceiverClash(): Int = 2",
+            "conflicting extension functions with the same erased receiver and name",
+        );
+        err_contains(
+            "fun Int.unsignedReceiverClash(): Int = 1\n\
+             fun UInt.unsignedReceiverClash(): Int = 2",
+            "conflicting extension functions with the same erased receiver and name",
+        );
+        assert_ne!(
+            extension_receiver_physical_key(Ty::obj_args("kotlin/Array", &[Ty::Int])),
+            extension_receiver_physical_key(Ty::obj_args("kotlin/Array", &[Ty::UInt]))
+        );
+    }
+
+    #[test]
+    fn nullable_inaccessible_callable_property_reports_access_once() {
+        let source = "class C(private val block: () -> Int)\n\
+                      fun invalid(value: C?): Int = value.block()";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
+        assert!(
+            diagnostics.diags[0]
+                .msg
+                .contains("cannot access 'block': it is private in 'C'"),
+            "{:?}",
+            diagnostics.diags
         );
     }
 
@@ -27851,6 +29680,36 @@ fun use(counter: Counter) {
         assert_eq!(
             &sources[1][error.span.lo as usize..error.span.hi as usize],
             "-counter"
+        );
+    }
+
+    #[test]
+    fn source_extension_declarations_use_the_direct_index() {
+        let sources = [
+            "package sample\nfun String.first(value: Int): Int = value",
+            "package sample\nfun String.second(): String = this",
+        ];
+        let mut diagnostics = DiagSink::new();
+        let files = sources
+            .iter()
+            .map(|source| parse_file(source, &mut diagnostics))
+            .collect::<Vec<_>>();
+        let symbols = collect_signatures(&files, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+
+        let first = files[0].decls[0];
+        let second = files[1].decls[0];
+        assert_eq!(
+            symbols
+                .source_extension_function(0, first)
+                .map(|(_, signature)| signature.params.clone()),
+            Some(vec![Ty::Int])
+        );
+        assert_eq!(
+            symbols
+                .source_extension_function(1, second)
+                .map(|(receiver, signature)| (receiver, signature.ret)),
+            Some((Ty::String, Ty::String))
         );
     }
 

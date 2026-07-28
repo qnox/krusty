@@ -4610,7 +4610,7 @@ impl<'a> Parser<'a> {
             let mut targs = Vec::new();
             let arg = if name == "Array" && self.at(TokenKind::Lt) {
                 self.bump(); // '<'
-                let in_projection = self.skip_variance(); // `out`/`in`
+                let (in_projection, out_projection) = self.skip_variance(); // `out`/`in`
                 let any_nullable = || TypeRef {
                     name: "Any".to_string(),
                     flags: TrFlags::default()
@@ -4627,11 +4627,15 @@ impl<'a> Parser<'a> {
                 // `Object[][]`) frames correctly. `Array<out X>` keeps `X`.
                 let elem = if self.eat(TokenKind::Star) {
                     any_nullable()
-                } else if in_projection {
-                    let _ = self.parse_type(); // consume + discard `X`
-                    any_nullable()
                 } else {
-                    self.parse_type()
+                    let mut declared = self.parse_type();
+                    declared.set_projection(in_projection, out_projection);
+                    if in_projection {
+                        self.file.type_projection_args.insert(span.lo, declared);
+                        any_nullable()
+                    } else {
+                        declared
+                    }
                 };
                 self.expect(TokenKind::Gt, "'>'");
                 Some(Box::new(elem))
@@ -4756,18 +4760,16 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Skip a leading `out`/`in` use-site variance modifier inside a type-argument list (`Array<in T>`,
-    /// `List<out T>`). Variance is JVM-erased for descriptors. `out` is a soft keyword (`Ident`); `in` is
-    /// the real keyword `KwIn`. Returns `true` for an `in` (CONTRAVARIANT) projection.
-    fn skip_variance(&mut self) -> bool {
+    fn skip_variance(&mut self) -> (bool, bool) {
         if self.at(TokenKind::KwIn) {
             self.bump();
-            return true;
+            return (true, false);
         }
         if self.at(TokenKind::Ident) && self.text() == "out" {
             self.bump();
+            return (false, true);
         }
-        false
+        (false, false)
     }
 
     /// Parse a generic type-argument list `< (variance? type | *),+ >` via the real grammar
@@ -4780,7 +4782,7 @@ impl<'a> Parser<'a> {
         }
         self.skip_newlines();
         while !self.at(TokenKind::Gt) && !self.at(TokenKind::Eof) {
-            let _ = self.skip_variance(); // `out`/`in` (general type args are JVM-erased anyway)
+            let (in_projection, out_projection) = self.skip_variance();
             if self.eat(TokenKind::Star) {
                 // Star projection `<*>` — erased to `Any?`.
                 let span = self.tok().span;
@@ -4796,7 +4798,9 @@ impl<'a> Parser<'a> {
                     fun_context_count: 0,
                 });
             } else {
-                args.push(self.parse_type());
+                let mut argument = self.parse_type();
+                argument.set_projection(in_projection, out_projection);
+                args.push(argument);
             }
             self.skip_newlines();
             if !self.eat(TokenKind::Comma) {
@@ -6892,7 +6896,7 @@ impl<'a> Parser<'a> {
                     );
                 }
                 TokenKind::Dot => {
-                    self.bump();
+                    let dot_span = self.bump().span;
                     let name_token = self.tok();
                     let name_span = self.syntactic_ident_span(name_token);
                     let name = self.ident_or_error("member name");
@@ -6909,6 +6913,11 @@ impl<'a> Parser<'a> {
                         self.file
                             .exact_member_name_spans
                             .insert(member.0, name_span);
+                    }
+                    if dot_span.hi != name_span.lo {
+                        self.file
+                            .non_adjacent_member_dot_spans
+                            .push((member.0, dot_span));
                     }
                     lhs = member;
                 }
@@ -7004,6 +7013,15 @@ impl<'a> Parser<'a> {
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let end = self.t[self.i.saturating_sub(1)].span;
                     let old = lhs;
+                    let has_named_parenthesized_args =
+                        self.file.call_arg_names.contains_key(&old.0);
+                    let close_paren_end = match (self.file.expr(old), has_named_parenthesized_args)
+                    {
+                        (Expr::Call { .. } | Expr::SafeCall { args: Some(_), .. }, true) => {
+                            Some(self.file.expr_spans[old.0 as usize].hi)
+                        }
+                        _ => None,
+                    };
                     let rebuilt_safe_call_name_span =
                         if let Expr::SafeCall { name, .. } = self.file.expr(old) {
                             self.file
@@ -7075,6 +7093,11 @@ impl<'a> Parser<'a> {
                     // binds it to the callee's LAST parameter (preceding gaps take defaults).
                     self.file.call_has_trailing_lambda.remove(&old.0);
                     self.file.call_has_trailing_lambda.insert(lhs.0);
+                    if let Some(close_paren_end) = close_paren_end {
+                        self.file
+                            .trailing_call_close_paren_ends
+                            .insert(lhs.0, close_paren_end);
+                    }
                     // Carry explicit type arguments onto the rebuilt call — both the `f<T>(args){…}` form
                     // (already consumed into `old`'s entry by the paren branch) and the `f<T>{…}` form
                     // (no parens — `pending_targs` is still unconsumed). Without this, a trailing lambda
@@ -8521,6 +8544,43 @@ mod tests {
             assert_eq!(receiver.targs.len(), 1);
             assert_eq!(receiver.targs[0].name, "Entry");
         }
+    }
+
+    #[test]
+    fn use_site_variance_is_preserved_on_type_arguments() {
+        let mut diagnostics = DiagSink::new();
+        let source = "class Context<T>\n\
+                      fun <T> projected(input: Context<in T>, output: Context<out T>, array: Array<in T>) {}";
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected: {}",
+            diagnostics.render("t", source)
+        );
+        let function = file
+            .decls
+            .iter()
+            .find_map(|&id| match file.decl(id) {
+                Decl::Fun(function) if function.name == "projected" => Some(function),
+                _ => None,
+            })
+            .expect("projected function");
+        let input = &function.params[0].ty.targs[0];
+        let output = &function.params[1].ty.targs[0];
+        let array = &function.params[2].ty;
+        assert!(input.in_projection());
+        assert!(!input.out_projection());
+        assert!(!output.in_projection());
+        assert!(output.out_projection());
+        assert_eq!(
+            array.arg.as_deref().map(|argument| argument.name.as_str()),
+            Some("Any")
+        );
+        assert!(array.targs.is_empty());
+        let projected = &file.type_projection_args[&array.span.lo];
+        assert!(projected.in_projection());
+        assert_eq!(projected.name, "T");
     }
 
     #[test]

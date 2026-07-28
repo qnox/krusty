@@ -801,6 +801,24 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
              fun argumentMismatch(): Int = needsInt(\"wrong\")\n",
         ),
         (
+            "NullableMemberCall.kt",
+            "fun nullableMemberCall(value: String?): String = value.substring(1)\n",
+        ),
+        (
+            "SpacedNullableMemberCall.kt",
+            "fun spacedNullableMemberCall(value: String?): String = value. /* gap */ substring(1)\n",
+        ),
+        (
+            "NullableCallableProperty.kt",
+            "class CallableHolder(val block: () -> Int)\n\
+             fun nullableCallableProperty(value: CallableHolder?): Int = value.block()\n",
+        ),
+        (
+            "NonNullGenericExtension.kt",
+            "fun <T : Any> T.nonNullGeneric(): Int = hashCode()\n\
+             fun nonNullGenericExtension(value: String?): Int = value.nonNullGeneric()\n",
+        ),
+        (
             "ConditionType.kt",
             "fun conditionMismatch(): Int { if (1) return 1; return 0 }\n",
         ),
@@ -875,10 +893,40 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
              fun invalidIncrement(input: NotIncrementable) { var value = input; value++ }\n",
         ),
     ];
-    let clean_diagnostic_cases = [(
-        "ContextArray.kt",
-        "fun emptyStrings(): Array<String> = arrayOf()\n",
-    )];
+    let clean_diagnostic_cases = [
+        (
+            "ContextArray.kt",
+            "fun emptyStrings(): Array<String> = arrayOf()\n",
+        ),
+        (
+            "StatementWhen.kt",
+            "fun consumeUnit(block: () -> Unit) { block() }\n\
+             fun statementWhen(value: Int) {\n\
+             \u{20}\u{20}when (value) { 1 -> println(value) }\n\
+             \u{20}\u{20}consumeUnit { when (value) { 2 -> println(value) } }\n\
+             }\n",
+        ),
+        (
+            "ExhaustiveNullableWhen.kt",
+            "enum class CompleteNullableState { READY, DONE }\n\
+             fun completeNullableWhen(value: CompleteNullableState?): Int = when (value) { CompleteNullableState.READY -> 1; CompleteNullableState.DONE -> 2; null -> 0 }\n",
+        ),
+        (
+            "ValidNullableCalls.kt",
+            "fun String?.nullableExtension(): Int = this?.length ?: 0\n\
+             fun validNullableCalls(value: String?): Int {\n\
+             \u{20}\u{20}val extension = value.nullableExtension()\n\
+             \u{20}\u{20}val safe = value?.substring(1)\n\
+             \u{20}\u{20}val asserted = value!!.substring(1)\n\
+             \u{20}\u{20}return extension + (safe?.length ?: 0) + asserted.length\n\
+             }\n",
+        ),
+        (
+            "UnboundedGenericNullableReceiver.kt",
+            "inline fun <T> T.acceptsNullable(block: () -> Unit): Boolean { block(); return this == null }\n\
+             fun unboundedGenericNullableReceiver(value: String?): Boolean = value.acceptsNullable { }\n",
+        ),
+    ];
     let token_cases = [
         (
             "BasicTokens.kt",
@@ -2757,7 +2805,7 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
         .iter()
         .map(|(name, source)| {
             let uri = format!("file://{}", source_root.join(name).display());
-            normalized_diagnostics(krusty.diagnostics(&uri, source))
+            normalized_diagnostics(krusty.diagnostics_allow_empty(&uri, source))
         })
         .collect::<Vec<_>>();
     let actual_clean_diagnostics = clean_diagnostic_cases

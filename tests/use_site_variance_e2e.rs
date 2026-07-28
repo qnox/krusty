@@ -1,7 +1,4 @@
-//! Use-site variance projections in type arguments — `Box<out T>` (covariant) and `Box<in T>`
-//! (contravariant). Variance is JVM-erased, so the projection is parsed and dropped, keeping the bare
-//! type. Previously `in` (a real keyword, unlike the soft `out`) was not skipped, so `Box<in T>` failed
-//! to parse. Round-tripped on the JVM.
+//! Use-site variance projections in generic type arguments.
 
 use super::common;
 
@@ -29,4 +26,86 @@ fn nested_in_projection() {
 fun f(b: Box<in Box<String>>): String = \"OK\"\n\
 fun box(): String = f(Box(Box(\"x\")))\n";
     assert_eq!(run(SRC).expect("nested in projection"), "OK");
+}
+
+#[test]
+fn explicit_generic_argument_avoids_projected_inference_gate() {
+    const SRC: &str = "class Context<T>\n\
+fun <T> select(context: Context<in T>, value: T): T = value\n\
+fun box(): String = select<String>(Context<Any>(), \"OK\")\n";
+    assert_eq!(
+        run(SRC).expect("explicit projected generic call compiles"),
+        "OK"
+    );
+}
+
+#[test]
+fn invariant_value_witness_avoids_projected_inference_gate() {
+    const SRC: &str = "class Context<T>\n\
+fun <T> select(context: Context<in T>, value: T): T = value\n\
+fun box(): String = select(Context<Any>(), \"OK\")\n";
+    assert_eq!(
+        run(SRC).expect("invariant value argument determines the inferred return"),
+        "OK"
+    );
+}
+
+#[test]
+fn generic_extension_boxes_a_primitive_receiver() {
+    const SRC: &str = "fun <T> T.id(): T = this\n\
+fun box(): String = if (42.id() == 42) \"OK\" else \"fail\"\n";
+    assert_eq!(run(SRC).expect("generic extension call compiles"), "OK");
+}
+
+#[test]
+fn covariant_parameter_infers_the_return_type() {
+    const SRC: &str = "class Context<T>(val value: T)\n\
+fun <T> read(context: Context<out T>): T = context.value\n\
+fun box(): String = read(Context(\"OK\"))\n";
+    assert_eq!(run(SRC).expect("covariant return inference"), "OK");
+}
+
+#[test]
+fn expected_type_resolves_projected_return_inference() {
+    const SRC: &str = "class Context<T>\n\
+fun <T> select(context: Context<in T>): T = throw IllegalStateException()\n\
+fun box(): String {\n\
+    if (1 == 2) {\n\
+        val inferred: String = select(Context<Any>())\n\
+        return inferred\n\
+    }\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("the expected type determines the projected return"),
+        "OK"
+    );
+}
+
+#[test]
+fn unresolved_projected_return_remains_gated() {
+    const SRC: &str = "class Context<T>\n\
+fun <T> select(context: Context<in T>): T = throw IllegalStateException()\n\
+fun box(): String {\n\
+    select(Context<Any>())\n\
+    return \"OK\"\n\
+}\n";
+    assert!(
+        run(SRC).is_none(),
+        "an unconstrained projected return must not be lowered as an arbitrary type"
+    );
+}
+
+#[test]
+fn nothing_projected_return_remains_gated() {
+    const SRC: &str = "class Context<T>\n\
+fun <T> something(): T = Any() as T\n\
+fun <T> Any.decodeIn(context: Context<in T>): T = something()\n\
+fun <T> Any?.decodeOut(context: Context<out T>): T =\n\
+    this?.decodeIn(context) ?: throw AssertionError()\n\
+fun box(): String {\n\
+    \"value\".decodeOut(Context<Any>())\n\
+    return \"OK\"\n\
+}\n";
+    assert!(run(SRC).is_none());
 }

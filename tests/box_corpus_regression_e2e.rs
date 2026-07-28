@@ -66,6 +66,50 @@ fn primitive_member_corpus_cases_box_ok() {
     assert_corpus_cases_box_ok(PRIMITIVE_MEMBER_CASES);
 }
 
+const NULLABLE_TPARAM_SUPPORTED_CASES: &[&str] = &[
+    "bridges/strListContains.kt",
+    "evaluate/booleanOperations.kt",
+    "evaluate/byteOperations.kt",
+    "evaluate/doubleOperations.kt",
+    "evaluate/floatOperations.kt",
+    "evaluate/intOperations.kt",
+    "evaluate/longOperations.kt",
+    "evaluate/shortOperations.kt",
+    "functions/defaultargs1.kt",
+];
+
+const NULLABLE_TPARAM_GATED_CASES: &[(&str, &str)] = &[
+    (
+        "coroutines/kt46813.kt",
+        "gate:suspend-generic-value-class-specialization",
+    ),
+    (
+        "nothingValue/nothingValueException.kt",
+        "gate:projected-generic-return-inference",
+    ),
+];
+
+#[test]
+fn nullable_type_parameter_admitted_cases_do_not_miscompile() {
+    if !common::corpus_ready() {
+        return;
+    }
+    for &case in NULLABLE_TPARAM_SUPPORTED_CASES {
+        assert_eq!(
+            common::run_box_corpus_case(case).as_deref(),
+            Some("OK"),
+            "{case} must execute successfully, not silently skip"
+        );
+    }
+    for &(case, reason) in NULLABLE_TPARAM_GATED_CASES {
+        assert_eq!(
+            common::box_corpus_case_backend_outcome(case),
+            Some(common::BackendOutcome::LowerBail(reason.to_string())),
+            "{case} must stop at its precise unsupported backend boundary"
+        );
+    }
+}
+
 /// Narrow primitive increments/decrements must wrap at the source type width in JVM emission.
 const PRIMITIVE_INC_DEC_CASES: &[&str] = &["intrinsics/kt12125.kt", "intrinsics/kt12125_inc.kt"];
 

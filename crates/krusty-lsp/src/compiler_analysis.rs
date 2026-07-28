@@ -428,6 +428,67 @@ mod tests {
     }
 
     #[test]
+    fn source_set_preserves_mixed_argument_diagnostic_and_positional_argument_span() {
+        let source = "fun pair(a: Int, b: Int): Int = a + b\n\
+                      fun invalid(): Int = pair(b = 2, 1)";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let diagnostics = &analysis.files[0].diagnostics;
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+        let diagnostic = &diagnostics[0];
+        assert_eq!(
+            diagnostic.msg,
+            "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters."
+        );
+        let positional = source.rfind('1').expect("positional argument") as u32;
+        assert_eq!(
+            diagnostic.span,
+            krusty::diag::Span::new(positional, positional + 1)
+        );
+        assert_eq!(diagnostics[1].msg, "no value passed for parameter 'a'.");
+        let callee = source.rfind("pair").expect("callee") as u32;
+        assert_eq!(
+            diagnostics[1].span,
+            krusty::diag::Span::new(callee, callee + 4)
+        );
+        assert_eq!(diagnostics[1].editor_span, None);
+    }
+
+    #[test]
+    fn source_set_preserves_nullable_receiver_diagnostic_and_dot_span() {
+        let source =
+            "fun nullableMemberCall(value: String?): String = value. /* gap */ substring(1)";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let diagnostics = &analysis.files[0].diagnostics;
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(
+            diagnostics[0].msg,
+            "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'."
+        );
+        assert_eq!(
+            &source[diagnostics[0].span.lo as usize..diagnostics[0].span.hi as usize],
+            "."
+        );
+        assert_eq!(diagnostics[0].editor_span, None);
+    }
+
+    #[test]
+    fn source_set_adds_official_boolean_simplification_inspection_before_equality_error() {
+        let source = "fun equal(): Boolean = 1 == \"x\"\nfun unequal(): Boolean = 1 != \"x\"";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let diagnostics = &analysis.files[0].diagnostics;
+        assert_eq!(diagnostics.len(), 4, "{diagnostics:?}");
+
+        for pair in diagnostics.chunks_exact(2) {
+            assert_eq!(pair[0].severity, Severity::Warning);
+            assert_eq!(pair[0].msg, BOOLEAN_EXPRESSION_SIMPLIFICATION);
+            assert_eq!(pair[0].span, pair[1].span);
+            assert_eq!(pair[1].severity, Severity::Error);
+        }
+        assert!(diagnostics[1].msg.starts_with("operator '=='"));
+        assert!(diagnostics[3].msg.starts_with("operator '!='"));
+    }
+
+    #[test]
     fn empty_source_set_is_valid_after_last_document_closes() {
         let analysis = analyze_standalone_source_set(&[]);
         assert!(analysis.files.is_empty());

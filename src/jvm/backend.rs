@@ -27,12 +27,13 @@ pub enum SkipReason {
 /// Runs, in order:
 /// 1. `plugins::run_enabled` — compiler-extension plugins (kotlinx.serialization) synthesize
 ///    declarations from the file's annotations; no-op without a trigger annotation.
-/// 2. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
+/// 2. `apply_collection_bridge_barriers` — attach JVM collection bridge semantics.
+/// 3. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
 ///    (the IR keeps them as plain classes so JS / a native-value-type JVM are unaffected).
-/// 3. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
-/// 4. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
+/// 4. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
+/// 5. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
 ///    (`require`/`check`) message lambda; it is spliced at the call site.
-/// 5. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
+/// 6. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
 ///    its `invokedynamic` (the impl is PRIVATE, kotlinc's placement, so a cross-class handle would
 ///    be an IllegalAccessError). Lowering attaches impls per `cur_class`, which misses code that
 ///    ends up in a class only later: enum-entry constructor arguments and suspend-lambda state
@@ -67,6 +68,7 @@ pub fn run_backend_passes_with_metadata(
         &resolve_class_name,
         jvm_plugin_type_descriptor,
     );
+    apply_collection_bridge_barriers(ir, syms);
     let vc_module = crate::module_symbols::ModuleSymbols::new(syms);
     let vc_resolver = crate::symbol_resolver::SymbolResolver::new_scoped_with_module(
         &*syms.libraries,
@@ -92,6 +94,134 @@ pub fn run_backend_passes_with_metadata(
     crate::jvm::ir_emit::mark_must_inline_lambdas(ir);
     crate::jvm::ir_emit::reparent_lambda_impls(ir);
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BridgeBarrierOutcome {
+    False,
+    NotFound,
+    Null,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BridgeBarrier {
+    pub parameter: usize,
+    pub outcome: BridgeBarrierOutcome,
+}
+
+#[derive(Clone, Copy)]
+enum CollectionOwner {
+    Collection,
+    MutableCollection,
+    List,
+    Map,
+}
+
+impl CollectionOwner {
+    fn matches(self, owner: crate::types::TypeName) -> bool {
+        let names: &[&str] = match self {
+            CollectionOwner::Collection => &[
+                "java/util/Collection",
+                "java/util/List",
+                "java/util/Set",
+                "kotlin/collections/Collection",
+                "kotlin/collections/MutableCollection",
+                "kotlin/collections/List",
+                "kotlin/collections/MutableList",
+                "kotlin/collections/Set",
+                "kotlin/collections/MutableSet",
+            ],
+            CollectionOwner::MutableCollection => &[
+                "java/util/Collection",
+                "java/util/List",
+                "java/util/Set",
+                "kotlin/collections/MutableCollection",
+                "kotlin/collections/MutableList",
+                "kotlin/collections/MutableSet",
+            ],
+            CollectionOwner::List => &[
+                "java/util/List",
+                "kotlin/collections/List",
+                "kotlin/collections/MutableList",
+            ],
+            CollectionOwner::Map => &[
+                "java/util/Map",
+                "kotlin/collections/Map",
+                "kotlin/collections/MutableMap",
+            ],
+        };
+        names.iter().any(|name| owner.matches(name))
+    }
+}
+
+fn collection_bridge_semantics(
+    bridge: &crate::ir::Bridge,
+) -> Option<(CollectionOwner, BridgeBarrier)> {
+    let (owner, outcome) = match bridge.name.as_str() {
+        "contains"
+            if bridge.erased_ret == crate::types::Ty::Boolean
+                && bridge.concrete_ret == crate::types::Ty::Boolean =>
+        {
+            (CollectionOwner::Collection, BridgeBarrierOutcome::False)
+        }
+        "remove"
+            if bridge.erased_ret == crate::types::Ty::Boolean
+                && bridge.concrete_ret == crate::types::Ty::Boolean =>
+        {
+            (
+                CollectionOwner::MutableCollection,
+                BridgeBarrierOutcome::False,
+            )
+        }
+        "indexOf" | "lastIndexOf"
+            if bridge.erased_ret == crate::types::Ty::Int
+                && bridge.concrete_ret == crate::types::Ty::Int =>
+        {
+            (CollectionOwner::List, BridgeBarrierOutcome::NotFound)
+        }
+        "containsKey"
+            if bridge.erased_ret == crate::types::Ty::Boolean
+                && bridge.concrete_ret == crate::types::Ty::Boolean =>
+        {
+            (CollectionOwner::Map, BridgeBarrierOutcome::False)
+        }
+        "get" if bridge.erased_ret.is_reference() && bridge.concrete_ret.is_reference() => {
+            (CollectionOwner::Map, BridgeBarrierOutcome::Null)
+        }
+        _ => return None,
+    };
+    let parameter = 0;
+    (bridge.erased_params.len() == 1
+        && bridge.concrete_params.len() == 1
+        && bridge.erased_params[parameter].is_erased_top()
+        && bridge.concrete_params[parameter].is_reference()
+        && !bridge.concrete_params[parameter].is_erased_top())
+    .then_some((parameter, outcome))
+    .map(|(parameter, outcome)| (owner, BridgeBarrier { parameter, outcome }))
+}
+
+pub(crate) fn bridge_barrier(bridge: &crate::ir::Bridge) -> Option<BridgeBarrier> {
+    bridge
+        .type_safe_barrier
+        .then(|| collection_bridge_semantics(bridge))
+        .flatten()
+        .map(|(_, barrier)| barrier)
+}
+
+fn apply_collection_bridge_barriers(ir: &mut crate::ir::IrFile, syms: &FrontendSymbols) {
+    for class in &mut ir.classes {
+        let owners = syms
+            .applied_hierarchy(crate::types::Ty::obj_name(class.fq_name))
+            .into_iter()
+            .map(|(owner, _, _)| owner)
+            .collect::<Vec<_>>();
+        for bridge in &mut class.bridges {
+            bridge.type_safe_barrier =
+                collection_bridge_semantics(bridge).is_some_and(|(required, _)| {
+                    owners.iter().copied().any(|owner| required.matches(owner))
+                });
+        }
+    }
 }
 
 fn jvm_plugin_type_descriptor(ty: Ty) -> Option<String> {
@@ -349,16 +479,14 @@ pub fn facade_package_metadata(
             continue;
         }
         // The decl's collected signature: a plain fn under `funs[name]`, an extension under
-        // `ext_funs[(erased receiver, name)]` — matched by source decl id so overloads can't mix.
+        // `ext_funs[name][semantic receiver]` — matched by source decl id so overloads can't mix.
         let (sig, receiver) = if f.receiver.is_some() {
-            let Some((recv, sig)) = syms.ext_funs.iter().find_map(|((recv, name), sigs)| {
-                (*name == f.name)
-                    .then(|| {
-                        sigs.iter()
-                            .find(|s| s.source_decl == Some(d) && s.source_file == Some(file_index))
-                            .map(|s| (*recv, s))
-                    })
-                    .flatten()
+            let Some((recv, sig)) = syms.ext_funs.get(&f.name).and_then(|families| {
+                families.iter().find_map(|(recv, sigs)| {
+                    sigs.iter()
+                        .find(|s| s.source_decl == Some(d) && s.source_file == Some(file_index))
+                        .map(|s| (*recv, s))
+                })
             }) else {
                 continue;
             };
@@ -529,11 +657,7 @@ mod tests {
         );
     }
 
-    /// The post-lowering JVM pass pipeline (plugins → value-classes → suspend → must-inline marks →
-    /// lambda reparenting) must run through `run_backend_passes` everywhere — every hand-replicated
-    /// copy is a site where a NEW pass silently goes missing (twice this produced false-green test
-    /// runs: IllegalAccessError miscompiles the gate never saw). This test bans direct calls to the
-    /// individual passes outside their defining module and the shared pipeline itself.
+    /// JVM post-lowering passes must run through `run_backend_passes`.
     #[test]
     fn backend_passes_are_only_called_via_run_backend_passes() {
         // token that marks a CALL of the pass → files allowed to contain it (the defining module's
@@ -559,6 +683,7 @@ mod tests {
                 "run_enabled(",
                 &["src/plugins/mod.rs", "src/jvm/backend.rs"],
             ),
+            ("apply_collection_bridge_barriers(", &["src/jvm/backend.rs"]),
         ];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut offenders = Vec::new();
@@ -581,6 +706,23 @@ mod tests {
             "backend passes must go through jvm::backend::run_backend_passes (so a new pass lands \
              in every pipeline by construction), but:\n  {}",
             offenders.join("\n  ")
+        );
+    }
+
+    #[test]
+    fn common_lowering_leaves_bridge_barriers_to_backends() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ir_lower.rs");
+        let text = std::fs::read_to_string(path).expect("read common lowering");
+        let offenders = text
+            .lines()
+            .filter(|line| {
+                line.contains("type_safe_barrier") && !line.contains("type_safe_barrier: false")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            offenders.is_empty(),
+            "common lowering must not assign backend bridge barriers:\n{}",
+            offenders.join("\n")
         );
     }
 

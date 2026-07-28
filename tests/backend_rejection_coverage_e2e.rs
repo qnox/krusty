@@ -173,3 +173,203 @@ fn suspend_safe_call_double_suspension_rejected() {
          suspend fun f(b: Box?): Int { return (b?.d() ?: 0) + (b?.d() ?: 0) }\n"
     ));
 }
+
+#[test]
+fn cross_file_suspend_generic_value_class_specialization_rejected() {
+    let sources = [
+        (
+            "Transform",
+            "fun <T, R> T.mapResult(transform: suspend (T) -> R): suspend () -> R = { transform(this) }\n",
+        ),
+        (
+            "Main",
+            "import kotlin.coroutines.*\n\
+             fun box(): String {\n\
+                 var result = \"fail\"\n\
+                 Result.success(\"OK\").mapResult { it.getOrThrow() }\n\
+                     .startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })\n\
+                 return result\n\
+             }\n",
+        ),
+    ];
+    assert!(
+        common::compile_and_run_files_with_stdlib(&sources).is_none(),
+        "cross-file declaration must not bypass the value-class/suspend ABI gate"
+    );
+}
+
+#[test]
+fn named_generic_value_class_operand_specialization_rejected() {
+    assert!(rejects(
+        "fun <T, R> mapResult(\n\
+             value: T,\n\
+             other: String = \"x\",\n\
+             transform: suspend (T) -> R\n\
+         ): suspend () -> R = { transform(value) }\n\
+         fun box(): String = \"unreachable\"\n\
+         fun trigger() = mapResult(\n\
+             transform = { \"OK\" },\n\
+             value = Result.success(\"OK\")\n\
+         )\n"
+    ));
+}
+
+#[test]
+fn generic_member_value_class_operand_specialization_rejected() {
+    assert!(rejects(
+        "class Mapper {\n\
+             fun <T, R> mapResult(\n\
+                 value: T,\n\
+                 other: String = \"x\",\n\
+                 transform: suspend (T) -> R\n\
+             ): suspend () -> R = { transform(value) }\n\
+         }\n\
+         fun box(): String = \"unreachable\"\n\
+         fun trigger() = Mapper().mapResult(\n\
+             transform = { \"OK\" },\n\
+             value = Result.success(\"OK\")\n\
+         )\n"
+    ));
+}
+
+#[test]
+fn owner_generic_member_value_class_operand_specialization_rejected() {
+    assert!(rejects(
+        "class Mapper<T> {\n\
+             fun <R> mapResult(\n\
+                 value: T,\n\
+                 transform: suspend (T) -> R\n\
+             ): suspend () -> R = { transform(value) }\n\
+         }\n\
+         fun trigger() = Mapper<Result<String>>().mapResult(\n\
+             value = Result.success(\"OK\"),\n\
+             transform = { \"OK\" }\n\
+         )\n\
+         fun box(): String = \"unreachable\"\n"
+    ));
+}
+
+#[test]
+fn generic_member_extension_value_class_receiver_specialization_rejected() {
+    assert!(rejects(
+        "class Scope {\n\
+             fun <T, R> T.mapResult(\n\
+                 transform: suspend (T) -> R\n\
+             ): suspend () -> R = { transform(this) }\n\
+             fun trigger() = Result.success(\"OK\").mapResult { \"OK\" }\n\
+         }\n\
+         fun box(): String = \"unreachable\"\n"
+    ));
+}
+
+#[test]
+fn owner_generic_member_extension_value_class_receiver_specialization_rejected() {
+    assert!(rejects(
+        "class Scope<T> {\n\
+             fun <R> T.mapResult(\n\
+                 transform: suspend (T) -> R\n\
+             ): suspend () -> R = { transform(this) }\n\
+         }\n\
+         fun trigger() = with(Scope<Result<String>>()) {\n\
+             Result.success(\"OK\").mapResult { \"OK\" }\n\
+         }\n\
+         fun box(): String = \"unreachable\"\n"
+    ));
+}
+
+#[test]
+fn unused_explicit_value_class_type_argument_does_not_trigger_suspend_gate() {
+    let source = "import kotlin.coroutines.*\n\
+        fun <T> make(): suspend () -> String = { \"OK\" }\n\
+        fun box(): String {\n\
+            var result = \"fail\"\n\
+            make<Result<String>>()\n\
+                .startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })\n\
+            return result\n\
+        }\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(source, "Main")
+            .expect("unused explicit value-class formal must still lower"),
+        "OK"
+    );
+}
+
+#[test]
+fn boxed_value_class_inside_container_does_not_trigger_suspend_gate() {
+    let source = "import kotlin.coroutines.*\n\
+        fun <T> make(values: List<T>): suspend () -> String = { \"OK\" }\n\
+        fun box(): String {\n\
+            var result = \"fail\"\n\
+            make(listOf(Result.success(\"unused\")))\n\
+                .startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })\n\
+            return result\n\
+        }\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(source, "Main")
+            .expect("boxed value-class element must not gate the container operand"),
+        "OK"
+    );
+}
+
+#[test]
+fn unrelated_concrete_value_class_parameter_does_not_trigger_suspend_gate() {
+    let source = "import kotlin.coroutines.*\n\
+        fun <T> make(value: Result<String>): suspend () -> String = { value.getOrThrow() }\n\
+        fun box(): String {\n\
+            var result = \"fail\"\n\
+            make<Int>(Result.success(\"OK\"))\n\
+                .startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })\n\
+            return result\n\
+        }\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(source, "Main")
+            .expect("concrete value-class parameter does not bind the unused formal"),
+        "OK"
+    );
+}
+
+#[test]
+fn cross_file_projected_generic_return_with_concrete_inference_is_accepted() {
+    let sources = [
+        (
+            "Decode",
+            "fun <T> something(): T = \"OK\" as T\n\
+             class Context<T>\n\
+             fun <T> Any.decodeIn(typeFrom: Context<in T>): T = something()\n",
+        ),
+        (
+            "Main",
+            "fun <T> Any?.decodeOut(typeFrom: Context<out T>): T =\n\
+                 this?.decodeIn(typeFrom) ?: throw AssertionError()\n\
+             fun box(): String = \"value\".decodeOut(Context<Any>()).toString()\n",
+        ),
+    ];
+    assert_eq!(
+        common::compile_and_run_files_with_stdlib(&sources).as_deref(),
+        Some("OK")
+    );
+}
+
+#[test]
+fn projected_generic_member_return_inference_rejected() {
+    assert!(rejects(
+        "class Context<T>\n\
+         fun <T> something(): T = Any() as T\n\
+         class Decoder { fun <T> decodeIn(typeFrom: Context<in T>): T = something() }\n\
+         fun <T> Decoder.decodeOut(typeFrom: Context<out T>): T = decodeIn(typeFrom)\n\
+         fun box(): String = Decoder().decodeOut(Context<Any>()).toString()\n"
+    ));
+}
+
+#[test]
+fn projected_generic_extension_receiver_with_concrete_inference_is_accepted() {
+    let source = "class Context<T>\n\
+         fun <T> something(): T = \"OK\" as T\n\
+         fun <T> Context<in T>.decode(): T = something()\n\
+         fun <T> Context<out T>.decodeOut(): T = decode()\n\
+         fun box(): String = Context<Any>().decodeOut().toString()\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(source, "ProjectedExtension").as_deref(),
+        Some("OK")
+    );
+}

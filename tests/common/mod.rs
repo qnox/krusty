@@ -425,6 +425,14 @@ pub fn compile_to_dir(
 /// front-end-valid source is declined by a backend unsupported-feature path. Returns `None` when the
 /// front end rejects the source, because backend-rejection tests should not pass via a parser/type
 /// error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BackendOutcome {
+    Emitted,
+    LowerBail(String),
+    BackendPassBail,
+    EmitBail,
+}
+
 #[allow(dead_code)]
 pub fn backend_rejects_in_process(
     src: &str,
@@ -432,6 +440,17 @@ pub fn backend_rejects_in_process(
     cp_jars: &[PathBuf],
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<bool> {
+    backend_outcome_in_process(src, stem, cp_jars, jdk_modules)
+        .map(|outcome| outcome != BackendOutcome::Emitted)
+}
+
+#[allow(dead_code)]
+pub fn backend_outcome_in_process(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Option<BackendOutcome> {
     use krusty::diag::DiagSink;
     use krusty::frontend::{check_file, collect_signatures_with_cp};
     use krusty::jvm::names::file_class_name;
@@ -475,13 +494,21 @@ pub fn backend_rejects_in_process(
     }
     let facade = file_class_name(stem, file.package.as_deref());
     let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
-    let Some(mut ir) = krusty::ir_lower::lower_file(file, &info, &syms, &runtime) else {
-        return Some(true);
+    let bail = std::cell::RefCell::new(String::new());
+    let Some(mut ir) = krusty::ir_lower::lower_file_reporting(file, &info, &syms, &runtime, &bail)
+    else {
+        return Some(BackendOutcome::LowerBail(bail.borrow().clone()));
     };
     if krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms).is_err() {
-        return Some(true);
+        return Some(BackendOutcome::BackendPassBail);
     }
-    Some(krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None).is_none())
+    Some(
+        if krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None).is_none() {
+            BackendOutcome::EmitBail
+        } else {
+            BackendOutcome::Emitted
+        },
+    )
 }
 
 /// Lower Kotlin `src` to backend-agnostic IR (`lex → parse → check → collect → ir_lower`), stopping
@@ -1464,6 +1491,19 @@ pub fn run_box_corpus_case(rel: &str) -> Option<String> {
     let classes = compile_in_process(&src, "P", &cp, Some(&jdk))?;
     let box_class = find_box_class(&classes)?;
     run_box(&classes, &box_class, &cp)
+}
+
+#[allow(dead_code)]
+pub fn box_corpus_case_backend_outcome(rel: &str) -> Option<BackendOutcome> {
+    let src = std::fs::read_to_string(box_corpus_dir()?.join(rel))
+        .ok()?
+        .replace("OPTIONAL_JVM_INLINE_ANNOTATION", "@JvmInline");
+    if src.contains("// FILE:") || src.contains("// MODULE:") {
+        return None;
+    }
+    let jdk = jdk_modules()?;
+    let cp = classpath_jars_for(&src);
+    backend_outcome_in_process(&src, "P", &cp, Some(&jdk))
 }
 
 // --- Persistent kotlinc compiler server -----------------------------------

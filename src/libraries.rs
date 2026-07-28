@@ -527,6 +527,8 @@ pub struct ParamList {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallArgMappingFailure {
     pub errors: Vec<CallArgMappingError>,
+    /// First positional argument rejected after named arguments.
+    pub recovery_argument: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -589,6 +591,7 @@ pub fn map_call_args<T: Copy>(
     let mut seen_named = false;
     let mut named_order_matches = true;
     let mut errors = Vec::new();
+    let mut recovery_argument = None;
 
     for (argument_index, &argument) in args.iter().enumerate() {
         match names
@@ -639,6 +642,13 @@ pub fn map_call_args<T: Copy>(
                 }
 
                 if seen_named {
+                    if named_order_matches && argument_index >= parameter_count {
+                        errors.push(CallArgMappingError::TooManyArguments {
+                            argument: argument_index,
+                            expected: parameter_count,
+                        });
+                        continue;
+                    }
                     let slot = if named_order_matches
                         && argument_index < parameter_count
                         && slots[argument_index].is_none()
@@ -651,6 +661,7 @@ pub fn map_call_args<T: Copy>(
                         slots[parameter_index] = Some(argument);
                         named_order_matches &= parameter_index == argument_index;
                     } else {
+                        recovery_argument.get_or_insert(argument_index);
                         errors.push(CallArgMappingError::PositionalAfterNamed {
                             argument: argument_index,
                         });
@@ -676,9 +687,11 @@ pub fn map_call_args<T: Copy>(
         }
     }
 
-    if errors
-        .iter()
-        .all(|error| matches!(error, CallArgMappingError::PositionalAfterNamed { .. }))
+    if errors.is_empty()
+        || (recovery_argument.is_some()
+            && errors
+                .iter()
+                .all(|error| matches!(error, CallArgMappingError::PositionalAfterNamed { .. })))
     {
         for (parameter_index, slot) in slots.iter().enumerate() {
             let has_default = vararg == Some(parameter_index)
@@ -704,7 +717,10 @@ pub fn map_call_args<T: Copy>(
     if errors.is_empty() {
         Ok(slots)
     } else {
-        Err(CallArgMappingFailure { errors })
+        Err(CallArgMappingFailure {
+            errors,
+            recovery_argument,
+        })
     }
 }
 
@@ -918,6 +934,7 @@ pub struct FunctionInfo {
     /// Parsed generic signature, if the provider has one. Carries type-variable binding facts with the
     /// overload instead of making consumers parse backend signature strings after selection.
     pub generic_sig: Option<GenericSig>,
+    pub projected_return_hazard: bool,
     /// The source-level call shape (defaults, named params, lambda param types, vararg) the checker needs
     /// beyond the erased descriptor. `Default` (empty) when the source doesn't provide it.
     pub call_sig: CallSig,
@@ -948,6 +965,7 @@ impl FunctionInfo {
             receiver_rank: 0,
             overload_rank: 0,
             generic_sig: None,
+            projected_return_hazard: false,
             call_sig: CallSig::default(),
             context_count: 0,
             source_key: None,

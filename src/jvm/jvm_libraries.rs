@@ -1912,8 +1912,6 @@ impl SymbolSource for JvmLibraries {
                 if mf.kotlin_name != name || !mf.is_extension() {
                     continue;
                 }
-
-                // Keep type-variable receivers intact so selection and descriptor lookup use the bound.
                 let raw_receiver = mf.generic_sig.as_ref().and_then(|g| g.receiver);
                 let receiver = raw_receiver
                     .map(|r| match r {
@@ -1983,10 +1981,7 @@ impl SymbolSource for JvmLibraries {
                         value_param_descs.as_deref(),
                     )
                 };
-                // The real bytecode method (public flag + descriptor), matched to the CHOSEN name so the
-                // visibility is that method's own — an `@InlineOnly` extension (`let`/`run`) is source-public
-                // but bytecode-non-public and MUST be inlined, never called. When metadata supplies the
-                // descriptor the candidate is still looked up (by that same name) only for its visibility.
+                // Match the bytecode method to recover its descriptor and inline implementation details.
                 let (jvm_name, descriptor, cand) = if let Some(d) = mf.jvm_desc {
                     (mf.jvm_name.clone(), d.to_string(), by_name(&mf.jvm_name))
                 } else if let Some(c) = by_name(&mf.jvm_name) {
@@ -2039,13 +2034,7 @@ impl SymbolSource for JvmLibraries {
                 };
                 overloads.push(FunctionInfo {
                     ret: ReturnInfo::new(mf.ret_nullable(), ret_class),
-                    // Public if EITHER the metadata OR the bytecode method is public: a value-class inline
-                    // extension is metadata-public but bytecode-private (resolved, then spliced), while some
-                    // metadata (a user library's top-level extension) under-reports visibility though the
-                    // emitted `invokestatic` target is plainly public. Either sense makes it callable.
-                    visibility: crate::libraries::Visibility::from_public(
-                        mf.is_public() || bytecode_public,
-                    ),
+                    visibility: crate::libraries::Visibility::from_public(mf.is_public()),
                     generic_sig,
                     flags: FnFlags {
                         inline,

@@ -148,6 +148,8 @@ mod classpath_is_smartcast_e2e;
 mod classpath_jdk_static_e2e;
 #[path = "classpath_nested_ctor_reordered_named_valueclass_e2e.rs"]
 mod classpath_nested_ctor_reordered_named_valueclass_e2e;
+#[path = "classpath_nullable_extension_receiver_e2e.rs"]
+mod classpath_nullable_extension_receiver_e2e;
 #[path = "classpath_number_conversion_e2e.rs"]
 mod classpath_number_conversion_e2e;
 #[path = "classpath_object_member_import_e2e.rs"]

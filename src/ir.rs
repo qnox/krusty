@@ -224,6 +224,11 @@ pub enum IrExpr {
         lhs: ExprId,
         rhs: ExprId,
     },
+    /// Built-in numeric unary negation.
+    PrimitiveNeg {
+        operand: ExprId,
+        ty: Ty,
+    },
     /// A Kotlin string template `"a${x}b"` as an ordered list of parts (string constants + interpolated
     /// values, with empty constant chunks dropped). The JVM backend emits it as kotlinc does: a single
     /// part → `String.valueOf(part)`; multiple parts → one `StringBuilder` with a typed `append` per part
@@ -1020,6 +1025,8 @@ pub struct Bridge {
     pub erased_ret: Ty,
     pub concrete_params: Vec<Ty>,
     pub concrete_ret: Ty,
+    /// Whether incompatible erased arguments return the collection operation's neutral result.
+    pub type_safe_barrier: bool,
     /// The method this bridge delegates to, when it differs from `name` — a value-class-returning
     /// override is emitted under a mangled name (`foo-<hash>`), so the unmangled bridge (`foo`, the
     /// supertype's erased signature) must call the mangled one. `None` ⇒ same as `name`.
@@ -1592,7 +1599,8 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         | IrExpr::EnumValueOf { arg, .. }
         | IrExpr::RefNew { init: arg, .. }
         | IrExpr::RefGet { holder: arg, .. }
-        | IrExpr::NewArray { size: arg, .. } => f(*arg),
+        | IrExpr::NewArray { size: arg, .. }
+        | IrExpr::PrimitiveNeg { operand: arg, .. } => f(*arg),
         IrExpr::StringConcat(parts) => parts.iter().for_each(|&p| f(p)),
         IrExpr::PrimitiveBinOp { lhs, rhs, .. } => {
             f(*lhs);
