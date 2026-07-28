@@ -1983,6 +1983,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   those subclasses when the subject class isn't a same-module sealed, so an exhaustive classpath `when`
   used as a value type-checks (a non-exhaustive one still errors). (`build702_gg1_sealed_when_e2e`)
 
+- **Exhaustive `when` over a CLASSPATH enum (Java or Kotlin).** A `when (c) { p.Color.RED -> …;
+  p.Color.GREEN -> … }` over an enum resolved from the classpath is exhaustive when every constant is
+  covered, including when constants use fully qualified names. Missing constants are still diagnosed.
+  (`when_classpath_java_enum_e2e`)
+
 - **`suspend` `$default` member call feeding an `if`/`when` CONDITION.** A suspension in an `if`/`when`
   CONDITION (rather than a bound `val`) is hoisted to a preceding bound temp by the coroutine pass — in
   a `return if (…)`, a lambda's tail `if`-expression, and a `val a = if (…)` init — so the state-machine

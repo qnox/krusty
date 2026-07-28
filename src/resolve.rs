@@ -18869,6 +18869,12 @@ impl<'a> Checker<'a> {
         field: crate::libraries::StaticFieldRef,
     ) -> Ty {
         if let Some(expr) = expr {
+            if self
+                .resolved_type_name(field.owner)
+                .is_some_and(|ty| ty.is_enum_entry(&field.name))
+            {
+                self.resolved_enum_entries.insert(expr, field.owner);
+            }
             self.expr_lowers.insert(
                 expr,
                 ExprLowering::StaticFieldRead {
