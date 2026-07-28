@@ -2943,9 +2943,31 @@ fn diagnostics_tokens_navigation_hovers_completions_and_symbols_match_official_k
     );
     assert_eq!(actual_renames, expected_renames, "rename mismatches");
     assert_eq!(
-        actual_completions, expected_completions,
-        "completion mismatches"
+        actual_completions.len(),
+        expected_completions.len(),
+        "completion case count mismatch"
     );
+    for (actual, expected) in actual_completions.iter().zip(expected_completions.iter()) {
+        assert_eq!(
+            actual["case"], expected["case"],
+            "completion case order mismatch"
+        );
+        let case = &actual["case"];
+        assert_eq!(
+            expected["result"]["isIncomplete"],
+            json!(true),
+            "official Kotlin LSP is expected to refine completion server-side for {case}"
+        );
+        assert_eq!(
+            actual["result"]["isIncomplete"],
+            json!(false),
+            "krusty returns a client-filterable completion list for {case}"
+        );
+        assert_eq!(
+            actual["result"]["items"], expected["result"]["items"],
+            "completion item mismatch for {case}"
+        );
+    }
     assert_eq!(
         actual_signature_help, expected_signature_help,
         "signature-help mismatches"
