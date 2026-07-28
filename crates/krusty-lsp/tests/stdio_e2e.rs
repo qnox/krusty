@@ -319,6 +319,27 @@ fn stdio_server_reports_official_duplicate_named_argument_diagnostic() {
 }
 
 #[test]
+fn stdio_server_reports_official_nullable_receiver_diagnostic_with_utf16_range() {
+    let diagnostics = diagnostics_after_open(
+        &[],
+        "file:///nullable.kt",
+        "fun nullableMemberCall(value: String?): String = /*😀*/ value. /* gap */ substring(1)",
+    );
+    assert_eq!(
+        diagnostics,
+        vec![json!({
+            "range": {
+                "start": {"line": 0, "character": 61},
+                "end": {"line": 0, "character": 62}
+            },
+            "severity": 1,
+            "source": "Kotlin",
+            "message": "Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'."
+        })]
+    );
+}
+
+#[test]
 fn stdio_server_reports_mixed_and_missing_argument_diagnostics() {
     let diagnostics = diagnostics_after_open(
         &[],

@@ -49,8 +49,13 @@ fun box(): String {
     let Some(jdk) = common::jdk_modules() else {
         return;
     };
-    let classes = common::compile_in_process(src, "LambdaSequence", &[stdlib.clone()], Some(&jdk))
-        .expect("same-named declarations should compile");
+    let classes = common::compile_in_process(
+        src,
+        "LambdaSequence",
+        std::slice::from_ref(&stdlib),
+        Some(&jdk),
+    )
+    .expect("same-named declarations should compile");
 
     for (class_name, expected) in [
         (

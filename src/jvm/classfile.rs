@@ -3042,6 +3042,18 @@ impl CodeBuilder {
     pub fn dconst_0(&mut self) {
         self.op(0x0e, 2);
     }
+    pub fn ineg(&mut self) {
+        self.op(0x74, 0);
+    }
+    pub fn lneg(&mut self) {
+        self.op(0x75, 0);
+    }
+    pub fn fneg(&mut self) {
+        self.op(0x76, 0);
+    }
+    pub fn dneg(&mut self) {
+        self.op(0x77, 0);
+    }
     pub fn athrow(&mut self) {
         self.op(0xbf, -1);
     }

@@ -1631,7 +1631,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   An unknown named argument reads `no parameter with name 'unknown' found.` and points at the
   argument name; the LSP publishes that exact name range with the official sentence-cased message.
   A repeated named argument reads `argument already passed for this parameter.` and points at the
-  repeated label rather than the first occurrence.
+  repeated label rather than the first occurrence. Invalid reordered mixing reads
+  `mixing named and positional arguments is not allowed unless the order of the arguments matches the
+  order of the parameters.` and points at the positional argument expression. Missing required parameters
+  are then reported in declaration order, excluding defaulted and vararg parameters. A trailing lambda
+  cannot supply a final vararg and reads
+  `passing value as a vararg is allowed only inside a parenthesized argument list.`; normal overload
+  selection still takes precedence.
+  Calling an ordinary member or a concrete non-null extension through a nullable receiver reports
+  `only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'T?'.`
+  at the unsafe `.`. A nullable-receiver extension remains callable through ordinary dot syntax and
+  may shadow a same-named member on the non-null type; safe calls, `!!`, and smart-cast receivers remain
+  valid. Extension applicability retains source and Kotlin-metadata receiver nullability rather than
+  deriving it from the erased JVM signature; `<T>` has the nullable `Any?` upper bound while
+  `<T : Any>` rejects nullable values. The LSP highlights the unsafe dot, including when comments
+  separate it from the member name. Explicit, same-package, star, and default imports retain Kotlin
+  precedence, and equally applicable star-imported extensions remain ambiguous.
   Unresolved member reads and calls use the same `unresolved reference` form as bare names. Verified
   by the differential `diagnostics_match_kotlinc` tests, which compile the snippets with both
   compilers, report all mismatches in one run, cover cross-file generic signatures, and assert the

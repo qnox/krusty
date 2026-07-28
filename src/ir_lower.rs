@@ -10,12 +10,12 @@ use std::collections::HashMap;
 
 use crate::ast::{self, BinOp, Decl, Expr, ExprId as AstExprId, FunBody, Stmt, TemplatePart};
 use crate::frontend::{
-    classifier_over_default, qualified_path, typeref_leaf, ClassNames, CompoundAssignmentTarget,
-    CtorDefaultValue, DelegateGetValueTarget, DestructureComponentTarget, ExprLowering,
-    FrontendSymbols, FrontendTypeInfo, InlineCall, InvokeKind, IteratorDispatchTarget,
-    LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ReceiverLambda, ResolvedCall,
-    ResolvedConstructor, ResolvedLocalFunctionCall, ResolvedMember, ResolvedModuleTopLevelCall,
-    SigFlags, Signature, StmtLowering,
+    classifier_over_default, function_import_scope, qualified_path, typeref_leaf, ClassNames,
+    CompoundAssignmentTarget, CtorDefaultValue, DelegateGetValueTarget, DestructureComponentTarget,
+    ExprLowering, FrontendSymbols, FrontendTypeInfo, FunctionImportScope, InlineCall, InvokeKind,
+    IteratorDispatchTarget, LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ReceiverLambda,
+    ResolvedCall, ResolvedConstructor, ResolvedLocalFunctionCall, ResolvedMember,
+    ResolvedModuleTopLevelCall, SigFlags, Signature, StmtLowering,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
@@ -59,6 +59,37 @@ fn is_conversion_call_name(name: &str) -> bool {
             | "toUInt"
             | "toULong"
     )
+}
+
+fn call_has_generic_value_class_operand(
+    file: &ast::File,
+    info: &FrontendTypeInfo,
+    platform: &dyn SemanticPlatform,
+    call: AstExprId,
+    generic_operand_slots: &[u32],
+) -> bool {
+    let operand = |slot: u32| match file.expr(call) {
+        Expr::Call { callee, args } if slot == 0 => match file.expr(*callee) {
+            Expr::Member { receiver, .. } => Some(*receiver),
+            _ => None,
+        },
+        Expr::Call { args, .. } => match info.resolved_call_arg_slots.get(&call) {
+            Some(slots) => slots.get(slot as usize - 1).copied().flatten(),
+            None => args.get(slot as usize - 1).copied(),
+        },
+        Expr::SafeCall { receiver, .. } if slot == 0 => Some(*receiver),
+        Expr::SafeCall {
+            args: Some(args), ..
+        } => match info.resolved_call_arg_slots.get(&call) {
+            Some(slots) => slots.get(slot as usize - 1).copied().flatten(),
+            None => args.get(slot as usize - 1).copied(),
+        },
+        _ => None,
+    };
+    generic_operand_slots.iter().copied().any(|slot| {
+        operand(slot)
+            .is_some_and(|expression| platform.value_underlying(info.ty(expression)).is_some())
+    })
 }
 
 /// The leading variant name of a `{:?}`-formatted AST node (`"Call { .. }"` → `"Call"`).
@@ -127,6 +158,7 @@ pub fn lower_file_at_reporting(
     runtime: &dyn TargetRuntime,
     bail: &std::cell::RefCell<String>,
 ) -> Option<IrFile> {
+    let source_ext_scope = function_import_scope(file, syms);
     let mut lo = Lower {
         afile: file,
         file_index,
@@ -134,6 +166,7 @@ pub fn lower_file_at_reporting(
         syms,
         runtime,
         bail,
+        source_ext_scope,
         ir: IrFile::with_package(file.package.clone()),
         fun_ids: HashMap::new(),
         fun_ids_by_decl: HashMap::new(),
@@ -233,6 +266,63 @@ pub fn lower_file_at_reporting(
         });
     if has_context_property {
         lo.set_bail("gate:context-property");
+        return None;
+    }
+
+    // Suspend lowering cannot yet specialize generic value-class operands.
+    let mut has_suspend_generic_value_class_specialization = false;
+    let mut has_projected_generic_return_call = false;
+    for expression in 0..file.expr_arena.len() {
+        let expression = AstExprId(expression as u32);
+        let source_key = info.resolved_source_call(expression);
+        let top_level_generic_slots = source_key
+            .and_then(|source_key| syms.source_generic_value_operand_slots.get(&source_key));
+        let member_generic_slots = info.resolved_source_member_signature(expression).and_then(
+            |(owner, name, receiver, params)| {
+                syms.source_generic_member_value_operand_slots
+                    .get(&owner)?
+                    .get(name)?
+                    .iter()
+                    .find(|(candidate_receiver, candidate_params, _)| {
+                        *candidate_receiver == receiver && candidate_params == params
+                    })
+                    .map(|(_, _, slots)| slots)
+            },
+        );
+        has_suspend_generic_value_class_specialization |= top_level_generic_slots
+            .or(member_generic_slots)
+            .is_some_and(|slots| {
+                matches!(info.ty(expression), Ty::Fun(signature) if signature.suspend)
+                    && call_has_generic_value_class_operand(
+                        file,
+                        info,
+                        syms.libraries.as_ref(),
+                        expression,
+                        slots,
+                    )
+            });
+        let expression_type = info.ty(expression);
+        let source_projected_return = source_key
+            .is_some_and(|key| syms.source_projected_return_hazards.contains(&key))
+            && (!expression_type.is_reference()
+                || (expression_type.non_null().is_erased_top()
+                    && info.is_discarded_expression(expression)));
+        let member_projected_return = info.resolved_member_has_projected_return_hazard(expression)
+            && (!expression_type.is_reference() || expression_type.non_null().is_erased_top());
+        has_projected_generic_return_call |= (source_projected_return || member_projected_return)
+            && !file.call_type_args.contains_key(&expression.0);
+        if has_suspend_generic_value_class_specialization && has_projected_generic_return_call {
+            break;
+        }
+    }
+    if has_suspend_generic_value_class_specialization {
+        lo.set_bail("gate:suspend-generic-value-class-specialization");
+        return None;
+    }
+
+    // Projected return inference is not represented in the resolved type yet.
+    if has_projected_generic_return_call {
+        lo.set_bail("gate:projected-generic-return-inference");
         return None;
     }
 
@@ -1880,6 +1970,7 @@ pub fn lower_file_at_reporting(
                 lo.ext_fun_ids
                     .entry((recv_key, f.name.clone()))
                     .or_insert(id);
+                lo.fun_ids_by_decl.insert(d, id);
                 // A `private` top-level extension is `private static` on the facade (kotlinc); a
                 // class-body caller goes through the `access$<name>` bridge (see `emit_pass`).
                 if f.visibility.is_private() {
@@ -2286,6 +2377,7 @@ pub fn lower_file_at_reporting(
                                     erased_ret: br,
                                     concrete_params: op,
                                     concrete_ret: or,
+                                    type_safe_barrier: false,
                                     target_name: None,
                                     box_ret: None,
                                     unbox_params: Vec::new(),
@@ -2377,6 +2469,7 @@ pub fn lower_file_at_reporting(
                                                 erased_ret: super_ret,
                                                 concrete_params: vec![],
                                                 concrete_ret: own_ret,
+                                                type_safe_barrier: false,
                                                 target_name: None,
                                                 box_ret: None,
                                                 unbox_params: Vec::new(),
@@ -2400,6 +2493,7 @@ pub fn lower_file_at_reporting(
                                                     erased_ret: ty_to_ir(Ty::Unit),
                                                     concrete_params: vec![ty_to_ir(own_ty)],
                                                     concrete_ret: ty_to_ir(Ty::Unit),
+                                                    type_safe_barrier: false,
                                                     target_name: None,
                                                     box_ret: None,
                                                     unbox_params: Vec::new(),
@@ -2471,6 +2565,7 @@ pub fn lower_file_at_reporting(
                                     erased_ret: ty_to_ir(pi.ty),
                                     concrete_params: vec![],
                                     concrete_ret: ty_to_ir(own_ty),
+                                    type_safe_barrier: false,
                                     target_name: None,
                                     box_ret: None,
                                     unbox_params: Vec::new(),
@@ -2514,6 +2609,7 @@ pub fn lower_file_at_reporting(
                                 erased_ret: ty_to_ir(mapped.ret),
                                 concrete_params: vec![],
                                 concrete_ret: ty_to_ir(concrete_ret),
+                                type_safe_barrier: false,
                                 target_name: Some(property_getter_name(&mapped.source_name)),
                                 box_ret: None,
                                 unbox_params: Vec::new(),
@@ -2543,6 +2639,7 @@ pub fn lower_file_at_reporting(
                                 erased_ret: ty_to_ir(mapped.ret),
                                 concrete_params: tys_to_ir(&implementation.params),
                                 concrete_ret: ty_to_ir(implementation.ret),
+                                type_safe_barrier: false,
                                 target_name: Some(mapped.source_name),
                                 box_ret: None,
                                 unbox_params: Vec::new(),
@@ -2739,6 +2836,7 @@ pub fn lower_file_at_reporting(
                                     erased_ret,
                                     concrete_params,
                                     concrete_ret,
+                                    type_safe_barrier: false,
                                     target_name: None,
                                     box_ret: None,
                                     unbox_params: Vec::new(),
@@ -5050,6 +5148,7 @@ pub(crate) struct Lower<'a> {
     /// Caller-owned sink for the reason `lower_file_at` last returned `None` — a survey/box-corpus
     /// diagnostic, plus the internal `deep*`-phase refinement (formerly the `BAIL_REASON` thread-local).
     bail: &'a std::cell::RefCell<String>,
+    source_ext_scope: FunctionImportScope,
     ir: IrFile,
     /// Top-level function ids keyed by (name, parameter types) so overloads (same name,
     /// different params) each map to their own compiled method.
@@ -5641,6 +5740,10 @@ impl<'a> Lower<'a> {
 
     fn emit_primitive_bin_op(&mut self, op: IrBinOp, lhs: u32, rhs: u32) -> u32 {
         self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs })
+    }
+
+    fn emit_primitive_neg(&mut self, operand: u32, ty: Ty) -> u32 {
+        self.ir.add_expr(IrExpr::PrimitiveNeg { operand, ty })
     }
 
     fn emit_set_field(&mut self, receiver: u32, class: u32, index: u32, value: u32) -> u32 {
@@ -10432,9 +10535,10 @@ impl<'a> Lower<'a> {
 
     /// Return an extension only when receiver, name, and arity identify one declaration.
     fn unique_ext_fun_id_by_arity(&self, receiver: Ty, name: &str, arity: usize) -> Option<u32> {
-        let mut matches = self
-            .syms
-            .ext_fun_overloads(receiver, name)
+        let overloads =
+            self.syms
+                .ext_fun_overloads_in_import_scope(receiver, name, &self.source_ext_scope);
+        let mut matches = overloads
             .iter()
             .filter(|signature| signature.params.len() == arity);
         let signature = matches.next()?;
@@ -10535,6 +10639,12 @@ impl<'a> Lower<'a> {
         // elsewhere.
         if name == "compareTo" && self.has_scalar_value_repr(lt) {
             let at = self.info.ty(arg);
+            if lt == Ty::Boolean && at == Ty::Boolean {
+                let pir = ty_to_ir(Ty::Boolean);
+                let l = self.lower_arg(recv, &pir)?;
+                let r = self.lower_arg(arg, &pir)?;
+                return self.runtime_call(RuntimeOp::PrimitiveCompare, Ty::Int, vec![l, r]);
+            }
             if lt == Ty::Char && at == Ty::Char {
                 let pir = ty_to_ir(Ty::Int);
                 let l = self.lower_arg(recv, &pir)?;
@@ -10627,6 +10737,33 @@ impl<'a> Lower<'a> {
             }
             _ => raw,
         })
+    }
+
+    /// Lower named primitive unary methods without boxed virtual dispatch.
+    fn lower_prim_unary_op_method(
+        &mut self,
+        recv: AstExprId,
+        name: &str,
+        result_ty: Ty,
+    ) -> Option<u32> {
+        let receiver_ty = self.info.ty(recv);
+        if receiver_ty == Ty::Boolean && name == "not" && result_ty == Ty::Boolean {
+            let value = self.expr(recv)?;
+            let false_value = self.emit_const(IrConst::Boolean(false));
+            return Some(self.emit_primitive_bin_op(IrBinOp::Eq, value, false_value));
+        }
+        if !receiver_ty.is_numeric()
+            || !matches!(name, "unaryPlus" | "unaryMinus")
+            || !self.has_scalar_value_repr(result_ty)
+        {
+            return None;
+        }
+        let result_ir = ty_to_ir(result_ty);
+        let value = self.lower_arg(recv, &result_ir)?;
+        if name == "unaryPlus" {
+            return Some(value);
+        }
+        Some(self.emit_primitive_neg(value, result_ty))
     }
 
     /// Resolve a field by name, walking the superclass chain. Returns the *owning* class id, the
@@ -12221,9 +12358,9 @@ impl<'a> Lower<'a> {
         selected: ResolvedCall,
         source_expr: Option<AstExprId>,
     ) -> Option<(u32, Ty)> {
-        let internal = recv_ty.kotlin_class_internal()?;
         match selected {
             ResolvedCall::Member(resolved) => {
+                let internal = recv_ty.kotlin_class_internal()?;
                 let member = resolved.member;
                 if member.name != name {
                     return None;
@@ -12304,15 +12441,26 @@ impl<'a> Lower<'a> {
                 params: selected_params,
                 ret: selected_ret,
                 owner,
+                source,
             } => {
                 if target != name || receiver.erased_recv() != recv_ty.erased_recv() {
                     return None;
                 }
-                if let Some(&fid) = self.ext_fun_id_by_sig.get(&(
-                    receiver.erased_recv(),
-                    target.to_string(),
-                    selected_params.clone(),
-                )) {
+                let exact_local = source
+                    .filter(|(file, _)| *file == self.file_index)
+                    .and_then(|(_, declaration)| {
+                        self.fun_ids_by_decl.get(&ast::DeclId(declaration)).copied()
+                    });
+                let legacy_local = source.is_none().then(|| {
+                    self.ext_fun_id_by_sig
+                        .get(&(
+                            receiver.erased_recv(),
+                            target.to_string(),
+                            selected_params.clone(),
+                        ))
+                        .copied()
+                });
+                if let Some(fid) = exact_local.or_else(|| legacy_local.flatten()) {
                     let params = self.ir.functions[fid as usize].params.clone();
                     let ret = self.ir.functions[fid as usize].ret;
                     if ret != selected_ret
@@ -12321,7 +12469,8 @@ impl<'a> Lower<'a> {
                     {
                         return None;
                     }
-                    let mut lowered = vec![recv_v];
+                    let receiver_value = self.coerce_argument_value(recv_v, recv_ty, params[0])?;
+                    let mut lowered = vec![receiver_value];
                     for (argument, parameter) in args.iter().zip(&params[1..]) {
                         lowered.push(self.lower_arg(*argument, parameter)?);
                     }
@@ -12332,13 +12481,26 @@ impl<'a> Lower<'a> {
                 if selected_params.len() != args.len() {
                     return None;
                 }
-                let receiver_value = self.coerce_to_static(recv_v, recv_ty, receiver);
+                let physical_receiver = source
+                    .and_then(|(file, declaration)| {
+                        self.syms
+                            .source_extension_function(file, ast::DeclId(declaration))
+                            .and_then(|(declared, _)| {
+                                declared
+                                    .non_null()
+                                    .is_ty_param()
+                                    .then(|| declared.erased_recv())
+                            })
+                    })
+                    .unwrap_or(receiver);
+                let receiver_value =
+                    self.coerce_argument_value(recv_v, recv_ty, physical_receiver)?;
                 let mut lowered = vec![receiver_value];
                 for (argument, parameter) in args.iter().zip(&selected_params) {
                     lowered.push(self.lower_arg(*argument, &ty_to_ir(*parameter))?);
                 }
                 let mut physical_params = Vec::with_capacity(selected_params.len() + 1);
-                physical_params.push(receiver);
+                physical_params.push(physical_receiver);
                 physical_params.extend(selected_params.iter().copied());
                 let descriptor = self
                     .runtime
@@ -12852,6 +13014,7 @@ impl<'a> Lower<'a> {
                     member,
                     ret,
                     suspend,
+                    ..
                 } = *resolved;
                 self.emit_library_member_call(
                     receiver,
@@ -15193,13 +15356,21 @@ impl<'a> Lower<'a> {
                 receiver,
                 parameter,
                 owner,
+                source,
             } => {
                 let recv_key = receiver.erased_recv();
                 let selected_params = vec![parameter];
-                if let Some(&fid) =
+                let exact_local = source
+                    .filter(|(file, _)| *file == self.file_index)
+                    .and_then(|(_, declaration)| {
+                        self.fun_ids_by_decl.get(&ast::DeclId(declaration)).copied()
+                    });
+                let legacy_local = source.is_none().then(|| {
                     self.ext_fun_id_by_sig
                         .get(&(recv_key, aname.to_string(), selected_params))
-                {
+                        .copied()
+                });
+                if let Some(fid) = exact_local.or_else(|| legacy_local.flatten()) {
                     let params = self.ir.functions[fid as usize].params.clone();
                     if params.len() != 2 {
                         return None;
@@ -15673,6 +15844,7 @@ impl<'a> Lower<'a> {
                                 params: params.clone(),
                                 ret: *ret,
                                 generic_sig: None,
+                                projected_return_hazard: false,
                                 flags: SigFlags::default()
                                     .with_vararg(false)
                                     .with_is_inline(false)
@@ -17063,8 +17235,8 @@ impl<'a> Lower<'a> {
                 .into_iter()
                 .find_map(|(candidate, applied, _)| (candidate == member.owner).then_some(applied))
         });
-        let f = if let Some(member) = member.as_ref() {
-            self.source_member_decl(member, fname)?
+        let (f, selected_source) = if let Some(member) = member.as_ref() {
+            (self.source_member_decl(member, fname)?, None)
         } else if let Some(target) = module_target {
             if recv.is_some() || target.name != fname || target.source_file != Some(self.file_index)
             {
@@ -17072,20 +17244,23 @@ impl<'a> Lower<'a> {
             }
             let decl = target.source_decl?;
             match self.afile.decl(decl) {
-                Decl::Fun(f) if f.name == fname && f.receiver.is_none() => f.clone(),
+                Decl::Fun(f) if f.name == fname && f.receiver.is_none() => {
+                    (f.clone(), Some((self.file_index, decl)))
+                }
                 _ => return None,
             }
         } else {
-            self.afile
-                .decls
-                .iter()
-                .find_map(|&d| match self.afile.decl(d) {
-                    Decl::Fun(f) if f.name == fname && f.receiver.is_some() == recv.is_some() => {
-                        Some(f)
-                    }
-                    _ => None,
-                })?
-                .clone()
+            let (file, declaration) = self.info.resolved_source_call(AstExprId(call_id))?;
+            if file != self.file_index {
+                return None;
+            }
+            let declaration = ast::DeclId(declaration);
+            match self.afile.decl(declaration) {
+                Decl::Fun(f) if f.name == fname && f.receiver.is_some() == recv.is_some() => {
+                    (f.clone(), Some((file, declaration)))
+                }
+                _ => return None,
+            }
         };
         if !f.is_inline() {
             return None;
@@ -17150,26 +17325,29 @@ impl<'a> Lower<'a> {
         // Whether every path through the body returns/throws (its checked type is `Nothing`) — then the
         // `do…while` wrapper omits the unreachable fall-through (avoids an unframed dead `goto` tail).
         let body_diverges = self.info.ty(body) == Ty::Nothing;
-        // Value-parameter types + return type. An extension is keyed in `ext_funs` by `(erased
-        // receiver, name)` with value params only; a GENERIC extension isn't registered there (its
-        // receiver erased to `Any`), so derive from the decl.
         let (sig_params, sig_ret): (Vec<Ty>, Ty) = if let Some(member) = &member {
             (member.params.clone(), member.ret)
         } else if let Some(rt) = &recv_ty {
-            // Match THIS declaration's overload by its parameter list (an extension may be overloaded
-            // by arity); fall back to the first overload when the decl's types don't line up.
             let want: Vec<Ty> = f
                 .params
                 .iter()
                 .map(|p| ty_of(self.afile, &p.ty, &*self.syms.libraries))
                 .collect();
-            let overloads = self.syms.ext_fun_overloads(*rt, fname);
-            if let Some(s) = overloads
-                .iter()
-                .find(|s| s.params == want)
-                .or_else(|| overloads.first())
-            {
-                (s.params.clone(), s.ret)
+            let selected = selected_source
+                .and_then(|(file, declaration)| {
+                    self.syms
+                        .source_extension_function(file, declaration)
+                        .map(|(_, signature)| signature)
+                })
+                .or_else(|| {
+                    self.syms
+                        .ext_fun_overloads_in_import_scope(*rt, fname, &self.source_ext_scope)
+                        .iter()
+                        .find(|signature| signature.params == want)
+                })
+                .map(|s| (s.params.clone(), s.ret));
+            if let Some(selected) = selected {
+                selected
             } else {
                 let ps = f
                     .params
@@ -18230,6 +18408,12 @@ impl<'a> Lower<'a> {
                         {
                             return Some(r);
                         }
+                    } else if args.as_deref().is_some_and(<[_]>::is_empty) {
+                        if let Some(r) =
+                            self.lower_prim_unary_op_method(receiver, &name, self.info.ty(e))
+                        {
+                            return Some(r);
+                        }
                     }
                 }
                 // The receiver must be a reference (the `?.` null-check is on an object). The result may be
@@ -18340,6 +18524,18 @@ impl<'a> Lower<'a> {
                             ) = self.info.resolved_calls.get(&e).cloned()
                             {
                                 self.lower_module_member_extension_call(recv2, &target, &args, e)?
+                            } else if let Some(target @ ResolvedCall::ModuleExtension { .. }) =
+                                self.info.resolved_calls.get(&e).cloned()
+                            {
+                                self.lower_selected_op_call(
+                                    recv2,
+                                    nn,
+                                    &name,
+                                    &args,
+                                    target,
+                                    Some(e),
+                                )?
+                                .0
                             } else if let Some((class, index, fid, physical_ret)) =
                                 self.resolve_method(&internal, &name)
                             {
@@ -19616,6 +19812,24 @@ impl<'a> Lower<'a> {
                     // builtin comparison. Nullable-primitive ONLY, matching the checker's gate (a
                     // nullable REFERENCE erases to the non-null form's key).
                     if lty.nullable_primitive().is_some() {
+                        if let Some(selected) =
+                            self.info.resolved_operator_call(e, "compareTo").cloned()
+                        {
+                            let l = self.expr(lhs)?;
+                            let (cmp, ret) = self.lower_selected_op_call(
+                                l,
+                                lty,
+                                "compareTo",
+                                &[rhs],
+                                selected,
+                                Some(e),
+                            )?;
+                            if ret != Ty::Int {
+                                return None;
+                            }
+                            let zero = self.emit_const(IrConst::Int(0));
+                            return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
+                        }
                         if let Some(fid) = self.unique_ext_fun_id_by_arity(lty, "compareTo", 1) {
                             let params = self.ir.functions[fid as usize].params.clone();
                             if params.len() == 2 {
@@ -20511,7 +20725,6 @@ impl<'a> Lower<'a> {
                     v = self.emit_type_op(IrTypeOp::ImplicitCoercion, v, ty_to_ir(builtin_ty));
                 }
                 match op {
-                    // `-x` → `0 - x` (zero typed to match); `!x` → `x == false`.
                     UnOp::Neg => {
                         // A negated `Double`/`Float` literal is the negative *constant* — not `0.0 - lit`,
                         // which yields `+0.0` for `-0.0` (losing the sign IEEE-754 comparisons distinguish,
@@ -20523,15 +20736,7 @@ impl<'a> Lower<'a> {
                             Expr::FloatLit(f) => return Some(self.emit_const(IrConst::Float(-f))),
                             _ => {}
                         }
-                        // `-x` → `0 - x` with the zero typed to the operand so both Sub operands
-                        // share one numeric type (Byte/Short/Char negate in the `int` category).
-                        let zero = match builtin_ty {
-                            Ty::Long => self.emit_const(IrConst::Long(0)),
-                            Ty::Double => self.emit_const(IrConst::Double(0.0)),
-                            Ty::Float => self.emit_const(IrConst::Float(0.0)),
-                            _ => self.emit_const(IrConst::Int(0)),
-                        };
-                        self.emit_primitive_bin_op(IrBinOp::Sub, zero, v)
+                        self.emit_primitive_neg(v, self.info.ty(e))
                     }
                     UnOp::Not => {
                         let f = self.emit_const(IrConst::Boolean(false));
@@ -20934,11 +21139,12 @@ impl<'a> Lower<'a> {
                         if let Some(target) = self
                             .info
                             .resolved_module_top_level(e)
-                            .filter(|target| target.name == fname && target.inline.can_inline())
+                            .filter(|target| target.inline.can_inline())
                             .cloned()
                         {
+                            let target_name = target.name.clone();
                             return self.lower_inline_fn_call(
-                                &fname,
+                                &target_name,
                                 &args,
                                 e.0,
                                 None,
@@ -21021,7 +21227,6 @@ impl<'a> Lower<'a> {
                         .info
                         .resolved_module_top_level(e)
                         .cloned()
-                        .filter(|target| target.name == fname)
                         .and_then(|target| {
                             (target.source_file == Some(self.file_index))
                                 .then(|| {
@@ -21161,7 +21366,6 @@ impl<'a> Lower<'a> {
                         self.info
                             .resolved_module_top_level(e)
                             .cloned()
-                            .filter(|target| target.name == fname)
                             .and_then(|target| {
                                 target.source_file.zip(target.source_decl).and_then(
                                     |(file, decl)| {
@@ -21935,6 +22139,13 @@ impl<'a> Lower<'a> {
                             return Some(r);
                         }
                     }
+                    if args.is_empty() && self.has_scalar_value_repr(self.info.ty(receiver)) {
+                        if let Some(r) =
+                            self.lower_prim_unary_op_method(receiver, &name, self.info.ty(e))
+                        {
+                            return Some(r);
+                        }
+                    }
                     // Array `isEmpty()`/`isNotEmpty()`/`count()` (stdlib extensions) → the `arraylength`
                     // intrinsic: `size == 0` / `size != 0` / `size`.
                     if self.info.ty(receiver).array_elem().is_some() && args.is_empty() {
@@ -22276,14 +22487,16 @@ impl<'a> Lower<'a> {
                     // A user `inline fun <recv>.name(args)` — expand it here (kotlinc's inliner) with the
                     // receiver bound as `this`, instead of a real static call.
                     {
-                        let recv_key = self.recv_ty(receiver).erased_recv();
-                        let is_inline_ext = self.afile.decls.iter().any(|&d| {
-                            matches!(self.afile.decl(d), Decl::Fun(f)
-                                if f.name == name && f.is_inline()
-                                && f.receiver.as_ref().is_some_and(|r|
-                                    f.type_params.iter().any(|tp| tp == &r.name)
-                                    || ty_of(self.afile, r, &*self.syms.libraries).erased_recv() == recv_key))
-                        });
+                        let is_inline_ext = self.info.resolved_source_call(e).is_some_and(
+                            |(file, decl)| {
+                                file == self.file_index
+                                    && matches!(
+                                        self.afile.decl(ast::DeclId(decl)),
+                                        Decl::Fun(f)
+                                            if f.name == name && f.is_inline() && f.receiver.is_some()
+                                    )
+                            },
+                        );
                         if is_inline_ext {
                             if let Some(r) = self.lower_inline_fn_call(
                                 &name,
@@ -22300,9 +22513,47 @@ impl<'a> Lower<'a> {
                     // A top-level extension function `recv.name(args)` → a static call whose first
                     // argument is the receiver (matching how the extension was registered/emitted).
                     {
-                        if let Some((fid, decl_recv)) =
+                        if !self.afile.call_arg_names.contains_key(&e.0) {
+                            if let Some(target @ ResolvedCall::ModuleExtension { .. }) =
+                                self.info.resolved_calls.get(&e).cloned().filter(|target| {
+                                    matches!(
+                                        target,
+                                        ResolvedCall::ModuleExtension { params, .. }
+                                            if params.len() == args.len()
+                                    )
+                                })
+                            {
+                                let receiver_ty = self.recv_ty(receiver);
+                                let receiver = self.expr(receiver)?;
+                                return self
+                                    .lower_selected_op_call(
+                                        receiver,
+                                        receiver_ty,
+                                        &name,
+                                        &args,
+                                        target,
+                                        Some(e),
+                                    )
+                                    .map(|(value, _)| value);
+                            }
+                        }
+                        let selected_source = self.info.resolved_source_call(e);
+                        let exact_local = selected_source.and_then(|(file, declaration)| {
+                            (file == self.file_index).then_some(())?;
+                            let declaration = ast::DeclId(declaration);
+                            let fid = self.fun_ids_by_decl.get(&declaration).copied()?;
+                            let (decl_recv, _) =
+                                self.syms.source_extension_function(file, declaration)?;
+                            Some((fid, decl_recv))
+                        });
+                        let target = if exact_local.is_some() {
+                            exact_local
+                        } else if selected_source.is_none() {
                             self.ext_fun_id_for_recv(self.recv_ty(receiver), &name, args.len())
-                        {
+                        } else {
+                            None
+                        };
+                        if let Some((fid, decl_recv)) = target {
                             let params = self.ir.functions[fid as usize].params.clone();
                             if params.len() == args.len() + 1 {
                                 // A NAMED extension call may reorder the arguments: map labels onto
