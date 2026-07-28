@@ -11,6 +11,10 @@ pub struct LspOptions {
     jdk_home: Option<PathBuf>,
     no_jdk: bool,
     language_arguments: Vec<String>,
+    deps_cache_dir: Option<PathBuf>,
+    deps_cache_max_age_days: Option<u64>,
+    deps_cache_max_bytes: Option<u64>,
+    deps_sources: Option<bool>,
 }
 
 impl LspOptions {
@@ -33,6 +37,34 @@ impl LspOptions {
                     ));
                 }
                 "-no-jdk" => options.no_jdk = true,
+                "-deps-cache-dir" => {
+                    options.deps_cache_dir =
+                        Some(PathBuf::from(args.next().ok_or_else(|| {
+                            "-deps-cache-dir requires a value".to_string()
+                        })?));
+                }
+                "-deps-cache-max-age-days" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| "-deps-cache-max-age-days requires a value".to_string())?;
+                    options.deps_cache_max_age_days = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("invalid -deps-cache-max-age-days '{value}'"))?,
+                    );
+                }
+                "-deps-cache-max-bytes" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| "-deps-cache-max-bytes requires a value".to_string())?;
+                    options.deps_cache_max_bytes = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("invalid -deps-cache-max-bytes '{value}'"))?,
+                    );
+                }
+                "-deps-sources" => options.deps_sources = Some(true),
+                "-no-deps-sources" => options.deps_sources = Some(false),
                 _ => {
                     if LangFeatures::new().apply_cli_arg(&argument) {
                         options.language_arguments.push(argument);
@@ -83,6 +115,22 @@ impl LspOptions {
             features.apply_cli_arg(argument);
         }
     }
+
+    pub fn deps_cache_dir(&self) -> Option<&Path> {
+        self.deps_cache_dir.as_deref()
+    }
+
+    pub fn deps_cache_max_age_days(&self) -> u64 {
+        self.deps_cache_max_age_days.unwrap_or(30)
+    }
+
+    pub fn deps_cache_max_bytes(&self) -> u64 {
+        self.deps_cache_max_bytes.unwrap_or(512 * 1024 * 1024)
+    }
+
+    pub fn deps_sources_enabled(&self) -> bool {
+        self.deps_sources.unwrap_or(true)
+    }
 }
 
 #[cfg(test)]
@@ -91,6 +139,28 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<LspOptions, String> {
         LspOptions::parse(args.iter().map(|argument| argument.to_string()))
+    }
+
+    #[test]
+    fn parses_dependency_cache_options_with_defaults() {
+        let options = parse(&[
+            "--stdio",
+            "-deps-cache-dir",
+            "/tmp/dc",
+            "-deps-cache-max-age-days",
+            "7",
+            "-no-deps-sources",
+        ])
+        .unwrap();
+        assert_eq!(options.deps_cache_dir(), Some(Path::new("/tmp/dc")));
+        assert_eq!(options.deps_cache_max_age_days(), 7);
+        assert!(!options.deps_sources_enabled());
+        assert_eq!(options.deps_cache_max_bytes(), 512 * 1024 * 1024);
+
+        let defaults = parse(&["--stdio"]).unwrap();
+        assert_eq!(defaults.deps_cache_dir(), None);
+        assert_eq!(defaults.deps_cache_max_age_days(), 30);
+        assert!(defaults.deps_sources_enabled());
     }
 
     #[test]

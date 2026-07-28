@@ -16,13 +16,15 @@ use serde_json::{json, Value};
 
 use super::super::{
     CompletionIndex, DefinitionIndex, DocumentAnalysis, DocumentSymbolIndex, FoldingRangeIndex,
-    HoverIndex, SemanticTokenIndex, SemanticTokenRange, SignatureHelpIndex,
-    SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
+    HoverIndex, LibraryDefinitionIndex, MaterializedDefinition, SemanticTokenIndex,
+    SemanticTokenRange, SignatureHelpIndex, SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
 };
+use crate::compiler_analysis::LibraryRef;
 use crate::server::engine::{
-    AnalysisBatch, AnalysisEngine, AnalysisJob, EngineBackend, EngineEvent,
+    AnalysisBatch, AnalysisEngine, AnalysisJob, EngineBackend, EngineEvent, MaterializeJob,
+    MaterializeResult,
 };
-use crate::uri::file_uri_to_path;
+use crate::uri::{file_uri_to_path, path_to_file_uri};
 use crate::worker::{source_set_fits, MAX_SOURCE_SET_BYTES};
 use krusty::diag::{Diagnostic, DiagnosticKind, Severity};
 
@@ -115,6 +117,13 @@ pub trait Analysis {
         (self.analyze(&sources), Vec::new())
     }
 
+    fn materialize_library_definition(
+        &mut self,
+        _reference: &LibraryRef,
+    ) -> Option<MaterializedDefinition> {
+        None
+    }
+
     fn analysis_ready(&self) -> bool {
         true
     }
@@ -165,6 +174,12 @@ where
 pub trait AnalysisBackend {
     fn analysis_ready(&self) -> bool;
     fn submit(&mut self, job: AnalysisJob) -> Option<AnalysisBatch>;
+    fn materialize(&mut self, job: MaterializeJob) -> Option<MaterializeResult> {
+        Some(MaterializeResult {
+            token: job.token,
+            definition: None,
+        })
+    }
     fn set_workspace_root(&mut self, root: Option<PathBuf>) -> Option<ProjectFeedback>;
     fn watched_globs(&mut self) -> Vec<String>;
     fn note_project_change(&mut self);
@@ -212,6 +227,14 @@ impl<A: Analysis> AnalysisBackend for InlineBackend<A> {
             analyses,
             support_documents,
             pending: self.0.analysis_pending(),
+        })
+    }
+
+    fn materialize(&mut self, job: MaterializeJob) -> Option<MaterializeResult> {
+        let definition = self.0.materialize_library_definition(&job.reference);
+        Some(MaterializeResult {
+            token: job.token,
+            definition,
         })
     }
 
@@ -549,6 +572,7 @@ struct OpenDocument {
     definitions: DefinitionIndex,
     type_definitions: DefinitionIndex,
     implementations: DefinitionIndex,
+    library_definitions: LibraryDefinitionIndex,
     document_symbols: DocumentSymbolIndex,
     folding_ranges: FoldingRangeIndex,
     analysis_blocked: bool,
@@ -563,6 +587,7 @@ impl OpenDocument {
         self.definitions = DefinitionIndex::default();
         self.type_definitions = DefinitionIndex::default();
         self.implementations = DefinitionIndex::default();
+        self.library_definitions = LibraryDefinitionIndex::default();
         self.document_symbols = DocumentSymbolIndex::default();
         self.folding_ranges = FoldingRangeIndex::default();
         self.diagnostics = DiagnosticIndex::default();
@@ -584,6 +609,8 @@ pub struct LspService<B> {
     analysis_in_flight: bool,
     resubmit_pending: bool,
     discard_in_flight: bool,
+    next_materialize_token: u64,
+    pending_materializations: HashMap<u64, Value>,
 }
 
 impl<A: Analysis> LspService<InlineBackend<A>> {
@@ -612,6 +639,8 @@ where
             analysis_in_flight: false,
             resubmit_pending: false,
             discard_in_flight: false,
+            next_materialize_token: 0,
+            pending_materializations: HashMap::new(),
         }
     }
 
@@ -752,6 +781,7 @@ where
             open.definitions = analysis.definitions;
             open.type_definitions = analysis.type_definitions;
             open.implementations = analysis.implementations;
+            open.library_definitions = analysis.library_definitions;
             open.document_symbols = analysis.document_symbols;
             open.folding_ranges = analysis.folding_ranges;
             open.diagnostics = DiagnosticIndex::from_diagnostics(
@@ -1047,6 +1077,7 @@ where
                 definitions: DefinitionIndex::default(),
                 type_definitions: DefinitionIndex::default(),
                 implementations: DefinitionIndex::default(),
+                library_definitions: LibraryDefinitionIndex::default(),
                 document_symbols: DocumentSymbolIndex::default(),
                 folding_ranges: FoldingRangeIndex::default(),
                 analysis_blocked: false,
@@ -1150,6 +1181,7 @@ where
                         definitions: DefinitionIndex::default(),
                         type_definitions: DefinitionIndex::default(),
                         implementations: DefinitionIndex::default(),
+                        library_definitions: LibraryDefinitionIndex::default(),
                         document_symbols: DocumentSymbolIndex::default(),
                         folding_ranges: FoldingRangeIndex::default(),
                         analysis_blocked: true,
@@ -1183,6 +1215,7 @@ where
                 definitions: DefinitionIndex::default(),
                 type_definitions: DefinitionIndex::default(),
                 implementations: DefinitionIndex::default(),
+                library_definitions: LibraryDefinitionIndex::default(),
                 document_symbols: DocumentSymbolIndex::default(),
                 folding_ranges: FoldingRangeIndex::default(),
                 analysis_blocked: false,
@@ -1411,7 +1444,7 @@ where
         )])
     }
 
-    fn definition(&self, id: Option<Value>, params: Value) -> Dispatch {
+    fn definition(&mut self, id: Option<Value>, params: Value) -> Dispatch {
         let Some(id) = id else {
             return Dispatch::none();
         };
@@ -1424,10 +1457,54 @@ where
         let Some(offset) = position_to_byte_offset(&open.text, params.position) else {
             return invalid_params(Some(id));
         };
-        Dispatch::messages(vec![rpc_result(
-            id,
-            Value::Array(self.navigation_locations(&open.definitions, offset)),
-        )])
+        let locations = self.navigation_locations(&open.definitions, offset);
+        let library_ref = locations
+            .is_empty()
+            .then(|| open.library_definitions.get(offset).cloned())
+            .flatten();
+        if !locations.is_empty() || library_ref.is_none() {
+            return Dispatch::messages(vec![rpc_result(id, Value::Array(locations))]);
+        }
+        const MAX_PENDING_MATERIALIZATIONS: usize = 128;
+        if self.pending_materializations.len() >= MAX_PENDING_MATERIALIZATIONS {
+            return Dispatch::messages(vec![rpc_error(
+                id,
+                -32000,
+                "too many pending dependency definitions",
+            )]);
+        }
+        let token = self.next_materialize_token;
+        self.next_materialize_token = self.next_materialize_token.wrapping_add(1);
+        let result = self.backend.materialize(MaterializeJob {
+            token,
+            reference: library_ref.unwrap(),
+        });
+        match result {
+            Some(result) => Dispatch::messages(vec![self.materialize_response(id, result)]),
+            None => {
+                self.pending_materializations.insert(token, id);
+                Dispatch::none()
+            }
+        }
+    }
+
+    fn materialize_response(&self, id: Value, result: MaterializeResult) -> Value {
+        let location = result.definition.and_then(|definition| {
+            let uri = path_to_file_uri(&definition.path)?;
+            Some(json!({
+                "uri": uri,
+                "range": {
+                    "start": byte_offset_to_position(&definition.text, definition.lo as usize),
+                    "end": byte_offset_to_position(&definition.text, definition.hi as usize),
+                }
+            }))
+        });
+        rpc_result(id, Value::Array(location.into_iter().collect()))
+    }
+
+    fn complete_materialization(&mut self, result: MaterializeResult) -> Option<Value> {
+        let id = self.pending_materializations.remove(&result.token)?;
+        Some(self.materialize_response(id, result))
     }
 
     fn type_definition(&self, id: Option<Value>, params: Value) -> Dispatch {
@@ -2650,6 +2727,12 @@ where
         EngineEvent::ReanalyzeRequested => service.mark_analysis_dirty(),
         EngineEvent::AnalysisComplete(batch) => {
             for message in service.apply_analysis_batch(batch) {
+                let encoded = serde_json::to_vec(&message).map_err(json_io)?;
+                write_framed(writer, &encoded)?;
+            }
+        }
+        EngineEvent::Materialized(result) => {
+            if let Some(message) = service.complete_materialization(result) {
                 let encoded = serde_json::to_vec(&message).map_err(json_io)?;
                 write_framed(writer, &encoded)?;
             }

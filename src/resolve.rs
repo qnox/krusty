@@ -6630,6 +6630,7 @@ fn ty_of_ref_with(
 /// Result of typechecking a file: the type assigned to every expression node.
 pub struct TypeInfo {
     pub expr_types: Vec<Ty>,
+    resolved_type_refs: HashMap<(u32, u32), TypeName>,
     /// Selected expression lowerings that cannot be recovered from the expression shape alone.
     pub expr_lowers: HashMap<ExprId, ExprLowering>,
     /// Selected statement lowerings that differ from the parser's generic statement shape.
@@ -7011,6 +7012,12 @@ impl DelegateGetValueTarget {
 }
 
 impl TypeInfo {
+    pub fn resolved_type_ref(&self, reference: &TypeRef) -> Option<TypeName> {
+        self.resolved_type_refs
+            .get(&(reference.span.lo, reference.span.hi))
+            .copied()
+    }
+
     /// Whether a checked call selected a class/object member rather than a top-level, extension, or
     /// local function. Process adapters use this semantic distinction without depending on the
     /// resolver's internal target representation.
@@ -7546,6 +7553,7 @@ fn make_checker<'a>(
         source_files,
         diags,
         expr_types: vec![Ty::Error; file.expr_arena.len()],
+        resolved_type_refs: HashMap::new(),
         scopes: Vec::new(),
         ret_ty: Ty::Unit,
         expected: None,
@@ -8699,6 +8707,7 @@ fn check_file_at_impl(
     }
     let Checker {
         expr_types,
+        resolved_type_refs,
         expr_lowers,
         inferred_fun_rets,
         inferred_ext_fun_rets,
@@ -8779,6 +8788,7 @@ fn check_file_at_impl(
     }
     TypeInfo {
         expr_types,
+        resolved_type_refs,
         expr_lowers,
         stmt_lowers,
         local_decl_types,
@@ -8940,6 +8950,7 @@ struct Checker<'a> {
     source_files: Option<&'a [File]>,
     diags: &'a mut DiagSink,
     expr_types: Vec<Ty>,
+    resolved_type_refs: HashMap<(u32, u32), TypeName>,
     scopes: Vec<HashMap<String, Local>>,
     ret_ty: Ty,
     /// Expected type for the next expression. Consumed by [`Self::expr`]; result-position
@@ -11648,10 +11659,18 @@ impl<'a> Checker<'a> {
         } else {
             Ty::Error
         };
-        if r.nullable() && base != Ty::Error {
-            return Ty::nullable(base);
+        let resolved = if r.nullable() && base != Ty::Error {
+            Ty::nullable(base)
+        } else {
+            base
+        };
+        if !self.tparams.contains(&r.name) {
+            if let Some(internal) = resolved.non_null().kotlin_class_internal() {
+                self.resolved_type_refs
+                    .insert((r.span.lo, r.span.hi), internal);
+            }
         }
-        base
+        resolved
     }
 
     /// The erased signature key of a function, using the type parameters currently in `self.tparams`

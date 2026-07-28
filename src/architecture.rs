@@ -60,6 +60,14 @@ mod tests {
     }
 
     #[test]
+    fn lsp_dependency_sources_use_only_materialization_dependencies() {
+        assert_allowed_external_crate_modules_in_tree(
+            "crates/krusty-lsp/src/dependency_sources",
+            &["diag", "jvm", "libraries", "symbol_source", "types"],
+        );
+    }
+
+    #[test]
     fn compiler_library_has_no_command_line_layer() {
         assert!(
             !Path::new("src/cli.rs").exists(),
@@ -87,6 +95,9 @@ mod tests {
                 || path
                     .components()
                     .any(|component| component.as_os_str() == "compiler_analysis")
+                || path
+                    .components()
+                    .any(|component| component.as_os_str() == "dependency_sources")
             {
                 continue;
             }

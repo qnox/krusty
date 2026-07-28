@@ -27,8 +27,9 @@ pub(crate) use folding_ranges::{
     TEXT_PARENTHESES, TEXT_RAW_STRING, TEXT_REGION_LABEL,
 };
 pub use krusty::frontend::{FrontendSymbols, FrontendTypeInfo};
-pub use navigation::{DefinitionOccurrence, DefinitionSymbols, DefinitionTarget};
-pub(crate) use semantic::{hover_wire_cost, SemanticLimits};
+pub use navigation::{DefinitionOccurrence, DefinitionSymbols, DefinitionTarget, LibraryRef};
+pub(crate) use rendering::render_ty;
+pub(crate) use semantic::{hover_wire_cost, SemanticLimits, MAX_LIBRARY_DEFINITION_BYTES};
 pub use semantic::{HighlightOccurrence, HighlightSymbols, HoverOccurrence};
 pub(crate) use signature_help::{SignatureCandidate, SignatureHelpCall, SignatureHelpSymbols};
 

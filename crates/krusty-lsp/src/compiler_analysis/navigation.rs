@@ -29,6 +29,16 @@ pub struct DefinitionOccurrence {
     pub target: DefinitionTarget,
 }
 
+/// A classpath declaration without a source-set definition target.
+#[derive(
+    Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub struct LibraryRef {
+    pub fqn: String,
+    pub member_name: String,
+    pub member_desc: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum MemberKind {
     InstanceValue,

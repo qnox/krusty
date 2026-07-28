@@ -22,8 +22,10 @@ use super::{
         declaration_name_span, definition_name_span, render_function_hover, source_name, MemberKind,
     },
     rendering::{render_ty, render_type},
-    DefinitionOccurrence, DefinitionSymbols, DefinitionTarget, FileAnalysis,
+    DefinitionOccurrence, DefinitionSymbols, DefinitionTarget, FileAnalysis, LibraryRef,
 };
+
+pub(crate) const MAX_LIBRARY_DEFINITION_BYTES: usize = 4 * 1024 * 1024;
 
 /// Editor-neutral semantic categories. Discriminants intentionally follow the LSP 3.17 predefined
 /// legend, so an LSP adapter can serialize the compact value without a lookup table.
@@ -84,6 +86,8 @@ pub struct SemanticOccurrences {
     pub type_definitions: Vec<DefinitionOccurrence>,
     pub implementations: Vec<DefinitionOccurrence>,
     pub hovers: Vec<HoverOccurrence>,
+    pub library_definitions: Vec<(Span, LibraryRef)>,
+    pub(crate) library_definition_bytes: usize,
 }
 
 pub struct HoverOccurrence {
@@ -105,6 +109,7 @@ pub(crate) struct SemanticLimits {
     pub implementation_entries: usize,
     pub hover_entries: usize,
     pub hover_wire_bytes: usize,
+    pub library_definition_wire_bytes: usize,
 }
 
 struct SemanticClassifier<'a> {
@@ -117,6 +122,8 @@ struct SemanticClassifier<'a> {
     classified: Vec<Option<HighlightOccurrence>>,
     definitions: Vec<DefinitionOccurrence>,
     type_definitions: Vec<DefinitionOccurrence>,
+    library_definitions: Vec<(Span, LibraryRef)>,
+    library_definition_bytes: usize,
     hovers: Vec<HoverOccurrence>,
     definition_limit: usize,
     type_definition_limit: usize,
@@ -125,6 +132,7 @@ struct SemanticClassifier<'a> {
     hover_limit: usize,
     hover_bytes: usize,
     hover_byte_limit: usize,
+    library_definition_byte_limit: usize,
     hover_values: HashMap<String, u32>,
     hover_entries: HashSet<[u32; 3]>,
     lambda_hover_types: HashMap<ExprId, Vec<String>>,
@@ -150,6 +158,7 @@ struct SemanticContext<'a> {
     implementation_limit: usize,
     hover_limit: usize,
     hover_byte_limit: usize,
+    library_definition_byte_limit: usize,
 }
 
 struct Binding {
@@ -341,6 +350,7 @@ impl FileAnalysis {
                 implementation_limit: 0,
                 hover_limit: 0,
                 hover_byte_limit: 0,
+                library_definition_byte_limit: 0,
             },
         );
         classifier.classify();
@@ -373,6 +383,7 @@ impl FileAnalysis {
                 implementation_limit: limits.implementation_entries,
                 hover_limit: limits.hover_entries,
                 hover_byte_limit: limits.hover_wire_bytes,
+                library_definition_byte_limit: limits.library_definition_wire_bytes,
             },
         );
         classifier.classify();
@@ -398,6 +409,7 @@ impl<'a> SemanticClassifier<'a> {
             implementation_limit,
             hover_limit,
             hover_byte_limit,
+            library_definition_byte_limit,
         } = context;
         let token_by_span = tokens
             .iter()
@@ -476,6 +488,8 @@ impl<'a> SemanticClassifier<'a> {
             classified,
             definitions: Vec::new(),
             type_definitions: Vec::new(),
+            library_definitions: Vec::new(),
+            library_definition_bytes: 0,
             hovers: Vec::new(),
             definition_limit,
             type_definition_limit,
@@ -484,6 +498,7 @@ impl<'a> SemanticClassifier<'a> {
             hover_limit,
             hover_bytes: 0,
             hover_byte_limit,
+            library_definition_byte_limit,
             hover_values: HashMap::new(),
             hover_entries: HashSet::new(),
             lambda_hover_types: HashMap::new(),
@@ -555,6 +570,8 @@ impl<'a> SemanticClassifier<'a> {
             type_definitions: self.type_definitions,
             implementations: self.implementations,
             hovers: self.hovers,
+            library_definitions: self.library_definitions,
+            library_definition_bytes: self.library_definition_bytes,
         }
     }
 
@@ -1697,8 +1714,14 @@ impl<'a> SemanticClassifier<'a> {
                     let targets = self
                         .definition_symbols
                         .top_level_targets(self.file, name, kind);
-                    for target in targets {
-                        self.push_definition(span, target);
+                    if targets.is_empty() {
+                        if let Some(library_ref) = self.library_ref_at(id) {
+                            self.push_library_definition(span, library_ref);
+                        }
+                    } else {
+                        for target in targets {
+                            self.push_definition(span, target);
+                        }
                     }
                 }
                 self.push_expression_type_definition(span, id);
@@ -2084,6 +2107,61 @@ impl<'a> SemanticClassifier<'a> {
         span
     }
 
+    fn push_library_definition(&mut self, span: Span, library_ref: LibraryRef) {
+        let span = definition_name_span(self.source, span);
+        let bytes = library_ref
+            .fqn
+            .len()
+            .saturating_add(library_ref.member_name.len())
+            .saturating_add(library_ref.member_desc.len());
+        let byte_limit = self
+            .library_definition_byte_limit
+            .min(MAX_LIBRARY_DEFINITION_BYTES);
+        if self.definitions.len() + self.library_definitions.len() < self.definition_limit
+            && bytes <= byte_limit.saturating_sub(self.library_definition_bytes)
+        {
+            self.library_definition_bytes += bytes;
+            self.library_definitions.push((span, library_ref));
+        }
+    }
+
+    fn library_ref_at(&self, expression: ExprId) -> Option<LibraryRef> {
+        let types = self.type_info?;
+        let expression = self.callees.get(&expression).copied().unwrap_or(expression);
+        if types.resolved_constructor(expression).is_some() {
+            let fqn = types
+                .expr_types
+                .get(expression.0 as usize)?
+                .kotlin_class_internal()?
+                .render();
+            return Some(LibraryRef {
+                fqn,
+                member_name: String::new(),
+                member_desc: String::new(),
+            });
+        }
+        let (member_name, member_desc) = if let Some(callable) = types
+            .resolved_top_level(expression)
+            .or_else(|| types.resolved_extension(expression))
+        {
+            (callable.name.clone(), callable.descriptor.clone())
+        } else if let Some(resolved) = types.resolved_member(expression) {
+            (
+                resolved.member.name.clone(),
+                resolved.member.descriptor.clone(),
+            )
+        } else {
+            let member = types.resolved_companion(expression)?;
+            (member.name.clone(), member.descriptor.clone())
+        };
+        let fqn = types.resolved_call_owner(expression)?.render();
+        Some(LibraryRef {
+            fqn,
+            member_name,
+            member_desc,
+        })
+    }
+
     fn push_hover(&mut self, span: Span, value: String) {
         let span = definition_name_span(self.source, span);
         let value_index = self
@@ -2162,6 +2240,7 @@ impl<'a> SemanticClassifier<'a> {
         resolved_expression: Option<ExprId>,
         kind: MemberKind,
     ) {
+        let definitions_before = self.definitions.len();
         if let Some(expression) = resolved_expression {
             if let Some(target) = self
                 .type_info
@@ -2294,6 +2373,13 @@ impl<'a> SemanticClassifier<'a> {
                         .extension_value_target(*receiver_ty, name, self.file)
                 {
                     self.push_definition(source_span, target);
+                }
+            }
+        }
+        if self.definitions.len() == definitions_before {
+            if let Some(expression) = resolved_expression {
+                if let Some(library_ref) = self.library_ref_at(expression) {
+                    self.push_library_definition(source_span, library_ref);
                 }
             }
         }
@@ -2547,6 +2633,17 @@ impl<'a> SemanticClassifier<'a> {
             if let Some(target) = self.type_reference_target(ty, source_span.lo) {
                 self.push_definition(source_span, target);
                 self.push_type_definition_for_type_ref(source_span, ty);
+            } else if let Some(internal) =
+                self.type_info.and_then(|types| types.resolved_type_ref(ty))
+            {
+                self.push_library_definition(
+                    source_span,
+                    LibraryRef {
+                        fqn: internal.render(),
+                        member_name: String::new(),
+                        member_desc: String::new(),
+                    },
+                );
             }
         }
         if let Some(argument) = &ty.arg {

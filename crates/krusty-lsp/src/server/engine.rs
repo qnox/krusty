@@ -6,8 +6,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use super::super::DocumentAnalysis;
+use super::super::{DocumentAnalysis, MaterializedDefinition};
 use super::implementation::{Analysis, AnalysisBackend, Incoming, ProjectFeedback};
+use crate::compiler_analysis::LibraryRef;
 
 const MAX_PENDING_WATCHED_FILES: usize = 1024;
 
@@ -25,9 +26,21 @@ pub struct AnalysisBatch {
 }
 
 #[derive(Debug)]
+pub struct MaterializeJob {
+    pub token: u64,
+    pub reference: LibraryRef,
+}
+
+pub struct MaterializeResult {
+    pub token: u64,
+    pub definition: Option<MaterializedDefinition>,
+}
+
+#[derive(Debug)]
 pub(crate) enum EngineCommand {
     SetWorkspaceRoot(Option<std::path::PathBuf>),
     Analyze(AnalysisJob),
+    Materialize(MaterializeJob),
     ProjectChange {
         refresh: bool,
         reanalyze: bool,
@@ -41,6 +54,7 @@ pub(crate) enum EngineEvent {
     Project(ProjectFeedback),
     ReanalyzeRequested,
     AnalysisComplete(AnalysisBatch),
+    Materialized(MaterializeResult),
 }
 
 pub(crate) struct AnalysisEngine {
@@ -161,6 +175,9 @@ impl CommandState {
                 }
                 self.compact_project_changes();
                 self.pending.push_back(EngineCommand::Analyze(job));
+            }
+            EngineCommand::Materialize(job) => {
+                self.pending.push_back(EngineCommand::Materialize(job));
             }
             EngineCommand::SetWorkspaceRoot(root) => {
                 let analysis = self
@@ -344,6 +361,11 @@ impl AnalysisBackend for EngineBackend {
         None
     }
 
+    fn materialize(&mut self, job: MaterializeJob) -> Option<MaterializeResult> {
+        self.engine.submit(EngineCommand::Materialize(job));
+        None
+    }
+
     fn set_workspace_root(&mut self, root: Option<std::path::PathBuf>) -> Option<ProjectFeedback> {
         self.engine.submit(EngineCommand::SetWorkspaceRoot(root));
         None
@@ -443,6 +465,20 @@ fn run<A: Analysis>(mut analyze: A, commands: CommandReceiver, events: SyncSende
                 };
                 if events
                     .send(Incoming::Engine(EngineEvent::AnalysisComplete(batch)))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Some(EngineCommand::Materialize(job)) => {
+                let definition = analyze.materialize_library_definition(&job.reference);
+                if events
+                    .send(Incoming::Engine(EngineEvent::Materialized(
+                        MaterializeResult {
+                            token: job.token,
+                            definition,
+                        },
+                    )))
                     .is_err()
                 {
                     break;
@@ -633,6 +669,50 @@ mod tests {
             }
         }
         assert!(found, "expected AnalysisComplete event");
+        engine.join();
+    }
+
+    #[test]
+    fn materialize_command_produces_correlated_event() {
+        use std::sync::mpsc::sync_channel;
+
+        struct Mock;
+        impl Analysis for Mock {
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+
+            fn materialize_library_definition(
+                &mut self,
+                _reference: &LibraryRef,
+            ) -> Option<MaterializedDefinition> {
+                Some(MaterializedDefinition {
+                    path: "/cache/Type.kt".into(),
+                    text: "class Type".into(),
+                    lo: 6,
+                    hi: 10,
+                })
+            }
+        }
+
+        let (tx, rx) = sync_channel(4);
+        let engine = AnalysisEngine::spawn(Mock, tx);
+        engine.submit(EngineCommand::Materialize(MaterializeJob {
+            token: 7,
+            reference: LibraryRef {
+                fqn: "sample/Type".into(),
+                member_name: String::new(),
+                member_desc: String::new(),
+            },
+        }));
+        let result = (0..2).find_map(|_| match rx.recv().unwrap() {
+            Incoming::Engine(EngineEvent::Materialized(result)) => Some(result),
+            Incoming::Engine(EngineEvent::ReadyState(_)) => None,
+            _ => panic!("unexpected event"),
+        });
+        let result = result.expect("materialize event");
+        assert_eq!(result.token, 7);
+        assert_eq!(result.definition.unwrap().lo, 6);
         engine.join();
     }
 

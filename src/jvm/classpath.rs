@@ -2152,10 +2152,27 @@ impl Classpath {
         }
     }
 
+    /// Return the jar containing `internal`, if its first classpath definition is in a jar.
+    pub fn owning_jar(&self, internal: &str) -> Option<PathBuf> {
+        let internal_id = super::jvm_class_map::to_jvm_type_name(type_name(internal));
+        if self.stub_overlay.borrow().contains_key(&internal_id) {
+            return None;
+        }
+        let (index, _) = self.physical_class_entry(&internal_id.render())?;
+        match self.entries.get(index)? {
+            Entry::Jar(path) => Some(path.clone()),
+            Entry::Dir(_) | Entry::Jimage(_) => None,
+        }
+    }
+
     /// The raw `.class` bytes for an internal name (Kotlin built-in names mapped to JVM first), or
     /// `None` if absent. Unlike `find`, this keeps the bytes (the inline expander needs the body).
     fn class_bytes(&self, internal: &str) -> Option<Vec<u8>> {
         let internal = super::jvm_class_map::to_jvm_internal(internal);
+        self.physical_class_entry(internal).map(|(_, bytes)| bytes)
+    }
+
+    fn physical_class_entry(&self, internal: &str) -> Option<(usize, Vec<u8>)> {
         let name = format!("{internal}.class");
         let tree = self.package_tree();
         for index in self.class_entry_indices(&tree, internal) {
@@ -2169,8 +2186,8 @@ impl Classpath {
                 Entry::Jar(j) => self.jar_entry(j, &name),
                 Entry::Jimage(_) => self.jimage_bytes(internal),
             };
-            if bytes.is_some() {
-                return bytes;
+            if let Some(bytes) = bytes {
+                return Some((index, bytes));
             }
         }
         None
@@ -3946,6 +3963,16 @@ mod fq_tests {
     /// never fails on CI regardless of where the stdlib lives.
     fn test_stdlib_jar() -> Option<PathBuf> {
         crate::toolchain::stdlib_jar()
+    }
+
+    #[test]
+    fn owning_jar_returns_the_jar_path_for_a_library_class() {
+        let Some(jar) = test_stdlib_jar() else {
+            return; // toolchain not provisioned
+        };
+        let cp = Classpath::new(vec![jar.clone()]);
+        let owner = cp.owning_jar("kotlin/collections/CollectionsKt");
+        assert_eq!(owner.as_deref(), Some(jar.as_path()));
     }
 
     fn write_test_jar_entry(path: &Path, name: &str, contents: &[u8]) {

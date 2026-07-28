@@ -7,9 +7,10 @@ use crate::compiler_analysis::{
     hover_wire_cost, CompletionDetails, CompletionKind, CompletionSymbols, DefinitionOccurrence,
     DefinitionSymbols, DefinitionTarget, DocumentSymbolOccurrence, FileAnalysis,
     FoldingRangeOccurrence, FrontendSymbols, HighlightOccurrence, HighlightSymbols,
-    HoverOccurrence, SemanticLimits, SignatureCandidate, SignatureHelpCall, SignatureHelpSymbols,
-    FOLDING_KIND_COMMENT, FOLDING_KIND_IMPORTS, FOLDING_KIND_REGION, TEXT_BLOCK_COMMENT,
-    TEXT_BRACES, TEXT_IMPORTS, TEXT_KDOC, TEXT_PARENTHESES, TEXT_RAW_STRING, TEXT_REGION_LABEL,
+    HoverOccurrence, LibraryRef, SemanticLimits, SignatureCandidate, SignatureHelpCall,
+    SignatureHelpSymbols, FOLDING_KIND_COMMENT, FOLDING_KIND_IMPORTS, FOLDING_KIND_REGION,
+    MAX_LIBRARY_DEFINITION_BYTES, TEXT_BLOCK_COMMENT, TEXT_BRACES, TEXT_IMPORTS, TEXT_KDOC,
+    TEXT_PARENTHESES, TEXT_RAW_STRING, TEXT_REGION_LABEL,
 };
 use krusty::diag::{Diagnostic, Span};
 use serde::{Deserialize, Serialize};
@@ -250,6 +251,66 @@ type DefinitionEntry = [u32; 5];
 #[derive(Default, Deserialize, Serialize)]
 pub struct DefinitionIndex {
     entries: Vec<DefinitionEntry>,
+}
+
+/// Classpath definitions keyed by their source occurrence.
+#[derive(Default, Clone, Deserialize, Serialize)]
+pub struct LibraryDefinitionIndex {
+    entries: Vec<[u32; 3]>,
+    references: Vec<LibraryRef>,
+}
+
+impl LibraryDefinitionIndex {
+    pub(crate) fn from_occurrences(
+        mut occurrences: Vec<(Span, LibraryRef)>,
+        budget: &mut NavigationBudget,
+    ) -> Self {
+        occurrences.sort_unstable_by(|left, right| {
+            (left.0.lo, left.0.hi, &left.1).cmp(&(right.0.lo, right.0.hi, &right.1))
+        });
+        occurrences.dedup();
+        occurrences.truncate(budget.remaining());
+
+        let mut references = Vec::new();
+        let mut reference_ids = HashMap::new();
+        let mut entries = Vec::with_capacity(occurrences.len());
+        for (span, reference) in occurrences {
+            let id = match reference_ids.get(&reference) {
+                Some(id) => *id,
+                None => {
+                    let Ok(id) = u32::try_from(references.len()) else {
+                        break;
+                    };
+                    reference_ids.insert(reference.clone(), id);
+                    references.push(reference);
+                    id
+                }
+            };
+            entries.push([span.lo, span.hi, id]);
+        }
+        budget.entries += entries.len();
+        Self {
+            entries,
+            references,
+        }
+    }
+
+    pub fn get(&self, offset: u32) -> Option<&LibraryRef> {
+        let upper = self.entries.partition_point(|entry| entry[0] <= offset);
+        let entry = upper
+            .checked_sub(1)
+            .and_then(|index| self.entries.get(index))
+            .filter(|entry| offset < entry[1])?;
+        self.references.get(entry[2] as usize)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 /// `(start line, start UTF-16 column, end line, end UTF-16 column,
@@ -1388,6 +1449,13 @@ impl HoverIndex {
     }
 }
 
+pub struct MaterializedDefinition {
+    pub path: std::path::PathBuf,
+    pub text: String,
+    pub lo: u32,
+    pub hi: u32,
+}
+
 pub struct DocumentAnalysis {
     pub diagnostics: Vec<Diagnostic>,
     pub hover: HoverIndex,
@@ -1397,6 +1465,7 @@ pub struct DocumentAnalysis {
     pub definitions: DefinitionIndex,
     pub type_definitions: DefinitionIndex,
     pub implementations: DefinitionIndex,
+    pub library_definitions: LibraryDefinitionIndex,
     pub document_symbols: DocumentSymbolIndex,
     pub folding_ranges: FoldingRangeIndex,
 }
@@ -1431,6 +1500,7 @@ pub(crate) struct AnalysisBudgets {
     hover: HoverBudget,
     completion: CompletionBudget,
     navigation: NavigationBudget,
+    library_definition_bytes: usize,
     pending_type_definitions: usize,
     pending_implementations: usize,
     document_symbol: DocumentSymbolBudget,
@@ -1444,6 +1514,7 @@ impl AnalysisBudgets {
             hover: HoverBudget::default(),
             completion: CompletionBudget::default(),
             navigation: NavigationBudget::default(),
+            library_definition_bytes: 0,
             pending_type_definitions: 0,
             pending_implementations: 0,
             document_symbol: DocumentSymbolBudget::default(),
@@ -1508,8 +1579,13 @@ impl DocumentAnalysis {
                 implementation_entries: pending_navigation_entries,
                 hover_entries: budgets.hover.remaining_entries(),
                 hover_wire_bytes: budgets.hover.remaining_wire_bytes(),
+                library_definition_wire_bytes: MAX_LIBRARY_DEFINITION_BYTES
+                    .saturating_sub(budgets.library_definition_bytes),
             },
         );
+        budgets.library_definition_bytes = budgets
+            .library_definition_bytes
+            .saturating_add(semantic.library_definition_bytes);
         budgets.retain_pending_navigation(
             &mut semantic.type_definitions,
             &mut semantic.implementations,
@@ -1518,6 +1594,10 @@ impl DocumentAnalysis {
         let semantic_tokens = SemanticTokenIndex::from_occurrences(source, semantic.highlights);
         let definitions =
             DefinitionIndex::from_occurrences(semantic.definitions, &mut budgets.navigation);
+        let library_definitions = LibraryDefinitionIndex::from_occurrences(
+            semantic.library_definitions,
+            &mut budgets.navigation,
+        );
         let document_symbols = DocumentSymbolIndex::from_occurrences(
             source,
             document_symbol_occurrences(
@@ -1540,6 +1620,7 @@ impl DocumentAnalysis {
                 signature_help,
                 semantic_tokens,
                 definitions,
+                library_definitions,
                 type_definitions: DefinitionIndex::default(),
                 implementations: DefinitionIndex::default(),
                 document_symbols,
@@ -1560,6 +1641,7 @@ impl DocumentAnalysis {
             definitions: DefinitionIndex::default(),
             type_definitions: DefinitionIndex::default(),
             implementations: DefinitionIndex::default(),
+            library_definitions: LibraryDefinitionIndex::default(),
             document_symbols: DocumentSymbolIndex::default(),
             folding_ranges: FoldingRangeIndex::default(),
         }
@@ -1642,6 +1724,95 @@ fn analyze_for_lsp_with_navigation_limit(
 mod tests {
     use super::*;
     use crate::compiler_analysis::CompletionKind;
+
+    #[test]
+    fn library_definition_index_round_trips_and_locates_by_offset() {
+        let reference = LibraryRef {
+            fqn: "kotlin/collections/CollectionsKt".to_string(),
+            member_name: "listOf".to_string(),
+            member_desc: "([Ljava/lang/Object;)Ljava/util/List;".to_string(),
+        };
+        let index = LibraryDefinitionIndex::from_occurrences(
+            vec![
+                (Span::new(10, 16), reference.clone()),
+                (Span::new(30, 36), reference),
+            ],
+            &mut NavigationBudget::default(),
+        );
+
+        let json = serde_json::to_string(&index).unwrap();
+        let restored: LibraryDefinitionIndex = serde_json::from_str(&json).unwrap();
+
+        let hit = restored
+            .get(13)
+            .expect("offset inside the occurrence resolves");
+        assert_eq!(hit.fqn, "kotlin/collections/CollectionsKt");
+        assert_eq!(hit.member_name, "listOf");
+        assert_eq!(restored.references.len(), 1);
+        assert_eq!(restored.get(33).unwrap().member_name, "listOf");
+        assert!(
+            restored.get(20).is_none(),
+            "offset outside the range misses"
+        );
+    }
+
+    #[test]
+    fn classpath_types_constructors_and_members_have_library_targets() {
+        let classpath = std::rc::Rc::new(krusty::toolchain::stdlib_classpath());
+        if classpath.scan_types().is_empty() {
+            return;
+        }
+        let source = concat!(
+            "import kotlin.text.Regex\n",
+            "fun use(input: Regex): Regex = Regex(input.pattern)\n",
+        );
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let mut frontend = crate::compiler_analysis::analyze_source_set(&[source], platform);
+        let highlights = HighlightSymbols::from_source_set(&frontend.files, &frontend.symbols);
+        let definitions = DefinitionSymbols::from_source_set(
+            &[source],
+            &frontend.files,
+            &frontend.symbols,
+            MAX_SOURCE_SET_NAVIGATION_ENTRIES,
+        );
+        let completions = CompletionSymbols::from_source_set(&frontend.files);
+        let signatures =
+            SignatureHelpSymbols::from_source_set(&[source], &frontend.files, &frontend.symbols);
+        let indexes = SourceSetIndexes::new(
+            &frontend.symbols,
+            &highlights,
+            &definitions,
+            &completions,
+            &signatures,
+        );
+        let file = frontend.files.remove(0);
+        let analysis = DocumentAnalysis::from_file_analysis(
+            source,
+            file,
+            0,
+            &indexes,
+            &mut AnalysisBudgets::new(),
+        )
+        .0;
+
+        let type_offset = source.find("input: Regex").unwrap() as u32 + "input: ".len() as u32;
+        let constructor_offset = source.rfind("Regex(").unwrap() as u32;
+        let member_offset = source.find("pattern").unwrap() as u32;
+        for offset in [type_offset, constructor_offset] {
+            let reference = analysis
+                .library_definitions
+                .get(offset)
+                .expect("classpath type target");
+            assert_eq!(reference.fqn, "kotlin/text/Regex");
+            assert!(reference.member_name.is_empty());
+        }
+        let member = analysis
+            .library_definitions
+            .get(member_offset)
+            .expect("classpath member target");
+        assert_eq!(member.fqn, "kotlin/text/Regex");
+        assert!(!member.member_name.is_empty());
+    }
 
     fn decoded_tokens(index: &SemanticTokenIndex) -> Vec<(u32, u32, u32, u32, u32)> {
         let mut line = 0;
@@ -3035,6 +3206,7 @@ mod tests {
                 implementation_entries: 2,
                 hover_entries: 0,
                 hover_wire_bytes: 0,
+                library_definition_wire_bytes: 0,
             },
         );
 
