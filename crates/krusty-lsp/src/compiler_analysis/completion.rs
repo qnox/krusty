@@ -79,6 +79,10 @@ pub(crate) struct CompletionSymbols {
 
 impl CompletionSymbols {
     pub fn from_source_set(files: &[FileAnalysis]) -> Self {
+        Self::from_source_set_prefix(files, files.len())
+    }
+
+    pub fn from_source_set_prefix(files: &[FileAnalysis], inferred_count: usize) -> Self {
         let mut result = Self {
             globals: Vec::new(),
             members: HashMap::new(),
@@ -117,7 +121,8 @@ impl CompletionSymbols {
             }
         }
         let mut inheritance = Vec::new();
-        for file in files {
+        for (file_index, file) in files.iter().enumerate() {
+            let internal_visible = file_index < inferred_count;
             let package = file.file.package.clone().unwrap_or_default();
             let local_classes: std::collections::HashSet<_> = file
                 .file
@@ -138,7 +143,9 @@ impl CompletionSymbols {
                             FunctionContext::TopLevel(&package),
                             file.inferred_function_return(function),
                         );
-                        if function.receiver.is_none() {
+                        if function.receiver.is_none()
+                            && (function.visibility != Visibility::Internal || internal_visible)
+                        {
                             result.globals.push(GlobalSymbol {
                                 package: package.clone(),
                                 visibility: function.visibility,
@@ -155,7 +162,7 @@ impl CompletionSymbols {
                             continue;
                         }
                         let owner = result.owner_for_name(&file.file, &class.name);
-                        result.add_class(&package, &owner, file, class);
+                        result.add_class(&package, &owner, file, class, internal_visible);
                         inheritance.extend(
                             class
                                 .base_class
@@ -174,7 +181,9 @@ impl CompletionSymbols {
                             .ty
                             .as_ref()
                             .map(|ty| result.owner_for_type(&file.file, ty));
-                        if property.receiver.is_none() {
+                        if property.receiver.is_none()
+                            && (property.visibility != Visibility::Internal || internal_visible)
+                        {
                             result.globals.push(GlobalSymbol {
                                 package: package.clone(),
                                 visibility: property.visibility,
@@ -236,26 +245,32 @@ impl CompletionSymbols {
         result
     }
 
-    fn add_class(&mut self, package: &str, owner: &str, file: &FileAnalysis, class: &ClassDecl) {
+    fn add_class(
+        &mut self,
+        package: &str,
+        owner: &str,
+        file: &FileAnalysis,
+        class: &ClassDecl,
+        internal_visible: bool,
+    ) {
         let kind = class_kind(class);
         let package_detail = package_label_detail(package);
-        self.globals.push(GlobalSymbol {
-            package: package.to_string(),
-            visibility: class.visibility,
-            symbol: Symbol {
-                label: class.name.clone(),
-                details: completion_details(package_detail.as_deref(), None),
-                kind,
-                result_type: Some(format!("@{owner}")),
-            },
-        });
+        if class.visibility != Visibility::Internal || internal_visible {
+            self.globals.push(GlobalSymbol {
+                package: package.to_string(),
+                visibility: class.visibility,
+                symbol: Symbol {
+                    label: class.name.clone(),
+                    details: completion_details(package_detail.as_deref(), None),
+                    kind,
+                    result_type: Some(format!("@{owner}")),
+                },
+            });
+        }
 
         let mut instance = Vec::new();
         for property in &class.body_props {
-            if matches!(
-                property.visibility,
-                Visibility::Public | Visibility::Internal
-            ) {
+            if completion_member_visible(property.visibility, internal_visible) {
                 let mut symbol = property_symbol(property, None);
                 symbol.result_type = property
                     .ty
@@ -266,10 +281,7 @@ impl CompletionSymbols {
         }
         for property in &class.props {
             if property.is_property
-                && matches!(
-                    property.visibility,
-                    Visibility::Public | Visibility::Internal
-                )
+                && completion_member_visible(property.visibility, internal_visible)
             {
                 let rendered_type = render_type(&property.ty);
                 instance.push(Symbol {
@@ -281,10 +293,7 @@ impl CompletionSymbols {
             }
         }
         for function in &class.methods {
-            if matches!(
-                function.visibility,
-                Visibility::Public | Visibility::Internal
-            ) {
+            if completion_member_visible(function.visibility, internal_visible) {
                 instance.push(function_symbol(
                     function,
                     FunctionContext::Member,
@@ -300,10 +309,7 @@ impl CompletionSymbols {
         let static_owner = format!("@{owner}");
         let mut static_members = Vec::new();
         for property in &class.companion_props {
-            if matches!(
-                property.visibility,
-                Visibility::Public | Visibility::Internal
-            ) {
+            if completion_member_visible(property.visibility, internal_visible) {
                 let mut symbol = property_symbol(property, None);
                 symbol.result_type = property
                     .ty
@@ -313,10 +319,7 @@ impl CompletionSymbols {
             }
         }
         for function in &class.companion_methods {
-            if matches!(
-                function.visibility,
-                Visibility::Public | Visibility::Internal
-            ) {
+            if completion_member_visible(function.visibility, internal_visible) {
                 static_members.push(function_symbol(
                     function,
                     FunctionContext::Member,
@@ -415,6 +418,10 @@ impl CompletionSymbols {
     fn owner_for_type(&self, file: &File, reference: &TypeRef) -> String {
         self.owner_for_name(file, &reference.name)
     }
+}
+
+fn completion_member_visible(visibility: Visibility, internal_visible: bool) -> bool {
+    visibility == Visibility::Public || (visibility == Visibility::Internal && internal_visible)
 }
 
 impl FileAnalysis {

@@ -66,14 +66,22 @@ boundary.
   signature strings are deduplicated per document and bounded across the source set. No AST node or
   hover entry retains a source-text copy. A scoped completion
   entry is a 24-byte packed array of scope bounds, declaration position, interned label/label-details
-  IDs, item kind, and optional receiver type; member entries are 16 bytes. Completion filters these
-  cached records, including parser-recovered `receiver.`/`receiver?.` expressions, without retaining
-  the AST or invoking the worker; source-item resolution returns the already complete item unchanged.
+  IDs, item kind, and optional receiver type; member entries are 16 bytes. Completion scopes these
+  cached records to the cursor position and receiver — including parser-recovered
+  `receiver.`/`receiver?.` expressions — but deliberately does *not* filter by the typed identifier
+  prefix, so the response carries the full, prefix-independent candidate set and the editor filters
+  it locally as the user types. This is done without retaining the AST or invoking the worker;
+  source-item resolution returns the already complete item unchanged.
   A document retains member catalogs only for
   receiver types referenced by its own lexical symbols/source, rather than duplicating every member
   in the open source set. A shared source-set budget caps completion at 32,768 records and a
-  conservative 4 MiB wire estimate; the response follows the official server's refinable
-  `isIncomplete: true` contract. Each
+  conservative 4 MiB wire estimate. The response is client-filterable — `isIncomplete: false` —
+  only when the snapshot is trustworthy: analysis is current (no pending edit or in-flight
+  re-analysis) and the budget dropped no candidate. Otherwise the snapshot is a strict subset of
+  the visible symbols and the response keeps the refinable `isIncomplete: true` contract so the
+  editor re-queries as the snapshot catches up. This deliberately differs from
+  the official Kotlin LSP, which refines server-side and always returns
+  `isIncomplete: true`. Each
   semantic token is a 16-byte `(UTF-16 line, start, length, type, modifiers)` record, positioned once
   in the compiler worker so full/range requests neither rerun analysis nor rescan source. Worker JSON
   uses packed array entries rather than repeating object keys, and range encoding binary-searches

@@ -819,7 +819,8 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             &source_set.symbols,
             crate::analysis::MAX_SOURCE_SET_NAVIGATION_ENTRIES,
         );
-        let completion_symbols = CompletionSymbols::from_source_set(&source_set.files);
+        let completion_symbols =
+            CompletionSymbols::from_source_set_prefix(&source_set.files, inferred_count);
         let signature_help_symbols =
             SignatureHelpSymbols::from_source_set(&sources, &source_set.files, &source_set.symbols);
         let indexes = SourceSetIndexes::new(

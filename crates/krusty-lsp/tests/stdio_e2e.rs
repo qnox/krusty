@@ -672,6 +672,7 @@ fn stdio_server_keeps_dependency_and_friend_visibility_distinct() {
         r#"<project><component name="ProjectModuleManager"><modules>
              <module filepath="$PROJECT_DIR$/producer/producer.iml" />
              <module filepath="$PROJECT_DIR$/consumer/consumer.iml" />
+             <module filepath="$PROJECT_DIR$/isolated/isolated.iml" />
            </modules></component></project>"#,
     );
     project.write(
@@ -698,7 +699,15 @@ fn stdio_server_keeps_dependency_and_friend_visibility_distinct() {
              <orderEntry type="module" module-name="producer" />
            </component></module>"#,
     );
-    let open_internal = "package fixture\ninternal class OpenInternal\n";
+    project.write(
+        "isolated/isolated.iml",
+        r#"<module><component name="NewModuleRootManager" inherit-compiler-output="true">
+             <content url="file://$MODULE_DIR$">
+               <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+             </content>
+           </component></module>"#,
+    );
+    let open_internal = "package fixture\ninternal class OpenInternal\nclass OpenPublic\n";
     let friend_use = "package fixture\n\
                       fun openFriend(): Any = OpenInternal()\n\
                       fun diskFriend(): Any = DiskInternal()\n";
@@ -708,6 +717,10 @@ fn stdio_server_keeps_dependency_and_friend_visibility_distinct() {
     project.write(
         "producer/src/main/DiskInternal.kt",
         "package fixture\ninternal class DiskInternal\n",
+    );
+    project.write(
+        "isolated/src/Isolated.kt",
+        "package fixture\nclass IsolatedPublic\n",
     );
     let open_internal_uri = project.uri("producer/src/main/OpenInternal.kt");
     let friend_uri = project.uri("producer/src/test/FriendUse.kt");
@@ -769,6 +782,43 @@ fn stdio_server_keeps_dependency_and_friend_visibility_distinct() {
                 .is_some_and(|message| message.contains("'DiskInternal'"))),
         "{dependency_diagnostics:?}"
     );
+
+    let completion_labels = |response: &Value| {
+        response["result"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["label"].as_str())
+            .map(str::to_owned)
+            .collect::<std::collections::HashSet<_>>()
+    };
+    let friend_completion = server.request(
+        2,
+        "textDocument/completion",
+        json!({
+            "textDocument": {"uri": friend_uri},
+            "position": {"line": 1, "character": 26}
+        }),
+    );
+    let friend_labels = completion_labels(&friend_completion);
+    assert!(friend_labels.contains("OpenPublic"));
+    assert!(friend_labels.contains("OpenInternal"));
+    assert!(friend_labels.contains("DiskInternal"));
+    assert!(!friend_labels.contains("IsolatedPublic"));
+
+    let dependency_completion = server.request(
+        3,
+        "textDocument/completion",
+        json!({
+            "textDocument": {"uri": dependency_uri},
+            "position": {"line": 1, "character": 30}
+        }),
+    );
+    let dependency_labels = completion_labels(&dependency_completion);
+    assert!(dependency_labels.contains("OpenPublic"));
+    assert!(!dependency_labels.contains("OpenInternal"));
+    assert!(!dependency_labels.contains("DiskInternal"));
+    assert!(!dependency_labels.contains("IsolatedPublic"));
     server.shutdown_and_exit();
 }
 

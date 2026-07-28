@@ -232,11 +232,24 @@ type CompletionEntry = [u32; 6];
 type CompletionMemberEntry = [u32; 4];
 
 /// Compact completion catalog retained after compiler analysis is dropped.
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct CompletionIndex {
     entries: Vec<CompletionEntry>,
     members: Vec<CompletionMemberEntry>,
     strings: Vec<String>,
+    #[serde(default)]
+    complete: bool,
+}
+
+impl Default for CompletionIndex {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            members: Vec::new(),
+            strings: Vec::new(),
+            complete: false,
+        }
+    }
 }
 
 pub struct Completion<'a> {
@@ -968,6 +981,7 @@ impl CompletionIndex {
                 id
             }
         };
+        let mut truncated = false;
         let entries = scoped
             .into_iter()
             .filter_map(|symbol| {
@@ -976,6 +990,7 @@ impl CompletionIndex {
                     &symbol.details,
                     symbol.result_type.as_deref(),
                 ) {
+                    truncated = true;
                     return None;
                 }
                 let label = intern(&symbol.label);
@@ -1000,6 +1015,7 @@ impl CompletionIndex {
             .filter(|(owner, _, _, _)| member_owners.contains(*owner))
             .filter_map(|(owner, label, details, kind)| {
                 if !budget.reserve(label, details, Some(owner)) {
+                    truncated = true;
                     return None;
                 }
                 Some([
@@ -1014,7 +1030,12 @@ impl CompletionIndex {
             entries,
             members,
             strings,
+            complete: !truncated,
         }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.complete
     }
 
     pub fn complete(&self, source: &str, offset: u32) -> Vec<Completion<'_>> {
@@ -1046,10 +1067,7 @@ impl CompletionIndex {
                 .members
                 .iter()
                 .enumerate()
-                .filter(|(_, entry)| {
-                    entry[0] == receiver_type
-                        && self.strings[entry[1] as usize].starts_with(context.prefix)
-                })
+                .filter(|(_, entry)| entry[0] == receiver_type)
                 .map(|(index, entry)| {
                     let (label_detail, label_description) =
                         completion_label_details(&self.strings[entry[2] as usize]);
@@ -1075,11 +1093,7 @@ impl CompletionIndex {
         let mut best_by_label = HashMap::<&str, (usize, u32, u32)>::new();
         for (index, entry) in self.entries.iter().enumerate() {
             let label = self.strings[entry[3] as usize].as_str();
-            if entry[0] > offset
-                || offset > entry[1]
-                || entry[2] > offset
-                || !label.starts_with(context.prefix)
-            {
+            if entry[0] > offset || offset > entry[1] || entry[2] > offset {
                 continue;
             }
             let width = entry[1].saturating_sub(entry[0]);
@@ -1171,7 +1185,6 @@ fn pack_completion_details(details: &CompletionDetails) -> String {
 
 struct CompletionContext<'a> {
     receiver: Option<&'a str>,
-    prefix: &'a str,
 }
 
 fn completion_context(source: &str, offset: usize) -> Option<CompletionContext<'_>> {
@@ -1179,7 +1192,6 @@ fn completion_context(source: &str, offset: usize) -> Option<CompletionContext<'
         return None;
     }
     let prefix_start = identifier_start(source, offset);
-    let prefix = &source[prefix_start..offset];
     let before_prefix = &source[..prefix_start];
     let before_dot = before_prefix
         .strip_suffix("?.")
@@ -1189,7 +1201,7 @@ fn completion_context(source: &str, offset: usize) -> Option<CompletionContext<'
         let receiver_start = identifier_start(before_receiver, receiver_end);
         (receiver_start != receiver_end).then_some(&before_receiver[receiver_start..receiver_end])
     });
-    Some(CompletionContext { receiver, prefix })
+    Some(CompletionContext { receiver })
 }
 
 fn identifier_start(source: &str, end: usize) -> usize {
@@ -2915,6 +2927,9 @@ mod tests {
         assert!(analyses
             .iter()
             .all(|analysis| analysis.definitions.entry_count() == 0));
+        assert!(analyses
+            .iter()
+            .all(|analysis| !analysis.completion.is_complete()));
     }
 
     #[test]
@@ -3927,6 +3942,45 @@ mod tests {
     }
 
     #[test]
+    fn completion_returns_prefix_independent_in_scope_candidates() {
+        let source = "fun alphaOne(): Int = 1\nfun betaTwo(): Int = 2\nfun use(): Int = al";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
+        let index = CompletionIndex::from_file_analysis(source, &analysis.files[0], &symbols);
+        let candidates = index.complete(source, source.len() as u32);
+
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.label == "alphaOne"));
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.label == "betaTwo"),
+            "prefix-independent completion must include non-prefix-matching in-scope symbols"
+        );
+    }
+
+    #[test]
+    fn completion_member_list_is_prefix_independent() {
+        let source = concat!(
+            "class Box(val alpha: Int, val beta: Int)\n",
+            "fun use(box: Box) = box.al"
+        );
+        let analysis = analyze_standalone_source_set(&[source]);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
+        let index = CompletionIndex::from_file_analysis(source, &analysis.files[0], &symbols);
+        let candidates = index.complete(source, source.len() as u32);
+
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.label == "alpha"));
+        assert!(
+            candidates.iter().any(|candidate| candidate.label == "beta"),
+            "prefix-independent member completion must include non-prefix-matching members"
+        );
+    }
+
+    #[test]
     fn completion_includes_inherited_members() {
         let source = concat!(
             "open class Base(val inherited: Int)\n",
@@ -4277,6 +4331,48 @@ mod tests {
         );
 
         assert_eq!(index.entry_count(), 0);
+        assert!(
+            !index.is_complete(),
+            "a budget-truncated snapshot must report itself incomplete"
+        );
+    }
+
+    #[test]
+    fn completion_wire_budget_truncates_source_set_snapshots() {
+        let source = "fun answer(): Int = 42";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
+        let mut budget = CompletionBudget {
+            entries: 0,
+            wire_bytes: MAX_SOURCE_SET_COMPLETION_WIRE_BYTES,
+        };
+        let index = CompletionIndex::from_file_analysis_with_budget(
+            source,
+            &analysis.files[0],
+            &symbols,
+            &mut budget,
+        );
+
+        assert_eq!(index.entry_count(), 0);
+        assert!(!index.is_complete());
+    }
+
+    #[test]
+    fn completion_reports_complete_for_an_untruncated_snapshot() {
+        let source = "fun answer(): Int = 42";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
+        let index = CompletionIndex::from_file_analysis(source, &analysis.files[0], &symbols);
+
+        assert!(
+            index.is_complete(),
+            "an untruncated snapshot must report itself complete"
+        );
+    }
+
+    #[test]
+    fn absent_completion_snapshot_is_incomplete() {
+        assert!(!CompletionIndex::default().is_complete());
     }
 
     #[test]
