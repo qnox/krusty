@@ -10243,8 +10243,12 @@ impl<'a> Checker<'a> {
             ret_ty = inferred;
         }
         if let Some((source_file, function)) = self.source_function_file_and_decl(selected) {
+            let has_spread = match self.file.expr(call) {
+                Expr::Call { args, .. } => args.iter().any(|arg| self.file.is_spread_arg(*arg)),
+                _ => false,
+            };
             if let Some(r) =
-                self.user_generic_return(call, source_file, function, arg_tys, expected)
+                self.user_generic_return(call, source_file, function, arg_tys, expected, has_spread)
             {
                 ret_ty = r;
             }
@@ -11594,6 +11598,18 @@ impl<'a> Checker<'a> {
     /// True if `t` is a `@JvmInline value class` reference type (carries a `value_field`).
     fn ty_is_value_class(&self, t: Ty) -> bool {
         matches!(t, Ty::Obj(n, _) if self.syms.class_by_type_name(n).is_some_and(|c| c.value_field.is_some()))
+    }
+
+    fn value_class_uses_type_parameter_storage(&self, ty: Ty) -> bool {
+        let Ty::Obj(internal, _) = ty.non_null() else {
+            return false;
+        };
+        self.syms.class_by_type_name(internal).is_some_and(|class| {
+            class
+                .value_field
+                .as_ref()
+                .is_some_and(|(name, _)| class.generic_props.contains_key(name))
+        })
     }
 
     /// Whether the file-declared class `internal` declares method `name` as abstract (`fun f()` /
@@ -16495,8 +16511,17 @@ impl<'a> Checker<'a> {
         f: &FunDecl,
         arg_tys: &[Ty],
         expected: Option<Ty>,
+        has_spread: bool,
     ) -> Option<Ty> {
-        if f.receiver.is_some() || f.type_params.is_empty() || f.params.len() != arg_tys.len() {
+        if f.receiver.is_some() || f.type_params.is_empty() {
+            return None;
+        }
+        let trailing_vararg = f.params.last().is_some_and(|p| p.is_vararg);
+        if trailing_vararg {
+            if has_spread || arg_tys.len() < f.params.len() - 1 {
+                return None;
+            }
+        } else if f.params.len() != arg_tys.len() {
             return None;
         }
         let tparams: std::collections::HashSet<&str> =
@@ -16510,6 +16535,20 @@ impl<'a> Checker<'a> {
         // plain-value witness scan).
         let mut conflicted: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for (i, p) in f.params.iter().enumerate() {
+            if trailing_vararg && i + 1 == f.params.len() {
+                if p.ty.fun_params.is_empty()
+                    && !p.ty.nullable()
+                    && tparams.contains(p.ty.name.as_str())
+                {
+                    for at in &arg_tys[i..] {
+                        if *at == Ty::Nothing {
+                            return None; // diverging args don't constrain inference
+                        }
+                        bind_or_conflict(&mut binds, &mut conflicted, p.ty.name.as_str(), *at);
+                    }
+                }
+                continue;
+            }
             let at = &arg_tys[i];
             if p.ty.fun_params.is_empty() && p.ty.name != "<fun>" {
                 // A plain value parameter typed as a bare type parameter (`x: T`).
@@ -16608,9 +16647,10 @@ impl<'a> Checker<'a> {
             if conflicted.contains(r) {
                 return None;
             }
-            // A vararg param (`vararg ts: T`) binds `T` to the element type, but the physical parameter
-            // is an array and the return machinery here doesn't model that — decline (KT-2739).
-            if f.params.last().is_some_and(|p| p.is_vararg) {
+            if binds
+                .values()
+                .any(|&ty| self.value_class_uses_type_parameter_storage(ty))
+            {
                 return None;
             }
             // Every plain-value parameter that mentions the return type parameter must bind it to the
@@ -16622,6 +16662,9 @@ impl<'a> Checker<'a> {
             // slot doesn't, so it isn't a reliable witness for `T`.
             let mut witness: Option<Ty> = None;
             for (i, p) in f.params.iter().enumerate() {
+                if trailing_vararg && i + 1 == f.params.len() {
+                    continue;
+                }
                 if p.ty.fun_params.is_empty() && p.ty.name == r {
                     if p.ty.nullable() {
                         return None;
