@@ -1027,6 +1027,12 @@ pub struct Classpath {
     /// instance. The ext lookups union these per queried name — no composed whole-cp index.
     ext: RefCell<Option<std::rc::Rc<Vec<std::sync::Arc<EntryExt>>>>>,
     types: RefCell<Option<std::sync::Arc<TypeIndex>>>,
+    /// Classpath `typealias` name → target, merged in ON DEMAND per referenced package (see
+    /// [`Self::type_alias_target_name`]). The companion sets record what has been folded in, so each
+    /// package is scoped once and each entry's table merged once.
+    aliases: RefCell<HashMap<TypeName, TypeName>>,
+    alias_packages: RefCell<HashSet<TypeName>>,
+    merged_alias_entries: RefCell<HashSet<usize>>,
     /// The composed package table (`package NameId → PackageNode`, each node listing the jars that declare
     /// that package) — the merged classpath view name resolution walks. Composed once from the per-jar
     /// [`JarPackages`] (each cached per jar via [`EntryCache`]) and shared via `Arc` from a process-global
@@ -1153,6 +1159,9 @@ impl Classpath {
             archives: RefCell::new(crate::lru::LruCache::new_fixed(OPEN_ARCHIVE_CAP)),
             ext: RefCell::new(None),
             types: RefCell::new(None),
+            aliases: RefCell::new(HashMap::new()),
+            alias_packages: RefCell::new(HashSet::new()),
+            merged_alias_entries: RefCell::new(HashSet::new()),
             pkg_tree: RefCell::new(None),
             jimage: RefCell::new(None),
             bodies: RefCell::new(crate::lru::LruCache::new(BODY_CAP)),
@@ -1174,7 +1183,8 @@ impl Classpath {
     pub fn prepare_for_source_analysis(&self) {
         self.ensure_jimage_index();
         let _ = self.package_tree();
-        let _ = self.scan_types();
+        // NOT the alias table: `type_alias_target_name` builds only the entries that declare the
+        // queried package, so preparation never scans a jar the source does not name.
         let _ = self.ext_parts();
     }
 
@@ -1870,8 +1880,42 @@ impl Classpath {
     }
 
     pub fn type_alias_target_name(&self, internal: TypeName) -> Option<TypeName> {
-        let idx = self.scan_types();
-        idx.type_aliases.get(&internal).copied()
+        // A `typealias` named `pkg/X` is declared in package `pkg`, so only the entries the package tree
+        // lists for `pkg` can carry it. Merge those entries' tables the first time a package is asked
+        // about, once each, instead of composing every entry at startup — a real classpath has hundreds
+        // of jars whose packages the source never names. The lookup itself stays a single hash hit: it
+        // sits under every classpath type resolution and cannot afford to re-scope per call.
+        let package = internal.parent().unwrap_or_else(|| type_name(""));
+        if self.alias_packages.borrow_mut().insert(package) {
+            let tree = self.package_tree();
+            let rendered = package.render();
+            let mut entry_ids = tree
+                .node_for(&rendered)
+                .map_or_else(Vec::new, |node| node.jars.clone());
+            entry_ids.extend(tree.incomplete_entries.iter().copied());
+            for entry_id in entry_ids {
+                if !self.merged_alias_entries.borrow_mut().insert(entry_id) {
+                    continue;
+                }
+                let (Some(entry), Some(key)) =
+                    (self.entries.get(entry_id), self.cache_key.get(entry_id))
+                else {
+                    continue;
+                };
+                let packages = self.entry_packages(entry_id);
+                let part = if tree.incomplete_entries.contains(&entry_id) {
+                    std::sync::Arc::new(build_entry_types(entry, &packages))
+                } else {
+                    global_entry_types().get_or_build(key, || build_entry_types(entry, &packages))
+                };
+                let mut aliases = self.aliases.borrow_mut();
+                for (&alias, &target) in &part.type_aliases {
+                    // First entry on the classpath wins, as the composed index's merge does.
+                    aliases.entry(alias).or_insert(target);
+                }
+            }
+        }
+        self.aliases.borrow().get(&internal).copied()
     }
 
     /// Whether `internal` is a Kotlin BUILTIN declared in a `.kotlin_builtins` fragment (`kotlin/Number`,
@@ -3977,8 +4021,10 @@ mod fq_tests {
 
         assert!(classpath.jimage.borrow().is_some());
         assert!(classpath.pkg_tree.borrow().is_some());
-        assert!(classpath.types.borrow().is_some());
         assert!(classpath.ext.borrow().is_some());
+        // The alias table is NOT among them: `type_alias_target_name` builds only the entries that
+        // declare the queried package, so preparation must not scan every entry's facades up front.
+        assert!(classpath.types.borrow().is_none());
     }
 
     #[test]
@@ -4002,6 +4048,26 @@ mod fq_tests {
     /// never fails on CI regardless of where the stdlib lives.
     fn test_stdlib_jar() -> Option<PathBuf> {
         crate::toolchain::stdlib_jar()
+    }
+
+    #[test]
+    fn alias_lookup_scopes_to_the_declaring_package_without_composing_every_entry() {
+        let Some(jar) = test_stdlib_jar() else {
+            return; // toolchain not provisioned
+        };
+        let cp = Classpath::new(vec![jar]);
+
+        let target = cp.type_alias_target_name(type_name("kotlin/collections/ArrayList"));
+        assert!(
+            target.is_some_and(|target| target.matches("java/util/ArrayList")),
+            "a classpath typealias still resolves without the eager whole-classpath scan"
+        );
+        // Resolving through the scoped path must not have composed the whole-classpath alias table.
+        assert!(cp.types.borrow().is_none());
+        // A name that is not an alias stays unresolved.
+        assert!(cp
+            .type_alias_target_name(type_name("kotlin/collections/CollectionsKt"))
+            .is_none());
     }
 
     #[test]
