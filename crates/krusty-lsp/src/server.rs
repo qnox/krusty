@@ -1738,6 +1738,135 @@ mod tests {
     }
 
     #[test]
+    fn definition_from_java_source_resolves_a_kotlin_declaration() {
+        let mut server = LspService::new(super::implementation::DocumentAnalyzer);
+        server.handle(request(1, "initialize", json!({})));
+        for (uri, language_id, text) in [
+            (
+                "file:///Greeter.kt",
+                "kotlin",
+                "package demo\nclass Greeter\n",
+            ),
+            (
+                "file:///Use.java",
+                "java",
+                "package demo;\n\nclass Use {\n    Greeter g;\n}\n",
+            ),
+        ] {
+            server.handle(notification(
+                "textDocument/didOpen",
+                json!({
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": language_id,
+                        "version": 1,
+                        "text": text
+                    }
+                }),
+            ));
+        }
+
+        let response = server.handle(request(
+            2,
+            "textDocument/definition",
+            json!({
+                "textDocument": {"uri": "file:///Use.java"},
+                "position": {"line": 3, "character": 5}
+            }),
+        ));
+
+        assert_eq!(
+            response.messages[0]["result"],
+            json!([{
+                "uri": "file:///Greeter.kt",
+                "range": {
+                    "start": {"line": 1, "character": 6},
+                    "end": {"line": 1, "character": 13}
+                }
+            }])
+        );
+    }
+
+    #[test]
+    fn java_documents_publish_no_diagnostics() {
+        let mut server = LspService::new(super::implementation::DocumentAnalyzer);
+        server.handle(request(1, "initialize", json!({})));
+        let response = server.handle(notification(
+            "textDocument/didOpen",
+            json!({ "textDocument": {
+                "uri": "file:///Noisy.java", "languageId": "java", "version": 1,
+                "text": "package demo;\npublic class Noisy implements java.io.Serializable {\n    public int size() { return 1; }\n}\n"
+            }}),
+        ));
+
+        let published = response
+            .messages
+            .iter()
+            .filter(|message| {
+                message["method"] == "textDocument/publishDiagnostics"
+                    && message["params"]["uri"] == "file:///Noisy.java"
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !published.is_empty(),
+            "the document must be published at all"
+        );
+        for message in published {
+            assert_eq!(message["params"]["diagnostics"], json!([]));
+        }
+    }
+
+    #[test]
+    fn definition_from_kotlin_resolves_a_java_declaration_kotlin_cannot_parse() {
+        let mut server = LspService::new(super::implementation::DocumentAnalyzer);
+        server.handle(request(1, "initialize", json!({})));
+        for (uri, language_id, text) in [
+            (
+                "file:///Gadget.java",
+                "java",
+                "package demo;\n\npublic record Gadget(int width, int height) {\n}\n",
+            ),
+            (
+                "file:///UseGadget.kt",
+                "kotlin",
+                "package demo\n\nfun make(): Gadget? = null\n",
+            ),
+        ] {
+            server.handle(notification(
+                "textDocument/didOpen",
+                json!({
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": language_id,
+                        "version": 1,
+                        "text": text
+                    }
+                }),
+            ));
+        }
+
+        let response = server.handle(request(
+            2,
+            "textDocument/definition",
+            json!({
+                "textDocument": {"uri": "file:///UseGadget.kt"},
+                "position": {"line": 2, "character": 14}
+            }),
+        ));
+
+        assert_eq!(
+            response.messages[0]["result"],
+            json!([{
+                "uri": "file:///Gadget.java",
+                "range": {
+                    "start": {"line": 2, "character": 14},
+                    "end": {"line": 2, "character": 20}
+                }
+            }])
+        );
+    }
+
+    #[test]
     fn type_definition_resolves_exact_cross_file_utf16_location_without_reanalysis() {
         let calls = Rc::new(Cell::new(0));
         let calls_for_analyzer = calls.clone();

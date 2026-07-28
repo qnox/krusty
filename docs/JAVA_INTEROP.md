@@ -141,3 +141,9 @@ outer loop is bounded by the KSP backstop too.
    calling `BridgeMidEnd.ping()`. Production remaining: the REAL-KSP sidecar as the KSP engine
    (ksp_real_e2e proves the sidecar; wiring it behind `SymbolProcessor` is the shim work in
    docs/PLUGIN_API.md) and CLI plumbing behind the plugin registry.
+6. **[landed] Java type navigation (LSP)** — Java stub generation and editor navigation use the
+   same parser and spanned declaration/type-reference model. References are collected only from
+   parsed type positions and explicit body constructs such as `new`; unresolved or ambiguous names
+   produce no navigation target. `SourceKind::Java` crosses the worker protocol, bypasses Kotlin
+   parsing and diagnostics, and remains non-batch-compilable. Navigation currently covers types,
+   not Java members.

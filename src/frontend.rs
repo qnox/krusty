@@ -314,12 +314,16 @@ fn parse_source_kind(
     features: &LangFeatures,
     diags: &mut DiagSink,
 ) -> File {
+    if kind == SourceKind::Java {
+        return File::default();
+    }
     let tokens = crate::lexer::lex(src, diags);
     match kind {
         SourceKind::Kotlin => crate::parser::parse_with_features(src, &tokens, diags, features),
         SourceKind::KotlinScript => {
             crate::parser::parse_script_with_features(src, &tokens, diags, features)
         }
+        SourceKind::Java => unreachable!(),
     }
 }
 
@@ -415,9 +419,10 @@ where
         let diagnostics_before = diags.diags.len();
         let file = parse_source_kind(source.text, source.kind, &features, diags);
         parse_errors.push(
-            diags.diags[diagnostics_before..]
-                .iter()
-                .any(|diagnostic| diagnostic.severity == Severity::Error),
+            source.kind == SourceKind::Java
+                || diags.diags[diagnostics_before..]
+                    .iter()
+                    .any(|diagnostic| diagnostic.severity == Severity::Error),
         );
         files.push(file);
     }

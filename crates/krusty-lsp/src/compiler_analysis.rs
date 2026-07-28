@@ -3,6 +3,7 @@
 mod completion;
 mod document_symbols;
 mod folding_ranges;
+pub mod java;
 mod navigation;
 mod rendering;
 mod semantic;
@@ -93,6 +94,7 @@ impl FileAnalysis {
 /// Sources are parsed once, signatures and inferred returns are collected globally, and every file
 /// is checked in that shared context. This mirrors the batch compiler while retaining a compact
 /// per-file handoff for editor queries.
+#[cfg(test)]
 pub fn analyze_source_set(
     sources: &[&str],
     platform: Box<dyn SemanticPlatform>,
@@ -100,6 +102,7 @@ pub fn analyze_source_set(
     analyze_source_set_with_features(sources, platform, &LangFeatures::new())
 }
 
+#[cfg(test)]
 pub fn analyze_source_set_with_features(
     sources: &[&str],
     platform: Box<dyn SemanticPlatform>,
@@ -188,12 +191,12 @@ fn with_ide_inspections(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
     result
 }
 
+#[cfg(test)]
 pub fn analyze_standalone_source_set(sources: &[&str]) -> SourceSetAnalysis {
     analyze_source_set(sources, Box::new(krusty::libraries::EmptySymbolSource))
 }
 
-#[cfg(test)]
-fn analyze_standalone_source_inputs(inputs: &[SourceInput<'_>]) -> SourceSetAnalysis {
+pub(crate) fn analyze_standalone_source_inputs(inputs: &[SourceInput<'_>]) -> SourceSetAnalysis {
     analyze_source_inputs_with_features(
         inputs,
         Box::new(krusty::libraries::EmptySymbolSource),

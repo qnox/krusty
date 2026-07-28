@@ -260,6 +260,26 @@ pub trait Analysis {
     }
 }
 
+/// URI-aware analysis for open Kotlin and Java documents.
+pub struct DocumentAnalyzer;
+
+impl Analysis for DocumentAnalyzer {
+    fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+        crate::analysis::analyze_for_lsp(sources)
+    }
+
+    fn analyze_open_documents(
+        &mut self,
+        documents: &[(&str, &str)],
+        _open_uris: &[&str],
+    ) -> (Vec<DocumentAnalysis>, Vec<(String, String)>) {
+        (
+            crate::analysis::analyze_documents_for_lsp(documents),
+            Vec::new(),
+        )
+    }
+}
+
 impl<F> Analysis for F
 where
     F: FnMut(&[&str]) -> Vec<DocumentAnalysis>,
@@ -2517,7 +2537,7 @@ pub fn write_framed<W: Write>(writer: &mut W, body: &[u8]) -> io::Result<()> {
 
 /// Serve one LSP connection until `exit` or input EOF.
 pub fn run_connection<R: BufRead, W: Write>(reader: &mut R, writer: &mut W) -> io::Result<i32> {
-    run_connection_with(reader, writer, super::super::analyze_for_lsp)
+    run_connection_with(reader, writer, DocumentAnalyzer)
 }
 
 /// Serve one LSP connection with a caller-provided semantic analysis platform.

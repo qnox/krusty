@@ -43,7 +43,15 @@ mod tests {
     fn lsp_compiler_analysis_uses_only_frontend_dependencies() {
         assert_allowed_external_crate_modules_in_tree(
             "crates/krusty-lsp/src/compiler_analysis",
-            &["ast", "diag", "frontend", "libraries", "source", "types"],
+            &[
+                "ast",
+                "diag",
+                "frontend",
+                "java_source",
+                "libraries",
+                "source",
+                "types",
+            ],
         );
         assert_allowed_external_crate_modules_in_file(
             Path::new("crates/krusty-lsp/src/compiler_analysis.rs"),
@@ -155,7 +163,13 @@ mod tests {
             "types",
         ];
         for path in rust_files_under("src/jvm") {
-            assert_allowed_crate_modules_in_file(&path, &allowed);
+            if path.ends_with("java_stub.rs") {
+                let mut allowed = allowed.to_vec();
+                allowed.push("java_source");
+                assert_allowed_crate_modules_in_file(&path, &allowed);
+            } else {
+                assert_allowed_crate_modules_in_file(&path, &allowed);
+            }
         }
     }
 

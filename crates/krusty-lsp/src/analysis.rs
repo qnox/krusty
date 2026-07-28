@@ -2,8 +2,11 @@
 
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+use crate::compiler_analysis::analyze_standalone_source_set;
+use crate::compiler_analysis::java;
 use crate::compiler_analysis::{
-    analyze_standalone_source_set, document_symbol_occurrences, folding_range_occurrences,
+    analyze_standalone_source_inputs, document_symbol_occurrences, folding_range_occurrences,
     hover_wire_cost, CompletionDetails, CompletionKind, CompletionSymbols, DefinitionOccurrence,
     DefinitionSymbols, DefinitionTarget, DocumentSymbolOccurrence, FileAnalysis,
     FoldingRangeOccurrence, FrontendSymbols, HighlightOccurrence, HighlightSymbols,
@@ -13,6 +16,7 @@ use crate::compiler_analysis::{
     TEXT_PARENTHESES, TEXT_RAW_STRING, TEXT_REGION_LABEL,
 };
 use krusty::diag::{Diagnostic, Span};
+use krusty::source::{SourceInput, SourceKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -1885,21 +1889,106 @@ pub fn analyze_for_lsp(sources: &[&str]) -> Vec<DocumentAnalysis> {
     analyze_for_lsp_with_navigation_limit(sources, MAX_SOURCE_SET_NAVIGATION_ENTRIES)
 }
 
+/// Register the classes each Java document declares, so Kotlin references to them navigate to the
+/// Java source rather than to the classpath stub that made them resolvable.
+pub(crate) fn register_java_declarations(
+    definition_symbols: &mut DefinitionSymbols,
+    sources: &[&str],
+    java_documents: &[u32],
+) {
+    let mut declarations = Vec::new();
+    let mut counts = HashMap::new();
+    for &index in java_documents {
+        let Some(source) = sources.get(index as usize) else {
+            continue;
+        };
+        for declaration in java::global_declared_class_occurrences(source, index) {
+            *counts.entry(declaration.0.clone()).or_insert(0usize) += 1;
+            declarations.push(declaration);
+        }
+    }
+    for (owner, target) in declarations {
+        if counts.get(&owner) == Some(&1)
+            && !definition_symbols.class_targets().contains_key(&owner)
+        {
+            definition_symbols.insert_class_target(owner, target);
+        }
+    }
+}
+
+pub(crate) fn apply_java_navigation(
+    analyses: &mut [DocumentAnalysis],
+    sources: &[&str],
+    java_documents: &[u32],
+    definition_symbols: &DefinitionSymbols,
+    budgets: &mut AnalysisBudgets,
+) {
+    let limit = analyses.len().min(sources.len());
+    let java_documents = java_documents
+        .iter()
+        .map(|index| *index as usize)
+        .filter(|index| *index < limit)
+        .collect::<Vec<_>>();
+    if java_documents.is_empty() {
+        return;
+    }
+    for &index in &java_documents {
+        let mut targets = definition_symbols.class_targets().clone();
+        targets.extend(java::declared_classes(sources[index], index as u32));
+        let occurrences = java::definition_occurrences(sources[index], &targets);
+        analyses[index].definitions =
+            DefinitionIndex::from_occurrences(occurrences, &mut budgets.navigation);
+    }
+}
+
+pub fn analyze_documents_for_lsp(documents: &[(&str, &str)]) -> Vec<DocumentAnalysis> {
+    let inputs = documents
+        .iter()
+        .map(|(uri, source)| {
+            if uri.ends_with(".java") {
+                SourceInput::java(source)
+            } else {
+                SourceInput::kotlin(source)
+            }
+        })
+        .collect::<Vec<_>>();
+    analyze_source_inputs_for_lsp(&inputs, MAX_SOURCE_SET_NAVIGATION_ENTRIES)
+}
+
 fn analyze_for_lsp_with_navigation_limit(
     sources: &[&str],
     navigation_relation_limit: usize,
 ) -> Vec<DocumentAnalysis> {
-    let analysis = analyze_standalone_source_set(sources);
+    let inputs = sources
+        .iter()
+        .map(|source| SourceInput::kotlin(source))
+        .collect::<Vec<_>>();
+    analyze_source_inputs_for_lsp(&inputs, navigation_relation_limit)
+}
+
+fn analyze_source_inputs_for_lsp(
+    inputs: &[SourceInput<'_>],
+    navigation_relation_limit: usize,
+) -> Vec<DocumentAnalysis> {
+    let sources = inputs.iter().map(|input| input.text).collect::<Vec<_>>();
+    let java_documents = inputs
+        .iter()
+        .enumerate()
+        .filter(|(_, input)| input.kind == SourceKind::Java)
+        .map(|(index, _)| index as u32)
+        .collect::<Vec<_>>();
+    let analysis = analyze_standalone_source_inputs(inputs);
     let highlight_symbols = HighlightSymbols::from_source_set(&analysis.files, &analysis.symbols);
-    let definition_symbols = DefinitionSymbols::from_source_set(
-        sources,
+    let mut definition_symbols = DefinitionSymbols::from_source_set(
+        &sources,
         &analysis.files,
         &analysis.symbols,
         navigation_relation_limit,
     );
+    register_java_declarations(&mut definition_symbols, &sources, &java_documents);
     let completion_symbols = CompletionSymbols::from_source_set(&analysis.files);
     let signature_help_symbols =
-        SignatureHelpSymbols::from_source_set(sources, &analysis.files, &analysis.symbols);
+        SignatureHelpSymbols::from_source_set(&sources, &analysis.files, &analysis.symbols);
     let indexes = SourceSetIndexes::new(
         &analysis.symbols,
         &highlight_symbols,
@@ -1911,7 +2000,7 @@ fn analyze_for_lsp_with_navigation_limit(
     let pending = analysis
         .files
         .into_iter()
-        .zip(sources)
+        .zip(&sources)
         .enumerate()
         .map(|(file_index, (file, source))| {
             DocumentAnalysis::from_file_analysis(
@@ -1923,13 +2012,36 @@ fn analyze_for_lsp_with_navigation_limit(
             )
         })
         .collect();
-    finalize_navigation(pending, &mut budgets)
+    let mut analyses = finalize_navigation(pending, &mut budgets);
+    apply_java_navigation(
+        &mut analyses,
+        &sources,
+        &java_documents,
+        &definition_symbols,
+        &mut budgets,
+    );
+    analyses
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::compiler_analysis::CompletionKind;
+
+    #[test]
+    fn duplicate_and_private_java_classes_are_not_global_targets() {
+        let sources = [
+            "package demo; class Same {}",
+            "package demo; class Same {} class Outer { private class Secret {} }",
+        ];
+        let mut definitions = DefinitionSymbols::default();
+        register_java_declarations(&mut definitions, &sources, &[0, 1]);
+        assert!(!definitions.class_targets().contains_key("demo/Same"));
+        assert!(!definitions
+            .class_targets()
+            .contains_key("demo/Outer$Secret"));
+        assert!(definitions.class_targets().contains_key("demo/Outer"));
+    }
 
     #[test]
     fn library_definition_index_round_trips_and_locates_by_offset() {

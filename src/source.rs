@@ -4,6 +4,7 @@ use std::path::Path;
 pub enum SourceKind {
     Kotlin,
     KotlinScript,
+    Java,
 }
 
 impl SourceKind {
@@ -15,6 +16,7 @@ impl SourceKind {
         match self {
             Self::Kotlin => 0,
             Self::KotlinScript => 1,
+            Self::Java => 2,
         }
     }
 
@@ -22,6 +24,7 @@ impl SourceKind {
         match code {
             0 => Some(Self::Kotlin),
             1 => Some(Self::KotlinScript),
+            2 => Some(Self::Java),
             _ => None,
         }
     }
@@ -40,6 +43,10 @@ impl<'a> SourceInput<'a> {
 
     pub fn kotlin(text: &'a str) -> Self {
         Self::new(SourceKind::Kotlin, text)
+    }
+
+    pub fn java(text: &'a str) -> Self {
+        Self::new(SourceKind::Java, text)
     }
 }
 

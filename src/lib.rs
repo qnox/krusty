@@ -20,6 +20,7 @@ pub mod features;
 pub mod frontend;
 pub mod ir;
 pub mod ir_lower;
+pub mod java_source;
 pub mod js;
 pub mod jvm;
 pub mod lexer;
