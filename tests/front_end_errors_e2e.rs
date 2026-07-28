@@ -223,9 +223,70 @@ fn break_with_unresolved_label() {
 
 #[test]
 fn non_exhaustive_when_as_expression() {
-    let d =
-        diags("fun box(): Int { val x: Int = 3; val y = when (x) { 1 -> 10; 2 -> 20 }; return y }");
+    let d = parse_diags("fun value(input: Int): Int = when (input) { 0 -> 1 }");
     assert_rejected(&d, "non-exhaustive when used as expression");
+    assert_eq!(
+        d,
+        vec!["'when' expression must be exhaustive. Add an 'else' branch.".to_string()]
+    );
+}
+
+#[test]
+fn non_exhaustive_when_as_statement_is_allowed() {
+    let d = parse_diags("fun consume(input: Int) { when (input) { 0 -> Unit } }");
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn non_exhaustive_enum_lists_missing_branches() {
+    let d = parse_diags(
+        "enum class Phase { FIRST, SECOND }\n\
+         fun value(phase: Phase?): Int = when (phase) { Phase.FIRST -> 1 }",
+    );
+    assert_eq!(
+        d,
+        vec![
+            "'when' expression must be exhaustive. Add the 'SECOND', 'null' branches or an 'else' branch."
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn non_exhaustive_sealed_type_lists_missing_branch() {
+    let d = parse_diags(
+        "sealed class State\n\
+         object Initial : State()\n\
+         class Complete : State()\n\
+         fun value(state: State): Int = when (state) { Initial -> 0 }",
+    );
+    assert_eq!(
+        d,
+        vec![
+            "'when' expression must be exhaustive. Add the 'is Complete' branch or an 'else' branch."
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn exhaustive_finite_when_produces_a_value() {
+    let d = parse_diags(
+        "enum class Phase { FIRST, SECOND }\n\
+         fun phaseValue(phase: Phase?): Int = when (phase) {\n\
+             Phase.FIRST -> 1\n\
+             Phase.SECOND -> 2\n\
+             null -> 0\n\
+         }\n\
+         sealed class State\n\
+         object Initial : State()\n\
+         class Complete : State()\n\
+         fun stateValue(state: State): Int = when (state) {\n\
+             Initial -> 0\n\
+             is Complete -> 1\n\
+         }",
+    );
+    assert!(d.is_empty(), "{d:?}");
 }
 
 #[test]

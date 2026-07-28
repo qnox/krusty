@@ -8325,7 +8325,7 @@ fn check_file_at_impl(
                     }
                     if let Some(body) = sc.body {
                         c.with_ret(Ty::Unit, |c| {
-                            c.expr(body);
+                            c.expr_statement(body);
                         });
                     }
                     c.pop_scope();
@@ -8520,7 +8520,7 @@ fn check_file_at_impl(
                                 c.expect_assignable(prop_ty, gt, c.span(*g), "getter body");
                             }
                             FunBody::Block(g) => {
-                                let _ = c.expr(*g);
+                                let _ = c.expr_statement(*g);
                             }
                             FunBody::None => {}
                         });
@@ -8534,7 +8534,7 @@ fn check_file_at_impl(
                                 c.declare(&pname, prop_ty, true);
                                 match body {
                                     FunBody::Expr(g) | FunBody::Block(g) => {
-                                        let _ = c.expr(*g);
+                                        let _ = c.expr_statement(*g);
                                     }
                                     FunBody::None => {}
                                 }
@@ -8556,7 +8556,7 @@ fn check_file_at_impl(
                 }
                 for step in &cl.init_order {
                     if let ClassInit::Block(b) = step {
-                        c.expr(*b);
+                        c.expr_statement(*b);
                     }
                 }
                 c.pop_scope();
@@ -8706,7 +8706,7 @@ fn check_file_at_impl(
                             c.expect_assignable(prop_ty, gt, c.span(*e), "getter body");
                         }
                         FunBody::Block(b) => {
-                            let _ = c.expr(*b);
+                            let _ = c.expr_statement(*b);
                         }
                         FunBody::None => {}
                     });
@@ -8724,7 +8724,7 @@ fn check_file_at_impl(
                                 c.declare(&pname, prop_ty, true);
                                 match body {
                                     FunBody::Expr(g) | FunBody::Block(g) => {
-                                        let _ = c.expr(*g);
+                                        let _ = c.expr_statement(*g);
                                     }
                                     FunBody::None => {}
                                 }
@@ -11791,98 +11791,125 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// True if a subject `when` is exhaustive because its subject is a `sealed` class and every
-    /// declared subclass is matched by a positive `is` arm. Conservative: anything it can't prove
-    /// (non-sealed subject, an uncovered subclass, a nested sealed subclass) returns false.
-    fn when_sealed_exhaustive(&self, subj_ty: Option<Ty>, arms: &[WhenArm]) -> bool {
-        let Some(Ty::Obj(internal, _)) = subj_ty else {
-            return false;
-        };
-        // Subclasses of the sealed subject: a SAME-MODULE sealed class walks the user-class registry
-        // (`subclass_names_of`); a CLASSPATH sealed class reads its `@Metadata` `sealedSubclassFqName`
-        // (`sealed_subclasses`), so `when (d) { is D.A -> …; is D.B -> … }` over a classpath sealed `D`
-        // is proven exhaustive (an expression) the same way a same-module one is.
-        let subs: Vec<TypeName> = match self.syms.class_by_type_name(internal) {
-            Some(cs) if cs.is_sealed() => self.syms.subclass_names_of(internal),
-            Some(_) => return false,
-            None => self
-                .resolved_type_name(internal)
-                .map(|t| t.sealed_subclasses.iter_ids().collect())
-                .unwrap_or_default(),
-        };
-        if subs.is_empty() {
-            return false;
+    fn when_sealed_missing_branches(
+        &self,
+        subject_ty: Option<Ty>,
+        arms: &[WhenArm],
+    ) -> Option<Vec<String>> {
+        let subject = subject_ty?;
+        let internal = subject.non_null().obj_internal()?;
+        let shape = self.resolved_type_name(internal)?;
+        let mut subclasses = shape.sealed_subclasses.iter_ids().collect::<Vec<_>>();
+        if subclasses.is_empty() {
+            return None;
         }
-        let mut covered: std::collections::HashSet<TypeName> = std::collections::HashSet::new();
-        for arm in arms {
-            for &c in &arm.conditions {
-                match self.file.expr(c) {
-                    // `is Sub` — type-test arm.
-                    Expr::Is {
-                        ty, negated: false, ..
-                    } => {
-                        if let Ty::Obj(n, _) = self.resolve_ty_no_diag(ty) {
-                            covered.insert(n);
-                        }
+        subclasses.sort_by_key(|subclass| subclass.render());
+
+        let mut covered = std::collections::HashSet::new();
+        let mut covers_null = false;
+        for condition in arms.iter().flat_map(|arm| &arm.conditions) {
+            match self.file.expr(*condition) {
+                Expr::Is {
+                    ty, negated: false, ..
+                } => {
+                    if let Ty::Obj(internal, _) = self.resolve_ty_no_diag(ty) {
+                        covered.insert(internal);
                     }
-                    // `Sub ->` — value arm naming a singleton object subclass (`object A : S`); a bare
-                    // name resolving to a known class whose internal is one of the sealed subclasses.
-                    Expr::Name(n) => {
-                        if let Some(ci) = self.syms.classes.get(n) {
-                            let internal = ci.internal_name();
-                            if subs.contains(&internal) {
-                                covered.insert(internal);
-                            }
-                        }
-                    }
-                    _ => {}
                 }
+                Expr::Name(_) | Expr::Member { .. } => {
+                    let object = match self.expr_lowers.get(condition) {
+                        Some(ExprLowering::ObjectValue { internal }) => Some(*internal),
+                        _ => self.expr_types.get(condition.0 as usize).and_then(|ty| {
+                            let internal = ty.non_null().obj_internal()?;
+                            self.resolved_type_name(internal)
+                                .is_some_and(|shape| shape.is_object())
+                                .then_some(internal)
+                        }),
+                    };
+                    if let Some(object) = object.filter(|internal| subclasses.contains(internal)) {
+                        covered.insert(object);
+                    }
+                }
+                Expr::NullLit => covers_null = true,
+                _ => {}
             }
         }
-        subs.iter().all(|d| covered.contains(d))
+
+        let mut missing = subclasses
+            .into_iter()
+            .filter(|subclass| !covered.contains(subclass))
+            .map(|subclass| {
+                let rendered = subclass.render();
+                let name = rendered.rsplit(['/', '$', '.']).next().unwrap_or(&rendered);
+                if self
+                    .resolved_type_name(subclass)
+                    .is_some_and(|shape| shape.is_object())
+                {
+                    name.to_string()
+                } else {
+                    format!("is {name}")
+                }
+            })
+            .collect::<Vec<_>>();
+        if subject.is_nullable() && !covers_null {
+            missing.push("null".to_string());
+        }
+        Some(missing)
     }
 
-    /// True if a subject `when` is exhaustive because the subject is an enum type and every
-    /// declared entry is matched by a `EnumName.ENTRY` arm condition.
-    fn when_enum_exhaustive(&self, subj_ty: Option<Ty>, arms: &[WhenArm]) -> bool {
-        let Some(Ty::Obj(internal, _)) = subj_ty else {
-            return false;
-        };
-        // Find the enum's simple name (key in self.syms.enums) matching this internal name.
-        let Some((_, entries)) = self.syms.enums.iter().find(|(name, _)| {
-            self.syms
-                .classes
-                .get(*name)
-                .map_or(false, |c| c.internal_name() == internal)
-        }) else {
-            return false;
-        };
+    fn when_enum_missing_branches(
+        &self,
+        subject_ty: Option<Ty>,
+        arms: &[WhenArm],
+    ) -> Option<Vec<String>> {
+        let subject = subject_ty?;
+        let internal = subject.non_null().obj_internal()?;
+        let entries = self.resolved_type_name(internal)?.enum_entries.clone();
         if entries.is_empty() {
-            return false;
+            return None;
         }
-        let mut covered: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for arm in arms {
-            for &cnd in &arm.conditions {
-                // Arm condition must be `EnumClass.ENTRY` — a member access on the enum class.
-                if let Expr::Member {
-                    receiver,
-                    name: entry,
-                } = self.file.expr(cnd)
+
+        let mut covered = std::collections::HashSet::new();
+        let mut covers_null = false;
+        for condition in arms.iter().flat_map(|arm| &arm.conditions) {
+            match self.file.expr(*condition) {
+                Expr::Member { name, .. }
+                    if self.resolved_enum_entries.get(condition) == Some(&internal) =>
                 {
-                    if let Expr::Name(en) = self.file.expr(*receiver) {
-                        if self
-                            .syms
-                            .classes
-                            .get(en)
-                            .map_or(false, |c| c.internal_name() == internal)
-                        {
-                            covered.insert(entry);
-                        }
-                    }
+                    covered.insert(name.clone());
                 }
+                Expr::NullLit => covers_null = true,
+                _ => {}
             }
         }
-        entries.iter().all(|e| covered.contains(e.as_str()))
+
+        let mut missing = entries
+            .into_iter()
+            .filter(|entry| !covered.contains(entry))
+            .collect::<Vec<_>>();
+        if subject.is_nullable() && !covers_null {
+            missing.push("null".to_string());
+        }
+        Some(missing)
+    }
+
+    fn non_exhaustive_when_message(missing: Option<Vec<String>>) -> String {
+        let Some(missing) = missing.filter(|branches| !branches.is_empty()) else {
+            return "'when' expression must be exhaustive. Add an 'else' branch.".to_string();
+        };
+        let branches = missing
+            .iter()
+            .map(|branch| format!("'{branch}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let noun = if missing.len() == 1 {
+            "branch"
+        } else {
+            "branches"
+        };
+        format!(
+            "'when' expression must be exhaustive. Add the {branches} {noun} or an 'else' branch."
+        )
     }
 
     /// True if evaluating `e` always transfers control away (a `return`, or a block/if whose every
@@ -12536,10 +12563,7 @@ impl<'a> Checker<'a> {
                 self.expect_assignable(self.ret_ty, t, self.span(*e), "function body");
             }
             FunBody::Block(e) => {
-                let _ = self.expr(*e); // block body; returns happen via `return`
-                                       // A block-body function with a non-`Unit` (non-`Nothing`) return type must return a
-                                       // value on every path — kotlinc rejects `fun f(): Int { }`. `body_terminates` errs
-                                       // toward "returns", so this only fires on a genuinely non-returning body.
+                let _ = self.expr_statement(*e);
                 if !matches!(self.ret_ty, Ty::Unit | Ty::Nothing | Ty::Error)
                     && !self.body_terminates(*e)
                 {
@@ -13413,6 +13437,14 @@ impl<'a> Checker<'a> {
     }
 
     fn expr(&mut self, e: ExprId) -> Ty {
+        self.expr_with_context(e, true)
+    }
+
+    fn expr_statement(&mut self, e: ExprId) -> Ty {
+        self.expr_with_context(e, false)
+    }
+
+    fn expr_with_context(&mut self, e: ExprId, value_required: bool) -> Ty {
         // Guard against a stack overflow on a pathologically deep expression: past the limit the
         // expression types as `Error` (the file is skipped, never crashed).
         self.expr_depth += 1;
@@ -13423,7 +13455,8 @@ impl<'a> Checker<'a> {
         // Consume the propagated expectation so it reaches only THIS expression; a nested
         // subexpression sees `None` unless a propagation site re-arms it via `expr_expected`.
         let expected = self.expected.take();
-        let t = self.expr_inner(e, expected);
+        let value_required = value_required || expected.is_some();
+        let t = self.expr_inner(e, expected, value_required);
         self.expr_depth -= 1;
         t
     }
@@ -13432,6 +13465,14 @@ impl<'a> Checker<'a> {
     fn expr_expected(&mut self, e: ExprId, expected: Ty) -> Ty {
         self.expected = Some(expected);
         self.expr(e)
+    }
+
+    fn expr_result(&mut self, e: ExprId, expected: Option<Ty>, value_required: bool) -> Ty {
+        match expected {
+            Some(expected) => self.expr_expected(e, expected),
+            None if value_required => self.expr(e),
+            None => self.expr_statement(e),
+        }
     }
 
     fn arg_tys(&mut self, args: &[ExprId]) -> Vec<Ty> {
@@ -13835,7 +13876,7 @@ impl<'a> Checker<'a> {
         Some(Ty::fun(exp.params.clone(), exp.ret))
     }
 
-    fn expr_inner(&mut self, e: ExprId, expected: Option<Ty>) -> Ty {
+    fn expr_inner(&mut self, e: ExprId, expected: Option<Ty>, value_required: bool) -> Ty {
         let t = match self.file.expr(e).clone() {
             Expr::IntLit(_) => Ty::Int,
             Expr::LongLit(_) => Ty::Long,
@@ -14084,9 +14125,9 @@ impl<'a> Checker<'a> {
                         "krusty: a nested try combined with a finally is not supported".to_string(),
                     );
                 }
-                let bt = self.expr(body);
+                let bt = self.expr_result(body, expected, value_required);
                 if let Some(f) = finally {
-                    self.expr(f); // finally runs for effect; its value is discarded
+                    self.expr_statement(f);
                 }
                 let mut result = bt;
                 for c in &catches {
@@ -14106,7 +14147,7 @@ impl<'a> Checker<'a> {
                     };
                     self.push_scope();
                     self.declare(&c.name, cty, false);
-                    let ht = self.expr(c.body);
+                    let ht = self.expr_result(c.body, expected, value_required);
                     self.pop_scope();
                     // A `try` used as a statement needn't have body/catch agree; merge leniently
                     // (mismatch → `Unit`) so only an expression use that needs a value is constrained. A
@@ -15332,14 +15373,9 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // `if (this is B)` narrows the implicit receiver to `B` for the branch body.
-                let tt =
-                    self.with_this_narrow(
-                        self.this_is_narrowing(cond, false),
-                        |c| match &expected {
-                            Some(ex) => c.expr_expected(then_branch, *ex),
-                            None => c.expr(then_branch),
-                        },
-                    );
+                let tt = self.with_this_narrow(self.this_is_narrowing(cond, false), |c| {
+                    c.expr_result(then_branch, expected, value_required)
+                });
                 self.pop_scope();
                 match else_branch {
                     Some(eb) => {
@@ -15353,10 +15389,7 @@ impl<'a> Checker<'a> {
                             }
                         }
                         let et = self.with_this_narrow(self.this_is_narrowing(cond, true), |c| {
-                            match &expected {
-                                Some(ex) => c.expr_expected(eb, *ex),
-                                None => c.expr(eb),
-                            }
+                            c.expr_result(eb, expected, value_required)
                         });
                         self.pop_scope();
                         self.join(tt, et, self.span(e))
@@ -15427,15 +15460,12 @@ impl<'a> Checker<'a> {
                     // A trailing after a diverging statement is dead — type the block `Nothing` (still
                     // visit the trailing so its sub-expressions are checked).
                     Some(te) if diverged => {
-                        self.expr(te);
+                        self.expr_result(te, expected, value_required);
                         Ty::Nothing
                     }
                     // Propagate an expected type into the block's trailing value (a typed context
                     // reaching a `{ … ; lambda }` result).
-                    Some(te) => match &expected {
-                        Some(ex) => self.expr_expected(te, *ex),
-                        None => self.expr(te),
-                    },
+                    Some(te) => self.expr_result(te, expected, value_required),
                     None if diverged => Ty::Nothing,
                     None => {
                         // A block whose last statement always transfers control (break/continue/return)
@@ -15519,9 +15549,8 @@ impl<'a> Checker<'a> {
                     if let Some((n, t)) = &arm_cast {
                         self.declare(n, *t, false);
                     }
-                    let bt = self.with_this_narrow(arm_this_narrow, |c| match &expected {
-                        Some(ex) => c.expr_expected(arm.body, *ex),
-                        None => c.expr(arm.body),
+                    let bt = self.with_this_narrow(arm_this_narrow, |c| {
+                        c.expr_result(arm.body, expected, value_required)
                     });
                     self.pop_scope();
                     result = Some(match result {
@@ -15529,14 +15558,24 @@ impl<'a> Checker<'a> {
                         None => bt,
                     });
                 }
-                // A `when` carries a value only when it is exhaustive: it has an `else`, or its
-                // subject is a `sealed` type whose every subclass is matched by an `is` arm, or
-                // its subject is an enum and every entry is covered by an `EnumName.ENTRY` arm.
-                let exhaustive = has_else
-                    || self.when_sealed_exhaustive(subj_ty, &arms)
-                    || self.when_enum_exhaustive(subj_ty, &arms);
+                let missing = if has_else {
+                    None
+                } else {
+                    self.when_sealed_missing_branches(subj_ty, &arms)
+                        .or_else(|| self.when_enum_missing_branches(subj_ty, &arms))
+                };
+                let exhaustive =
+                    has_else || missing.as_ref().is_some_and(|branches| branches.is_empty());
                 if exhaustive {
                     result.unwrap_or(Ty::Unit)
+                } else if value_required {
+                    let span = self.span(e);
+                    self.diags.error_with_editor_span(
+                        span,
+                        Span::new(span.lo, span.lo.saturating_add(4)),
+                        Self::non_exhaustive_when_message(missing),
+                    );
+                    Ty::Error
                 } else {
                     Ty::Unit
                 }
@@ -24216,7 +24255,7 @@ impl<'a> Checker<'a> {
                 if let Some(l) = &label {
                     self.loop_labels.push(l.clone());
                 }
-                self.expr(body);
+                self.expr_statement(body);
                 if label.is_some() {
                     self.loop_labels.pop();
                 }
@@ -24225,7 +24264,7 @@ impl<'a> Checker<'a> {
                 if let Some(l) = &label {
                     self.loop_labels.push(l.clone());
                 }
-                self.expr(body);
+                self.expr_statement(body);
                 if label.is_some() {
                     self.loop_labels.pop();
                 }
@@ -24259,7 +24298,7 @@ impl<'a> Checker<'a> {
                 if let Some(l) = &label {
                     self.loop_labels.push(l.clone());
                 }
-                self.expr(body);
+                self.expr_statement(body);
                 if label.is_some() {
                     self.loop_labels.pop();
                 }
@@ -24298,7 +24337,7 @@ impl<'a> Checker<'a> {
                 if let Some(l) = &label {
                     self.loop_labels.push(l.clone());
                 }
-                self.expr(body);
+                self.expr_statement(body);
                 if label.is_some() {
                     self.loop_labels.pop();
                 }
@@ -24313,7 +24352,7 @@ impl<'a> Checker<'a> {
                 if self.is_contract_call(e) {
                     self.stmt_lowers.insert(s, StmtLowering::Erased);
                 } else {
-                    self.expr(e);
+                    self.expr_statement(e);
                 }
             }
             Stmt::LocalFun(f) => {
@@ -24487,7 +24526,7 @@ impl<'a> Checker<'a> {
                     c.expect_assignable(ret_ty, t, c.span(*e), "local function body");
                 }
                 FunBody::Block(b) => {
-                    let _ = c.expr(*b);
+                    let _ = c.expr_statement(*b);
                 }
                 FunBody::None => {}
             }
