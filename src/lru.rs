@@ -22,6 +22,14 @@ pub struct LruCache<K, V> {
 }
 
 impl<K: Eq + Hash + Clone, V> LruCache<K, V> {
+    fn with_cap(cap: usize) -> Self {
+        LruCache {
+            cap: cap.max(1),
+            tick: 0,
+            map: HashMap::default(),
+        }
+    }
+
     /// A cache bounded to `default_cap` entries, or to `KRUSTY_CACHE_CAP` when that env var is set.
     pub fn new(default_cap: usize) -> Self {
         let cap = std::env::var("KRUSTY_CACHE_CAP")
@@ -29,11 +37,12 @@ impl<K: Eq + Hash + Clone, V> LruCache<K, V> {
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(default_cap)
             .max(1);
-        LruCache {
-            cap,
-            tick: 0,
-            map: HashMap::default(),
-        }
+        Self::with_cap(cap)
+    }
+
+    /// A cache whose cap cannot be overridden by `KRUSTY_CACHE_CAP`.
+    pub fn new_fixed(cap: usize) -> Self {
+        Self::with_cap(cap)
     }
 
     /// Read `k`, marking it most-recently-used. `None` if absent (the caller recomputes and `insert`s).
@@ -48,6 +57,18 @@ impl<K: Eq + Hash + Clone, V> LruCache<K, V> {
         let e = self.map.get_mut(k)?;
         e.1 = t;
         Some(&e.0)
+    }
+
+    pub fn get_mut<Q>(&mut self, k: &Q) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.tick += 1;
+        let t = self.tick;
+        let e = self.map.get_mut(k)?;
+        e.1 = t;
+        Some(&mut e.0)
     }
 
     pub fn contains_key<Q>(&self, k: &Q) -> bool
@@ -120,6 +141,17 @@ mod tests {
         assert_eq!(c.len(), 2);
         assert_eq!(c.get(&"a"), Some(&10));
         assert_eq!(c.get(&"b"), Some(&2));
+    }
+
+    #[test]
+    fn mutable_access_refreshes_recency() {
+        let mut c = LruCache::new_fixed(2);
+        c.insert("a", 1);
+        c.insert("b", 2);
+        *c.get_mut(&"a").unwrap() = 10;
+        c.insert("c", 3);
+        assert_eq!(c.get(&"a"), Some(&10));
+        assert_eq!(c.get(&"b"), None);
     }
 
     #[test]
