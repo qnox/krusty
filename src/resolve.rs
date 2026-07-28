@@ -423,8 +423,8 @@ pub struct ClassSig {
     /// `serializer()`). A `ClassName.fn(...)` call lowers to `getstatic Companion; invokevirtual` only
     /// for a source companion function; a plugin-owned name is left to the plugin's own emit path.
     pub companion_fun_names: std::collections::HashSet<String>,
-    /// `companion object` properties, emitted as `static final` fields read as `ClassName.PROP`.
-    pub static_props: HashMap<String, Ty>,
+    /// `companion object` properties and their source visibility.
+    pub static_props: HashMap<String, (Ty, Visibility)>,
     /// Names of `lateinit` properties (instance and companion) — reads emit a null-check that throws.
     pub lateinit_props: std::collections::HashSet<String>,
     /// Internal names of interfaces this type implements (for subtyping).
@@ -3882,7 +3882,7 @@ pub fn collect_signatures_with_cp(
                             },
                         );
                     }
-                    let static_props: HashMap<String, Ty> = c
+                    let static_props: HashMap<String, (Ty, Visibility)> = c
                         .companion_props
                         .iter()
                         .map(|p| {
@@ -3899,7 +3899,7 @@ pub fn collect_signatures_with_cp(
                             if p.getter.is_some() || p.setter.is_some() {
                                 diags.error(p.span, "krusty: companion-object property custom accessors are not supported".to_string());
                             }
-                            (p.name.clone(), ty)
+                            (p.name.clone(), (ty, p.visibility))
                         })
                         .collect();
                     let lateinit_props: std::collections::HashSet<String> = c
@@ -7338,11 +7338,11 @@ pub enum ExprLowering {
     Lambda(LambdaInfo),
     /// A classpath `object` used as a value. Lowering emits `getstatic <internal>.INSTANCE`.
     ObjectValue { internal: TypeName },
-    /// A public static field read. Lowering emits `getstatic <owner>.<name>:<descriptor>`.
-    ExternalStaticFieldRead {
+    /// A static field read selected by a symbol provider.
+    StaticFieldRead {
         owner: TypeName,
         name: String,
-        descriptor: String,
+        descriptor: Option<String>,
     },
     /// A bare-name call `m(args)` resolved to a MEMBER function of a classpath `object` that was imported
     /// unqualified (`import Obj.m; m()`). Kotlin dispatches this on the singleton, so lowering reads
@@ -14758,7 +14758,7 @@ impl<'a> Checker<'a> {
                             .syms
                             .classes
                             .get(cls)
-                            .and_then(|c| c.static_props.get(&n))
+                            .and_then(|c| c.static_props.get(&n).map(|(ty, _)| ty))
                         {
                             return self.set(e, ty);
                         }
@@ -14813,7 +14813,7 @@ impl<'a> Checker<'a> {
                             if let Some(&ty) = self
                                 .syms
                                 .class_by_type_name(internal)
-                                .and_then(|c| c.static_props.get(&n))
+                                .and_then(|c| c.static_props.get(&n).map(|(ty, _)| ty))
                             {
                                 return self.set(e, ty);
                             }
@@ -14867,6 +14867,19 @@ impl<'a> Checker<'a> {
                             "context property access is not supported".to_string(),
                         );
                         Ty::Error
+                    } else if let Some((owner, property, ty, visibility)) =
+                        self.imported_source_companion_property(&n)
+                    {
+                        self.reject_if_inaccessible(visibility, &n, owner, self.span(e));
+                        self.expr_lowers.insert(
+                            e,
+                            ExprLowering::StaticFieldRead {
+                                owner,
+                                name: property,
+                                descriptor: None,
+                            },
+                        );
+                        ty
                     } else if let Some(&(ty, _, _)) = self.syms.props.get(&n) {
                         ty // top-level property
                     } else if crate::libraries::coroutine_intrinsic(&n)
@@ -15160,7 +15173,13 @@ impl<'a> Checker<'a> {
                         }
                         // `ClassName.PROP` — a companion (static) property read.
                         if let Some(cs) = self.syms.classes.get(&en) {
-                            if let Some(&ty) = cs.static_props.get(&name) {
+                            if let Some(&(ty, visibility)) = cs.static_props.get(&name) {
+                                self.reject_if_inaccessible(
+                                    visibility,
+                                    &name,
+                                    cs.internal_name(),
+                                    self.span(e),
+                                );
                                 return self.set(e, ty);
                             }
                         }
@@ -18678,10 +18697,10 @@ impl<'a> Checker<'a> {
         if let Some(expr) = expr {
             self.expr_lowers.insert(
                 expr,
-                ExprLowering::ExternalStaticFieldRead {
+                ExprLowering::StaticFieldRead {
                     owner: field.owner,
                     name: field.name,
-                    descriptor: field.descriptor,
+                    descriptor: Some(field.descriptor),
                 },
             );
         }
@@ -18892,6 +18911,22 @@ impl<'a> Checker<'a> {
         self.resolved_type_name(owner)
             .filter(|t| t.is_object())
             .map(|_| (owner, member.to_string()))
+    }
+
+    fn imported_source_companion_property(
+        &self,
+        name: &str,
+    ) -> Option<(TypeName, String, Ty, Visibility)> {
+        let full = self.imports.get(name)?;
+        let (owner_path, member) = full.rsplit_once('/')?;
+        let outer_path = owner_path.strip_suffix("/Companion")?;
+        let owner = self.nested_internal_name(outer_path)?;
+        let (ty, visibility) = *self
+            .syms
+            .class_by_type_name(owner)?
+            .static_props
+            .get(member)?;
+        Some((owner, member.to_string(), ty, visibility))
     }
 
     /// Primary-constructor parameter names/defaults of a same-file class, in declaration order — for

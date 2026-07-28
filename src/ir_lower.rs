@@ -5433,6 +5433,22 @@ impl<'a> Lower<'a> {
         )
     }
 
+    fn lower_recorded_static_field(&mut self, expression: AstExprId) -> Option<u32> {
+        let ExprLowering::StaticFieldRead {
+            owner,
+            name,
+            descriptor,
+        } = self.info.expr_lowers.get(&expression)?.clone()
+        else {
+            return None;
+        };
+        let descriptor = match descriptor {
+            Some(descriptor) => descriptor,
+            None => self.runtime.type_descriptor(self.info.ty(expression))?,
+        };
+        Some(self.emit_external_static_field(owner.render(), name, descriptor))
+    }
+
     fn emit_library_static_call(
         &mut self,
         callable: crate::libraries::LibraryCallable,
@@ -19005,6 +19021,12 @@ impl<'a> Lower<'a> {
                         vec![],
                     ));
                 }
+                if matches!(
+                    self.info.expr_lowers.get(&e),
+                    Some(ExprLowering::StaticFieldRead { .. })
+                ) {
+                    return self.lower_recorded_static_field(e);
+                }
                 // `this@Label` the checker resolved: `LabeledThisInner` (the current receiver) reads as a
                 // bare `this`; `LabeledThisOuter` (the immediate enclosing class of an `inner class`) reads
                 // the captured outer instance `this.this$0` (field index 0). Any other (unmarked) label
@@ -19413,14 +19435,11 @@ impl<'a> Lower<'a> {
                         vec![],
                     ));
                 }
-                if let Some(ExprLowering::ExternalStaticFieldRead {
-                    owner,
-                    name,
-                    descriptor,
-                }) = self.info.expr_lowers.get(&e).cloned()
-                {
-                    let owner = owner.render();
-                    return Some(self.emit_external_static_field(&owner, &name, &descriptor));
+                if matches!(
+                    self.info.expr_lowers.get(&e),
+                    Some(ExprLowering::StaticFieldRead { .. })
+                ) {
+                    return self.lower_recorded_static_field(e);
                 }
                 // A classpath nested singleton object recorded by the checker (`PrimitiveKind.STRING`) →
                 // `getstatic <Outer$Nested>.INSTANCE`.

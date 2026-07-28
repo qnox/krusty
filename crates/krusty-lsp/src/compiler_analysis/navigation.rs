@@ -372,7 +372,10 @@ impl DefinitionSymbols {
                                             property,
                                             analysis.types.as_ref(),
                                             class_symbols.and_then(|symbols| {
-                                                symbols.static_props.get(&property.name).copied()
+                                                symbols
+                                                    .static_props
+                                                    .get(&property.name)
+                                                    .map(|(ty, _)| *ty)
                                             }),
                                         ),
                                         source_name(source, target.span, &property.name),

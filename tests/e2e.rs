@@ -450,6 +450,8 @@ mod implicit_this_member_hof_lambda_e2e;
 mod implicit_this_method_ref_e2e;
 #[path = "import_scope_conformance_e2e.rs"]
 mod import_scope_conformance_e2e;
+#[path = "imported_companion_property_e2e.rs"]
+mod imported_companion_property_e2e;
 #[path = "indy_infra_e2e.rs"]
 mod indy_infra_e2e;
 #[path = "inferred_computed_prop_e2e.rs"]
