@@ -143,6 +143,10 @@ impl<K: Eq + Hash + Clone, V> LruCache<K, V> {
         self.map.is_empty()
     }
 
+    pub fn values(&self) -> impl Iterator<Item = &V> {
+        self.map.values().map(|(value, _)| value)
+    }
+
     /// Remove every entry.
     pub fn clear(&mut self) {
         self.map.clear();

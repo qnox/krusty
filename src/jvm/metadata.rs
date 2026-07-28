@@ -1577,7 +1577,7 @@ pub fn package_functions(ci: &ClassInfo) -> &[MetaFn] {
     &ci.meta.package_functions
 }
 
-/// Type aliases declared in a file facade's `Package` `@Metadata`.
+/// Public type aliases declared in a file facade's `Package` `@Metadata`.
 pub fn package_type_aliases(ci: &ClassInfo) -> &[(String, String)] {
     &ci.meta.type_aliases
 }
@@ -1654,16 +1654,17 @@ fn type_aliases(ctx: &MetaCtx, this_class: &str) -> Vec<(String, String)> {
     out
 }
 
-/// Decode a `TypeAlias` message → `(alias name, expanded/underlying class internal name)`.
-/// `TypeAlias.name` = 2 (string-table id), `underlyingType` = 4, `expandedType` = 6 (both `Type`).
+/// Decode a public `TypeAlias` message → `(alias name, expanded/underlying class internal name)`.
 fn parse_type_alias(body: &[u8], records: &[Rec], d2: &[String]) -> Option<(String, String)> {
     let mut pb = Pb { b: body, i: 0 };
+    let mut flags = 0;
     let mut name_id: Option<u64> = None;
     let mut expanded_class: Option<u64> = None;
     let mut underlying_class: Option<u64> = None;
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
+            (1, 0) => flags = pb.varint()?,
             (2, 0) => name_id = pb.varint(),
             (4, 2) => {
                 let len = pb.varint()? as usize;
@@ -1677,6 +1678,9 @@ fn parse_type_alias(body: &[u8], records: &[Rec], d2: &[String]) -> Option<(Stri
             }
             (_, w) => pb.skip(w)?,
         }
+    }
+    if flags_visibility(flags) != VIS_PUBLIC {
+        return None;
     }
     let name = d2.get(name_id? as usize).cloned()?;
     let class_id = expanded_class.or(underlying_class)?;
