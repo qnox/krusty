@@ -19746,6 +19746,7 @@ impl<'a> Lower<'a> {
                         crate::libraries::LibConst::Long(v) => IrConst::Long(v),
                         crate::libraries::LibConst::Float(v) => IrConst::Float(v),
                         crate::libraries::LibConst::Double(v) => IrConst::Double(v),
+                        crate::libraries::LibConst::Str(v) => IrConst::String(v),
                     };
                     return Some(self.emit_const(c));
                 }

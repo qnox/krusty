@@ -104,13 +104,14 @@ pub struct LibraryMember {
     pub call_sig: CallSig,
 }
 
-/// A public static field read.
+/// A public static field and its optional compile-time constant.
 #[derive(Clone, Debug)]
 pub struct StaticFieldRef {
     pub owner: TypeName,
     pub name: String,
     pub descriptor: String,
     pub ty: Ty,
+    pub constant: Option<LibraryConst>,
 }
 
 /// Source-level services exposed by compiled libraries.
@@ -1338,17 +1339,17 @@ impl LibraryType {
     }
 }
 
-/// A primitive constant value read from a library (a `const`/`static final` field's compile-time
-/// value), platform-agnostic so the front end can inline it like the reference compiler does.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// A library field's compile-time constant.
+#[derive(Clone, Debug, PartialEq)]
 pub enum LibConst {
     Int(i32),
     Long(i64),
     Float(f32),
     Double(f64),
+    Str(String),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LibraryConst {
     pub ty: Ty,
     pub value: LibConst,

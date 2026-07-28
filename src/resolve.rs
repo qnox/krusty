@@ -1077,7 +1077,7 @@ impl ClassNames {
             .get(type_name)
             .unwrap_or_else(|| crate::types::type_name(&format!("kotlin/{type_name}")));
         src.resolve_type_name(fallback)
-            .and_then(|t| t.companion_consts.get(const_name).copied())
+            .and_then(|t| t.companion_consts.get(const_name).cloned())
     }
     pub fn insert(&mut self, k: String, v: impl AsRef<str>) -> Option<TypeName> {
         self.ambiguous.remove(&k);
@@ -7963,7 +7963,7 @@ impl TypeInfo {
         &self,
         e: ExprId,
     ) -> Option<crate::libraries::LibraryConst> {
-        self.resolved_library_companion_consts.get(&e).copied()
+        self.resolved_library_companion_consts.get(&e).cloned()
     }
     /// The selected enum-entry owner for member-read expression `e`.
     pub fn resolved_enum_entry_owner(&self, e: ExprId) -> Option<TypeName> {
@@ -16736,8 +16736,9 @@ impl<'a> Checker<'a> {
                             .class_names
                             .library_companion_const(&source, &type_name, &name)
                         {
+                            let ty = c.ty;
                             self.resolved_library_companion_consts.insert(e, c);
-                            return self.set(e, c.ty);
+                            return self.set(e, ty);
                         }
                     }
                 }
@@ -20703,6 +20704,14 @@ impl<'a> Checker<'a> {
         expr: Option<ExprId>,
         field: crate::libraries::StaticFieldRef,
     ) -> Ty {
+        if let Some(constant) = field.constant {
+            let ty = constant.ty;
+            if let Some(expr) = expr {
+                self.resolved_library_companion_consts
+                    .insert(expr, constant);
+            }
+            return ty;
+        }
         if let Some(expr) = expr {
             if self
                 .resolved_type_name(field.owner)
