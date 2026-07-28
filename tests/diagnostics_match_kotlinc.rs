@@ -123,6 +123,9 @@ fn errors_match_kotlinc_in_text_and_location() {
         "class C { fun plus(other: C): C = this }\nfun g(left: C, right: C): C = left + right",
         "class Parser\nfun Parser.decode(source: String): String = source\nfun Parser.decode(value: Int): String = value.toString()\nfun bad() { val parser = Parser(); val reference = parser::decode }",
         "fun cross(x: String, y: Any): String = \"A\"\nfun cross(x: CharSequence, y: CharSequence): String = \"B\"\nfun bad() { val reference: (String, String) -> String = ::cross }",
+        "fun <T> applySame(block: (T) -> T, value: T): T = block(value)\nfun mismatched(x: String, suffix: Char = 'K'): Int = x.length + suffix.code\nfun bad(): Any = applySame(::mismatched, \"O\")",
+        "fun foo(x: String, y: Char = 'K'): String = x + y\nfun <T, U> hold(f: (T) -> U): U = hold(f)\nfun bad(): String = hold<Int, String>(::foo)",
+        "fun foo(x: Int, y: Char = 'K'): String = x.toString() + y\nfun <T : CharSequence, U> hold(f: (T) -> U): U = hold(f)\nfun bad(): String = hold(::foo)",
         // A type present on NO classpath in either compiler (`Widget` resolves to the JDK-internal
         // `jdk.internal.org.jline.reader.Widget` when the JDK is on the classpath, so it is a poor
         // choice for an "unresolved" probe).

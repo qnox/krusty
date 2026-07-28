@@ -139,9 +139,14 @@ fn referenced_class_names(ir: &IrFile) -> Vec<TypeName> {
                 collect_obj_names(*array_type, &mut out)
             }
             IrExpr::Call {
-                callee: Callee::CrossFile { ret, .. },
+                callee: Callee::CrossFile { params, ret, .. },
                 ..
-            } => collect_obj_names(*ret, &mut out),
+            } => {
+                for parameter in params {
+                    collect_obj_names(*parameter, &mut out);
+                }
+                collect_obj_names(*ret, &mut out);
+            }
             IrExpr::Call {
                 callee:
                     Callee::Virtual {
@@ -1018,7 +1023,7 @@ pub fn lower_value_classes(
             }
         }
     }
-    // Rewrite cross-file member calls with value-class signatures to use mangled names and erased types.
+    // Rewrite cross-file calls with value-class signatures to their JVM names and types.
     if !under.is_empty() {
         for e in &mut ir.exprs {
             if let IrExpr::Call {
@@ -1040,6 +1045,22 @@ pub fn lower_value_classes(
                     *ret = erase(ret, &under);
                 }
             }
+        }
+        for e in &mut ir.exprs {
+            let IrExpr::Call { callee, .. } = e else {
+                continue;
+            };
+            let (name, params, ret) = match callee {
+                Callee::CrossFile {
+                    name, params, ret, ..
+                } => (name, params, ret),
+                _ => continue,
+            };
+            *name = vc_mangle(name, params, ret, &under, true, false);
+            for parameter in params.iter_mut() {
+                *parameter = erase(parameter, &under);
+            }
+            *ret = erase(ret, &under);
         }
     }
     // Function-reference classes have two signatures: the public `FunctionN.invoke(Object...)Object`
