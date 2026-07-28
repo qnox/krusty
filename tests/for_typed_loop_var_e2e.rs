@@ -37,3 +37,45 @@ fn nullable_typed_loop_var_downto() {
 }\n";
     assert_eq!(run(SRC).expect("nullable typed loop var"), "OK");
 }
+
+#[test]
+fn source_interface_inheriting_list_is_iterable() {
+    let declarations = "\
+package sample
+
+class Token
+interface TokenList : List<Token>
+";
+    let usage = "\
+package sample
+
+fun visit(tokens: TokenList) {
+    for (token in tokens) {
+        token.toString()
+    }
+}
+";
+    common::expect_front_end_ok_files_with_stdlib(
+        &[declarations, usage],
+        "SourceInterfaceInheritingListIsIterable",
+    );
+}
+
+#[test]
+fn source_class_inheriting_array_list_is_iterable() {
+    const SRC: &str = "\
+class TokenList : ArrayList<String>()
+
+fun box(): String {
+    val tokens = TokenList()
+    tokens.add(\"O\")
+    tokens.add(\"K\")
+    var result = \"\"
+    for (token in tokens) {
+        result += token
+    }
+    return result
+}
+";
+    common::expect_box_ok_with_stdlib(SRC, "SourceClassInheritingArrayListIsIterable");
+}
