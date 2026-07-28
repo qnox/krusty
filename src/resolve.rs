@@ -5151,6 +5151,13 @@ fn collect_closure_reassigned(file: &File, e: ExprId, out: &mut std::collections
     *out = cell.into_inner();
 }
 
+fn fun_body_expr(body: &FunBody) -> Option<ExprId> {
+    match body {
+        FunBody::Expr(expression) | FunBody::Block(expression) => Some(*expression),
+        FunBody::None => None,
+    }
+}
+
 fn infer_getter_ty(file: &File, e: ExprId, locals: &HashMap<&str, Ty>) -> Ty {
     match file.expr(e) {
         Expr::IntLit(_) => Ty::Int,
@@ -7594,6 +7601,8 @@ fn make_checker<'a>(
         allow_lambda_mutation: false,
         symbolic_signature_inference: false,
         loop_labels: Vec::new(),
+        loop_depth: 0,
+        return_allowed: true,
     }
 }
 
@@ -8678,6 +8687,15 @@ fn check_file_at_impl(
             }
         }
     }
+    if let Some(body) = file.script_body {
+        c.scopes.truncate(base_scope_depth);
+        c.reset_body_mutations(Some(body));
+        c.push_local_funs();
+        c.with_ret_allowed(Ty::Unit, false, |c| {
+            c.expr_statement(body);
+        });
+        c.pop_local_funs();
+    }
     let Checker {
         expr_types,
         expr_lowers,
@@ -9028,6 +9046,8 @@ struct Checker<'a> {
     /// In-scope loop labels (`l@ for …`), innermost last. A `break@l`/`continue@l` must name one of
     /// these — an unknown label is rejected (the file skips) rather than silently retargeting a loop.
     loop_labels: Vec<String>,
+    loop_depth: usize,
+    return_allowed: bool,
 }
 
 enum ClasspathMemberSlotCall {
@@ -9175,6 +9195,15 @@ impl crate::assignable::TypeOracle for Checker<'_> {
 }
 
 impl<'a> Checker<'a> {
+    fn reset_body_mutations(&mut self, body: Option<ExprId>) {
+        self.fn_reassigned.clear();
+        self.fn_closure_reassigned.clear();
+        if let Some(body) = body {
+            collect_all_reassigned(self.file, body, &mut self.fn_reassigned);
+            collect_closure_reassigned(self.file, body, &mut self.fn_closure_reassigned);
+        }
+    }
+
     fn resolved_type(&self, internal: &str) -> Option<crate::libraries::LibraryType> {
         self.resolver().resolve_type(internal)
     }
@@ -9187,10 +9216,33 @@ impl<'a> Checker<'a> {
     }
 
     fn with_ret<R>(&mut self, ret_ty: Ty, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.with_ret_allowed(ret_ty, true, f)
+    }
+
+    fn with_ret_allowed<R>(
+        &mut self,
+        ret_ty: Ty,
+        return_allowed: bool,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
         let prev = std::mem::replace(&mut self.ret_ty, ret_ty);
+        let previous_return_allowed = std::mem::replace(&mut self.return_allowed, return_allowed);
         let r = f(self);
         self.ret_ty = prev;
+        self.return_allowed = previous_return_allowed;
         r
+    }
+
+    fn check_loop_body(&mut self, body: ExprId, label: &Option<String>) {
+        if let Some(label) = label {
+            self.loop_labels.push(label.clone());
+        }
+        self.loop_depth += 1;
+        self.expr_statement(body);
+        self.loop_depth -= 1;
+        if label.is_some() {
+            self.loop_labels.pop();
+        }
     }
 
     fn with_ret_field<R>(
@@ -12213,13 +12265,7 @@ impl<'a> Checker<'a> {
                 "'reified' type parameter is only allowed on an 'inline' function".to_string(),
             );
         }
-        // The set of locals reassigned anywhere in this function (for captured-`var` boxing).
-        self.fn_reassigned.clear();
-        self.fn_closure_reassigned.clear();
-        if let FunBody::Expr(b) | FunBody::Block(b) = &f.body {
-            collect_all_reassigned(self.file, *b, &mut self.fn_reassigned);
-            collect_closure_reassigned(self.file, *b, &mut self.fn_closure_reassigned);
-        }
+        self.reset_body_mutations(fun_body_expr(&f.body));
         // Inline functions are expanded at each call site by the lowerer (like kotlinc's inliner),
         // so the body is checked here but never emitted standalone. A lambda *parameter* of an
         // inline function may be invoked on a mutable capture (it ends up inlined into the caller),
@@ -12332,12 +12378,7 @@ impl<'a> Checker<'a> {
     /// Check an instance method: the class properties are visible (implicit `this`), then the
     /// method's own parameters shadow them.
     fn check_method(&mut self, f: &FunDecl, props: &[ScopedProperty]) {
-        self.fn_reassigned.clear();
-        self.fn_closure_reassigned.clear();
-        if let FunBody::Expr(b) | FunBody::Block(b) = &f.body {
-            collect_all_reassigned(self.file, *b, &mut self.fn_reassigned);
-            collect_closure_reassigned(self.file, *b, &mut self.fn_closure_reassigned);
-        }
+        self.reset_body_mutations(fun_body_expr(&f.body));
         let resolve = class_internal_resolver(self.syms);
         let added = self
             .tparams
@@ -13823,6 +13864,10 @@ impl<'a> Checker<'a> {
                 Ty::Nothing
             }
             Expr::Return { value, .. } => {
+                if !self.return_allowed {
+                    self.diags
+                        .error(self.span(e), "'return' is not allowed here");
+                }
                 if let Some(v) = value {
                     self.expr_expected(v, self.ret_ty);
                 }
@@ -24197,6 +24242,11 @@ impl<'a> Checker<'a> {
                             format!("krusty: unresolved loop label '{l}'"),
                         );
                     }
+                } else if self.loop_depth == 0 {
+                    self.diags.error(
+                        self.file.stmt_spans[s.0 as usize],
+                        "loop jump is not allowed outside a loop",
+                    );
                 }
             }
             Stmt::Return(e, label) => {
@@ -24214,6 +24264,12 @@ impl<'a> Checker<'a> {
                         }
                     }
                     return;
+                }
+                if !self.return_allowed {
+                    self.diags.error(
+                        self.file.stmt_spans[s.0 as usize],
+                        "'return' is not allowed here",
+                    );
                 }
                 let rt = self.ret_ty;
                 match e {
@@ -24236,22 +24292,10 @@ impl<'a> Checker<'a> {
             Stmt::While { cond, body, label } => {
                 let ct = self.expr(cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "while condition");
-                if let Some(l) = &label {
-                    self.loop_labels.push(l.clone());
-                }
-                self.expr_statement(body);
-                if label.is_some() {
-                    self.loop_labels.pop();
-                }
+                self.check_loop_body(body, &label);
             }
             Stmt::DoWhile { body, cond, label } => {
-                if let Some(l) = &label {
-                    self.loop_labels.push(l.clone());
-                }
-                self.expr_statement(body);
-                if label.is_some() {
-                    self.loop_labels.pop();
-                }
+                self.check_loop_body(body, &label);
                 let ct = self.expr(cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "do-while condition");
             }
@@ -24279,13 +24323,7 @@ impl<'a> Checker<'a> {
                 });
                 self.push_scope();
                 self.declare(&name, elem, true); // loop variable (mutated by the lowering)
-                if let Some(l) = &label {
-                    self.loop_labels.push(l.clone());
-                }
-                self.expr_statement(body);
-                if label.is_some() {
-                    self.loop_labels.pop();
-                }
+                self.check_loop_body(body, &label);
                 self.pop_scope();
             }
             Stmt::ForEach {
@@ -24318,13 +24356,7 @@ impl<'a> Checker<'a> {
                 };
                 self.push_scope();
                 self.declare(&name, elem, false);
-                if let Some(l) = &label {
-                    self.loop_labels.push(l.clone());
-                }
-                self.expr_statement(body);
-                if label.is_some() {
-                    self.loop_labels.pop();
-                }
+                self.check_loop_body(body, &label);
                 self.pop_scope();
             }
             Stmt::Expr(e) => {

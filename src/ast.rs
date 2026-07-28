@@ -1037,6 +1037,7 @@ pub enum Decl {
 #[derive(Default)]
 pub struct File {
     pub package: Option<String>,
+    pub is_script: bool,
     /// Fully-qualified import names (e.g. `util.Calc`), used to resolve Java/JDK references.
     pub imports: Vec<String>,
     /// Aliased imports as `(source alias, fully-qualified target)`.
@@ -1044,6 +1045,8 @@ pub struct File {
     /// Number of source lines, including a final empty line after a trailing newline.
     pub source_line_count: u32,
     pub decls: Vec<DeclId>,
+    /// Kotlin script statements in source order.
+    pub script_body: Option<ExprId>,
     /// Top-level declarations carrying the `expect` modifier (multiplatform headers). A matched
     /// `actual` in the same compiled source set replaces them (see `strip_matched_expects`); an
     /// unmatched `expect` stays and fails checking like any body-less declaration.

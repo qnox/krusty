@@ -1072,6 +1072,29 @@ fun combine(entries: Array<Entry>): String {
     }
 
     #[test]
+    fn worker_protocol_checks_kotlin_script_statements() {
+        let sources = ["fun render(value: String): String = value\n\
+             render(\"sample\")"];
+        let request = serde_json::to_vec(&AnalysisRequest {
+            sources: &sources,
+            source_kinds: &[krusty::source::SourceKind::KotlinScript.wire_code()],
+            result_count: 1,
+            inferred_count: 1,
+            language_features: &[],
+            java_sources: &[],
+        })
+        .unwrap();
+        let mut input = Vec::new();
+        write_framed(&mut input, &request).unwrap();
+        let mut output = Vec::new();
+
+        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
+
+        let analyses = decode_worker_output(output);
+        assert!(analyses[0].diagnostics.is_empty());
+    }
+
+    #[test]
     fn worker_resolves_kotlin_reference_to_stubbed_java() {
         let kotlin = "fun use(w: p.Widget) {}";
         let request = format!(

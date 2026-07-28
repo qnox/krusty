@@ -192,6 +192,15 @@ pub fn analyze_standalone_source_set(sources: &[&str]) -> SourceSetAnalysis {
 }
 
 #[cfg(test)]
+fn analyze_standalone_source_inputs(inputs: &[SourceInput<'_>]) -> SourceSetAnalysis {
+    analyze_source_inputs_with_features(
+        inputs,
+        Box::new(krusty::libraries::EmptySymbolSource),
+        &LangFeatures::new(),
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -208,6 +217,41 @@ mod tests {
             analysis.files[1].diagnostics
         );
         assert!(analysis.files[1].types.is_some());
+    }
+
+    #[test]
+    fn kotlin_script_accepts_and_checks_a_top_level_call() {
+        let source = "fun render(value: String): String = value\n\
+                      fun suspend(block: () -> Unit) = block()\n\
+                      fun context(value: String): String = value\n\
+                      render(\"sample\")\n\
+                      context(\"sample\")\n\
+                      fun after_line_call(): Unit {}\n\
+                      context(\"sample\"); fun after_semicolon_call(): Unit {}\n\
+                      suspend {}";
+        let inputs = [SourceInput::new(
+            krusty::source::SourceKind::KotlinScript,
+            source,
+        )];
+
+        let analysis = analyze_standalone_source_inputs(&inputs);
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+        assert!(analysis.files[0].file.script_body.is_some());
+        let call_start = source.find("render(\"sample\")").unwrap() as u32;
+        assert!(analysis.files[0]
+            .typed_expressions()
+            .any(|(span, ty)| span.lo == call_start && ty == Ty::String));
+
+        let kotlin = analyze_standalone_source_inputs(&[SourceInput::kotlin(source)]);
+        assert!(kotlin.files[0]
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.msg == "expected a top-level declaration"));
     }
 
     #[test]
