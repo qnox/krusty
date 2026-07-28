@@ -2421,10 +2421,8 @@ fn object_member_import_sig(file: &File, name: &str, src: &dyn SymbolSource) -> 
         if src.resolve_type(&cand).is_some_and(|t| t.is_object()) {
             return Some(cand);
         }
-        match cand.rfind('/') {
-            Some(pos) => cand.replace_range(pos..=pos, "$"),
-            None => return None,
-        }
+        let pos = cand.rfind('/')?;
+        cand.replace_range(pos..=pos, "$");
     }
 }
 
@@ -10220,11 +10218,7 @@ impl<'a> Checker<'a> {
                 s.iter()
                     .find_map(|(n, l)| matches(l.ty, want).then(|| n.clone()))
             });
-            if let Some(name) = local {
-                out.push(name);
-            } else {
-                return None;
-            }
+            out.push(local?);
         }
         // Two context parameters resolving to the SAME source is ambiguous (kotlinc rejects duplicate
         // context types); decline rather than pass one value into two parameters.

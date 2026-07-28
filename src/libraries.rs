@@ -572,6 +572,8 @@ impl std::fmt::Display for CallArgMappingError {
     }
 }
 
+// Call and parameter metadata are independent inputs to slot assignment.
+#[allow(clippy::too_many_arguments)]
 pub fn map_call_args<T: Copy>(
     args: &[T],
     names: Option<&[Option<String>]>,

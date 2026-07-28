@@ -1386,7 +1386,7 @@ pub fn lower_file_at_reporting(
                         let value = if fty == *property_ty {
                             gf
                         } else {
-                            lo.emit_type_op(IrTypeOp::ImplicitCoercion, gf, property_ir.clone())
+                            lo.emit_type_op(IrTypeOp::ImplicitCoercion, gf, property_ir)
                         };
                         let ret = lo.emit_return(Some(value));
                         let body = lo.emit_block(vec![ret], None);
@@ -1394,7 +1394,7 @@ pub fn lower_file_at_reporting(
                         let fid = lo.ir.add_fun(IrFunction {
                             name: gname.clone(),
                             params: vec![],
-                            ret: property_ir.clone(),
+                            ret: property_ir,
                             body: Some(body),
                             is_static: false,
                             dispatch_receiver: Some(type_name(&internal)),
@@ -1447,7 +1447,7 @@ pub fn lower_file_at_reporting(
                             };
                             let fid = lo.ir.add_fun(IrFunction {
                                 name: sname.clone(),
-                                params: vec![property_ir.clone()],
+                                params: vec![property_ir],
                                 ret: Ty::Unit,
                                 body: Some(body),
                                 is_static: false,
@@ -14753,18 +14753,16 @@ impl<'a> Lower<'a> {
             // A dotted CLASSPATH nested type (`Subject.User`) → `Outer$Nested`, matching the checker's
             // `resolve_ty` — so an `is`/`as` target on such a type resolves the same internal name.
             Ty::obj(&internal)
-        } else if let Some(internal) = self
-            .cur_class
-            .as_ref()
-            .map(|c| format!("{c}${}", r.name))
-            .filter(|n| self.contains_class(n))
-        {
+        } else {
             // A sibling nested type unqualified within the enclosing class body (`is Inner`/`as Inner` /
             // `Inner` type in `class Outer { class Inner }`) → `Outer$Inner`, matching the checker's
             // nested-type scoping (`resolve_ty`/`resolve_ty_no_diag`).
+            let internal = self
+                .cur_class
+                .as_ref()
+                .map(|c| format!("{c}${}", r.name))
+                .filter(|n| self.contains_class(n))?;
             Ty::obj(&internal)
-        } else {
-            return None;
         };
         if t.is_reference() {
             Some(t)
@@ -17275,10 +17273,7 @@ impl<'a> Lower<'a> {
             for (k, p) in f.params.iter().enumerate() {
                 match slot[k] {
                     Some(a) => eff.push(a),
-                    None => match p.default {
-                        Some(d) => eff.push(d),
-                        None => return None,
-                    },
+                    None => eff.push(p.default?),
                 }
             }
             eff_storage = eff;
@@ -21750,23 +21745,21 @@ impl<'a> Lower<'a> {
                             self.append_default_masks_marker(&mut a, field_tys.len(), omitted);
                             let params = Self::ctor_default_param_tys(&field_tys);
                             self.emit_new(class, a, Some(params))
-                        } else if let Some(sc) = no_named
-                            .then(|| {
-                                self.ir.classes[class as usize]
-                                    .secondary_ctors
-                                    .clone()
-                                    .into_iter()
-                                    .find(|sc| sc.params.len() == args.len())
-                            })
-                            .flatten()
-                        {
+                        } else {
+                            let sc = no_named
+                                .then(|| {
+                                    self.ir.classes[class as usize]
+                                        .secondary_ctors
+                                        .clone()
+                                        .into_iter()
+                                        .find(|sc| sc.params.len() == args.len())
+                                })
+                                .flatten()?;
                             let mut a = Vec::new();
                             for (arg, pt) in args.iter().zip(&sc.params) {
                                 a.push(self.lower_arg(*arg, pt)?);
                             }
                             self.emit_new(class, a, Some(sc.params))
-                        } else {
-                            return None;
                         }
                     }
                 }

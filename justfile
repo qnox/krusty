@@ -55,9 +55,17 @@ fmt:
 # Emit current clippy findings as a stable, line-number-independent fingerprint set:
 #   <count><TAB><file><TAB><message>   (one per file+message, so a new occurrence bumps the count)
 clippy-findings:
-    @cargo clippy --workspace --all-targets --all-features --message-format=short 2>&1 \
-      | grep -E ':[0-9]+:[0-9]+: warning: ' \
-      | sed -E 's/^([^:]+):[0-9]+:[0-9]+: warning: (.*)$/\1\t\2/' \
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Cached crates do not re-emit diagnostics, so rebuild first-party crates before fingerprinting.
+    cargo clean -p krusty -p krusty-cli -p krusty-lsp >/dev/null
+    output=$(mktemp)
+    trap 'rm -f "$output"' EXIT
+    if ! cargo clippy --workspace --all-targets --all-features --message-format=short >"$output" 2>&1; then
+        cat "$output" >&2
+        exit 1
+    fi
+    sed -nE 's/^([^:]+):[0-9]+:[0-9]+: warning: (.*)$/\1\t\2/p' "$output" \
       | sort | uniq -c | sed -E 's/^ *([0-9]+) /\1\t/' | sort
 
 # Freeze the current clippy findings as the accepted baseline. Run after intentionally fixing (or
