@@ -767,6 +767,12 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             })
             .collect::<io::Result<Vec<_>>>()?;
         let sources = inputs.iter().map(|input| input.text).collect::<Vec<_>>();
+        let java_documents = inputs
+            .iter()
+            .enumerate()
+            .filter(|(_, input)| input.kind == SourceKind::Java)
+            .map(|(index, _)| index as u32)
+            .collect::<Vec<_>>();
         let mut language_features = LangFeatures::new();
         for feature in &request.language_features {
             language_features.enable(feature);
@@ -813,11 +819,16 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
         );
         let highlight_symbols =
             HighlightSymbols::from_source_set(&source_set.files, &source_set.symbols);
-        let definition_symbols = DefinitionSymbols::from_source_set(
+        let mut definition_symbols = DefinitionSymbols::from_source_set(
             &sources,
             &source_set.files,
             &source_set.symbols,
             crate::analysis::MAX_SOURCE_SET_NAVIGATION_ENTRIES,
+        );
+        crate::analysis::register_java_declarations(
+            &mut definition_symbols,
+            &sources,
+            &java_documents,
         );
         let completion_symbols =
             CompletionSymbols::from_source_set_prefix(&source_set.files, inferred_count);
@@ -849,7 +860,14 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             .collect();
         let implementation_relations =
             compact_implementation_relations(definition_symbols.implementation_relations());
-        let analyses = finalize_navigation(pending, &mut budgets);
+        let mut analyses = finalize_navigation(pending, &mut budgets);
+        crate::analysis::apply_java_navigation(
+            &mut analyses,
+            &sources,
+            &java_documents,
+            &definition_symbols,
+            &mut budgets,
+        );
         let mut analyses = analyses
             .into_iter()
             .map(AnalysisResponse::from)
@@ -1390,6 +1408,74 @@ mod tests {
             .iter()
             .any(|diagnostic| diagnostic.message.contains("Only")));
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn worker_protocol_gives_java_documents_a_navigation_index() {
+        let sources = [
+            "package demo\nclass Greeter\n",
+            "package demo;\n\nclass Use {\n    Greeter g;\n}\n",
+        ];
+        let source_kinds = vec![SourceKind::Kotlin.wire_code(), SourceKind::Java.wire_code()];
+        let request = serde_json::to_vec(&AnalysisRequest {
+            sources: &sources,
+            source_kinds: &source_kinds,
+            result_count: sources.len(),
+            inferred_count: sources.len(),
+            language_features: &[],
+            java_sources: &[],
+            classpath: None,
+        })
+        .unwrap();
+        let mut input = Vec::new();
+        write_framed(&mut input, &request).unwrap();
+        let mut output = Vec::new();
+        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
+
+        let java = decode_worker_output(output)
+            .into_iter()
+            .nth(1)
+            .unwrap()
+            .into_document_analysis();
+        assert!(java.diagnostics.is_empty());
+        let targets = java.definitions.get(31).collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].file, 0);
+    }
+
+    #[test]
+    fn worker_protocol_points_kotlin_at_a_java_source_declaration() {
+        let java = "package demo;\n\npublic record Gadget(int width, int height) {\n}\n";
+        let sources = [java, "package demo\n\nfun make(): Gadget? = null\n"];
+        let source_kinds = vec![SourceKind::Java.wire_code(), SourceKind::Kotlin.wire_code()];
+        let java_sources = vec![java.to_string()];
+        let request = serde_json::to_vec(&AnalysisRequest {
+            sources: &sources,
+            source_kinds: &source_kinds,
+            result_count: sources.len(),
+            inferred_count: sources.len(),
+            language_features: &[],
+            java_sources: &java_sources,
+            classpath: None,
+        })
+        .unwrap();
+        let mut input = Vec::new();
+        write_framed(&mut input, &request).unwrap();
+        let mut output = Vec::new();
+        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
+
+        let kotlin = decode_worker_output(output)
+            .into_iter()
+            .nth(1)
+            .unwrap()
+            .into_document_analysis();
+        let targets = kotlin.definitions.get(26).collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].file, 0);
+        assert_eq!(
+            &java[targets[0].span.lo as usize..targets[0].span.hi as usize],
+            "Gadget"
+        );
     }
 
     #[test]
