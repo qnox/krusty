@@ -33,6 +33,20 @@ fn top_level_simple_field_getter() {
 }
 
 #[test]
+fn annotated_context_extension_getter_has_no_diagnostics() {
+    const SRC: &str = "class Scope\n\
+class Item\n\
+context(scope: Scope)\n\
+val Item.code: Int\n\
+    @Suppress(\"unused\")\n\
+    get() = 1\n";
+    assert_eq!(
+        common::front_end_diagnostics(SRC, &[], None),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
 fn top_level_compound_assign_routes_through_accessors() {
     // `v += 2` desugars to `v = v + 2` — the read MUST call `getV()` and the write `setV()`, so the
     // custom setter's side effect (appending to `log`) runs on every compound assignment.
