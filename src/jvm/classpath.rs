@@ -477,6 +477,17 @@ fn global_entry_types() -> &'static EntryCache<TypeIndex> {
     CACHE.get_or_init(EntryCache::new)
 }
 
+type EntryPkgTypes = std::sync::Arc<TypeIndex>;
+fn global_entry_pkg_types(
+) -> &'static std::sync::Mutex<crate::lru::LruCache<(EntryKey, TypeName), EntryPkgTypes>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<crate::lru::LruCache<(EntryKey, TypeName), EntryPkgTypes>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        std::sync::Mutex::new(crate::lru::LruCache::new_fixed(GLOBAL_ALIAS_PACKAGE_CAP))
+    })
+}
+
 /// The spec's `(jar, package) → PkgMembers`: a per-(jar, package) index of the package's static
 /// callables, parsed once from that jar's `kotlin_module` facades and SHARED across every classpath that
 /// includes the jar (keyed by jar path + package id), exactly like the other per-entry caches. Three
@@ -693,6 +704,12 @@ pub struct TypeIndex {
 impl TypeIndex {
     pub fn is_empty(&self) -> bool {
         self.type_aliases.is_empty()
+    }
+}
+
+fn merge_alias_part(aliases: &mut TypeIndex, part: &TypeIndex) {
+    for (&alias, &target) in &part.type_aliases {
+        aliases.type_aliases.entry(alias).or_insert(target);
     }
 }
 
@@ -1008,8 +1025,9 @@ type MetaOverloadCache =
     RefCell<crate::lru::LruCache<TypeName, std::rc::Rc<LambdaReturnOverloads>>>;
 
 const OPEN_ARCHIVE_CAP: usize = 16;
+const ALIAS_PACKAGE_CAP: usize = 1024;
+const GLOBAL_ALIAS_PACKAGE_CAP: usize = 8192;
 
-#[derive(Default)]
 pub struct Classpath {
     entries: Vec<Entry>,
     snapshot: Vec<Option<EntryStamp>>,
@@ -1027,6 +1045,8 @@ pub struct Classpath {
     /// instance. The ext lookups union these per queried name — no composed whole-cp index.
     ext: RefCell<Option<std::rc::Rc<Vec<std::sync::Arc<EntryExt>>>>>,
     types: RefCell<Option<std::sync::Arc<TypeIndex>>>,
+    /// Composed type aliases for recently queried packages.
+    aliases: RefCell<crate::lru::LruCache<TypeName, std::sync::Arc<TypeIndex>>>,
     /// The composed package table (`package NameId → PackageNode`, each node listing the jars that declare
     /// that package) — the merged classpath view name resolution walks. Composed once from the per-jar
     /// [`JarPackages`] (each cached per jar via [`EntryCache`]) and shared via `Arc` from a process-global
@@ -1153,6 +1173,7 @@ impl Classpath {
             archives: RefCell::new(crate::lru::LruCache::new_fixed(OPEN_ARCHIVE_CAP)),
             ext: RefCell::new(None),
             types: RefCell::new(None),
+            aliases: RefCell::new(crate::lru::LruCache::new_fixed(ALIAS_PACKAGE_CAP)),
             pkg_tree: RefCell::new(None),
             jimage: RefCell::new(None),
             bodies: RefCell::new(crate::lru::LruCache::new(BODY_CAP)),
@@ -1170,11 +1191,10 @@ impl Classpath {
         }
     }
 
-    /// Materialize every classpath index needed by source analysis.
+    /// Materialize indexes needed before source-specific name resolution.
     pub fn prepare_for_source_analysis(&self) {
         self.ensure_jimage_index();
         let _ = self.package_tree();
-        let _ = self.scan_types();
         let _ = self.ext_parts();
     }
 
@@ -1211,6 +1231,13 @@ impl Classpath {
             .borrow()
             .as_ref()
             .map_or(0, |i| i.type_aliases.len());
+        let aliases = self
+            .aliases
+            .borrow()
+            .values()
+            .map(|index| index.type_aliases.len())
+            .sum::<usize>();
+        let alias_packages = self.aliases.borrow().len();
         // RAW per-entry map sizes (unfiltered, undeduplicated) — the retained footprint, which is what
         // this memory diagnostic tracks; there is no composed per-cp index anymore.
         let ext = self.ext.borrow().as_ref().map_or(0, |parts| {
@@ -1226,7 +1253,7 @@ impl Classpath {
             .map_or(0, |t| t.package_count());
         format!(
             "classpath#{} L1_class={} L2_class={} meta_fns={} meta_ovl={} bodies={} builtin={} | \
-             jimage={} type={} ext={} pkgtree={}",
+             jimage={} type={} alias={} alias_pkg={} ext={} pkgtree={}",
             self.id,
             self.local_cache.borrow().len(),
             self.entry_caches.iter().map(|c| c.len()).sum::<usize>(),
@@ -1236,6 +1263,8 @@ impl Classpath {
             self.builtin_members.borrow().len(),
             jimage,
             types,
+            aliases,
+            alias_packages,
             ext,
             pkgtree,
         )
@@ -1870,8 +1899,48 @@ impl Classpath {
     }
 
     pub fn type_alias_target_name(&self, internal: TypeName) -> Option<TypeName> {
-        let idx = self.scan_types();
-        idx.type_aliases.get(&internal).copied()
+        let tree = self.package_tree();
+        if !tree.incomplete_entries.is_empty() {
+            return self.scan_types().type_aliases.get(&internal).copied();
+        }
+        let package = internal.parent().unwrap_or_else(|| type_name(""));
+        if let Some(index) = self.aliases.borrow_mut().get(&package) {
+            return index.type_aliases.get(&internal).copied();
+        }
+
+        let mut index = TypeIndex::default();
+        let rendered = package.render();
+        if let Some(node) = tree.node_for(&rendered) {
+            for &entry_id in &node.jars {
+                merge_alias_part(&mut index, &self.entry_package_types(entry_id, package));
+            }
+        }
+        let index = std::sync::Arc::new(index);
+        let target = index.type_aliases.get(&internal).copied();
+        self.aliases.borrow_mut().insert(package, index);
+        target
+    }
+
+    fn entry_package_types(&self, entry_id: usize, package: TypeName) -> EntryPkgTypes {
+        let key = (self.cache_key[entry_id].clone(), package);
+        let packages = self.entry_packages(entry_id);
+        if packages.complete {
+            if let Some(index) = global_entry_pkg_types().lock().unwrap().get(&key) {
+                return index.clone();
+            }
+        }
+        let index = std::sync::Arc::new(build_entry_package_types(
+            &self.entries[entry_id],
+            &packages,
+            package,
+        ));
+        if packages.complete {
+            global_entry_pkg_types()
+                .lock()
+                .unwrap()
+                .insert(key, index.clone());
+        }
+        index
     }
 
     /// Whether `internal` is a Kotlin BUILTIN declared in a `.kotlin_builtins` fragment (`kotlin/Number`,
@@ -1916,7 +1985,7 @@ impl Classpath {
     }
 
     pub fn empty() -> Classpath {
-        Classpath::default()
+        Classpath::new(Vec::new())
     }
 
     /// Scan all classpath entries and return the full type index (class names + type aliases).
@@ -2853,6 +2922,12 @@ impl Classpath {
     }
 }
 
+impl Default for Classpath {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 /// Scan ONE classpath entry into its [`EntryExt`] contribution: collect each class's lean record, then
 /// index the statics reachable via each class's super-walk WITHIN this entry (a Kotlin multifile facade
 /// and its `*___*Kt` part classes are compiled into the same jar, so the chain never crosses entries).
@@ -3598,6 +3673,30 @@ fn build_entry_types(entry: &Entry, packages: &JarPackages) -> TypeIndex {
     idx
 }
 
+fn build_entry_package_types(
+    entry: &Entry,
+    packages: &JarPackages,
+    package: TypeName,
+) -> TypeIndex {
+    let mut index = TypeIndex::default();
+    let package = package.render();
+    match entry {
+        Entry::Dir(directory) => {
+            if let Some(entry) = packages.entry(&package) {
+                for &facade in &entry.facades {
+                    let path = directory.join(format!("{}.class", packages.names.render(facade)));
+                    if let Ok(bytes) = std::fs::read(path) {
+                        parse_aliases_from_bytes(&bytes, &mut index);
+                    }
+                }
+            }
+        }
+        Entry::Jar(jar) => scan_types_jar_package(jar, packages, &package, &mut index),
+        Entry::Jimage(_) => {}
+    }
+    index
+}
+
 fn scan_types_dir(dir: &Path, idx: &mut TypeIndex) {
     let mut ancestors = HashSet::new();
     scan_types_dir_rooted(dir, dir, idx, &mut ancestors);
@@ -3660,6 +3759,37 @@ fn scan_types_jar(jar: &Path, packages: &JarPackages, idx: &mut TypeIndex) {
         let mut buf = Vec::new();
         if entry.read_to_end(&mut buf).is_ok() {
             parse_aliases_from_bytes(&buf, idx);
+        }
+    }
+}
+
+fn scan_types_jar_package(
+    jar: &Path,
+    packages: &JarPackages,
+    package: &str,
+    index: &mut TypeIndex,
+) {
+    let Ok(file) = File::open(jar) else { return };
+    let Ok(mut archive) = zip::ZipArchive::new(file) else {
+        return;
+    };
+    for entry_id in 0..archive.len() {
+        let wanted = archive
+            .name_for_index(entry_id)
+            .and_then(class_internal_from_entry)
+            .is_some_and(|internal| {
+                internal.rsplit_once('/').map_or("", |(parent, _)| parent) == package
+                    && type_alias_scan_wanted(internal, packages)
+            });
+        if !wanted {
+            continue;
+        }
+        let Ok(mut entry) = archive.by_index(entry_id) else {
+            continue;
+        };
+        let mut bytes = Vec::new();
+        if entry.read_to_end(&mut bytes).is_ok() {
+            parse_aliases_from_bytes(&bytes, index);
         }
     }
 }
@@ -3977,8 +4107,9 @@ mod fq_tests {
 
         assert!(classpath.jimage.borrow().is_some());
         assert!(classpath.pkg_tree.borrow().is_some());
-        assert!(classpath.types.borrow().is_some());
         assert!(classpath.ext.borrow().is_some());
+        assert!(classpath.types.borrow().is_none());
+        assert!(classpath.aliases.borrow().is_empty());
     }
 
     #[test]
@@ -4002,6 +4133,77 @@ mod fq_tests {
     /// never fails on CI regardless of where the stdlib lives.
     fn test_stdlib_jar() -> Option<PathBuf> {
         crate::toolchain::stdlib_jar()
+    }
+
+    #[test]
+    fn alias_lookup_scopes_to_the_declaring_package_without_composing_every_entry() {
+        let Some(jar) = test_stdlib_jar() else {
+            return;
+        };
+        let cp = Classpath::new(vec![jar]);
+
+        let target = cp.type_alias_target_name(type_name("kotlin/collections/ArrayList"));
+        assert!(
+            target.is_some_and(|target| target.matches("java/util/ArrayList")),
+            "classpath typealias still resolves without the eager whole-classpath scan"
+        );
+        assert!(cp.types.borrow().is_none());
+        let package = type_name("kotlin/collections");
+        assert!(cp.aliases.borrow_mut().get(&package).is_some_and(|index| {
+            index
+                .type_aliases
+                .keys()
+                .all(|alias| alias.parent() == Some(package))
+        }));
+        assert!(cp
+            .type_alias_target_name(type_name("kotlin/collections/CollectionsKt"))
+            .is_none());
+    }
+
+    #[test]
+    fn lazy_alias_merge_preserves_classpath_order() {
+        let alias = type_name("sample/Alias");
+        let earlier_target = type_name("sample/Earlier");
+        let later_target = type_name("sample/Later");
+        let mut earlier = TypeIndex::default();
+        earlier.type_aliases.insert(alias, earlier_target);
+        let mut later = TypeIndex::default();
+        later.type_aliases.insert(alias, later_target);
+
+        let mut aliases = TypeIndex::default();
+        merge_alias_part(&mut aliases, &earlier);
+        merge_alias_part(&mut aliases, &later);
+
+        assert_eq!(aliases.type_aliases.get(&alias), Some(&earlier_target));
+    }
+
+    #[test]
+    fn incomplete_catalogs_do_not_enter_the_lazy_alias_cache() {
+        let directory = test_temp_dir("incomplete-alias-catalog");
+        let jar = directory.join("broken.jar");
+        std::fs::write(&jar, b"not a zip").expect("write broken jar");
+        let cp = Classpath::new(vec![jar]);
+
+        assert!(!cp.package_tree().incomplete_entries.is_empty());
+        assert!(cp
+            .type_alias_target_name(type_name("sample/Missing"))
+            .is_none());
+        assert!(cp.aliases.borrow().is_empty());
+        assert!(cp.types.borrow().is_none());
+
+        drop(cp);
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn alias_package_misses_are_bounded() {
+        let cp = Classpath::empty();
+        for index in 0..=ALIAS_PACKAGE_CAP {
+            cp.type_alias_target_name(type_name(&format!("missing{index}/Alias")));
+        }
+
+        assert_eq!(cp.aliases.borrow().len(), ALIAS_PACKAGE_CAP);
+        assert!(cp.cache_report().contains("alias_pkg=1024"));
     }
 
     #[test]

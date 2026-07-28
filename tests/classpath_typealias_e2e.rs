@@ -34,3 +34,44 @@ fn classpath_typealias_ctor_and_type_position() {
         assert_eq!(out.trim(), "OK", "box() = {out:?}");
     }
 }
+
+#[test]
+fn classpath_typealias_visibility_is_enforced() {
+    const VISIBILITY_LIB: &str = "package visibility\n\
+        class Real\n\
+        typealias PublicAlias = Real\n\
+        internal typealias InternalAlias = Real\n\
+        private typealias PrivateAlias = Real\n";
+    let Some(libout) = common::compile_lib("typealias_visibility", VISIBILITY_LIB) else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let jdk = common::jdk_modules();
+    let cp = [libout.clone(), stdlib];
+    let diagnostics = common::front_end_diagnostics(
+        "import visibility.PublicAlias\n\
+         import visibility.InternalAlias\n\
+         import visibility.PrivateAlias\n\
+         fun publicValue(): Any = PublicAlias()\n\
+         fun internalValue(): Any = InternalAlias()\n\
+         fun privateValue(): Any = PrivateAlias()\n",
+        &cp,
+        jdk.as_deref(),
+    );
+
+    assert!(diagnostics
+        .iter()
+        .any(|message| message.contains("InternalAlias")));
+    assert!(diagnostics
+        .iter()
+        .any(|message| message.contains("PrivateAlias")));
+    assert!(!diagnostics
+        .iter()
+        .any(|message| message.contains("PublicAlias")));
+
+    if let Some(root) = libout.parent() {
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
