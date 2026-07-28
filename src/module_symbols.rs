@@ -155,6 +155,17 @@ impl<'a> ModuleSymbols<'a> {
         let mut seen = std::collections::HashSet::new();
         if let Some(i) = rt.non_null().obj_internal() {
             self.collect_member_libs(i, name, &mut out, &mut seen);
+            let rendered = i.render();
+            if out.is_empty() {
+                if let Some(signature) = rendered
+                    .strip_suffix("$Companion")
+                    .and_then(|outer| self.class_by_internal(outer))
+                    .filter(|class| class.companion_fun_names.contains(name))
+                    .and_then(|class| class.static_methods.get(name))
+                {
+                    out.push(lib_member(name, signature, i, false));
+                }
+            }
         }
         out
     }

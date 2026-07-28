@@ -15696,14 +15696,20 @@ impl<'a> Checker<'a> {
                         }
                     }
                     // Constructor reference `::ClassName` → `Fun(ctor_params, ClassName)`.
-                    if !self.syms.objects.contains(&name) {
-                        if let Some(cls) = self.syms.classes.get(&name).cloned() {
-                            if !cls.is_annotation() {
-                                return self.set(
-                                    e,
-                                    Ty::fun(cls.ctor_params.clone(), Ty::obj(&cls.internal())),
-                                );
-                            }
+                    if let Some(cls) = self
+                        .scoped_classifier_name(&name)
+                        .and_then(|internal| self.syms.class_by_type_name(internal))
+                        .cloned()
+                    {
+                        if cls.is_interface() || cls.is_abstract() {
+                            self.reject_abstract_construction(cls.internal_name(), self.span(e));
+                            return self.set(e, Ty::Error);
+                        }
+                        if !cls.is_object() && !cls.is_annotation() {
+                            return self.set(
+                                e,
+                                Ty::fun(cls.ctor_params.clone(), Ty::obj(&cls.internal())),
+                            );
                         }
                     }
                 }
@@ -17808,10 +17814,7 @@ impl<'a> Checker<'a> {
         );
     }
 
-    fn ctor_result_name(&mut self, call: ExprId, internal: TypeName) -> Ty {
-        // Cannot construct an abstract class / interface directly (kotlinc rejects it; the JVM would
-        // throw at `new`). Only fires on a genuine construction call here — a `super(…)` delegation
-        // and an `object : I {}` literal reach the backend by other paths, not `ctor_result`.
+    fn reject_abstract_construction(&mut self, internal: TypeName, span: Span) {
         if let Some(cls) = self.syms.class_by_type_name(internal) {
             if cls.is_interface() || cls.is_abstract() {
                 let kind = if cls.is_interface() {
@@ -17821,11 +17824,15 @@ impl<'a> Checker<'a> {
                 };
                 let rendered = internal.render();
                 self.diags.error(
-                    self.span(call),
+                    span,
                     format!("cannot create an instance of {kind} '{rendered}'"),
                 );
             }
         }
+    }
+
+    fn ctor_result_name(&mut self, call: ExprId, internal: TypeName) -> Ty {
+        self.reject_abstract_construction(internal, self.span(call));
         if let Some(targs) = self.file.call_type_args.get(&call.0).cloned() {
             let args: Vec<Ty> = targs.iter().map(|r| self.resolve_ty(r)).collect();
             if !args.is_empty() {
@@ -17942,8 +17949,10 @@ impl<'a> Checker<'a> {
                     .filter(|(_, _, is_class)| *is_class)
                     .filter_map(|(_, receiver, _)| receiver.obj_internal())
                     .any(|enclosing| {
+                        let enclosing_prefix = format!("{}$", enclosing.render());
                         enclosing == owner
                             || enclosing.starts_with(&nested_prefix)
+                            || owner.starts_with(&enclosing_prefix)
                             // `protected` additionally reaches from a subclass of the owner.
                             || (vis == Visibility::Protected
                                 && self
@@ -19221,6 +19230,32 @@ impl<'a> Checker<'a> {
         self.check_module_member_call_mode(call, rt, name, args, arg_tys, true)
     }
 
+    fn check_source_companion_call(
+        &mut self,
+        call: ExprId,
+        class: &ClassSig,
+        name: &str,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+        require_operator: bool,
+    ) -> Option<Ty> {
+        let signature = class.static_methods.get(name)?;
+        if !class.companion_fun_names.contains(name) || require_operator && !signature.is_operator()
+        {
+            return None;
+        }
+        let owner = type_name(&format!("{}$Companion", class.internal()));
+        let ret = self.check_module_member_call(call, Ty::obj_name(owner), name, args, arg_tys)?;
+        self.expr_lowers.insert(
+            call,
+            ExprLowering::ObjectMemberCall {
+                internal: owner,
+                member: name.to_string(),
+            },
+        );
+        Some(ret)
+    }
+
     fn check_module_member_call(
         &mut self,
         call: ExprId,
@@ -20047,16 +20082,19 @@ impl<'a> Checker<'a> {
                 // path and let the receiver resolve as that property value below.
                 if let Expr::Name(cls) = self.file.expr(receiver).clone() {
                     if !self.value_root_shadows_classifier(&cls) {
-                        let is_object = self.syms.objects.contains(&cls);
+                        let source_class = self
+                            .scoped_classifier_name(&cls)
+                            .and_then(|internal| self.syms.class_by_type_name(internal))
+                            .cloned();
+                        let is_object =
+                            source_class.as_ref().is_some_and(|class| class.is_object());
                         // Ordinary object members precede synthesized static fallbacks.
                         if is_object {
                             let arg_tys = self.arg_tys(args);
-                            let internal = self
-                                .syms
-                                .classes
-                                .get(&cls)
+                            let internal = source_class
+                                .as_ref()
                                 .map(ClassSig::internal_name)
-                                .unwrap_or_else(|| type_name(&class_internal(self.file, &cls)));
+                                .expect("source object has a signature");
                             let receiver_ty = Ty::obj_name(internal);
                             let arg_names = self.file.call_arg_names.get(&call.0).cloned();
                             let full_arg_tys =
@@ -20094,79 +20132,35 @@ impl<'a> Checker<'a> {
                             }
                         }
                         // `ClassName.fn(args)` — a companion (static) method call.
-                        if let Some(sig) = self
-                            .syms
-                            .classes
-                            .get(&cls)
-                            .and_then(|c| c.static_methods.get(&name))
+                        let source_companion = source_class
+                            .as_ref()
+                            .is_some_and(|class| class.companion_fun_names.contains(&name));
+                        if source_companion {
+                            let arg_tys = self.arg_tys(args);
+                            if let Some(ret) = source_class.as_ref().and_then(|class| {
+                                self.check_source_companion_call(
+                                    call, class, &name, args, &arg_tys, false,
+                                )
+                            }) {
+                                return ret;
+                            }
+                            return Ty::Error;
+                        }
+                        if let Some(sig) = source_class
+                            .as_ref()
+                            .and_then(|class| class.static_methods.get(&name))
                             .cloned()
                         {
                             let arg_tys = self.arg_tys(args);
-                            if sig.params.len() != arg_tys.len() {
-                                self.diags.error(
-                                    span,
-                                    format!(
-                                        "static method '{cls}.{name}' expects {} args, got {}",
-                                        sig.params.len(),
-                                        arg_tys.len()
-                                    ),
-                                );
-                            } else {
-                                self.expect_call_args(&sig.params, false, args, &arg_tys);
-                            }
-                            if let Some(comp_internal) =
-                                self.file
-                                    .decls
-                                    .iter()
-                                    .find_map(|&d| match self.file.decl(d) {
-                                        Decl::Class(c)
-                                            if c.name == cls
-                                                && c.companion_methods
-                                                    .iter()
-                                                    .any(|m| m.name == name) =>
-                                        {
-                                            Some(format!(
-                                                "{}$Companion",
-                                                class_internal(self.file, &c.name)
-                                            ))
-                                        }
-                                        _ => None,
-                                    })
-                            {
-                                let owner = type_name(&comp_internal);
-                                self.expr_lowers.insert(
-                                    call,
-                                    ExprLowering::ObjectMemberCall {
-                                        internal: owner,
-                                        member: name.clone(),
-                                    },
-                                );
-                                self.resolved_calls.insert(
-                                    call,
-                                    ResolvedCall::ModuleMember {
-                                        receiver: Ty::obj_name(owner),
-                                        owner,
-                                        name: name.clone(),
-                                        params: sig.params.clone(),
-                                        physical_ret: sig.ret,
-                                        ret: sig.ret,
-                                        inline: InlineKind::from_flags(sig.is_inline(), false),
-                                        interface: false,
-                                        vararg: sig.vararg(),
-                                        suspend: sig.is_suspend(),
-                                    },
-                                );
-                            }
+                            self.expect_call_args(&sig.params, sig.vararg(), args, &arg_tys);
                             return sig.ret;
                         }
                         if is_object {
                             let arg_tys = self.arg_tys(args);
-                            let internal = self
-                                .syms
-                                .classes
-                                .get(&cls)
+                            let internal = source_class
+                                .as_ref()
                                 .map(ClassSig::internal_name)
-                                .unwrap_or_else(|| type_name(&class_internal(self.file, &cls)));
+                                .expect("source object has a signature");
                             if let Some(ret) = self.check_module_member_call(
                                 call,
                                 Ty::obj_name(internal),
@@ -22389,6 +22383,18 @@ impl<'a> Checker<'a> {
                             })
                         });
                     if let Some(cls) = ctor_cls {
+                        if cls.is_interface() {
+                            if let Some(ret) = self.check_source_companion_call(
+                                call,
+                                &cls,
+                                CALLABLE_INVOKE_OPERATOR,
+                                args,
+                                &arg_tys,
+                                true,
+                            ) {
+                                return ret;
+                            }
+                        }
                         let ctor_params: Vec<Ty> = cls.ctor_params.clone();
                         // A value class is resolved like ANY class here — no value-class special case.
                         // Its construction (incl. `Vid()` omitting a defaulted sole param) lowers through
