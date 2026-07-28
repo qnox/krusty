@@ -807,6 +807,8 @@ pub struct ClassDecl {
     pub companion_base_args: Vec<ExprId>,
     /// A `companion object`'s declared interface supertypes (`companion object : I1, I2`).
     pub companion_supertypes: Vec<String>,
+    /// Source line of the `companion object` declaration (0 when absent).
+    pub companion_decl_line: u32,
     /// Properties declared in the class *body* (`class C { val x = … }`) — backing field + accessor,
     /// initialized in the primary constructor.
     pub body_props: Vec<PropDecl>,
