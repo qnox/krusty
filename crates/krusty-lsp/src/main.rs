@@ -23,6 +23,39 @@ fn analysis_remains_pending(kind: io::ErrorKind) -> bool {
     matches!(kind, io::ErrorKind::TimedOut | io::ErrorKind::Interrupted)
 }
 
+fn finish_analysis(
+    analysis_pending: &mut bool,
+    result: io::Result<Vec<DocumentAnalysis>>,
+    document_count: usize,
+) -> Vec<DocumentAnalysis> {
+    match result {
+        Ok(analysis) => {
+            *analysis_pending = false;
+            analysis
+        }
+        Err(error) if analysis_remains_pending(error.kind()) => {
+            *analysis_pending = true;
+            eprintln!("krusty-lsp: {error}; source analysis remains pending");
+            Vec::new()
+        }
+        Err(error) => {
+            *analysis_pending = false;
+            (0..document_count)
+                .map(|_| {
+                    DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
+                        span: krusty::diag::Span::new(0, 0),
+                        editor_span: None,
+                        severity: krusty::diag::Severity::Error,
+                        kind: krusty::diag::DiagnosticKind::Compiler,
+                        msg: format!("analysis worker failed: {error}"),
+                        file: 0,
+                    }])
+                })
+                .collect()
+        }
+    }
+}
+
 fn run_cache_command(args: &[String]) {
     let (all, root) = parse_cache_command(args).unwrap_or_else(|error| {
         eprintln!("krusty-lsp: {error}");
@@ -179,7 +212,7 @@ impl WorkerHost {
     }
 
     fn configure(&mut self) -> ProjectFeedback {
-        let previous_model = self.sync.as_ref().and_then(ProjectSync::model).cloned();
+        let previous_snapshot = self.sync.as_ref().and_then(ProjectSync::snapshot).cloned();
         let Some(sync) = self.sync.as_mut() else {
             return ProjectFeedback::default();
         };
@@ -201,7 +234,7 @@ impl WorkerHost {
                     self.worker
                         .reconfigure(&classpath, jdk_home.as_deref(), self.options.no_jdk())
                 {
-                    sync.rollback_model(previous_model);
+                    sync.rollback_snapshot(previous_snapshot);
                     let (retry_at, backoff) = next_worker_reconfigure_retry(
                         self.now_ms(),
                         self.worker_reconfigure_retry_backoff_ms,
@@ -327,47 +360,14 @@ impl WorkerHost {
                 .to_string(),
         ))
     }
-
-    fn finish_analysis(
-        &mut self,
-        result: io::Result<Vec<DocumentAnalysis>>,
-        document_count: usize,
-    ) -> Vec<DocumentAnalysis> {
-        match result {
-            Ok(analysis) => {
-                self.analysis_pending = false;
-                analysis
-            }
-            Err(error) if analysis_remains_pending(error.kind()) => {
-                self.analysis_pending = true;
-                eprintln!("krusty-lsp: {error}; source analysis remains pending");
-                Vec::new()
-            }
-            Err(error) => {
-                self.analysis_pending = false;
-                (0..document_count)
-                    .map(|_| {
-                        DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
-                            span: krusty::diag::Span::new(0, 0),
-                            editor_span: None,
-                            severity: krusty::diag::Severity::Error,
-                            kind: krusty::diag::DiagnosticKind::Compiler,
-                            msg: format!("analysis worker failed: {error}"),
-                            file: 0,
-                        }])
-                    })
-                    .collect()
-            }
-        }
-    }
 }
 
 impl krusty_lsp::Analysis for WorkerHost {
     fn document_admission(&self) -> krusty_lsp::DocumentAdmission {
         self.sync
             .as_ref()
-            .and_then(ProjectSync::model)
-            .map(krusty_lsp::DocumentAdmission::for_model)
+            .and_then(ProjectSync::snapshot)
+            .map(krusty_lsp::DocumentAdmission::for_snapshot)
             .unwrap_or_default()
     }
 
@@ -381,7 +381,7 @@ impl krusty_lsp::Analysis for WorkerHost {
 
     fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
         let result = self.worker.analyze(sources);
-        self.finish_analysis(result, sources.len())
+        finish_analysis(&mut self.analysis_pending, result, sources.len())
     }
 
     fn materialize_library_definition(
@@ -417,6 +417,7 @@ impl krusty_lsp::Analysis for WorkerHost {
         let module_assignments =
             project_module_assignments(self.sync.as_ref().and_then(ProjectSync::model), documents);
         let group_seeds = project_analysis_groups(&module_assignments);
+        let module_relations = self.sync.as_ref().and_then(ProjectSync::snapshot);
         let mut analyses = (0..documents.len())
             .map(|_| DocumentAnalysis::empty())
             .collect::<Vec<_>>();
@@ -441,10 +442,10 @@ impl krusty_lsp::Analysis for WorkerHost {
                 self.sync.as_ref().and_then(ProjectSync::model),
                 module_index,
             ) {
-                (Some(model), Some(_)) => self
+                (Some(_), Some(_)) => self
                     .project_sources
                     .load(
-                        model,
+                        module_relations.expect("project model relation graph"),
                         &modeled_documents,
                         open_uris,
                         krusty_lsp::MAX_SOURCE_SET_BYTES,
@@ -467,23 +468,26 @@ impl krusty_lsp::Analysis for WorkerHost {
                     continue;
                 }
             };
-            let visible_open_documents = if let (Some(model), Some(module_index)) = (
-                self.sync
-                    .as_ref()
-                    .and_then(ProjectSync::model)
-                    .filter(|model| {
-                        !matches!(model.kind, ProviderKind::Explicit | ProviderKind::None)
-                    }),
-                module_index,
-            ) {
-                let friend_indices = model.friend_source_module_indices(module_index);
-                let dependency_indices = model
-                    .dependency_source_module_indices(module_index)
-                    .into_iter()
+            let relations = module_relations
+                .filter(|snapshot| {
+                    !matches!(
+                        snapshot.model().kind,
+                        ProviderKind::Explicit | ProviderKind::None
+                    )
+                })
+                .and_then(|snapshot| {
+                    module_index.and_then(|module_index| snapshot.get(module_index))
+                });
+            let visible_open_documents = if let Some(relations) = relations {
+                let friend_indices = &relations.friends;
+                let dependency_indices = relations
+                    .dependencies
+                    .iter()
+                    .copied()
                     .filter(|index| !friend_indices.contains(index))
                     .collect::<Vec<_>>();
                 (
-                    open_documents_from_modules(&friend_indices, documents, &module_assignments),
+                    open_documents_from_modules(friend_indices, documents, &module_assignments),
                     open_documents_from_modules(
                         &dependency_indices,
                         documents,
@@ -578,7 +582,8 @@ impl krusty_lsp::Analysis for WorkerHost {
                     classpath.as_deref(),
                 );
                 let cacheable = result.is_ok();
-                let mut group_analyses = self.finish_analysis(result, documents.len());
+                let mut group_analyses =
+                    finish_analysis(&mut self.analysis_pending, result, documents.len());
                 if self.analysis_pending {
                     return (Vec::new(), Vec::new());
                 }
@@ -1082,6 +1087,7 @@ mod tests {
             (consumer_uri.as_str(), "fun same() {}"),
         ];
         let assignments = project_module_assignments(Some(&model), &documents);
+        let module_graph = model.clone().into_source_module_graph();
 
         assert_eq!(assignments, [Some(0), None, Some(1)]);
         assert_eq!(
@@ -1091,7 +1097,7 @@ mod tests {
         assert!(project_analysis_groups(&[None, None]).is_empty());
         assert_eq!(
             open_documents_from_modules(
-                &model.dependency_source_module_indices(1),
+                &module_graph.get(1).unwrap().dependencies,
                 &documents,
                 &assignments,
             ),
@@ -1262,7 +1268,8 @@ mod tests {
         let second_uri = "file:///workspace/second/src/Second.kt";
         let consumer_uri = "file:///workspace/consumer/src/Consumer.kt";
         let large = krusty_lsp::MAX_SOURCE_SET_BYTES / 2 + 1;
-        let admission = krusty_lsp::DocumentAdmission::for_model(&model);
+        let snapshot = model.clone().into_source_module_graph();
+        let admission = krusty_lsp::DocumentAdmission::for_snapshot(&snapshot);
 
         assert!(admission.accepts(&[(first_uri, large), (second_uri, large)]));
         assert!(admission.accepts(&[
@@ -1283,7 +1290,8 @@ mod tests {
 
         let fallback = krusty_lsp::ProjectModel::new("/workspace", ProviderKind::None)
             .with_modules(model.modules.clone());
-        assert!(!krusty_lsp::DocumentAdmission::for_model(&fallback)
+        let fallback = fallback.into_source_module_graph();
+        assert!(!krusty_lsp::DocumentAdmission::for_snapshot(&fallback)
             .accepts(&[(first_uri, large), (second_uri, large)]));
         assert!(!krusty_lsp::DocumentAdmission::default()
             .accepts(&[(first_uri, large), (second_uri, large)]));
