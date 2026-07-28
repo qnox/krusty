@@ -13,7 +13,7 @@ use crate::frontend::{
 };
 use crate::libraries::{
     FnFlags, FnKind, FunctionInfo, FunctionSet, InlineKind, LibraryCallable, LibraryMember,
-    LibraryType, Origin, PropKind, PropertyInfo, PropertySet,
+    LibraryType, Origin, ParamList, PropKind, PropertyInfo, PropertySet,
 };
 use crate::symbol_source::{InheritanceShape, SymbolSource};
 use crate::types::{stored_value_ty, type_name, Ty, TypeName, Visibility};
@@ -123,6 +123,23 @@ impl<'a> ModuleSymbols<'a> {
         } else {
             Default::default()
         };
+        let ctor_named_params = (c.has_primary_ctor
+            && c.ctor_param_names.len() == c.ctor_params.len())
+        .then(|| ParamList {
+            names: c
+                .ctor_param_names
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect(),
+            defaults: c
+                .ctor_param_names
+                .iter()
+                .map(|(_, has_default)| *has_default)
+                .collect(),
+            vararg: c.ctor_vararg,
+        })
+        .into_iter()
+        .collect();
         LibraryType {
             is_public: c.visibility == Visibility::Public,
             kind,
@@ -142,7 +159,7 @@ impl<'a> ModuleSymbols<'a> {
             sealed_subclasses,
             enum_entries,
             value_ctor_has_default: false,
-            ctor_named_params: Vec::new(),
+            ctor_named_params,
             value_class_properties: Vec::new(),
             retention: None,
         }
@@ -741,6 +758,12 @@ impl SymbolSource for ModuleSymbols<'_> {
         self.syms
             .class_by_type_name(internal)
             .map(|c| std::rc::Rc::new(self.type_shape_for(c)))
+    }
+
+    fn classifier_visibility(&self, internal: TypeName) -> Option<Visibility> {
+        self.syms
+            .class_by_type_name(internal)
+            .map(|class| class.visibility)
     }
 
     fn inheritance_shape_name(&self, internal: TypeName) -> Option<InheritanceShape> {
