@@ -3,9 +3,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use krusty_lsp::{
-    detect, resolve_jdk, AnalysisWorker, DocumentAnalysis, JdkRequest, LoadedProjectSources,
-    LspOptions, ProcessRunner, ProjectFeedback, ProjectMessageKind, ProjectSources, ProjectSync,
-    ProviderKind, RefreshOutcome, SystemEnvironment,
+    detect, resolve_jdk, AnalysisWorker, DocumentAnalysis, JdkRequest, LibraryRef,
+    LoadedProjectSources, LspOptions, MaterializedDefinition, ProcessRunner, ProjectFeedback,
+    ProjectMessageKind, ProjectSources, ProjectSync, ProviderKind, RefreshOutcome,
+    SystemEnvironment,
 };
 
 const WORKER_RECONFIGURE_RETRY_INITIAL_MS: u64 = 1_000;
@@ -19,8 +20,56 @@ fn analysis_remains_pending(kind: io::ErrorKind) -> bool {
     matches!(kind, io::ErrorKind::TimedOut | io::ErrorKind::Interrupted)
 }
 
+fn run_cache_command(args: &[String]) {
+    let (all, root) = parse_cache_command(args).unwrap_or_else(|error| {
+        eprintln!("krusty-lsp: {error}");
+        std::process::exit(2);
+    });
+    let root = root.unwrap_or_else(|| {
+        krusty_lsp::deps_cache::default_cache_root(&|key| std::env::var(key).ok())
+    });
+    match krusty_lsp::deps_cache::clean(&root, all) {
+        Ok(freed) => println!("krusty-lsp: freed {freed} bytes from {}", root.display()),
+        Err(error) => {
+            eprintln!("krusty-lsp: cache clean failed: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn parse_cache_command(args: &[String]) -> Result<(bool, Option<PathBuf>), String> {
+    if args.first().map(String::as_str) != Some("clean") {
+        return Err("usage: cache clean [--all] [-deps-cache-dir <dir>]".to_string());
+    }
+    let mut all = false;
+    let mut root = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--all" => {
+                all = true;
+                index += 1;
+            }
+            "-deps-cache-dir" => {
+                let path = args
+                    .get(index + 1)
+                    .filter(|path| !path.starts_with('-'))
+                    .ok_or_else(|| "-deps-cache-dir requires a value".to_string())?;
+                root = Some(PathBuf::from(path));
+                index += 2;
+            }
+            option => return Err(format!("unknown cache option '{option}'")),
+        }
+    }
+    Ok((all, root))
+}
+
 fn main() {
     let mut arguments: Vec<String> = std::env::args().skip(1).collect();
+    if arguments.first().map(String::as_str) == Some("cache") {
+        run_cache_command(&arguments[1..]);
+        return;
+    }
     let worker_mode = arguments
         .iter()
         .position(|argument| argument == "--analysis-worker")
@@ -51,6 +100,21 @@ fn main() {
     .unwrap_or_else(|error| {
         eprintln!("krusty-lsp: cannot start analysis worker: {error}");
         std::process::exit(1);
+    });
+
+    let cache_root = options
+        .deps_cache_dir()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| {
+            krusty_lsp::deps_cache::default_cache_root(&|key| std::env::var(key).ok())
+        });
+    let max_age_days = options.deps_cache_max_age_days();
+    let max_bytes = options.deps_cache_max_bytes();
+    std::thread::spawn(move || {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        let _ = krusty_lsp::deps_cache::gc(&cache_root, max_age_days, max_bytes, now_secs);
     });
 
     let host = WorkerHost::new(worker, options);
@@ -290,6 +354,31 @@ impl krusty_lsp::Analysis for WorkerHost {
         self.finish_analysis(result, sources.len())
     }
 
+    fn materialize_library_definition(
+        &mut self,
+        reference: &LibraryRef,
+    ) -> Option<MaterializedDefinition> {
+        let (text, span) = self
+            .worker
+            .materialize_library_definition(reference, self.options.deps_sources_enabled())
+            .ok()
+            .flatten()?;
+        let cache_root = self
+            .options
+            .deps_cache_dir()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| {
+                krusty_lsp::deps_cache::default_cache_root(&|key| std::env::var(key).ok())
+            });
+        let path = krusty_lsp::deps_cache::store(&cache_root, &reference.fqn, &text).ok()?;
+        Some(MaterializedDefinition {
+            path,
+            text,
+            lo: span.lo,
+            hi: span.hi,
+        })
+    }
+
     fn analyze_open_documents(
         &mut self,
         documents: &[(&str, &str)],
@@ -488,6 +577,22 @@ fn source_kind_from_uri(uri: &str) -> krusty::source::SourceKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_command_rejects_missing_values_and_unknown_options() {
+        let args = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            parse_cache_command(&args(&["clean", "--all", "-deps-cache-dir", "/cache"])).unwrap(),
+            (true, Some(PathBuf::from("/cache")))
+        );
+        assert!(parse_cache_command(&args(&["clean", "-deps-cache-dir"])).is_err());
+        assert!(parse_cache_command(&args(&["clean", "--unknown"])).is_err());
+    }
 
     #[test]
     fn project_logs_bound_the_classpath_listing() {

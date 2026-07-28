@@ -20,12 +20,12 @@ use krusty::source::{SourceInput, SourceKind};
 use serde::{Deserialize, Serialize};
 
 use crate::compiler_analysis::{
-    self, CompletionSymbols, DefinitionSymbols, HighlightSymbols, SignatureHelpSymbols,
+    self, CompletionSymbols, DefinitionSymbols, HighlightSymbols, LibraryRef, SignatureHelpSymbols,
 };
 use crate::{
     finalize_navigation, read_framed, write_framed, AnalysisBudgets, CompletionIndex,
     DefinitionIndex, DocumentAnalysis, DocumentSymbolIndex, FoldingRangeIndex, HoverIndex,
-    SemanticTokenIndex, SignatureHelpIndex, SourceSetIndexes,
+    LibraryDefinitionIndex, SemanticTokenIndex, SignatureHelpIndex, SourceSetIndexes,
 };
 
 pub const DEFAULT_ANALYSES_PER_WORKER: usize = 64;
@@ -59,6 +59,28 @@ struct OwnedAnalysisRequest {
     java_sources: Vec<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OwnedWorkerRequest {
+    Materialize {
+        materialize: OwnedMaterializeRequest,
+    },
+    Analyze(OwnedAnalysisRequest),
+}
+
+#[derive(Deserialize, Serialize)]
+struct OwnedMaterializeRequest {
+    reference: LibraryRef,
+    use_sources: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+struct MaterializeResponse {
+    text: String,
+    lo: u32,
+    hi: u32,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct WireDiagnostic {
     lo: u32,
@@ -78,6 +100,8 @@ struct AnalysisResponse {
     definitions: DefinitionIndex,
     type_definitions: DefinitionIndex,
     implementations: DefinitionIndex,
+    #[serde(default)]
+    library_definitions: LibraryDefinitionIndex,
     document_symbols: DocumentSymbolIndex,
     folding_ranges: FoldingRangeIndex,
 }
@@ -110,6 +134,7 @@ impl From<DocumentAnalysis> for AnalysisResponse {
             definitions: analysis.definitions,
             type_definitions: analysis.type_definitions,
             implementations: analysis.implementations,
+            library_definitions: analysis.library_definitions,
             document_symbols: analysis.document_symbols,
             folding_ranges: analysis.folding_ranges,
         }
@@ -146,6 +171,7 @@ impl AnalysisResponse {
             definitions: self.definitions,
             type_definitions: self.type_definitions,
             implementations: self.implementations,
+            library_definitions: self.library_definitions,
             document_symbols: self.document_symbols,
             folding_ranges: self.folding_ranges,
         }
@@ -248,6 +274,21 @@ fn encode_response(analyses: &[AnalysisResponse]) -> io::Result<Vec<u8>> {
     serde_json::to_writer(&mut response, analyses)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     Ok(response.bytes)
+}
+
+fn encode_materialize_request(reference: &LibraryRef, use_sources: bool) -> io::Result<Vec<u8>> {
+    let mut request = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
+    serde_json::to_writer(
+        &mut request,
+        &serde_json::json!({
+            "materialize": OwnedMaterializeRequest {
+                reference: reference.clone(),
+                use_sources,
+            }
+        }),
+    )
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    Ok(request.bytes)
 }
 
 fn framed_read_receiver<R>(
@@ -391,6 +432,17 @@ impl WorkerProcess {
             .map(AnalysisResponse::into_document_analysis)
             .collect())
     }
+
+    fn materialize(
+        &mut self,
+        reference: &LibraryRef,
+        use_sources: bool,
+    ) -> io::Result<Option<MaterializeResponse>> {
+        let request = encode_materialize_request(reference, use_sources)?;
+        write_framed(&mut self.stdin, &request)?;
+        let response = self.read_response()?;
+        serde_json::from_slice(&response).map_err(json_io)
+    }
 }
 
 impl Drop for WorkerProcess {
@@ -481,19 +533,40 @@ impl AnalysisWorker {
         inferred_count: usize,
         java_sources: &[String],
     ) -> io::Result<Vec<DocumentAnalysis>> {
+        let features = self.language_features.clone();
+        self.request(|process| {
+            process.analyze(
+                inputs,
+                result_count,
+                inferred_count,
+                &features,
+                java_sources,
+            )
+        })
+    }
+
+    pub fn materialize_library_definition(
+        &mut self,
+        reference: &LibraryRef,
+        use_sources: bool,
+    ) -> io::Result<Option<(String, Span)>> {
+        self.request(|process| process.materialize(reference, use_sources))
+            .map(|response| {
+                response.map(|response| (response.text, Span::new(response.lo, response.hi)))
+            })
+    }
+
+    fn request<T>(
+        &mut self,
+        mut operation: impl FnMut(&mut WorkerProcess) -> io::Result<T>,
+    ) -> io::Result<T> {
         if self.restart_required || self.analyses >= self.max_analyses {
             self.restart()?;
         }
-        match self.process.analyze(
-            inputs,
-            result_count,
-            inferred_count,
-            &self.language_features,
-            java_sources,
-        ) {
-            Ok(analysis) => {
+        match operation(&mut self.process) {
+            Ok(result) => {
                 self.analyses += 1;
-                Ok(analysis)
+                Ok(result)
             }
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => Err(error),
             Err(error) if error.kind() == io::ErrorKind::TimedOut => {
@@ -502,16 +575,10 @@ impl AnalysisWorker {
             }
             Err(_) => {
                 self.restart()?;
-                match self.process.analyze(
-                    inputs,
-                    result_count,
-                    inferred_count,
-                    &self.language_features,
-                    java_sources,
-                ) {
-                    Ok(analysis) => {
+                match operation(&mut self.process) {
+                    Ok(result) => {
                         self.analyses += 1;
-                        Ok(analysis)
+                        Ok(result)
                     }
                     Err(error) => {
                         self.restart_required = true;
@@ -536,8 +603,34 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
     classpath.prepare_for_source_analysis();
     write_framed(writer, WORKER_READY)?;
     while let Some(body) = read_framed(reader, MAX_WORKER_MESSAGE_BYTES)? {
-        let request: OwnedAnalysisRequest = serde_json::from_slice(&body).map_err(json_io)?;
+        let request: OwnedWorkerRequest = serde_json::from_slice(&body).map_err(json_io)?;
         drop(body);
+        let request = match request {
+            OwnedWorkerRequest::Analyze(request) => request,
+            OwnedWorkerRequest::Materialize { materialize } => {
+                let response = crate::dependency_sources::render::materialize(
+                    &classpath,
+                    &materialize.reference.fqn,
+                    materialize.use_sources,
+                )
+                .map(|source| {
+                    let (text, span) = source.into_text_and_span(
+                        &materialize.reference.fqn,
+                        &materialize.reference.member_name,
+                        &materialize.reference.member_desc,
+                    );
+                    MaterializeResponse {
+                        text,
+                        lo: span.lo,
+                        hi: span.hi,
+                    }
+                });
+                let mut encoded = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
+                serde_json::to_writer(&mut encoded, &response).map_err(json_io)?;
+                write_framed(writer, &encoded.bytes)?;
+                continue;
+            }
+        };
         let inferred_count = request.inferred_count.unwrap_or(request.sources.len());
         if request.result_count > inferred_count || inferred_count > request.sources.len() {
             return Err(io::Error::new(
@@ -797,6 +890,7 @@ mod tests {
             definitions: DefinitionIndex::wire_saturation_fixture(definitions),
             type_definitions: DefinitionIndex::wire_saturation_fixture(type_definitions),
             implementations: DefinitionIndex::wire_saturation_fixture(implementations),
+            library_definitions: LibraryDefinitionIndex::default(),
             document_symbols: DocumentSymbolIndex::default(),
             folding_ranges: FoldingRangeIndex::default(),
         }
@@ -969,6 +1063,60 @@ mod tests {
             replace_launch_arguments(&arguments, &[], None, true),
             vec!["-no-jdk".to_string()]
         );
+    }
+
+    #[test]
+    fn worker_protocol_materializes_from_its_configured_classpath() {
+        let directory =
+            std::env::temp_dir().join(format!("krusty-worker-materialize-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let classes = directory.join("widget.jar");
+        let sources = directory.join("widget-sources.jar");
+        let write_jar = |path: &Path, name: &str, content: &[u8]| {
+            let file = std::fs::File::create(path).unwrap();
+            let mut archive = zip::ZipWriter::new(file);
+            archive
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(content).unwrap();
+            archive.finish().unwrap();
+        };
+        write_jar(&classes, "sample/Widget.class", b"");
+        write_jar(
+            &sources,
+            "sample/Widget.kt",
+            b"package sample\nclass Widget { fun value() = 1 }\n",
+        );
+        let reference = LibraryRef {
+            fqn: "sample/Widget".to_string(),
+            member_name: "value".to_string(),
+            member_desc: String::new(),
+        };
+        let request = encode_materialize_request(&reference, true).unwrap();
+        let mut input = Vec::new();
+        write_framed(&mut input, &request).unwrap();
+        let mut output = Vec::new();
+
+        run_analysis_worker(&mut Cursor::new(input), &mut output, vec![classes]).unwrap();
+
+        let mut output = Cursor::new(output);
+        assert_eq!(
+            read_framed(&mut output, WORKER_READY.len())
+                .unwrap()
+                .as_deref(),
+            Some(WORKER_READY)
+        );
+        let response = read_framed(&mut output, MAX_WORKER_MESSAGE_BYTES)
+            .unwrap()
+            .unwrap();
+        let materialized: Option<MaterializeResponse> = serde_json::from_slice(&response).unwrap();
+        let materialized = materialized.unwrap();
+        assert_eq!(
+            &materialized.text[materialized.lo as usize..materialized.hi as usize],
+            "value"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

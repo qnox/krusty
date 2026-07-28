@@ -2629,6 +2629,102 @@ mod tests {
     }
 
     #[test]
+    fn definition_into_a_library_returns_a_materialized_file_location() {
+        use super::super::{LibraryDefinitionIndex, MaterializedDefinition};
+        use crate::compiler_analysis::LibraryRef;
+        use krusty::diag::Span;
+
+        struct LibraryHost {
+            cache: std::path::PathBuf,
+        }
+        impl Analysis for LibraryHost {
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                sources
+                    .iter()
+                    .map(|_| {
+                        let mut analysis = DocumentAnalysis::empty();
+                        analysis.library_definitions = LibraryDefinitionIndex::from_occurrences(
+                            vec![(
+                                Span::new(10, 16),
+                                LibraryRef {
+                                    fqn: "kotlin/collections/CollectionsKt".to_string(),
+                                    member_name: "listOf".to_string(),
+                                    member_desc: String::new(),
+                                },
+                            )],
+                            &mut super::super::NavigationBudget::default(),
+                        );
+                        analysis
+                    })
+                    .collect()
+            }
+
+            fn materialize_library_definition(
+                &mut self,
+                reference: &LibraryRef,
+            ) -> Option<MaterializedDefinition> {
+                if reference.fqn != "kotlin/collections/CollectionsKt" {
+                    return None;
+                }
+                let text = "package kotlin.collections\n\nclass CollectionsKt {\n    fun listOf() { TODO() }\n}\n".to_string();
+                let lo = text.find("listOf").unwrap() as u32;
+                let path = crate::deps_cache::store(&self.cache, &reference.fqn, &text).ok()?;
+                Some(MaterializedDefinition {
+                    path,
+                    text,
+                    lo,
+                    hi: lo + 6,
+                })
+            }
+        }
+
+        let cache = std::env::temp_dir().join(format!("krusty-c6-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache);
+        let mut server = LspService::new(LibraryHost {
+            cache: cache.clone(),
+        });
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///Use.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "fun f() { listOf() }\n"
+                }
+            }),
+        ));
+
+        let response = server.handle(request(
+            2,
+            "textDocument/definition",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 0, "character": 12}
+            }),
+        ));
+
+        let location = response.messages[0]["result"][0].clone();
+        let target_uri = location["uri"].as_str().expect("file uri");
+        assert!(target_uri.starts_with("file://"), "got {target_uri}");
+        assert_eq!(
+            location["range"]["start"],
+            json!({"line": 3, "character": 8})
+        );
+        let path = crate::uri::file_uri_to_path(target_uri).unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("fun listOf"),
+            "materialized file lacks the member"
+        );
+
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
     fn definition_prefers_local_values_and_functions() {
         let mut server = LspService::new(super::super::analyze_for_lsp);
         server.handle(request(1, "initialize", json!({})));

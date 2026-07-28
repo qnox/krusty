@@ -2306,3 +2306,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   their declared type parameters, receiver, parameters, bounds, and return type. Receiver-call
   resolution uses that signature to specialize higher-order parameters, so a declaration such as
   `fun <T> Container<T>.transform(f: (T) -> T)` types `f` from the applied receiver.
+
+- **Go-to-definition into classpath dependencies (LSP).** A reference that resolves to a
+  classpath-library declaration with no source target (a top-level function such as `listOf`, an
+  extension such as `String.trim`) is recorded as a `LibraryRef` (owner internal name + JVM member
+  name and descriptor) alongside the source definition index. On a go-to-definition request with no
+  source target, the async engine asks the restartable compiler worker to materialize the owning class
+  and returns a `file://` `Location`. Materialization prefers a dependency's attached `-sources.jar`
+  entry (configurable with
+  `-deps-sources`/`-no-deps-sources`) and otherwise renders a browsable Kotlin stub from the resolved
+  `LibraryType` plus its `@Metadata`: package, declaration keyword, type parameters, supertypes,
+  member functions (with `suspend`/`inline`, extension receiver, source parameter names, return type),
+  properties (`val`/`var`/`const`), enum entries, and a companion marker. Classes without Kotlin
+  metadata render their resolved bytecode members. Materialized text is cached under a content key in
+  a format-versioned directory (`$XDG_CACHE_HOME/krusty/deps/v<N>/`) and garbage-collected by access
+  age and total size. Tests:
+  `crates/krusty-lsp/tests/deps_render.rs`, `crates/krusty-lsp/src/server.rs`
+  (`definition_into_a_library_returns_a_materialized_file_location`),
+  `crates/krusty-lsp/src/deps_cache.rs`.
