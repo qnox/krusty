@@ -11,6 +11,10 @@ use krusty_lsp::{
 const WORKER_RECONFIGURE_RETRY_INITIAL_MS: u64 = 1_000;
 const WORKER_RECONFIGURE_RETRY_MAX_MS: u64 = 30_000;
 
+fn is_java_source_path(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()) == Some("java")
+}
+
 fn analysis_remains_pending(kind: io::ErrorKind) -> bool {
     matches!(kind, io::ErrorKind::TimedOut | io::ErrorKind::Interrupted)
 }
@@ -291,9 +295,11 @@ impl krusty_lsp::Analysis for WorkerHost {
         documents: &[(&str, &str)],
         open_uris: &[&str],
     ) -> (Vec<DocumentAnalysis>, Vec<(String, String)>) {
-        let (support_documents, inferred_support_count) =
+        let (support_documents, inferred_support_count, java_sources) =
             match self.project_support_sources(documents, open_uris) {
-                Ok((sources, inferred_count)) => (sources.to_vec(), inferred_count),
+                Ok((sources, inferred_count, java_docs)) => {
+                    (sources.to_vec(), inferred_count, java_docs)
+                }
                 Err(message) => {
                     self.analysis_pending = false;
                     let analyses = documents
@@ -325,6 +331,7 @@ impl krusty_lsp::Analysis for WorkerHost {
             &inputs,
             documents.len(),
             documents.len() + inferred_support_count,
+            &java_sources,
         );
         let analyses = self.finish_analysis(analyses, documents.len());
         (analyses, support_documents)
@@ -351,7 +358,11 @@ impl krusty_lsp::Analysis for WorkerHost {
             .as_ref()
             .map(ProjectSync::watch_globs)
             .unwrap_or_default();
-        for extension in krusty::source::SUPPORTED_EXTENSIONS {
+        for extension in krusty::source::SUPPORTED_EXTENSIONS
+            .iter()
+            .copied()
+            .chain(std::iter::once("java"))
+        {
             let source_glob = format!("**/*.{extension}");
             if !globs.iter().any(|glob| glob == source_glob.as_str()) {
                 globs.push(source_glob);
@@ -380,8 +391,8 @@ impl krusty_lsp::Analysis for WorkerHost {
             self.note_project_change();
             return false;
         }
-        let is_kotlin_source = path.as_ref().is_some_and(|path| {
-            krusty::source::is_supported_path(path)
+        let is_project_source = path.as_ref().is_some_and(|path| {
+            (krusty::source::is_supported_path(path) || is_java_source_path(path))
                 && self
                     .sync
                     .as_ref()
@@ -389,7 +400,7 @@ impl krusty_lsp::Analysis for WorkerHost {
                     .and_then(|model| model.module_for_source(path))
                     .is_some()
         });
-        if is_kotlin_source {
+        if is_project_source {
             self.project_sources.invalidate();
             true
         } else {
@@ -454,7 +465,7 @@ impl WorkerHost {
         open_uris: &[&str],
     ) -> Result<LoadedProjectSources<'_>, String> {
         let Some(model) = self.sync.as_ref().and_then(ProjectSync::model) else {
-            return Ok((&[], 0));
+            return Ok((&[], 0, Vec::new()));
         };
         self.project_sources.load(
             model,
@@ -515,5 +526,15 @@ mod tests {
         assert!(analysis_remains_pending(io::ErrorKind::Interrupted));
         assert!(analysis_remains_pending(io::ErrorKind::TimedOut));
         assert!(!analysis_remains_pending(io::ErrorKind::UnexpectedEof));
+    }
+
+    #[test]
+    fn recognizes_java_project_sources() {
+        assert!(is_java_source_path(Path::new(
+            "src/main/java/p/Widget.java"
+        )));
+        assert!(!is_java_source_path(Path::new(
+            "src/main/kotlin/p/Widget.kt"
+        )));
     }
 }

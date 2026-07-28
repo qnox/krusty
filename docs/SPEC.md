@@ -1521,6 +1521,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `primitiveTypes/kt75{3,6,7}.kt` (bitwise/unary names) stay skipped on separate gaps
   (builtin `shl` return typing, safe-call with a primitive result), so those names stay rejected.
 
+- **krusty-lsp resolves unbuilt Java sources through in-memory signature stubs.** The LSP collects
+  sibling `.java` sources and injects lenient `jvm::java_stub` output into the analysis classpath.
+  Lenient mode skips malformed declarations and erases unresolved member types; strict compiler
+  callers still reject them.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

@@ -142,6 +142,12 @@ impl<K: Eq + Hash + Clone, V> LruCache<K, V> {
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
+
+    /// Remove every entry.
+    pub fn clear(&mut self) {
+        self.map.clear();
+        self.recency.clear();
+    }
 }
 
 impl<K: Eq + Hash + Clone, V> Default for LruCache<K, V> {
@@ -190,6 +196,18 @@ mod tests {
         *c.get_mut(&"a").unwrap() = 10;
         c.insert("c", 3);
         assert_eq!(c.get(&"a"), Some(&10));
+        assert_eq!(c.get(&"b"), None);
+    }
+
+    #[test]
+    fn clear_empties_the_cache() {
+        let mut c = LruCache::new(4);
+        c.insert("a", 1);
+        c.insert("b", 2);
+        c.clear();
+        assert!(c.is_empty());
+        assert!(c.recency.is_empty());
+        assert_eq!(c.get(&"a"), None);
         assert_eq!(c.get(&"b"), None);
     }
 

@@ -461,7 +461,11 @@ fn compile_kotlin_first(
             .clone()
     });
     let resolve = |cand: &str| kotlin_names.contains(cand) || classpath.find(cand).is_some();
-    let stubs = krusty::jvm::java_stub::stub_classes(java_blocks, &resolve)?;
+    let stubs = krusty::jvm::java_stub::stub_classes(
+        java_blocks,
+        krusty::jvm::java_stub::StubMode::Strict,
+        &resolve,
+    )?;
 
     static UID: AtomicU64 = AtomicU64::new(0);
     let uid = UID.fetch_add(1, Ordering::Relaxed);

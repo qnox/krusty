@@ -80,9 +80,12 @@ fun box(): String = J().name()
     cp_paths.push(jdk.clone());
     let classpath = krusty::jvm::classpath::Classpath::new(cp_paths);
     let resolve = |cand: &str| cand == "A" || classpath.find(cand).is_some();
-    let stubs =
-        krusty::jvm::java_stub::stub_classes(&[("J.java".to_string(), java.to_string())], &resolve)
-            .expect("stub generation");
+    let stubs = krusty::jvm::java_stub::stub_classes(
+        &[("J.java".to_string(), java.to_string())],
+        krusty::jvm::java_stub::StubMode::Strict,
+        &resolve,
+    )
+    .expect("stub generation");
 
     let root = std::env::temp_dir().join(format!("krusty_stub_e2e_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
