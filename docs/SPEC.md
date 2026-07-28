@@ -108,6 +108,13 @@ exact `Int` parameter wins over adaptation to `Long`; non-literal `Int` values a
 Public static fields are valid class-qualified property reads, including in inferred property
 initializers.
 
+Static methods of **nested** Java classes resolve through all three kotlinc-accepted spellings —
+`Outer.Bus.notify(x)` with `Outer` imported, `Bus.notify(x)` with `import pkg.Outer.Bus`, and the
+fully-qualified `pkg.Outer.Bus.notify(x)`. A dotted qualifier chain maps to the JVM internal name
+by resolving an in-scope outer class first (an in-scope type name shadows a package path, as in
+kotlinc), then the trailing segments join with `$`; the fully-qualified form converts `/` → `$`
+from the right until the type exists (`tests/java_nested_static_e2e.rs`).
+
 ## 6. Correctness & compatibility: differential testing vs kotlinc
 
 **Compatibility IS a goal — specifically ABI + `@Metadata`, NOT byte-identity.** A krusty-compiled
