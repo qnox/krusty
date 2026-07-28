@@ -445,6 +445,66 @@ fn continuation_metadata_keeps_names_with_each_scope_snapshot() {
 }
 
 #[test]
+fn continuation_metadata_omits_unnamed_loop_spills() {
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(javap) = javap_path() else {
+        return;
+    };
+
+    let source = "package demo\n\
+        suspend fun consume(value: String): String = value\n\
+        suspend fun work(values: List<String>, seed: String): String {\n\
+        \x20 var result = seed\n\
+        \x20 for (value in values) {\n\
+        \x20\x20 consume(value)\n\
+        \x20\x20 result += value\n\
+        \x20 }\n\
+        \x20 return result\n\
+        }\n";
+    let classes = common::compile_in_process_files(
+        &[("LoopSpills", source)],
+        &[stdlib, jdk.clone()],
+        Some(&jdk),
+    )
+    .expect("compile loop-spill continuation");
+    let bytes = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == "demo/LoopSpillsKt$work$1").then_some(bytes))
+        .expect("work continuation");
+    let text = disassemble(&javap, bytes, "LoopSpillsKt$work$1.class", "loop_spills");
+    let annotation = text
+        .rsplit_once("RuntimeVisibleAnnotations:")
+        .map(|(_, annotation)| annotation)
+        .expect("runtime-visible annotations");
+    let names = annotation
+        .lines()
+        .find(|line| line.trim_start().starts_with("n=["))
+        .expect("debug metadata names");
+    let spill_fields: Vec<_> = text
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("java.lang.Object ")
+                .and_then(|field| field.strip_suffix(';'))
+                .filter(|field| field.starts_with("L$"))
+        })
+        .collect();
+
+    assert!(!names.contains("\"\""), "{text}");
+    assert!(
+        spill_fields
+            .iter()
+            .any(|field| !annotation.contains(&format!("\"{field}\""))),
+        "{text}"
+    );
+}
+
+#[test]
 fn continuation_metadata_uses_later_value_branch_as_resume_line() {
     let Some(jdk) = common::jdk_modules() else {
         return;

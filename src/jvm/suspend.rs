@@ -1860,15 +1860,17 @@ fn build_state_machine(
                 )
             });
             for (slot, _ty, kind, pos) in positions {
+                let name = scope
+                    .names
+                    .get(&slot)
+                    .or_else(|| slot_name.get(&slot))
+                    .cloned()
+                    .unwrap_or_default();
+                if name.is_empty() {
+                    continue;
+                }
                 s.push(format!("{kind}${pos}"));
-                n.push(
-                    scope
-                        .names
-                        .get(&slot)
-                        .or_else(|| slot_name.get(&slot))
-                        .cloned()
-                        .unwrap_or_default(),
-                );
+                n.push(name);
                 state_indices.push(state_idx as i32);
             }
         }
