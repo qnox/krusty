@@ -228,11 +228,13 @@ mod tests {
                       context(\"sample\")\n\
                       fun after_line_call(): Unit {}\n\
                       context(\"sample\"); fun after_semicolon_call(): Unit {}\n\
+                      hostAction(\"sample\")\n\
                       suspend {}";
-        let inputs = [SourceInput::new(
-            krusty::source::SourceKind::KotlinScript,
-            source,
-        )];
+        let support = "fun hostAction() {}";
+        let inputs = [
+            SourceInput::new(krusty::source::SourceKind::KotlinScript, source),
+            SourceInput::kotlin(support),
+        ];
 
         let analysis = analyze_standalone_source_inputs(&inputs);
 
@@ -246,8 +248,47 @@ mod tests {
         assert!(analysis.files[0]
             .typed_expressions()
             .any(|(span, ty)| span.lo == call_start && ty == Ty::String));
+        assert!(analysis.files[1].diagnostics.is_empty());
 
-        let kotlin = analyze_standalone_source_inputs(&[SourceInput::kotlin(source)]);
+        let invalid_script = "fun localAction() {}\n\
+                              hostAction(\"sample\")\n\
+                              hostNamed(value = if (1) \"sample\" else \"other\")\n\
+                              if (1) {}\n\
+                              localAction(\"sample\")";
+        let invalid = analyze_standalone_source_inputs(&[
+            SourceInput::new(krusty::source::SourceKind::KotlinScript, invalid_script),
+            SourceInput::kotlin(support),
+        ]);
+        let messages = invalid.files[0]
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            messages
+                .iter()
+                .filter(|message| message.contains("condition type mismatch"))
+                .count()
+                == 2,
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("localAction")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| !message.contains("hostAction") && !message.contains("hostNamed")),
+            "{messages:?}"
+        );
+
+        let kotlin = analyze_standalone_source_inputs(&[
+            SourceInput::kotlin(source),
+            SourceInput::kotlin(support),
+        ]);
         assert!(kotlin.files[0]
             .diagnostics
             .iter()

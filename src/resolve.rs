@@ -7562,6 +7562,8 @@ fn make_checker<'a>(
         field_ty: None,
         companion_of: None,
         local_funs: Vec::new(),
+        in_script_body: false,
+        script_host_call_diagnostics: None,
         expr_lowers: HashMap::new(),
         inferred_fun_rets: HashMap::new(),
         inferred_ext_fun_rets: HashMap::new(),
@@ -8691,9 +8693,11 @@ fn check_file_at_impl(
         c.scopes.truncate(base_scope_depth);
         c.reset_body_mutations(Some(body));
         c.push_local_funs();
+        c.in_script_body = true;
         c.with_ret_allowed(Ty::Unit, false, |c| {
             c.expr_statement(body);
         });
+        c.in_script_body = false;
         c.pop_local_funs();
     }
     let Checker {
@@ -8982,6 +8986,12 @@ struct Checker<'a> {
     /// Pushed when entering a function, popped on exit; each `Stmt::LocalFun` registers into the
     /// innermost frame so that sibling local-function calls resolve correctly.
     local_funs: Vec<HashMap<String, Vec<(StmtId, Signature)>>>,
+    /// Whether executable Kotlin-script statements are being checked. Such statements may call
+    /// members supplied by a host-defined base class that is not represented in the source input.
+    in_script_body: bool,
+    /// Diagnostic checkpoint for the current unqualified script call while an external source
+    /// candidate is validated. The enclosing call expression consumes this checkpoint.
+    script_host_call_diagnostics: Option<usize>,
     /// Accumulated output maps (moved into TypeInfo at the end of `check_file`).
     expr_lowers: HashMap<ExprId, ExprLowering>,
     inferred_fun_rets: HashMap<(u32, u32), Ty>,
@@ -11240,6 +11250,19 @@ impl<'a> Checker<'a> {
     }
     fn lexical_value_declares(&self, name: &str) -> bool {
         self.lookup(name).is_some() || self.lookup_local_fun(name).is_some()
+    }
+    fn script_host_may_declare_call(&self, name: &str) -> bool {
+        self.in_script_body
+            && !self.lexical_value_declares(name)
+            && !self
+                .file
+                .decls
+                .iter()
+                .any(|declaration| match self.file.decl(*declaration) {
+                    Decl::Fun(function) => function.name == name,
+                    Decl::Class(class) => class.name == name,
+                    Decl::Property(property) => property.name == name,
+                })
     }
     fn value_root_shadows_classifier(&self, name: &str) -> bool {
         self.lexical_value_declares(name)
@@ -15319,7 +15342,21 @@ impl<'a> Checker<'a> {
                 self.check_member(rt, &name, self.span(e), Some(e))
             }
             Expr::Call { callee, args } => {
-                self.check_call(e, callee, &args, self.span(e), expected)
+                let ty = self.check_call(e, callee, &args, self.span(e), expected);
+                if let Some(checkpoint) = self.script_host_call_diagnostics.take() {
+                    if self.diags.diags.len() > checkpoint {
+                        self.diags.diags.truncate(checkpoint);
+                        self.resolved_calls.remove(&e);
+                        self.resolved_source_calls.remove(&e);
+                        self.resolved_call_type_args.remove(&e);
+                        self.resolved_call_arg_slots.remove(&e);
+                        Ty::Error
+                    } else {
+                        ty
+                    }
+                } else {
+                    ty
+                }
             }
             Expr::If {
                 cond,
@@ -19526,7 +19563,8 @@ impl<'a> Checker<'a> {
                 // A top-level function, or a same-file class CONSTRUCTOR (`C(b = 9)`) — the primary
                 // ctor's parameter names map the labels onto positions, just like a function's.
                 Expr::Name(n) => {
-                    self.module_declares(n)
+                    self.script_host_may_declare_call(n)
+                        || self.module_declares(n)
                         || self.syms.classes.contains_key(n.as_str())
                         || self
                             .lookup_local_fun(n)
@@ -22826,6 +22864,18 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if let Some(fi) = module_top {
+                    // A script host may contribute an unqualified member with the same name as an
+                    // unrelated declaration in another source file. Check that source candidate for
+                    // useful typing/navigation, but if it proves inapplicable, discard only the
+                    // diagnostics created by candidate validation. Argument expressions were checked
+                    // before this point, so their independent diagnostics remain intact.
+                    let script_host_candidate = self.script_host_may_declare_call(&fname)
+                        && fi
+                            .source_key
+                            .is_some_and(|(source_file, _)| source_file != self.file_index);
+                    if script_host_candidate {
+                        self.script_host_call_diagnostics = Some(self.diags.diags.len());
+                    }
                     let params = &fi.callable.params;
                     let cs = &fi.call_sig;
                     let ret_ty = self.module_top_level_return(call, &fi, &arg_tys, expected);
@@ -23420,6 +23470,9 @@ impl<'a> Checker<'a> {
                     {
                         return ret;
                     }
+                }
+                if self.script_host_may_declare_call(&fname) {
+                    return Ty::Error;
                 }
                 let has_inapplicable_candidate = !self
                     .module
