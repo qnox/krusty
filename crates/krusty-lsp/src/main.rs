@@ -54,7 +54,7 @@ fn main() {
     });
 
     let host = WorkerHost::new(worker, options);
-    match krusty_lsp::run_stdio_connection_with(host) {
+    match krusty_lsp::run_stdio_connection_async(host) {
         Ok(0) => {}
         Ok(code) => std::process::exit(code),
         Err(error) => {

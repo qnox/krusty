@@ -62,7 +62,7 @@ impl fmt::Display for ProbeError {
     }
 }
 
-pub trait ProjectProvider {
+pub trait ProjectProvider: Send {
     fn kind(&self) -> ProviderKind;
     fn root(&self) -> &Path;
 

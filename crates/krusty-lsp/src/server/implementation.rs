@@ -19,6 +19,9 @@ use super::super::{
     HoverIndex, SemanticTokenIndex, SemanticTokenRange, SignatureHelpIndex,
     SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
 };
+use crate::server::engine::{
+    AnalysisBatch, AnalysisEngine, AnalysisJob, EngineBackend, EngineEvent,
+};
 use crate::uri::file_uri_to_path;
 use crate::worker::{source_set_fits, MAX_SOURCE_SET_BYTES};
 use krusty::diag::{Diagnostic, DiagnosticKind, Severity};
@@ -156,6 +159,84 @@ where
 {
     fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
         self(sources)
+    }
+}
+
+pub trait AnalysisBackend {
+    fn analysis_ready(&self) -> bool;
+    fn submit(&mut self, job: AnalysisJob) -> Option<AnalysisBatch>;
+    fn set_workspace_root(&mut self, root: Option<PathBuf>) -> Option<ProjectFeedback>;
+    fn watched_globs(&mut self) -> Vec<String>;
+    fn note_project_change(&mut self);
+    fn note_watched_file_change(&mut self, uri: &str) -> bool;
+    fn note_watched_file_changes(&mut self, uris: &[String]) -> bool {
+        let mut source_changed = false;
+        for uri in uris {
+            source_changed |= self.note_watched_file_change(uri);
+        }
+        source_changed
+    }
+    fn project_refresh_due_in(&self) -> Option<Duration>;
+    fn refresh_project(&mut self) -> Option<ProjectFeedback>;
+    fn set_ready(&mut self, _ready: bool) {}
+}
+
+pub struct InlineBackend<A>(A);
+
+impl<A: Analysis> InlineBackend<A> {
+    pub fn new(analyze: A) -> Self {
+        InlineBackend(analyze)
+    }
+}
+
+impl<A: Analysis> AnalysisBackend for InlineBackend<A> {
+    fn analysis_ready(&self) -> bool {
+        self.0.analysis_ready()
+    }
+
+    fn submit(&mut self, job: AnalysisJob) -> Option<AnalysisBatch> {
+        debug_assert!(self.0.analysis_ready());
+        let docs: Vec<(&str, &str)> = job
+            .documents
+            .iter()
+            .map(|(u, t, _)| (u.as_str(), t.as_str()))
+            .collect();
+        let open: Vec<&str> = job.open_uris.iter().map(String::as_str).collect();
+        let (analyses, support_documents) = self.0.analyze_open_documents(&docs, &open);
+        Some(AnalysisBatch {
+            analyzed: job
+                .documents
+                .iter()
+                .map(|(u, _, v)| (u.clone(), *v))
+                .collect(),
+            analyses,
+            support_documents,
+            pending: self.0.analysis_pending(),
+        })
+    }
+
+    fn set_workspace_root(&mut self, root: Option<PathBuf>) -> Option<ProjectFeedback> {
+        Some(self.0.set_workspace_root(root))
+    }
+
+    fn watched_globs(&mut self) -> Vec<String> {
+        self.0.watched_globs()
+    }
+
+    fn note_project_change(&mut self) {
+        self.0.note_project_change()
+    }
+
+    fn note_watched_file_change(&mut self, uri: &str) -> bool {
+        self.0.note_watched_file_change(uri)
+    }
+
+    fn project_refresh_due_in(&self) -> Option<Duration> {
+        self.0.project_refresh_due_in()
+    }
+
+    fn refresh_project(&mut self) -> Option<ProjectFeedback> {
+        Some(self.0.refresh_project())
     }
 }
 
@@ -488,34 +569,49 @@ impl OpenDocument {
     }
 }
 
-/// Stateful LSP dispatcher with an injected analysis function for deterministic unit testing.
-pub struct LspService<A> {
+pub struct LspService<B> {
     documents: HashMap<String, OpenDocument>,
     source_set: Vec<(String, String)>,
-    analyze: A,
+    backend: B,
     analysis_dirty: bool,
     analysis_retry_at: Option<Instant>,
     analysis_retry_backoff: Duration,
     initialized: bool,
+    client_initialized: bool,
     shutdown_requested: bool,
     pending_init_feedback: Option<ProjectFeedback>,
+    pending_watched_globs: Vec<String>,
+    analysis_in_flight: bool,
+    resubmit_pending: bool,
+    discard_in_flight: bool,
 }
 
-impl<A> LspService<A>
-where
-    A: Analysis,
-{
+impl<A: Analysis> LspService<InlineBackend<A>> {
     pub fn new(analyze: A) -> Self {
+        Self::with_backend(InlineBackend::new(analyze))
+    }
+}
+
+impl<B> LspService<B>
+where
+    B: AnalysisBackend,
+{
+    pub fn with_backend(backend: B) -> Self {
         Self {
             documents: HashMap::new(),
             source_set: Vec::new(),
-            analyze,
+            backend,
             analysis_dirty: false,
             analysis_retry_at: None,
             analysis_retry_backoff: Duration::ZERO,
             initialized: false,
+            client_initialized: false,
             shutdown_requested: false,
             pending_init_feedback: None,
+            pending_watched_globs: Vec::new(),
+            analysis_in_flight: false,
+            resubmit_pending: false,
+            discard_in_flight: false,
         }
     }
 
@@ -546,53 +642,75 @@ where
         )
     }
 
-    fn refresh_documents(&mut self) -> Vec<Value> {
-        let mut diagnostic_budget = DiagnosticBudget::default();
-        let uris = self
+    fn note_document_identity_change(&mut self) {
+        if self.analysis_in_flight {
+            self.discard_in_flight = true;
+        }
+    }
+
+    fn take_analysis_job(&mut self) -> AnalysisJob {
+        self.analysis_dirty = false;
+        let documents = self
             .analyzed_uris()
             .into_iter()
-            .map(str::to_owned)
+            .map(|uri| {
+                let open = &self.documents[uri];
+                (uri.to_owned(), open.text.clone(), open.version)
+            })
+            .collect();
+        let open_uris = self.documents.keys().cloned().collect();
+        AnalysisJob {
+            documents,
+            open_uris,
+        }
+    }
+
+    fn dispatch_pending_analysis(&mut self) -> Option<AnalysisJob> {
+        if !self.analysis_dirty || !self.backend.analysis_ready() {
+            return None;
+        }
+        if self.analysis_in_flight {
+            self.resubmit_pending = true;
+            return None;
+        }
+        let job = self.take_analysis_job();
+        self.analysis_in_flight = true;
+        Some(job)
+    }
+
+    fn apply_analysis_batch(&mut self, batch: AnalysisBatch) -> Vec<Value> {
+        let stale = batch.analyzed.iter().any(|(uri, analyzed_version)| {
+            self.documents
+                .get(uri)
+                .is_none_or(|open| open.version != *analyzed_version)
+        });
+        self.analysis_in_flight = false;
+        let resubmit = std::mem::take(&mut self.resubmit_pending);
+        if std::mem::take(&mut self.discard_in_flight) {
+            self.analysis_dirty = true;
+            return Vec::new();
+        }
+        if stale {
+            self.analysis_dirty = true;
+            return Vec::new();
+        }
+        let uris = batch
+            .analyzed
+            .iter()
+            .map(|(uri, _)| uri.clone())
             .collect::<Vec<_>>();
-        let analyses = if self.analyze.analysis_ready() {
-            let documents = &self.documents;
-            let open_documents = uris
-                .iter()
-                .map(|uri| (uri.as_str(), documents[uri].text.as_str()))
-                .collect::<Vec<_>>();
-            let open_uris = documents.keys().map(String::as_str).collect::<Vec<_>>();
-            let (analyses, support_documents) = self
-                .analyze
-                .analyze_open_documents(&open_documents, &open_uris);
-            if self.analyze.analysis_pending() {
-                self.source_set.clear();
-                for uri in &uris {
-                    self.documents.get_mut(uri).unwrap().clear_analysis();
-                }
-                self.analysis_retry_backoff = if self.analysis_retry_backoff.is_zero() {
-                    ANALYSIS_RETRY_INITIAL_DELAY
-                } else {
-                    self.analysis_retry_backoff
-                        .saturating_mul(2)
-                        .min(ANALYSIS_RETRY_MAX_DELAY)
-                };
-                self.analysis_retry_at = Some(Instant::now() + self.analysis_retry_backoff);
-                return Vec::new();
-            }
-            self.analysis_retry_at = None;
-            self.analysis_retry_backoff = Duration::ZERO;
-            self.source_set = open_documents
-                .into_iter()
-                .map(|(uri, source)| (uri.to_string(), source.to_string()))
-                .chain(support_documents)
-                .collect();
-            analyses
-        } else {
+        if batch.pending {
+            self.schedule_analysis_retry(&uris);
+            return Vec::new();
+        }
+        let mut diagnostic_budget = DiagnosticBudget::default();
+        if batch.analyses.len() != batch.analyzed.len() {
             self.source_set.clear();
-            uris.iter().map(|_| DocumentAnalysis::empty()).collect()
-        };
-        if analyses.len() != uris.len() {
             for uri in &uris {
-                let open = self.documents.get_mut(uri).unwrap();
+                let open = self
+                    .documents
+                    .get_mut(uri)
+                    .expect("batch freshness checked before applying");
                 open.clear_analysis();
                 open.diagnostics = DiagnosticIndex::from_diagnostics(
                     vec![Diagnostic {
@@ -607,6 +725,9 @@ where
                     &mut diagnostic_budget,
                 );
             }
+            if resubmit {
+                self.analysis_dirty = true;
+            }
             return uris
                 .into_iter()
                 .map(|uri| {
@@ -615,34 +736,66 @@ where
                 })
                 .collect();
         }
-        uris.into_iter()
-            .zip(analyses)
-            .map(|(uri, analysis)| {
-                let open = self.documents.get_mut(&uri).unwrap();
-                open.hover = analysis.hover;
-                open.completion = analysis.completion;
-                open.signature_help = analysis.signature_help;
-                open.semantic_tokens = analysis.semantic_tokens;
-                open.definitions = analysis.definitions;
-                open.type_definitions = analysis.type_definitions;
-                open.implementations = analysis.implementations;
-                open.document_symbols = analysis.document_symbols;
-                open.folding_ranges = analysis.folding_ranges;
-                open.diagnostics = DiagnosticIndex::from_diagnostics(
-                    analysis.diagnostics,
-                    &open.text,
-                    &mut diagnostic_budget,
-                );
-                publish_diagnostics(&uri, Some(open.version), &open.diagnostics)
-            })
-            .collect()
+        self.analysis_retry_at = None;
+        self.analysis_retry_backoff = Duration::ZERO;
+        let mut messages = Vec::with_capacity(batch.analyses.len());
+        let mut analyzed_documents = Vec::with_capacity(batch.analyzed.len());
+        for (analysis, (uri, _analyzed_version)) in batch.analyses.into_iter().zip(batch.analyzed) {
+            let open = self
+                .documents
+                .get_mut(&uri)
+                .expect("batch freshness checked before applying");
+            open.hover = analysis.hover;
+            open.completion = analysis.completion;
+            open.signature_help = analysis.signature_help;
+            open.semantic_tokens = analysis.semantic_tokens;
+            open.definitions = analysis.definitions;
+            open.type_definitions = analysis.type_definitions;
+            open.implementations = analysis.implementations;
+            open.document_symbols = analysis.document_symbols;
+            open.folding_ranges = analysis.folding_ranges;
+            open.diagnostics = DiagnosticIndex::from_diagnostics(
+                analysis.diagnostics,
+                &open.text,
+                &mut diagnostic_budget,
+            );
+            messages.push(publish_diagnostics(
+                &uri,
+                Some(open.version),
+                &open.diagnostics,
+            ));
+            analyzed_documents.push((uri, open.text.clone()));
+        }
+        self.source_set = analyzed_documents
+            .into_iter()
+            .chain(batch.support_documents)
+            .collect();
+        if resubmit {
+            self.analysis_dirty = true;
+        }
+        messages
+    }
+
+    fn schedule_analysis_retry(&mut self, uris: &[String]) {
+        self.source_set.clear();
+        self.analysis_dirty = false;
+        for uri in uris {
+            if let Some(open) = self.documents.get_mut(uri) {
+                open.clear_analysis();
+            }
+        }
+        self.analysis_retry_backoff = if self.analysis_retry_backoff.is_zero() {
+            ANALYSIS_RETRY_INITIAL_DELAY
+        } else {
+            self.analysis_retry_backoff
+                .saturating_mul(2)
+                .min(ANALYSIS_RETRY_MAX_DELAY)
+        };
+        self.analysis_retry_at = Some(Instant::now() + self.analysis_retry_backoff);
     }
 
     fn flush_analysis(&mut self) -> Vec<Value> {
-        if !std::mem::take(&mut self.analysis_dirty) {
-            return Vec::new();
-        }
-        self.refresh_documents()
+        self.submit_pending_analysis()
     }
 
     pub fn handle(&mut self, message: Value) -> Dispatch {
@@ -717,7 +870,7 @@ where
                 }
                 self.initialized = true;
                 self.pending_init_feedback =
-                    Some(self.analyze.set_workspace_root(workspace_root(&params)));
+                    self.backend.set_workspace_root(workspace_root(&params));
                 Dispatch::messages(vec![rpc_result(
                     id,
                     json!({
@@ -763,8 +916,12 @@ where
                 )])
             }
             "initialized" => {
+                self.client_initialized = true;
                 let mut messages = Vec::new();
-                let globs = self.analyze.watched_globs();
+                let mut globs = std::mem::take(&mut self.pending_watched_globs);
+                globs.extend(self.backend.watched_globs());
+                globs.sort_unstable();
+                globs.dedup();
                 if !globs.is_empty() {
                     messages.push(register_watched_files(&globs));
                 }
@@ -811,10 +968,12 @@ where
         let Ok(params) = serde_json::from_value::<DidChangeWatchedFilesParams>(params) else {
             return Dispatch::none();
         };
-        let mut source_changed = false;
-        for change in params.changes {
-            source_changed |= self.analyze.note_watched_file_change(&change.uri);
-        }
+        let uris: Vec<String> = params
+            .changes
+            .into_iter()
+            .map(|change| change.uri)
+            .collect();
+        let source_changed = self.backend.note_watched_file_changes(&uris);
         if !source_changed {
             return Dispatch::none();
         }
@@ -830,7 +989,7 @@ where
         let retry_due = self
             .analysis_retry_at
             .map(|deadline| deadline.saturating_duration_since(Instant::now()));
-        match (retry_due, self.analyze.project_refresh_due_in()) {
+        match (retry_due, self.backend.project_refresh_due_in()) {
             (Some(retry), Some(project)) => Some(retry.min(project)),
             (Some(retry), None) => Some(retry),
             (None, project) => project,
@@ -838,6 +997,12 @@ where
     }
 
     pub fn run_due_project_refresh(&mut self) -> Vec<Value> {
+        let mut messages = self.run_due_project_refresh_deferred();
+        messages.extend(self.flush_analysis());
+        messages
+    }
+
+    fn run_due_project_refresh_deferred(&mut self) -> Vec<Value> {
         if self
             .analysis_retry_at
             .is_some_and(|deadline| deadline <= Instant::now())
@@ -845,13 +1010,12 @@ where
             self.analysis_retry_at = None;
             self.analysis_dirty = true;
         }
-        let feedback = self.analyze.refresh_project();
+        let feedback = self.backend.refresh_project().unwrap_or_default();
         let reanalyze = feedback.reanalyze;
-        let mut messages = feedback.into_messages();
+        let messages = feedback.into_messages();
         if reanalyze {
             self.analysis_dirty = true;
         }
-        messages.extend(self.flush_analysis());
         messages
     }
 
@@ -862,12 +1026,111 @@ where
         }
     }
 
+    #[cfg(test)]
+    fn force_initialized_for_test(&mut self) {
+        self.initialized = true;
+        self.client_initialized = true;
+    }
+
+    #[cfg(test)]
+    fn open_document_for_test(&mut self, uri: &str, text: &str, version: i64) {
+        self.documents.insert(
+            uri.to_string(),
+            OpenDocument {
+                text: text.to_string(),
+                version,
+                diagnostics: DiagnosticIndex::default(),
+                hover: HoverIndex::default(),
+                completion: CompletionIndex::default(),
+                signature_help: SignatureHelpIndex::default(),
+                semantic_tokens: SemanticTokenIndex::default(),
+                definitions: DefinitionIndex::default(),
+                type_definitions: DefinitionIndex::default(),
+                implementations: DefinitionIndex::default(),
+                document_symbols: DocumentSymbolIndex::default(),
+                folding_ranges: FoldingRangeIndex::default(),
+                analysis_blocked: false,
+            },
+        );
+    }
+
+    #[cfg(test)]
+    fn analysis_dirty_for_test(&self) -> bool {
+        self.analysis_dirty
+    }
+
+    fn mark_analysis_dirty(&mut self) {
+        self.analysis_dirty |= !self.documents.is_empty() || !self.source_set.is_empty();
+    }
+
+    fn client_initialized(&self) -> bool {
+        self.client_initialized
+    }
+
+    fn defer_watched_globs(&mut self, globs: Vec<String>) {
+        self.pending_watched_globs.extend(globs);
+    }
+
+    fn project_feedback_messages(&mut self, feedback: ProjectFeedback) -> Vec<Value> {
+        if self.client_initialized {
+            return feedback.into_messages();
+        }
+        let pending = self
+            .pending_init_feedback
+            .get_or_insert_with(ProjectFeedback::default);
+        pending.reanalyze |= feedback.reanalyze;
+        if feedback.message.is_some() {
+            pending.message = feedback.message;
+        }
+        pending.logs.extend(feedback.logs);
+        Vec::new()
+    }
+
+    fn set_backend_ready(&mut self, ready: bool) {
+        self.backend.set_ready(ready);
+    }
+
+    fn submit_pending_analysis(&mut self) -> Vec<Value> {
+        let Some(job) = self.dispatch_pending_analysis() else {
+            return Vec::new();
+        };
+        match self.backend.submit(job) {
+            Some(batch) => self.apply_analysis_batch(batch),
+            None => Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn mark_analysis_dirty_for_test(&mut self) {
+        self.mark_analysis_dirty();
+    }
+
+    #[cfg(test)]
+    fn resubmit_pending_for_test(&self) -> bool {
+        self.resubmit_pending
+    }
+
+    #[cfg(test)]
+    fn analysis_in_flight_for_test(&self) -> bool {
+        self.analysis_in_flight
+    }
+
+    #[cfg(test)]
+    fn document_diagnostic_count_for_test(&self, uri: &str) -> usize {
+        self.documents
+            .get(uri)
+            .map_or(0, |open| open.diagnostics.entries.len())
+    }
+
     fn did_open(&mut self, id: Option<Value>, params: Value, defer_analysis: bool) -> Dispatch {
         let Ok(params) = serde_json::from_value::<DidOpenParams>(params) else {
             return invalid_params(id);
         };
         let uri = params.text_document.uri;
         let version = params.text_document.version;
+        if self.documents.contains_key(&uri) {
+            self.note_document_identity_change();
+        }
         if !self.accepts_replacement(&uri, params.text_document.text.len()) {
             let replaced_analyzed_document = self
                 .documents
@@ -1001,7 +1264,9 @@ where
             return invalid_params(id);
         };
         let uri = params.text_document.uri;
-        self.documents.remove(&uri);
+        if self.documents.remove(&uri).is_some() {
+            self.note_document_identity_change();
+        }
         self.analysis_dirty = true;
         let mut messages = if defer_analysis {
             Vec::new()
@@ -2095,6 +2360,7 @@ pub(crate) enum Incoming {
     ParseError,
     Error(io::Error),
     Eof,
+    Engine(EngineEvent),
 }
 
 fn change_identity(message: &Value) -> Option<(&str, i64)> {
@@ -2230,14 +2496,14 @@ fn dispatch_messages<W: Write>(writer: &mut W, dispatch: Dispatch) -> io::Result
     }
 }
 
-pub(super) fn dispatch_document_batch<W, A>(
+pub(super) fn dispatch_document_batch<W, B>(
     writer: &mut W,
-    service: &mut LspService<A>,
+    service: &mut LspService<B>,
     changes: Vec<Value>,
 ) -> io::Result<Option<i32>>
 where
     W: Write,
-    A: Analysis,
+    B: AnalysisBackend,
 {
     for change in changes {
         if let Some(code) = dispatch_messages(writer, service.handle_deferred(change))? {
@@ -2322,6 +2588,7 @@ where
             }
             Incoming::Error(error) => return Err(error),
             Incoming::Eof => return Ok(0),
+            Incoming::Engine(_) => Vec::new(),
         };
         let result = if messages.len() > 1
             || messages
@@ -2342,6 +2609,169 @@ where
     }
 }
 
+fn handle_engine_event<W, B>(
+    service: &mut LspService<B>,
+    writer: &mut W,
+    event: EngineEvent,
+) -> io::Result<()>
+where
+    W: Write,
+    B: AnalysisBackend,
+{
+    match event {
+        EngineEvent::ReadyState(ready) => {
+            service.set_backend_ready(ready);
+            if ready {
+                service.mark_analysis_dirty();
+            }
+        }
+        EngineEvent::WatchedGlobs(globs) => {
+            if globs.is_empty() {
+                return Ok(());
+            }
+            if service.client_initialized() {
+                let message = register_watched_files(&globs);
+                let encoded = serde_json::to_vec(&message).map_err(json_io)?;
+                write_framed(writer, &encoded)?;
+            } else {
+                service.defer_watched_globs(globs);
+            }
+        }
+        EngineEvent::Project(feedback) => {
+            let reanalyze = feedback.reanalyze;
+            for message in service.project_feedback_messages(feedback) {
+                let encoded = serde_json::to_vec(&message).map_err(json_io)?;
+                write_framed(writer, &encoded)?;
+            }
+            if reanalyze {
+                service.mark_analysis_dirty();
+            }
+        }
+        EngineEvent::ReanalyzeRequested => service.mark_analysis_dirty(),
+        EngineEvent::AnalysisComplete(batch) => {
+            for message in service.apply_analysis_batch(batch) {
+                let encoded = serde_json::to_vec(&message).map_err(json_io)?;
+                write_framed(writer, &encoded)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn step_async<W, B>(
+    service: &mut LspService<B>,
+    writer: &mut W,
+    incoming: &Receiver<Incoming>,
+    pending: &mut VecDeque<Incoming>,
+    event: Incoming,
+) -> io::Result<Option<i32>>
+where
+    W: Write,
+    B: AnalysisBackend,
+{
+    match event {
+        Incoming::Message(message) => {
+            for change in coalesce_document_notifications(message, incoming, pending) {
+                if let Some(code) = dispatch_messages(writer, service.handle_deferred(change))? {
+                    return Ok(Some(code));
+                }
+            }
+        }
+        Incoming::ParseError => {
+            let response = rpc_error(Value::Null, -32700, "parse error");
+            let encoded = serde_json::to_vec(&response).map_err(json_io)?;
+            write_framed(writer, &encoded)?;
+        }
+        Incoming::Error(error) => return Err(error),
+        Incoming::Eof => return Ok(Some(0)),
+        Incoming::Engine(engine_event) => handle_engine_event(service, writer, engine_event)?,
+    }
+    for message in service.submit_pending_analysis() {
+        let encoded = serde_json::to_vec(&message).map_err(json_io)?;
+        write_framed(writer, &encoded)?;
+    }
+    Ok(None)
+}
+
+pub fn run_stdio_connection_async<A>(analyze: A) -> io::Result<i32>
+where
+    A: Analysis + Send + 'static,
+{
+    let (sender, incoming) = mpsc::sync_channel(INPUT_QUEUE_CAPACITY);
+    let engine_events = sender.clone();
+    std::thread::spawn(move || {
+        let stdin = io::stdin();
+        let mut reader = stdin.lock();
+        loop {
+            let event = match read_framed(&mut reader, MAX_MESSAGE_BYTES) {
+                Ok(Some(body)) => match serde_json::from_slice::<Value>(&body) {
+                    Ok(message) => Incoming::Message(message),
+                    Err(_) => Incoming::ParseError,
+                },
+                Ok(None) => Incoming::Eof,
+                Err(error) => Incoming::Error(error),
+            };
+            let terminal = matches!(event, Incoming::Eof | Incoming::Error(_));
+            if sender.send(event).is_err() || terminal {
+                break;
+            }
+        }
+    });
+
+    let engine = AnalysisEngine::spawn(analyze, engine_events);
+    let backend = EngineBackend::new(engine, false);
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+    let service = LspService::with_backend(backend);
+    run_async_loop(service, &mut writer, incoming)
+}
+
+fn run_async_loop<W>(
+    mut service: LspService<EngineBackend>,
+    writer: &mut W,
+    incoming: Receiver<Incoming>,
+) -> io::Result<i32>
+where
+    W: Write,
+{
+    let mut pending = VecDeque::new();
+    let outcome = loop {
+        let event = match pending.pop_front() {
+            Some(event) => event,
+            None => match service.project_refresh_due_in() {
+                Some(due) => match incoming.recv_timeout(due) {
+                    Ok(event) => event,
+                    Err(RecvTimeoutError::Timeout) => {
+                        for message in service.run_due_project_refresh_deferred() {
+                            let encoded = serde_json::to_vec(&message).map_err(json_io)?;
+                            write_framed(writer, &encoded)?;
+                        }
+                        for message in service.submit_pending_analysis() {
+                            let encoded = serde_json::to_vec(&message).map_err(json_io)?;
+                            write_framed(writer, &encoded)?;
+                        }
+                        continue;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => Incoming::Eof,
+                },
+                None => incoming.recv().unwrap_or(Incoming::Eof),
+            },
+        };
+        match step_async(&mut service, writer, &incoming, &mut pending, event) {
+            Ok(Some(code)) => break Ok(code),
+            Ok(None) => continue,
+            Err(error) => break Err(error),
+        }
+    };
+    let mut engine = service.backend.into_engine();
+    engine.disconnect();
+    while !engine.is_finished() {
+        let _ = incoming.recv_timeout(Duration::from_millis(50));
+    }
+    engine.join();
+    outcome
+}
+
 fn maintenance_preempts_input(input_dispatches: usize, due: Option<Duration>) -> bool {
     input_dispatches >= MAX_INPUT_DISPATCHES_BEFORE_MAINTENANCE
         && due.is_some_and(|due| due.is_zero())
@@ -2354,6 +2784,492 @@ fn json_io(error: serde_json::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::engine::{EngineCommand, EngineEvent};
+
+    struct RecordingBackend {
+        ready: bool,
+        submitted: std::rc::Rc<std::cell::RefCell<Vec<AnalysisJob>>>,
+    }
+
+    impl AnalysisBackend for RecordingBackend {
+        fn analysis_ready(&self) -> bool {
+            self.ready
+        }
+        fn submit(&mut self, job: AnalysisJob) -> Option<AnalysisBatch> {
+            self.submitted.borrow_mut().push(job);
+            None
+        }
+        fn set_workspace_root(&mut self, _root: Option<PathBuf>) -> Option<ProjectFeedback> {
+            None
+        }
+        fn watched_globs(&mut self) -> Vec<String> {
+            Vec::new()
+        }
+        fn note_project_change(&mut self) {}
+        fn note_watched_file_change(&mut self, _uri: &str) -> bool {
+            false
+        }
+        fn project_refresh_due_in(&self) -> Option<Duration> {
+            None
+        }
+        fn refresh_project(&mut self) -> Option<ProjectFeedback> {
+            None
+        }
+        fn set_ready(&mut self, ready: bool) {
+            self.ready = ready;
+        }
+    }
+
+    struct CountingBackend {
+        batch_calls: std::rc::Rc<std::cell::Cell<usize>>,
+        single_calls: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl AnalysisBackend for CountingBackend {
+        fn analysis_ready(&self) -> bool {
+            true
+        }
+        fn submit(&mut self, _job: AnalysisJob) -> Option<AnalysisBatch> {
+            None
+        }
+        fn set_workspace_root(&mut self, _root: Option<PathBuf>) -> Option<ProjectFeedback> {
+            None
+        }
+        fn watched_globs(&mut self) -> Vec<String> {
+            Vec::new()
+        }
+        fn note_project_change(&mut self) {}
+        fn note_watched_file_change(&mut self, _uri: &str) -> bool {
+            self.single_calls.set(self.single_calls.get() + 1);
+            true
+        }
+        fn note_watched_file_changes(&mut self, _uris: &[String]) -> bool {
+            self.batch_calls.set(self.batch_calls.get() + 1);
+            false
+        }
+        fn project_refresh_due_in(&self) -> Option<Duration> {
+            None
+        }
+        fn refresh_project(&mut self) -> Option<ProjectFeedback> {
+            None
+        }
+    }
+
+    #[test]
+    fn watched_file_changes_are_coalesced_into_one_backend_submit() {
+        let batch_calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let single_calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut service = LspService::with_backend(CountingBackend {
+            batch_calls: batch_calls.clone(),
+            single_calls: single_calls.clone(),
+        });
+        service.force_initialized_for_test();
+
+        let changes: Vec<Value> = (0..20)
+            .map(|i| json!({ "uri": format!("file:///p/File{i}.kt") }))
+            .collect();
+        let notification = json!({
+            "jsonrpc": "2.0",
+            "method": "workspace/didChangeWatchedFiles",
+            "params": { "changes": changes }
+        });
+        let _ = service.handle_deferred(notification);
+
+        assert_eq!(
+            batch_calls.get(),
+            1,
+            "20 changes coalesce to one backend submit per notification"
+        );
+        assert_eq!(
+            single_calls.get(),
+            0,
+            "the per-uri single-submit path must not be used on this route"
+        );
+    }
+
+    #[test]
+    fn async_loop_applies_completion_and_dispatches_next() {
+        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let backend = RecordingBackend {
+            ready: false,
+            submitted: submitted.clone(),
+        };
+        let mut service = LspService::with_backend(backend);
+        service.force_initialized_for_test();
+
+        let (tx, incoming) = mpsc::sync_channel::<Incoming>(1);
+        drop(tx);
+        let mut pending = VecDeque::new();
+        let mut out: Vec<u8> = Vec::new();
+
+        let did_open = json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": { "textDocument": {
+                "uri": "file:///a.kt", "languageId": "kotlin", "version": 1, "text": "fun a(){}"
+            }}
+        });
+        step_async(
+            &mut service,
+            &mut out,
+            &incoming,
+            &mut pending,
+            Incoming::Message(did_open),
+        )
+        .unwrap();
+        assert!(submitted.borrow().is_empty());
+
+        step_async(
+            &mut service,
+            &mut out,
+            &incoming,
+            &mut pending,
+            Incoming::Engine(EngineEvent::ReadyState(true)),
+        )
+        .unwrap();
+        assert_eq!(
+            submitted.borrow().len(),
+            1,
+            "opening a document dispatches one analysis job"
+        );
+        let version = {
+            let jobs = submitted.borrow();
+            jobs[0].documents[0].2
+        };
+
+        let batch = AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), version)],
+            analyses: vec![DocumentAnalysis::empty()],
+            support_documents: Vec::new(),
+            pending: false,
+        };
+        step_async(
+            &mut service,
+            &mut out,
+            &incoming,
+            &mut pending,
+            Incoming::Engine(EngineEvent::AnalysisComplete(batch)),
+        )
+        .unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("textDocument/publishDiagnostics"));
+        assert!(text.contains("file:///a.kt"));
+        assert_eq!(submitted.borrow().len(), 1);
+    }
+
+    #[test]
+    fn watcher_registration_waits_for_initialized_notification() {
+        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let backend = RecordingBackend {
+            ready: false,
+            submitted,
+        };
+        let mut service = LspService::with_backend(backend);
+        let mut out = Vec::new();
+
+        let initialize = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        });
+        dispatch_messages(&mut out, service.handle(initialize)).unwrap();
+        out.clear();
+
+        handle_engine_event(
+            &mut service,
+            &mut out,
+            EngineEvent::WatchedGlobs(vec!["**/build.gradle.kts".into()]),
+        )
+        .unwrap();
+        handle_engine_event(
+            &mut service,
+            &mut out,
+            EngineEvent::Project(ProjectFeedback {
+                logs: vec!["project loaded".into()],
+                ..ProjectFeedback::default()
+            }),
+        )
+        .unwrap();
+        assert!(out.is_empty());
+
+        let initialized = json!({
+            "jsonrpc": "2.0",
+            "method": "initialized",
+            "params": {}
+        });
+        dispatch_messages(&mut out, service.handle(initialized)).unwrap();
+        let output = String::from_utf8(out).unwrap();
+        assert!(output.contains("client/registerCapability"));
+        assert!(output.contains("project loaded"));
+    }
+
+    #[test]
+    fn pending_async_batch_retries_after_backoff() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        service.open_document_for_test("file:///a.kt", "fun a() {}", 1);
+        service.mark_analysis_dirty_for_test();
+        service
+            .dispatch_pending_analysis()
+            .expect("initial analysis job");
+
+        let messages = service.apply_analysis_batch(AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), 1)],
+            analyses: Vec::new(),
+            support_documents: Vec::new(),
+            pending: true,
+        });
+        assert!(messages.is_empty());
+        assert!(service.analysis_retry_at.is_some());
+        assert!(!service.analysis_dirty_for_test());
+        assert!(!service.analysis_in_flight_for_test());
+
+        service.make_analysis_retry_due();
+        service.run_due_project_refresh_deferred();
+        assert!(service.dispatch_pending_analysis().is_some());
+    }
+
+    #[test]
+    fn engine_thread_is_joined_on_eof() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        struct Mock {
+            _flag: DropFlag,
+        }
+        impl Analysis for Mock {
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mock = Mock {
+            _flag: DropFlag(dropped.clone()),
+        };
+
+        let (sender, incoming) = mpsc::sync_channel(8);
+        let engine = AnalysisEngine::spawn(mock, sender.clone());
+        let service = LspService::with_backend(EngineBackend::new(engine, false));
+
+        sender.send(Incoming::Eof).unwrap();
+
+        let mut out: Vec<u8> = Vec::new();
+        let code = run_async_loop(service, &mut out, incoming).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the engine thread must be joined on EOF, dropping the owned Analysis"
+        );
+    }
+
+    #[test]
+    fn shutdown_drains_a_backlog_of_events_without_deadlocking() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        struct Mock {
+            _flag: DropFlag,
+        }
+        impl Analysis for Mock {
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mock = Mock {
+            _flag: DropFlag(dropped.clone()),
+        };
+
+        let (sender, incoming) = mpsc::sync_channel(INPUT_QUEUE_CAPACITY);
+        let engine = AnalysisEngine::spawn(mock, sender.clone());
+
+        sender.send(Incoming::Eof).unwrap();
+
+        engine.submit(EngineCommand::SetWorkspaceRoot(None));
+        engine.submit(EngineCommand::Analyze(AnalysisJob {
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 1)],
+            open_uris: vec!["file:///a.kt".into()],
+        }));
+        engine.submit(EngineCommand::ProjectChange {
+            refresh: false,
+            reanalyze: true,
+            uris: Vec::new(),
+        });
+
+        let service = LspService::with_backend(EngineBackend::new(engine, false));
+
+        let mut out: Vec<u8> = Vec::new();
+        let code = run_async_loop(service, &mut out, incoming).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "shutdown must drain the backlog and join the engine thread instead of deadlocking"
+        );
+    }
+
+    #[test]
+    fn request_is_answered_while_analysis_is_in_flight() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc::{channel, sync_channel};
+        use std::sync::Arc;
+
+        struct BlockingAnalysis {
+            entered: std::sync::mpsc::Sender<()>,
+            release: std::sync::mpsc::Receiver<()>,
+            completed: Arc<AtomicBool>,
+        }
+        impl Analysis for BlockingAnalysis {
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                let _ = self.entered.send(());
+                let _ = self.release.recv_timeout(Duration::from_secs(5));
+                self.completed.store(true, Ordering::SeqCst);
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+        }
+
+        let (entered_tx, entered_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let completed = Arc::new(AtomicBool::new(false));
+        let mock = BlockingAnalysis {
+            entered: entered_tx,
+            release: release_rx,
+            completed: completed.clone(),
+        };
+
+        let (sender, incoming) = sync_channel::<Incoming>(INPUT_QUEUE_CAPACITY);
+        let engine = AnalysisEngine::spawn(mock, sender.clone());
+        let backend = EngineBackend::new(engine, true);
+        let mut service = LspService::with_backend(backend);
+        service.force_initialized_for_test();
+
+        let mut pending = VecDeque::new();
+        let mut out: Vec<u8> = Vec::new();
+
+        let ready = incoming.recv().expect("engine startup ready-state");
+        step_async(&mut service, &mut out, &incoming, &mut pending, ready).unwrap();
+
+        let did_open = json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": { "textDocument": {
+                "uri": "file:///a.kt", "languageId": "kotlin", "version": 1, "text": "fun a() {}"
+            }}
+        });
+        step_async(
+            &mut service,
+            &mut out,
+            &incoming,
+            &mut pending,
+            Incoming::Message(did_open),
+        )
+        .unwrap();
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("analysis started on the engine thread");
+        assert!(
+            !completed.load(Ordering::SeqCst),
+            "analysis must still be in flight"
+        );
+
+        let before = out.len();
+        let hover = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": {"uri": "file:///a.kt"},
+                "position": {"line": 0, "character": 1}
+            }
+        });
+        step_async(
+            &mut service,
+            &mut out,
+            &incoming,
+            &mut pending,
+            Incoming::Message(hover),
+        )
+        .unwrap();
+
+        let answered = String::from_utf8(out[before..].to_vec()).unwrap();
+        assert!(
+            answered.contains("\"id\":2"),
+            "hover response must be written while analysis is in flight: {answered:?}"
+        );
+        assert!(
+            !completed.load(Ordering::SeqCst),
+            "the hover was answered before analysis completed"
+        );
+
+        release_tx.send(()).unwrap();
+        let mut published = false;
+        for _ in 0..INPUT_QUEUE_CAPACITY + 2 {
+            let event = incoming
+                .recv_timeout(Duration::from_secs(5))
+                .expect("analysis completion event");
+            step_async(&mut service, &mut out, &incoming, &mut pending, event).unwrap();
+            if String::from_utf8_lossy(&out).contains("textDocument/publishDiagnostics") {
+                published = true;
+                break;
+            }
+        }
+        assert!(published, "analysis result is published after release");
+        assert!(completed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn mixed_stale_batch_discards_entire_batch() {
+        let mut service = LspService::new(|s: &[&str]| {
+            s.iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        service.open_document_for_test("file:///a.kt", "v1", 1);
+        service.open_document_for_test("file:///b.kt", "v1", 1);
+        service.mark_analysis_dirty_for_test();
+        let _job = service
+            .dispatch_pending_analysis()
+            .expect("job for the open documents");
+
+        service.open_document_for_test("file:///b.kt", "v2", 2);
+
+        let batch = AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), 1), ("file:///b.kt".into(), 1)],
+            analyses: vec![DocumentAnalysis::empty(), DocumentAnalysis::empty()],
+            support_documents: Vec::new(),
+            pending: false,
+        };
+        let messages = service.apply_analysis_batch(batch);
+        assert!(messages.is_empty());
+        assert!(service.analysis_dirty_for_test());
+        assert!(!service.analysis_in_flight_for_test());
+    }
 
     #[test]
     fn overdue_maintenance_gets_a_bounded_turn_amid_input() {
@@ -2369,6 +3285,200 @@ mod tests {
             MAX_INPUT_DISPATCHES_BEFORE_MAINTENANCE,
             Some(Duration::ZERO)
         ));
+    }
+
+    #[test]
+    fn stale_batch_document_is_discarded() {
+        let mut service = LspService::new(|s: &[&str]| {
+            s.iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        service.open_document_for_test("file:///a.kt", "v1", 1);
+        let job = service.take_analysis_job();
+        assert_eq!(job.documents[0].2, 1);
+
+        service.open_document_for_test("file:///a.kt", "v2", 2);
+
+        let batch = AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), 1)],
+            analyses: vec![DocumentAnalysis::empty()],
+            support_documents: Vec::new(),
+            pending: false,
+        };
+        let messages = service.apply_analysis_batch(batch);
+        assert!(messages.is_empty());
+        assert!(service.analysis_dirty_for_test());
+    }
+
+    #[test]
+    fn fresh_batch_document_is_applied() {
+        let mut service = LspService::new(|s: &[&str]| {
+            s.iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        service.open_document_for_test("file:///a.kt", "v1", 1);
+        service.take_analysis_job();
+        let batch = AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), 1)],
+            analyses: vec![DocumentAnalysis::empty()],
+            support_documents: Vec::new(),
+            pending: false,
+        };
+        let messages = service.apply_analysis_batch(batch);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["method"], "textDocument/publishDiagnostics");
+    }
+
+    #[test]
+    fn close_reopen_with_reused_version_discards_in_flight_batch() {
+        let mut service = LspService::new(|s: &[&str]| {
+            s.iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+
+        let with_diagnostic = || DocumentAnalysis {
+            diagnostics: vec![Diagnostic {
+                span: krusty::diag::Span::new(0, 0),
+                editor_span: None,
+                severity: Severity::Error,
+                kind: DiagnosticKind::Compiler,
+                msg: "from stale batch".to_string(),
+                file: 0,
+            }],
+            ..DocumentAnalysis::empty()
+        };
+        let did_open = |uri: &str, text: &str, version: i64| {
+            serde_json::json!({
+                "textDocument": { "uri": uri, "languageId": "kotlin", "version": version, "text": text }
+            })
+        };
+
+        service.did_open(None, did_open("file:///a.kt", "old", 1), true);
+        let in_flight_job = service
+            .dispatch_pending_analysis()
+            .expect("job for the freshly opened document");
+        assert_eq!(in_flight_job.documents[0].2, 1);
+        assert!(service.analysis_in_flight_for_test());
+
+        service.did_close(
+            None,
+            serde_json::json!({ "textDocument": { "uri": "file:///a.kt" } }),
+            true,
+        );
+        service.did_open(None, did_open("file:///a.kt", "new", 1), true);
+
+        let stale_batch = AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), 1)],
+            analyses: vec![with_diagnostic()],
+            support_documents: Vec::new(),
+            pending: false,
+        };
+        let messages = service.apply_analysis_batch(stale_batch);
+        assert!(
+            messages.is_empty(),
+            "stale close+reopen batch must not publish diagnostics"
+        );
+        assert_eq!(
+            service.document_diagnostic_count_for_test("file:///a.kt"),
+            0,
+            "stale analysis must not populate the reopened document's indices"
+        );
+        assert!(!service.analysis_in_flight_for_test());
+        assert!(service.analysis_dirty_for_test());
+        assert!(
+            !service.resubmit_pending_for_test(),
+            "discard clears the resubmit slot; a fresh job re-dispatches via analysis_dirty"
+        );
+
+        let fresh_job = service
+            .dispatch_pending_analysis()
+            .expect("fresh job re-dispatches after discard");
+        assert_eq!(fresh_job.documents[0].1, "new");
+        let fresh_batch = AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), 1)],
+            analyses: vec![with_diagnostic()],
+            support_documents: Vec::new(),
+            pending: false,
+        };
+        let messages = service.apply_analysis_batch(fresh_batch);
+        assert_eq!(messages.len(), 1, "fresh batch is applied");
+        assert_eq!(messages[0]["method"], "textDocument/publishDiagnostics");
+        assert_eq!(
+            service.document_diagnostic_count_for_test("file:///a.kt"),
+            1,
+            "fresh analysis populates the reopened document"
+        );
+    }
+
+    #[test]
+    fn analysis_coalesces_to_one_in_flight() {
+        let mut service = LspService::new(|s: &[&str]| {
+            s.iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        service.open_document_for_test("file:///a.kt", "v1", 1);
+        service.mark_analysis_dirty_for_test();
+
+        let first = service.dispatch_pending_analysis();
+        assert!(first.is_some(), "first dispatch runs");
+
+        service.mark_analysis_dirty_for_test();
+        let second = service.dispatch_pending_analysis();
+        assert!(second.is_none(), "in-flight → coalesced");
+        assert!(service.resubmit_pending_for_test());
+
+        let batch = AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), 1)],
+            analyses: vec![DocumentAnalysis::empty()],
+            support_documents: Vec::new(),
+            pending: false,
+        };
+        let _ = service.apply_analysis_batch(batch);
+        assert!(!service.analysis_in_flight_for_test());
+        let third = service.dispatch_pending_analysis();
+        assert!(third.is_some(), "resubmit dispatches after completion");
+    }
+
+    #[test]
+    fn stale_batch_clears_resubmit_pending_and_stays_dirty() {
+        let mut service = LspService::new(|s: &[&str]| {
+            s.iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        service.open_document_for_test("file:///a.kt", "v1", 1);
+        service.mark_analysis_dirty_for_test();
+
+        let first = service.dispatch_pending_analysis();
+        assert!(first.is_some(), "first dispatch runs");
+
+        service.mark_analysis_dirty_for_test();
+        let second = service.dispatch_pending_analysis();
+        assert!(second.is_none(), "in-flight → coalesced");
+        assert!(service.resubmit_pending_for_test());
+
+        service.open_document_for_test("file:///a.kt", "v2", 2);
+
+        let batch = AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), 1)],
+            analyses: vec![DocumentAnalysis::empty()],
+            support_documents: Vec::new(),
+            pending: false,
+        };
+        let _ = service.apply_analysis_batch(batch);
+
+        assert!(!service.resubmit_pending_for_test());
+        assert!(!service.analysis_in_flight_for_test());
+        assert!(service.analysis_dirty_for_test());
     }
 
     #[test]
@@ -2684,5 +3794,21 @@ mod tests {
             apply_content_changes_with_budget("abcd".to_string(), changes, budget),
             Ok("replacement".to_string())
         );
+    }
+
+    #[test]
+    fn inline_backend_submit_returns_batch_immediately() {
+        let mut backend = InlineBackend::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        let batch = backend.submit(crate::server::engine::AnalysisJob {
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 1)],
+            open_uris: vec!["file:///a.kt".into()],
+        });
+        let batch = batch.expect("inline backend is synchronous");
+        assert_eq!(batch.analyzed, vec![("file:///a.kt".to_string(), 1)]);
     }
 }
