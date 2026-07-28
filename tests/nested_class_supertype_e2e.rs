@@ -53,3 +53,20 @@ fn nested_class_extends_sibling_nested_class() {
         fun box(): String = Test.Sub().s\n";
     assert_eq!(run(SRC).expect("sibling nested base"), "OK");
 }
+
+#[test]
+fn packaged_nested_class_implements_qualified_interface() {
+    const SRC: &str = "package sample.scope\n\
+        sealed interface Kind {\n\
+        \x20 interface Branch : Kind\n\
+        \x20 interface Leaf : Branch\n\
+        }\n\
+        sealed class Marker {\n\
+        \x20 class Leaf : Kind.Leaf\n\
+        }\n\
+        fun box(): String {\n\
+        \x20 val leaf = Marker.Leaf()\n\
+        \x20 return if (leaf is Kind.Leaf && leaf is Kind.Branch && leaf is Kind) \"OK\" else \"FAIL\"\n\
+        }\n";
+    common::expect_box_ok_with_stdlib(SRC, "PackagedNestedInterface");
+}
