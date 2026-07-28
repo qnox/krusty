@@ -11,6 +11,10 @@ use krusty_lsp::{
 const WORKER_RECONFIGURE_RETRY_INITIAL_MS: u64 = 1_000;
 const WORKER_RECONFIGURE_RETRY_MAX_MS: u64 = 30_000;
 
+fn analysis_remains_pending(kind: io::ErrorKind) -> bool {
+    matches!(kind, io::ErrorKind::TimedOut | io::ErrorKind::Interrupted)
+}
+
 fn main() {
     let mut arguments: Vec<String> = std::env::args().skip(1).collect();
     let worker_mode = arguments
@@ -244,7 +248,7 @@ impl WorkerHost {
                 self.analysis_pending = false;
                 analysis
             }
-            Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+            Err(error) if analysis_remains_pending(error.kind()) => {
                 self.analysis_pending = true;
                 eprintln!("krusty-lsp: {error}; source analysis remains pending");
                 Vec::new()
@@ -504,5 +508,12 @@ mod tests {
             next_worker_reconfigure_retry(u64::MAX - 10, 30_000),
             (u64::MAX, 30_000)
         );
+    }
+
+    #[test]
+    fn interrupted_analysis_remains_pending() {
+        assert!(analysis_remains_pending(io::ErrorKind::Interrupted));
+        assert!(analysis_remains_pending(io::ErrorKind::TimedOut));
+        assert!(!analysis_remains_pending(io::ErrorKind::UnexpectedEof));
     }
 }

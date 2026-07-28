@@ -332,12 +332,27 @@ impl WorkerProcess {
     }
 
     fn read_response(&mut self) -> io::Result<Vec<u8>> {
-        self.read_frame(
+        match self.read_frame(
             MAX_WORKER_MESSAGE_BYTES,
             ANALYSIS_TIMEOUT,
             "analysis worker timed out",
-        )?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "analysis worker exited"))
+        )? {
+            Some(response) => Ok(response),
+            None => match self.child.wait() {
+                Ok(status) if status.success() => Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "analysis worker classpath changed",
+                )),
+                Ok(status) => Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("analysis worker exited with {status}"),
+                )),
+                Err(error) => Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("analysis worker exited: {error}"),
+                )),
+            },
+        }
     }
 
     fn analyze(
@@ -594,6 +609,10 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             .map(AnalysisResponse::from)
             .collect::<Vec<_>>();
         let response = encode_response(&analyses)?;
+        // A clean EOF makes the supervisor retry the request in a fresh worker.
+        if !classpath.snapshot_is_current() {
+            return Ok(());
+        }
         write_framed(writer, &response)?;
     }
     Ok(())
@@ -652,7 +671,7 @@ fn join_classpath(classpath: &[PathBuf]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Cursor, Read};
+    use std::io::{BufRead, Cursor, Read};
 
     use super::*;
     use crate::analysis::MAX_SOURCE_SET_NAVIGATION_ENTRIES;
@@ -665,6 +684,37 @@ mod tests {
         fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
             std::thread::sleep(self.delay);
             Ok(0)
+        }
+    }
+
+    struct MutatingReader {
+        inner: Cursor<Vec<u8>>,
+        mutation: Option<Box<dyn FnOnce()>>,
+    }
+
+    impl MutatingReader {
+        fn mutate(&mut self) {
+            if let Some(mutation) = self.mutation.take() {
+                mutation();
+            }
+        }
+    }
+
+    impl Read for MutatingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.mutate();
+            self.inner.read(buffer)
+        }
+    }
+
+    impl BufRead for MutatingReader {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            self.mutate();
+            self.inner.fill_buf()
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.inner.consume(amount);
         }
     }
 
@@ -728,6 +778,49 @@ mod tests {
         let error = output.write_all(b"5").unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(output.bytes, b"1234");
+    }
+
+    #[test]
+    fn worker_discards_analysis_when_classpath_snapshot_changes() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "krusty-worker-classpath-revision-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).expect("create classpath directory");
+
+        let inputs = [SourceInput::kotlin("fun use() = 1")];
+        let request = encode_request(&inputs, 1, 1, &LangFeatures::new()).unwrap();
+        let mut framed = Vec::new();
+        write_framed(&mut framed, &request).unwrap();
+        let generated = directory.join("generated");
+        let mut reader = MutatingReader {
+            inner: Cursor::new(framed),
+            mutation: Some(Box::new(move || {
+                std::fs::create_dir(&generated).expect("mutate classpath directory");
+            })),
+        };
+        let mut output = Vec::new();
+
+        run_analysis_worker(&mut reader, &mut output, vec![directory.clone()]).unwrap();
+
+        let mut output = Cursor::new(output);
+        assert_eq!(
+            read_framed(&mut output, WORKER_READY.len())
+                .unwrap()
+                .as_deref(),
+            Some(WORKER_READY)
+        );
+        assert!(
+            read_framed(&mut output, MAX_WORKER_MESSAGE_BYTES)
+                .unwrap()
+                .is_none(),
+            "stale worker must not produce an analysis response"
+        );
+        std::fs::remove_dir_all(directory).expect("remove classpath directory");
     }
 
     #[test]
