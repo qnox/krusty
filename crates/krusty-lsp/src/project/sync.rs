@@ -1,11 +1,12 @@
 //! Content-guarded project-model refresh with last-good retention.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use krusty::features::LangFeatures;
 
 use super::fingerprint::{fingerprint_files, Fingerprint};
-use super::model::{paths_equivalent, ProjectModel, ProviderKind};
+use super::model::{CanonicalPathCache, ProjectModel, ProviderKind, SourceModuleGraph};
 use super::provider::{ProbeError, ProjectProvider};
 use super::runner::CommandRunner;
 
@@ -23,7 +24,7 @@ pub enum RefreshOutcome {
 
 pub struct ProjectSync {
     provider: Box<dyn ProjectProvider>,
-    model: Option<ProjectModel>,
+    snapshot: Option<SourceModuleGraph>,
     fingerprint: Option<Fingerprint>,
     dirty_since: Option<u64>,
 }
@@ -32,7 +33,7 @@ impl ProjectSync {
     pub fn new(provider: Box<dyn ProjectProvider>) -> Self {
         Self {
             provider,
-            model: None,
+            snapshot: None,
             fingerprint: None,
             dirty_since: None,
         }
@@ -43,11 +44,15 @@ impl ProjectSync {
     }
 
     pub fn model(&self) -> Option<&ProjectModel> {
-        self.model.as_ref()
+        self.snapshot.as_ref().map(SourceModuleGraph::model)
     }
 
-    pub fn rollback_model(&mut self, model: Option<ProjectModel>) {
-        self.model = model;
+    pub fn snapshot(&self) -> Option<&SourceModuleGraph> {
+        self.snapshot.as_ref()
+    }
+
+    pub fn rollback_snapshot(&mut self, snapshot: Option<SourceModuleGraph>) {
+        self.snapshot = snapshot;
         self.fingerprint = None;
     }
 
@@ -84,7 +89,7 @@ impl ProjectSync {
             &self.provider.watch_paths(),
             &self.provider.fingerprint_salt(),
         );
-        if self.model.is_some() && self.fingerprint == Some(fingerprint) {
+        if self.snapshot.is_some() && self.fingerprint == Some(fingerprint) {
             return RefreshOutcome::Unchanged;
         }
         let _lock = match super::lock::WorkspaceProbeLock::acquire(self.provider.root()) {
@@ -95,19 +100,19 @@ impl ProjectSync {
                         "could not lock {}: {error}",
                         self.provider.root().display()
                     )),
-                    model_retained: self.model.is_some(),
+                    model_retained: self.snapshot.is_some(),
                 };
             }
         };
         match self.provider.probe(runner) {
             Ok(model) => {
                 self.fingerprint = Some(fingerprint);
-                self.model = Some(model);
+                self.snapshot = Some(model.into_source_module_graph());
                 RefreshOutcome::Updated
             }
             Err(error) => RefreshOutcome::Failed {
                 error,
-                model_retained: self.model.is_some(),
+                model_retained: self.snapshot.is_some(),
             },
         }
     }
@@ -117,40 +122,51 @@ impl ProjectSync {
     /// Used for worker startup and dependency-source materialization. Module analysis requests pass
     /// their narrower compile classpath. Project outputs precede published copies.
     pub fn project_classpath(&self) -> Vec<PathBuf> {
-        let Some(model) = self.model.as_ref() else {
+        self.project_classpath_with(&|path| std::fs::canonicalize(path).ok())
+    }
+
+    fn project_classpath_with(
+        &self,
+        canonicalize: &dyn Fn(&Path) -> Option<PathBuf>,
+    ) -> Vec<PathBuf> {
+        let Some(model) = self.model() else {
             return Vec::new();
         };
         let mut union = Vec::new();
+        let mut seen = HashSet::new();
         for module in &model.modules {
             for entry in model.compile_classpath(module) {
-                if !union.contains(&entry) {
+                if seen.insert(entry.clone()) {
                     union.push(entry);
                 }
             }
         }
-        let declared_outputs: Vec<&Path> = model
+        let declared_output_set = model
             .modules
             .iter()
             .flat_map(|module| {
                 module
                     .outputs
                     .iter()
-                    .map(|output| output.path())
-                    .chain(module.friend_paths.iter().map(PathBuf::as_path))
+                    .map(|output| output.path().to_path_buf())
+                    .chain(module.friend_paths.iter().cloned())
             })
-            .collect();
-        let canonical_outputs: Vec<PathBuf> = declared_outputs
-            .iter()
-            .filter_map(|output| std::fs::canonicalize(output).ok())
-            .collect();
-        let is_output = |entry: &Path| {
-            declared_outputs
-                .iter()
-                .any(|output| paths_equivalent(entry, output) || entry.starts_with(output))
-                || std::fs::canonicalize(entry).is_ok_and(|entry| {
-                    canonical_outputs
-                        .iter()
-                        .any(|output| entry == *output || entry.starts_with(output))
+            .collect::<HashSet<_>>();
+        let mut canonical_paths = CanonicalPathCache::new(canonicalize);
+        let mut canonical_output_set = HashSet::new();
+        for output in &declared_output_set {
+            if let Some(canonical) = canonical_paths.get(output) {
+                canonical_output_set.insert(canonical.to_path_buf());
+            }
+        }
+        let mut is_output = |entry: &Path| {
+            entry
+                .ancestors()
+                .any(|ancestor| declared_output_set.contains(ancestor))
+                || canonical_paths.get(entry).is_some_and(|entry| {
+                    entry
+                        .ancestors()
+                        .any(|ancestor| canonical_output_set.contains(ancestor))
                 })
         };
         let (mut outputs, others): (Vec<_>, Vec<_>) =
@@ -161,8 +177,7 @@ impl ProjectSync {
 
     /// The `jvmTarget` the project reports, used to pick a matching JDK.
     pub fn jvm_target(&self) -> Option<&str> {
-        self.model
-            .as_ref()?
+        self.model()?
             .modules
             .iter()
             .find_map(|module| module.jvm_target.as_deref())
@@ -173,7 +188,7 @@ impl ProjectSync {
     /// Default worker features for analyses without a modeled module.
     pub fn project_language_features(&self) -> LangFeatures {
         let mut project_features = LangFeatures::new();
-        let Some(model) = self.model.as_ref() else {
+        let Some(model) = self.model() else {
             return project_features;
         };
         for module in &model.modules {
@@ -201,6 +216,7 @@ mod tests {
     use crate::project::model::{Module, ModuleId, ModuleOutput, SourceRoot};
     use crate::project::runner::testing::FakeRunner;
     use crate::project::testing::TempTree;
+    use crate::project::ProjectSources;
 
     /// A provider whose probe result the test controls, counting how often it ran.
     struct ScriptedProvider {
@@ -425,6 +441,119 @@ mod tests {
     }
 
     #[test]
+    fn project_classpath_memoizes_duplicate_paths() {
+        use std::cell::Cell;
+
+        let mut dependency = Module::new(ModuleId::new(":dependency", "main"), "/workspace");
+        let mut consumer = Module::new(ModuleId::new(":consumer", "main"), "/workspace");
+        for index in 0..128 {
+            let output = PathBuf::from(format!("/declared/output-{index}"));
+            let alias = PathBuf::from(format!("/alias/output-{index}"));
+            dependency.outputs.extend([
+                ModuleOutput::location(output.clone()),
+                ModuleOutput::location(output.clone()),
+            ]);
+            consumer
+                .friend_paths
+                .extend([output.clone(), output.clone()]);
+            consumer.classpath.extend([alias.clone(), alias]);
+        }
+        let model = ProjectModel::new("/workspace", ProviderKind::Gradle)
+            .with_modules(vec![consumer, dependency]);
+        let mut sync =
+            ProjectSync::new(Box::new(ScriptedProvider::new(Vec::new(), vec![Ok(model)])));
+        assert_eq!(
+            sync.refresh(&FakeRunner::default()),
+            RefreshOutcome::Updated
+        );
+        let calls = Cell::new(0usize);
+        let classpath = sync.project_classpath_with(&|path| {
+            calls.set(calls.get() + 1);
+            let name = path.file_name()?.to_str()?;
+            Some(PathBuf::from("/canonical").join(name))
+        });
+
+        assert_eq!(classpath.len(), 256);
+        assert_eq!(calls.get(), 256);
+    }
+
+    #[test]
+    fn accepted_snapshot_change_invalidates_project_sources() {
+        let tree = TempTree::new("sync-source-cache");
+        tree.write(
+            "build.gradle.kts",
+            "dependencies { implementation(project(\":dep\")) }",
+        );
+        tree.write("consumer/Open.kt", "fun open() = support()");
+        tree.write("dependency/Support.kt", "fun support() = 1");
+        let consumer_root = tree.path("consumer");
+        let dependency_root = tree.path("dependency");
+        let dependency_id = ModuleId::new(":dependency", "main");
+        let model = |has_dependency| {
+            let mut consumer = Module::new(ModuleId::new(":consumer", "main"), &consumer_root);
+            consumer.source_roots = vec![SourceRoot::source(&consumer_root)];
+            if has_dependency {
+                consumer.depends_on = vec![dependency_id.clone()];
+            }
+            let mut dependency = Module::new(dependency_id.clone(), &dependency_root);
+            dependency.source_roots = vec![SourceRoot::source(&dependency_root)];
+            ProjectModel::new(tree.root(), ProviderKind::Gradle)
+                .with_modules(vec![consumer, dependency])
+        };
+        let mut sync = ProjectSync::new(Box::new(ScriptedProvider::new(
+            vec![tree.path("build.gradle.kts")],
+            vec![Ok(model(true)), Ok(model(false))],
+        )));
+        let open_uri = url::Url::from_file_path(tree.path("consumer/Open.kt"))
+            .unwrap()
+            .to_string();
+        let documents = [(open_uri.as_str(), "fun open() = support()")];
+        let open_uris = [open_uri.as_str()];
+        let mut sources = ProjectSources::default();
+
+        assert_eq!(
+            sync.refresh(&FakeRunner::default()),
+            RefreshOutcome::Updated
+        );
+        let first = sources
+            .load(
+                sync.snapshot().unwrap(),
+                &documents,
+                &open_uris,
+                32 * 1024 * 1024,
+            )
+            .unwrap()
+            .0
+            .to_vec();
+        tree.write("build.gradle.kts", "dependencies {}");
+        assert_eq!(
+            sync.refresh(&FakeRunner::default()),
+            RefreshOutcome::Updated
+        );
+        let second = sources
+            .load(
+                sync.snapshot().unwrap(),
+                &documents,
+                &open_uris,
+                32 * 1024 * 1024,
+            )
+            .unwrap()
+            .0
+            .to_vec();
+
+        assert_eq!(
+            first,
+            [(
+                url::Url::from_file_path(tree.path("dependency/Support.kt"))
+                    .unwrap()
+                    .to_string(),
+                "fun support() = 1".to_string(),
+            )]
+        );
+        assert!(second.is_empty());
+    }
+
+    #[test]
     fn a_failed_probe_keeps_the_last_good_model_serving() {
         let tree = TempTree::new("sync-failure");
         tree.write("build.gradle.kts", "dependencies {}");
@@ -465,14 +594,14 @@ mod tests {
             sync.refresh(&FakeRunner::default()),
             RefreshOutcome::Updated
         );
-        let previous = sync.model().cloned();
+        let previous = sync.snapshot().cloned();
         tree.write("build.gradle.kts", "dependencies { implementation(b) }");
         assert_eq!(
             sync.refresh(&FakeRunner::default()),
             RefreshOutcome::Updated
         );
 
-        sync.rollback_model(previous);
+        sync.rollback_snapshot(previous);
         assert_eq!(sync.project_classpath(), vec![PathBuf::from("/m2/a.jar")]);
         assert_eq!(
             sync.refresh(&FakeRunner::default()),
