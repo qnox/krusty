@@ -5489,7 +5489,7 @@ fn infer_lit_ty_p(
                 .map(crate::symbol_resolver::Symbol::overloads)
                 .unwrap_or_default()
                 .into_iter()
-                .map(|o| o.callable.ret)
+                .map(|o| o.ret.apply(o.callable.ret))
                 .collect(),
             None => crate::libraries::FunctionSet {
                 overloads: resolver
@@ -5498,7 +5498,7 @@ fn infer_lit_ty_p(
                     .unwrap_or_default(),
             }
             .into_top_level()
-            .map(|o| o.callable.ret)
+            .map(|o| o.ret.apply(o.callable.ret))
             .collect(),
         };
         let mut ret: Option<Ty> = None;
