@@ -16,17 +16,28 @@ use crate::libraries::{
     LibraryType, Origin, PropKind, PropertyInfo, PropertySet,
 };
 use crate::symbol_source::{InheritanceShape, SymbolSource};
-use crate::types::{type_name, Ty, TypeName, Visibility};
+use crate::types::{stored_value_ty, type_name, Ty, TypeName, Visibility};
 use std::collections::HashMap;
 
 /// The current module's declarations as a [`SymbolSource`]. Borrows the frontend symbols; cheap.
 pub struct ModuleSymbols<'a> {
     syms: &'a FrontendSymbols,
+    source_file: Option<u32>,
 }
 
 impl<'a> ModuleSymbols<'a> {
     pub fn new(syms: &'a FrontendSymbols) -> Self {
-        ModuleSymbols { syms }
+        ModuleSymbols {
+            syms,
+            source_file: None,
+        }
+    }
+
+    pub fn for_file(syms: &'a FrontendSymbols, source_file: u32) -> Self {
+        ModuleSymbols {
+            syms,
+            source_file: Some(source_file),
+        }
     }
 
     /// The declaring facade of a top-level `name`, if the multi-file driver recorded one. `None` means
@@ -465,6 +476,17 @@ fn source_callable(owner: TypeName, name: String, params: Vec<Ty>, ret: Ty) -> L
     }
 }
 
+fn source_property_getter(
+    owner: TypeName,
+    name: String,
+    params: Vec<Ty>,
+    ty: Ty,
+) -> LibraryCallable {
+    let mut callable = source_callable(owner, name, params, ty);
+    callable.physical_ret = stored_value_ty(ty);
+    callable
+}
+
 fn source_accessor(
     owner: TypeName,
     name: &str,
@@ -497,7 +519,7 @@ fn source_property(
         formals: Vec::new(),
         ty: property.ty,
         context_count: property.context_params.len(),
-        getter: source_callable(
+        getter: source_property_getter(
             owner,
             property.getter_name.clone(),
             property.context_params.clone(),
@@ -505,13 +527,14 @@ fn source_property(
         ),
         setter: property.setter_name.as_ref().map(|setter| {
             let mut params = property.context_params.clone();
-            params.push(property.ty);
+            params.push(stored_value_ty(property.ty));
             source_callable(owner, setter.clone(), params, Ty::Unit)
         }),
         is_const: false,
         visibility: property.visibility,
         owner,
         receiver_rank,
+        source_key: None,
     }
 }
 
@@ -577,10 +600,66 @@ impl SymbolSource for ModuleSymbols<'_> {
                 }
             }
         }
-        let callables = if overloads.is_empty() {
-            Callables::None
-        } else {
-            Callables::Functions(FunctionSet { overloads })
+        let mut properties = Vec::new();
+        for ((_, property_name), signatures) in &self.syms.ext_props {
+            if property_name != &name {
+                continue;
+            }
+            for property in signatures {
+                if !pkg.matches(&property.package)
+                    || (property.visibility.is_private()
+                        && self.source_file != Some(property.source.0))
+                {
+                    continue;
+                }
+                let owner = self
+                    .syms
+                    .ext_prop_facades_by_decl
+                    .get(&property.source)
+                    .copied()
+                    .unwrap_or_else(|| type_name(""));
+                let getter = source_property_getter(
+                    owner,
+                    property.getter_name.clone(),
+                    vec![property.receiver],
+                    property.ty,
+                );
+                let setter = property.setter_name.as_ref().map(|setter_name| {
+                    source_callable(
+                        owner,
+                        setter_name.clone(),
+                        vec![property.receiver, stored_value_ty(property.ty)],
+                        Ty::Unit,
+                    )
+                });
+                properties.push(PropertyInfo {
+                    kind: PropKind::Extension,
+                    receiver: Some(property.receiver),
+                    formals: Vec::new(),
+                    ty: property.ty,
+                    context_count: property.context_params.len(),
+                    getter,
+                    setter,
+                    is_const: false,
+                    visibility: property.visibility,
+                    owner,
+                    receiver_rank: 0,
+                    source_key: Some(property.source),
+                });
+            }
+        }
+        let callables = match (overloads.is_empty(), properties.is_empty()) {
+            (false, false) => Callables::Both {
+                functions: FunctionSet { overloads },
+                properties: PropertySet {
+                    overloads: properties,
+                },
+            },
+            (false, true) => Callables::Functions(FunctionSet { overloads }),
+            (true, false) => Callables::Properties(PropertySet {
+                overloads: properties,
+            }),
+            (true, true) => Callables::None,
         };
         std::rc::Rc::new(ResolvedSymbols {
             classifier,
@@ -646,7 +725,7 @@ impl SymbolSource for ModuleSymbols<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolve::{CtorDefaultValue, DeclaredPropertySig};
+    use crate::resolve::{CtorDefaultValue, DeclaredPropertySig, ExtPropSig};
     use std::collections::{HashMap, HashSet};
 
     fn sig(params: Vec<Ty>, ret: Ty) -> Signature {
@@ -930,6 +1009,76 @@ mod tests {
         assert_eq!(actual.receiver, generic_sig.receiver);
         assert_eq!(actual.params, generic_sig.params);
         assert_eq!(actual.ret, generic_sig.ret);
+    }
+
+    #[test]
+    fn extension_property_preserves_scope_and_source_identity() {
+        let mut symbols = FrontendSymbols::default();
+        let receiver = Ty::String;
+        symbols.ext_props.insert(
+            (receiver.erased_recv(), "label".into()),
+            vec![
+                ExtPropSig {
+                    receiver,
+                    ty: Ty::String,
+                    is_var: true,
+                    getter_name: "getLabel".into(),
+                    setter_name: Some("setLabel".into()),
+                    context_params: Vec::new(),
+                    accepts_nullable_receiver: false,
+                    source: (0, 3),
+                    package: "one".into(),
+                    visibility: Visibility::Private,
+                },
+                ExtPropSig {
+                    receiver,
+                    ty: Ty::Int,
+                    is_var: false,
+                    getter_name: "getLabel".into(),
+                    setter_name: None,
+                    context_params: Vec::new(),
+                    accepts_nullable_receiver: false,
+                    source: (1, 4),
+                    package: "two".into(),
+                    visibility: Visibility::Public,
+                },
+            ],
+        );
+        symbols
+            .ext_prop_facades_by_decl
+            .insert((0, 3), type_name("one/FirstKt"));
+        symbols
+            .ext_prop_facades_by_decl
+            .insert((1, 4), type_name("two/SecondKt"));
+
+        let private = match ModuleSymbols::for_file(&symbols, 0)
+            .resolve_symbols("one/label")
+            .callables
+        {
+            crate::libraries::Callables::Properties(properties) => properties.overloads,
+            _ => Vec::new(),
+        };
+        assert_eq!(private.len(), 1);
+        assert_eq!(private[0].source_key, Some((0, 3)));
+        assert!(private[0].owner.matches("one/FirstKt"));
+        assert!(private[0].setter.is_some());
+
+        assert!(matches!(
+            ModuleSymbols::for_file(&symbols, 1)
+                .resolve_symbols("one/label")
+                .callables,
+            crate::libraries::Callables::None
+        ));
+        let public = match ModuleSymbols::for_file(&symbols, 0)
+            .resolve_symbols("two/label")
+            .callables
+        {
+            crate::libraries::Callables::Properties(properties) => properties.overloads,
+            _ => Vec::new(),
+        };
+        assert_eq!(public.len(), 1);
+        assert_eq!(public[0].source_key, Some((1, 4)));
+        assert!(public[0].owner.matches("two/SecondKt"));
     }
 
     #[test]

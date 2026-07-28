@@ -1,7 +1,7 @@
 //! `val` extension properties (`val Recv.name: T get() = …`) lower to a static getter `getName(Recv): T`
 //! (like an extension function), with `this` = the receiver; a read `x.name` becomes `getName(x)`. No
-//! backing field. `var` extension properties (custom setter) and extension-delegated properties skip
-//! cleanly. Round-tripped on the JVM.
+//! backing field. Mutable extension properties use the corresponding static setter. Round-tripped on
+//! the JVM.
 
 use super::common;
 
@@ -586,6 +586,189 @@ fn member_extension_property_resolution() {
             );
         }
     }
+}
+
+#[test]
+fn imported_extension_property_keeps_declaration_identity() {
+    let model = "\
+package sample.model
+
+class Item
+";
+    let first = "\
+package sample.first
+
+import sample.model.Item
+
+var Item.label: String
+    get() = \"OK\"
+    set(value) {}
+
+val <T> T.marker: String
+    get() = \"\"
+";
+    let second = "\
+package sample.second
+
+import sample.model.Item
+
+val Item.label: Int
+    get() = 7
+
+val Item.marker: String
+    get() = \"WRONG\"
+";
+    let entry = "\
+package sample.second
+
+import sample.first.label
+import sample.first.marker
+import sample.model.Item
+
+fun box(): String {
+    val item = Item()
+    item.label = \"ignored\"
+    val bound = item::label
+    bound.set(\"ignored\")
+    val unbound = Item::label
+    unbound.set(item, \"ignored\")
+    val arbitrary = Item()::label
+    arbitrary.set(\"ignored\")
+    return if (
+        item.label == \"OK\" &&
+        bound.get() == \"OK\" &&
+        unbound.get(item) == \"OK\" &&
+        arbitrary.get() == \"OK\" &&
+        item.marker == \"\"
+    ) \"OK\" else \"FAIL\"
+}
+";
+
+    common::expect_front_end_ok_files_with_stdlib(
+        &[model, first, second, entry],
+        "imported extension property",
+    );
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            ("Model", model),
+            ("First", first),
+            ("Second", second),
+            ("Entry", entry),
+        ],
+        "imported extension property",
+    );
+}
+
+#[test]
+fn aliased_extension_property_import_selects_declaration() {
+    let model = "package sample.model\nclass Item\n";
+    let first = "\
+package sample.first
+import sample.model.Item
+val Item.label: String get() = \"OK\"
+";
+    let second = "\
+package sample.second
+import sample.model.Item
+val Item.label: Int get() = 1
+";
+    let entry = "\
+package sample.use
+import sample.first.label as selectedLabel
+import sample.model.Item
+fun box(): String = Item().selectedLabel
+";
+
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            ("Model", model),
+            ("First", first),
+            ("Second", second),
+            ("Entry", entry),
+        ],
+        "aliased extension property",
+    );
+}
+
+#[test]
+fn cross_file_unit_extension_property_uses_value_descriptors() {
+    let model = "package sample.model\nclass Item(var touched: Boolean)\n";
+    let extension = "\
+package sample.extension
+import sample.model.Item
+var Item.signal: Unit
+    get() = Unit
+    set(value) { touched = value == Unit }
+";
+    let entry = "\
+package sample.use
+import sample.extension.signal
+import sample.model.Item
+fun box(): String {
+    val item = Item(false)
+    item.signal = Unit
+    val direct: Unit = item.signal
+    return if (item.touched && direct == Unit) \"OK\" else \"FAIL\"
+}
+";
+
+    common::expect_box_ok_files_with_stdlib(
+        &[("Model", model), ("Extension", extension), ("Entry", entry)],
+        "cross-file Unit extension property",
+    );
+}
+
+#[test]
+fn private_extension_properties_are_file_scoped() {
+    let first = "\
+package sample
+
+private val String.code: String
+    get() = \"O\"
+
+fun first(): String = \"\".code
+";
+    let second = "\
+package sample
+
+private val String.code: String
+    get() = \"K\"
+
+fun second(): String = \"\".code
+";
+    let entry = "\
+package sample
+
+fun box(): String = first() + second()
+";
+
+    common::expect_front_end_ok_files_with_stdlib(
+        &[first, second, entry],
+        "private extension properties",
+    );
+    common::expect_box_ok_files_with_stdlib(
+        &[("First", first), ("Second", second), ("Entry", entry)],
+        "private extension properties",
+    );
+}
+
+#[test]
+fn same_precedence_extension_properties_are_ambiguous() {
+    let diagnostics = common::front_end_diagnostics_files(
+        &[
+            "package one\nval String.code: String get() = \"one\"",
+            "package two\nval String.code: Int get() = 2",
+            "package use\nimport one.*\nimport two.*\nfun read(): Any = \"\".code",
+        ],
+        &[],
+        None,
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("overload resolution ambiguity")),
+        "{diagnostics:?}"
+    );
 }
 
 #[test]

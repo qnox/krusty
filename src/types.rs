@@ -496,6 +496,14 @@ pub enum Ty {
     TyParam(&'static str, &'static Ty),
 }
 
+pub(crate) fn stored_value_ty(ty: Ty) -> Ty {
+    if ty == Ty::Unit {
+        Ty::obj("kotlin/Unit")
+    } else {
+        ty
+    }
+}
+
 impl Ty {
     /// A class reference type from an internal name (no generic arguments).
     pub fn obj(internal: &str) -> Ty {

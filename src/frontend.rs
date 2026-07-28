@@ -608,6 +608,7 @@ mod tests {
                         visibility: Visibility::Private,
                         owner: "fixture/Container$Labels".into(),
                         receiver_rank: 0,
+                        source_key: None,
                     }],
                 }
             } else {

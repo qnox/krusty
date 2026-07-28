@@ -452,6 +452,7 @@ mod tests {
             visibility,
             owner,
             receiver_rank: 0,
+            source_key: None,
         }
     }
 
