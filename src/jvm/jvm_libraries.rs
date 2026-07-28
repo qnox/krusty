@@ -248,6 +248,16 @@ impl JvmLibraries {
         JvmLibraries { cp }
     }
 
+    fn library_const(value: &ConstVal) -> LibConst {
+        match value {
+            ConstVal::Int(value) => LibConst::Int(*value),
+            ConstVal::Long(value) => LibConst::Long(*value),
+            ConstVal::Float(value) => LibConst::Float(*value),
+            ConstVal::Double(value) => LibConst::Double(*value),
+            ConstVal::Str(value) => LibConst::Str(value.clone()),
+        }
+    }
+
     fn const_fields<F>(
         fields: &[FieldSig],
         mut ty: F,
@@ -259,13 +269,7 @@ impl JvmLibraries {
             .iter()
             .filter_map(|f| {
                 let ty = ty(f)?;
-                let value = match f.const_value.as_ref()? {
-                    ConstVal::Int(v) => LibConst::Int(*v),
-                    ConstVal::Long(v) => LibConst::Long(*v),
-                    ConstVal::Float(v) => LibConst::Float(*v),
-                    ConstVal::Double(v) => LibConst::Double(*v),
-                    ConstVal::Str(_) => return None,
-                };
+                let value = Self::library_const(f.const_value.as_ref()?);
                 Some((f.name.clone(), LibraryConst { ty, value }))
             })
             .collect()
@@ -2543,17 +2547,22 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
             let Some(ci) = self.cp.find_name(cur) else {
                 continue;
             };
-            if let Some(f) = ci.fields.iter().find(|f| {
-                f.name == name
-                    && f.access & 0x0008 != 0
-                    && f.access & 0x0001 != 0
-                    && f.const_value.is_none()
-            }) {
+            if let Some(f) = ci
+                .fields
+                .iter()
+                .find(|f| f.name == name && f.access & 0x0008 != 0 && f.access & 0x0001 != 0)
+            {
+                let ty = field_desc_to_ty(&f.descriptor);
+                let constant = f.const_value.as_ref().map(|value| LibraryConst {
+                    ty,
+                    value: Self::library_const(value),
+                });
                 return Some(crate::libraries::StaticFieldRef {
                     owner: cur,
                     name: name.to_string(),
                     descriptor: f.descriptor.clone(),
-                    ty: field_desc_to_ty(&f.descriptor),
+                    ty,
+                    constant,
                 });
             }
             if let Some(s) = ci.super_class {
