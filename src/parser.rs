@@ -1927,13 +1927,14 @@ impl<'a> Parser<'a> {
     }
 
     /// Hoist nested interfaces and supported interface subclasses.
-    fn register_interface_nested(&mut self, iface: &str) {
+    fn register_interface_nested(&mut self, iface: &str, modifiers: &[String]) {
         let start = self.file.decls.len();
         let mut nested = self.parse_nested_type_decl();
         let implements = nested.supertypes.iter().any(|s| s.name == iface)
             || nested.base_class.as_deref() == Some(iface);
         if nested.is_interface() || implements {
             self.reprefix_hoisted(iface, start);
+            nested.visibility = visibility_of(modifiers);
             nested.name = format!("{iface}.{}", nested.name);
             let id = self.file.add_decl(Decl::Class(nested));
             self.file.decls.push(id);
@@ -3573,6 +3574,7 @@ impl<'a> Parser<'a> {
                         let mut nested = self.parse_class();
                         self.reprefix_hoisted(&name, start);
                         nested.modality = modality_from_modifiers(&mods);
+                        nested.visibility = visibility_of(&mods);
                         nested.name = format!("{}.{}", name, nested.name);
                         if is_inner {
                             nested.inner_of = Some(name.clone());
@@ -3601,6 +3603,7 @@ impl<'a> Parser<'a> {
                         };
                         self.reprefix_hoisted(&name, start);
                         nested.is_data = true;
+                        nested.visibility = visibility_of(&mods);
                         nested.name = format!("{}.{}", name, nested.name);
                         let id = self.file.add_decl(Decl::Class(nested));
                         self.file.decls.push(id);
@@ -3622,6 +3625,7 @@ impl<'a> Parser<'a> {
                         let start = self.file.decls.len();
                         let mut nested = self.parse_interface();
                         self.reprefix_hoisted(&name, start);
+                        nested.visibility = visibility_of(&mods);
                         nested.name = format!("{}.{}", name, nested.name);
                         let id = self.file.add_decl(Decl::Class(nested));
                         self.file.decls.push(id);
@@ -3639,6 +3643,7 @@ impl<'a> Parser<'a> {
                         let start = self.file.decls.len();
                         let mut nested = self.parse_enum();
                         self.reprefix_hoisted(&name, start);
+                        nested.visibility = visibility_of(&mods);
                         nested.name = format!("{}.{}", name, nested.name);
                         let id = self.file.add_decl(Decl::Class(nested));
                         self.file.decls.push(id);
@@ -3650,6 +3655,7 @@ impl<'a> Parser<'a> {
                         let start = self.file.decls.len();
                         let mut nested = self.parse_object();
                         self.reprefix_hoisted(&name, start);
+                        nested.visibility = visibility_of(&mods);
                         nested.name = format!("{}.{}", name, nested.name);
                         let id = self.file.add_decl(Decl::Class(nested));
                         self.file.decls.push(id);
@@ -4031,7 +4037,7 @@ impl<'a> Parser<'a> {
                     // may call a private interface member through a synthetic accessor krusty doesn't
                     // synthesize, so those are still dropped (the file skips) rather than miscompiled.
                     TokenKind::KwClass => {
-                        self.register_interface_nested(&name);
+                        self.register_interface_nested(&name, &imods);
                     }
                     TokenKind::Ident
                         if matches!(self.text(), "object" | "interface")
@@ -4044,7 +4050,7 @@ impl<'a> Parser<'a> {
                                     || (t.kind == TokenKind::Ident && t.text(self.src) == "object")
                             })) =>
                     {
-                        self.register_interface_nested(&name);
+                        self.register_interface_nested(&name, &imods);
                     }
                     TokenKind::Ident if self.text() == "typealias" => {
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
@@ -4337,6 +4343,7 @@ impl<'a> Parser<'a> {
                     TokenKind::KwClass if !mods.iter().any(|m| m == "inner") => {
                         let mut nested = self.parse_class();
                         nested.modality = modality_from_modifiers(&mods);
+                        nested.visibility = visibility_of(&mods);
                         nested.name = format!("{}.{}", name, nested.name);
                         let id = self.file.add_decl(Decl::Class(nested));
                         self.file.decls.push(id);
@@ -4360,6 +4367,7 @@ impl<'a> Parser<'a> {
                         } else {
                             let mut nested = self.parse_class();
                             nested.is_data = true;
+                            nested.visibility = visibility_of(&mods);
                             nested.name = format!("{}.{}", name, nested.name);
                             let id = self.file.add_decl(Decl::Class(nested));
                             self.file.decls.push(id);
@@ -8709,6 +8717,37 @@ mod tests {
         assert_eq!(vis("p"), Visibility::Public);
         assert_eq!(vis("C"), Visibility::Internal);
         assert_eq!(vis("x"), Visibility::Private);
+    }
+
+    #[test]
+    fn nested_classifier_visibility_modifiers_captured() {
+        let mut diagnostics = DiagSink::new();
+        let source = "class Parent {\n\
+                          private class Hidden\n\
+                          protected class DerivedOnly\n\
+                          internal class ModuleOnly\n\
+                          class Visible\n\
+                      }\n";
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected: {}",
+            diagnostics.render("test", source)
+        );
+        let visibility = |name: &str| {
+            file.decls
+                .iter()
+                .find_map(|&declaration| match file.decl(declaration) {
+                    Decl::Class(class) if class.name == name => Some(class.visibility),
+                    _ => None,
+                })
+                .expect("nested classifier")
+        };
+        assert_eq!(visibility("Parent.Hidden"), Visibility::Private);
+        assert_eq!(visibility("Parent.DerivedOnly"), Visibility::Protected);
+        assert_eq!(visibility("Parent.ModuleOnly"), Visibility::Internal);
+        assert_eq!(visibility("Parent.Visible"), Visibility::Public);
     }
 
     #[test]

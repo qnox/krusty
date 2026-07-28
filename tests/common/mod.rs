@@ -1385,6 +1385,15 @@ pub fn run_box_against(tag: &str, lib_src: &str, main: &str) -> Option<String> {
     compile_and_run_box(main, "Main", &[libout, stdlib], jdk_modules().as_deref())
 }
 
+/// Frontend diagnostics for `main` against a kotlinc-built source dependency.
+#[allow(dead_code)]
+pub fn diagnostics_against(tag: &str, lib_src: &str, main: &str) -> Option<Vec<String>> {
+    let libout = compile_lib(tag, lib_src)?;
+    let stdlib = stdlib_jar()?;
+    let jdk = jdk_modules()?;
+    Some(front_end_diagnostics(main, &[libout, stdlib], Some(&jdk)))
+}
+
 /// Run a classpath fixture, skipping only when the external toolchain is unavailable.
 #[allow(dead_code)]
 pub fn expect_box_ok_against(tag: &str, lib_src: &str, main: &str) {
@@ -1397,8 +1406,11 @@ pub fn expect_box_ok_against(tag: &str, lib_src: &str, main: &str) {
     let Some(jdk) = jdk_modules() else {
         return;
     };
-    let output = compile_and_run_box(main, "Main", &[libout, stdlib], Some(&jdk))
-        .unwrap_or_else(|| panic!("{tag}: compile/run returned None"));
+    let classpath = [libout, stdlib];
+    let output = compile_and_run_box(main, "Main", &classpath, Some(&jdk)).unwrap_or_else(|| {
+        let diagnostics = front_end_diagnostics(main, &classpath, Some(&jdk));
+        panic!("{tag}: compile/run returned None; diagnostics: {diagnostics:?}")
+    });
     assert_eq!(output, "OK", "{tag}");
 }
 

@@ -710,9 +710,7 @@ struct ParsedValueParam {
 struct ParsedFunction {
     is_inline: bool,
     is_suspend: bool,
-    /// `true` when the Kotlin `Visibility` in `flags` is `PUBLIC` — the metadata-truth visibility, which
-    /// differs from the bytecode access flags for an `inline` function (private/synthetic in bytecode).
-    is_public: bool,
+    visibility: crate::types::Visibility,
     name_id: u64,
     jvm_sig: Option<(u64, u64)>,
     ret_class: Option<u64>,
@@ -861,7 +859,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
     Some(ParsedFunction {
         is_inline: flags & IS_INLINE_BIT != 0,
         is_suspend: flags & IS_SUSPEND_BIT != 0,
-        is_public: flags_visibility(flags) == VIS_PUBLIC,
+        visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
         name_id,
         jvm_sig,
         ret_class,
@@ -1188,18 +1186,15 @@ impl MetaValueParam {
     }
 }
 
-/// Bit-packed boolean flags for a [`MetaFn`], collapsing `is_public`/`is_inline`/`is_suspend`/
-/// `is_extension`/`ret_nullable` into one byte. Read through the `MetaFn` accessors of the same names;
-/// built with the `with_*` chain. Headroom for three more flags before the byte fills.
+/// Bit-packed boolean flags for a [`MetaFn`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MfnFlags(u8);
 
 impl MfnFlags {
-    const IS_PUBLIC: u8 = 1 << 0;
-    const IS_INLINE: u8 = 1 << 1;
-    const IS_SUSPEND: u8 = 1 << 2;
-    const IS_EXTENSION: u8 = 1 << 3;
-    const RET_NULLABLE: u8 = 1 << 4;
+    const IS_INLINE: u8 = 1 << 0;
+    const IS_SUSPEND: u8 = 1 << 1;
+    const IS_EXTENSION: u8 = 1 << 2;
+    const RET_NULLABLE: u8 = 1 << 3;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -1215,10 +1210,6 @@ impl MfnFlags {
         self.0 & mask != 0
     }
 
-    #[inline]
-    pub const fn with_is_public(self, on: bool) -> Self {
-        self.with(Self::IS_PUBLIC, on)
-    }
     #[inline]
     pub const fn with_is_inline(self, on: bool) -> Self {
         self.with(Self::IS_INLINE, on)
@@ -1249,8 +1240,9 @@ pub struct MetaFn {
     /// The JVM descriptor from the `method_signature` extension; `None` when metadata omits it (the
     /// caller may then fall back to a bytecode method of the same name, or compute it from proto types).
     pub jvm_desc: Option<&'static str>,
-    /// Bit-packed `is_public`/`is_inline`/`is_suspend`/`is_extension`/`ret_nullable` (read via the
-    /// accessors below). `is_extension` — whether this is an EXTENSION (a receiver of any kind, class or
+    pub visibility: crate::types::Visibility,
+    /// Bit-packed `is_inline`/`is_suspend`/`is_extension`/`ret_nullable` (read via the accessors below).
+    /// `is_extension` — whether this is an EXTENSION (a receiver of any kind, class or
     /// type parameter) vs a true top-level function; lets the classpath ext index avoid mis-indexing a
     /// top-level generic as an extension on its first parameter's type. `ret_nullable` — whether the
     /// Kotlin return type is nullable (`T?`, `Type.nullable`); the JVM descriptor/`Signature` erase this,
@@ -1273,7 +1265,7 @@ pub struct MetaFn {
 impl MetaFn {
     #[inline]
     pub fn is_public(&self) -> bool {
-        self.flags.has(MfnFlags::IS_PUBLIC)
+        self.visibility == crate::types::Visibility::Public
     }
     #[inline]
     pub fn is_inline(&self) -> bool {
@@ -1362,6 +1354,9 @@ pub struct MetaProp {
 /// distinguish the sources.
 #[derive(Clone, Debug)]
 pub struct KotlinMeta {
+    /// `Class.flags` visibility for a Kotlin class (`None` for plain Java classes and package facades).
+    /// JVM access flags cannot represent Kotlin `internal`, so classifier access must prefer this fact.
+    pub class_visibility: Option<crate::types::Visibility>,
     /// `Class.function` (field 9) — member/extension functions of a class kind. `Arc` slices so a
     /// consumer cache shares the decode instead of copying it.
     pub class_functions: std::sync::Arc<[MetaFn]>,
@@ -1389,6 +1384,7 @@ pub struct KotlinMeta {
 impl Default for KotlinMeta {
     fn default() -> Self {
         KotlinMeta {
+            class_visibility: None,
             class_functions: std::sync::Arc::from([]),
             package_functions: std::sync::Arc::from([]),
             class_properties: std::sync::Arc::from([]),
@@ -1406,7 +1402,8 @@ impl Default for KotlinMeta {
 impl KotlinMeta {
     /// Whether this classfile carried any Kotlin metadata at all.
     pub fn is_present(&self) -> bool {
-        !(self.class_functions.is_empty()
+        !(self.class_visibility.is_none()
+            && self.class_functions.is_empty()
             && self.package_functions.is_empty()
             && self.class_properties.is_empty()
             && self.package_properties.is_empty()
@@ -1447,7 +1444,10 @@ pub fn decode_metadata(
         };
     }
     if d1.is_empty() {
-        return KotlinMeta::default();
+        return KotlinMeta {
+            class_visibility: (k == Some(1)).then_some(crate::types::Visibility::Public),
+            ..KotlinMeta::default()
+        };
     }
     let bytes = decode_d1(d1);
     let (st_body, msg) = split_d1(&bytes);
@@ -1459,6 +1459,7 @@ pub fn decode_metadata(
         methods,
     };
     KotlinMeta {
+        class_visibility: (k == Some(1)).then(|| class_visibility(&ctx)),
         class_functions: decode_functions(&ctx, 9).into(),
         package_functions: decode_functions(&ctx, 3).into(),
         class_properties: decode_properties(&ctx, 10).into(),
@@ -1470,6 +1471,25 @@ pub fn decode_metadata(
         inline: inline_class(&ctx),
         multifile_parts: Vec::new(),
     }
+}
+
+/// Kotlin `Class.flags` visibility. The protobuf default is PUBLIC FINAL (`6`), so an omitted flags
+/// field must decode as public rather than internal.
+fn class_visibility(ctx: &MetaCtx<'_>) -> crate::types::Visibility {
+    let mut flags = 6u64;
+    let mut pb = Pb { b: ctx.msg, i: 0 };
+    while !pb.at_end() {
+        let Some(tag) = pb.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            (1, 0) => flags = pb.varint().unwrap_or(6),
+            (_, wire) => {
+                if pb.skip(wire).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    crate::types::Visibility::from_metadata(flags_visibility(flags))
 }
 
 /// Decode every `Function` (proto field `fn_field`: 9 in a `Class`, 3 in a `Package`) of this class's
@@ -1575,8 +1595,8 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64) -> Vec<MetaFn> {
                         kotlin_name,
                         jvm_name,
                         jvm_desc: jvm_desc.map(|s| intern(&s)),
+                        visibility: pf.visibility,
                         flags: MfnFlags::default()
-                            .with_is_public(pf.is_public)
                             .with_is_inline(pf.is_inline)
                             .with_is_suspend(pf.is_suspend)
                             .with_is_extension(pf.has_receiver)
@@ -1965,7 +1985,7 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
         let mut ret = None;
         let mut ret_nullable = false;
         let mut ret_body = None;
-        let mut flags = 0u64;
+        let mut flags = 6u64;
         let mut sig = (None, None);
         let mut receiver_class = None;
         let mut receiver_body = None;
@@ -1974,7 +1994,7 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
         while !p.at_end() {
             let Some(tag) = p.varint() else { break };
             match (tag >> 3, tag & 7) {
-                (1, 0) => flags = p.varint().unwrap_or(0),
+                (1, 0) => flags = p.varint().unwrap_or(6),
                 (2, 0) => name_id = p.varint(),
                 (3, 2) => {
                     let Some(n) = p.varint() else { break };
@@ -2905,5 +2925,6 @@ mod module_reader_tests {
             Some("kotlin/String".to_string())
         );
         assert!(properties[0].ret_nullable);
+        assert_eq!(properties[0].visibility, crate::types::Visibility::Public);
     }
 }

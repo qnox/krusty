@@ -14,7 +14,85 @@ use crate::libraries::{
     Origin, PropKind, PropertyInfo, SemanticPlatform,
 };
 use crate::symbol_source::SymbolSource;
-use crate::types::{Ty, TypeName, Visibility};
+use crate::types::{type_name, Ty, TypeName, Visibility};
+
+/// Result of inherited nested-classifier lookup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InheritedNestedClassifier {
+    NotFound,
+    Found(TypeName),
+    Ambiguous,
+}
+
+impl InheritedNestedClassifier {
+    pub(crate) fn found(self) -> Option<TypeName> {
+        match self {
+            Self::Found(internal) => Some(internal),
+            Self::NotFound | Self::Ambiguous => None,
+        }
+    }
+}
+
+/// Return a source class and its lexical owners, nearest first.
+pub(crate) fn lexical_enclosing_classifier_names(
+    owner: TypeName,
+    mut classifier_exists: impl FnMut(TypeName) -> bool,
+) -> Vec<TypeName> {
+    let rendered = owner.render();
+    let mut candidate = rendered.as_str();
+    let mut owners = Vec::new();
+    loop {
+        let internal = type_name(candidate);
+        if classifier_exists(internal) {
+            owners.push(internal);
+        }
+        let Some((enclosing, _)) = candidate.rsplit_once('$') else {
+            break;
+        };
+        candidate = enclosing;
+    }
+    owners
+}
+
+pub(crate) fn inherited_nested_classifier_name(
+    name: &str,
+    roots: Vec<TypeName>,
+    mut direct_supertypes: impl FnMut(TypeName) -> Vec<TypeName>,
+    mut classifier_exists: impl FnMut(TypeName) -> bool,
+) -> InheritedNestedClassifier {
+    if name.contains(['.', '/', '$']) {
+        return InheritedNestedClassifier::NotFound;
+    }
+    let mut level = roots;
+    let mut seen = std::collections::HashSet::new();
+    while !level.is_empty() {
+        let mut matches = std::collections::HashSet::new();
+        let mut next = Vec::new();
+        for owner in level {
+            if !seen.insert(owner) {
+                continue;
+            }
+            let candidate = type_name(&format!("{}${name}", owner.render()));
+            if classifier_exists(candidate) {
+                matches.insert(candidate);
+            }
+            next.extend(direct_supertypes(owner));
+        }
+        match matches.len() {
+            0 => level = next,
+            1 => {
+                return InheritedNestedClassifier::Found(
+                    matches
+                        .into_iter()
+                        .next()
+                        .expect("one inherited classifier"),
+                )
+            }
+            _ => return InheritedNestedClassifier::Ambiguous,
+        }
+    }
+    InheritedNestedClassifier::NotFound
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LambdaCallShape {
@@ -1112,12 +1190,18 @@ pub struct SymbolResolver<'a> {
     lib: &'a dyn SemanticPlatform,
     /// The aggregated resolution source: module declarations shadow library declarations of the same name.
     src: crate::symbol_source::CompositeSource<'a>,
+    /// The current compilation module, when present.
+    module: Option<&'a dyn SymbolSource>,
     /// The packages in scope for TOP-LEVEL function resolution (same-package, star/explicit imports,
     /// defaults). `None` disables the filter (a context with no import scope — signature inference).
     /// When `Some`, a top-level function resolves only if its facade's package is in scope, matching
     /// kotlinc: an unqualified top-level call binds ONLY to an imported/same-package/default function,
     /// not to any classpath function of that name.
     fn_scope: Option<FunctionScopeRef<'a>>,
+    /// Lexically enclosing classes, nearest first.
+    lexical_classes: Vec<TypeName>,
+    /// Package containing the current source declaration, for Java package-private classifier access.
+    access_package: Option<TypeName>,
 }
 
 #[derive(Clone, Copy)]
@@ -1137,11 +1221,11 @@ impl FunctionScopeRef<'_> {
     }
 }
 
-/// The receiver of a reference: a VALUE of some type (`x.name`), or a named TYPE (`Type(args)`,
-/// `Type.name(args)`). Reports only the receiver the caller already resolved.
+/// The receiver of a reference: a value, an implicit `this`, or a named type.
 #[derive(Clone, Copy)]
 pub enum SymRecv<'q> {
     Value(Ty),
+    ImplicitValue(Ty),
     Type(&'q str),
     TypeName(TypeName),
     /// No receiver — a plain `name(args)` resolved against the import scope's top-level (and same-facade
@@ -1325,7 +1409,10 @@ impl<'a> SymbolResolver<'a> {
         SymbolResolver {
             lib,
             src: crate::symbol_source::CompositeSource::new(vec![lib as &dyn SymbolSource]),
+            module: None,
             fn_scope: None,
+            lexical_classes: Vec::new(),
+            access_package: None,
         }
     }
 
@@ -1334,7 +1421,10 @@ impl<'a> SymbolResolver<'a> {
         SymbolResolver {
             lib,
             src: crate::symbol_source::CompositeSource::new(vec![lib as &dyn SymbolSource]),
+            module: None,
             fn_scope: Some(FunctionScopeRef::Flat(fn_scope)),
+            lexical_classes: Vec::new(),
+            access_package: None,
         }
     }
 
@@ -1345,7 +1435,10 @@ impl<'a> SymbolResolver<'a> {
         SymbolResolver {
             lib,
             src: crate::symbol_source::CompositeSource::new(vec![lib as &dyn SymbolSource]),
+            module: None,
             fn_scope: Some(FunctionScopeRef::Imports(fn_scope)),
+            lexical_classes: Vec::new(),
+            access_package: None,
         }
     }
 
@@ -1358,7 +1451,10 @@ impl<'a> SymbolResolver<'a> {
         SymbolResolver {
             lib,
             src: crate::symbol_source::CompositeSource::new(vec![module, lib as &dyn SymbolSource]),
+            module: Some(module),
             fn_scope: Some(FunctionScopeRef::Flat(fn_scope)),
+            lexical_classes: Vec::new(),
+            access_package: None,
         }
     }
 
@@ -1370,8 +1466,71 @@ impl<'a> SymbolResolver<'a> {
         SymbolResolver {
             lib,
             src: crate::symbol_source::CompositeSource::new(vec![module, lib as &dyn SymbolSource]),
+            module: Some(module),
             fn_scope: Some(FunctionScopeRef::Imports(fn_scope)),
+            lexical_classes: Vec::new(),
+            access_package: None,
         }
+    }
+
+    pub(crate) fn with_access_context(mut self, package: TypeName, classes: Vec<TypeName>) -> Self {
+        self.access_package = Some(package);
+        self.lexical_classes = classes;
+        self
+    }
+
+    fn member_receiver_accessible(&self, receiver: Ty) -> bool {
+        let Some(internal) = receiver.kotlin_class_internal() else {
+            return false;
+        };
+        let visibility = self.src.classifier_visibility(internal);
+        if visibility == Some(crate::types::Visibility::Public)
+            || (visibility.is_none()
+                && self
+                    .src
+                    .resolve_type_name(internal)
+                    .is_some_and(|shape| shape.is_public))
+        {
+            return true;
+        }
+        if self
+            .module
+            .is_some_and(|module| module.classifier_visibility(internal).is_some())
+        {
+            return true;
+        }
+        if self.access_package.is_some_and(|package| {
+            self.src
+                .classifier_accessible_from_package(internal, package)
+        }) {
+            return true;
+        }
+        let rendered = internal.render();
+        let Some(simple) = rendered.rsplit_once('$').map(|(_, simple)| simple) else {
+            return false;
+        };
+        self.lexical_classes.iter().copied().any(|owner| {
+            inherited_nested_classifier_name(
+                simple,
+                self.src
+                    .direct_supertypes(Ty::obj_name(owner))
+                    .into_iter()
+                    .filter_map(Ty::kotlin_class_internal)
+                    .collect(),
+                |candidate_owner| {
+                    self.src
+                        .direct_supertypes(Ty::obj_name(candidate_owner))
+                        .into_iter()
+                        .filter_map(Ty::kotlin_class_internal)
+                        .collect()
+                },
+                |candidate| {
+                    self.src
+                        .inherited_classifier_shape(candidate, owner)
+                        .is_some()
+                },
+            ) == InheritedNestedClassifier::Found(internal)
+        })
     }
 
     /// Whether `internal` names a `@JvmInline value`/inline class — resolved through the FEDERATED source
@@ -1576,6 +1735,7 @@ impl<'a> SymbolResolver<'a> {
                 fn_scope: self.fn_scope,
                 current_source_file: None,
                 source: &self.src,
+                member_access: None,
             },
         ) else {
             return Vec::new();
@@ -1626,15 +1786,22 @@ impl<'a> SymbolResolver<'a> {
     ) -> Option<Symbol> {
         debug_assert!(integer_literals.is_empty() || integer_literals.len() == args.len());
         debug_assert!(lambda_literals.is_empty() || lambda_literals.len() == args.len());
+        let implicit_value = matches!(recv, SymRecv::ImplicitValue(_));
         match recv {
-            SymRecv::Value(ty) => {
+            SymRecv::Value(ty) | SymRecv::ImplicitValue(ty) => {
                 // Resolve every facet the name supports on this receiver; a name can support several (a
                 // Java zero-arg method is a property read AND a callable). Each facet is exactly the
                 // former per-use resolution, so the caller's chosen facet behaves as before.
-                let (call, read, write, method_ref, property_ref) = if ty.is_nullable() {
-                    (None, None, None, None, None)
-                } else {
-                    (
+                let member_receiver_accessible =
+                    !ty.is_nullable() && self.member_receiver_accessible(ty);
+                let member_access = MemberAccess {
+                    source: &self.src,
+                    module: self.module,
+                    lexical_classes: &self.lexical_classes,
+                    receiver: (!implicit_value).then_some(ty),
+                };
+                let call = member_receiver_accessible
+                    .then(|| {
                         resolve_instance_member(
                             self.lib,
                             ty,
@@ -1642,13 +1809,22 @@ impl<'a> SymbolResolver<'a> {
                             args,
                             integer_literals,
                             lambda_literals,
-                        ),
-                        resolve_property_member(self.lib, ty, name),
-                        resolve_property_setter(self.lib, ty, name),
-                        resolve_instance_ref(self.lib, ty, name),
-                        resolve_property_ref(self.lib, ty, name),
-                    )
-                };
+                            Some(&member_access),
+                        )
+                    })
+                    .flatten();
+                let read = member_receiver_accessible
+                    .then(|| resolve_property_member(self.lib, ty, name, Some(&member_access)))
+                    .flatten();
+                let write = member_receiver_accessible
+                    .then(|| resolve_property_setter(self.lib, ty, name, Some(&member_access)))
+                    .flatten();
+                let method_ref = member_receiver_accessible
+                    .then(|| resolve_instance_ref(self.lib, ty, name, Some(&member_access)))
+                    .flatten();
+                let property_ref = member_receiver_accessible
+                    .then(|| resolve_property_ref(self.lib, ty, name, Some(&member_access)))
+                    .flatten();
                 // The classpath EXTENSION callable for `recv.name(args)`: one extension selection (admits
                 // `@InlineOnly` splice candidates — a plain and an inline call resolve identically, only the
                 // emitter differs). A same-module extension emits through the module path, not a library
@@ -1665,6 +1841,7 @@ impl<'a> SymbolResolver<'a> {
                         fn_scope: self.fn_scope,
                         current_source_file: None,
                         source: &self.src,
+                        member_access: None,
                     },
                 )
                 .filter(|o| !matches!(o.callable.origin, Origin::Module { .. }))
@@ -1682,10 +1859,18 @@ impl<'a> SymbolResolver<'a> {
                 // is the whole candidate family `select_overload` picks from — a caller inspecting the set
                 // (named-argument mapping, default-argument selection, return agreement, member-vs-extension
                 // dispatch) reads it here and filters by `kind`/`receiver_rank` as it needs.
-                let mut overloads = if ty.is_nullable() {
-                    Vec::new()
+                let mut overloads = if member_receiver_accessible {
+                    self.src
+                        .member_overloads(ty, name)
+                        .overloads
+                        .into_iter()
+                        .filter(|overload| {
+                            member_access
+                                .allows(overload.visibility, overload.callable.owner_type())
+                        })
+                        .collect()
                 } else {
-                    self.src.member_overloads(ty, name).overloads
+                    Vec::new()
                 };
                 if self.fn_scope.is_some() {
                     overloads.extend(
@@ -1757,12 +1942,25 @@ impl<'a> SymbolResolver<'a> {
                 type_args,
             ),
             SymRecv::TypeName(internal) => {
+                if !self.member_receiver_accessible(Ty::obj_name(internal)) {
+                    return None;
+                }
+                let access = MemberAccess {
+                    source: &self.src,
+                    module: self.module,
+                    lexical_classes: &self.lexical_classes,
+                    receiver: Some(Ty::obj_name(internal)),
+                };
                 if name.is_empty() {
                     // `Type(args)` — the type's constructor, real or synthesized.
                     resolve_constructor_name(self.lib, internal, args)
+                        .filter(|member| access.allows(member.visibility, internal))
                         .map(Symbol::Constructor)
                         .or_else(|| {
                             resolve_synthetic_constructor_name(self.lib, internal, args)
+                                .filter(|constructor| {
+                                    access.allows(constructor.visibility, internal)
+                                })
                                 .map(Symbol::SyntheticConstructor)
                         })
                 } else {
@@ -1775,6 +1973,7 @@ impl<'a> SymbolResolver<'a> {
                         args,
                         integer_literals,
                         lambda_literals,
+                        Some(&access),
                     )
                     .map(Symbol::Instance)
                     .or_else(|| {
@@ -1783,9 +1982,8 @@ impl<'a> SymbolResolver<'a> {
                             &self.src,
                             internal,
                             name,
-                            args,
-                            integer_literals,
-                            lambda_literals,
+                            CallArgs::new(args, integer_literals, lambda_literals),
+                            Some(&access),
                         )
                         .map(Symbol::Companion)
                     })
@@ -1814,8 +2012,24 @@ impl<'a> SymbolResolver<'a> {
                 fn_scope: self.fn_scope,
                 current_source_file,
                 source: &self.src,
+                member_access: None,
             },
         )
+    }
+
+    pub(crate) fn resolve_super_instance(
+        &self,
+        internal: TypeName,
+        name: &str,
+        args: &[Ty],
+    ) -> Option<LibraryMember> {
+        let access = MemberAccess {
+            source: &self.src,
+            module: self.module,
+            lexical_classes: &self.lexical_classes,
+            receiver: None,
+        };
+        resolve_instance_name(self.lib, internal, name, args, &[], &[], Some(&access))
     }
 
     /// Overload-resolve a top-level call against an already-built [`FunctionSet`] (from the resolver's
@@ -2542,6 +2756,15 @@ fn resolve_constructor_name(
         );
         return None;
     };
+    resolve_constructor_from_type(lib, internal, &t, args)
+}
+
+pub(crate) fn resolve_constructor_from_type(
+    lib: &dyn SemanticPlatform,
+    internal: TypeName,
+    t: &crate::libraries::LibraryType,
+    args: &[Ty],
+) -> Option<LibraryMember> {
     crate::trace_compiler!(
         "value_classes",
         "resolve_constructor {internal} ctors={:?} args={args:?}",
@@ -2695,6 +2918,8 @@ pub struct SyntheticCtorCall {
     pub provided: usize,
     /// The default bitmask (bit `i` set = param `i` omitted), present only in the default-arg shape.
     pub mask: Option<i32>,
+    /// Source visibility of the synthetic constructor.
+    pub visibility: crate::types::Visibility,
 }
 
 /// The classpath default-value synthetic constructor `<init>(<params…>, int mask, DefaultConstructorMarker)`
@@ -2708,13 +2933,23 @@ pub(crate) fn synthetic_default_ctor_name(
     source: &dyn SymbolSource,
     internal: TypeName,
     arity: usize,
-) -> Option<(String, Vec<Ty>)> {
+) -> Option<(String, Vec<Ty>, crate::types::Visibility)> {
     let t = source.resolve_type_name(internal)?;
-    let m = t
-        .constructors
-        .iter()
-        .find(|m| has_default_tail(&m.params, arity, is_default_ctor_marker))?;
-    Some((m.descriptor.clone(), m.params[..arity].to_vec()))
+    synthetic_default_ctor_from_type(&t, arity)
+}
+
+pub(crate) fn synthetic_default_ctor_from_type(
+    t: &crate::libraries::LibraryType,
+    arity: usize,
+) -> Option<(String, Vec<Ty>, crate::types::Visibility)> {
+    let m = t.constructors.iter().find(|m| {
+        !m.descriptor.is_empty() && has_default_tail(&m.params, arity, is_default_ctor_marker)
+    })?;
+    Some((
+        m.descriptor.clone(),
+        m.params[..arity].to_vec(),
+        m.visibility,
+    ))
 }
 
 /// The classpath default-value synthetic for a MEMBER — `name$default(Owner, <params…>, int mask,
@@ -2772,12 +3007,22 @@ fn resolve_synthetic_constructor_name(
     args: &[Ty],
 ) -> Option<SyntheticCtorCall> {
     let t = lib.resolve_type_name(internal)?;
+    resolve_synthetic_constructor_from_type(lib, internal, &t, args)
+}
+
+pub(crate) fn resolve_synthetic_constructor_from_type(
+    lib: &dyn SemanticPlatform,
+    internal: TypeName,
+    t: &crate::libraries::LibraryType,
+    args: &[Ty],
+) -> Option<SyntheticCtorCall> {
     let erased = value_erased_args(lib, args);
     for m in &t.constructors {
-        if m.params
-            .last()
-            .copied()
-            .is_none_or(|p| !is_default_ctor_marker(p))
+        if m.descriptor.is_empty()
+            || m.params
+                .last()
+                .copied()
+                .is_none_or(|p| !is_default_ctor_marker(p))
         {
             continue;
         }
@@ -2825,6 +3070,7 @@ fn resolve_synthetic_constructor_name(
             real_params: real_params.to_vec(),
             provided: erased.len(),
             mask,
+            visibility: m.visibility,
         });
     }
     None
@@ -2836,18 +3082,25 @@ fn resolve_companion_name(
     src: &dyn SymbolSource,
     internal: TypeName,
     name: &str,
-    args: &[Ty],
-    integer_literals: &[bool],
-    lambda_literals: &[bool],
+    args: CallArgs<'_>,
+    member_access: Option<&MemberAccess<'_>>,
 ) -> Option<LibraryMember> {
+    let CallArgs {
+        types: args,
+        integer_literals,
+        lambda_literals,
+    } = args;
     let t = lib.resolve_type_name(internal)?;
-    if !t.is_public {
-        return None;
-    }
     best_companion_overload(
         lib,
         src,
-        t.companion.iter(),
+        t.companion.iter().filter(|member| {
+            member_visible(
+                member_access,
+                member.visibility,
+                member.owner.unwrap_or(internal),
+            )
+        }),
         name,
         args,
         integer_literals,
@@ -2867,6 +3120,7 @@ fn resolve_instance_name(
     args: &[Ty],
     integer_literals: &[bool],
     lambda_literals: &[bool],
+    member_access: Option<&MemberAccess<'_>>,
 ) -> Option<LibraryMember> {
     select_instance_info(
         lib,
@@ -2875,6 +3129,7 @@ fn resolve_instance_name(
         args,
         integer_literals,
         lambda_literals,
+        member_access,
     )
     .map(|o| {
         let ret = o.ret.apply(o.callable.ret);
@@ -2885,11 +3140,17 @@ fn resolve_instance_name(
 /// Resolve a library instance member for a BOUND callable reference (`"KOTLIN"::get`) — where there are
 /// no call arguments to drive overload resolution. Returns the UNIQUE fixed-arity overload of `name` on
 /// `internal`, or `None` when the member is absent, defaulted/vararg, or ambiguous.
-fn resolve_instance_ref(lib: &dyn SemanticPlatform, recv: Ty, name: &str) -> Option<LibraryMember> {
+fn resolve_instance_ref(
+    lib: &dyn SemanticPlatform,
+    recv: Ty,
+    name: &str,
+    member_access: Option<&MemberAccess<'_>>,
+) -> Option<LibraryMember> {
     let mut fixed = lib
         .member_overloads(recv, name)
         .overloads
         .into_iter()
+        .filter(|o| member_visible(member_access, o.visibility, o.callable.owner_type()))
         .filter(|o| o.call_sig.requires_all_args(o.callable.params.len()));
     let o = fixed.next()?;
     // Duplicate facts for the same signature are not ambiguous; distinct signatures are.
@@ -2952,6 +3213,7 @@ fn resolve_property_ref(
     lib: &dyn SemanticPlatform,
     recv: Ty,
     name: &str,
+    member_access: Option<&MemberAccess<'_>>,
 ) -> Option<ResolvedPropertyRef> {
     if matches!(recv, Ty::TyParam(..) | Ty::Nullable(..))
         || recv.kotlin_class_internal() == Some(crate::types::wk::any())
@@ -2961,7 +3223,7 @@ fn resolve_property_ref(
     if !lib.member_is_property(recv, name) {
         return None;
     }
-    let resolved = resolve_property_member(lib, recv, name)?;
+    let resolved = resolve_property_member(lib, recv, name, member_access)?;
     if resolved.suspend {
         return None;
     }
@@ -2969,6 +3231,7 @@ fn resolve_property_ref(
         .property_members(recv, name)
         .overloads
         .into_iter()
+        .filter(|property| member_visible(member_access, property.visibility, property.owner))
         .min_by_key(|property| property.receiver_rank);
     let (getter, setter) = if let Some(property) = property {
         (
@@ -2989,7 +3252,7 @@ fn resolve_property_ref(
                 member.physical_ret,
                 member.descriptor,
             ),
-            resolve_property_setter(lib, recv, name),
+            resolve_property_setter(lib, recv, name, member_access),
         )
     };
     let direct_member = |callable: &LibraryCallable| {
@@ -3043,8 +3306,17 @@ fn resolve_instance_member(
     args: &[Ty],
     integer_literals: &[bool],
     lambda_literals: &[bool],
+    member_access: Option<&MemberAccess<'_>>,
 ) -> Option<ResolvedMember> {
-    let o = select_instance_info(lib, recv, name, args, integer_literals, lambda_literals)?;
+    let o = select_instance_info(
+        lib,
+        recv,
+        name,
+        args,
+        integer_literals,
+        lambda_literals,
+        member_access,
+    )?;
     let ret = o
         .generic_sig
         .as_ref()
@@ -3069,6 +3341,7 @@ fn property_getter_via_query(
     lib: &dyn SemanticPlatform,
     recv: Ty,
     property: &str,
+    member_access: Option<&MemberAccess<'_>>,
 ) -> Option<ResolvedMember> {
     // A value-class-typed property's getter is `@JvmName`-mangled (`getId-<hash>`) and erases its return
     // to the underlying type; resolving it as a plain member would type the read as the underlying, not
@@ -3077,11 +3350,14 @@ fn property_getter_via_query(
         .property_members(recv, property)
         .overloads
         .into_iter()
-        .filter(|property| property.context_count == 0)
+        .filter(|property| {
+            property.context_count == 0
+                && member_visible(member_access, property.visibility, property.owner)
+        })
         .min_by_key(|p| p.receiver_rank)
         .map(|p| p.getter.name)
         .filter(|getter| !getter.contains('-'))?;
-    resolve_instance_member(lib, recv, &getter, &[], &[], &[])
+    resolve_instance_member(lib, recv, &getter, &[], &[], &[], member_access)
         .filter(|m| m.ret.is_read_value_result())
 }
 
@@ -3092,13 +3368,14 @@ fn resolve_property_member(
     lib: &dyn SemanticPlatform,
     recv: Ty,
     property: &str,
+    member_access: Option<&MemberAccess<'_>>,
 ) -> Option<ResolvedMember> {
-    property_getter_via_query(lib, recv, property)
-        .or_else(|| resolve_instance_member(lib, recv, property, &[], &[], &[]))
+    property_getter_via_query(lib, recv, property, member_access)
+        .or_else(|| resolve_instance_member(lib, recv, property, &[], &[], &[], member_access))
         .filter(|m| m.ret.is_read_value_result())
         .or_else(|| {
             let getter = lib.physical_property_getter_name(property)?;
-            resolve_instance_member(lib, recv, &getter, &[], &[], &[])
+            resolve_instance_member(lib, recv, &getter, &[], &[], &[], member_access)
                 .filter(|m| m.ret.is_read_value_result())
         })
         .or_else(|| {
@@ -3109,6 +3386,13 @@ fn resolve_property_member(
             let member = lib
                 .resolve_type_name(internal)?
                 .value_class_property(property)
+                .filter(|member| {
+                    member_visible(
+                        member_access,
+                        member.visibility,
+                        member.owner.unwrap_or(internal),
+                    )
+                })
                 .cloned()?;
             let ret = member.ret;
             Some(ResolvedMember {
@@ -3130,12 +3414,16 @@ fn resolve_property_setter(
     lib: &dyn SemanticPlatform,
     recv: Ty,
     property: &str,
+    member_access: Option<&MemberAccess<'_>>,
 ) -> Option<LibraryCallable> {
     let setter = lib
         .property_members(recv, property)
         .overloads
         .into_iter()
-        .filter(|property| property.context_count == 0)
+        .filter(|property| {
+            property.context_count == 0
+                && member_visible(member_access, property.visibility, property.owner)
+        })
         .min_by_key(|p| p.receiver_rank)
         .and_then(|p| p.setter)?;
     if setter.name.contains('-') {
@@ -3157,6 +3445,7 @@ fn select_instance_info(
     args: &[Ty],
     integer_literals: &[bool],
     lambda_literals: &[bool],
+    member_access: Option<&MemberAccess<'_>>,
 ) -> Option<FunctionInfo> {
     select_overload(
         lib,
@@ -3170,6 +3459,7 @@ fn select_instance_info(
             fn_scope: None,
             current_source_file: None,
             source: lib,
+            member_access,
         },
     )
 }
@@ -3425,11 +3715,12 @@ fn fn_in_scope(o: &FunctionInfo, fn_scope: Option<FunctionScopeRef<'_>>) -> bool
 /// admitted (the bytecode inliner), and the packages in scope for an extension (`None` = unscoped). Both
 /// only affect EXTENSION selection — a member is always visible on its type.
 #[derive(Clone, Copy)]
-struct ExtCtx<'a> {
+struct ExtCtx<'a, 'm> {
     allow_must_inline: bool,
     fn_scope: Option<FunctionScopeRef<'a>>,
     current_source_file: Option<u32>,
     source: &'a dyn SymbolSource,
+    member_access: Option<&'m MemberAccess<'a>>,
 }
 
 fn source_extension_visible_from(o: &FunctionInfo, current_source_file: Option<u32>) -> bool {
@@ -3447,6 +3738,50 @@ fn source_extension_visible_from(o: &FunctionInfo, current_source_file: Option<u
             .is_some_and(|((declaring, _), current)| declaring == current),
         Visibility::Protected | Visibility::Public => false,
     }
+}
+
+struct MemberAccess<'a> {
+    source: &'a dyn SymbolSource,
+    module: Option<&'a dyn SymbolSource>,
+    lexical_classes: &'a [TypeName],
+    receiver: Option<Ty>,
+}
+
+impl MemberAccess<'_> {
+    fn allows(&self, visibility: crate::types::Visibility, owner: TypeName) -> bool {
+        use crate::types::Visibility;
+        match visibility {
+            Visibility::Public => true,
+            Visibility::Internal => self
+                .module
+                .is_some_and(|module| module.classifier_visibility(owner).is_some()),
+            Visibility::Private => self.lexical_classes.contains(&owner),
+            Visibility::Protected => self.lexical_classes.iter().copied().any(|enclosing| {
+                if enclosing == owner {
+                    return true;
+                }
+                let caller_is_subclass = ReceiverMro::new(self.source, Ty::obj_name(enclosing))
+                    .rank(self.source, Ty::obj_name(owner))
+                    .is_some();
+                let receiver_is_caller = self.receiver.is_none_or(|receiver| {
+                    ReceiverMro::new(self.source, receiver)
+                        .rank(self.source, Ty::obj_name(enclosing))
+                        .is_some()
+                });
+                caller_is_subclass && receiver_is_caller
+            }),
+        }
+    }
+}
+
+fn member_visible(
+    access: Option<&MemberAccess<'_>>,
+    visibility: crate::types::Visibility,
+    owner: TypeName,
+) -> bool {
+    access.map_or(visibility == crate::types::Visibility::Public, |access| {
+        access.allows(visibility, owner)
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -3525,7 +3860,7 @@ fn select_overload(
     args: CallArgs<'_>,
     type_args: &[Ty],
     kind: FnKind,
-    ext: ExtCtx,
+    ext: ExtCtx<'_, '_>,
 ) -> Option<FunctionInfo> {
     let src = ext.source;
     let CallArgs {
@@ -3533,14 +3868,6 @@ fn select_overload(
         integer_literals,
         lambda_literals,
     } = args;
-    // A MEMBER call needs a public class receiver; an EXTENSION resolves on any receiver (primitives,
-    // type variables, nullable types) that may have no `resolve_type` entry, so gate only members.
-    if kind == FnKind::Member {
-        let internal = recv.kotlin_class_internal()?;
-        if !lib.resolve_type_name(internal)?.is_public {
-            return None;
-        }
-    }
     let allow_must_inline = ext.allow_must_inline;
     // EXTENSION candidates come from the ONE query — union `resolve_symbols`' function callables over the
     // in-scope packages (scope-pruned, tree-driven), so an unqualified extension binds only when its
@@ -3609,6 +3936,8 @@ fn select_overload(
         std::collections::BTreeMap::new();
     for o in overloads.iter().copied().filter(|&o| {
         o.kind == kind
+            && (kind != FnKind::Member
+                || member_visible(ext.member_access, o.visibility, o.callable.owner_type()))
             && (kind != FnKind::Extension
                 || (o.receiver_rank != u32::MAX
                     && (source_extension_visible_from(o, ext.current_source_file)
@@ -4105,7 +4434,9 @@ fn fun_return_compatible(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::libraries::{CallSig, FunctionSet, LibraryCallable, Origin, TypeKind};
+    use crate::libraries::{
+        CallSig, FunctionSet, LibraryCallable, LibraryMember, LibraryType, Origin, TypeKind,
+    };
     use crate::symbol_source::SymbolSource;
     use crate::types::type_name;
 
@@ -4222,6 +4553,30 @@ mod tests {
         );
     }
 
+    fn fake_library_type(supertypes: Vec<String>, constructors: Vec<LibraryMember>) -> LibraryType {
+        LibraryType {
+            is_public: true,
+            kind: TypeKind::Class,
+            supertypes: supertypes.into(),
+            constructors,
+            members: vec![],
+            companion: vec![],
+            companion_consts: std::collections::HashMap::new(),
+            sam_method: None,
+            companion_object: None,
+            value_companion_fns: Vec::new(),
+            value_underlying: None,
+            alias_target: None,
+            type_params: Vec::new(),
+            sealed_subclasses: crate::types::TypeNameList::new(),
+            enum_entries: Vec::new(),
+            value_ctor_has_default: false,
+            ctor_named_params: Vec::new(),
+            value_class_properties: Vec::new(),
+            retention: None,
+        }
+    }
+
     struct FakeSource {
         name: &'static str,
         receiver: Option<Ty>,
@@ -4261,27 +4616,9 @@ mod tests {
                 "kotlin/UInt" | "demo/Box" => vec!["kotlin/Any".to_string()],
                 _ => return None,
             };
-            Some(crate::libraries::LibraryType {
-                is_public: true,
-                kind: TypeKind::Class,
-                supertypes: supertypes.into(),
-                constructors: vec![],
-                members: vec![],
-                companion: vec![],
-                companion_consts: std::collections::HashMap::new(),
-                sam_method: None,
-                companion_object: None,
-                value_companion_fns: Vec::new(),
-                value_underlying: (internal == "kotlin/UInt").then_some(Ty::Int),
-                alias_target: None,
-                type_params: Vec::new(),
-                sealed_subclasses: crate::types::TypeNameList::new(),
-                enum_entries: Vec::new(),
-                value_ctor_has_default: false,
-                ctor_named_params: Vec::new(),
-                value_class_properties: Vec::new(),
-                retention: None,
-            })
+            let mut ty = fake_library_type(supertypes, Vec::new());
+            ty.value_underlying = (internal == "kotlin/UInt").then_some(Ty::Int);
+            Some(ty)
         }
     }
 
@@ -4300,6 +4637,35 @@ mod tests {
     }
 
     impl crate::runtime::TargetRuntime for FakeSource {}
+
+    #[test]
+    fn declaration_shapes_are_not_emittable_synthetic_constructors() {
+        let plain = LibraryMember::new("<init>".into(), Vec::new(), Ty::Unit, String::new());
+        let marker = LibraryMember::new(
+            "<init>".into(),
+            vec![
+                Ty::Int,
+                Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"),
+            ],
+            Ty::Unit,
+            String::new(),
+        );
+        let classifier = fake_library_type(Vec::new(), vec![plain, marker]);
+        let source = FakeSource {
+            name: "",
+            receiver: None,
+            info: top_level_nullable_string_info(),
+        };
+
+        assert!(synthetic_default_ctor_from_type(&classifier, 0).is_none());
+        assert!(resolve_synthetic_constructor_from_type(
+            &source,
+            type_name("demo/Category"),
+            &classifier,
+            &[],
+        )
+        .is_none());
+    }
 
     fn top_level_default_uint_info() -> FunctionInfo {
         let callable = LibraryCallable {
@@ -4966,7 +5332,7 @@ mod tests {
             info: member_nullable_string_info(),
         };
         let resolved =
-            resolve_instance_member(&source, Ty::obj("demo/Box"), "maybe", &[], &[], &[])
+            resolve_instance_member(&source, Ty::obj("demo/Box"), "maybe", &[], &[], &[], None)
                 .expect("nullable member should resolve");
         assert_eq!(resolved.ret, Ty::nullable(Ty::String));
         assert_eq!(resolved.member.physical_ret, Ty::String);
@@ -4980,7 +5346,7 @@ mod tests {
             info: member_metadata_class_info(),
         };
         let resolved =
-            resolve_instance_member(&source, Ty::obj("demo/Box"), "names", &[], &[], &[])
+            resolve_instance_member(&source, Ty::obj("demo/Box"), "names", &[], &[], &[], None)
                 .expect("member with metadata return class should resolve");
         assert_eq!(
             resolved.ret,

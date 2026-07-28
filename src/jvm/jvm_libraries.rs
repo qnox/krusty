@@ -23,6 +23,35 @@ use crate::symbol_resolver::{ty_subst, ty_subst_all};
 use crate::symbol_source::{InheritanceShape, SymbolSource};
 use crate::types::{intern, type_name, Ty, TypeName, TypeNameList};
 
+fn effective_class_access(class: &super::classreader::ClassInfo) -> u16 {
+    class
+        .inner_classes
+        .iter()
+        .find(|entry| type_name(&entry.inner) == class.this_class)
+        .map(|entry| entry.access)
+        .unwrap_or(class.access)
+}
+
+fn inherited_class_access(
+    class: &super::classreader::ClassInfo,
+    internal_name: TypeName,
+) -> Option<u16> {
+    let nested = super::jvm_class_map::to_jvm_type_name(internal_name).render();
+    let (outer, _) = nested.rsplit_once('$')?;
+    class
+        .inner_classes
+        .iter()
+        .find(|entry| entry.inner == nested && entry.outer.as_deref() == Some(outer))
+        .map(|entry| entry.access)
+}
+
+fn internal_package(internal: TypeName) -> String {
+    let rendered = super::jvm_class_map::to_jvm_type_name(internal).render();
+    rendered
+        .rsplit_once('/')
+        .map_or_else(String::new, |(package, _)| package.to_string())
+}
+
 /// The `kotlin/…Array` classifier name for an array `Ty` — a primitive specialized array
 /// (`kotlin/IntArray`) or the boxed `Array<T>` (`kotlin/Array`). `None` for a non-array type. Arrays are
 /// `Obj` types carrying their class name directly, so this is a straight class-name match.
@@ -813,6 +842,13 @@ impl JvmLibraries {
                 // infer a generic return from the receiver's type arguments (`Repo<Config>.load(): Config`).
                 member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
                 member.set_suspend(self.cp.is_suspend_method_name(internal_name, &m.name));
+                let value_arity = member
+                    .params
+                    .len()
+                    .saturating_sub(usize::from(member.suspend()));
+                if let Some(metadata) = member_meta(&m.name, value_arity) {
+                    member.visibility = metadata.visibility;
+                }
                 // A `suspend` member's descriptor erases its return to `Object` (the CPS convention). Recover
                 // the LOGICAL return from `@Metadata` (`Int`, not `Object`) so a caller unboxes the suspension
                 // result — keeping the erased type as `physical_ret` for the emitter.
@@ -918,6 +954,7 @@ impl JvmLibraries {
                 };
                 let mut member =
                     LibraryMember::new(mf.kotlin_name.clone(), logical, ret, desc.to_string());
+                member.visibility = mf.visibility;
                 member.physical_name = Some(mf.jvm_name.clone());
                 member.physical_ret = physical_ret;
                 member.set_ret_nullable(mf.ret_nullable());
@@ -1859,6 +1896,68 @@ impl SymbolSource for JvmLibraries {
         built
     }
 
+    fn classifier_visibility(&self, internal_name: TypeName) -> Option<Visibility> {
+        let jvm_name = super::jvm_class_map::to_jvm_type_name(internal_name);
+        let class = self.cp.find_name(jvm_name)?;
+        if let Some(visibility) = class.meta.class_visibility {
+            return Some(visibility);
+        }
+        let access = effective_class_access(&class);
+        Some(if access & 0x0001 != 0 {
+            Visibility::Public
+        } else if access & 0x0004 != 0 {
+            Visibility::Protected
+        } else {
+            Visibility::Private
+        })
+    }
+
+    fn classifier_accessible_from_package(
+        &self,
+        internal_name: TypeName,
+        accessor_package: TypeName,
+    ) -> bool {
+        let jvm_name = super::jvm_class_map::to_jvm_type_name(internal_name);
+        let Some(class) = self.cp.find_name(jvm_name) else {
+            return false;
+        };
+        if let Some(visibility) = class.meta.class_visibility {
+            return visibility == Visibility::Public;
+        }
+        let access = effective_class_access(&class);
+        if access & 0x0001 != 0 {
+            true
+        } else if access & 0x0002 != 0 {
+            false
+        } else {
+            internal_package(internal_name) == accessor_package.render()
+        }
+    }
+
+    fn inherited_classifier_shape(
+        &self,
+        internal_name: TypeName,
+        inheritor: TypeName,
+    ) -> Option<std::rc::Rc<LibraryType>> {
+        let jvm_name = super::jvm_class_map::to_jvm_type_name(internal_name);
+        let class = self.cp.find_name(jvm_name)?;
+        let access = inherited_class_access(&class, internal_name)?;
+        let accessible = if let Some(visibility) = class.meta.class_visibility {
+            matches!(visibility, Visibility::Public | Visibility::Protected)
+        } else {
+            if access & 0x0001 != 0 || access & 0x0004 != 0 {
+                true
+            } else if access & 0x0002 != 0 {
+                false
+            } else {
+                internal_package(internal_name) == internal_package(inheritor)
+            }
+        };
+        accessible
+            .then(|| self.resolve_type_name(internal_name))
+            .flatten()
+    }
+
     fn resolve_symbols(&self, fqn: &str) -> crate::libraries::ResolvedSymbols {
         (*self.resolve_symbols_name(type_name(fqn))).clone()
     }
@@ -2034,7 +2133,7 @@ impl SymbolSource for JvmLibraries {
                 };
                 overloads.push(FunctionInfo {
                     ret: ReturnInfo::new(mf.ret_nullable(), ret_class),
-                    visibility: crate::libraries::Visibility::from_public(mf.is_public()),
+                    visibility: mf.visibility,
                     generic_sig,
                     flags: FnFlags {
                         inline,

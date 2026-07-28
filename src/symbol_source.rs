@@ -12,7 +12,7 @@
 //! the composite federates at the resolve boundary, never by flattening one global overload set.
 
 use crate::libraries::{FunctionSet, LibraryType, PropertySet, ResolvedSymbols};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TypeName, Visibility};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InheritanceShape {
@@ -67,6 +67,40 @@ pub trait SymbolSource {
     /// string-backed sources working while callers stop rendering names at each use site.
     fn resolve_type_name(&self, internal: TypeName) -> Option<std::rc::Rc<LibraryType>> {
         self.resolve_type(&internal.render()).map(std::rc::Rc::new)
+    }
+
+    /// The declaration visibility of a classifier.
+    fn classifier_visibility(&self, internal: TypeName) -> Option<Visibility> {
+        self.resolve_type_name(internal).map(|classifier| {
+            if classifier.is_public {
+                Visibility::Public
+            } else {
+                Visibility::Private
+            }
+        })
+    }
+
+    /// Whether ordinary lookup may use a classifier from `accessor_package`.
+    fn classifier_accessible_from_package(
+        &self,
+        internal: TypeName,
+        _accessor_package: TypeName,
+    ) -> bool {
+        self.classifier_visibility(internal) == Some(Visibility::Public)
+    }
+
+    /// Resolve a nested classifier through `inheritor`'s supertype scope.
+    fn inherited_classifier_shape(
+        &self,
+        internal: TypeName,
+        _inheritor: TypeName,
+    ) -> Option<std::rc::Rc<LibraryType>> {
+        match self.classifier_visibility(internal)? {
+            Visibility::Public | Visibility::Internal | Visibility::Protected => {
+                self.resolve_type_name(internal)
+            }
+            Visibility::Private => None,
+        }
     }
 
     /// Direct supertypes with type arguments substituted from `ty`.
@@ -172,6 +206,36 @@ impl SymbolSource for CompositeSource<'_> {
         self.children
             .iter()
             .find_map(|c| c.resolve_type_name(internal))
+    }
+
+    fn classifier_visibility(&self, internal: TypeName) -> Option<Visibility> {
+        self.children
+            .iter()
+            .find_map(|child| child.classifier_visibility(internal))
+    }
+
+    fn classifier_accessible_from_package(
+        &self,
+        internal: TypeName,
+        accessor_package: TypeName,
+    ) -> bool {
+        self.children
+            .iter()
+            .find(|child| child.classifier_visibility(internal).is_some())
+            .is_some_and(|child| {
+                child.classifier_accessible_from_package(internal, accessor_package)
+            })
+    }
+
+    fn inherited_classifier_shape(
+        &self,
+        internal: TypeName,
+        inheritor: TypeName,
+    ) -> Option<std::rc::Rc<LibraryType>> {
+        self.children
+            .iter()
+            .find(|child| child.classifier_visibility(internal).is_some())
+            .and_then(|child| child.inherited_classifier_shape(internal, inheritor))
     }
 
     fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
