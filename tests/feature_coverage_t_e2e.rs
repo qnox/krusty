@@ -96,6 +96,30 @@ fun box(): String {\n\
 }
 
 #[test]
+fn mutable_map_plus_assign_map_mutates_val() {
+    const SRC: &str = "class Store {\n\
+    private val target = mutableMapOf<String, Int>()\n\
+    private val copied = mapOf(\"seed\" to 0).toMutableMap()\n\
+    fun add(additions: Map<String, Int>) {\n\
+        target += additions\n\
+        copied += additions\n\
+    }\n\
+    fun get(key: String): Int? = target[key]\n\
+    fun size(): Int = target.size\n\
+    fun copied(key: String): Int? = copied[key]\n\
+    fun copiedSize(): Int = copied.size\n\
+}\n\
+fun box(): String {\n\
+    val store = Store()\n\
+    store.add(mapOf(\"b\" to 2, \"a\" to 3))\n\
+    return if (store.size() == 2 && store.get(\"a\") == 3 && store.get(\"b\") == 2 &&\n\
+        store.copiedSize() == 3 && store.copied(\"seed\") == 0 && store.copied(\"a\") == 3\n\
+    ) \"OK\" else \"FAIL\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "MutableMapPlusAssignMap");
+}
+
+#[test]
 fn inc_dec_property_and_array() {
     const SRC: &str = "class Counter(var n: Int)\n\
 fun box(): String {\n\
