@@ -156,7 +156,7 @@ pub fn lower_file_at_reporting(
         cur_fn_name: String::new(),
         cur_fn_suspend: false,
         cur_tparams: Vec::new(),
-        lambda_seq: 0,
+        synthetic_seq_by_owner: HashMap::new(),
         shared_cell_vars: std::collections::HashSet::new(),
         boxed_elem: HashMap::new(),
         local_fun_ids: HashMap::new(),
@@ -2140,7 +2140,6 @@ pub fn lower_file_at_reporting(
                     &f.non_null_type_params,
                     &*syms.libraries,
                 );
-                lo.lambda_seq = 0;
                 let (fid, sig) = if f.receiver.is_some() {
                     // Extension bodies bind `this` to parameter zero.
                     let (recv_ty, sig) = syms.source_extension_function(file_index, d)?;
@@ -2828,7 +2827,6 @@ pub fn lower_file_at_reporting(
                     lo.cur_class = Some(type_name(&internal));
                     lo.cur_fn_name = m.name.clone();
                     lo.cur_fn_suspend = m.is_suspend();
-                    lo.lambda_seq = 0;
                     // This method's own type params (`fun <R> m()`) plus the class's (`class C<T>`) are
                     // the `as T` cast targets in scope. The method's go FIRST so a same-named method
                     // param shadows the class one (`.find` takes the first match).
@@ -2930,7 +2928,6 @@ pub fn lower_file_at_reporting(
                     lo.cur_class = Some(type_name(&internal));
                     lo.cur_fn_name = gname;
                     lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
-                    lo.lambda_seq = 0;
                     let this_v = lo.fresh_value();
                     lo.scope
                         .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -2960,7 +2957,6 @@ pub fn lower_file_at_reporting(
                         lo.cur_field = Some((class_id, fidx, fty_ir.clone()));
                         lo.cur_fn_name = gname;
                         lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
-                        lo.lambda_seq = 0;
                         let this_v = lo.fresh_value();
                         lo.scope
                             .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -2982,7 +2978,6 @@ pub fn lower_file_at_reporting(
                             lo.cur_field = Some((class_id, fidx, fty_ir.clone()));
                             lo.cur_fn_name = sname;
                             lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
-                            lo.lambda_seq = 0;
                             let this_v = lo.fresh_value();
                             lo.scope
                                 .push(("this".to_string(), this_v, Ty::obj(&internal)));
@@ -3120,7 +3115,6 @@ pub fn lower_file_at_reporting(
                         lo.next_value = 0;
                         lo.cur_class = Some(comp_name);
                         lo.cur_fn_name = m.name.clone();
-                        lo.lambda_seq = 0;
                         let this_v = lo.fresh_value();
                         lo.scope
                             .push(("this".to_string(), this_v, Ty::obj(&comp_fq)));
@@ -4039,7 +4033,6 @@ pub fn lower_file_at_reporting(
                             lo.next_value = 0;
                             lo.cur_class = Some(type_name(&sub_fq));
                             lo.cur_fn_name = "<init>".to_string();
-                            lo.lambda_seq = 0;
                             let this_v = lo.fresh_value();
                             lo.scope
                                 .push(("this".to_string(), this_v, Ty::obj(&sub_fq)));
@@ -4085,7 +4078,6 @@ pub fn lower_file_at_reporting(
                             lo.next_value = 0;
                             lo.cur_class = Some(type_name(&body_cur));
                             lo.cur_fn_name = bm.name.clone();
-                            lo.lambda_seq = 0;
                             let this_v = lo.fresh_value();
                             lo.scope
                                 .push(("this".to_string(), this_v, Ty::obj(&body_cur)));
@@ -4134,7 +4126,6 @@ pub fn lower_file_at_reporting(
                     let pty = stored_value_ty(signature.ty);
                     let gfid = *lo.ext_prop_get_ids.get(&(recv_key, p.name.clone()))?;
                     lo.cur_fn_name = property_getter_name(&p.name);
-                    lo.lambda_seq = 0;
                     let this_v = lo.fresh_value();
                     lo.scope.push(("this".to_string(), this_v, recv_ty));
                     let body = p.getter.clone().unwrap();
@@ -4149,7 +4140,6 @@ pub fn lower_file_at_reporting(
                         lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_fn_name = property_setter_name(&p.name);
-                        lo.lambda_seq = 0;
                         let this_v = lo.fresh_value();
                         lo.scope.push(("this".to_string(), this_v, recv_ty));
                         let v_v = lo.fresh_value();
@@ -4182,7 +4172,6 @@ pub fn lower_file_at_reporting(
                         lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_fn_name = property_getter_name(&p.name);
-                        lo.lambda_seq = 0;
                         lo.cur_static_field = Some((sidx, ir_ty));
                         if let Some(getter) = p.getter.clone() {
                             lo.lower_body(&getter, &ir_ty, gfid)?;
@@ -4200,7 +4189,6 @@ pub fn lower_file_at_reporting(
                         lo.boxed_elem.clear();
                         lo.next_value = 0;
                         lo.cur_fn_name = property_setter_name(&p.name);
-                        lo.lambda_seq = 0;
                         let pty = body_prop_ty(file, info, p, &*syms.libraries);
                         let custom = p.setter.as_ref().filter(|s| s.body.is_some()).cloned();
                         let pname = ast::setter_param_or_value(
@@ -4225,11 +4213,12 @@ pub fn lower_file_at_reporting(
                 } else if let Some(&(fid, _)) = lo.computed_props.get(&p.name) {
                     // A computed property: lower its custom getter into the `getX()` body.
                     lo.cur_fn_name = property_getter_name(&p.name);
-                    lo.lambda_seq = 0;
                     let ret_ty = body_prop_ir_ty(file, info, p, &*syms.libraries);
                     let body = p.getter.clone().unwrap();
                     lo.lower_body(&body, &ret_ty, fid)?;
                 } else {
+                    // Property-initializer lambdas use the property name as their synthetic owner.
+                    lo.cur_fn_name = p.name.clone();
                     let ir_ty = body_prop_ir_ty(file, info, p, &*syms.libraries);
                     let init = lo.lower_arg(p.init.unwrap(), &ir_ty)?;
                     lo.ir.statics.push(crate::ir::IrStatic {
@@ -4266,7 +4255,6 @@ pub fn lower_file_at_reporting(
         lo.next_value = 0;
         lo.cur_class = None;
         lo.cur_fn_name = lo.ir.functions[fid as usize].name.clone();
-        lo.lambda_seq = 0;
         let local_fun = info.local_fun(*stmt_id)?;
         let sig = local_fun.sig.clone();
         // Captured outer locals occupy the leading value slots; a boxed one binds its `Ref` holder
@@ -5126,8 +5114,8 @@ pub(crate) struct Lower<'a> {
     /// is the declared upper bound as an un-erased `IrType` (`kotlin/Any` when unbounded); `non_null`
     /// is set for a non-nullable bound (`<T : Any>`, `<T : Foo>`) — drives the `as T` null assertion.
     cur_tparams: Vec<(String, Ty, bool)>,
-    /// Per-enclosing-function counter for lambda impl-method naming.
-    lambda_seq: u32,
+    /// Synthetic-method sequence shared by declarations with the same JVM owner and name.
+    synthetic_seq_by_owner: HashMap<(Option<TypeName>, String), u32>,
     /// Names of local `var`s in the current lowered body that need a shared mutable cell because a
     /// non-inlined closure captures them from an outer local scope.
     shared_cell_vars: std::collections::HashSet<String>,
@@ -7914,6 +7902,14 @@ impl<'a> Lower<'a> {
         self.lower_lambda_sam(e, params, body, None)
     }
 
+    fn next_synthetic_seq(&mut self) -> u32 {
+        let key = (self.cur_class, self.cur_fn_name.clone());
+        let slot = self.synthetic_seq_by_owner.entry(key).or_insert(0);
+        let idx = *slot;
+        *slot += 1;
+        idx
+    }
+
     fn lower_lambda_sam(
         &mut self,
         e: AstExprId,
@@ -8140,8 +8136,8 @@ impl<'a> Lower<'a> {
             let b = self.emit_block(vec![ret], None);
             (ty_to_ir(sig.ret), b, ret_val)
         };
-        let impl_name = format!("{}$lambda${}", self.cur_fn_name, self.lambda_seq);
-        self.lambda_seq += 1;
+        let seq = self.next_synthetic_seq();
+        let impl_name = format!("{}$lambda${}", self.cur_fn_name, seq);
         // Impl parameters: captured variables first, then the lambda's own parameters.
         let mut params_ir: Vec<Ty> = captures.iter().map(|(_, _, t)| ty_to_ir(*t)).collect();
         let own_params_from = params_ir.len() as u32;
@@ -8490,11 +8486,8 @@ impl<'a> Lower<'a> {
             .function_type(jvm_arity)?
             .obj_internal()?
             .to_string();
-        let internal = class_internal(
-            self.afile,
-            &format!("{}$suspend${}", self.cur_fn_name, self.lambda_seq),
-        );
-        self.lambda_seq += 1;
+        let seq = self.next_synthetic_seq();
+        let internal = class_internal(self.afile, &format!("{}$suspend${}", self.cur_fn_name, seq));
         let cont_ir = ty_to_ir(Ty::obj("kotlin/coroutines/Continuation"));
         let object_ir = ty_to_ir(Ty::obj("kotlin/Any"));
 
@@ -11065,11 +11058,11 @@ impl<'a> Lower<'a> {
         // A mutable (`var`) reference uses the `KMutableProperty*` runtime class and gets a `set`
         // method (emitted alongside `get`); an immutable one stays `KProperty*`.
         let bound = capture.is_some();
+        let seq = self.next_synthetic_seq();
         let synth_fq = class_internal(
             self.afile,
-            &format!("{}$propref${}${}", self.cur_fn_name, name, self.lambda_seq),
+            &format!("{}$propref${}${}", self.cur_fn_name, name, seq),
         );
-        self.lambda_seq += 1;
         let superclass = self
             .property_reference_impl(if bound { 0 } else { 1 }, is_var)?
             .internal;
@@ -11183,11 +11176,11 @@ impl<'a> Lower<'a> {
                 .and_then(Ty::kotlin_class_internal)?,
             None => p.getter.owner,
         };
+        let seq = self.next_synthetic_seq();
         let synth_fq = class_internal(
             self.afile,
-            &format!("{}$propref${}${}", self.cur_fn_name, name, self.lambda_seq),
+            &format!("{}$propref${}${}", self.cur_fn_name, name, seq),
         );
-        self.lambda_seq += 1;
         let superclass = self
             .property_reference_impl(if bound { 0 } else { 1 }, mutable)?
             .internal;
@@ -11442,11 +11435,11 @@ impl<'a> Lower<'a> {
             };
         let prop_ty = ty_to_ir(prop_ty);
         let superclass = self.property_reference_impl(0, is_var)?.internal;
+        let seq = self.next_synthetic_seq();
         let synth_fq = class_internal(
             self.afile,
-            &format!("{}$propref${}${}", self.cur_fn_name, name, self.lambda_seq),
+            &format!("{}$propref${}${}", self.cur_fn_name, name, seq),
         );
-        self.lambda_seq += 1;
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
             is_value: false,
@@ -11976,8 +11969,7 @@ impl<'a> Lower<'a> {
             (vec![ret_e], ty_to_ir(ret))
         };
         let block = self.emit_block(stmts, None);
-        // Name with the ref's globally-unique AST expr id (not the per-function `lambda_seq`): two
-        // OVERLOADED enclosing functions share `cur_fn_name`, so a seq-based name would clash.
+        // This internal-only name needs uniqueness, not kotlinc sequence parity.
         let impl_name = format!("{}$boundref${}", self.cur_fn_name, e.0);
         let mut impl_params: Vec<Ty> = vec![ty_to_ir(rty)];
         impl_params.extend(params.iter().map(|t| stored_value_ty(*t)));
@@ -18832,8 +18824,8 @@ impl<'a> Lower<'a> {
                     let new_e = self.emit_new(class_id, argvals, None);
                     let ret_e = self.emit_return(Some(new_e));
                     let block = self.emit_block(vec![ret_e], None);
-                    let impl_name = format!("{}$ctorref${}", self.cur_fn_name, self.lambda_seq);
-                    self.lambda_seq += 1;
+                    let seq = self.next_synthetic_seq();
+                    let impl_name = format!("{}$ctorref${}", self.cur_fn_name, seq);
                     let fid = self.ir.add_fun(IrFunction {
                         name: impl_name,
                         params: field_tys,
