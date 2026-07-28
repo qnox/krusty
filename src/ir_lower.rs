@@ -17078,7 +17078,7 @@ impl<'a> Lower<'a> {
         };
         let member_owner_ty = member.as_ref().and_then(|member| {
             self.syms
-                .applied_source_hierarchy(member.receiver)
+                .applied_type_hierarchy(member.receiver)
                 .into_iter()
                 .find_map(|(candidate, applied, _)| (candidate == member.owner).then_some(applied))
         });
