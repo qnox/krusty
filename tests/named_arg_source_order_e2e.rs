@@ -42,3 +42,18 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run(SRC).expect("reordered ctor named args"), "OK");
 }
+
+#[test]
+fn mixed_named_and_positional_args_keep_matching_slots() {
+    const SRC: &str = "fun render(\n\
+    first: Int = 1,\n\
+    second: String = \"2\",\n\
+    third: Double = 3.0,\n\
+    fourth: Char = '4'\n\
+): String = \"$first $second ${third.toInt()} $fourth\"\n\
+fun box(): String {\n\
+    val value = render(1, second = \"2\", 3.0)\n\
+    return if (value == \"1 2 3 4\") \"OK\" else \"fail: $value\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("mixed named and positional args"), "OK");
+}

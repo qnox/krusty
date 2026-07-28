@@ -1424,7 +1424,7 @@ impl Classpath {
         };
         let names = c.value_params.iter().map(|p| p.name.clone()).collect();
         let defaults = c.value_params.iter().map(|p| p.has_default()).collect();
-        let vararg = c.last_param_vararg();
+        let vararg = c.vararg_index();
         MetadataCallFacts {
             kept_params: Some(end),
             call_sig: if extension {
