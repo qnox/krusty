@@ -52,16 +52,26 @@ mod tests {
         analysis_blocked: bool,
         ready_after_refresh: bool,
         analysis_calls: Rc<Cell<u32>>,
+        worker_pending: Rc<Cell<bool>>,
+        real_analysis: bool,
     }
 
     impl Analysis for RecordingHost {
         fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
             self.analysis_calls.set(self.analysis_calls.get() + 1);
-            sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            if self.real_analysis {
+                super::super::analyze_for_lsp(sources)
+            } else {
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
         }
 
         fn analysis_ready(&self) -> bool {
             !self.analysis_blocked
+        }
+
+        fn analysis_pending(&self) -> bool {
+            self.worker_pending.get()
         }
 
         fn set_workspace_root(&mut self, root: Option<std::path::PathBuf>) -> ProjectFeedback {
@@ -320,6 +330,121 @@ mod tests {
             message["method"] == "textDocument/publishDiagnostics"
                 && message["params"]["uri"] == "file:///p/A.kt"
         }));
+    }
+
+    #[test]
+    fn pending_worker_analysis_invalidates_stale_facts_without_publishing() {
+        let worker_pending = Rc::new(Cell::new(false));
+        let analysis_calls = Rc::new(Cell::new(0));
+        let host = RecordingHost {
+            worker_pending: worker_pending.clone(),
+            analysis_calls: analysis_calls.clone(),
+            real_analysis: true,
+            ..RecordingHost::default()
+        };
+        let mut server = LspService::new(host);
+        server.handle(request(1, "initialize", json!({})));
+
+        let opened = server.handle(notification(
+            "textDocument/didOpen",
+            json!({ "textDocument": {
+                "uri": "file:///p/A.kt", "languageId": "kotlin", "version": 1,
+                "text": "val value: String = 1"
+            }}),
+        ));
+        assert!(!opened.messages[0]["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        let hover = server.handle(request(
+            2,
+            "textDocument/hover",
+            json!({
+                "textDocument": {"uri": "file:///p/A.kt"},
+                "position": {"line": 0, "character": 5}
+            }),
+        ));
+        assert!(!hover.messages[0]["result"].is_null());
+
+        worker_pending.set(true);
+        let dispatch = server.handle(notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": "file:///p/A.kt", "version": 2},
+                "contentChanges": [{"text": "val value: String = \"ok\""}]
+            }),
+        ));
+
+        assert_eq!(analysis_calls.get(), 2);
+        assert!(dispatch.messages.is_empty());
+        let stale_hover = server.handle(request(
+            3,
+            "textDocument/hover",
+            json!({
+                "textDocument": {"uri": "file:///p/A.kt"},
+                "position": {"line": 0, "character": 5}
+            }),
+        ));
+        assert!(stale_hover.messages[0]["result"].is_null());
+        let stale_diagnostics = server.handle(request(
+            4,
+            "textDocument/diagnostic",
+            json!({"textDocument": {"uri": "file:///p/A.kt"}}),
+        ));
+        assert_eq!(
+            stale_diagnostics.messages[0]["result"],
+            json!({"kind": "full", "items": []})
+        );
+
+        let first_retry = server.project_refresh_due_in().unwrap();
+        assert!(first_retry > std::time::Duration::ZERO);
+        assert!(first_retry <= std::time::Duration::from_secs(1));
+        worker_pending.set(true);
+        server.make_analysis_retry_due();
+        assert!(server.run_due_project_refresh().is_empty());
+        assert_eq!(analysis_calls.get(), 3);
+        let second_retry = server.project_refresh_due_in().unwrap();
+        assert!(second_retry > std::time::Duration::ZERO);
+        assert!(second_retry <= std::time::Duration::from_secs(2));
+
+        worker_pending.set(false);
+        server.make_analysis_retry_due();
+        let recovered = server.run_due_project_refresh();
+        assert_eq!(analysis_calls.get(), 4);
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0]["params"]["diagnostics"], json!([]));
+        let recovered_hover = server.handle(request(
+            6,
+            "textDocument/hover",
+            json!({
+                "textDocument": {"uri": "file:///p/A.kt"},
+                "position": {"line": 0, "character": 5}
+            }),
+        ));
+        assert!(!recovered_hover.messages[0]["result"].is_null());
+
+        worker_pending.set(true);
+        let pending_again = server.handle(notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": "file:///p/A.kt", "version": 3},
+                "contentChanges": [{"text": "val value: String = 2"}]
+            }),
+        ));
+        assert!(pending_again.messages.is_empty());
+        assert_eq!(analysis_calls.get(), 5);
+
+        worker_pending.set(false);
+        let changed_before_retry = server.handle(notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": "file:///p/A.kt", "version": 4},
+                "contentChanges": [{"text": "val value: String = \"ready\""}]
+            }),
+        ));
+        assert_eq!(analysis_calls.get(), 6);
+        assert_eq!(changed_before_retry.messages.len(), 1);
+        assert!(server.project_refresh_due_in().is_none());
     }
 
     #[test]

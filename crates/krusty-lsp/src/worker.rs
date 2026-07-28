@@ -31,10 +31,9 @@ use crate::{
 pub const DEFAULT_ANALYSES_PER_WORKER: usize = 64;
 const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_SOURCE_SET_BYTES: usize = 32 * 1024 * 1024;
-const BASE_ANALYSIS_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_ANALYSIS_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const ANALYSIS_MILLIS_PER_ADDITIONAL_SOURCE: u64 = 1_000;
-const ANALYSIS_SECS_PER_SOURCE_MIB: u64 = 2;
+const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const READINESS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const WORKER_READY: &[u8] = b"ready";
 
 #[derive(Serialize)]
 struct AnalysisRequest<'a> {
@@ -230,20 +229,19 @@ fn encode_response(analyses: &[AnalysisResponse]) -> io::Result<Vec<u8>> {
     Ok(response.bytes)
 }
 
-fn analysis_timeout(sources: &[SourceInput<'_>]) -> Duration {
-    let additional_sources = sources.len().saturating_sub(1) as u64;
-    let source_bytes = sources.iter().fold(0usize, |total, source| {
-        total.saturating_add(source.text.len())
+fn framed_read_receiver<R>(
+    mut reader: R,
+    max_bytes: usize,
+) -> mpsc::Receiver<(R, io::Result<Option<Vec<u8>>>)>
+where
+    R: BufRead + Send + 'static,
+{
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let response = read_framed(&mut reader, max_bytes);
+        let _ = sender.send((reader, response));
     });
-    let source_mib = (source_bytes / (1024 * 1024)) as u64;
-    BASE_ANALYSIS_TIMEOUT
-        .saturating_add(Duration::from_millis(
-            additional_sources.saturating_mul(ANALYSIS_MILLIS_PER_ADDITIONAL_SOURCE),
-        ))
-        .saturating_add(Duration::from_secs(
-            source_mib.saturating_mul(ANALYSIS_SECS_PER_SOURCE_MIB),
-        ))
-        .min(MAX_ANALYSIS_TIMEOUT)
+    receiver
 }
 
 impl WorkerProcess {
@@ -263,29 +261,49 @@ impl WorkerProcess {
             .stdout
             .take()
             .ok_or_else(|| io::Error::other("analysis worker stdout unavailable"))?;
-        Ok(Self {
+        let mut process = Self {
             child,
             stdin,
             stdout: Some(BufReader::new(stdout)),
-        })
+        };
+        process.wait_until_ready()?;
+        Ok(process)
     }
 
-    fn read_response(&mut self, timeout: Duration) -> io::Result<Vec<u8>> {
-        let mut stdout = self
+    fn wait_until_ready(&mut self) -> io::Result<()> {
+        let ready = self
+            .read_frame(
+                WORKER_READY.len(),
+                READINESS_TIMEOUT,
+                "analysis worker readiness timed out",
+            )?
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::UnexpectedEof, "analysis worker exited")
+            })?;
+        if ready != WORKER_READY {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "analysis worker sent an invalid readiness message",
+            ));
+        }
+        Ok(())
+    }
+
+    fn read_frame(
+        &mut self,
+        max_bytes: usize,
+        timeout: Duration,
+        timeout_message: &'static str,
+    ) -> io::Result<Option<Vec<u8>>> {
+        let stdout = self
             .stdout
             .take()
             .ok_or_else(|| io::Error::other("analysis worker stdout unavailable"))?;
-        let (sender, receiver) = mpsc::sync_channel(1);
-        std::thread::spawn(move || {
-            let response = read_framed(&mut stdout, MAX_WORKER_MESSAGE_BYTES);
-            let _ = sender.send((stdout, response));
-        });
+        let receiver = framed_read_receiver(stdout, max_bytes);
         match receiver.recv_timeout(timeout) {
             Ok((stdout, response)) => {
                 self.stdout = Some(stdout);
-                response?.ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::UnexpectedEof, "analysis worker exited")
-                })
+                response
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let _ = self.child.kill();
@@ -293,16 +311,22 @@ impl WorkerProcess {
                 if let Ok((stdout, _)) = receiver.recv() {
                     self.stdout = Some(stdout);
                 }
-                Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "analysis worker timed out",
-                ))
+                Err(io::Error::new(io::ErrorKind::TimedOut, timeout_message))
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "analysis worker response reader stopped",
             )),
         }
+    }
+
+    fn read_response(&mut self) -> io::Result<Vec<u8>> {
+        self.read_frame(
+            MAX_WORKER_MESSAGE_BYTES,
+            ANALYSIS_TIMEOUT,
+            "analysis worker timed out",
+        )?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "analysis worker exited"))
     }
 
     fn analyze(
@@ -315,7 +339,7 @@ impl WorkerProcess {
         let request = encode_request(inputs, result_count, inferred_count, language_features)?;
         write_framed(&mut self.stdin, &request)?;
         drop(request);
-        let response = self.read_response(analysis_timeout(inputs))?;
+        let response = self.read_response()?;
         let analyses =
             serde_json::from_slice::<Vec<AnalysisResponse>>(&response).map_err(json_io)?;
         drop(response);
@@ -337,6 +361,7 @@ pub struct AnalysisWorker {
     executable: PathBuf,
     arguments: Vec<String>,
     process: WorkerProcess,
+    restart_required: bool,
     analyses: usize,
     max_analyses: usize,
     language_features: LangFeatures,
@@ -349,6 +374,7 @@ impl AnalysisWorker {
             executable,
             arguments,
             process,
+            restart_required: false,
             analyses: 0,
             max_analyses: DEFAULT_ANALYSES_PER_WORKER,
             language_features: LangFeatures::new(),
@@ -358,8 +384,10 @@ impl AnalysisWorker {
     fn restart(&mut self) -> io::Result<()> {
         let _ = self.process.child.kill();
         let _ = self.process.child.wait();
+        self.restart_required = true;
         let replacement = WorkerProcess::spawn(&self.executable, &self.arguments)?;
         self.process = replacement;
+        self.restart_required = false;
         self.analyses = 0;
         Ok(())
     }
@@ -378,13 +406,19 @@ impl AnalysisWorker {
     ) -> io::Result<()> {
         let arguments = replace_launch_arguments(&self.arguments, classpath, jdk_home, no_jdk);
         if arguments == self.arguments {
-            return Ok(());
+            return if self.restart_required {
+                self.restart()
+            } else {
+                Ok(())
+            };
         }
-        let replacement = WorkerProcess::spawn(&self.executable, &arguments)?;
         let _ = self.process.child.kill();
         let _ = self.process.child.wait();
-        self.process = replacement;
+        self.restart_required = true;
+        let replacement = WorkerProcess::spawn(&self.executable, &arguments)?;
         self.arguments = arguments;
+        self.process = replacement;
+        self.restart_required = false;
         self.analyses = 0;
         Ok(())
     }
@@ -403,7 +437,7 @@ impl AnalysisWorker {
         result_count: usize,
         inferred_count: usize,
     ) -> io::Result<Vec<DocumentAnalysis>> {
-        if self.analyses >= self.max_analyses {
+        if self.restart_required || self.analyses >= self.max_analyses {
             self.restart()?;
         }
         match self.process.analyze(
@@ -418,19 +452,26 @@ impl AnalysisWorker {
             }
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => Err(error),
             Err(error) if error.kind() == io::ErrorKind::TimedOut => {
-                self.restart()?;
+                self.restart_required = true;
                 Err(error)
             }
             Err(_) => {
                 self.restart()?;
-                let analysis = self.process.analyze(
+                match self.process.analyze(
                     inputs,
                     result_count,
                     inferred_count,
                     &self.language_features,
-                )?;
-                self.analyses += 1;
-                Ok(analysis)
+                ) {
+                    Ok(analysis) => {
+                        self.analyses += 1;
+                        Ok(analysis)
+                    }
+                    Err(error) => {
+                        self.restart_required = true;
+                        Err(error)
+                    }
+                }
             }
         }
     }
@@ -446,6 +487,8 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
     classpath: Vec<PathBuf>,
 ) -> io::Result<()> {
     let classpath = Rc::new(Classpath::new(classpath));
+    classpath.prepare_for_source_analysis();
+    write_framed(writer, WORKER_READY)?;
     while let Some(body) = read_framed(reader, MAX_WORKER_MESSAGE_BYTES)? {
         let request: OwnedAnalysisRequest = serde_json::from_slice(&body).map_err(json_io)?;
         drop(body);
@@ -598,10 +641,39 @@ fn join_classpath(classpath: &[PathBuf]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::io::{Cursor, Read};
 
     use super::*;
     use crate::analysis::MAX_SOURCE_SET_NAVIGATION_ENTRIES;
+
+    struct DelayedEof {
+        delay: Duration,
+    }
+
+    impl Read for DelayedEof {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            std::thread::sleep(self.delay);
+            Ok(0)
+        }
+    }
+
+    fn decode_worker_output(output: Vec<u8>) -> Vec<AnalysisResponse> {
+        let mut output = Cursor::new(output);
+        let ready = read_framed(&mut output, WORKER_READY.len())
+            .unwrap()
+            .expect("worker readiness message");
+        assert_eq!(ready, WORKER_READY);
+        let response = read_framed(&mut output, MAX_WORKER_MESSAGE_BYTES)
+            .unwrap()
+            .expect("worker analysis response");
+        assert!(
+            read_framed(&mut output, MAX_WORKER_MESSAGE_BYTES)
+                .unwrap()
+                .is_none(),
+            "worker emitted an unexpected trailing frame"
+        );
+        serde_json::from_slice(&response).unwrap()
+    }
 
     fn navigation_saturation_response(
         definitions: usize,
@@ -648,25 +720,19 @@ mod tests {
     }
 
     #[test]
-    fn analysis_deadline_scales_with_the_complete_source_set_and_stays_bounded() {
-        assert_eq!(
-            analysis_timeout(&[SourceInput::kotlin("fun one() = 1")]),
-            BASE_ANALYSIS_TIMEOUT
+    fn framed_worker_read_times_out_when_no_readiness_frame_arrives() {
+        let receiver = framed_read_receiver(
+            BufReader::new(DelayedEof {
+                delay: Duration::from_millis(50),
+            }),
+            WORKER_READY.len(),
         );
-
-        let module = vec![SourceInput::kotlin(""); 96];
-        assert_eq!(
-            analysis_timeout(&module),
-            BASE_ANALYSIS_TIMEOUT + Duration::from_secs(95)
-        );
-        let one_mib = "x".repeat(1024 * 1024);
-        assert_eq!(
-            analysis_timeout(&[SourceInput::kotlin(&one_mib)]),
-            BASE_ANALYSIS_TIMEOUT + Duration::from_secs(2)
-        );
-
-        let maximum = vec![SourceInput::kotlin(""); 1_000];
-        assert_eq!(analysis_timeout(&maximum), MAX_ANALYSIS_TIMEOUT);
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_millis(1)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        let (_, result) = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(result.unwrap().is_none());
     }
 
     #[test]
@@ -774,10 +840,7 @@ mod tests {
         let mut output = Vec::new();
         run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
 
-        let response = read_framed(&mut Cursor::new(output), MAX_WORKER_MESSAGE_BYTES)
-            .unwrap()
-            .unwrap();
-        let analyses = serde_json::from_slice::<Vec<AnalysisResponse>>(&response).unwrap();
+        let analyses = decode_worker_output(output);
         let analysis = analyses
             .into_iter()
             .last()
@@ -809,10 +872,7 @@ mod tests {
 
         run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
 
-        let response = read_framed(&mut Cursor::new(output), MAX_WORKER_MESSAGE_BYTES)
-            .unwrap()
-            .unwrap();
-        let analyses = serde_json::from_slice::<Vec<AnalysisResponse>>(&response).unwrap();
+        let analyses = decode_worker_output(output);
         assert!(analyses[0].diagnostics.is_empty());
     }
 
@@ -841,10 +901,7 @@ fun combine(entries: Array<Entry>): String {
         let mut output = Vec::new();
         run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
 
-        let response = read_framed(&mut Cursor::new(output), MAX_WORKER_MESSAGE_BYTES)
-            .unwrap()
-            .unwrap();
-        let analyses = serde_json::from_slice::<Vec<AnalysisResponse>>(&response).unwrap();
+        let analyses = decode_worker_output(output);
         let diagnostics = &analyses[0].diagnostics;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }

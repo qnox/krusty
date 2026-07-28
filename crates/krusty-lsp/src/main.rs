@@ -8,6 +8,9 @@ use krusty_lsp::{
     ProviderKind, RefreshOutcome, SystemEnvironment,
 };
 
+const WORKER_RECONFIGURE_RETRY_INITIAL_MS: u64 = 1_000;
+const WORKER_RECONFIGURE_RETRY_MAX_MS: u64 = 30_000;
+
 fn main() {
     let mut arguments: Vec<String> = std::env::args().skip(1).collect();
     let worker_mode = arguments
@@ -62,6 +65,9 @@ struct WorkerHost {
     root: Option<PathBuf>,
     jdk_warning_shown: bool,
     project_sources: ProjectSources,
+    analysis_pending: bool,
+    worker_reconfigure_retry_at_ms: Option<u64>,
+    worker_reconfigure_retry_backoff_ms: u64,
 }
 
 impl WorkerHost {
@@ -76,6 +82,9 @@ impl WorkerHost {
             root: None,
             jdk_warning_shown: false,
             project_sources: ProjectSources::default(),
+            analysis_pending: false,
+            worker_reconfigure_retry_at_ms: None,
+            worker_reconfigure_retry_backoff_ms: 0,
         }
     }
 
@@ -106,6 +115,12 @@ impl WorkerHost {
                         .reconfigure(&classpath, jdk_home.as_deref(), self.options.no_jdk())
                 {
                     sync.rollback_model(previous_model);
+                    let (retry_at, backoff) = next_worker_reconfigure_retry(
+                        self.now_ms(),
+                        self.worker_reconfigure_retry_backoff_ms,
+                    );
+                    self.worker_reconfigure_retry_at_ms = Some(retry_at);
+                    self.worker_reconfigure_retry_backoff_ms = backoff;
                     return ProjectFeedback {
                         reanalyze: false,
                         message: Some((
@@ -115,6 +130,8 @@ impl WorkerHost {
                         logs,
                     };
                 }
+                self.worker_reconfigure_retry_at_ms = None;
+                self.worker_reconfigure_retry_backoff_ms = 0;
                 self.worker.set_language_features(language_features);
                 ProjectFeedback {
                     reanalyze: true,
@@ -126,6 +143,16 @@ impl WorkerHost {
                 error,
                 model_retained,
             } => {
+                if self.worker_reconfigure_retry_backoff_ms > 0
+                    && self.worker_reconfigure_retry_at_ms.is_none()
+                {
+                    let (retry_at, backoff) = next_worker_reconfigure_retry(
+                        self.now_ms(),
+                        self.worker_reconfigure_retry_backoff_ms,
+                    );
+                    self.worker_reconfigure_retry_at_ms = Some(retry_at);
+                    self.worker_reconfigure_retry_backoff_ms = backoff;
+                }
                 let kind = if model_retained {
                     ProjectMessageKind::Warning
                 } else {
@@ -206,6 +233,38 @@ impl WorkerHost {
                 .to_string(),
         ))
     }
+
+    fn finish_analysis(
+        &mut self,
+        result: io::Result<Vec<DocumentAnalysis>>,
+        document_count: usize,
+    ) -> Vec<DocumentAnalysis> {
+        match result {
+            Ok(analysis) => {
+                self.analysis_pending = false;
+                analysis
+            }
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                self.analysis_pending = true;
+                eprintln!("krusty-lsp: {error}; source analysis remains pending");
+                Vec::new()
+            }
+            Err(error) => {
+                self.analysis_pending = false;
+                (0..document_count)
+                    .map(|_| {
+                        DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
+                            span: krusty::diag::Span::new(0, 0),
+                            editor_span: None,
+                            severity: krusty::diag::Severity::Error,
+                            msg: format!("analysis worker failed: {error}"),
+                            file: 0,
+                        }])
+                    })
+                    .collect()
+            }
+        }
+    }
 }
 
 impl krusty_lsp::Analysis for WorkerHost {
@@ -213,21 +272,13 @@ impl krusty_lsp::Analysis for WorkerHost {
         self.sync.as_ref().and_then(ProjectSync::model).is_some()
     }
 
+    fn analysis_pending(&self) -> bool {
+        self.analysis_pending
+    }
+
     fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
-        self.worker.analyze(sources).unwrap_or_else(|error| {
-            sources
-                .iter()
-                .map(|_| {
-                    DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
-                        span: krusty::diag::Span::new(0, 0),
-                        editor_span: None,
-                        severity: krusty::diag::Severity::Error,
-                        msg: format!("analysis worker failed: {error}"),
-                        file: 0,
-                    }])
-                })
-                .collect()
-        })
+        let result = self.worker.analyze(sources);
+        self.finish_analysis(result, sources.len())
     }
 
     fn analyze_open_documents(
@@ -239,6 +290,7 @@ impl krusty_lsp::Analysis for WorkerHost {
             match self.project_support_sources(documents, open_uris) {
                 Ok((sources, inferred_count)) => (sources.to_vec(), inferred_count),
                 Err(message) => {
+                    self.analysis_pending = false;
                     let analyses = documents
                         .iter()
                         .map(|_| {
@@ -263,27 +315,12 @@ impl krusty_lsp::Analysis for WorkerHost {
         inputs.extend(support_documents.iter().map(|(uri, source)| {
             krusty::source::SourceInput::new(source_kind_from_uri(uri), source)
         }));
-        let analyses = self
-            .worker
-            .analyze_inputs_prefix(
-                &inputs,
-                documents.len(),
-                documents.len() + inferred_support_count,
-            )
-            .unwrap_or_else(|error| {
-                documents
-                    .iter()
-                    .map(|_| {
-                        DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
-                            span: krusty::diag::Span::new(0, 0),
-                            editor_span: None,
-                            severity: krusty::diag::Severity::Error,
-                            msg: format!("analysis worker failed: {error}"),
-                            file: 0,
-                        }])
-                    })
-                    .collect()
-            });
+        let analyses = self.worker.analyze_inputs_prefix(
+            &inputs,
+            documents.len(),
+            documents.len() + inferred_support_count,
+        );
+        let analyses = self.finish_analysis(analyses, documents.len());
         (analyses, support_documents)
     }
 
@@ -356,25 +393,52 @@ impl krusty_lsp::Analysis for WorkerHost {
     }
 
     fn project_refresh_due_in(&self) -> Option<Duration> {
-        self.sync
-            .as_ref()
-            .and_then(|sync| sync.refresh_due_in(self.now_ms()))
-            .map(Duration::from_millis)
+        let now = self.now_ms();
+        let project_due = self.sync.as_ref().and_then(|sync| sync.refresh_due_in(now));
+        let worker_due = self
+            .worker_reconfigure_retry_at_ms
+            .map(|deadline| deadline.saturating_sub(now));
+        match (project_due, worker_due) {
+            (Some(project), Some(worker)) => Some(Duration::from_millis(project.min(worker))),
+            (Some(project), None) => Some(Duration::from_millis(project)),
+            (None, Some(worker)) => Some(Duration::from_millis(worker)),
+            (None, None) => None,
+        }
     }
 
     fn refresh_project(&mut self) -> ProjectFeedback {
         let now = self.now_ms();
+        let worker_retry_due = self
+            .worker_reconfigure_retry_at_ms
+            .is_some_and(|deadline| deadline <= now);
         let Some(sync) = self.sync.as_mut() else {
             return ProjectFeedback::default();
         };
-        if !sync.take_due(now) {
+        let project_refresh_due = sync.take_due(now);
+        if !project_refresh_due && !worker_retry_due {
             return ProjectFeedback::default();
         }
-        if let Some(root) = &self.root {
-            sync.update_provider(detect(root, self.options.explicit_classpath()));
+        if project_refresh_due {
+            if let Some(root) = &self.root {
+                sync.update_provider(detect(root, self.options.explicit_classpath()));
+            }
+        }
+        if worker_retry_due {
+            self.worker_reconfigure_retry_at_ms = None;
         }
         self.configure()
     }
+}
+
+fn next_worker_reconfigure_retry(now_ms: u64, previous_backoff_ms: u64) -> (u64, u64) {
+    let backoff = if previous_backoff_ms == 0 {
+        WORKER_RECONFIGURE_RETRY_INITIAL_MS
+    } else {
+        previous_backoff_ms
+            .saturating_mul(2)
+            .min(WORKER_RECONFIGURE_RETRY_MAX_MS)
+    };
+    (now_ms.saturating_add(backoff), backoff)
 }
 
 impl WorkerHost {
@@ -424,5 +488,19 @@ mod tests {
         assert!(logs[2].contains("/classpath/59.jar"));
         assert!(!logs[2].contains("/classpath/60.jar"));
         assert!(logs[2].ends_with("… 1 more"));
+    }
+
+    #[test]
+    fn worker_reconfigure_retry_uses_capped_backoff() {
+        assert_eq!(next_worker_reconfigure_retry(500, 0), (1_500, 1_000));
+        assert_eq!(next_worker_reconfigure_retry(1_500, 1_000), (3_500, 2_000));
+        assert_eq!(
+            next_worker_reconfigure_retry(10_000, 30_000),
+            (40_000, 30_000)
+        );
+        assert_eq!(
+            next_worker_reconfigure_retry(u64::MAX - 10, 30_000),
+            (u64::MAX, 30_000)
+        );
     }
 }
