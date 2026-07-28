@@ -116,6 +116,10 @@ impl LspOptions {
         }
     }
 
+    pub fn language_arguments(&self) -> &[String] {
+        &self.language_arguments
+    }
+
     pub fn deps_cache_dir(&self) -> Option<&Path> {
         self.deps_cache_dir.as_deref()
     }

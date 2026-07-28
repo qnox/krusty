@@ -979,6 +979,19 @@ impl DefinitionSymbols {
             .unwrap_or(&[])
     }
 
+    pub(crate) fn implementation_relations(
+        &self,
+    ) -> impl Iterator<Item = (DefinitionTarget, DefinitionTarget)> + '_ {
+        self.implementations
+            .iter()
+            .flat_map(|(declaration, implementations)| {
+                implementations
+                    .iter()
+                    .copied()
+                    .map(|implementation| (*declaration, implementation))
+            })
+    }
+
     pub(crate) fn is_file_target(&self, target: DefinitionTarget) -> bool {
         self.file_targets(target.file)
             .binary_search_by_key(&(target.span.lo, target.span.hi), |candidate| {

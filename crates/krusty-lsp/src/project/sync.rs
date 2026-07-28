@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use krusty::features::LangFeatures;
 
 use super::fingerprint::{fingerprint_files, Fingerprint};
-use super::model::{ProjectModel, ProviderKind};
+use super::model::{paths_equivalent, ProjectModel, ProviderKind};
 use super::provider::{ProbeError, ProjectProvider};
 use super::runner::CommandRunner;
 
@@ -114,11 +114,8 @@ impl ProjectSync {
 
     /// The union of every module's compile classpath.
     ///
-    /// The compiler worker analyses all open documents as one source set against a single
-    /// classpath, so this is what the whole session is configured with. It is a superset of any one
-    /// module's classpath, which keeps cross-module references resolving at the cost of admitting a
-    /// few symbols a stricter per-module view would reject. Project outputs precede other entries so
-    /// current classes shadow published copies.
+    /// Used for worker startup and dependency-source materialization. Module analysis requests pass
+    /// their narrower compile classpath. Project outputs precede published copies.
     pub fn project_classpath(&self) -> Vec<PathBuf> {
         let Some(model) = self.model.as_ref() else {
             return Vec::new();
@@ -149,7 +146,7 @@ impl ProjectSync {
         let is_output = |entry: &Path| {
             declared_outputs
                 .iter()
-                .any(|output| entry == *output || entry.starts_with(output))
+                .any(|output| paths_equivalent(entry, output) || entry.starts_with(output))
                 || std::fs::canonicalize(entry).is_ok_and(|entry| {
                     canonical_outputs
                         .iter()
@@ -173,8 +170,7 @@ impl ProjectSync {
 
     /// The union of language features enabled by any module.
     ///
-    /// Open documents are analyzed together against a project-wide classpath, so feature handling
-    /// follows the same permissive union until analysis becomes module-specific.
+    /// Default worker features for analyses without a modeled module.
     pub fn project_language_features(&self) -> LangFeatures {
         let mut project_features = LangFeatures::new();
         let Some(model) = self.model.as_ref() else {

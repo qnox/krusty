@@ -774,6 +774,67 @@ mod tests {
     }
 
     #[test]
+    fn declaration_only_sources_hide_internal_classifiers() {
+        let inputs = [
+            SourceInput::kotlin(
+                "package consumer\n\
+                 import dependency.Hidden\n\
+                 import dependency.Visible\n\
+                 fun hidden(): Any = Hidden()\n\
+                 fun visible(): Any = Visible()",
+            ),
+            SourceInput::kotlin(
+                "package dependency\n\
+                 internal class Hidden\n\
+                 class Visible",
+            ),
+        ];
+        let mut diagnostics = DiagSink::new();
+
+        analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            1,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert!(diagnostics
+            .diags
+            .iter()
+            .any(|diagnostic| diagnostic.msg.contains("'Hidden'")));
+        assert!(!diagnostics
+            .diags
+            .iter()
+            .any(|diagnostic| diagnostic.msg.contains("'Visible'")));
+    }
+
+    #[test]
+    fn inferred_friend_sources_expose_internal_classifiers() {
+        let inputs = [
+            SourceInput::kotlin(
+                "package consumer\n\
+                 import dependency.Hidden\n\
+                 fun hidden(): Any = Hidden()",
+            ),
+            SourceInput::kotlin("package dependency\ninternal class Hidden"),
+        ];
+        let mut diagnostics = DiagSink::new();
+
+        analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            2,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+    }
+
+    #[test]
     fn dependency_fallback_keeps_a_source_property_missing_from_the_public_api() {
         let features = LangFeatures::new();
         let inputs = [

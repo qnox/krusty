@@ -2,6 +2,14 @@
 
 use std::path::{Path, PathBuf};
 
+pub(super) fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    left == right
+        || std::fs::canonicalize(left)
+            .ok()
+            .zip(std::fs::canonicalize(right).ok())
+            .is_some_and(|(left, right)| left == right)
+}
+
 /// Stable identity of one compilation unit.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ModuleId(String);
@@ -172,20 +180,70 @@ impl ProjectModel {
             .find(|module| module.id.as_ref() == Some(id))
     }
 
-    pub fn module_for_source(&self, path: &Path) -> Option<&Module> {
+    pub fn module_index_for_source(&self, path: &Path) -> Option<usize> {
         self.modules
             .iter()
-            .filter_map(|module| {
+            .enumerate()
+            .filter_map(|(index, module)| {
                 module
                     .source_roots
                     .iter()
                     .filter(|root| path.starts_with(&root.path))
                     .map(|root| root.path.components().count())
                     .max()
-                    .map(|depth| (depth, module))
+                    .map(|depth| (depth, index))
             })
-            .max_by_key(|(depth, _)| *depth)
-            .map(|(_, module)| module)
+            .max()
+            .map(|(_, index)| index)
+    }
+
+    pub fn module_for_source(&self, path: &Path) -> Option<&Module> {
+        self.module_index_for_source(path)
+            .and_then(|index| self.modules.get(index))
+    }
+
+    pub fn dependency_source_module_indices(&self, module_index: usize) -> Vec<usize> {
+        let Some(module) = self.modules.get(module_index) else {
+            return Vec::new();
+        };
+        self.modules
+            .iter()
+            .enumerate()
+            .filter_map(|(index, candidate)| {
+                let dependency = candidate
+                    .id
+                    .as_ref()
+                    .is_some_and(|id| module.depends_on.contains(id));
+                (index != module_index && dependency).then_some(index)
+            })
+            .collect()
+    }
+
+    pub fn friend_source_module_indices(&self, module_index: usize) -> Vec<usize> {
+        let Some(module) = self.modules.get(module_index) else {
+            return Vec::new();
+        };
+        self.modules
+            .iter()
+            .enumerate()
+            .filter_map(|(index, candidate)| {
+                let associated = candidate.outputs.iter().any(|output| {
+                    module
+                        .friend_paths
+                        .iter()
+                        .any(|friend| paths_equivalent(friend, output.path()))
+                });
+                (index != module_index && associated).then_some(index)
+            })
+            .collect()
+    }
+
+    pub fn visible_source_module_indices(&self, module_index: usize) -> Vec<usize> {
+        let mut visible = self.dependency_source_module_indices(module_index);
+        visible.extend(self.friend_source_module_indices(module_index));
+        visible.sort_unstable();
+        visible.dedup();
+        visible
     }
 
     /// Classpath handed to the compiler for `module`, deduplicated in build-tool order.
@@ -281,8 +339,49 @@ mod tests {
                 .map(ModuleId::as_str),
             Some(":app:test")
         );
+        assert_eq!(
+            model.module_index_for_source(Path::new("/p/app/src/test/kotlin/Example.kt")),
+            Some(3)
+        );
         assert!(model
             .module_for_source(Path::new("/p/unowned/Example.kt"))
             .is_none());
+    }
+
+    #[test]
+    fn visible_source_modules_include_dependencies_and_exact_friend_outputs_once() {
+        let mut model = model();
+        model.modules[1].outputs = vec![ModuleOutput::classes("/p/generated/classes")];
+        model.modules[2].friend_paths = vec![PathBuf::from("/p/generated/classes")];
+
+        assert_eq!(model.dependency_source_module_indices(2), [0, 1]);
+        assert_eq!(model.friend_source_module_indices(2), [1]);
+        assert_eq!(model.visible_source_module_indices(2), [0, 1]);
+        assert_eq!(model.dependency_source_module_indices(3), [2]);
+        assert_eq!(model.friend_source_module_indices(3), [2]);
+        assert_eq!(model.visible_source_module_indices(3), [2]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn friend_source_modules_match_canonically_equivalent_output_paths() {
+        use std::os::unix::fs::symlink;
+
+        use crate::project::testing::TempTree;
+
+        let tree = TempTree::new("model-friend-output-symlink");
+        let output = tree.path("real/classes");
+        let linked_output = tree.path("linked-classes");
+        std::fs::create_dir_all(&output).unwrap();
+        symlink(&output, &linked_output).unwrap();
+
+        let mut producer = Module::new(ModuleId::new(":producer", "main"), tree.path("producer"));
+        producer.outputs = vec![ModuleOutput::classes(output)];
+        let mut consumer = Module::new(ModuleId::new(":consumer", "test"), tree.path("consumer"));
+        consumer.friend_paths = vec![linked_output];
+        let model = ProjectModel::new(tree.root(), ProviderKind::Gradle)
+            .with_modules(vec![producer, consumer]);
+
+        assert_eq!(model.friend_source_module_indices(1), [0]);
     }
 }

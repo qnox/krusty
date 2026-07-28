@@ -6,18 +6,19 @@ use std::path::{Path, PathBuf};
 use super::model::ProjectModel;
 
 const MAX_INVENTORY_ENTRIES: usize = 32 * 1024;
+const MAX_CACHED_SOURCE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_CACHED_MODULE_KEYS: usize = 32 * 1024;
 
 pub type LoadedProjectSources<'a> = (&'a [(String, String)], usize, Vec<String>);
 
 #[derive(Default)]
 pub struct ProjectSources {
-    cache: Option<Cache>,
+    excluded_paths: Vec<PathBuf>,
+    caches: Vec<Cache>,
 }
 
 struct Cache {
-    roots: Vec<PathBuf>,
-    inferred_roots: Vec<PathBuf>,
-    excluded_paths: Vec<PathBuf>,
+    module_indices: Vec<usize>,
     documents: Vec<(String, String)>,
     java_documents: Vec<(String, String)>,
     inferred_count: usize,
@@ -25,9 +26,31 @@ struct Cache {
     max_bytes: usize,
 }
 
+impl Cache {
+    fn retained_bytes(&self) -> usize {
+        self.kotlin_bytes.saturating_add(
+            self.java_documents
+                .iter()
+                .map(|(_, source)| source.len())
+                .sum::<usize>(),
+        )
+    }
+
+    fn retained_entries(&self) -> usize {
+        self.documents
+            .len()
+            .saturating_add(self.java_documents.len())
+    }
+
+    fn retained_module_keys(&self) -> usize {
+        self.module_indices.len()
+    }
+}
+
 impl ProjectSources {
     pub fn invalidate(&mut self) {
-        self.cache = None;
+        self.excluded_paths.clear();
+        self.caches.clear();
     }
 
     pub fn load(
@@ -53,28 +76,26 @@ impl ProjectSources {
         let remaining = max_bytes - open_bytes;
 
         let mut root_policies = BTreeMap::new();
-        let mut inferred_roots = Vec::new();
-        let mut inferred_modules = HashSet::new();
+        let mut inferred_module_indices = HashSet::new();
+        let mut visible_module_indices = HashSet::new();
+        let mut module_indices = HashSet::new();
         for source_path in &source_paths {
-            if let Some(module) = model.module_for_source(source_path) {
-                if let Some(id) = &module.id {
-                    inferred_modules.insert(id.clone());
-                }
+            if let Some(module_index) = model.module_index_for_source(source_path) {
+                module_indices.insert(module_index);
+                inferred_module_indices.insert(module_index);
+                visible_module_indices.insert(module_index);
+                let module = &model.modules[module_index];
                 for root in &module.source_roots {
                     let broad_root = root.path == model.root || root.path == module.base_directory;
                     root_policies
                         .entry(root.path.clone())
                         .and_modify(|broad| *broad |= broad_root)
                         .or_insert(broad_root);
-                    if !inferred_roots.contains(&root.path) {
-                        inferred_roots.push(root.path.clone());
-                    }
                 }
-                for dependency in module
-                    .depends_on
-                    .iter()
-                    .filter_map(|dependency| model.module(dependency))
-                {
+                inferred_module_indices.extend(model.friend_source_module_indices(module_index));
+                let visible = model.visible_source_module_indices(module_index);
+                visible_module_indices.extend(visible.iter().copied());
+                for dependency in visible.iter().filter_map(|&index| model.modules.get(index)) {
                     for root in &dependency.source_roots {
                         let broad_root =
                             root.path == model.root || root.path == dependency.base_directory;
@@ -86,19 +107,32 @@ impl ProjectSources {
                 }
             }
         }
-        let roots = root_policies.keys().cloned().collect::<Vec<_>>();
-        inferred_roots.sort();
+        let mut module_indices = module_indices.into_iter().collect::<Vec<_>>();
+        module_indices.sort_unstable();
+        let mut excluded_source_roots = model
+            .modules
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !visible_module_indices.contains(index))
+            .flat_map(|(_, module)| module.source_roots.iter().map(|root| root.path.clone()))
+            .filter(|root| !root_policies.contains_key(root))
+            .collect::<Vec<_>>();
+        excluded_source_roots.sort();
+        excluded_source_roots.dedup();
 
         let mut excluded_paths = excluded_paths.into_iter().collect::<Vec<_>>();
         excluded_paths.sort();
-        let cache_matches = self.cache.as_ref().is_some_and(|cache| {
-            cache.roots == roots
-                && cache.inferred_roots == inferred_roots
-                && cache.excluded_paths == excluded_paths
-                && cache.max_bytes == max_bytes
+        if self.excluded_paths != excluded_paths {
+            self.excluded_paths = excluded_paths;
+            self.caches.clear();
+        }
+        let cached = self.caches.iter().position(|cache| {
+            cache.module_indices == module_indices && cache.max_bytes == max_bytes
         });
-        if cache_matches {
-            let cache = self.cache.as_ref().unwrap();
+        if let Some(index) = cached {
+            let cache = self.caches.remove(index);
+            self.caches.push(cache);
+            let cache = self.caches.last().unwrap();
             if cache.kotlin_bytes > remaining {
                 return Err(size_limit_message(max_bytes));
             }
@@ -113,10 +147,16 @@ impl ProjectSources {
             paths.extend(find_sources(
                 root,
                 *ignore_workspace_directories,
+                &excluded_source_roots,
                 &mut remaining_entries,
             )?);
         }
-        paths.retain(|path| excluded_paths.binary_search(path).is_err());
+        paths.retain(|path| self.excluded_paths.binary_search(path).is_err());
+        paths.retain(|path| {
+            model
+                .module_index_for_source(path)
+                .is_some_and(|index| visible_module_indices.contains(&index))
+        });
         paths.sort();
         paths.dedup();
         let (kotlin_paths, java_paths): (Vec<_>, Vec<_>) = paths
@@ -125,29 +165,63 @@ impl ProjectSources {
         let (mut inferred_paths, dependency_paths): (Vec<_>, Vec<_>) =
             kotlin_paths.into_iter().partition(|path| {
                 model
-                    .module_for_source(path)
-                    .and_then(|module| module.id.as_ref())
-                    .is_some_and(|id| inferred_modules.contains(id))
+                    .module_index_for_source(path)
+                    .is_some_and(|index| inferred_module_indices.contains(&index))
             });
         let inferred_count = inferred_paths.len();
         inferred_paths.extend(dependency_paths);
 
         let (documents, kotlin_bytes) = load_documents(inferred_paths, remaining, max_bytes)?;
         let java_documents = load_documents_best_effort(java_paths, max_bytes - kotlin_bytes);
-        self.cache = Some(Cache {
-            roots,
-            inferred_roots,
-            excluded_paths,
+        let cache = Cache {
+            module_indices,
             documents,
             java_documents,
             inferred_count,
             kotlin_bytes,
             max_bytes,
-        });
-        let cache = self.cache.as_ref().unwrap();
+        };
+        retain_cache_budget(
+            &mut self.caches,
+            cache.retained_bytes(),
+            cache.retained_entries(),
+            cache.retained_module_keys(),
+            MAX_CACHED_SOURCE_BYTES,
+            MAX_INVENTORY_ENTRIES,
+            MAX_CACHED_MODULE_KEYS,
+        );
+        self.caches.push(cache);
+        let cache = self.caches.last().unwrap();
         let java_sources =
             sources_within_budget(&cache.java_documents, remaining - cache.kotlin_bytes);
         Ok((&cache.documents, cache.inferred_count, java_sources))
+    }
+}
+
+fn retain_cache_budget(
+    caches: &mut Vec<Cache>,
+    incoming_bytes: usize,
+    incoming_entries: usize,
+    incoming_module_keys: usize,
+    max_bytes: usize,
+    max_entries: usize,
+    max_module_keys: usize,
+) {
+    let mut retained_bytes = caches.iter().map(Cache::retained_bytes).sum::<usize>();
+    let mut retained_entries = caches.iter().map(Cache::retained_entries).sum::<usize>();
+    let mut retained_module_keys = caches
+        .iter()
+        .map(Cache::retained_module_keys)
+        .sum::<usize>();
+    while !caches.is_empty()
+        && (incoming_bytes > max_bytes.saturating_sub(retained_bytes)
+            || incoming_entries > max_entries.saturating_sub(retained_entries)
+            || incoming_module_keys > max_module_keys.saturating_sub(retained_module_keys))
+    {
+        let evicted = caches.remove(0);
+        retained_bytes = retained_bytes.saturating_sub(evicted.retained_bytes());
+        retained_entries = retained_entries.saturating_sub(evicted.retained_entries());
+        retained_module_keys = retained_module_keys.saturating_sub(evicted.retained_module_keys());
     }
 }
 
@@ -245,6 +319,7 @@ fn read_error_message() -> String {
 fn find_sources(
     root: &Path,
     ignore_workspace_directories: bool,
+    excluded_source_roots: &[PathBuf],
     remaining_entries: &mut usize,
 ) -> Result<Vec<PathBuf>, String> {
     let mut pending = vec![root.to_path_buf()];
@@ -257,12 +332,15 @@ fn find_sources(
         };
         for entry in entries {
             let entry = entry.map_err(|_| read_error_message())?;
+            let path = entry.path();
+            let kind = entry.file_type().map_err(|_| read_error_message())?;
+            if kind.is_dir() && excluded_source_roots.binary_search(&path).is_ok() {
+                continue;
+            }
             let Some(next_remaining) = remaining_entries.checked_sub(1) else {
                 return Err(inventory_limit_message());
             };
             *remaining_entries = next_remaining;
-            let path = entry.path();
-            let kind = entry.file_type().map_err(|_| read_error_message())?;
             if kind.is_dir()
                 && (!ignore_workspace_directories || !super::walk::is_ignored_directory(&path))
             {
@@ -283,6 +361,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
+    use crate::project::model::ModuleOutput;
     use crate::project::{Module, ModuleId, ProjectModel, ProviderKind, SourceRoot};
 
     const MAX_BYTES: usize = 32 * 1024 * 1024;
@@ -389,6 +468,69 @@ mod tests {
     }
 
     #[test]
+    fn caches_support_sources_for_each_open_module() {
+        let directory = temp_path("module-caches");
+        let first_root = directory.join("first");
+        let second_root = directory.join("second");
+        fs::create_dir_all(&first_root).unwrap();
+        fs::create_dir_all(&second_root).unwrap();
+        let first_open = first_root.join("Open.kt");
+        let first_support = first_root.join("Support.kt");
+        let second_open = second_root.join("Open.kt");
+        let second_support = second_root.join("Support.kt");
+        fs::write(&first_open, "fun open() {}").unwrap();
+        fs::write(&first_support, "fun first() {}").unwrap();
+        fs::write(&second_open, "fun open() {}").unwrap();
+        fs::write(&second_support, "fun second() {}").unwrap();
+        let mut first = Module::new(ModuleId::new(":first", "main"), &first_root);
+        first.source_roots = vec![SourceRoot::source(&first_root)];
+        let mut second = Module::new(ModuleId::new(":second", "main"), &second_root);
+        second.source_roots = vec![SourceRoot::source(&second_root)];
+        let model =
+            ProjectModel::new(&directory, ProviderKind::Gradle).with_modules(vec![first, second]);
+        let first_uri = file_uri(&first_open);
+        let second_uri = file_uri(&second_open);
+        let open_uris = [first_uri.as_str(), second_uri.as_str()];
+        let first_documents = [(first_uri.as_str(), "fun open() {}")];
+        let second_documents = [(second_uri.as_str(), "fun open() {}")];
+        let mut sources = ProjectSources::default();
+
+        let first_loaded = sources
+            .load(&model, &first_documents, &open_uris, MAX_BYTES)
+            .unwrap()
+            .0
+            .to_vec();
+        let second_loaded = sources
+            .load(&model, &second_documents, &open_uris, MAX_BYTES)
+            .unwrap()
+            .0
+            .to_vec();
+        assert_eq!(sources.caches.len(), 2);
+        let first_only = [first_uri.as_str()];
+        sources
+            .load(&model, &first_documents, &first_only, MAX_BYTES)
+            .unwrap();
+        assert_eq!(sources.caches.len(), 1);
+        fs::remove_file(&first_support).unwrap();
+        let first_cached = sources
+            .load(&model, &first_documents, &first_only, MAX_BYTES)
+            .unwrap()
+            .0
+            .to_vec();
+
+        fs::remove_dir_all(directory).ok();
+        assert_eq!(
+            first_loaded,
+            [(file_uri(&first_support), "fun first() {}".to_string())]
+        );
+        assert_eq!(
+            second_loaded,
+            [(file_uri(&second_support), "fun second() {}".to_string())]
+        );
+        assert_eq!(first_cached, first_loaded);
+    }
+
+    #[test]
     fn oversized_java_file_does_not_hide_other_java_sources() {
         let directory = temp_path("java-partial-budget");
         fs::create_dir_all(&directory).unwrap();
@@ -451,13 +593,17 @@ mod tests {
         let base_root = directory.join("base/src");
         let consumer_root = directory.join("feature/src");
         let dependency_root = consumer_root.join("foundation");
+        let unrelated_root = consumer_root.join("unrelated");
         fs::create_dir_all(&base_root).unwrap();
         fs::create_dir_all(&dependency_root).unwrap();
+        fs::create_dir_all(&unrelated_root).unwrap();
         fs::create_dir_all(&consumer_root).unwrap();
         let base = base_root.join("Marker.kt");
         let dependency = dependency_root.join("Bridge.kt");
         let consumer = consumer_root.join("Use.kt");
         let local = consumer_root.join("Local.kt");
+        let unrelated = unrelated_root.join("Hidden.kt");
+        let unrelated_java = unrelated_root.join("HiddenJava.java");
         fs::write(&base, "package fixture\ninterface Marker\n").unwrap();
         fs::write(
             &dependency,
@@ -466,6 +612,8 @@ mod tests {
         .unwrap();
         fs::write(&consumer, "package fixture\nfun use() = Bridge.current()\n").unwrap();
         fs::write(&local, "package fixture\nfun local() = 1\n").unwrap();
+        fs::write(&unrelated, "package fixture\ninternal class Hidden\n").unwrap();
+        fs::write(&unrelated_java, "package fixture; class HiddenJava {}").unwrap();
 
         let base_id = ModuleId::new(":base", "main");
         let mut base_module = Module::new(base_id.clone(), directory.join("base"));
@@ -475,6 +623,11 @@ mod tests {
             Module::new(dependency_id.clone(), directory.join("foundation"));
         dependency_module.source_roots = vec![SourceRoot::source(dependency_root)];
         dependency_module.depends_on = vec![base_id];
+        let mut unrelated_module = Module::new(
+            ModuleId::new(":unrelated", "main"),
+            directory.join("unrelated"),
+        );
+        unrelated_module.source_roots = vec![SourceRoot::source(unrelated_root)];
         let mut consumer_module =
             Module::new(ModuleId::new(":feature", "main"), directory.join("feature"));
         consumer_module.source_roots = vec![SourceRoot::source(consumer_root)];
@@ -482,6 +635,7 @@ mod tests {
         let model = ProjectModel::new(&directory, ProviderKind::Gradle).with_modules(vec![
             base_module,
             dependency_module,
+            unrelated_module,
             consumer_module,
         ]);
         let consumer_uri = file_uri(&consumer);
@@ -516,6 +670,79 @@ mod tests {
     }
 
     #[test]
+    fn load_includes_sources_exposed_by_friend_outputs() {
+        let directory = temp_path("friend-source");
+        let associated_root = directory.join("associated/src");
+        let consumer_root = directory.join("consumer/src");
+        fs::create_dir_all(&associated_root).unwrap();
+        fs::create_dir_all(&consumer_root).unwrap();
+        let associated_source = associated_root.join("Available.kt");
+        let consumer_source = consumer_root.join("Open.kt");
+        fs::write(&associated_source, "package sample\nfun available() = 1\n").unwrap();
+        fs::write(
+            &consumer_source,
+            "package sample\nfun use() = available()\n",
+        )
+        .unwrap();
+        let output = directory.join("associated/out");
+        let mut associated = Module::new(ModuleId::new(":associated", "main"), &associated_root);
+        associated.source_roots = vec![SourceRoot::source(&associated_root)];
+        associated.outputs = vec![ModuleOutput::classes(&output)];
+        let mut consumer = Module::new(ModuleId::new(":consumer", "main"), &consumer_root);
+        consumer.source_roots = vec![SourceRoot::source(&consumer_root)];
+        consumer.friend_paths = vec![output];
+        let model = ProjectModel::new(&directory, ProviderKind::Gradle)
+            .with_modules(vec![associated, consumer]);
+        let consumer_uri = file_uri(&consumer_source);
+        let documents = [(
+            consumer_uri.as_str(),
+            "package sample\nfun use() = available()\n",
+        )];
+        let open_uris = [consumer_uri.as_str()];
+        let mut sources = ProjectSources::default();
+
+        let (loaded, inferred_count, java_docs) = sources
+            .load(&model, &documents, &open_uris, MAX_BYTES)
+            .unwrap();
+
+        fs::remove_dir_all(directory).ok();
+        assert_eq!(
+            loaded,
+            [(
+                file_uri(&associated_source),
+                "package sample\nfun available() = 1\n".to_string()
+            )]
+        );
+        assert_eq!(inferred_count, 1);
+        assert!(java_docs.is_empty());
+    }
+
+    #[test]
+    fn source_cache_eviction_is_byte_entry_and_metadata_bounded() {
+        let cache = |module_index: usize, bytes: usize, entries: usize| Cache {
+            module_indices: vec![module_index],
+            documents: (0..entries)
+                .map(|index| {
+                    (
+                        format!("{module_index}/{index}.kt"),
+                        "x".repeat(bytes / entries),
+                    )
+                })
+                .collect(),
+            java_documents: Vec::new(),
+            inferred_count: entries,
+            kotlin_bytes: bytes,
+            max_bytes: bytes,
+        };
+        let mut caches = vec![cache(0, 4, 1), cache(1, 4, 1)];
+
+        retain_cache_budget(&mut caches, 4, 1, 1, 8, 2, 2);
+
+        assert_eq!(caches.len(), 1);
+        assert_eq!(caches[0].module_indices, [1]);
+    }
+
+    #[test]
     fn oversized_sources_are_rejected_before_they_are_read() {
         let path = temp_path("oversized-support").with_extension("kt");
         let file = fs::File::create(&path).unwrap();
@@ -535,10 +762,32 @@ mod tests {
         fs::write(directory.join("Second.kt"), "").unwrap();
         let mut remaining_entries = 1;
 
-        let result = find_sources(&directory, false, &mut remaining_entries);
+        let result = find_sources(&directory, false, &[], &mut remaining_entries);
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(result.unwrap_err(), inventory_limit_message());
+    }
+
+    #[test]
+    fn inventory_prunes_unrelated_nested_source_roots_before_counting() {
+        let directory = temp_path("support-pruned-module");
+        let unrelated = directory.join("nested");
+        fs::create_dir_all(&unrelated).unwrap();
+        fs::write(directory.join("Active.kt"), "").unwrap();
+        for index in 0..8 {
+            fs::write(unrelated.join(format!("{index}.kt")), "").unwrap();
+        }
+        let mut remaining_entries = 1;
+
+        let result = find_sources(
+            &directory,
+            false,
+            std::slice::from_ref(&unrelated),
+            &mut remaining_entries,
+        );
+
+        fs::remove_dir_all(&directory).ok();
+        assert_eq!(result.unwrap(), vec![directory.join("Active.kt")]);
     }
 
     #[test]
@@ -552,7 +801,7 @@ mod tests {
         fs::write(directory.join("src/Feature.kt"), "").unwrap();
         let mut remaining_entries = 3;
 
-        let result = find_sources(&directory, true, &mut remaining_entries);
+        let result = find_sources(&directory, true, &[], &mut remaining_entries);
 
         fs::remove_dir_all(&directory).ok();
         assert_eq!(result.unwrap(), vec![directory.join("src/Feature.kt")]);
@@ -565,7 +814,7 @@ mod tests {
         fs::write(directory.join("build/Feature.kt"), "").unwrap();
         let mut remaining_entries = 2;
 
-        let result = find_sources(&directory, false, &mut remaining_entries);
+        let result = find_sources(&directory, false, &[], &mut remaining_entries);
 
         fs::remove_dir_all(&directory).ok();
         assert_eq!(result.unwrap(), vec![directory.join("build/Feature.kt")]);

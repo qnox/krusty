@@ -17,7 +17,8 @@ use serde_json::{json, Value};
 use super::super::{
     CompletionIndex, DefinitionIndex, DocumentAnalysis, DocumentSymbolIndex, FoldingRangeIndex,
     HoverIndex, LibraryDefinitionIndex, MaterializedDefinition, SemanticTokenIndex,
-    SemanticTokenRange, SignatureHelpIndex, SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
+    SemanticTokenRange, SignatureHelpIndex, MAX_RETAINED_ANALYSIS_BYTES, SEMANTIC_TOKEN_MODIFIERS,
+    SEMANTIC_TOKEN_TYPES,
 };
 use crate::compiler_analysis::LibraryRef;
 use crate::server::engine::{
@@ -33,6 +34,7 @@ pub const MAX_HEADER_BYTES: usize = 8 * 1024;
 const INPUT_QUEUE_CAPACITY: usize = 4;
 const MAX_INPUT_DISPATCHES_BEFORE_MAINTENANCE: usize = 32;
 const MAX_OPEN_DOCUMENTS: usize = 256;
+const MAX_OPEN_SOURCE_BYTES: usize = MAX_RETAINED_ANALYSIS_BYTES;
 const MAX_CONTENT_CHANGES: usize = 256;
 const MAX_CONTENT_CHANGE_SCAN_BYTES: usize = MAX_SOURCE_SET_BYTES * 3;
 const MAX_CONTENT_CHANGE_EDIT_BYTES: usize = MAX_SOURCE_SET_BYTES * 3;
@@ -100,9 +102,104 @@ impl ProjectFeedback {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct DocumentAdmission {
+    grouped: bool,
+    source_roots: Vec<(PathBuf, usize, usize)>,
+    visible_modules: Vec<Vec<usize>>,
+}
+
+impl DocumentAdmission {
+    pub fn for_model(model: &crate::project::ProjectModel) -> Self {
+        if matches!(
+            model.kind,
+            crate::project::ProviderKind::Explicit | crate::project::ProviderKind::None
+        ) {
+            return Self::default();
+        }
+        let source_roots = model
+            .modules
+            .iter()
+            .enumerate()
+            .flat_map(|(module_index, module)| {
+                module.source_roots.iter().map(move |root| {
+                    (
+                        root.path.clone(),
+                        root.path.components().count(),
+                        module_index,
+                    )
+                })
+            })
+            .collect();
+        let visible_modules = (0..model.modules.len())
+            .map(|module_index| {
+                let mut visible = model.visible_source_module_indices(module_index);
+                visible.push(module_index);
+                visible.sort_unstable();
+                visible.dedup();
+                visible
+            })
+            .collect();
+        Self {
+            grouped: true,
+            source_roots,
+            visible_modules,
+        }
+    }
+
+    pub fn accepts(&self, documents: &[(&str, usize)]) -> bool {
+        let global_bytes = documents
+            .iter()
+            .try_fold(0usize, |total, (_, length)| total.checked_add(*length));
+        if global_bytes.is_none_or(|bytes| bytes > MAX_OPEN_SOURCE_BYTES) {
+            return false;
+        }
+        if !self.grouped {
+            return source_set_fits(documents.iter().map(|(_, length)| *length));
+        }
+        let mut assignments = Vec::with_capacity(documents.len());
+        for &(uri, length) in documents {
+            if length > MAX_SOURCE_SET_BYTES {
+                return false;
+            }
+            let assignment = url::Url::parse(uri)
+                .ok()
+                .and_then(|uri| uri.to_file_path().ok())
+                .and_then(|path| {
+                    self.source_roots
+                        .iter()
+                        .filter(|(root, _, _)| path.starts_with(root))
+                        .map(|(_, depth, module_index)| (*depth, *module_index))
+                        .max()
+                        .map(|(_, module_index)| module_index)
+                });
+            assignments.push(assignment);
+        }
+        let mut active_modules = assignments.iter().flatten().copied().collect::<Vec<_>>();
+        active_modules.sort_unstable();
+        active_modules.dedup();
+        active_modules.into_iter().all(|module_index| {
+            let Some(visible) = self.visible_modules.get(module_index) else {
+                return false;
+            };
+            source_set_fits(documents.iter().zip(&assignments).filter_map(
+                |((_, length), assignment)| {
+                    assignment
+                        .is_some_and(|assigned| visible.binary_search(&assigned).is_ok())
+                        .then_some(*length)
+                },
+            ))
+        })
+    }
+}
+
 /// Analysis and project-model operations behind an LSP session.
 pub trait Analysis {
     fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis>;
+
+    fn document_admission(&self) -> DocumentAdmission {
+        DocumentAdmission::default()
+    }
 
     /// Analyze open documents together with project support sources.
     fn analyze_open_documents(
@@ -173,6 +270,9 @@ where
 
 pub trait AnalysisBackend {
     fn analysis_ready(&self) -> bool;
+    fn accepts_document_set(&self, documents: &[(&str, usize)]) -> bool {
+        DocumentAdmission::default().accepts(documents)
+    }
     fn submit(&mut self, job: AnalysisJob) -> Option<AnalysisBatch>;
     fn materialize(&mut self, job: MaterializeJob) -> Option<MaterializeResult> {
         Some(MaterializeResult {
@@ -207,6 +307,10 @@ impl<A: Analysis> InlineBackend<A> {
 impl<A: Analysis> AnalysisBackend for InlineBackend<A> {
     fn analysis_ready(&self) -> bool {
         self.0.analysis_ready()
+    }
+
+    fn accepts_document_set(&self, documents: &[(&str, usize)]) -> bool {
+        self.0.document_admission().accepts(documents)
     }
 
     fn submit(&mut self, job: AnalysisJob) -> Option<AnalysisBatch> {
@@ -663,12 +767,15 @@ where
         if !self.documents.contains_key(uri) && self.documents.len() >= MAX_OPEN_DOCUMENTS {
             return false;
         }
-        source_set_fits(
-            self.documents
-                .iter()
-                .filter_map(|(open_uri, document)| (open_uri != uri).then_some(document.text.len()))
-                .chain(std::iter::once(text_len)),
-        )
+        let documents = self
+            .documents
+            .iter()
+            .filter_map(|(open_uri, document)| {
+                (open_uri != uri).then_some((open_uri.as_str(), document.text.len()))
+            })
+            .chain(std::iter::once((uri, text_len)))
+            .collect::<Vec<_>>();
+        self.backend.accepts_document_set(&documents)
     }
 
     fn note_document_identity_change(&mut self) {
@@ -2316,7 +2423,8 @@ fn analysis_limit_diagnostics() -> DiagnosticIndex {
             severity: Severity::Error,
             kind: DiagnosticKind::Compiler,
             msg: format!(
-                "workspace analysis limit exceeded (maximum {} MiB across {} open documents)",
+                "workspace analysis limit exceeded (maximum {} MiB of open source, {} MiB per analysis group, and {} open documents)",
+                MAX_OPEN_SOURCE_BYTES / (1024 * 1024),
                 MAX_SOURCE_SET_BYTES / (1024 * 1024),
                 MAX_OPEN_DOCUMENTS
             ),

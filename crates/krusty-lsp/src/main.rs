@@ -1,16 +1,19 @@
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use krusty::jvm::classpath::platform_jdk_modules;
 use krusty_lsp::{
-    detect, resolve_jdk, AnalysisWorker, DocumentAnalysis, JdkRequest, LibraryRef,
-    LoadedProjectSources, LspOptions, MaterializedDefinition, ProcessRunner, ProjectFeedback,
-    ProjectMessageKind, ProjectModel, ProjectSources, ProjectSync, ProviderKind, RefreshOutcome,
-    SystemEnvironment,
+    detect, resolve_jdk, AnalysisWorker, DocumentAnalysis, JdkRequest, LibraryRef, LspOptions,
+    MaterializedDefinition, ProcessRunner, ProjectFeedback, ProjectMessageKind, ProjectModel,
+    ProjectSources, ProjectSync, ProviderKind, RefreshOutcome, SystemEnvironment,
 };
 
 const WORKER_RECONFIGURE_RETRY_INITIAL_MS: u64 = 1_000;
 const WORKER_RECONFIGURE_RETRY_MAX_MS: u64 = 30_000;
+const MAX_RETAINED_SUPPORT_DOCUMENTS: usize = 32 * 1024;
 
 fn is_java_source_path(path: &Path) -> bool {
     path.extension().and_then(|extension| extension.to_str()) == Some("java")
@@ -137,7 +140,9 @@ struct WorkerHost {
     root: Option<PathBuf>,
     jdk_warning_shown: bool,
     project_sources: ProjectSources,
+    analysis_cache: Vec<CachedProjectAnalysis>,
     analysis_pending: bool,
+    platform_classpath: Vec<PathBuf>,
     worker_reconfigure_retry_at_ms: Option<u64>,
     worker_reconfigure_retry_backoff_ms: u64,
 }
@@ -145,6 +150,13 @@ struct WorkerHost {
 impl WorkerHost {
     fn new(mut worker: AnalysisWorker, options: LspOptions) -> Self {
         worker.set_language_features(options.language_features());
+        let platform_classpath = if options.no_jdk() {
+            Vec::new()
+        } else {
+            platform_jdk_modules(options.jdk_home())
+                .into_iter()
+                .collect()
+        };
         Self {
             worker,
             options,
@@ -154,7 +166,9 @@ impl WorkerHost {
             root: None,
             jdk_warning_shown: false,
             project_sources: ProjectSources::default(),
+            analysis_cache: Vec::new(),
             analysis_pending: false,
+            platform_classpath,
             worker_reconfigure_retry_at_ms: None,
             worker_reconfigure_retry_backoff_ms: 0,
         }
@@ -173,6 +187,7 @@ impl WorkerHost {
             RefreshOutcome::Unchanged => ProjectFeedback::default(),
             RefreshOutcome::Updated => {
                 self.project_sources.invalidate();
+                self.analysis_cache.clear();
                 let (classpath, jdk_home) = Self::launch_from(sync, &self.options, &self.runner);
                 let mut language_features = sync.project_language_features();
                 self.options.apply_language_features(&mut language_features);
@@ -204,6 +219,13 @@ impl WorkerHost {
                 }
                 self.worker_reconfigure_retry_at_ms = None;
                 self.worker_reconfigure_retry_backoff_ms = 0;
+                self.platform_classpath = if self.options.no_jdk() {
+                    Vec::new()
+                } else {
+                    platform_jdk_modules(jdk_home.as_deref())
+                        .into_iter()
+                        .collect()
+                };
                 self.worker.set_language_features(language_features);
                 ProjectFeedback {
                     reanalyze: true,
@@ -341,6 +363,14 @@ impl WorkerHost {
 }
 
 impl krusty_lsp::Analysis for WorkerHost {
+    fn document_admission(&self) -> krusty_lsp::DocumentAdmission {
+        self.sync
+            .as_ref()
+            .and_then(ProjectSync::model)
+            .map(krusty_lsp::DocumentAdmission::for_model)
+            .unwrap_or_default()
+    }
+
     fn analysis_ready(&self) -> bool {
         self.sync.as_ref().and_then(ProjectSync::model).is_some()
     }
@@ -384,32 +414,231 @@ impl krusty_lsp::Analysis for WorkerHost {
         documents: &[(&str, &str)],
         open_uris: &[&str],
     ) -> (Vec<DocumentAnalysis>, Vec<(String, String)>) {
-        let project_sources =
-            project_source_mask(self.sync.as_ref().and_then(ProjectSync::model), documents);
-        let modeled_documents = modeled_documents(documents, &project_sources);
-        let (support_documents, inferred_support_count, java_sources) =
-            match self.project_support_sources(&modeled_documents, open_uris) {
-                Ok((sources, inferred_count, java_docs)) => {
-                    (sources.to_vec(), inferred_count, java_docs)
-                }
+        let module_assignments =
+            project_module_assignments(self.sync.as_ref().and_then(ProjectSync::model), documents);
+        let group_seeds = project_analysis_groups(&module_assignments);
+        let mut analyses = (0..documents.len())
+            .map(|_| DocumentAnalysis::empty())
+            .collect::<Vec<_>>();
+        self.analysis_pending = false;
+
+        let mut retained_support_bytes = 0usize;
+        let mut support_documents = Vec::new();
+        let mut support_indices = HashMap::<String, usize>::new();
+        let mut next_discarded_support_file = u32::MAX;
+        self.analysis_cache.retain(|cached| {
+            group_seeds.iter().any(|(module_index, document_indices)| {
+                *module_index == cached.module_index && *document_indices == cached.document_indices
+            })
+        });
+        let mut remaining_analysis_bytes = krusty_lsp::MAX_RETAINED_ANALYSIS_BYTES;
+        for (module_index, document_indices) in group_seeds {
+            let modeled_documents = document_indices
+                .iter()
+                .map(|&index| documents[index])
+                .collect::<Vec<_>>();
+            let loaded = match (
+                self.sync.as_ref().and_then(ProjectSync::model),
+                module_index,
+            ) {
+                (Some(model), Some(_)) => self
+                    .project_sources
+                    .load(
+                        model,
+                        &modeled_documents,
+                        open_uris,
+                        krusty_lsp::MAX_SOURCE_SET_BYTES,
+                    )
+                    .map(|(sources, inferred_count, java_sources)| {
+                        (sources.to_vec(), inferred_count, java_sources)
+                    }),
+                _ => Ok((Vec::new(), 0, Vec::new())),
+            };
+            let (mut group_support, mut inferred_support_count, java_sources) = match loaded {
+                Ok(loaded) => loaded,
                 Err(message) => {
-                    self.analysis_pending = false;
-                    let analyses = project_source_error_analyses(&project_sources, &message);
-                    return (analyses, Vec::new());
+                    fail_project_group(
+                        &mut analyses,
+                        &mut self.analysis_cache,
+                        module_index,
+                        &document_indices,
+                        &message,
+                    );
+                    continue;
                 }
             };
-        let mut inputs = project_analysis_inputs(documents, &project_sources);
-        inputs.extend(support_documents.iter().map(|(uri, source)| {
-            krusty::source::SourceInput::new(source_kind_from_uri(uri), source)
-        }));
-        let analyses = self.worker.analyze_inputs_prefix(
-            &inputs,
-            documents.len(),
-            documents.len() + inferred_support_count,
-            &java_sources,
+            let visible_open_documents = if let (Some(model), Some(module_index)) = (
+                self.sync
+                    .as_ref()
+                    .and_then(ProjectSync::model)
+                    .filter(|model| {
+                        !matches!(model.kind, ProviderKind::Explicit | ProviderKind::None)
+                    }),
+                module_index,
+            ) {
+                let friend_indices = model.friend_source_module_indices(module_index);
+                let dependency_indices = model
+                    .dependency_source_module_indices(module_index)
+                    .into_iter()
+                    .filter(|index| !friend_indices.contains(index))
+                    .collect::<Vec<_>>();
+                (
+                    open_documents_from_modules(&friend_indices, documents, &module_assignments),
+                    open_documents_from_modules(
+                        &dependency_indices,
+                        documents,
+                        &module_assignments,
+                    ),
+                )
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            let (friend_documents, dependency_documents) = visible_open_documents;
+            if !friend_documents.is_empty() {
+                group_support.splice(
+                    inferred_support_count..inferred_support_count,
+                    friend_documents
+                        .iter()
+                        .map(|(_, uri, source)| (uri.clone(), source.clone())),
+                );
+                inferred_support_count += friend_documents.len();
+            }
+            if !dependency_documents.is_empty() {
+                group_support.splice(
+                    inferred_support_count..inferred_support_count,
+                    dependency_documents
+                        .iter()
+                        .map(|(_, uri, source)| (uri.clone(), source.clone())),
+                );
+            }
+
+            let group_source_bytes = source_bytes(
+                document_indices
+                    .iter()
+                    .map(|&index| documents[index].1)
+                    .chain(group_support.iter().map(|(_, source)| source.as_str()))
+                    .chain(java_sources.iter().map(String::as_str)),
+            );
+            let fits_worker =
+                group_source_bytes.is_some_and(|bytes| bytes <= krusty_lsp::MAX_SOURCE_SET_BYTES);
+            if !fits_worker {
+                fail_project_group(
+                    &mut analyses,
+                    &mut self.analysis_cache,
+                    module_index,
+                    &document_indices,
+                    &project_source_size_limit_message(),
+                );
+                continue;
+            }
+            let remaining_support_entries =
+                MAX_RETAINED_SUPPORT_DOCUMENTS.saturating_sub(support_documents.len());
+            let (navigation_file_remaps, added_bytes) = register_canonical_support(
+                documents,
+                &group_support,
+                &mut support_documents,
+                &mut support_indices,
+                krusty_lsp::MAX_SOURCE_SET_BYTES.saturating_sub(retained_support_bytes),
+                remaining_support_entries,
+                &mut next_discarded_support_file,
+            );
+            retained_support_bytes += added_bytes;
+            let group = ProjectAnalysisGroup {
+                module_index,
+                document_indices,
+                support_documents: group_support,
+                inferred_support_count,
+                java_sources,
+                navigation_file_remaps,
+            };
+            let inputs = project_group_inputs(documents, &group);
+            let fingerprint = project_group_fingerprint(documents, &group);
+            let mut selected = if let Some(index) = self.analysis_cache.iter().position(|cached| {
+                cached.module_index == group.module_index
+                    && cached.fingerprint == fingerprint
+                    && cached.document_indices == group.document_indices
+            }) {
+                let cached = self.analysis_cache.remove(index);
+                let selected = cached.analyses.clone();
+                self.analysis_cache.push(cached);
+                selected
+            } else {
+                let (classpath, language_arguments) = project_group_compiler_config(
+                    self.sync.as_ref().and_then(ProjectSync::model),
+                    group.module_index,
+                    &self.platform_classpath,
+                    &self.options,
+                );
+                let result = self.worker.analyze_inputs_prefix_with_config(
+                    &inputs,
+                    documents.len(),
+                    documents.len() + group.inferred_support_count,
+                    &group.java_sources,
+                    &language_arguments,
+                    classpath.as_deref(),
+                );
+                let cacheable = result.is_ok();
+                let mut group_analyses = self.finish_analysis(result, documents.len());
+                if self.analysis_pending {
+                    return (Vec::new(), Vec::new());
+                }
+                if group_analyses.len() != documents.len() {
+                    return (Vec::new(), support_documents);
+                }
+                for analysis in &mut group_analyses {
+                    analysis.remap_navigation_files(&group.navigation_file_remaps);
+                }
+                let implementation_relations = group_analyses
+                    .iter_mut()
+                    .flat_map(|analysis| std::mem::take(&mut analysis.implementation_relations))
+                    .collect::<Vec<_>>();
+                let mut selected = group
+                    .document_indices
+                    .iter()
+                    .map(|&index| group_analyses[index].clone())
+                    .collect::<Vec<_>>();
+                if let Some(first) = selected.first_mut() {
+                    first.implementation_relations = implementation_relations;
+                }
+                if cacheable {
+                    self.analysis_cache
+                        .retain(|cached| cached.module_index != group.module_index);
+                    let retained_bytes = selected
+                        .iter()
+                        .map(DocumentAnalysis::retained_wire_bytes)
+                        .sum::<usize>();
+                    retain_analysis_cache_budget(
+                        &mut self.analysis_cache,
+                        retained_bytes,
+                        krusty_lsp::MAX_RETAINED_ANALYSIS_BYTES,
+                    );
+                    if retained_bytes <= krusty_lsp::MAX_RETAINED_ANALYSIS_BYTES {
+                        self.analysis_cache.push(CachedProjectAnalysis {
+                            module_index: group.module_index,
+                            fingerprint,
+                            document_indices: group.document_indices.clone(),
+                            analyses: selected.clone(),
+                            retained_bytes,
+                        });
+                    }
+                }
+                selected
+            };
+            krusty_lsp::retain_analysis_wire_budget(&mut selected, remaining_analysis_bytes);
+            let selected_bytes = selected
+                .iter()
+                .map(DocumentAnalysis::retained_wire_bytes)
+                .sum::<usize>();
+            remaining_analysis_bytes = remaining_analysis_bytes.saturating_sub(selected_bytes);
+            for (&index, analysis) in group.document_indices.iter().zip(selected) {
+                analyses[index] = analysis;
+            }
+        }
+        krusty_lsp::merge_cross_document_implementations(&mut analyses);
+        krusty_lsp::retain_analysis_wire_budget(
+            &mut analyses,
+            krusty_lsp::MAX_RETAINED_ANALYSIS_BYTES,
         );
-        let mut analyses = self.finish_analysis(analyses, documents.len());
-        suppress_unowned_analyses(&mut analyses, &project_sources);
         (analyses, support_documents)
     }
 
@@ -421,6 +650,8 @@ impl krusty_lsp::Analysis for WorkerHost {
         let root_display = root.display().to_string();
         self.root = Some(root);
         self.sync = Some(ProjectSync::new(provider));
+        self.project_sources.invalidate();
+        self.analysis_cache.clear();
         let mut feedback = self.configure();
         feedback
             .logs
@@ -534,24 +765,6 @@ fn next_worker_reconfigure_retry(now_ms: u64, previous_backoff_ms: u64) -> (u64,
     (now_ms.saturating_add(backoff), backoff)
 }
 
-impl WorkerHost {
-    fn project_support_sources(
-        &mut self,
-        documents: &[(&str, &str)],
-        open_uris: &[&str],
-    ) -> Result<LoadedProjectSources<'_>, String> {
-        let Some(model) = self.sync.as_ref().and_then(ProjectSync::model) else {
-            return Ok((&[], 0, Vec::new()));
-        };
-        self.project_sources.load(
-            model,
-            documents,
-            open_uris,
-            krusty_lsp::MAX_SOURCE_SET_BYTES,
-        )
-    }
-}
-
 fn source_kind_from_uri(uri: &str) -> krusty::source::SourceKind {
     url::Url::parse(uri)
         .ok()
@@ -561,83 +774,236 @@ fn source_kind_from_uri(uri: &str) -> krusty::source::SourceKind {
         .unwrap_or(krusty::source::SourceKind::Kotlin)
 }
 
-fn document_is_project_source(model: &ProjectModel, uri: &str) -> bool {
-    url::Url::parse(uri)
-        .ok()
-        .and_then(|uri| uri.to_file_path().ok())
-        .is_some_and(|path| model.module_for_source(&path).is_some())
-}
-
-fn project_source_mask(model: Option<&ProjectModel>, documents: &[(&str, &str)]) -> Vec<bool> {
+fn project_module_assignments(
+    model: Option<&ProjectModel>,
+    documents: &[(&str, &str)],
+) -> Vec<Option<usize>> {
     model.map_or_else(
-        || vec![true; documents.len()],
+        || vec![Some(0); documents.len()],
         |model| {
             if matches!(model.kind, ProviderKind::Explicit | ProviderKind::None) {
-                return vec![true; documents.len()];
+                return vec![Some(0); documents.len()];
             }
             documents
                 .iter()
-                .map(|(uri, _)| document_is_project_source(model, uri))
+                .map(|(uri, _)| {
+                    url::Url::parse(uri)
+                        .ok()
+                        .and_then(|uri| uri.to_file_path().ok())
+                        .and_then(|path| model.module_index_for_source(&path))
+                })
                 .collect()
         },
     )
 }
 
-fn modeled_documents<'a>(
-    documents: &[(&'a str, &'a str)],
-    project_sources: &[bool],
-) -> Vec<(&'a str, &'a str)> {
-    documents
-        .iter()
-        .zip(project_sources)
-        .filter_map(|(document, is_project_source)| is_project_source.then_some(*document))
-        .collect()
+fn project_analysis_groups(
+    module_assignments: &[Option<usize>],
+) -> Vec<(Option<usize>, Vec<usize>)> {
+    let mut groups: Vec<(Option<usize>, Vec<usize>)> = Vec::new();
+    for (document_index, module_index) in module_assignments.iter().copied().enumerate() {
+        let Some(module_index) = module_index else {
+            continue;
+        };
+        if let Some((_, document_indices)) = groups
+            .iter_mut()
+            .find(|(candidate, _)| *candidate == Some(module_index))
+        {
+            document_indices.push(document_index);
+        } else {
+            groups.push((Some(module_index), vec![document_index]));
+        }
+    }
+    groups
 }
 
-fn project_analysis_inputs<'a>(
-    documents: &[(&'a str, &'a str)],
-    project_sources: &[bool],
-) -> Vec<krusty::source::SourceInput<'a>> {
-    documents
-        .iter()
-        .zip(project_sources)
-        .map(|((uri, source), is_project_source)| {
-            krusty::source::SourceInput::new(
-                source_kind_from_uri(uri),
-                if *is_project_source { source } else { "" },
-            )
-        })
-        .collect()
+fn project_group_compiler_config(
+    model: Option<&ProjectModel>,
+    module_index: Option<usize>,
+    platform_classpath: &[PathBuf],
+    options: &LspOptions,
+) -> (Option<Vec<PathBuf>>, Vec<String>) {
+    let Some((model, module)) = model
+        .zip(module_index)
+        .and_then(|(model, index)| model.modules.get(index).map(|module| (model, module)))
+    else {
+        return (None, options.language_arguments().to_vec());
+    };
+
+    let mut classpath = model.compile_classpath(module);
+    for entry in platform_classpath {
+        if !classpath.contains(entry) {
+            classpath.push(entry.clone());
+        }
+    }
+    let mut language_arguments = module.kotlinc_args.clone();
+    language_arguments.extend_from_slice(options.language_arguments());
+    (Some(classpath), language_arguments)
 }
 
-fn project_source_error_analyses(project_sources: &[bool], message: &str) -> Vec<DocumentAnalysis> {
-    project_sources
+struct ProjectAnalysisGroup {
+    module_index: Option<usize>,
+    document_indices: Vec<usize>,
+    support_documents: Vec<(String, String)>,
+    inferred_support_count: usize,
+    java_sources: Vec<String>,
+    navigation_file_remaps: Vec<(u32, u32)>,
+}
+
+struct CachedProjectAnalysis {
+    module_index: Option<usize>,
+    fingerprint: u64,
+    document_indices: Vec<usize>,
+    analyses: Vec<DocumentAnalysis>,
+    retained_bytes: usize,
+}
+
+fn open_documents_from_modules<'a>(
+    visible_indices: &[usize],
+    documents: &[(&'a str, &'a str)],
+    module_assignments: &[Option<usize>],
+) -> Vec<(usize, String, String)> {
+    documents
         .iter()
-        .map(|is_project_source| {
-            if *is_project_source {
-                DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
-                    span: krusty::diag::Span::new(0, 0),
-                    editor_span: None,
-                    severity: krusty::diag::Severity::Error,
-                    kind: krusty::diag::DiagnosticKind::Compiler,
-                    msg: message.to_string(),
-                    file: 0,
-                }])
+        .zip(module_assignments)
+        .enumerate()
+        .filter_map(|(document_index, ((uri, source), assignment))| {
+            if assignment.is_some_and(|index| visible_indices.contains(&index)) {
+                Some((document_index, (*uri).to_string(), (*source).to_string()))
             } else {
-                DocumentAnalysis::empty()
+                None
             }
         })
         .collect()
 }
 
-fn suppress_unowned_analyses(analyses: &mut [DocumentAnalysis], project_sources: &[bool]) {
-    if analyses.len() != project_sources.len() {
-        return;
+fn project_group_inputs<'a>(
+    documents: &[(&'a str, &'a str)],
+    group: &'a ProjectAnalysisGroup,
+) -> Vec<krusty::source::SourceInput<'a>> {
+    documents
+        .iter()
+        .enumerate()
+        .map(|(index, (uri, source))| {
+            krusty::source::SourceInput::new(
+                source_kind_from_uri(uri),
+                if group.document_indices.contains(&index) {
+                    source
+                } else {
+                    ""
+                },
+            )
+        })
+        .chain(group.support_documents.iter().map(|(uri, source)| {
+            krusty::source::SourceInput::new(source_kind_from_uri(uri), source)
+        }))
+        .collect()
+}
+
+fn register_canonical_support(
+    documents: &[(&str, &str)],
+    group_support: &[(String, String)],
+    support_documents: &mut Vec<(String, String)>,
+    support_indices: &mut HashMap<String, usize>,
+    mut remaining_bytes: usize,
+    mut remaining_entries: usize,
+    next_discarded_file: &mut u32,
+) -> (Vec<(u32, u32)>, usize) {
+    let mut added_bytes = 0usize;
+    let mut remaps = Vec::with_capacity(group_support.len());
+    for (local_index, (uri, source)) in group_support.iter().enumerate() {
+        let canonical =
+            if let Some(index) = documents.iter().position(|(open_uri, _)| open_uri == uri) {
+                index as u32
+            } else if let Some(index) = support_indices.get(uri) {
+                (documents.len() + index) as u32
+            } else if remaining_entries > 0 && source.len() <= remaining_bytes {
+                let index = support_documents.len();
+                support_indices.insert(uri.clone(), index);
+                support_documents.push((uri.clone(), source.clone()));
+                remaining_bytes -= source.len();
+                remaining_entries -= 1;
+                added_bytes += source.len();
+                (documents.len() + index) as u32
+            } else {
+                let discarded = *next_discarded_file;
+                *next_discarded_file = next_discarded_file.saturating_sub(1);
+                discarded
+            };
+        remaps.push(((documents.len() + local_index) as u32, canonical));
     }
-    for (analysis, is_project_source) in analyses.iter_mut().zip(project_sources) {
-        if !is_project_source {
-            *analysis = DocumentAnalysis::empty();
+    (remaps, added_bytes)
+}
+
+fn project_group_fingerprint(documents: &[(&str, &str)], group: &ProjectAnalysisGroup) -> u64 {
+    let mut fingerprint = DefaultHasher::new();
+    documents.len().hash(&mut fingerprint);
+    group.module_index.hash(&mut fingerprint);
+    group.document_indices.hash(&mut fingerprint);
+    group.inferred_support_count.hash(&mut fingerprint);
+    group.navigation_file_remaps.hash(&mut fingerprint);
+    for (index, (uri, source)) in documents.iter().enumerate() {
+        if group.document_indices.contains(&index) {
+            uri.hash(&mut fingerprint);
+            source.hash(&mut fingerprint);
         }
+    }
+    for (uri, source) in &group.support_documents {
+        uri.hash(&mut fingerprint);
+        source.hash(&mut fingerprint);
+    }
+    group.java_sources.hash(&mut fingerprint);
+    fingerprint.finish()
+}
+
+fn retain_analysis_cache_budget(
+    cache: &mut Vec<CachedProjectAnalysis>,
+    incoming_bytes: usize,
+    max_bytes: usize,
+) {
+    let mut retained = cache
+        .iter()
+        .map(|cached| cached.retained_bytes)
+        .sum::<usize>();
+    while !cache.is_empty() && incoming_bytes > max_bytes.saturating_sub(retained) {
+        retained = retained.saturating_sub(cache.remove(0).retained_bytes);
+    }
+}
+
+fn source_bytes<'a>(sources: impl IntoIterator<Item = &'a str>) -> Option<usize> {
+    sources
+        .into_iter()
+        .try_fold(0usize, |bytes, source| bytes.checked_add(source.len()))
+}
+
+fn project_source_size_limit_message() -> String {
+    format!(
+        "module source set exceeds analysis limit (maximum {} MiB); semantic diagnostics suppressed",
+        krusty_lsp::MAX_SOURCE_SET_BYTES / (1024 * 1024)
+    )
+}
+
+fn project_source_error_analysis(message: &str) -> DocumentAnalysis {
+    DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
+        span: krusty::diag::Span::new(0, 0),
+        editor_span: None,
+        severity: krusty::diag::Severity::Error,
+        kind: krusty::diag::DiagnosticKind::Compiler,
+        msg: message.to_string(),
+        file: 0,
+    }])
+}
+
+fn fail_project_group(
+    analyses: &mut [DocumentAnalysis],
+    cache: &mut Vec<CachedProjectAnalysis>,
+    module_index: Option<usize>,
+    document_indices: &[usize],
+    message: &str,
+) {
+    cache.retain(|cached| cached.module_index != module_index);
+    for &index in document_indices {
+        analyses[index] = project_source_error_analysis(message);
     }
 }
 
@@ -680,83 +1046,348 @@ mod tests {
     }
 
     #[test]
-    fn project_analysis_preserves_owned_document_slots() {
-        let mut module = krusty_lsp::project::Module::new(
-            krusty_lsp::project::ModuleId::new(":", "main"),
-            "/workspace",
+    fn project_analysis_groups_preserve_global_slots() {
+        let mut dependency = krusty_lsp::project::Module::new(
+            krusty_lsp::project::ModuleId::new(":dependency", "main"),
+            "/workspace/dependency",
         );
-        module.source_roots = vec![krusty_lsp::project::SourceRoot::source(
-            "/workspace/src/main/kotlin",
+        dependency.source_roots = vec![krusty_lsp::project::SourceRoot::source(
+            "/workspace/dependency/src",
         )];
-        let model =
-            ProjectModel::new("/workspace", ProviderKind::Gradle).with_modules(vec![module]);
-        let source = url::Url::from_file_path("/workspace/src/main/kotlin/Source.kt")
+        let mut consumer = krusty_lsp::project::Module::new(
+            krusty_lsp::project::ModuleId::new(":consumer", "main"),
+            "/workspace/consumer",
+        );
+        consumer.source_roots = vec![krusty_lsp::project::SourceRoot::source(
+            "/workspace/consumer/src",
+        )];
+        consumer.depends_on = vec![krusty_lsp::project::ModuleId::new(":dependency", "main")];
+        let model = krusty_lsp::ProjectModel::new("/workspace", krusty_lsp::ProviderKind::Gradle)
+            .with_modules(vec![dependency, consumer]);
+        let dependency_uri = url::Url::from_file_path("/workspace/dependency/src/First.kt")
             .unwrap()
             .to_string();
-        let second_source = url::Url::from_file_path("/workspace/src/main/kotlin/Second.kt")
+        let consumer_uri = url::Url::from_file_path("/workspace/consumer/src/Second.kt")
             .unwrap()
             .to_string();
-        let resource = url::Url::from_file_path("/workspace/src/main/resources/Fixture.kt")
+        let unowned_uri = url::Url::from_file_path("/workspace/other/Third.kt")
             .unwrap()
             .to_string();
         let documents = [
-            (source.as_str(), "fun first() {}"),
-            (resource.as_str(), "fun first() {}"),
-            (second_source.as_str(), "fun second() {}"),
+            (dependency_uri.as_str(), "fun same() {}"),
+            (unowned_uri.as_str(), "fun same() {}"),
+            (consumer_uri.as_str(), "fun same() {}"),
         ];
-        let project_sources = project_source_mask(Some(&model), &documents);
+        let assignments = project_module_assignments(Some(&model), &documents);
 
-        assert!(document_is_project_source(&model, &source));
-        assert!(!document_is_project_source(&model, &resource));
-        assert!(!document_is_project_source(&model, "untitled:Scratch.kt"));
-        assert_eq!(project_sources, [true, false, true]);
+        assert_eq!(assignments, [Some(0), None, Some(1)]);
         assert_eq!(
-            modeled_documents(&documents, &project_sources),
-            [documents[0], documents[2]]
+            project_analysis_groups(&assignments),
+            [(Some(0), vec![0]), (Some(1), vec![2])]
+        );
+        assert!(project_analysis_groups(&[None, None]).is_empty());
+        assert_eq!(
+            open_documents_from_modules(
+                &model.dependency_source_module_indices(1),
+                &documents,
+                &assignments,
+            ),
+            [(0, dependency_uri.clone(), documents[0].1.to_string())]
         );
 
-        let inputs = project_analysis_inputs(&documents, &project_sources);
-        assert_eq!(inputs.len(), documents.len());
-        assert_eq!(inputs[0].text, documents[0].1);
-        assert_eq!(inputs[1].text, "");
-        assert_eq!(inputs[2].text, documents[2].1);
-
-        let diagnostic = |message: &str| krusty::diag::Diagnostic {
-            span: krusty::diag::Span::new(0, 0),
-            editor_span: None,
-            severity: krusty::diag::Severity::Error,
-            kind: krusty::diag::DiagnosticKind::Compiler,
-            msg: message.to_string(),
-            file: 0,
+        let dependency_support = (
+            "file:///dependency-support.kt".into(),
+            "fun helper() {}".into(),
+        );
+        let consumer_support = (
+            "file:///consumer-support.kt".into(),
+            "fun helper() {}".into(),
+        );
+        let dependency_group = ProjectAnalysisGroup {
+            module_index: Some(0),
+            document_indices: vec![0],
+            support_documents: vec![dependency_support.clone()],
+            inferred_support_count: 1,
+            java_sources: Vec::new(),
+            navigation_file_remaps: vec![(3, 3)],
         };
-        let mut analyses = vec![
-            DocumentAnalysis::with_diagnostics(vec![diagnostic("first")]),
-            DocumentAnalysis::with_diagnostics(vec![diagnostic("unowned")]),
-            DocumentAnalysis::with_diagnostics(vec![diagnostic("second")]),
+        let consumer_group = ProjectAnalysisGroup {
+            module_index: Some(1),
+            document_indices: vec![2],
+            support_documents: vec![
+                consumer_support.clone(),
+                (dependency_uri.clone(), documents[0].1.into()),
+            ],
+            inferred_support_count: 1,
+            java_sources: Vec::new(),
+            navigation_file_remaps: vec![(3, 4), (4, 0)],
+        };
+        let dependency_inputs = project_group_inputs(&documents, &dependency_group);
+        assert_eq!(
+            dependency_inputs
+                .iter()
+                .map(|input| input.text)
+                .collect::<Vec<_>>(),
+            [documents[0].1, "", "", dependency_support.1.as_str()]
+        );
+        let consumer_inputs = project_group_inputs(&documents, &consumer_group);
+        assert_eq!(
+            consumer_inputs
+                .iter()
+                .map(|input| input.text)
+                .collect::<Vec<_>>(),
+            [
+                "",
+                "",
+                documents[2].1,
+                consumer_support.1.as_str(),
+                documents[0].1
+            ]
+        );
+        let fingerprint = project_group_fingerprint(&documents, &consumer_group);
+        let unrelated_changed = [
+            documents[0],
+            (documents[1].0, "fun changed() {}"),
+            documents[2],
         ];
-        suppress_unowned_analyses(&mut analyses, &project_sources);
-        assert_eq!(analyses[0].diagnostics[0].msg, "first");
-        assert!(analyses[1].diagnostics.is_empty());
-        assert_eq!(analyses[2].diagnostics[0].msg, "second");
+        assert_eq!(
+            project_group_fingerprint(&unrelated_changed, &consumer_group),
+            fingerprint
+        );
+        let consumer_changed = [
+            documents[0],
+            documents[1],
+            (documents[2].0, "fun changed() {}"),
+        ];
+        assert_ne!(
+            project_group_fingerprint(&consumer_changed, &consumer_group),
+            fingerprint
+        );
 
-        let failures = project_source_error_analyses(&project_sources, "failed");
-        assert_eq!(failures.len(), documents.len());
+        let mut failures = (0..documents.len())
+            .map(|_| DocumentAnalysis::empty())
+            .collect::<Vec<_>>();
+        let mut cache = Vec::new();
+        fail_project_group(&mut failures, &mut cache, Some(0), &[0], "failed");
+        fail_project_group(&mut failures, &mut cache, Some(1), &[2], "failed");
         assert_eq!(failures[0].diagnostics[0].msg, "failed");
         assert!(failures[1].diagnostics.is_empty());
         assert_eq!(failures[2].diagnostics[0].msg, "failed");
 
-        let mut pending = Vec::new();
-        suppress_unowned_analyses(&mut pending, &project_sources);
-        assert!(pending.is_empty());
+        let fallback_model =
+            krusty_lsp::ProjectModel::new("/workspace", krusty_lsp::ProviderKind::None)
+                .with_modules(model.modules);
+        assert_eq!(
+            project_module_assignments(Some(&fallback_model), &documents),
+            [Some(0), Some(0), Some(0)]
+        );
+        assert_eq!(
+            project_module_assignments(None, &documents),
+            [Some(0), Some(0), Some(0)]
+        );
+    }
 
-        for kind in [ProviderKind::Explicit, ProviderKind::None] {
-            let standalone =
-                ProjectModel::new("/workspace", kind).with_modules(model.modules.clone());
-            assert_eq!(
-                project_source_mask(Some(&standalone), &documents),
-                [true, true, true]
-            );
-        }
+    #[test]
+    fn project_group_config_is_module_scoped() {
+        let mut first = krusty_lsp::project::Module::new(
+            krusty_lsp::project::ModuleId::new(":first", "main"),
+            "/workspace/first",
+        );
+        first.classpath = vec![PathBuf::from("/deps/first.jar")];
+        first.kotlinc_args = vec!["-XXLanguage:+NameBasedDestructuring".to_string()];
+        let mut second = krusty_lsp::project::Module::new(
+            krusty_lsp::project::ModuleId::new(":second", "main"),
+            "/workspace/second",
+        );
+        second.classpath = vec![PathBuf::from("/deps/second.jar")];
+        let model =
+            ProjectModel::new("/workspace", ProviderKind::Gradle).with_modules(vec![first, second]);
+        let options = LspOptions::parse(Vec::<String>::new()).unwrap();
+        let platform = [PathBuf::from("/jdk/lib/modules")];
+
+        let (classpath, language_arguments) =
+            project_group_compiler_config(Some(&model), Some(0), &platform, &options);
+
+        assert_eq!(
+            classpath.unwrap(),
+            [
+                PathBuf::from("/deps/first.jar"),
+                PathBuf::from("/jdk/lib/modules")
+            ]
+        );
+        assert_eq!(language_arguments, ["-XXLanguage:+NameBasedDestructuring"]);
+        let (classpath, language_arguments) =
+            project_group_compiler_config(Some(&model), Some(1), &platform, &options);
+        assert_eq!(
+            classpath.unwrap(),
+            [
+                PathBuf::from("/deps/second.jar"),
+                PathBuf::from("/jdk/lib/modules")
+            ]
+        );
+        assert!(language_arguments.is_empty());
+    }
+
+    #[test]
+    fn document_admission_is_bounded_per_modeled_module() {
+        let mut first = krusty_lsp::project::Module::new(
+            krusty_lsp::project::ModuleId::new(":first", "main"),
+            "/workspace/first",
+        );
+        first.source_roots = vec![krusty_lsp::project::SourceRoot::source(
+            "/workspace/first/src",
+        )];
+        let mut second = krusty_lsp::project::Module::new(
+            krusty_lsp::project::ModuleId::new(":second", "main"),
+            "/workspace/second",
+        );
+        second.source_roots = vec![krusty_lsp::project::SourceRoot::source(
+            "/workspace/second/src",
+        )];
+        let mut consumer = krusty_lsp::project::Module::new(
+            krusty_lsp::project::ModuleId::new(":consumer", "main"),
+            "/workspace/consumer",
+        );
+        consumer.source_roots = vec![krusty_lsp::project::SourceRoot::source(
+            "/workspace/consumer/src",
+        )];
+        consumer.depends_on = vec![krusty_lsp::project::ModuleId::new(":first", "main")];
+        let model = krusty_lsp::ProjectModel::new("/workspace", ProviderKind::Gradle)
+            .with_modules(vec![first, second, consumer]);
+        let first_uri = "file:///workspace/first/src/First.kt";
+        let first_other_uri = "file:///workspace/first/src/Other.kt";
+        let second_uri = "file:///workspace/second/src/Second.kt";
+        let consumer_uri = "file:///workspace/consumer/src/Consumer.kt";
+        let large = krusty_lsp::MAX_SOURCE_SET_BYTES / 2 + 1;
+        let admission = krusty_lsp::DocumentAdmission::for_model(&model);
+
+        assert!(admission.accepts(&[(first_uri, large), (second_uri, large)]));
+        assert!(admission.accepts(&[
+            (first_uri, krusty_lsp::MAX_SOURCE_SET_BYTES),
+            (second_uri, krusty_lsp::MAX_SOURCE_SET_BYTES),
+        ]));
+        assert!(!admission.accepts(&[
+            (first_uri, krusty_lsp::MAX_SOURCE_SET_BYTES),
+            (second_uri, krusty_lsp::MAX_SOURCE_SET_BYTES),
+            ("file:///workspace/unowned/Extra.kt", 1),
+        ]));
+        assert!(!admission.accepts(&[(first_uri, large), (first_other_uri, large)]));
+        assert!(!admission.accepts(&[(first_uri, large), (consumer_uri, large)]));
+        assert!(!admission.accepts(&[(
+            "file:///workspace/unowned/Oversized.kt",
+            krusty_lsp::MAX_SOURCE_SET_BYTES + 1,
+        )],));
+
+        let fallback = krusty_lsp::ProjectModel::new("/workspace", ProviderKind::None)
+            .with_modules(model.modules.clone());
+        assert!(!krusty_lsp::DocumentAdmission::for_model(&fallback)
+            .accepts(&[(first_uri, large), (second_uri, large)]));
+        assert!(!krusty_lsp::DocumentAdmission::default()
+            .accepts(&[(first_uri, large), (second_uri, large)]));
+    }
+
+    #[test]
+    fn module_analysis_cache_evicts_to_its_global_byte_budget() {
+        let cached = |module_index, retained_bytes| CachedProjectAnalysis {
+            module_index: Some(module_index),
+            fingerprint: module_index as u64,
+            document_indices: vec![module_index],
+            analyses: vec![DocumentAnalysis::empty()],
+            retained_bytes,
+        };
+        let mut cache = vec![cached(0, 4), cached(1, 4)];
+
+        retain_analysis_cache_budget(&mut cache, 4, 8);
+
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache[0].module_index, Some(1));
+    }
+
+    #[test]
+    fn two_consumers_share_one_canonical_support_target() {
+        let documents = [
+            ("file:///base-open.kt", "class Base"),
+            ("file:///first-open.kt", "class First"),
+            ("file:///second-open.kt", "class Second"),
+        ];
+        let shared = ("file:///shared.kt".to_string(), "class Shared".to_string());
+        let first_support = vec![
+            shared.clone(),
+            (
+                "file:///first-support.kt".into(),
+                "class FirstSupport".into(),
+            ),
+            (documents[0].0.into(), documents[0].1.into()),
+        ];
+        let second_support = vec![
+            shared.clone(),
+            (
+                "file:///second-support.kt".into(),
+                "class SecondSupport".into(),
+            ),
+            (documents[0].0.into(), documents[0].1.into()),
+        ];
+        let mut support_documents = Vec::new();
+        let mut support_indices = HashMap::new();
+        let mut next_discarded = u32::MAX;
+
+        let (first_remaps, _) = register_canonical_support(
+            &documents,
+            &first_support,
+            &mut support_documents,
+            &mut support_indices,
+            usize::MAX,
+            usize::MAX,
+            &mut next_discarded,
+        );
+        let (second_remaps, _) = register_canonical_support(
+            &documents,
+            &second_support,
+            &mut support_documents,
+            &mut support_indices,
+            usize::MAX,
+            usize::MAX,
+            &mut next_discarded,
+        );
+
+        assert_eq!(
+            support_documents
+                .iter()
+                .filter(|(uri, _)| uri == &shared.0)
+                .count(),
+            1
+        );
+        assert_eq!(first_remaps[0].1, second_remaps[0].1);
+        assert_eq!(first_remaps[2], (5, 0));
+        assert_eq!(second_remaps[2], (5, 0));
+    }
+
+    #[test]
+    fn canonical_support_budget_sheds_navigation_without_failing_analysis() {
+        let documents = [("file:///open.kt", "class Open")];
+        let support = vec![
+            ("file:///kept.kt".to_string(), "x".to_string()),
+            ("file:///shed.kt".to_string(), "yy".to_string()),
+            ("file:///also-shed.kt".to_string(), "zzz".to_string()),
+        ];
+        let mut support_documents = Vec::new();
+        let mut support_indices = HashMap::new();
+        let mut next_discarded = u32::MAX;
+
+        let (remaps, added_bytes) = register_canonical_support(
+            &documents,
+            &support,
+            &mut support_documents,
+            &mut support_indices,
+            1,
+            usize::MAX,
+            &mut next_discarded,
+        );
+
+        assert_eq!(added_bytes, 1);
+        assert_eq!(support_documents, [support[0].clone()]);
+        assert_eq!(remaps, [(1, 1), (2, u32::MAX), (3, u32::MAX - 1)]);
+        assert_eq!(next_discarded, u32::MAX - 2);
     }
 
     #[test]
