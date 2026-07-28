@@ -386,6 +386,14 @@ fn global_jimage_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, std::sync
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+fn cached_jimage_index(path: &Path) -> std::sync::Arc<JimageIndex> {
+    let mut cache = global_jimage_cache().lock().unwrap();
+    cache
+        .entry(path.to_path_buf())
+        .or_insert_with(|| std::sync::Arc::new(build_jimage_index(path).unwrap_or_default()))
+        .clone()
+}
+
 /// A process-global cache of a value derived from a SINGLE classpath entry (jar / dir / jimage), keyed
 /// by that entry's path. A jar's classes, extension statics, and type aliases are identical wherever the
 /// jar appears, so its contribution is built ONCE and shared by every classpath that includes it — a
@@ -1122,6 +1130,14 @@ impl Classpath {
             symbols_memo: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
             id,
         }
+    }
+
+    /// Materialize every classpath index needed by source analysis.
+    pub fn prepare_for_source_analysis(&self) {
+        self.ensure_jimage_index();
+        let _ = self.package_tree();
+        let _ = self.scan_types();
+        let _ = self.ext_parts();
     }
 
     /// Process-unique identity assigned at construction — a stable cache key for per-classpath caches
@@ -1896,16 +1912,8 @@ impl Classpath {
         });
         let entry = match path {
             Some(p) => {
-                let mut g = global_jimage_cache().lock().unwrap();
-                let idx = match g.get(&p) {
-                    Some(i) => i.clone(),
-                    None => {
-                        let i = std::sync::Arc::new(build_jimage_index(&p).unwrap_or_default());
-                        g.insert(p.clone(), i.clone());
-                        i
-                    }
-                };
-                (p, idx)
+                let index = cached_jimage_index(&p);
+                (p, index)
             }
             None => (PathBuf::new(), std::sync::Arc::new(JimageIndex::default())),
         };
@@ -2801,17 +2809,16 @@ fn build_jar_packages(entry: &Entry) -> JarPackages {
         Entry::Jar(j) => build_jar_packages_jar(j, &mut jp),
         Entry::Dir(d) => build_jar_packages_dir(d, d, &mut jp),
         Entry::Jimage(p) => {
-            if let Some(idx) = build_jimage_index(p) {
-                for &internal in idx.by_name.keys() {
-                    let Some(pkg) = idx.names.parent(internal) else {
-                        continue;
-                    };
-                    if pkg == NameTree::ROOT {
-                        continue;
-                    }
-                    let pkg = jp.names.insert_from(&idx.names, pkg);
-                    jp.packages.entry(pkg).or_default().has_classes = true;
+            let idx = cached_jimage_index(p);
+            for &internal in idx.by_name.keys() {
+                let Some(pkg) = idx.names.parent(internal) else {
+                    continue;
+                };
+                if pkg == NameTree::ROOT {
+                    continue;
                 }
+                let pkg = jp.names.insert_from(&idx.names, pkg);
+                jp.packages.entry(pkg).or_default().has_classes = true;
             }
         }
     }
@@ -3441,6 +3448,22 @@ mod fq_tests {
         let target = idx.type_aliases[&array_list_alias];
         assert!(target.matches("java/util/ArrayList"));
         assert!(!idx.is_empty());
+    }
+
+    #[test]
+    fn source_analysis_preparation_builds_classpath_indexes() {
+        let classpath = Classpath::empty();
+        assert!(classpath.jimage.borrow().is_none());
+        assert!(classpath.pkg_tree.borrow().is_none());
+        assert!(classpath.types.borrow().is_none());
+        assert!(classpath.ext.borrow().is_none());
+
+        classpath.prepare_for_source_analysis();
+
+        assert!(classpath.jimage.borrow().is_some());
+        assert!(classpath.pkg_tree.borrow().is_some());
+        assert!(classpath.types.borrow().is_some());
+        assert!(classpath.ext.borrow().is_some());
     }
 
     #[test]

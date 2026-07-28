@@ -26,6 +26,7 @@ use krusty::diag::{Diagnostic, Severity};
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_HEADER_BYTES: usize = 8 * 1024;
 const INPUT_QUEUE_CAPACITY: usize = 4;
+const MAX_INPUT_DISPATCHES_BEFORE_MAINTENANCE: usize = 32;
 const MAX_OPEN_DOCUMENTS: usize = 256;
 const MAX_CONTENT_CHANGES: usize = 256;
 const MAX_CONTENT_CHANGE_SCAN_BYTES: usize = MAX_SOURCE_SET_BYTES * 3;
@@ -46,6 +47,8 @@ const DIAGNOSTIC_WARNING_BIT: u32 = 1 << 31;
 const DIAGNOSTIC_MESSAGE_MASK: u32 = !DIAGNOSTIC_WARNING_BIT;
 const CHANGE_DEBOUNCE: Duration = Duration::from_millis(150);
 const MAX_BATCH_DURATION: Duration = Duration::from_millis(500);
+const ANALYSIS_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
+const ANALYSIS_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 const SERVER_VERSION: &str = match option_env!("KRUSTY_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
@@ -110,6 +113,11 @@ pub trait Analysis {
 
     fn analysis_ready(&self) -> bool {
         true
+    }
+
+    /// Whether the latest analysis attempt is waiting on infrastructure.
+    fn analysis_pending(&self) -> bool {
+        false
     }
 
     /// Adopt the workspace root and report the initial project state.
@@ -454,12 +462,29 @@ struct OpenDocument {
     analysis_blocked: bool,
 }
 
+impl OpenDocument {
+    fn clear_analysis(&mut self) {
+        self.hover = HoverIndex::default();
+        self.completion = CompletionIndex::default();
+        self.signature_help = SignatureHelpIndex::default();
+        self.semantic_tokens = SemanticTokenIndex::default();
+        self.definitions = DefinitionIndex::default();
+        self.type_definitions = DefinitionIndex::default();
+        self.implementations = DefinitionIndex::default();
+        self.document_symbols = DocumentSymbolIndex::default();
+        self.folding_ranges = FoldingRangeIndex::default();
+        self.diagnostics = DiagnosticIndex::default();
+    }
+}
+
 /// Stateful LSP dispatcher with an injected analysis function for deterministic unit testing.
 pub struct LspService<A> {
     documents: HashMap<String, OpenDocument>,
     source_set: Vec<(String, String)>,
     analyze: A,
     analysis_dirty: bool,
+    analysis_retry_at: Option<Instant>,
+    analysis_retry_backoff: Duration,
     initialized: bool,
     shutdown_requested: bool,
     pending_init_feedback: Option<ProjectFeedback>,
@@ -475,6 +500,8 @@ where
             source_set: Vec::new(),
             analyze,
             analysis_dirty: false,
+            analysis_retry_at: None,
+            analysis_retry_backoff: Duration::ZERO,
             initialized: false,
             shutdown_requested: false,
             pending_init_feedback: None,
@@ -525,6 +552,23 @@ where
             let (analyses, support_documents) = self
                 .analyze
                 .analyze_open_documents(&open_documents, &open_uris);
+            if self.analyze.analysis_pending() {
+                self.source_set.clear();
+                for uri in &uris {
+                    self.documents.get_mut(uri).unwrap().clear_analysis();
+                }
+                self.analysis_retry_backoff = if self.analysis_retry_backoff.is_zero() {
+                    ANALYSIS_RETRY_INITIAL_DELAY
+                } else {
+                    self.analysis_retry_backoff
+                        .saturating_mul(2)
+                        .min(ANALYSIS_RETRY_MAX_DELAY)
+                };
+                self.analysis_retry_at = Some(Instant::now() + self.analysis_retry_backoff);
+                return Vec::new();
+            }
+            self.analysis_retry_at = None;
+            self.analysis_retry_backoff = Duration::ZERO;
             self.source_set = open_documents
                 .into_iter()
                 .map(|(uri, source)| (uri.to_string(), source.to_string()))
@@ -538,15 +582,7 @@ where
         if analyses.len() != uris.len() {
             for uri in &uris {
                 let open = self.documents.get_mut(uri).unwrap();
-                open.hover = HoverIndex::default();
-                open.completion = CompletionIndex::default();
-                open.signature_help = SignatureHelpIndex::default();
-                open.semantic_tokens = SemanticTokenIndex::default();
-                open.definitions = DefinitionIndex::default();
-                open.type_definitions = DefinitionIndex::default();
-                open.implementations = DefinitionIndex::default();
-                open.document_symbols = DocumentSymbolIndex::default();
-                open.folding_ranges = FoldingRangeIndex::default();
+                open.clear_analysis();
                 open.diagnostics = DiagnosticIndex::from_diagnostics(
                     vec![Diagnostic {
                         span: krusty::diag::Span::new(0, 0),
@@ -779,18 +815,39 @@ where
     }
 
     pub fn project_refresh_due_in(&self) -> Option<Duration> {
-        self.analyze.project_refresh_due_in()
+        let retry_due = self
+            .analysis_retry_at
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        match (retry_due, self.analyze.project_refresh_due_in()) {
+            (Some(retry), Some(project)) => Some(retry.min(project)),
+            (Some(retry), None) => Some(retry),
+            (None, project) => project,
+        }
     }
 
     pub fn run_due_project_refresh(&mut self) -> Vec<Value> {
+        if self
+            .analysis_retry_at
+            .is_some_and(|deadline| deadline <= Instant::now())
+        {
+            self.analysis_retry_at = None;
+            self.analysis_dirty = true;
+        }
         let feedback = self.analyze.refresh_project();
         let reanalyze = feedback.reanalyze;
         let mut messages = feedback.into_messages();
         if reanalyze {
             self.analysis_dirty = true;
-            messages.extend(self.flush_analysis());
         }
+        messages.extend(self.flush_analysis());
         messages
+    }
+
+    #[cfg(test)]
+    pub(crate) fn make_analysis_retry_due(&mut self) {
+        if self.analysis_retry_at.is_some() {
+            self.analysis_retry_at = Some(Instant::now());
+        }
     }
 
     fn did_open(&mut self, id: Option<Value>, params: Value, defer_analysis: bool) -> Dispatch {
@@ -901,15 +958,7 @@ where
             let was_analyzed = !open.analysis_blocked;
             open.version = params.text_document.version;
             open.text.clear();
-            open.hover = HoverIndex::default();
-            open.completion = CompletionIndex::default();
-            open.signature_help = SignatureHelpIndex::default();
-            open.semantic_tokens = SemanticTokenIndex::default();
-            open.definitions = DefinitionIndex::default();
-            open.type_definitions = DefinitionIndex::default();
-            open.implementations = DefinitionIndex::default();
-            open.document_symbols = DocumentSymbolIndex::default();
-            open.folding_ranges = FoldingRangeIndex::default();
+            open.clear_analysis();
             open.diagnostics = analysis_limit_diagnostics();
             open.analysis_blocked = true;
             self.analysis_dirty |= was_analyzed;
@@ -2215,20 +2264,32 @@ where
     let mut writer = stdout.lock();
     let mut service = LspService::new(analyze);
     let mut pending = VecDeque::new();
+    let mut input_dispatches_since_maintenance = 0usize;
     loop {
+        if maintenance_preempts_input(
+            input_dispatches_since_maintenance,
+            service.project_refresh_due_in(),
+        ) {
+            for message in service.run_due_project_refresh() {
+                let encoded = serde_json::to_vec(&message).map_err(json_io)?;
+                write_framed(&mut writer, &encoded)?;
+            }
+            input_dispatches_since_maintenance = 0;
+            continue;
+        }
         let event = match pending.pop_front() {
             Some(event) => event,
             None => match service.project_refresh_due_in() {
-                Some(due) if due.is_zero() => {
-                    for message in service.run_due_project_refresh() {
-                        let encoded = serde_json::to_vec(&message).map_err(json_io)?;
-                        write_framed(&mut writer, &encoded)?;
-                    }
-                    continue;
-                }
                 Some(due) => match incoming.recv_timeout(due) {
                     Ok(event) => event,
-                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Timeout) => {
+                        for message in service.run_due_project_refresh() {
+                            let encoded = serde_json::to_vec(&message).map_err(json_io)?;
+                            write_framed(&mut writer, &encoded)?;
+                        }
+                        input_dispatches_since_maintenance = 0;
+                        continue;
+                    }
                     Err(RecvTimeoutError::Disconnected) => Incoming::Eof,
                 },
                 None => incoming.recv().unwrap_or(Incoming::Eof),
@@ -2242,6 +2303,8 @@ where
                 let response = rpc_error(Value::Null, -32700, "parse error");
                 let encoded = serde_json::to_vec(&response).map_err(json_io)?;
                 write_framed(&mut writer, &encoded)?;
+                input_dispatches_since_maintenance =
+                    input_dispatches_since_maintenance.saturating_add(1);
                 continue;
             }
             Incoming::Error(error) => return Err(error),
@@ -2262,7 +2325,13 @@ where
         if let Some(code) = result {
             return Ok(code);
         }
+        input_dispatches_since_maintenance = input_dispatches_since_maintenance.saturating_add(1);
     }
+}
+
+fn maintenance_preempts_input(input_dispatches: usize, due: Option<Duration>) -> bool {
+    input_dispatches >= MAX_INPUT_DISPATCHES_BEFORE_MAINTENANCE
+        && due.is_some_and(|due| due.is_zero())
 }
 
 fn json_io(error: serde_json::Error) -> io::Error {
@@ -2272,6 +2341,22 @@ fn json_io(error: serde_json::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overdue_maintenance_gets_a_bounded_turn_amid_input() {
+        assert!(!maintenance_preempts_input(
+            MAX_INPUT_DISPATCHES_BEFORE_MAINTENANCE - 1,
+            Some(Duration::ZERO)
+        ));
+        assert!(!maintenance_preempts_input(
+            MAX_INPUT_DISPATCHES_BEFORE_MAINTENANCE,
+            Some(Duration::from_millis(1))
+        ));
+        assert!(maintenance_preempts_input(
+            MAX_INPUT_DISPATCHES_BEFORE_MAINTENANCE,
+            Some(Duration::ZERO)
+        ));
+    }
 
     #[test]
     fn rename_diff_matches_the_official_delete_on_tie_edits_and_bounds_work() {
