@@ -397,6 +397,15 @@ mod tests {
             stale_diagnostics.messages[0]["result"],
             json!({"kind": "full", "items": []})
         );
+        let stale_completion = server.handle(request(
+            5,
+            "textDocument/completion",
+            json!({
+                "textDocument": {"uri": "file:///p/A.kt"},
+                "position": {"line": 0, "character": 5}
+            }),
+        ));
+        assert_eq!(stale_completion.messages[0]["result"]["isIncomplete"], true);
 
         let first_retry = server.project_refresh_due_in().unwrap();
         assert!(first_retry > std::time::Duration::ZERO);
@@ -3942,7 +3951,10 @@ mod tests {
             }),
         ));
         assert_eq!(calls.get(), 1, "completion must use the cached snapshot");
-        assert_eq!(completion.messages[0]["result"]["isIncomplete"], true);
+        assert_eq!(
+            completion.messages[0]["result"]["isIncomplete"], false,
+            "a current, untruncated snapshot is client-filterable"
+        );
         let items = completion.messages[0]["result"]["items"]
             .as_array()
             .unwrap();
@@ -3983,6 +3995,68 @@ mod tests {
         let stale = server.handle(request(4, "completionItem/resolve", greeting.clone()));
         assert_eq!(&stale.messages[0]["result"], greeting);
         assert_eq!(calls.get(), 2);
+    }
+
+    fn completion_ready_server() -> LspService<InlineBackend<impl super::super::Analysis>> {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": "file:///main.kt",
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "fun answer(): Int = 42\nfun use(): Int = ans"
+                }
+            }),
+        ));
+        server
+    }
+
+    fn completion_request(
+        server: &mut LspService<InlineBackend<impl super::super::Analysis>>,
+    ) -> Value {
+        let completion = server.handle(request(
+            2,
+            "textDocument/completion",
+            json!({
+                "textDocument": {"uri": "file:///main.kt"},
+                "position": {"line": 1, "character": 20}
+            }),
+        ));
+        completion.messages[0]["result"].clone()
+    }
+
+    #[test]
+    fn completion_is_client_filterable_when_analysis_is_current() {
+        let mut server = completion_ready_server();
+        let result = completion_request(&mut server);
+
+        assert_eq!(
+            result["isIncomplete"], false,
+            "a current, untruncated snapshot lets the client filter locally"
+        );
+        assert!(
+            result["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["label"] == "answer"),
+            "the client-filterable response must carry the full candidate set"
+        );
+    }
+
+    #[test]
+    fn completion_stays_incomplete_while_analysis_is_stale() {
+        let mut server = completion_ready_server();
+        server.mark_analysis_dirty_for_test();
+        let result = completion_request(&mut server);
+
+        assert_eq!(
+            result["isIncomplete"], true,
+            "a stale snapshot must ask the client to re-query"
+        );
     }
 
     #[test]
@@ -4058,7 +4132,7 @@ mod tests {
         assert_eq!(
             completion.messages[0]["result"],
             json!({
-                "isIncomplete": true,
+                "isIncomplete": false,
                 "items": [
                     {
                         "label": "krustyParityLocal",
@@ -4098,6 +4172,15 @@ mod tests {
                             "description": "Int"
                         },
                         "sortText": "0000000004"
+                    },
+                    {
+                        "label": "use",
+                        "kind": 3,
+                        "labelDetails": {
+                            "detail": "() (completionparity)",
+                            "description": "Int"
+                        },
+                        "sortText": "0000000005"
                     }
                 ]
             })

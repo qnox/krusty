@@ -1239,7 +1239,7 @@ where
     }
 
     #[cfg(test)]
-    fn mark_analysis_dirty_for_test(&mut self) {
+    pub(crate) fn mark_analysis_dirty_for_test(&mut self) {
         self.mark_analysis_dirty();
     }
 
@@ -1497,6 +1497,8 @@ where
         let Some(offset) = position_to_byte_offset(&open.text, params.position) else {
             return invalid_params(Some(id));
         };
+        let is_incomplete =
+            self.analysis_dirty || self.analysis_in_flight || !open.completion.is_complete();
         let items: Vec<_> = open
             .completion
             .complete(&open.text, offset)
@@ -1528,7 +1530,7 @@ where
             .collect();
         Dispatch::messages(vec![rpc_result(
             id,
-            json!({"isIncomplete": true, "items": items}),
+            json!({"isIncomplete": is_incomplete, "items": items}),
         )])
     }
 
