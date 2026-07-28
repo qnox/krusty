@@ -42,6 +42,7 @@ struct AnalysisRequest<'a> {
     result_count: usize,
     inferred_count: usize,
     language_features: &'a [&'a str],
+    java_sources: &'a [String],
 }
 
 #[derive(Deserialize)]
@@ -54,6 +55,8 @@ struct OwnedAnalysisRequest {
     inferred_count: Option<usize>,
     #[serde(default)]
     language_features: Vec<String>,
+    #[serde(default)]
+    java_sources: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -198,8 +201,14 @@ fn encode_request(
     result_count: usize,
     inferred_count: usize,
     features: &LangFeatures,
+    java_sources: &[String],
 ) -> io::Result<Vec<u8>> {
-    if !source_set_fits(inputs.iter().map(|source| source.text.len())) {
+    if !source_set_fits(
+        inputs
+            .iter()
+            .map(|source| source.text.len())
+            .chain(java_sources.iter().map(String::len)),
+    ) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "open source set exceeds analysis limit",
@@ -227,6 +236,7 @@ fn encode_request(
             result_count,
             inferred_count,
             language_features: &language_features,
+            java_sources,
         },
     )
     .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
@@ -361,8 +371,15 @@ impl WorkerProcess {
         result_count: usize,
         inferred_count: usize,
         language_features: &LangFeatures,
+        java_sources: &[String],
     ) -> io::Result<Vec<DocumentAnalysis>> {
-        let request = encode_request(inputs, result_count, inferred_count, language_features)?;
+        let request = encode_request(
+            inputs,
+            result_count,
+            inferred_count,
+            language_features,
+            java_sources,
+        )?;
         write_framed(&mut self.stdin, &request)?;
         drop(request);
         let response = self.read_response()?;
@@ -454,7 +471,7 @@ impl AnalysisWorker {
             .iter()
             .map(|source| SourceInput::kotlin(source))
             .collect::<Vec<_>>();
-        self.analyze_inputs_prefix(&inputs, sources.len(), sources.len())
+        self.analyze_inputs_prefix(&inputs, sources.len(), sources.len(), &[])
     }
 
     pub fn analyze_inputs_prefix(
@@ -462,6 +479,7 @@ impl AnalysisWorker {
         inputs: &[SourceInput<'_>],
         result_count: usize,
         inferred_count: usize,
+        java_sources: &[String],
     ) -> io::Result<Vec<DocumentAnalysis>> {
         if self.restart_required || self.analyses >= self.max_analyses {
             self.restart()?;
@@ -471,6 +489,7 @@ impl AnalysisWorker {
             result_count,
             inferred_count,
             &self.language_features,
+            java_sources,
         ) {
             Ok(analysis) => {
                 self.analyses += 1;
@@ -488,6 +507,7 @@ impl AnalysisWorker {
                     result_count,
                     inferred_count,
                     &self.language_features,
+                    java_sources,
                 ) {
                     Ok(analysis) => {
                         self.analyses += 1;
@@ -561,6 +581,30 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
         for feature in &request.language_features {
             language_features.enable(feature);
         }
+        let stub_overlay_set = if !request.java_sources.is_empty() {
+            let java: Vec<(String, String)> = request
+                .java_sources
+                .iter()
+                .map(|source| (String::new(), source.clone()))
+                .collect();
+            let resolve = |cand: &str| {
+                classpath
+                    .find_name(krusty::types::type_name(cand))
+                    .is_some()
+            };
+            if let Some(stubs) = krusty::jvm::java_stub::stub_classes(
+                &java,
+                krusty::jvm::java_stub::StubMode::Lenient,
+                &resolve,
+            ) {
+                classpath.set_stub_overlay(stubs);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         let platform = Box::new(JvmLibraries::new(classpath.clone()));
         let source_set = compiler_analysis::analyze_source_inputs_prefix_with_features(
             &inputs,
@@ -608,6 +652,9 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             .into_iter()
             .map(AnalysisResponse::from)
             .collect::<Vec<_>>();
+        if stub_overlay_set {
+            classpath.clear_stub_overlay();
+        }
         let response = encode_response(&analyses)?;
         // A clean EOF makes the supervisor retry the request in a fresh worker.
         if !classpath.snapshot_is_current() {
@@ -761,15 +808,27 @@ mod tests {
         assert!(!source_set_fits([MAX_SOURCE_SET_BYTES, 1]));
         let inputs = [SourceInput::kotlin("fun use() = 1")];
         assert_eq!(
-            encode_request(&inputs, 1, 0, &LangFeatures::new())
+            encode_request(&inputs, 1, 0, &LangFeatures::new(), &[])
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidInput
         );
         assert_eq!(
-            encode_request(&inputs, 0, 2, &LangFeatures::new())
+            encode_request(&inputs, 0, 2, &LangFeatures::new(), &[])
                 .unwrap_err()
                 .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            encode_request(
+                &inputs,
+                1,
+                1,
+                &LangFeatures::new(),
+                &[String::from_utf8(vec![b'x'; MAX_SOURCE_SET_BYTES]).unwrap()],
+            )
+            .unwrap_err()
+            .kind(),
             io::ErrorKind::InvalidInput
         );
 
@@ -793,7 +852,7 @@ mod tests {
         std::fs::create_dir(&directory).expect("create classpath directory");
 
         let inputs = [SourceInput::kotlin("fun use() = 1")];
-        let request = encode_request(&inputs, 1, 1, &LangFeatures::new()).unwrap();
+        let request = encode_request(&inputs, 1, 1, &LangFeatures::new(), &[]).unwrap();
         let mut framed = Vec::new();
         write_framed(&mut framed, &request).unwrap();
         let generated = directory.join("generated");
@@ -937,6 +996,7 @@ mod tests {
             result_count: sources.len(),
             inferred_count: sources.len(),
             language_features: &[],
+            java_sources: &[],
         })
         .unwrap();
         let mut input = Vec::new();
@@ -998,6 +1058,7 @@ fun combine(entries: Array<Entry>): String {
             result_count: sources.len(),
             inferred_count: sources.len(),
             language_features: &["NameBasedDestructuring"],
+            java_sources: &[],
         })
         .unwrap();
         let mut input = Vec::new();
@@ -1008,5 +1069,27 @@ fun combine(entries: Array<Entry>): String {
         let analyses = decode_worker_output(output);
         let diagnostics = &analyses[0].diagnostics;
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn worker_resolves_kotlin_reference_to_stubbed_java() {
+        let kotlin = "fun use(w: p.Widget) {}";
+        let request = format!(
+            "{{\"sources\":[{}],\"source_kinds\":[0],\"result_count\":1,\
+              \"java_sources\":[{}],\"language_features\":[]}}",
+            serde_json::to_string(kotlin).unwrap(),
+            serde_json::to_string("package p; public class Widget {}").unwrap(),
+        );
+        let mut input = Vec::new();
+        write_framed(&mut input, request.as_bytes()).unwrap();
+        let mut output = Vec::new();
+        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
+
+        let analyses = decode_worker_output(output);
+        let diagnostics = &analyses[0].diagnostics;
+        assert!(
+            !diagnostics.iter().any(|d| d.message.contains("Widget")),
+            "Widget resolved from stub: {diagnostics:?}"
+        );
     }
 }

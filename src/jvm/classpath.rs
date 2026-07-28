@@ -1082,6 +1082,8 @@ pub struct Classpath {
     /// pointer address, which a freed-then-reallocated `Classpath` can reuse, yielding a false cache hit
     /// that serves a DIFFERENT classpath's data (e.g. a cross-module class going unresolved).
     id: u64,
+    /// Per-request classes that shadow filesystem entries.
+    stub_overlay: RefCell<HashMap<TypeName, std::sync::Arc<ClassInfo>>>,
 }
 
 /// Current process resident-set size in KiB from Linux `/proc/self/status` (`VmRSS`, already in KiB),
@@ -1164,6 +1166,7 @@ impl Classpath {
             facade_statics_memo: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             symbols_memo: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
             id,
+            stub_overlay: RefCell::new(HashMap::new()),
         }
     }
 
@@ -2052,6 +2055,9 @@ impl Classpath {
         // class is shared behind an `Arc`: L1↔L2 and every caller clone is a refcount bump, never a deep
         // copy of the (large) `ClassInfo`.
         let internal_id = super::jvm_class_map::to_jvm_type_name(internal);
+        if let Some(hit) = self.stub_overlay.borrow().get(&internal_id) {
+            return Some(hit.clone());
+        }
         let tree = self.package_tree();
         let catalog_complete = tree.incomplete_entries.is_empty();
         // L1: per-thread, no lock.
@@ -2117,6 +2123,33 @@ impl Classpath {
                 .insert(internal_id, found.clone());
         }
         found
+    }
+
+    /// Replace the in-memory class overlay and invalidate dependent lookups.
+    pub fn set_stub_overlay(&self, classes: Vec<(String, Vec<u8>)>) {
+        let mut map = HashMap::new();
+        for (_, bytes) in classes {
+            if let Ok(ci) = parse_class(&bytes) {
+                map.entry(ci.this_class)
+                    .or_insert_with(|| std::sync::Arc::new(ci));
+            }
+        }
+        *self.stub_overlay.borrow_mut() = map;
+        self.clear_overlay_memos();
+    }
+
+    fn clear_overlay_memos(&self) {
+        self.local_cache.borrow_mut().clear();
+        self.resolved_types.borrow_mut().clear();
+        self.symbols_memo.borrow_mut().clear();
+    }
+
+    /// Remove all in-memory classes.
+    pub fn clear_stub_overlay(&self) {
+        if !self.stub_overlay.borrow().is_empty() {
+            self.stub_overlay.borrow_mut().clear();
+            self.clear_overlay_memos();
+        }
     }
 
     /// The raw `.class` bytes for an internal name (Kotlin built-in names mapped to JVM first), or
@@ -4779,5 +4812,22 @@ mod fq_tests {
         let string = type_name("kotlin/String");
         assert!(cp.builtin_members.borrow().contains_key(&string));
         assert!(cp.builtin_members("kotlin/String").is_empty());
+    }
+
+    #[test]
+    fn stub_overlay_resolves_injected_class_by_name() {
+        let stubs = crate::jvm::java_stub::stub_classes(
+            &[("W.java".into(), "package p; public class Widget {}".into())],
+            crate::jvm::java_stub::StubMode::Lenient,
+            &|c| c == "java/lang/Object",
+        )
+        .expect("stub");
+        let cp = Classpath::new(vec![]);
+        assert!(cp.find("p/Widget").is_none(), "absent before overlay");
+        cp.set_stub_overlay(stubs);
+        let ci = cp.find("p/Widget").expect("resolved from overlay");
+        assert_eq!(ci.this_class.render(), "p/Widget");
+        cp.clear_stub_overlay();
+        assert!(cp.find("p/Widget").is_none(), "gone after clear");
     }
 }
