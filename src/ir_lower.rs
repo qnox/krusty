@@ -21120,7 +21120,14 @@ impl<'a> Lower<'a> {
                             }
                             let arr = self.emit_vararg(params[fixed], elements);
                             a.push(arr);
-                            return Some(self.emit_local_call(fid, a));
+                            let call = self.emit_local_call(fid, a);
+                            let ret = self.ir.functions[fid as usize].ret;
+                            return Some(self.coerce_erased_call_result(
+                                e,
+                                call,
+                                &ret,
+                                target.ret_is_tparam,
+                            ));
                         }
                         let params = self.ir.functions[fid as usize].params.clone();
                         let meta = target.param_meta.clone();
