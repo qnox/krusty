@@ -255,6 +255,47 @@ mod tests {
     }
 
     #[test]
+    fn kotlin_script_allows_unmodeled_host_calls_without_hiding_other_errors() {
+        let script = "fun localAction() {}\n\
+                      hostAction(\"sample\")\n\
+                      hostNamed(value = if (1) \"sample\" else \"other\")\n\
+                      if (1) {}\n\
+                      localAction(\"sample\")";
+        let support = "fun hostAction() {}";
+        let analysis = analyze_standalone_source_inputs(&[
+            SourceInput::new(krusty::source::SourceKind::KotlinScript, script),
+            SourceInput::kotlin(support),
+        ]);
+        let messages = analysis.files[0]
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.contains("condition type mismatch"))
+                .count(),
+            2,
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("localAction")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| !message.contains("hostAction") && !message.contains("hostNamed")),
+            "{messages:?}"
+        );
+        assert!(analysis.files[1].diagnostics.is_empty());
+    }
+
+    #[test]
     fn source_set_adds_equality_inspections_before_compiler_errors() {
         let source = "fun equal(): Boolean = 1 == \"text\"\nfun unequal(): Boolean = 1 != \"text\"";
         let analysis = analyze_standalone_source_set(&[source]);
