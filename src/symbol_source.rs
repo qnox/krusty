@@ -319,6 +319,7 @@ mod tests {
                         visibility: Visibility::Public,
                         owner: self.owner.as_str().into(),
                         receiver_rank: 0,
+                        source_key: None,
                     }],
                 }
             } else {

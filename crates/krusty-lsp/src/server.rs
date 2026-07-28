@@ -2328,6 +2328,78 @@ mod tests {
     }
 
     #[test]
+    fn definition_selects_same_named_extension_property_by_import() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        for (uri, text) in [
+            (
+                "file:///Model.kt",
+                "package sample.model\nclass Item\n",
+            ),
+            (
+                "file:///FirstExtension.kt",
+                "package sample.first\nimport sample.model.Item\nval Item.label: String get() = \"first\"\n",
+            ),
+            (
+                "file:///SecondExtension.kt",
+                "package sample.second\nimport sample.model.Item\nval Item.label: Int get() = 2\n",
+            ),
+            (
+                "file:///Use.kt",
+                "package sample.use\nimport sample.first.label\nimport sample.model.Item\nfun use(): String = Item().label\nval ref = Item()::label\n",
+            ),
+        ] {
+            server.handle(notification(
+                "textDocument/didOpen",
+                json!({
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": "kotlin",
+                        "version": 1,
+                        "text": text
+                    }
+                }),
+            ));
+        }
+        let response = server.handle(request(
+            2,
+            "textDocument/definition",
+            json!({
+                "textDocument": {"uri": "file:///Use.kt"},
+                "position": {"line": 3, "character": 28}
+            }),
+        ));
+        assert_eq!(
+            response.messages[0]["result"],
+            json!([{
+                "uri": "file:///FirstExtension.kt",
+                "range": {
+                    "start": {"line": 2, "character": 9},
+                    "end": {"line": 2, "character": 14}
+                }
+            }])
+        );
+        let response = server.handle(request(
+            3,
+            "textDocument/definition",
+            json!({
+                "textDocument": {"uri": "file:///Use.kt"},
+                "position": {"line": 4, "character": 19}
+            }),
+        ));
+        assert_eq!(
+            response.messages[0]["result"],
+            json!([{
+                "uri": "file:///FirstExtension.kt",
+                "range": {
+                    "start": {"line": 2, "character": 9},
+                    "end": {"line": 2, "character": 14}
+                }
+            }])
+        );
+    }
+
+    #[test]
     fn definition_resolves_a_generic_source_extension() {
         let mut server = LspService::new(super::super::analyze_for_lsp);
         server.handle(request(1, "initialize", json!({})));

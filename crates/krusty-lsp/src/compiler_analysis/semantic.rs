@@ -1786,7 +1786,7 @@ impl<'a> SemanticClassifier<'a> {
                             source_span,
                             *receiver,
                             name,
-                            None,
+                            Some(id),
                             self.member_kind(
                                 *receiver,
                                 matches!(
@@ -2179,6 +2179,18 @@ impl<'a> SemanticClassifier<'a> {
                 return;
             }
             if let Some(target) = self.checked_companion_target(expression, name, kind) {
+                self.push_definition(source_span, target);
+                return;
+            }
+            if let Some(target) = self
+                .type_info
+                .and_then(|types| types.source_extension_property(expression))
+                .and_then(|property| property.source_key)
+                .and_then(|(file, declaration)| {
+                    self.definition_symbols
+                        .declaration_target(file, declaration)
+                })
+            {
                 self.push_definition(source_span, target);
                 return;
             }

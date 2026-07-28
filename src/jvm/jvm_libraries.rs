@@ -1827,6 +1827,7 @@ impl SymbolSource for JvmLibraries {
                         visibility: mp.visibility,
                         owner: cn,
                         receiver_rank: rung,
+                        source_key: None,
                     });
                 }
             }
@@ -2212,6 +2213,7 @@ impl SymbolSource for JvmLibraries {
                     visibility: mp.visibility,
                     owner: facade,
                     receiver_rank: 0,
+                    source_key: None,
                 });
             }
         }

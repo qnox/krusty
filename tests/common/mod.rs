@@ -1281,6 +1281,21 @@ pub fn expect_box_ok_with_stdlib(src: &str, stem: &str) {
     assert_eq!(out, "OK", "{stem}");
 }
 
+/// Multi-file form of [`expect_box_ok_with_stdlib`].
+#[allow(dead_code)]
+pub fn expect_box_ok_files_with_stdlib(sources: &[(&str, &str)], stem: &str) {
+    let Some(stdlib) = stdlib_jar() else {
+        return;
+    };
+    let Some(jdk) = jdk_modules() else {
+        return;
+    };
+    let Some(out) = compile_and_run_box_files(sources, &[stdlib], Some(&jdk)) else {
+        panic!("{stem}: compile/run returned None");
+    };
+    assert_eq!(out, "OK", "{stem}");
+}
+
 /// Assert that a multi-file source set is accepted by the shared frontend with stdlib/JDK symbols.
 #[allow(dead_code)]
 pub fn expect_front_end_ok_files_with_stdlib(sources: &[&str], stem: &str) {

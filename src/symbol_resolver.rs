@@ -1182,6 +1182,12 @@ impl Symbol {
             _ => None,
         }
     }
+    pub fn extension_property(self) -> Option<PropertyInfo> {
+        match self {
+            Symbol::Member(f) => f.extension_property,
+            _ => None,
+        }
+    }
     pub fn extension_property_ref(self) -> Option<ResolvedPropertyRef> {
         match self {
             Symbol::Member(f) => f
@@ -1223,6 +1229,9 @@ impl Symbol {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AmbiguousExtensionProperty;
 
 impl<'a> SymbolResolver<'a> {
     pub fn new(lib: &'a dyn SemanticPlatform) -> Self {
@@ -1315,6 +1324,45 @@ impl<'a> SymbolResolver<'a> {
         self.fn_scope
             .map(|scope| resolve_symbols_in_scope(&self.src, name, scope))
             .unwrap_or_default()
+    }
+
+    /// Select the nearest in-scope extension property, rejecting equal-rank candidates.
+    pub fn resolve_extension_property(
+        &self,
+        receiver: Ty,
+        name: &str,
+    ) -> Result<Option<PropertyInfo>, AmbiguousExtensionProperty> {
+        let receiver_mro = ReceiverMro::new(&self.src, receiver);
+        let mut candidates = self
+            .symbols_in_scope(name)
+            .into_iter()
+            .flat_map(|(_, symbols)| match &symbols.callables {
+                crate::libraries::Callables::Properties(properties) => properties.overloads.clone(),
+                crate::libraries::Callables::Both { properties, .. } => {
+                    properties.overloads.clone()
+                }
+                _ => Vec::new(),
+            })
+            .filter(|property| property.kind == PropKind::Extension)
+            .filter(|property| property.context_count == 0)
+            .filter_map(|property| {
+                let declared = ty_subst(property.receiver?, &std::collections::HashMap::new());
+                if receiver.is_nullable() && !declared.is_nullable() {
+                    return None;
+                }
+                receiver_mro
+                    .rank(&self.src, declared)
+                    .map(|rank| (rank, property))
+            })
+            .collect::<Vec<_>>();
+        let Some(nearest) = candidates.iter().map(|(rank, _)| *rank).min() else {
+            return Ok(None);
+        };
+        candidates.retain(|(rank, _)| *rank == nearest);
+        match candidates.as_mut_slice() {
+            [(_, property)] => Ok(Some(property.clone())),
+            _ => Err(AmbiguousExtensionProperty),
+        }
     }
 
     /// Classify a type name — the ONE type query. `internal` → its [`LibraryType`] (a class/object/
@@ -1505,24 +1553,10 @@ impl<'a> SymbolResolver<'a> {
                 .and_then(|o| self.build_extension_callable(name, ty, args, type_args, &o));
                 let recv_mro = ReceiverMro::new(&self.src, ty);
                 let extension_property = self
-                    .symbols_in_scope(name)
-                    .into_iter()
-                    .flat_map(|(_, r)| match &r.callables {
-                        crate::libraries::Callables::Properties(p) => p.overloads.clone(),
-                        crate::libraries::Callables::Both { properties, .. } => {
-                            properties.overloads.clone()
-                        }
-                        _ => Vec::new(),
-                    })
-                    .filter(|p| p.kind == PropKind::Extension)
-                    .filter(|p| p.context_count == 0)
-                    .filter_map(|p| {
-                        let decl_recv = ty_subst(p.receiver?, &std::collections::HashMap::new());
-                        let rank = recv_mro.rank(&self.src, decl_recv)?;
-                        Some((rank, p))
-                    })
-                    .min_by_key(|(rank, _)| *rank)
-                    .map(|(_, property)| specialize_property(property, ty))
+                    .resolve_extension_property(ty, name)
+                    .ok()
+                    .flatten()
+                    .map(|property| specialize_property(property, ty))
                     .filter(|property| property.getter.ret.is_read_value_result());
                 // EVERY overload named `name` applicable to the receiver: instance members and operators
                 // (the receiver-aware member query, federated over module + libraries) UNION the in-scope
