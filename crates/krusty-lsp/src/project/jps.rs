@@ -148,7 +148,10 @@ fn parse_module(
     project_out: Option<&Path>,
     project_target: Option<&str>,
 ) -> Result<Vec<Module>, ProbeError> {
-    let document = read_xml(iml_path)?;
+    // Listed modules may be absent from partial checkouts.
+    let Some(document) = read_optional_xml(iml_path)? else {
+        return Ok(Vec::new());
+    };
     let Some(name) = iml_path.file_stem().and_then(|stem| stem.to_str()) else {
         return Ok(Vec::new());
     };
@@ -468,8 +471,7 @@ fn project_settings(root: &Path) -> Result<ProjectSettings, ProbeError> {
     })
 }
 
-/// The `.iml` paths listed in `.idea/modules.xml`. A malformed file is a hard
-/// parse error; a missing file yields no modules.
+/// The `.iml` paths listed in `.idea/modules.xml`.
 fn iml_paths(root: &Path) -> Result<Vec<PathBuf>, ProbeError> {
     let path = root.join(".idea").join("modules.xml");
     let document = read_xml(&path)?;
@@ -692,16 +694,25 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_listed_iml_fails_the_probe_input() {
-        let error = parse_module(
-            Path::new("/does/not/exist.iml"),
-            Path::new("/p"),
+    fn a_missing_listed_iml_yields_no_modules() {
+        let tree = crate::project::testing::TempTree::new("jps-missing-iml");
+        let modules = parse_module(
+            &tree.path("missing.iml"),
+            tree.root(),
             &HashMap::new(),
             None,
             None,
         )
-        .unwrap_err();
-        assert!(matches!(error, ProbeError::Io(_)));
+        .unwrap();
+        assert!(modules.is_empty());
+    }
+
+    #[test]
+    fn a_malformed_listed_iml_fails_the_probe_input() {
+        let tree = crate::project::testing::TempTree::new("jps-bad-iml");
+        let iml = tree.write("core/core.iml", "<module><component></module>");
+        let error = parse_module(&iml, tree.root(), &HashMap::new(), None, None).unwrap_err();
+        assert!(matches!(error, ProbeError::Parse(_)));
     }
 
     #[test]
@@ -859,6 +870,31 @@ mod tests {
             .unwrap();
 
         assert_eq!(model.jdk_home, Some(tree.path("fake-jdk")));
+    }
+
+    #[test]
+    fn the_probe_skips_listed_imls_that_are_absent_from_the_checkout() {
+        let tree = multi_module_tree();
+        tree.write(
+            ".idea/modules.xml",
+            r#"<project version="4">
+                 <component name="ProjectModuleManager">
+                   <modules>
+                     <module fileurl="file://$PROJECT_DIR$/core/core.iml" filepath="$PROJECT_DIR$/core/core.iml" />
+                     <module fileurl="file://$PROJECT_DIR$/app/app.iml" filepath="$PROJECT_DIR$/app/app.iml" />
+                     <module fileurl="file://$PROJECT_DIR$/prebuilts/gen.iml" filepath="$PROJECT_DIR$/prebuilts/gen.iml" />
+                   </modules>
+                 </component>
+               </project>"#,
+        );
+
+        let model = JpsProvider::new(tree.root())
+            .probe_with_jdk_tables(&[])
+            .unwrap();
+
+        assert!(model.module(&ModuleId::new("core", "main")).is_some());
+        assert!(model.module(&ModuleId::new("app", "main")).is_some());
+        assert!(model.module(&ModuleId::new("gen", "main")).is_none());
     }
 
     #[test]
