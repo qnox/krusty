@@ -1650,7 +1650,8 @@ impl Classpath {
     /// read once and cached. The single builtins entry point — both the collection hierarchy and a
     /// type's member API derive from it.
     fn builtins_file_for_package(&self, package: TypeName) -> std::rc::Rc<BuiltinsFile> {
-        let catalog_complete = self.catalog_complete();
+        let tree = self.package_tree();
+        let catalog_complete = tree.incomplete_entries.is_empty();
         if catalog_complete {
             if let Some(m) = self.builtins.borrow().get(&package) {
                 return m.clone();
@@ -1658,12 +1659,24 @@ impl Classpath {
         }
         let path = Self::builtins_path_for_package(package);
         let mut map = HashMap::new();
-        for e in &self.entries {
-            if let Entry::Jar(j) = e {
-                if let Some(bytes) = self.jar_entry(j, &path) {
-                    map = super::metadata::parse_builtins(&bytes);
-                    break;
-                }
+        let mut indices = tree
+            .node_for(&package.render())
+            .map_or_else(Vec::new, |node| node.builtins_jars.clone());
+        indices.extend(tree.incomplete_entries.iter().copied());
+        indices.sort_unstable();
+        indices.dedup();
+        for i in indices {
+            let Some(entry) = self.entries.get(i) else {
+                continue;
+            };
+            let bytes = match entry {
+                Entry::Dir(dir) => std::fs::read(dir.join(&path)).ok(),
+                Entry::Jar(jar) => self.jar_entry(jar, &path),
+                Entry::Jimage(_) => None,
+            };
+            if let Some(bytes) = bytes {
+                map = super::metadata::parse_builtins(&bytes);
+                break;
             }
         }
         let rc = std::rc::Rc::new(BuiltinsFile::from_classes(map));
@@ -2025,6 +2038,14 @@ impl Classpath {
         self.find_name(type_name(internal))
     }
 
+    fn class_entry_indices(&self, tree: &PackageTree, internal: &str) -> Vec<usize> {
+        let mut indices = tree.jars_for_class(internal);
+        indices.extend(tree.incomplete_entries.iter().copied());
+        indices.sort_unstable();
+        indices.dedup();
+        indices
+    }
+
     pub fn find_name(&self, internal: TypeName) -> Option<std::sync::Arc<ClassInfo>> {
         // The front end names built-in types in Kotlin terms (`kotlin/Any`); a classpath artifact is
         // a real JVM class, so map to the JVM name (`java/lang/Object`) before looking it up. The parsed
@@ -2047,20 +2068,7 @@ impl Classpath {
         let name = format!("{internal}.class");
         let mut found = None;
         let mut all_cached = true;
-        // Search only the entries the package tree says declare this class's package, in classpath order
-        // (the spec's qualified-name step: search `node.jars`). The tree lists EVERY jar/dir/jimage that
-        // declares the package, so the result is identical to scanning all entries — just fewer reads
-        // (a probe for an absent class touches the one jar that owns the package, not every entry + the
-        // jimage). Incomplete entries remain fallback probes.
-        let pkg = internal.rsplit_once('/').map_or("", |(p, _)| p);
-        let mut indices = tree
-            .node_for(pkg)
-            .filter(|n| !n.jars.is_empty())
-            .map_or_else(Vec::new, |node| node.jars.clone());
-        indices.extend(tree.incomplete_entries.iter().copied());
-        indices.sort_unstable();
-        indices.dedup();
-        for i in indices {
+        for i in self.class_entry_indices(&tree, &internal) {
             let (Some(e), Some(l2)) = (self.entries.get(i), self.entry_caches.get(i)) else {
                 continue;
             };
@@ -2116,7 +2124,9 @@ impl Classpath {
     fn class_bytes(&self, internal: &str) -> Option<Vec<u8>> {
         let internal = super::jvm_class_map::to_jvm_internal(internal);
         let name = format!("{internal}.class");
-        for e in &self.entries {
+        let tree = self.package_tree();
+        for index in self.class_entry_indices(&tree, internal) {
+            let e = self.entries.get(index)?;
             let bytes = match e {
                 Entry::Dir(d) => std::fs::read(d.join(&name)).ok().filter(|b| {
                     // Case-insensitive-filesystem guard (see `find`): the served file must BE the
@@ -3032,6 +3042,8 @@ struct JarPackages {
     names: NameTree,
     /// slashed package name ID (`kotlin/collections`, `""` for the default package) → its facts.
     packages: HashMap<NameId, PkgEntry>,
+    /// Exact internal class names declared by this entry.
+    classes: Vec<NameId>,
     /// Whether the entire entry was catalogued successfully.
     complete: bool,
 }
@@ -3052,12 +3064,16 @@ impl JarPackages {
 #[derive(Default)]
 pub struct PackageNode {
     jars: Vec<JarId>,
+    /// Entries whose catalog records a `.kotlin_builtins` fragment for this package.
+    builtins_jars: Vec<JarId>,
 }
 
 #[derive(Default)]
 pub struct PackageTree {
     names: NameTree,
     packages: HashMap<NameId, PackageNode>,
+    /// Exact class owners, sorted by name and classpath order.
+    classes: Vec<(NameId, JarId)>,
     incomplete_entries: Vec<JarId>,
 }
 
@@ -3067,6 +3083,20 @@ impl PackageTree {
     #[allow(dead_code)]
     fn node_for(&self, pkg: &str) -> Option<&PackageNode> {
         self.names.get(pkg).and_then(|id| self.packages.get(&id))
+    }
+
+    fn jars_for_class(&self, internal: &str) -> Vec<JarId> {
+        let Some(class) = self.names.get(internal) else {
+            return Vec::new();
+        };
+        let start = self
+            .classes
+            .partition_point(|&(candidate, _)| candidate.0 < class.0);
+        self.classes[start..]
+            .iter()
+            .take_while(|&&(candidate, _)| candidate == class)
+            .map(|&(_, jar)| jar)
+            .collect()
     }
 
     /// Total package count in the table. For memory reporting.
@@ -3082,7 +3112,9 @@ fn record_pkg_entry_name(name: &str, jp: &mut JarPackages) {
         n.rsplit_once('/')
             .map_or(String::new(), |(p, _)| p.to_string())
     };
-    if name.ends_with(".class") {
+    if let Some(internal) = name.strip_suffix(".class") {
+        let class = jp.names.insert(internal);
+        jp.classes.push(class);
         jp.entry_mut(&pkg_of(name)).has_classes = true;
     } else if name.ends_with(".kotlin_builtins") {
         jp.entry_mut(&pkg_of(name)).has_builtins = true;
@@ -3122,6 +3154,8 @@ fn build_jar_packages(entry: &Entry) -> JarPackages {
                 let Some(pkg) = idx.names.parent(internal) else {
                     continue;
                 };
+                let class = jp.names.insert_from(&idx.names, internal);
+                jp.classes.push(class);
                 if pkg == NameTree::ROOT {
                     continue;
                 }
@@ -3135,8 +3169,10 @@ fn build_jar_packages(entry: &Entry) -> JarPackages {
 }
 
 fn build_jar_packages_jar(jar: &Path, jp: &mut JarPackages) -> bool {
-    let Ok(f) = File::open(jar) else {
-        return false;
+    let f = match File::open(jar) {
+        Ok(file) => file,
+        // A missing entry is empty until its snapshot changes.
+        Err(error) => return error.kind() == std::io::ErrorKind::NotFound,
     };
     let Ok(mut archive) = zip::ZipArchive::new(f) else {
         return false;
@@ -3186,11 +3222,14 @@ fn build_jar_packages_dir_visited(
         Ok(Some(canonical)) => canonical,
         // A cycle leaves the catalog incomplete because alias paths remain directly addressable.
         Ok(None) => return false,
-        Err(_) => return false,
+        Err(error) => return error.kind() == std::io::ErrorKind::NotFound,
     };
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        ancestors.remove(&canonical);
-        return false;
+    let rd = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            ancestors.remove(&canonical);
+            return error.kind() == std::io::ErrorKind::NotFound;
+        }
     };
     let mut complete = true;
     for entry in rd {
@@ -3256,14 +3295,24 @@ fn compose_package_tree(parts: &[std::sync::Arc<JarPackages>]) -> PackageTree {
         if !jp.complete {
             tree.incomplete_entries.push(jar_id);
         }
-        for &pkg_id in jp.packages.keys() {
+        for (&pkg_id, entry) in &jp.packages {
             let pkg = tree.names.insert_from(&jp.names, pkg_id);
             let node = tree.packages.entry(pkg).or_default();
             if !node.jars.contains(&jar_id) {
                 node.jars.push(jar_id);
             }
+            if entry.has_builtins && !node.builtins_jars.contains(&jar_id) {
+                node.builtins_jars.push(jar_id);
+            }
+        }
+        for &class_id in &jp.classes {
+            let class = tree.names.insert_from(&jp.names, class_id);
+            tree.classes.push((class, jar_id));
         }
     }
+    tree.classes
+        .sort_unstable_by_key(|&(class, jar)| (class.0, jar));
+    tree.classes.dedup();
     tree
 }
 
@@ -3932,6 +3981,77 @@ mod fq_tests {
     }
 
     #[test]
+    fn builtin_miss_does_not_open_unrelated_archives() {
+        let directory = test_temp_dir("builtin-miss");
+        let mut paths = Vec::new();
+        for index in 0..(OPEN_ARCHIVE_CAP * 4) {
+            let path = directory.join(format!("{index}.jar"));
+            write_test_jar(&path, b"entry");
+            paths.push(path);
+        }
+        let classpath = Classpath::new(paths.clone());
+
+        let builtins = classpath.builtins_file_for_package(type_name("unrelated/package"));
+
+        assert!(builtins.classes.is_empty());
+        assert!(classpath.archives.borrow().is_empty());
+        drop(builtins);
+        drop(classpath);
+        for path in paths {
+            std::fs::remove_file(path).expect("archive remains closed");
+        }
+        std::fs::remove_dir(directory).expect("remove builtin miss directory");
+    }
+
+    #[test]
+    fn exact_class_miss_does_not_open_same_package_archives() {
+        let directory = test_temp_dir("exact-class-miss");
+        let mut paths = Vec::new();
+        for index in 0..(OPEN_ARCHIVE_CAP * 4) {
+            let path = directory.join(format!("{index}.jar"));
+            write_test_jar_entry(
+                &path,
+                &format!("shared/package/Present{index}.class"),
+                b"class bytes are read lazily",
+            );
+            paths.push(path);
+        }
+        let classpath = Classpath::new(paths.clone());
+
+        assert!(classpath.find("shared/package/Missing").is_none());
+        assert!(classpath.archives.borrow().is_empty());
+        drop(classpath);
+        for path in paths {
+            std::fs::remove_file(path).expect("archive remains closed");
+        }
+        std::fs::remove_dir(directory).expect("remove exact class miss directory");
+    }
+
+    #[test]
+    fn raw_class_miss_does_not_open_same_package_archives() {
+        let directory = test_temp_dir("raw-class-miss");
+        let mut paths = Vec::new();
+        for index in 0..(OPEN_ARCHIVE_CAP * 4) {
+            let path = directory.join(format!("{index}.jar"));
+            write_test_jar_entry(
+                &path,
+                &format!("shared/package/Present{index}.class"),
+                b"class bytes are read lazily",
+            );
+            paths.push(path);
+        }
+        let classpath = Classpath::new(paths.clone());
+
+        assert!(classpath.class_bytes("shared/package/Missing").is_none());
+        assert!(classpath.archives.borrow().is_empty());
+        drop(classpath);
+        for path in paths {
+            std::fs::remove_file(path).expect("archive remains closed");
+        }
+        std::fs::remove_dir(directory).expect("remove raw class miss directory");
+    }
+
+    #[test]
     fn warmed_directory_catalog_detects_a_generated_package() {
         let directory = test_temp_dir("live-class-dir");
         let classpath = Classpath::new(vec![directory.clone()]);
@@ -3951,6 +4071,32 @@ mod fq_tests {
         drop(refreshed);
         drop(classpath);
         std::fs::remove_dir_all(&directory).expect("remove class directory");
+    }
+
+    #[test]
+    fn missing_output_is_an_authoritative_empty_snapshot() {
+        let parent = test_temp_dir("missing-class-output");
+        let output = parent.join("not-built-yet");
+        let classpath = Classpath::new(vec![output.clone()]);
+
+        assert!(classpath.package_tree().incomplete_entries.is_empty());
+        assert!(classpath.find("generated/Later").is_none());
+        assert!(classpath.snapshot_is_current());
+
+        let package = output.join("generated");
+        std::fs::create_dir_all(&package).expect("create generated package");
+        let bytes =
+            crate::jvm::classfile::ClassWriter::new("generated/Later", "java/lang/Object").finish();
+        std::fs::write(package.join("Later.class"), bytes).expect("write generated class");
+        assert!(!classpath.snapshot_is_current());
+        assert!(classpath.find("generated/Later").is_none());
+
+        let refreshed = Classpath::new(vec![output]);
+        assert!(refreshed.find("generated/Later").is_some());
+
+        drop(refreshed);
+        drop(classpath);
+        std::fs::remove_dir_all(parent).expect("remove class output parent");
     }
 
     #[test]
@@ -4326,6 +4472,11 @@ mod fq_tests {
             tree.node_for("kotlin/collections").unwrap().jars,
             vec![0, 1]
         );
+        assert_eq!(
+            tree.node_for("kotlin/collections").unwrap().builtins_jars,
+            vec![1]
+        );
+        assert!(tree.node_for("kotlin").unwrap().builtins_jars.is_empty());
         assert!(tree.node_for("kotlin/ranges").is_none());
         // `kotlin` and `kotlin/collections` are the two packages.
         assert_eq!(tree.package_count(), 2);
@@ -4340,6 +4491,30 @@ mod fq_tests {
         let c = jp.entry("kotlin/collections").unwrap();
         assert!(c.has_classes && c.has_builtins);
         assert!(jp.entry("").unwrap().has_classes);
+        assert_eq!(
+            jp.classes
+                .iter()
+                .map(|&class| jp.names.render(class))
+                .collect::<Vec<_>>(),
+            vec!["kotlin/collections/CollectionsKt", "Top"]
+        );
+    }
+
+    #[test]
+    fn compose_routes_exact_classes_in_classpath_order() {
+        let mut first = JarPackages::default();
+        record_pkg_entry_name("shared/One.class", &mut first);
+        record_pkg_entry_name("shared/Duplicate.class", &mut first);
+        let mut second = JarPackages::default();
+        record_pkg_entry_name("shared/Two.class", &mut second);
+        record_pkg_entry_name("shared/Duplicate.class", &mut second);
+
+        let tree = compose_package_tree(&[std::sync::Arc::new(first), std::sync::Arc::new(second)]);
+
+        assert_eq!(tree.jars_for_class("shared/One"), vec![0]);
+        assert_eq!(tree.jars_for_class("shared/Two"), vec![1]);
+        assert_eq!(tree.jars_for_class("shared/Duplicate"), vec![0, 1]);
+        assert!(tree.jars_for_class("shared/Missing").is_empty());
     }
 
     #[test]

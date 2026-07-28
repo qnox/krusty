@@ -2,15 +2,39 @@
 //! Hot entries (the common stdlib/JDK classes queried on every compile) stay resident; cold one-off
 //! entries evict once the cap is reached, so memory plateaus instead of growing toward the full JDK.
 //!
-//! Recency is a monotonically increasing tick stamped on each access; eviction removes the entry with
-//! the smallest tick (a linear scan, run only when inserting a NEW key into a full cache — rare relative
-//! to hits once the working set is warm). The count cap defaults per cache and is overridable for all
-//! caches at once via the `KRUSTY_CACHE_CAP` environment variable (for profiling / constrained hosts).
+//! A bounded min-heap avoids scanning the full map when an entry must be evicted.
 
 use crate::name_tree::FxBuildHasher;
 use std::borrow::Borrow;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::hash::Hash;
+
+struct Recency<K> {
+    tick: u64,
+    key: K,
+}
+
+impl<K> PartialEq for Recency<K> {
+    fn eq(&self, other: &Self) -> bool {
+        self.tick == other.tick
+    }
+}
+
+impl<K> Eq for Recency<K> {}
+
+impl<K> PartialOrd for Recency<K> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<K> Ord for Recency<K> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.tick.cmp(&other.tick)
+    }
+}
 
 pub struct LruCache<K, V> {
     cap: usize,
@@ -19,6 +43,8 @@ pub struct LruCache<K, V> {
     /// real run; a `u64` avoids the pinning `saturating_add` would cause at the ceiling.
     tick: u64,
     map: HashMap<K, (V, u64), FxBuildHasher>,
+    /// One lazily refreshed eviction candidate per key.
+    recency: BinaryHeap<Reverse<Recency<K>>>,
 }
 
 impl<K: Eq + Hash + Clone, V> LruCache<K, V> {
@@ -27,6 +53,7 @@ impl<K: Eq + Hash + Clone, V> LruCache<K, V> {
             cap: cap.max(1),
             tick: 0,
             map: HashMap::default(),
+            recency: BinaryHeap::new(),
         }
     }
 
@@ -84,17 +111,28 @@ impl<K: Eq + Hash + Clone, V> LruCache<K, V> {
     pub fn insert(&mut self, k: K, v: V) {
         self.tick += 1;
         let t = self.tick;
-        if self.map.len() >= self.cap && !self.map.contains_key(&k) {
-            if let Some(lru) = self
-                .map
-                .iter()
-                .min_by_key(|(_, (_, stamp))| *stamp)
-                .map(|(key, _)| key.clone())
-            {
-                self.map.remove(&lru);
+        let replacing = self.map.contains_key(&k);
+        if self.map.len() >= self.cap && !replacing {
+            while let Some(Reverse(candidate)) = self.recency.pop() {
+                let Some(current) = self.map.get(&candidate.key).map(|(_, stamp)| *stamp) else {
+                    continue;
+                };
+                if current == candidate.tick {
+                    self.map.remove(&candidate.key);
+                    break;
+                }
+                self.recency.push(Reverse(Recency {
+                    tick: current,
+                    key: candidate.key,
+                }));
             }
         }
-        self.map.insert(k, (v, t));
+        if replacing {
+            self.map.insert(k, (v, t));
+        } else {
+            self.map.insert(k.clone(), (v, t));
+            self.recency.push(Reverse(Recency { tick: t, key: k }));
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -138,6 +176,7 @@ mod tests {
         c.insert("a", 1);
         c.insert("b", 2);
         c.insert("a", 10); // replace, not a new key
+        assert_eq!(c.recency.len(), 2);
         assert_eq!(c.len(), 2);
         assert_eq!(c.get(&"a"), Some(&10));
         assert_eq!(c.get(&"b"), Some(&2));
@@ -163,5 +202,24 @@ mod tests {
         assert_eq!(c.len(), 1);
         assert_eq!(c.get(&1), None);
         assert_eq!(c.get(&2), Some(&2));
+    }
+
+    #[test]
+    fn recency_heap_stays_bounded_across_hits() {
+        let mut c = LruCache::new_fixed(64);
+        for key in 0..64 {
+            c.insert(key, key);
+        }
+        for _ in 0..1024 {
+            for key in 0..64 {
+                assert_eq!(c.get(&key), Some(&key));
+            }
+        }
+
+        assert_eq!(c.recency.len(), 64);
+        c.insert(64, 64);
+        assert_eq!(c.recency.len(), 64);
+        assert_eq!(c.len(), 64);
+        assert_eq!(c.get(&0), None);
     }
 }
