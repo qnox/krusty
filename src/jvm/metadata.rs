@@ -1577,7 +1577,7 @@ pub fn package_functions(ci: &ClassInfo) -> &[MetaFn] {
     &ci.meta.package_functions
 }
 
-/// Type aliases declared in a file facade's `Package` `@Metadata`.
+/// Public type aliases declared in a file facade's `Package` `@Metadata`.
 pub fn package_type_aliases(ci: &ClassInfo) -> &[(String, String)] {
     &ci.meta.type_aliases
 }
@@ -1654,16 +1654,17 @@ fn type_aliases(ctx: &MetaCtx, this_class: &str) -> Vec<(String, String)> {
     out
 }
 
-/// Decode a `TypeAlias` message → `(alias name, expanded/underlying class internal name)`.
-/// `TypeAlias.name` = 2 (string-table id), `underlyingType` = 4, `expandedType` = 6 (both `Type`).
+/// Decode a public `TypeAlias` message → `(alias name, expanded/underlying class internal name)`.
 fn parse_type_alias(body: &[u8], records: &[Rec], d2: &[String]) -> Option<(String, String)> {
     let mut pb = Pb { b: body, i: 0 };
+    let mut flags = 6u64;
     let mut name_id: Option<u64> = None;
     let mut expanded_class: Option<u64> = None;
     let mut underlying_class: Option<u64> = None;
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
+            (1, 0) => flags = pb.varint()?,
             (2, 0) => name_id = pb.varint(),
             (4, 2) => {
                 let len = pb.varint()? as usize;
@@ -1677,6 +1678,9 @@ fn parse_type_alias(body: &[u8], records: &[Rec], d2: &[String]) -> Option<(Stri
             }
             (_, w) => pb.skip(w)?,
         }
+    }
+    if flags_visibility(flags) != VIS_PUBLIC {
+        return None;
     }
     let name = d2.get(name_id? as usize).cloned()?;
     let class_id = expanded_class.or(underlying_class)?;
@@ -2734,8 +2738,8 @@ fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<
 #[cfg(test)]
 mod module_reader_tests {
     use super::{
-        decode_properties, parse_type_gsig, parse_type_gsig_node, primary_erasure_bounds,
-        read_kotlin_module, MetaCtx,
+        decode_properties, parse_type_alias, parse_type_gsig, parse_type_gsig_node,
+        primary_erasure_bounds, read_kotlin_module, MetaCtx,
     };
     use crate::metadata::module::build_kotlin_module;
     use crate::types::Ty;
@@ -2761,6 +2765,19 @@ mod module_reader_tests {
             parse_type_gsig(&type_parameter, &[], &[], &parameters),
             Some(Ty::ty_param("T", Ty::obj("kotlin/Any")))
         );
+    }
+
+    #[test]
+    fn type_alias_visibility_uses_the_public_default() {
+        let d2 = vec!["Alias".to_string(), "sample/Real".to_string()];
+        let omitted_flags = [0x10, 0x00, 0x32, 0x02, 0x30, 0x01];
+        let internal_flags = [0x08, 0x00, 0x10, 0x00, 0x32, 0x02, 0x30, 0x01];
+
+        assert_eq!(
+            parse_type_alias(&omitted_flags, &[], &d2),
+            Some(("Alias".to_string(), "sample/Real".to_string()))
+        );
+        assert_eq!(parse_type_alias(&internal_flags, &[], &d2), None);
     }
 
     #[test]
