@@ -27,6 +27,12 @@ pub struct AnalysisBatch {
     pub pending: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ServerStatus {
+    Working(String),
+    Ready,
+}
+
 #[derive(Debug)]
 pub struct MaterializeJob {
     pub token: u64,
@@ -57,6 +63,7 @@ pub(crate) enum EngineEvent {
     ReanalyzeRequested,
     AnalysisComplete(AnalysisBatch),
     Materialized(MaterializeResult),
+    Status(ServerStatus),
 }
 
 pub(crate) struct AnalysisEngine {
@@ -447,6 +454,19 @@ fn run<A: Analysis>(
             CommandReceive::Timeout => None,
             CommandReceive::Disconnected => break,
         };
+        let working = match &command {
+            None => Some("Refreshing project".to_string()),
+            Some(EngineCommand::SetWorkspaceRoot(_)) => Some("Loading project".to_string()),
+            Some(EngineCommand::Analyze(job)) => {
+                Some(format!("Analyzing {} files", job.documents.len()))
+            }
+            _ => None,
+        };
+        if let Some(message) = working {
+            if send_status(&events, ServerStatus::Working(message)).is_err() {
+                break;
+            }
+        }
         match command {
             None => {
                 let feedback = analyze_refresh(&mut analyze);
@@ -492,6 +512,9 @@ fn run<A: Analysis>(
                     .send(Incoming::Engine(EngineEvent::AnalysisComplete(batch)))
                     .is_err()
                 {
+                    break;
+                }
+                if send_status(&events, ServerStatus::Ready).is_err() {
                     break;
                 }
             }
@@ -558,7 +581,13 @@ fn emit_project<A: Analysis>(
             .send(Incoming::Engine(EngineEvent::ReadyState(ready)))
             .map_err(|_| ())?;
     }
-    Ok(())
+    send_status(events, ServerStatus::Ready)
+}
+
+fn send_status(events: &SyncSender<Incoming>, status: ServerStatus) -> Result<(), ()> {
+    events
+        .send(Incoming::Engine(EngineEvent::Status(status)))
+        .map_err(|_| ())
 }
 
 #[cfg(test)]
@@ -687,7 +716,7 @@ mod tests {
             open_uris: vec!["file:///a.kt".into()],
         }));
         let mut found = false;
-        for _ in 0..2 {
+        for _ in 0..4 {
             match rx.recv().unwrap() {
                 Incoming::Engine(EngineEvent::AnalysisComplete(batch)) => {
                     assert_eq!(batch.analyzed, vec![("file:///a.kt".to_string(), 2)]);
@@ -696,6 +725,7 @@ mod tests {
                     break;
                 }
                 Incoming::Engine(EngineEvent::ReadyState(_)) => {}
+                Incoming::Engine(EngineEvent::Status(_)) => {}
                 _ => panic!("unexpected event"),
             }
         }
@@ -799,7 +829,7 @@ mod tests {
         }));
 
         let mut support = None;
-        for _ in 0..8 {
+        loop {
             match rx.recv_timeout(std::time::Duration::from_secs(2)) {
                 Ok(Incoming::Engine(EngineEvent::AnalysisComplete(batch))) => {
                     support = Some(batch.support_documents);
@@ -852,7 +882,7 @@ mod tests {
         let mut saw_globs = false;
         let mut saw_ready = false;
         let mut saw_project = false;
-        for _ in 0..4 {
+        for _ in 0..8 {
             match rx.recv_timeout(std::time::Duration::from_secs(1)) {
                 Ok(Incoming::Engine(EngineEvent::WatchedGlobs(g))) => {
                     assert_eq!(g, vec!["**/*.kt".to_string()]);
@@ -891,13 +921,14 @@ mod tests {
         });
         assert!(now.is_none(), "engine backend is asynchronous");
         let mut found = false;
-        for _ in 0..2 {
+        for _ in 0..4 {
             match rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap() {
                 Incoming::Engine(EngineEvent::AnalysisComplete(_)) => {
                     found = true;
                     break;
                 }
                 Incoming::Engine(EngineEvent::ReadyState(_)) => {}
+                Incoming::Engine(EngineEvent::Status(_)) => {}
                 _ => panic!("unexpected event"),
             }
         }
@@ -1018,5 +1049,50 @@ mod tests {
             "at most one ReanalyzeRequested is emitted per notification"
         );
         backend.into_engine().join();
+    }
+
+    #[test]
+    fn run_loop_reports_project_and_analysis_work() {
+        use std::sync::mpsc::sync_channel;
+        use std::time::Duration;
+
+        struct Mock;
+        impl Analysis for Mock {
+            fn analyze(&mut self, s: &[&str]) -> Vec<DocumentAnalysis> {
+                s.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+            fn set_workspace_root(&mut self, _root: Option<std::path::PathBuf>) -> ProjectFeedback {
+                ProjectFeedback::default()
+            }
+        }
+
+        let (tx, rx) = sync_channel(16);
+        let engine = AnalysisEngine::spawn(Mock, tx);
+        engine.submit(EngineCommand::SetWorkspaceRoot(None));
+        engine.submit(EngineCommand::Analyze(AnalysisJob {
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 1)],
+            open_uris: vec!["file:///a.kt".into()],
+        }));
+
+        let mut statuses = Vec::new();
+        while statuses.len() < 4 {
+            match rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(Incoming::Engine(EngineEvent::Status(status))) => statuses.push(status),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+
+        assert_eq!(
+            statuses,
+            vec![
+                ServerStatus::Working("Loading project".to_string()),
+                ServerStatus::Ready,
+                ServerStatus::Working("Analyzing 1 files".to_string()),
+                ServerStatus::Ready,
+            ]
+        );
+
+        engine.join();
     }
 }

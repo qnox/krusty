@@ -25,6 +25,7 @@ use crate::server::engine::{
     AnalysisBatch, AnalysisEngine, AnalysisJob, EngineBackend, EngineEvent, MaterializeJob,
     MaterializeResult,
 };
+use crate::server::status::StatusReporter;
 use crate::uri::{file_uri_to_path, path_to_file_uri};
 use crate::worker::{source_set_fits, MAX_SOURCE_SET_BYTES};
 use krusty::diag::{Diagnostic, DiagnosticKind, Severity};
@@ -715,6 +716,7 @@ pub struct LspService<B> {
     discard_in_flight: bool,
     next_materialize_token: u64,
     pending_materializations: HashMap<u64, Value>,
+    status: StatusReporter,
 }
 
 impl<A: Analysis> LspService<InlineBackend<A>> {
@@ -745,6 +747,7 @@ where
             discard_in_flight: false,
             next_materialize_token: 0,
             pending_materializations: HashMap::new(),
+            status: StatusReporter::default(),
         }
     }
 
@@ -1006,6 +1009,8 @@ where
                     )]);
                 }
                 self.initialized = true;
+                self.status
+                    .set_supported(client_supports_work_done_progress(&params));
                 self.pending_init_feedback =
                     self.backend.set_workspace_root(workspace_root(&params));
                 Dispatch::messages(vec![rpc_result(
@@ -2353,6 +2358,15 @@ fn workspace_root(params: &Value) -> Option<PathBuf> {
         })
 }
 
+fn client_supports_work_done_progress(params: &Value) -> bool {
+    params
+        .get("capabilities")
+        .and_then(|c| c.get("window"))
+        .and_then(|w| w.get("workDoneProgress"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// A `client/registerCapability` request for `workspace/didChangeWatchedFiles` over `globs`.
 fn register_watched_files(globs: &[String]) -> Value {
     let watchers: Vec<Value> = globs
@@ -2841,6 +2855,12 @@ where
                 write_framed(writer, &encoded)?;
             }
         }
+        EngineEvent::Status(status) => {
+            for message in service.status.report(status) {
+                let encoded = serde_json::to_vec(&message).map_err(json_io)?;
+                write_framed(writer, &encoded)?;
+            }
+        }
         EngineEvent::Materialized(result) => {
             if let Some(message) = service.complete_materialization(result) {
                 let encoded = serde_json::to_vec(&message).map_err(json_io)?;
@@ -2956,6 +2976,11 @@ where
             Err(error) => break Err(error),
         }
     };
+    for message in service.status.finish() {
+        if let Ok(encoded) = serde_json::to_vec(&message) {
+            let _ = write_framed(writer, &encoded);
+        }
+    }
     let mut engine = service.backend.into_engine();
     engine.disconnect();
     while !engine.is_finished() {
@@ -2977,7 +3002,16 @@ fn json_io(error: serde_json::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::engine::{EngineCommand, EngineEvent};
+    use crate::server::engine::{EngineCommand, EngineEvent, ServerStatus};
+
+    fn decode_messages(bytes: &[u8]) -> Vec<Value> {
+        let mut reader = io::Cursor::new(bytes);
+        let mut messages = Vec::new();
+        while let Some(body) = read_framed(&mut reader, MAX_MESSAGE_BYTES).unwrap() {
+            messages.push(serde_json::from_slice(&body).unwrap());
+        }
+        messages
+    }
 
     struct RecordingBackend {
         ready: bool,
@@ -3230,6 +3264,69 @@ mod tests {
     }
 
     #[test]
+    fn async_loop_emits_status_notifications() {
+        let backend = RecordingBackend {
+            ready: false,
+            submitted: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        };
+        let mut service = LspService::with_backend(backend);
+        let initialize = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "capabilities": {
+                    "window": { "workDoneProgress": true }
+                }
+            }
+        });
+        let mut out = Vec::new();
+        dispatch_messages(&mut out, service.handle(initialize)).unwrap();
+        out.clear();
+
+        let (tx, incoming) = mpsc::sync_channel::<Incoming>(1);
+        drop(tx);
+        let mut pending = VecDeque::new();
+
+        for status in [
+            ServerStatus::Working("Loading project".into()),
+            ServerStatus::Working("Analyzing 3 files".into()),
+            ServerStatus::Ready,
+        ] {
+            step_async(
+                &mut service,
+                &mut out,
+                &incoming,
+                &mut pending,
+                Incoming::Engine(EngineEvent::Status(status)),
+            )
+            .unwrap();
+        }
+
+        let messages = decode_messages(&out);
+        let shapes: Vec<(String, Option<String>)> = messages
+            .iter()
+            .map(|m| {
+                let method = m["method"].as_str().unwrap_or_default().to_string();
+                let kind = m["params"]["value"]["kind"]
+                    .as_str()
+                    .map(ToString::to_string);
+                (method, kind)
+            })
+            .collect();
+        assert_eq!(
+            shapes,
+            vec![
+                ("window/workDoneProgress/create".to_string(), None),
+                ("$/progress".to_string(), Some("begin".to_string())),
+                ("$/progress".to_string(), Some("report".to_string())),
+                ("$/progress".to_string(), Some("end".to_string())),
+            ],
+            "create, then begin/report/end in order: {messages:?}"
+        );
+    }
+
+    #[test]
     fn engine_thread_is_joined_on_eof() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
@@ -3268,6 +3365,41 @@ mod tests {
         assert!(
             dropped.load(Ordering::SeqCst),
             "the engine thread must be joined on EOF, dropping the owned Analysis"
+        );
+    }
+
+    #[test]
+    fn shutdown_ends_open_status() {
+        struct Mock;
+        impl Analysis for Mock {
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+        }
+
+        let (sender, incoming) = mpsc::sync_channel(8);
+        let engine = AnalysisEngine::spawn(Mock, sender.clone());
+        let mut service = LspService::with_backend(EngineBackend::new(engine, false));
+        service.force_initialized_for_test();
+        service.status.set_supported(true);
+
+        sender
+            .send(Incoming::Engine(EngineEvent::Status(
+                ServerStatus::Working("Loading project".into()),
+            )))
+            .unwrap();
+        sender.send(Incoming::Eof).unwrap();
+
+        let mut out: Vec<u8> = Vec::new();
+        let code = run_async_loop(service, &mut out, incoming).unwrap();
+        assert_eq!(code, 0);
+
+        let messages = decode_messages(&out);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m["method"] == "$/progress" && m["params"]["value"]["kind"] == "end"),
+            "shutdown must end the still-open transient token: {messages:?}"
         );
     }
 
@@ -4003,5 +4135,16 @@ mod tests {
         });
         let batch = batch.expect("inline backend is synchronous");
         assert_eq!(batch.analyzed, vec![("file:///a.kt".to_string(), 1)]);
+    }
+
+    #[test]
+    fn parses_work_done_progress_capability() {
+        let params = json!({
+            "capabilities": {
+                "window": { "workDoneProgress": true }
+            }
+        });
+        assert!(client_supports_work_done_progress(&params));
+        assert!(!client_supports_work_done_progress(&json!({})));
     }
 }

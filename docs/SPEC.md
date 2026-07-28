@@ -1526,6 +1526,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Lenient mode skips malformed declarations and erases unresolved member types; strict compiler
   callers still reject them.
 
+- **krusty-lsp reports project and analysis work through server-initiated work-done progress.**
+  When the client advertises `capabilities.window.workDoneProgress`, the async engine opens one
+  token for project loading or analysis, updates that token when the current work changes, and ends
+  it when the command completes or the connection shuts down. Unsupported clients receive no
+  progress traffic. Project warnings and errors continue to use the existing `ProjectFeedback`
+  message path.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
