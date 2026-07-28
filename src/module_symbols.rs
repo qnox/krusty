@@ -125,7 +125,12 @@ impl<'a> ModuleSymbols<'a> {
             alias_target: None,
             type_params: Vec::new(),
             sealed_subclasses: crate::types::TypeNameList::new(),
-            enum_entries: Vec::new(),
+            enum_entries: self
+                .syms
+                .class_simple_name(c.internal_name())
+                .and_then(|name| self.syms.enums.get(name))
+                .cloned()
+                .unwrap_or_default(),
             value_ctor_has_default: false,
             ctor_named_params: Vec::new(),
             value_class_properties: Vec::new(),
