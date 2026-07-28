@@ -3,8 +3,21 @@ use super::common;
 fn numeric_api() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
     let source = r#"
         package fixtures;
-        public final class NumericApi {
+        public class NumericApi {
             public static String FIELD = "field";
+            private final String construction;
+            public NumericApi() { construction = "default"; }
+            public NumericApi(String value) { construction = "fixed"; }
+            public NumericApi(String... values) { construction = "vararg"; }
+            public String construction() { return construction; }
+            public String instanceJoin(String... values) { return String.join("", values); }
+            public String prefixedJoin(String prefix, String... values) {
+                return prefix + String.join("", values);
+            }
+            public String nullableJoin(String... values) {
+                return (values[0] == null ? "O" : values[0]) + values[1];
+            }
+            public static String staticJoin(String... values) { return String.join("", values); }
             public static String mixed(int first, long second) { return "mixed"; }
             public static String mixed(long first, long second) { return "wide"; }
             public static String pick(int value) { return "int"; }
@@ -105,6 +118,9 @@ fn static_fields_and_integer_literal_arguments_use_declared_types() {
         val field = NumericApi.FIELD
         val qualifiedField = fixtures.NumericApi.FIELD
         class Holder { val field = NumericApi.FIELD }
+        class Child : NumericApi() {
+            fun joined(): String = instanceJoin("O", "K")
+        }
 
         fun box(): String {
             if (NumericApi.mixed(1, 2) != "mixed") return "mixed"
@@ -121,6 +137,12 @@ fn static_fields_and_integer_literal_arguments_use_declared_types() {
             if (NumericApi.supplyText { "ok" } != "ok") return "generic sam return"
             if (NumericApi.combine("x", Any()) != "generic") return "generic non-sam"
             if (NumericApi().consumePairInstance("x", "y") { it.length } != "generic") return "generic instance sam"
+            if (NumericApi().construction() != "default") return "default constructor"
+            if (NumericApi("x").construction() != "fixed") return "fixed constructor"
+            if (NumericApi("x", "y").construction() != "vararg") return "vararg constructor"
+            if (Child().joined() != "OK") return "implicit receiver vararg"
+            if (NumericApi.staticJoin("O", "K") != "OK") return "static vararg"
+            if (NumericApi().nullableJoin(null, "K") != "OK") return "nullable vararg"
             if (fixtures.NumericApi.onlyLong(4) != "4") return "qualified call"
             if (NumericApi().instanceOnlyLong(+2) != "2") return "instance"
             if (field != "field") return "field"
@@ -160,6 +182,85 @@ fn non_literal_int_does_not_match_long_parameter() {
             .iter()
             .any(|message| message.contains("unresolved Java static")),
         "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn java_vararg_does_not_omit_fixed_parameters() {
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    let Some((java_classes, temp_root)) = numeric_api() else {
+        return;
+    };
+    let diagnostics = common::front_end_diagnostics(
+        "import fixtures.NumericApi\nfun value(): String = NumericApi().prefixedJoin()\n",
+        &[java_classes],
+        Some(&jdk),
+    );
+    let _ = std::fs::remove_dir_all(temp_root);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("none of the following candidates is applicable")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn jdk_instance_vararg_accepts_expanded_arguments() {
+    const SOURCE: &str = "class Marker {\n\
+    fun first(): String = \"O\"\n\
+    fun join(left: String, right: String): String = left + right\n\
+}\n\
+fun box(): String {\n\
+    val marker = Marker()\n\
+    val first = Marker::class.java.getDeclaredMethod(\"first\").invoke(marker) as String\n\
+    val join = Marker::class.java.getDeclaredMethod(\"join\", String::class.java, String::class.java)\n\
+    return first + (join.invoke(marker, \"K\", \"\") as String)\n\
+}\n";
+    let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
+        return;
+    };
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        common::compile_and_run_with_stdlib(SOURCE, "Main").expect("compile Java vararg calls"),
+        "OK"
+    );
+}
+
+#[test]
+fn jdk_vararg_constructor_accepts_expanded_arguments() {
+    const SOURCE: &str = "import java.lang.ProcessBuilder\n\
+fun box(): String {\n\
+    val values = ProcessBuilder(\"O\", \"K\").command()\n\
+    return values[0] + values[1]\n\
+}\n";
+    let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
+        return;
+    };
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        common::compile_and_run_with_stdlib(SOURCE, "Main")
+            .expect("compile Java vararg constructor"),
+        "OK"
+    );
+}
+
+#[test]
+fn fully_qualified_jdk_vararg_constructor_accepts_expanded_arguments() {
+    const SOURCE: &str = "fun box(): String {\n\
+    val size = java.lang.ProcessBuilder(null, \"K\").command().size\n\
+    return if (size == 2) \"OK\" else size.toString()\n\
+}\n";
+    let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
+        return;
+    };
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        common::compile_and_run_with_stdlib(SOURCE, "Main")
+            .expect("compile fully qualified Java vararg constructor"),
+        "OK"
     );
 }
 

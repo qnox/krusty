@@ -892,10 +892,11 @@ fn best_companion_overload<'a>(
     };
     let logical = |member: &LibraryMember| {
         let params = specialized_sam_member_params(member, args, lambda_literals);
-        apply_platform_parameter_nullability(
+        apply_platform_call_parameter_nullability(
             params,
             &member.call_sig.platform_nullable_params,
             args,
+            member.call_sig.vararg,
         )
     };
     let named = candidates.filter(|member| member.name == name);
@@ -2301,10 +2302,50 @@ fn value_erased_args(lib: &dyn SemanticPlatform, args: &[Ty]) -> Vec<Ty> {
 }
 
 pub(crate) fn apply_platform_parameter_nullability(
-    mut params: Vec<Ty>,
+    params: Vec<Ty>,
     nullable: &[bool],
     args: &[Ty],
 ) -> Vec<Ty> {
+    apply_platform_call_parameter_nullability(params, nullable, args, false)
+}
+
+pub(crate) fn apply_platform_call_parameter_nullability(
+    mut params: Vec<Ty>,
+    nullable: &[bool],
+    args: &[Ty],
+    vararg: bool,
+) -> Vec<Ty> {
+    if vararg {
+        let Some((array, fixed)) = params.split_last() else {
+            return params;
+        };
+        let array = *array;
+        let fixed_len = fixed.len();
+        for ((parameter, accepts_null), argument) in
+            params[..fixed_len].iter_mut().zip(nullable).zip(args)
+        {
+            if *accepts_null
+                && (argument.is_nullable() || *argument == Ty::Null)
+                && parameter.is_reference()
+            {
+                *parameter = Ty::nullable(*parameter);
+            }
+        }
+        if nullable.get(fixed_len).copied().unwrap_or(false) {
+            if let Some(element) = array.array_elem() {
+                if element.is_reference()
+                    && args
+                        .get(fixed_len..)
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|argument| argument.is_nullable() || *argument == Ty::Null)
+                {
+                    params[fixed_len] = Ty::array(Ty::nullable(element));
+                }
+            }
+        }
+        return params;
+    }
     for ((parameter, accepts_null), argument) in params.iter_mut().zip(nullable).zip(args) {
         if *accepts_null
             && (argument.is_nullable() || *argument == Ty::Null)
@@ -2314,6 +2355,32 @@ pub(crate) fn apply_platform_parameter_nullability(
         }
     }
     params
+}
+
+fn resolve_vararg_constructor<'a>(
+    lib: &dyn SemanticPlatform,
+    constructors: &'a [LibraryMember],
+    args: &[Ty],
+) -> Option<&'a LibraryMember> {
+    let candidates = constructors.iter().filter_map(|member| {
+        if !member.call_sig.vararg {
+            return None;
+        }
+        let params = apply_platform_call_parameter_nullability(
+            member.params.clone(),
+            &member.call_sig.platform_nullable_params,
+            args,
+            true,
+        );
+        vararg_parameter_shape(&params, args, |_, parameter, argument| {
+            abi_arg_assignable_to_param(lib, *argument, *parameter)
+        })
+        .map(|shape| (shape, member))
+    });
+    match unique_most_specific(candidates, |_, sub, sup| abi_param_subtype(lib, sub, sup)) {
+        CandidateSelection::Selected(member) => Some(member),
+        CandidateSelection::None | CandidateSelection::Ambiguous => None,
+    }
 }
 
 /// Resolve a constructor on a library type by argument types (with the type's own widening).
@@ -2408,6 +2475,20 @@ fn resolve_constructor_name(
         }
         CandidateSelection::Ambiguous => return None,
         CandidateSelection::None => {}
+    }
+    // Fixed-arity constructors take precedence over expanded varargs.
+    for candidate_args in std::iter::once(args).chain((erased != args).then_some(erased.as_slice()))
+    {
+        if let Some(member) = resolve_vararg_constructor(lib, &t.constructors, candidate_args) {
+            return Some(member.clone());
+        }
+    }
+    if let Some(abi_args) = &abi_args {
+        if abi_args.as_slice() != args && abi_args.as_slice() != erased.as_slice() {
+            if let Some(member) = resolve_vararg_constructor(lib, &t.constructors, abi_args) {
+                return Some(member.clone());
+            }
+        }
     }
     // A classpath `@JvmInline value class` exposes only a PRIVATE `<init>` (its public surface is the
     // static `box-impl`/`constructor-impl`). Construction is `X(u)` over the single underlying value
@@ -3372,8 +3453,12 @@ fn select_overload(
         }
         let lp = logical_value_params(lib, o, binding_receiver, type_args);
         let lp = specialized_sam_params(&lp, o.generic_sig.as_ref(), args, lambda_literals);
-        let lp =
-            apply_platform_parameter_nullability(lp, &o.call_sig.platform_nullable_params, args);
+        let lp = apply_platform_call_parameter_nullability(
+            lp,
+            &o.call_sig.platform_nullable_params,
+            args,
+            o.call_sig.vararg,
+        );
         crate::trace_compiler!(
             "resolve",
             "  cand {name} rank={rank} logical_params={lp:?} owner={}",

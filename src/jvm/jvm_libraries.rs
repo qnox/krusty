@@ -11,9 +11,9 @@ use super::jvm_class_map::to_kotlin_internal;
 use super::metadata;
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{
-    FnFlags, FnKind, FunctionInfo, FunctionSet, GenericSig, InlineKind, LibConst, LibraryCallable,
-    LibraryConst, LibraryMember, LibraryType, PropKind, PropertyInfo, PropertySet, ReturnInfo,
-    SemanticPlatform, Visibility,
+    CallSig, FnFlags, FnKind, FunctionInfo, FunctionSet, GenericSig, InlineKind, LibConst,
+    LibraryCallable, LibraryConst, LibraryMember, LibraryType, PropKind, PropertyInfo, PropertySet,
+    ReturnInfo, SemanticPlatform, Visibility,
 };
 use crate::runtime::{
     CountedLoopInfo, PlatformAccessor, PlatformCtor, PlatformField, PlatformRangeCtor,
@@ -755,7 +755,7 @@ impl JvmLibraries {
                     .iter()
                     .find(|f| f.jvm_name == jvm_name && f.value_params.len() == value_arity)
             };
-            let member_call_sig = |member: &LibraryMember, jvm_name: &str| {
+            let member_call_sig = |member: &LibraryMember, jvm_name: &str, jvm_vararg: bool| {
                 let value_arity = if member.suspend() && !member.params.is_empty() {
                     member.params.len() - 1
                 } else {
@@ -763,7 +763,9 @@ impl JvmLibraries {
                 };
                 member_meta(jvm_name, value_arity)
                     .map(metadata::MetaFn::member_call_sig)
-                    .unwrap_or_default()
+                    .unwrap_or_else(|| {
+                        CallSig::metadata_member(value_arity, Vec::new(), Vec::new(), jvm_vararg)
+                    })
             };
             for m in &ci.methods {
                 if m.is_bridge()
@@ -836,6 +838,8 @@ impl JvmLibraries {
                 if is_map && member.name == "put" {
                     member.set_ret_nullable(true);
                 }
+                member.call_sig = member_call_sig(&member, &m.name, m.is_vararg());
+                member.call_sig.platform_nullable_params = platform_nullable_params;
                 if m.name == "<init>" {
                     // Parse the ctor's generic signature so the resolver can infer a construction's type
                     // arguments (`Pair(1, 2)` → `<Int, Int>`) without spelling backend signature strings.
@@ -843,15 +847,8 @@ impl JvmLibraries {
                     constructors.push(member);
                 } else if m.is_static() {
                     // A Kotlin companion member compiles to a JVM static on the class.
-                    member.call_sig = member_call_sig(&member, &m.name);
-                    // Plain Java methods carry vararg shape only in the class-file flag.
-                    member.call_sig.vararg |= m.is_vararg();
-                    member.call_sig.platform_nullable_params = platform_nullable_params;
                     companion.push(member);
                 } else {
-                    member.call_sig = member_call_sig(&member, &m.name);
-                    member.call_sig.vararg |= m.is_vararg();
-                    member.call_sig.platform_nullable_params = platform_nullable_params;
                     let source_name =
                         super::names::mapped_builtin_virtual_source_name(&ci.this_class(), &m.name);
                     if source_name != m.name {
