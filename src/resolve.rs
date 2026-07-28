@@ -8015,6 +8015,31 @@ enum BoundSourceExtensionRef<'a> {
     Inaccessible,
 }
 
+#[derive(Clone)]
+struct AdaptedSourceRef {
+    function: crate::libraries::FunctionInfo,
+    target_default_values: Vec<Option<CtorDefaultValue>>,
+    adapted_params: Vec<Ty>,
+    adapted_ret: Ty,
+    vararg_tail: bool,
+    source_file: u32,
+    source_decl: u32,
+    bindings: crate::symbol_resolver::GSigBinds,
+}
+
+enum AdaptedSourceRefSelection {
+    Selected(AdaptedSourceRef),
+    Inaccessible,
+    Inapplicable(crate::libraries::FunctionInfo),
+    UnavailableDefault {
+        function: crate::libraries::FunctionInfo,
+        parameter: usize,
+    },
+    BoundFailure(String),
+    Ambiguous(Vec<crate::libraries::FunctionInfo>),
+    None,
+}
+
 #[derive(Clone, Debug)]
 pub enum ExprLowering {
     /// A call or function reference resolved to a local function declaration.
@@ -8057,26 +8082,20 @@ pub enum ExprLowering {
         /// adapter invokes it on `Host.INSTANCE` instead of as a top-level static.
         object_internal: Option<TypeName>,
     },
-    /// An ADAPTED same-file top-level function reference (`::foo` passed where a shorter function type is
-    /// expected, `foo` having trailing DEFAULT parameters). Lowering synthesizes an adapter of the
-    /// expected arity that calls `foo`'s `$default` stub filling the omitted defaults. `target_params` is
-    /// `foo`'s full parameter list (locates its IR function), `adapted_params`/`ret` are the expected
-    /// function type's parameters/return (the adapter's own signature).
+    /// A source top-level reference adapted to a shorter function type.
     AdaptedRef {
-        name: String,
-        target_params: Vec<Ty>,
+        target: Box<crate::libraries::LibraryCallable>,
+        /// `None` for this file's facade; the declaring facade for a sibling-file target.
+        owner: Option<TypeName>,
+        /// Full source-parameter defaults for a sibling-file target. Empty for same-file targets.
+        target_default_values: Vec<Option<CtorDefaultValue>>,
         adapted_params: Vec<Ty>,
         ret: Ty,
         /// The single dropped parameter is a trailing `vararg` filled with an EMPTY array (a plain call
         /// to the target), rather than trailing DEFAULTS filled via the `$default` stub.
         vararg_tail: bool,
-        /// The target function's last parameter is a `vararg`. In the `$default` path (dropped defaults
-        /// ending in the vararg), the dropped vararg slot gets an empty array and NO mask bit.
+        /// Whether the target's trailing parameter is a `vararg`.
         target_vararg: bool,
-        /// The expected function type returns `Unit` but the target returns a value — the adapter calls
-        /// the target, DISCARDS the result, and returns `Unit` (kotlin's coercion-to-`Unit` for a
-        /// reference in a `() -> Unit` position).
-        coerce_unit: bool,
     },
     /// A call whose selected lowering is an inline/custom emit form rather than the normal function-call
     /// path: value-class companion calls (`Result.success`) or receiver-lambda scope calls.
@@ -10461,6 +10480,26 @@ impl<'a> Checker<'a> {
         )
     }
 
+    fn source_callable_display(&self, function: &crate::libraries::FunctionInfo) -> Option<String> {
+        let (file_index, declaration) = function.source_key?;
+        let file = if file_index == self.file_index {
+            self.file
+        } else {
+            self.source_files?.get(file_index as usize)?
+        };
+        let Decl::Fun(declaration) = file.decl(DeclId(declaration)) else {
+            return None;
+        };
+        Some(source_function_display(
+            file,
+            declaration,
+            function.callable.ret,
+        ))
+    }
+
+    /// Select a same-module top-level callable reference from its expected function type. Calls have
+    /// argument expressions for overload resolution; `::name` instead uses the expected parameter and
+    /// return shape. Kotlin also permits a value-returning target where `Unit` is expected.
     fn selected_toplevel_source_ref(
         &mut self,
         expression: ExprId,
@@ -11556,11 +11595,11 @@ impl<'a> Checker<'a> {
         }
         if selected.projected_return_hazard
             && ret_ty.is_erased_top()
-            && !self
+            && self
                 .file
                 .call_type_args
                 .get(&call.0)
-                .is_some_and(|arguments| !arguments.is_empty())
+                .is_none_or(Vec::is_empty)
         {
             if let Some(expected) = expected.filter(|expected| *expected != Ty::Error) {
                 ret_ty = expected;
@@ -11922,11 +11961,11 @@ impl<'a> Checker<'a> {
         });
         let projected_return_hazard = selected.projected_return_hazard
             && ret.is_erased_top()
-            && !self
+            && self
                 .file
                 .call_type_args
                 .get(&call.0)
-                .is_some_and(|arguments| !arguments.is_empty());
+                .is_none_or(Vec::is_empty);
         self.resolved_calls.insert(
             call,
             ResolvedCall::ModuleTopLevel(Box::new(ResolvedModuleTopLevelCall {
@@ -15222,107 +15261,591 @@ impl<'a> Checker<'a> {
             .collect()
     }
 
-    /// Try to ADAPT a same-file top-level function reference `::name` to an expected function type `exp`
-    /// that has FEWER parameters — the dropped trailing parameters must all have defaults, and the
-    /// retained parameters + return must match exactly. Records the adaptation (the lowerer synthesizes
-    /// an adapter calling `name`'s `$default` stub) and returns the expected function type. `None` when no
-    /// clean adaptation applies (the caller then types the reference normally). vararg/`suspend`
-    /// conversion and non-trailing defaults are out of scope (later slices) — a sound skip.
+    fn select_adapted_source_ref(
+        &self,
+        name: &str,
+        exp: &'static crate::types::FnSig,
+        outer_generic: Option<&crate::libraries::GenericSig>,
+        seed_bindings: &crate::symbol_resolver::GSigBinds,
+    ) -> AdaptedSourceRefSelection {
+        if exp.suspend {
+            return AdaptedSourceRefSelection::None;
+        }
+        let mut inaccessible = false;
+        let mut accessible_source = false;
+        let mut structurally_adaptable = Vec::new();
+        let mut candidates = Vec::new();
+        let mut failed_inference_bound = None;
+        let mut unavailable_default = None;
+        let mut seen = std::collections::HashSet::new();
+
+        for function in self
+            .resolver()
+            .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default()
+        {
+            let Some((source_file, source_declaration)) = function.source_key else {
+                continue;
+            };
+            if !seen.insert((source_file, source_declaration))
+                || function.kind != crate::libraries::FnKind::TopLevel
+                || function.flags.suspend
+            {
+                continue;
+            }
+            let accessible = matches!(
+                function.visibility,
+                Visibility::Public | Visibility::Internal
+            ) || source_file == self.file_index;
+            if !accessible {
+                inaccessible = true;
+                continue;
+            }
+            accessible_source = true;
+
+            let n = exp.params.len();
+            let m = function.callable.params.len();
+            if n > m {
+                continue;
+            }
+            let vararg_tail = function.call_sig.vararg && n + 1 == m;
+            if n < m
+                && !vararg_tail
+                && !(n..m).all(|index| {
+                    function.call_sig.param_has_default(index)
+                        || (function.call_sig.vararg && index + 1 == m)
+                })
+            {
+                continue;
+            }
+            let coerce_unit = exp.ret == Ty::Unit && function.callable.ret != Ty::Unit;
+            if n == m && !coerce_unit {
+                continue;
+            }
+            structurally_adaptable.push(function.clone());
+            let target_default_values = if source_file != self.file_index && n < m && !vararg_tail {
+                let defaults = self
+                    .syms
+                    .funs
+                    .values()
+                    .find_map(|signatures| {
+                        signatures.iter().find(|signature| {
+                            signature.source_file == Some(source_file)
+                                && signature.source_decl == Some(DeclId(source_declaration))
+                        })
+                    })
+                    .map(|signature| signature.param_default_values.clone())
+                    .unwrap_or_default();
+                if let Some(parameter) = (n..m).find(|&parameter| {
+                    let is_vararg = function.call_sig.vararg && parameter + 1 == m;
+                    !is_vararg
+                        && !defaults
+                            .get(parameter)
+                            .and_then(Option::as_ref)
+                            .is_some_and(|value| {
+                                value.fills_param_ty(function.callable.params[parameter])
+                            })
+                }) {
+                    unavailable_default.get_or_insert((function.clone(), parameter));
+                    continue;
+                }
+                defaults
+            } else {
+                Vec::new()
+            };
+
+            let mut bindings = seed_bindings.clone();
+            let mut adapted_params = Vec::with_capacity(n);
+            let mut compatible = true;
+            for (&target, &expected_shape) in function.callable.params[..n].iter().zip(&exp.params)
+            {
+                let expected = match expected_shape {
+                    Ty::TyParam(formal, _) => {
+                        bindings.get(formal).copied().unwrap_or(expected_shape)
+                    }
+                    _ => crate::symbol_resolver::ty_subst(expected_shape, &bindings),
+                };
+                if let Ty::TyParam(formal, _) = expected {
+                    bindings.entry(formal.to_string()).or_insert(target);
+                    adapted_params.push(target);
+                } else if crate::assignable::is_assignable(
+                    &crate::assignable::TyCtx::new(),
+                    self,
+                    expected,
+                    target,
+                ) {
+                    adapted_params.push(expected);
+                } else {
+                    compatible = false;
+                    break;
+                }
+            }
+            if !compatible {
+                continue;
+            }
+
+            let expected_ret = match exp.ret {
+                Ty::TyParam(formal, _) => bindings.get(formal).copied().unwrap_or(exp.ret),
+                _ => crate::symbol_resolver::ty_subst(exp.ret, &bindings),
+            };
+            let adapted_ret = if expected_ret == Ty::Unit {
+                Ty::Unit
+            } else if let Ty::TyParam(formal, _) = expected_ret {
+                bindings
+                    .entry(formal.to_string())
+                    .or_insert(function.callable.ret);
+                function.callable.ret
+            } else if crate::assignable::is_assignable(
+                &crate::assignable::TyCtx::new(),
+                self,
+                function.callable.ret,
+                expected_ret,
+            ) {
+                expected_ret
+            } else {
+                continue;
+            };
+
+            if outer_generic.is_some_and(|generic| {
+                !crate::symbol_resolver::generic_bindings_satisfy_bounds(
+                    generic,
+                    &bindings,
+                    |actual, bound| {
+                        crate::assignable::is_assignable(
+                            &crate::assignable::TyCtx::new(),
+                            self,
+                            actual,
+                            bound,
+                        )
+                    },
+                )
+            }) {
+                failed_inference_bound = outer_generic.and_then(|generic| {
+                    generic.formals.iter().zip(&generic.formal_bounds).find_map(
+                        |(formal, bounds)| {
+                            let actual = bindings.get(formal).copied()?;
+                            bounds
+                                .iter()
+                                .any(|bound| {
+                                    !crate::assignable::is_assignable(
+                                        &crate::assignable::TyCtx::new(),
+                                        self,
+                                        actual,
+                                        crate::symbol_resolver::ty_subst(*bound, &bindings),
+                                    )
+                                })
+                                .then(|| formal.clone())
+                        },
+                    )
+                });
+                continue;
+            }
+
+            candidates.push(AdaptedSourceRef {
+                function,
+                target_default_values,
+                adapted_params,
+                adapted_ret,
+                vararg_tail,
+                source_file,
+                source_decl: source_declaration,
+                bindings,
+            });
+        }
+
+        if candidates.is_empty() {
+            if let Some(formal) = failed_inference_bound {
+                return AdaptedSourceRefSelection::BoundFailure(formal);
+            }
+            if inaccessible && !accessible_source {
+                return AdaptedSourceRefSelection::Inaccessible;
+            }
+            if let Some((function, parameter)) = unavailable_default {
+                return AdaptedSourceRefSelection::UnavailableDefault {
+                    function,
+                    parameter,
+                };
+            }
+            if let Some(candidate) = structurally_adaptable.into_iter().next() {
+                return AdaptedSourceRefSelection::Inapplicable(candidate);
+            }
+            return AdaptedSourceRefSelection::None;
+        }
+
+        let maximal = candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(index, current)| {
+                let dominated = candidates.iter().enumerate().any(|(other_index, other)| {
+                    index != other_index
+                        && self.callable_ref_shape_at_least_as_specific(
+                            &other.function.callable.params[..other.adapted_params.len()],
+                            other.function.callable.ret,
+                            &current.function.callable.params[..current.adapted_params.len()],
+                            current.function.callable.ret,
+                        )
+                        && !self.callable_ref_shape_at_least_as_specific(
+                            &current.function.callable.params[..current.adapted_params.len()],
+                            current.function.callable.ret,
+                            &other.function.callable.params[..other.adapted_params.len()],
+                            other.function.callable.ret,
+                        )
+                });
+                (!dominated).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let [selected] = maximal.as_slice() else {
+            return AdaptedSourceRefSelection::Ambiguous(
+                maximal
+                    .into_iter()
+                    .map(|index| candidates[index].function.clone())
+                    .collect(),
+            );
+        };
+        AdaptedSourceRefSelection::Selected(candidates.swap_remove(*selected))
+    }
+
+    fn adapted_outer_call_signature(
+        &mut self,
+        call: ExprId,
+        name: &str,
+        args: &[ExprId],
+        arg_names: Option<&[Option<String>]>,
+        partial: &[Option<Ty>],
+    ) -> Option<(Signature, crate::symbol_resolver::GSigBinds)> {
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let explicit_type_arguments = self
+            .file
+            .call_type_args
+            .get(&call.0)
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|argument| self.resolve_ty(argument))
+            .collect::<Vec<_>>();
+        let outer_functions = self
+            .resolver()
+            .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default();
+        let mut matches = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for function in outer_functions {
+            if function.kind != crate::libraries::FnKind::TopLevel {
+                continue;
+            }
+            let Some((source_file, source_decl)) = function.source_key else {
+                continue;
+            };
+            if !seen.insert((source_file, source_decl)) {
+                continue;
+            }
+            let Some(signature) = self.syms.funs.values().find_map(|signatures| {
+                signatures
+                    .iter()
+                    .find(|signature| {
+                        signature.source_file == Some(source_file)
+                            && signature.source_decl == Some(DeclId(source_decl))
+                    })
+                    .cloned()
+            }) else {
+                continue;
+            };
+            let Some(generic) = signature.generic_sig.as_ref() else {
+                continue;
+            };
+            let Some(argument_parameters) = call_argument_parameter_indices(
+                args,
+                arg_names,
+                trailing_lambda,
+                &signature.call_sig(),
+            ) else {
+                continue;
+            };
+
+            let mut bindings = crate::symbol_resolver::GSigBinds::new();
+            for (formal, argument) in generic.formals.iter().zip(&explicit_type_arguments) {
+                bindings.insert(formal.clone(), *argument);
+            }
+            let inferred = crate::symbol_resolver::infer_generic_bindings(
+                generic,
+                argument_parameters
+                    .iter()
+                    .copied()
+                    .zip(partial.iter().copied())
+                    .filter_map(|(parameter, actual)| actual.map(|actual| (parameter, actual))),
+            );
+            for (formal, actual) in inferred {
+                bindings.entry(formal).or_insert(actual);
+            }
+            if argument_parameters
+                .iter()
+                .copied()
+                .zip(partial.iter().copied())
+                .any(|(parameter, actual)| {
+                    actual.is_some_and(|actual| {
+                        let expected = generic
+                            .params
+                            .get(parameter)
+                            .copied()
+                            .map(|shape| crate::symbol_resolver::ty_subst(shape, &bindings))
+                            .or_else(|| signature.params.get(parameter).copied())
+                            .unwrap_or(Ty::Error);
+                        !arg_assignable_simple(expected, actual)
+                    })
+                })
+            {
+                continue;
+            }
+
+            let mut applicable = true;
+            for (argument, &parameter) in args.iter().zip(&argument_parameters) {
+                let Expr::CallableRef {
+                    receiver: None,
+                    name: target_name,
+                } = self.file.expr(*argument)
+                else {
+                    continue;
+                };
+                let expected = generic
+                    .params
+                    .get(parameter)
+                    .copied()
+                    .or_else(|| signature.params.get(parameter).copied());
+                let Some(Ty::Fun(expected)) = expected else {
+                    applicable = false;
+                    break;
+                };
+                match self.select_adapted_source_ref(
+                    target_name,
+                    expected,
+                    Some(generic),
+                    &bindings,
+                ) {
+                    AdaptedSourceRefSelection::Selected(selected) => {
+                        bindings = selected.bindings;
+                    }
+                    _ => {
+                        applicable = false;
+                        break;
+                    }
+                }
+            }
+            if applicable
+                && crate::symbol_resolver::generic_bindings_satisfy_bounds(
+                    generic,
+                    &bindings,
+                    |actual, bound| {
+                        crate::assignable::is_assignable(
+                            &crate::assignable::TyCtx::new(),
+                            self,
+                            actual,
+                            bound,
+                        )
+                    },
+                )
+            {
+                matches.push((signature, bindings));
+            }
+        }
+
+        let [selected] = matches.as_slice() else {
+            return None;
+        };
+        Some(selected.clone())
+    }
+
+    /// Select and record a source top-level reference adapted to a call parameter.
     fn try_adapt_toplevel_ref(
         &mut self,
+        outer_call: ExprId,
         ref_expr: ExprId,
         name: &str,
-        exp: &crate::types::FnSig,
+        exp: &'static crate::types::FnSig,
+        outer_generic: Option<&crate::libraries::GenericSig>,
+        generic_bindings: &mut crate::symbol_resolver::GSigBinds,
     ) -> Option<Ty> {
         if exp.suspend {
             return None;
         }
-        // The target is a same-file top-level function, or a member imported from a same-file `object`
-        // (`import Host.foo`) — the latter recorded so the adapter invokes it on `Host.INSTANCE`.
-        let (sig, object_internal, target_name) = if let Some(sig) = self.syms.single_fun(name) {
-            (sig, None, name.to_string())
-        } else if !self.module_declares(name) {
-            let (internal, member) = self.object_member_import(name)?;
-            let sig = self.syms.method_of_name(internal, &member)?;
-            (sig, Some(internal), member)
-        } else {
-            return None;
-        };
-        let (n, m) = (exp.params.len(), sig.params.len());
-        let call_sig = sig.call_sig();
-        // VARARG COLLECTION: `::of` where `of`'s last parameter is a `vararg` (and the leading fixed
-        // parameters have no defaults) adapted to a function type with MORE parameters than fixed — the
-        // extra expected parameters are collected into the vararg array. `fixed` = m-1 leading parameters.
-        if sig.vararg() && !sig.is_suspend() {
-            let fixed = m - 1;
-            let coerce_unit = exp.ret == Ty::Unit && sig.ret != Ty::Unit;
-            let fixed_ok = (0..fixed).all(|i| !call_sig.param_has_default(i))
-                && sig.params.get(..fixed) == exp.params.get(..fixed);
-            // Only when there is at least one COLLECTED argument (n > fixed) — an exactly-fixed count is
-            // the empty-vararg drop handled by the `vararg_tail` path below.
-            if n > fixed
-                && fixed_ok
-                && (sig.ret == exp.ret || coerce_unit)
-                && sig.params[fixed].array_elem().is_some_and(|elem| {
-                    exp.params[fixed..]
-                        .iter()
-                        .all(|&p| elem.is_erased_top() || p == elem)
-                })
-            {
-                self.expr_lowers.insert(
-                    ref_expr,
-                    ExprLowering::AdaptedVarargCollect {
-                        name: target_name,
-                        target_params: sig.params.clone(),
-                        adapted_params: exp.params.clone(),
-                        ret: exp.ret,
-                        fixed,
-                        object_internal,
-                    },
-                );
-                return Some(Ty::fun(exp.params.clone(), exp.ret));
+        if let Some(sig) = self.syms.single_fun(name) {
+            let (n, m) = (exp.params.len(), sig.params.len());
+            if sig.vararg() && !sig.is_suspend() && m != 0 {
+                let fixed = m - 1;
+                let coerce_unit = exp.ret == Ty::Unit && sig.ret != Ty::Unit;
+                let call_sig = sig.call_sig();
+                let fixed_ok = (0..fixed).all(|i| !call_sig.param_has_default(i))
+                    && sig.params.get(..fixed) == exp.params.get(..fixed);
+                if n > fixed
+                    && fixed_ok
+                    && (sig.ret == exp.ret || coerce_unit)
+                    && sig.params[fixed].array_elem().is_some_and(|elem| {
+                        exp.params[fixed..]
+                            .iter()
+                            .all(|&parameter| elem.is_erased_top() || parameter == elem)
+                    })
+                {
+                    self.expr_lowers.insert(
+                        ref_expr,
+                        ExprLowering::AdaptedVarargCollect {
+                            name: name.to_string(),
+                            target_params: sig.params.clone(),
+                            adapted_params: exp.params.clone(),
+                            ret: exp.ret,
+                            fixed,
+                            object_internal: None,
+                        },
+                    );
+                    return Some(Ty::Fun(exp));
+                }
             }
         }
-        // Only the vararg-collection shape is modeled for an object-member target; the `$default`/drop
-        // shapes below are top-level-only.
-        if object_internal.is_some() || sig.is_suspend() || n > m {
-            return None;
+        if !self.module_declares(name) {
+            let object = self.object_member_import(name);
+            if let Some((internal, member)) = object {
+                let sig = self.syms.method_of_name(internal, &member)?;
+                let (n, m) = (exp.params.len(), sig.params.len());
+                let call_sig = sig.call_sig();
+                if sig.vararg() && !sig.is_suspend() {
+                    let fixed = m - 1;
+                    let coerce_unit = exp.ret == Ty::Unit && sig.ret != Ty::Unit;
+                    let fixed_ok = (0..fixed).all(|i| !call_sig.param_has_default(i))
+                        && sig.params.get(..fixed) == exp.params.get(..fixed);
+                    if n > fixed
+                        && fixed_ok
+                        && (sig.ret == exp.ret || coerce_unit)
+                        && sig.params[fixed].array_elem().is_some_and(|elem| {
+                            exp.params[fixed..]
+                                .iter()
+                                .all(|&p| elem.is_erased_top() || p == elem)
+                        })
+                    {
+                        self.expr_lowers.insert(
+                            ref_expr,
+                            ExprLowering::AdaptedVarargCollect {
+                                name: member,
+                                target_params: sig.params.clone(),
+                                adapted_params: exp.params.clone(),
+                                ret: exp.ret,
+                                fixed,
+                                object_internal: Some(internal),
+                            },
+                        );
+                        return Some(Ty::Fun(exp));
+                    }
+                }
+            }
         }
-        // The retained prefix parameters must match; the return matches EXACTLY or coerces to `Unit`
-        // (the expected type discards a value result).
-        let coerce_unit = exp.ret == Ty::Unit && sig.ret != Ty::Unit;
-        if sig.params[..n] != exp.params[..] || (sig.ret != exp.ret && !coerce_unit) {
-            return None;
-        }
-        // Adaptation must actually CHANGE something — otherwise the reference types normally.
-        if n == m && !coerce_unit {
-            return None;
-        }
-        // Parameter-drop shape for the dropped tail `sig.params[n..m]` (empty when `n == m`). Each dropped
-        // parameter must be fillable WITHOUT an argument: a DEFAULT (filled by the `$default` stub) or the
-        // function's single trailing `vararg` (filled with an empty array). A `vararg` as the ONLY dropped
-        // parameter (`vararg_tail`) is a plain call; a vararg preceded by dropped defaults routes through
-        // `$default` with an empty array for the vararg slot.
-        let vararg_tail = sig.vararg() && n == m - 1;
-        if n < m
-            && !vararg_tail
-            && !(n..m).all(|k| call_sig.param_has_default(k) || (call_sig.vararg && k + 1 == m))
-        {
-            return None;
-        }
+
+        let selected =
+            match self.select_adapted_source_ref(name, exp, outer_generic, generic_bindings) {
+                AdaptedSourceRefSelection::Selected(selected) => selected,
+                AdaptedSourceRefSelection::BoundFailure(formal) => {
+                    if self
+                        .file
+                        .call_type_args
+                        .get(&outer_call.0)
+                        .is_none_or(Vec::is_empty)
+                    {
+                        let anchor = match self.file.expr(outer_call) {
+                            Expr::Call { callee, .. } => *callee,
+                            _ => outer_call,
+                        };
+                        self.diags.error(
+                            self.span(anchor),
+                            format!(
+                        "cannot infer type for type parameter '{formal}'. Specify it explicitly."
+                    ),
+                        );
+                        return Some(Ty::Error);
+                    }
+                    return None;
+                }
+                AdaptedSourceRefSelection::Inaccessible => {
+                    self.diags.error(
+                        self.member_name_span(ref_expr, name),
+                        format!("cannot access '{name}': it is private in its file"),
+                    );
+                    return Some(Ty::Error);
+                }
+                AdaptedSourceRefSelection::UnavailableDefault {
+                    function,
+                    parameter,
+                } => {
+                    let parameter = function
+                        .call_sig
+                        .param_names
+                        .get(parameter)
+                        .filter(|name| !name.is_empty())
+                        .map_or("value", String::as_str);
+                    self.diags.error(
+                        self.member_name_span(ref_expr, name),
+                        format!(
+                        "cannot adapt cross-file reference '{name}': default value for parameter \
+                         '{parameter}' is not available at this call site"
+                    ),
+                    );
+                    return Some(Ty::Error);
+                }
+                AdaptedSourceRefSelection::Inapplicable(candidate) => {
+                    let display = self
+                        .source_callable_display(&candidate)
+                        .unwrap_or_else(|| format!("fun {name}(...)"));
+                    self.diags.error(
+                        self.member_name_span(ref_expr, name),
+                        format!("inapplicable candidate(s): {display}"),
+                    );
+                    return Some(Ty::Error);
+                }
+                AdaptedSourceRefSelection::Ambiguous(candidates) => {
+                    let mut message =
+                        "overload resolution ambiguity between candidates:".to_string();
+                    for candidate in candidates {
+                        message.push('\n');
+                        message.push_str(
+                            &self
+                                .source_callable_display(&candidate)
+                                .unwrap_or_else(|| format!("fun {name}(...)")),
+                        );
+                    }
+                    self.diags
+                        .error(self.member_name_span(ref_expr, name), message);
+                    return Some(Ty::Error);
+                }
+                AdaptedSourceRefSelection::None => return None,
+            };
+
+        let owner = if selected.source_file == self.file_index {
+            None
+        } else {
+            Some(
+                self.syms
+                    .fn_facades_by_decl
+                    .get(&(selected.source_file, selected.source_decl))
+                    .copied()
+                    .or(match selected.function.callable.origin {
+                        crate::libraries::Origin::Module { facade } => Some(facade),
+                        _ => None,
+                    })?,
+            )
+        };
+        *generic_bindings = selected.bindings;
+        let resolved_type = crate::symbol_resolver::ty_subst(Ty::Fun(exp), generic_bindings);
         self.expr_lowers.insert(
             ref_expr,
             ExprLowering::AdaptedRef {
-                name: name.to_string(),
-                target_params: sig.params.clone(),
-                adapted_params: exp.params.clone(),
-                ret: exp.ret,
-                vararg_tail,
-                target_vararg: sig.vararg(),
-                coerce_unit,
+                target: Box::new(selected.function.callable.clone()),
+                owner,
+                target_default_values: selected.target_default_values,
+                adapted_params: selected.adapted_params,
+                ret: selected.adapted_ret,
+                vararg_tail: selected.vararg_tail,
+                target_vararg: selected.function.call_sig.vararg,
             },
         );
-        Some(Ty::fun(exp.params.clone(), exp.ret))
+        Some(resolved_type)
     }
 
     fn expr_inner(&mut self, e: ExprId, expected: Option<Ty>, value_required: bool) -> Ty {
@@ -18240,6 +18763,36 @@ impl<'a> Checker<'a> {
         } else if f.params.len() != arg_tys.len() {
             return None;
         }
+        let call_args = match self.file.expr(call) {
+            Expr::Call { args, .. } => args.as_slice(),
+            _ => return None,
+        };
+        let call_sig = CallSig {
+            param_names: f
+                .params
+                .iter()
+                .map(|parameter| parameter.name.clone())
+                .collect(),
+            param_defaults: f
+                .params
+                .iter()
+                .map(|parameter| parameter.default.is_some())
+                .collect(),
+            required: f
+                .params
+                .iter()
+                .rposition(|parameter| parameter.default.is_none() && !parameter.is_vararg)
+                .map_or(0, |index| index + 1),
+            vararg: trailing_vararg,
+            vararg_index: trailing_vararg.then(|| f.params.len() - 1),
+            ..CallSig::default()
+        };
+        let argument_parameters = call_argument_parameter_indices(
+            call_args,
+            self.file.call_arg_names.get(&call.0).map(Vec::as_slice),
+            self.file.call_has_trailing_lambda.contains(&call.0),
+            &call_sig,
+        )?;
         let tparams: std::collections::HashSet<&str> =
             f.type_params.iter().map(String::as_str).collect();
         let mut binds: std::collections::HashMap<&str, Ty> = std::collections::HashMap::new();
@@ -18250,26 +18803,42 @@ impl<'a> Checker<'a> {
         // conflict set is the soundness guard layered on top, covering EVERY binding site (not just the
         // plain-value witness scan).
         let mut conflicted: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for (i, p) in f.params.iter().enumerate() {
-            if trailing_vararg && i + 1 == f.params.len() {
+        for (argument_index, (&parameter_index, at)) in
+            argument_parameters.iter().zip(arg_tys).enumerate()
+        {
+            let p = &f.params[parameter_index];
+            if trailing_vararg && parameter_index + 1 == f.params.len() {
                 if p.ty.fun_params.is_empty()
                     && !p.ty.nullable()
                     && tparams.contains(p.ty.name.as_str())
                 {
-                    for at in &arg_tys[i..] {
-                        if *at == Ty::Nothing {
-                            return None; // diverging args don't constrain inference
-                        }
-                        bind_or_conflict(&mut binds, &mut conflicted, p.ty.name.as_str(), *at);
+                    if *at == Ty::Nothing {
+                        return None; // diverging args don't constrain inference
                     }
+                    bind_or_conflict(&mut binds, &mut conflicted, p.ty.name.as_str(), *at);
                 }
                 continue;
             }
-            let at = &arg_tys[i];
             if p.ty.fun_params.is_empty() && p.ty.name != "<fun>" {
                 // A plain value parameter typed as a bare type parameter (`x: T`).
                 if tparams.contains(p.ty.name.as_str()) {
                     bind_or_conflict(&mut binds, &mut conflicted, p.ty.name.as_str(), *at);
+                }
+            } else if let Some(ExprLowering::AdaptedRef {
+                adapted_params,
+                ret,
+                ..
+            }) = self.expr_lowers.get(&call_args[argument_index])
+            {
+                for (decl, actual) in p.ty.fun_params.iter().zip(adapted_params) {
+                    if tparams.contains(decl.name.as_str()) {
+                        bind_or_conflict(&mut binds, &mut conflicted, decl.name.as_str(), *actual);
+                    }
+                }
+                if let Some(rret) = &p.ty.arg {
+                    if tparams.contains(rret.name.as_str()) {
+                        bind_or_conflict(&mut binds, &mut conflicted, rret.name.as_str(), *ret);
+                    }
                 }
             } else if let Ty::Fun(fsig) = at {
                 // A function-typed parameter `(A) -> R`: bind `A` from the lambda's parameter types
@@ -18377,8 +18946,9 @@ impl<'a> Checker<'a> {
             // (`x: T?`) is likewise excluded: its argument type carries a nullability the erased `T`
             // slot doesn't, so it isn't a reliable witness for `T`.
             let mut witness: Option<Ty> = None;
-            for (i, p) in f.params.iter().enumerate() {
-                if trailing_vararg && i + 1 == f.params.len() {
+            for (argument_index, &parameter_index) in argument_parameters.iter().enumerate() {
+                let p = &f.params[parameter_index];
+                if trailing_vararg && parameter_index + 1 == f.params.len() {
                     continue;
                 }
                 if p.ty.fun_params.is_empty() && p.ty.name == r {
@@ -18386,10 +18956,10 @@ impl<'a> Checker<'a> {
                         return None;
                     }
                     // Diverging arguments do not constrain inference.
-                    if arg_tys[i] == Ty::Nothing {
+                    if arg_tys[argument_index] == Ty::Nothing {
                         return None;
                     }
-                    let actual = crate::symbol_resolver::inference_actual(arg_tys[i]);
+                    let actual = crate::symbol_resolver::inference_actual(arg_tys[argument_index]);
                     match witness {
                         None => witness = Some(actual),
                         Some(w) => {
@@ -21485,11 +22055,11 @@ impl<'a> Checker<'a> {
             })
             .is_some_and(|signature| signature.projected_return_hazard)
             && ret.is_erased_top()
-            && !self
+            && self
                 .file
                 .call_type_args
                 .get(&call.0)
-                .is_some_and(|arguments| !arguments.is_empty());
+                .is_none_or(Vec::is_empty);
         if fi.visibility != Visibility::Public {
             self.reject_if_inaccessible(
                 fi.visibility,
@@ -23823,46 +24393,30 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // Type-directed lambda checking: if we know the target function's signature and a
-                // parameter is a function type with known inner param types, check lambda args with
-                // the correct `it` type instead of always using Object.
-                // For lambda-argument pre-typing we need a single known signature; use it only when the
-                // name is unambiguous (one overload). An overloaded call's lambda `it` falls back to the
-                // erased type — a minor precision loss, not a miscompile.
-                let known_sig = self.syms.single_fun(&fname);
-                let known_argument_parameters = known_sig.as_ref().and_then(|sig| {
-                    call_argument_parameter_indices(
-                        args,
-                        arg_names.as_deref(),
-                        self.file.call_has_trailing_lambda.contains(&call.0),
-                        &sig.call_sig(),
-                    )
-                });
+                let has_lambda_argument = args
+                    .iter()
+                    .any(|&argument| matches!(self.file.expr(argument), Expr::Lambda { .. }));
+                let has_callable_ref_argument = args
+                    .iter()
+                    .any(|&argument| matches!(self.file.expr(argument), Expr::CallableRef { .. }));
                 // An array init constructor `IntArray(n) { i -> … }` / `Array(n) { i -> … }` types its
                 // lambda's parameter (the index) as `Int`.
                 let array_init_lambda = (Ty::primitive_array_element(&fname).is_some()
                     || fname == "Array")
                     && args.len() == 2
                     && matches!(self.file.expr(args[1]), Expr::Lambda { .. });
-                // A receiver-less top-level *library* function with a lambda argument (`applyIt(5){ it+1 }`):
-                // recover the lambda parameter types from its generic signature so `it` types correctly
-                // (the erased `Function1` descriptor hides them), mirroring the extension-call path.
-                // Non-lambda argument types, computed once here for a top-level lib fn with a lambda
-                // argument (to recover the lambda's parameter types from the fn's generic signature) and
-                // reused in the `arg_tys` loop below so they aren't re-typed (no duplicate diagnostics).
-                // Non-lambda argument types, computed once for ANY receiver-less call with a lambda argument
-                // (a user fn allowed too, so a user generic inline HOF reaches `user_generic_call`).
                 let toplevel_partial: Option<Vec<Option<Ty>>> = if !self
                     .lexical_value_declares(&fname)
                     && !array_init_lambda
-                    && args
-                        .iter()
-                        .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
+                    && (has_lambda_argument || has_callable_ref_argument)
                 {
                     Some(
                         args.iter()
                             .map(|&a| {
-                                if matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                                if matches!(
+                                    self.file.expr(a),
+                                    Expr::Lambda { .. } | Expr::CallableRef { .. }
+                                ) {
                                     None
                                 } else {
                                     Some(self.expr(a))
@@ -23873,16 +24427,73 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
+                let adapted_outer = has_callable_ref_argument
+                    .then(|| {
+                        self.adapted_outer_call_signature(
+                            call,
+                            &fname,
+                            args,
+                            arg_names.as_deref(),
+                            toplevel_partial.as_deref().unwrap_or_default(),
+                        )
+                    })
+                    .flatten();
+                let known_sig = adapted_outer
+                    .as_ref()
+                    .map(|(signature, _)| signature.clone())
+                    .or_else(|| self.syms.single_fun(&fname));
+                let known_argument_parameters = known_sig.as_ref().and_then(|sig| {
+                    call_argument_parameter_indices(
+                        args,
+                        arg_names.as_deref(),
+                        self.file.call_has_trailing_lambda.contains(&call.0),
+                        &sig.call_sig(),
+                    )
+                });
                 // A user generic inline HOF (`twice(1){…}`): bind its type params from the value args to
                 // recover the lambda parameter types and the specialized return type.
                 let user_generic: Option<Vec<Vec<Ty>>> = toplevel_partial
                     .as_ref()
+                    .filter(|_| has_lambda_argument)
                     .and_then(|partial| self.user_generic_call(&fname, partial));
                 let toplevel_lambda_shape = toplevel_partial
                     .as_ref()
+                    .filter(|_| has_lambda_argument)
                     // A library top-level function only when no user function shadows it.
                     .filter(|_| known_sig.is_none())
                     .and_then(|partial| self.top_level_lambda_shape(&fname, partial));
+                let mut known_generic_bindings = if let Some((_, bindings)) = adapted_outer {
+                    bindings
+                } else if let Some(generic) =
+                    known_sig.as_ref().and_then(|sig| sig.generic_sig.as_ref())
+                {
+                    let mut bindings = crate::symbol_resolver::GSigBinds::new();
+                    if let Some(type_arguments) = self.file.call_type_args.get(&call.0).cloned() {
+                        for (formal, argument) in generic.formals.iter().zip(type_arguments) {
+                            bindings.insert(formal.clone(), self.resolve_ty(&argument));
+                        }
+                    }
+                    if let Some(partial) = toplevel_partial.as_ref() {
+                        let inferred = crate::symbol_resolver::infer_generic_bindings(
+                            generic,
+                            partial.iter().enumerate().filter_map(|(argument, actual)| {
+                                let actual = (*actual)?;
+                                let parameter = known_argument_parameters
+                                    .as_ref()
+                                    .and_then(|parameters| parameters.get(argument))
+                                    .copied()
+                                    .unwrap_or(argument);
+                                Some((parameter, actual))
+                            }),
+                        );
+                        for (formal, actual) in inferred {
+                            bindings.entry(formal).or_insert(actual);
+                        }
+                    }
+                    bindings
+                } else {
+                    crate::symbol_resolver::GSigBinds::new()
+                };
                 let toplevel_lambda_pts: Option<Vec<Vec<Ty>>> = toplevel_lambda_shape
                     .as_ref()
                     .and_then(|shape| shape.param_types.clone())
@@ -24250,13 +24861,27 @@ impl<'a> Checker<'a> {
                             // function with trailing defaults) passed to a function-typed parameter of
                             // SMALLER arity. Type it as the expected function type and record the
                             // adaptation (the lowerer synthesizes an arity-matching adapter).
-                            if let Some(&Ty::Fun(exp)) = sig.params.get(pi) {
+                            // Generic signatures retain callable shapes erased from `Signature.params`.
+                            let expected_callable = sig
+                                .generic_sig
+                                .as_ref()
+                                .and_then(|generic| generic.params.get(pi))
+                                .copied()
+                                .or_else(|| sig.params.get(pi).copied());
+                            if let Some(Ty::Fun(exp)) = expected_callable {
                                 if let Expr::CallableRef {
                                     receiver: None,
                                     name,
                                 } = self.file.expr(a).clone()
                                 {
-                                    if let Some(t) = self.try_adapt_toplevel_ref(a, &name, exp) {
+                                    if let Some(t) = self.try_adapt_toplevel_ref(
+                                        call,
+                                        a,
+                                        &name,
+                                        exp,
+                                        sig.generic_sig.as_ref(),
+                                        &mut known_generic_bindings,
+                                    ) {
                                         return t;
                                     }
                                 }
