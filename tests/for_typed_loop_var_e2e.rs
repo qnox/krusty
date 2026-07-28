@@ -4,6 +4,38 @@
 
 use super::common;
 
+const LIST_INTERFACE_DECLARATIONS: &str = "\
+package sample.model
+
+interface Token {
+    fun mark()
+}
+interface Owner
+interface TokenList : List<Token>, Owner
+interface TokenOwner {
+    val tokens: TokenList
+}
+";
+
+const LIST_INTERFACE_USAGE: &str = "\
+package sample.render
+
+import sample.model.Token
+import sample.model.TokenOwner
+
+object Printer {
+    private fun StringBuilder.printToken(token: Token) {
+        token.mark()
+    }
+
+    private fun StringBuilder.printTokens(owner: TokenOwner) {
+        for (token in owner.tokens) {
+            printToken(token)
+        }
+    }
+}
+";
+
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")
 }
@@ -40,23 +72,8 @@ fn nullable_typed_loop_var_downto() {
 
 #[test]
 fn source_interface_inheriting_list_is_iterable() {
-    let declarations = "\
-package sample
-
-class Token
-interface TokenList : List<Token>
-";
-    let usage = "\
-package sample
-
-fun visit(tokens: TokenList) {
-    for (token in tokens) {
-        token.toString()
-    }
-}
-";
     common::expect_front_end_ok_files_with_stdlib(
-        &[declarations, usage],
+        &[LIST_INTERFACE_DECLARATIONS, LIST_INTERFACE_USAGE],
         "SourceInterfaceInheritingListIsIterable",
     );
 }
@@ -78,4 +95,16 @@ fun box(): String {
 }
 ";
     common::expect_box_ok_with_stdlib(SRC, "SourceClassInheritingArrayListIsIterable");
+}
+
+#[test]
+fn classpath_interface_inheriting_list_preserves_element_type() {
+    let Some(diagnostics) = common::checker_diags_against(
+        "classpath_interface_inheriting_list_preserves_element_type",
+        LIST_INTERFACE_DECLARATIONS,
+        LIST_INTERFACE_USAGE,
+    ) else {
+        return;
+    };
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
