@@ -27,8 +27,8 @@ use crate::runtime::{
     CountedLoopInfo, PlatformAccessor, PlatformCtor, PlatformField, RuntimeCtor, RuntimeOp,
     TargetRuntime,
 };
-use crate::symbol_resolver::SymbolResolver;
-use crate::types::{existing_type_name, stored_value_ty, type_name, Ty, TypeName};
+use crate::symbol_resolver::{InheritedNestedClassifier, SymbolResolver};
+use crate::types::{existing_type_name, stored_value_ty, type_name, Ty, TypeName, Visibility};
 
 // --- Lower-bail diagnostics ----------------------------------------------------------------------
 // `lower_file` returns `None` (silently skips a file) for any construct outside the IR subset. That is
@@ -14772,20 +14772,87 @@ impl<'a> Lower<'a> {
             || self.syms.libraries.resolve_type(internal).is_some()
     }
 
-    fn scoped_classifier_internal(&self, name: &str) -> Option<TypeName> {
-        self.resolve_qualified_nested(name)
-            .and_then(|internal| existing_type_name(&internal))
-            .or_else(|| {
-                self.syms
-                    .classes
-                    .get(name)
-                    .map(|class| class.internal_name())
-            })
-            .or_else(|| self.syms.class_names.get_class(name))
+    fn scoped_classifier_internal(&self, name: &str) -> InheritedNestedClassifier {
+        if name.contains('.') {
+            if let Some(internal) = self
+                .resolve_qualified_nested(name)
+                .and_then(|internal| existing_type_name(&internal))
+            {
+                return InheritedNestedClassifier::Found(internal);
+            }
+        }
+        match self.inherited_nested_classifier_name(name) {
+            InheritedNestedClassifier::Found(internal) => {
+                InheritedNestedClassifier::Found(internal)
+            }
+            InheritedNestedClassifier::Ambiguous => InheritedNestedClassifier::Ambiguous,
+            InheritedNestedClassifier::NotFound => self
+                .syms
+                .classes
+                .get(name)
+                .map(|class| class.internal_name())
+                .or_else(|| self.syms.class_names.get_class(name))
+                .map_or(
+                    InheritedNestedClassifier::NotFound,
+                    InheritedNestedClassifier::Found,
+                ),
+        }
     }
 
-    fn scoped_classifier_over_default(&self, name: &str) -> Option<TypeName> {
-        classifier_over_default(name, self.scoped_classifier_internal(name))
+    fn inherited_nested_classifier_name(&self, name: &str) -> InheritedNestedClassifier {
+        let Some(current) = self.cur_class else {
+            return InheritedNestedClassifier::NotFound;
+        };
+        let direct_supertypes = |owner: TypeName| {
+            if let Some(class) = self.syms.class_by_type_name(owner) {
+                let mut supertypes = class.interfaces.iter_ids().collect::<Vec<_>>();
+                supertypes.extend(class.super_internal);
+                supertypes
+            } else {
+                self.syms
+                    .libraries
+                    .resolve_type_name(owner)
+                    .map(|class| class.supertypes.iter_ids().collect())
+                    .unwrap_or_default()
+            }
+        };
+        let owners =
+            crate::symbol_resolver::lexical_enclosing_classifier_names(current, |candidate| {
+                self.syms.class_by_type_name(candidate).is_some()
+            });
+        for owner in owners {
+            let inherited = crate::symbol_resolver::inherited_nested_classifier_name(
+                name,
+                direct_supertypes(owner),
+                direct_supertypes,
+                |candidate| {
+                    self.syms
+                        .class_by_type_name(candidate)
+                        .is_some_and(|class| class.visibility != Visibility::Private)
+                        || self
+                            .syms
+                            .libraries
+                            .inherited_classifier_shape(candidate, owner)
+                            .is_some()
+                },
+            );
+            if inherited != InheritedNestedClassifier::NotFound {
+                return inherited;
+            }
+        }
+        InheritedNestedClassifier::NotFound
+    }
+
+    fn scoped_classifier_over_default(&self, name: &str) -> InheritedNestedClassifier {
+        match self.scoped_classifier_internal(name) {
+            InheritedNestedClassifier::Found(internal) => {
+                classifier_over_default(name, Some(internal)).map_or(
+                    InheritedNestedClassifier::NotFound,
+                    InheritedNestedClassifier::Found,
+                )
+            }
+            other => other,
+        }
     }
 
     /// Resolve a dotted nested type/qualifier (`Subject.User` → `lib/Subject$User`) — the
@@ -14881,8 +14948,11 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        let t = if let Some(internal) = self.scoped_classifier_over_default(&r.name) {
+        let classifier = self.scoped_classifier_over_default(&r.name);
+        let t = if let InheritedNestedClassifier::Found(internal) = classifier {
             Ty::obj_name(internal)
+        } else if classifier == InheritedNestedClassifier::Ambiguous {
+            return None;
         } else if let Some(p) = Ty::from_name(&r.name) {
             p
         } else if let Some(elem) = Ty::primitive_array_element(&r.name) {
@@ -15672,7 +15742,12 @@ impl<'a> Lower<'a> {
                 // `A`, not the `null` initializer's `Ty::Null`), else the checker's inferred type.
                 let shadowing_classifier = ty
                     .as_ref()
-                    .and_then(|reference| self.scoped_classifier_over_default(&reference.name));
+                    .map(|reference| self.scoped_classifier_over_default(&reference.name))
+                    .unwrap_or(InheritedNestedClassifier::NotFound);
+                if shadowing_classifier == InheritedNestedClassifier::Ambiguous {
+                    return None;
+                }
+                let shadowing_classifier_name = shadowing_classifier.found();
                 let kty = match ty.as_ref() {
                     // A declared function type (`val f: (C) -> Int`): use the annotation's `Ty::Fun`.
                     Some(r) if !r.fun_params.is_empty() || r.name == "<fun>" => {
@@ -15683,12 +15758,12 @@ impl<'a> Lower<'a> {
                     Some(r)
                         if r.nullable()
                             && Ty::from_name(&r.name).is_some_and(|t| !t.is_reference())
-                            && shadowing_classifier.is_none() =>
+                            && shadowing_classifier == InheritedNestedClassifier::NotFound =>
                     {
                         ty_of(self.afile, r, &*self.syms.libraries)
                     }
-                    Some(_) if shadowing_classifier.is_some() => {
-                        Ty::obj_name(shadowing_classifier.unwrap())
+                    Some(_) if shadowing_classifier_name.is_some() => {
+                        Ty::obj_name(shadowing_classifier_name.expect("found classifier"))
                     }
                     Some(r) if Ty::from_name(&r.name).is_some() => Ty::from_name(&r.name).unwrap(),
                     Some(r) if self.contains_class(&class_internal(self.afile, &r.name)) => {
@@ -20573,7 +20648,8 @@ impl<'a> Lower<'a> {
                         None => match self.cur_tparams.iter().find(|(n, _, _)| *n == ty.name) {
                             Some((name, bound, _)) => Ty::ty_param(name, *bound),
                             None if ty.name != "Unit"
-                                && self.scoped_classifier_over_default(&ty.name).is_none() =>
+                                && self.scoped_classifier_over_default(&ty.name)
+                                    == InheritedNestedClassifier::NotFound =>
                             {
                                 match Ty::from_name(&ty.name) {
                                     Some(p) if !p.is_reference() => p.nullable_boxed()?,
@@ -20679,7 +20755,9 @@ impl<'a> Lower<'a> {
                 {
                     if let Some(tprim) = reified_target
                         .or_else(|| {
-                            if self.scoped_classifier_over_default(&ty.name).is_none() {
+                            if self.scoped_classifier_over_default(&ty.name)
+                                == InheritedNestedClassifier::NotFound
+                            {
                                 Ty::from_name(&ty.name)
                             } else {
                                 None
@@ -20704,7 +20782,9 @@ impl<'a> Lower<'a> {
                 if !ty.nullable() {
                     if let Some(prim) = reified_target
                         .or_else(|| {
-                            if self.scoped_classifier_over_default(&ty.name).is_none() {
+                            if self.scoped_classifier_over_default(&ty.name)
+                                == InheritedNestedClassifier::NotFound
+                            {
                                 Ty::from_name(&ty.name)
                             } else {
                                 None

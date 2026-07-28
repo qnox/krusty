@@ -396,6 +396,355 @@ fn run_mixed(java: &[(&str, &str)], kotlin: &str) {
 }
 
 #[test]
+fn same_package_java_package_classifier_keeps_public_member_access() {
+    run_mixed(
+        &[(
+            "fixtures/PackageType.java",
+            r#"
+                package fixtures;
+                class PackageType {
+                    public PackageType() {}
+                    public String value() { return "O"; }
+                    public static String staticValue() { return "K"; }
+                }
+            "#,
+        )],
+        r#"
+            package fixtures
+            fun box(): String = PackageType().value() + PackageType.staticValue()
+        "#,
+    );
+}
+
+#[test]
+fn cross_package_java_package_classifier_constructor_is_rejected() {
+    let Some(diagnostics) = mixed_diagnostics(
+        &[(
+            "fixtures/PackageType.java",
+            r#"
+                package fixtures;
+                class PackageType {
+                    public PackageType() {}
+                }
+            "#,
+        )],
+        r#"
+            package consumer
+            import fixtures.PackageType
+            fun use(): Any = PackageType()
+        "#,
+    ) else {
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("PackageType")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn subclass_calls_protected_java_super_member() {
+    run_mixed(
+        &[(
+            "fixtures/Parent.java",
+            r#"
+                package fixtures;
+                public class Parent {
+                    protected String value() { return "OK"; }
+                }
+            "#,
+        )],
+        r#"
+            package consumer
+            import fixtures.Parent
+            class Child : Parent() {
+                fun read(): String = super.value()
+            }
+            fun box(): String = Child().read()
+        "#,
+    );
+}
+
+#[test]
+fn subclass_resolves_protected_nested_classifier_from_java_base() {
+    run_mixed(
+        &[(
+            "fixtures/Parent.java",
+            r#"
+                package fixtures;
+                public class Parent {
+                    protected static class Category {
+                        public Category() {}
+                        public String value() { return "OK"; }
+                    }
+                }
+            "#,
+        )],
+        r#"
+            import fixtures.Parent
+            class Child : Parent() {
+                fun value(): String = Category().value()
+            }
+            fun box(): String = Child().value()
+        "#,
+    );
+}
+
+#[test]
+fn inherited_classifier_does_not_expose_its_protected_member() {
+    let Some(diagnostics) = mixed_diagnostics(
+        &[(
+            "fixtures/Parent.java",
+            r#"
+                package fixtures;
+                public class Parent {
+                    protected static class Category {
+                        public Category() {}
+                        protected String secret() { return "hidden"; }
+                    }
+                }
+            "#,
+        )],
+        r#"
+            import fixtures.Parent
+            class Child : Parent() {
+                fun value(): String = Category().secret()
+            }
+        "#,
+    ) else {
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("secret")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn inherited_classifier_does_not_expose_its_protected_constructor() {
+    let Some(diagnostics) = mixed_diagnostics(
+        &[(
+            "fixtures/Parent.java",
+            r#"
+                package fixtures;
+                public class Parent {
+                    protected static class Category {
+                        protected Category() {}
+                        public String value() { return "hidden"; }
+                    }
+                }
+            "#,
+        )],
+        r#"
+            import fixtures.Parent
+            class Child : Parent() {
+                fun value(): String = Category().value()
+            }
+        "#,
+    ) else {
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("Category")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn same_package_subclass_resolves_package_nested_classifier() {
+    run_mixed(
+        &[(
+            "fixtures/Parent.java",
+            r#"
+                package fixtures;
+                public class Parent {
+                    static class Category {
+                        public Category() {}
+                        public String value() { return "OK"; }
+                    }
+                }
+            "#,
+        )],
+        r#"
+            package fixtures
+            class Child : Parent() {
+                fun value(): String = Category().value()
+            }
+            fun box(): String = Child().value()
+        "#,
+    );
+}
+
+#[test]
+fn package_nested_classifier_does_not_shadow_cross_package_source_type() {
+    run_mixed(
+        &[(
+            "fixtures/Parent.java",
+            r#"
+                package fixtures;
+                public class Parent {
+                    static class Category {}
+                }
+            "#,
+        )],
+        r#"
+            import fixtures.Parent
+            class Category(val value: String)
+            class Child : Parent() {
+                fun value(): String = Category("OK").value
+            }
+            fun box(): String = Child().value()
+        "#,
+    );
+}
+
+#[test]
+fn peer_inherited_nested_ambiguity_does_not_fall_back_to_source_type() {
+    let Some(diagnostics) = mixed_diagnostics(
+        &[
+            (
+                "fixtures/Left.java",
+                "package fixtures; public interface Left { class Category {} }",
+            ),
+            (
+                "fixtures/Right.java",
+                "package fixtures; public interface Right { class Category {} }",
+            ),
+        ],
+        r#"
+            package fixtures
+            class Category
+            class Child(category: Category) : Left, Right
+        "#,
+    ) else {
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("Category")),
+        "peer inherited classifiers must remain ambiguous: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn private_nested_classifier_from_java_base_does_not_shadow_source_type() {
+    run_mixed(
+        &[(
+            "fixtures/Parent.java",
+            r#"
+                package fixtures;
+                public class Parent {
+                    private static class Category {}
+                }
+            "#,
+        )],
+        r#"
+            import fixtures.Parent
+            class Category(val value: String)
+            class Child : Parent() {
+                fun value(): String = Category("OK").value
+            }
+            fun box(): String = Child().value()
+        "#,
+    );
+}
+
+#[test]
+fn dollar_named_top_level_class_is_not_an_inherited_classifier() {
+    run_mixed(
+        &[
+            (
+                "fixtures/Parent.java",
+                "package fixtures; public class Parent {}",
+            ),
+            (
+                "fixtures/Parent$Category.java",
+                r#"
+                    package fixtures;
+                    public class Parent$Category {
+                        public Parent$Category() {}
+                        public String value() { return "FAIL"; }
+                    }
+                "#,
+            ),
+        ],
+        r#"
+            import fixtures.Parent
+            class Category(val value: String)
+            class Child : Parent() {
+                fun value(): String = Category("OK").value
+            }
+            fun box(): String = Child().value()
+        "#,
+    );
+}
+
+#[test]
+fn protected_java_member_is_not_visible_through_base_value() {
+    let Some(diagnostics) = mixed_diagnostics(
+        &[(
+            "fixtures/Parent.java",
+            r#"
+                package fixtures;
+                public class Parent {
+                    protected String value() { return "hidden"; }
+                }
+            "#,
+        )],
+        r#"
+            package consumer
+            import fixtures.Parent
+            class Child : Parent() {
+                fun read(parent: Parent): String = parent.value()
+            }
+        "#,
+    ) else {
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("value")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn dependency_internal_member_is_not_visible() {
+    let Some(diagnostics) = common::diagnostics_against(
+        "internal_member_visibility",
+        "package fixtures\n\
+         class PublicApi {\n\
+             @PublishedApi internal fun hidden(): String = \"hidden\"\n\
+         }",
+        "package consumer\n\
+         import fixtures.PublicApi\n\
+         fun read(api: PublicApi): String = api.hidden()",
+    ) else {
+        return;
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("hidden")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
 fn boxed_java_primitive_returns_work_in_kotlin_contexts() {
     run_mixed(
         &[(

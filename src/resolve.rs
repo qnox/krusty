@@ -16,6 +16,7 @@ use crate::libraries::{
     EmptySymbolSource, GenericSig, InlineKind, Origin, ParamList, SemanticPlatform,
 };
 use crate::names::{property_getter_name, property_setter_name};
+use crate::symbol_resolver::InheritedNestedClassifier;
 use crate::symbol_source::SymbolSource;
 use crate::types::{existing_type_name, type_name, Ty, TypeName, Visibility};
 
@@ -1009,6 +1010,7 @@ fn local_function_candidate_score(
 pub struct ClassNames {
     base: std::rc::Rc<HashMap<String, TypeName>>,
     user: HashMap<String, TypeName>,
+    ambiguous: std::collections::HashSet<String>,
 }
 
 impl ClassNames {
@@ -1016,9 +1018,13 @@ impl ClassNames {
         ClassNames {
             base,
             user: HashMap::new(),
+            ambiguous: std::collections::HashSet::new(),
         }
     }
     pub fn get(&self, k: &str) -> Option<TypeName> {
+        if self.ambiguous.contains(k) {
+            return None;
+        }
         self.user
             .get(k)
             .copied()
@@ -1032,7 +1038,7 @@ impl ClassNames {
         classifier_over_default(name, self.get_class(name))
     }
     pub fn contains_key(&self, k: &str) -> bool {
-        self.user.contains_key(k) || self.base.contains_key(k)
+        !self.ambiguous.contains(k) && (self.user.contains_key(k) || self.base.contains_key(k))
     }
     fn has_internal(&self, internal: &str) -> bool {
         existing_type_name(internal).is_some_and(|internal| {
@@ -1074,11 +1080,34 @@ impl ClassNames {
             .and_then(|t| t.companion_consts.get(const_name).copied())
     }
     pub fn insert(&mut self, k: String, v: impl AsRef<str>) -> Option<TypeName> {
+        self.ambiguous.remove(&k);
         self.user.insert(k, crate::types::type_name(v.as_ref()))
     }
     pub fn insert_name(&mut self, k: String, v: TypeName) -> Option<TypeName> {
+        self.ambiguous.remove(&k);
         self.user.insert(k, v)
     }
+    pub fn mark_ambiguous(&mut self, name: String) {
+        self.user.remove(&name);
+        self.ambiguous.insert(name);
+    }
+}
+
+fn declared_supertype_name(
+    class: &ClassDecl,
+    name: &str,
+    class_names: &ClassNames,
+) -> Option<TypeName> {
+    class_names.get_qualified_supertype(name).or_else(|| {
+        let mut prefix = class.name.as_str();
+        while let Some((enclosing, _)) = prefix.rsplit_once('.') {
+            if let Some(internal) = class_names.get(&format!("{enclosing}.{name}")) {
+                return Some(internal);
+            }
+            prefix = enclosing;
+        }
+        None
+    })
 }
 
 fn default_classifier_internal(name: &str) -> Option<TypeName> {
@@ -1094,9 +1123,7 @@ fn default_classifier_internal(name: &str) -> Option<TypeName> {
 
 pub(crate) fn classifier_over_default(name: &str, resolved: Option<TypeName>) -> Option<TypeName> {
     let resolved = resolved?;
-    default_classifier_internal(name)
-        .filter(|&default| default != resolved)
-        .map(|_| resolved)
+    (default_classifier_internal(name) != Some(resolved)).then_some(resolved)
 }
 
 /// A collected TOP-LEVEL extension property: its declared type, mutability, and the source
@@ -1148,6 +1175,9 @@ pub struct SymbolTable {
     pub objects: std::collections::HashSet<String>,
     /// Declared `enum` types (simple name → entry names), accessed via `Name.ENTRY`.
     pub enums: HashMap<String, Vec<String>>,
+    /// Static values by resolved classifier identity. Pre-indexed before signature inference so enum
+    /// initializers do not depend on source declaration order or collide across packages.
+    pub static_classifier_values: HashMap<TypeName, HashMap<String, Ty>>,
     /// The target's compiled library set — a JVM classpath or a klib (empty unless the driver
     /// supplies one). The front end resolves external references only through this abstraction.
     pub libraries: Box<dyn SemanticPlatform>,
@@ -1194,6 +1224,7 @@ impl Default for SymbolTable {
             computed_props: std::collections::HashSet::new(),
             objects: std::collections::HashSet::new(),
             enums: HashMap::new(),
+            static_classifier_values: HashMap::new(),
             libraries: Box::new(EmptySymbolSource),
             ext_funs: HashMap::new(),
             source_ext_funs: HashMap::new(),
@@ -2417,43 +2448,273 @@ fn collect_typeref_names(r: &TypeRef, out: &mut std::collections::HashSet<String
     }
 }
 
-/// Collect every simple type NAME referenced in TYPE positions across a file's declarations (function
-/// params/returns/receivers + type-param bounds, property types, class members) — so the signature phase
-/// can import-resolve names absent from the global seed (ambiguity-pruned), matching the Checker.
-fn collect_file_type_names(file: &File, out: &mut std::collections::HashSet<String>) {
-    fn fun_names(f: &FunDecl, file: &File, out: &mut std::collections::HashSet<String>) {
-        let _ = file;
-        if let Some(r) = &f.receiver {
-            collect_typeref_names(r, out);
+fn collect_fun_type_names(f: &FunDecl, out: &mut std::collections::HashSet<String>) {
+    if let Some(receiver) = &f.receiver {
+        collect_typeref_names(receiver, out);
+    }
+    for parameter in &f.params {
+        collect_typeref_names(&parameter.ty, out);
+    }
+    if let Some(ret) = &f.ret {
+        collect_typeref_names(ret, out);
+    }
+    for (_, bound) in &f.type_param_bounds {
+        collect_typeref_names(bound, out);
+    }
+}
+
+fn collect_property_type_names(p: &PropDecl, out: &mut std::collections::HashSet<String>) {
+    for parameter in &p.context_params {
+        collect_typeref_names(&parameter.ty, out);
+    }
+    if let Some(receiver) = &p.receiver {
+        collect_typeref_names(receiver, out);
+    }
+    if let Some(ty) = &p.ty {
+        collect_typeref_names(ty, out);
+    }
+    if let Some(ty) = p
+        .explicit_backing_field
+        .as_ref()
+        .and_then(|field| field.ty.as_ref())
+    {
+        collect_typeref_names(ty, out);
+    }
+}
+
+fn collect_expression_type_names(
+    file: &File,
+    roots: impl IntoIterator<Item = ExprId>,
+    out: &mut std::collections::HashSet<String>,
+) {
+    let mut expressions = roots.into_iter().collect::<Vec<_>>();
+    let mut statements = Vec::new();
+    let mut seen_expressions = std::collections::HashSet::new();
+    let mut seen_statements = std::collections::HashSet::new();
+    while let Some(expression) = expressions.pop() {
+        if !seen_expressions.insert(expression) {
+            continue;
         }
-        for p in &f.params {
-            collect_typeref_names(&p.ty, out);
+        match file.expr(expression) {
+            Expr::Name(name) => {
+                out.insert(name.clone());
+            }
+            Expr::Is { ty, .. } | Expr::As { ty, .. } => collect_typeref_names(ty, out),
+            Expr::Try { catches, .. } => {
+                for catch in catches {
+                    collect_typeref_names(&catch.ty, out);
+                }
+            }
+            _ => {}
         }
-        if let Some(r) = &f.ret {
-            collect_typeref_names(r, out);
+        if let Some(arguments) = file.call_type_args.get(&expression.0) {
+            for argument in arguments {
+                collect_typeref_names(argument, out);
+            }
         }
-        for (_, b) in &f.type_param_bounds {
-            collect_typeref_names(b, out);
+        if let Some(parameters) = file.lambda_param_types.get(&expression.0) {
+            for parameter in parameters.iter().flatten() {
+                collect_typeref_names(parameter, out);
+            }
+        }
+        if let Some(ret) = file.anon_fun_ret.get(&expression.0) {
+            collect_typeref_names(ret, out);
+        }
+        file.any_child_expr(
+            expression,
+            &mut |child| {
+                expressions.push(child);
+                false
+            },
+            &mut |statement| {
+                statements.push(statement);
+                false
+            },
+        );
+        while let Some(statement) = statements.pop() {
+            if !seen_statements.insert(statement) {
+                continue;
+            }
+            match file.stmt(statement) {
+                Stmt::LocalLateinit { ty, .. }
+                | Stmt::Local { ty: Some(ty), .. }
+                | Stmt::LocalDelegate { ty: Some(ty), .. } => collect_typeref_names(ty, out),
+                Stmt::LocalFun(function) => collect_fun_type_names(function, out),
+                Stmt::LocalClass(class) => collect_class_type_names(file, class, out),
+                _ => {}
+            }
+            file.any_child_stmt(statement, &mut |child| {
+                expressions.push(child);
+                false
+            });
         }
     }
-    fn prop_names(p: &PropDecl, out: &mut std::collections::HashSet<String>) {
-        for parameter in &p.context_params {
+}
+
+fn fun_expression_roots(function: &FunDecl) -> impl Iterator<Item = ExprId> + '_ {
+    function
+        .params
+        .iter()
+        .filter_map(|parameter| parameter.default)
+        .chain(
+            function
+                .params
+                .iter()
+                .flat_map(|parameter| parameter.annotation_args.iter().flatten().copied()),
+        )
+        .chain(match function.body {
+            FunBody::Expr(body) | FunBody::Block(body) => Some(body),
+            FunBody::None => None,
+        })
+}
+
+fn property_expression_roots(property: &PropDecl) -> impl Iterator<Item = ExprId> + '_ {
+    property
+        .context_params
+        .iter()
+        .filter_map(|parameter| parameter.default)
+        .chain(
+            property
+                .context_params
+                .iter()
+                .flat_map(|parameter| parameter.annotation_args.iter().flatten().copied()),
+        )
+        .chain(property.init)
+        .chain(property.delegate)
+        .chain(property.getter.as_ref().and_then(|body| match body {
+            FunBody::Expr(body) | FunBody::Block(body) => Some(*body),
+            FunBody::None => None,
+        }))
+        .chain(
+            property
+                .setter
+                .as_ref()
+                .and_then(|setter| setter.body.as_ref())
+                .and_then(|body| match body {
+                    FunBody::Expr(body) | FunBody::Block(body) => Some(*body),
+                    FunBody::None => None,
+                }),
+        )
+}
+
+fn collect_class_type_names(
+    file: &File,
+    class: &ClassDecl,
+    out: &mut std::collections::HashSet<String>,
+) {
+    out.extend(
+        class
+            .annotations
+            .iter()
+            .chain(class.methods.iter().flat_map(|method| &method.annotations))
+            .cloned(),
+    );
+    for supertype in &class.supertypes {
+        collect_typeref_names(supertype, out);
+    }
+    out.extend(class.base_class.iter().cloned());
+    out.extend(class.companion_base.iter().cloned());
+    out.extend(class.companion_supertypes.iter().cloned());
+    out.extend(
+        class
+            .delegations
+            .iter()
+            .map(|(interface, _, _)| interface.clone()),
+    );
+    out.extend(
+        class
+            .delegation_exprs
+            .iter()
+            .map(|(interface, _)| interface.clone()),
+    );
+    for (_, bound) in &class.type_param_bounds {
+        collect_typeref_names(bound, out);
+    }
+    for parameter in &class.props {
+        collect_typeref_names(&parameter.ty, out);
+    }
+    for property in class.body_props.iter().chain(&class.companion_props) {
+        collect_property_type_names(property, out);
+    }
+    for method in class.methods.iter().chain(&class.companion_methods) {
+        collect_fun_type_names(method, out);
+    }
+    for constructor in &class.secondary_ctors {
+        for parameter in &constructor.params {
             collect_typeref_names(&parameter.ty, out);
         }
-        if let Some(r) = &p.receiver {
-            collect_typeref_names(r, out);
-        }
-        if let Some(r) = &p.ty {
-            collect_typeref_names(r, out);
-        }
-        if let Some(ty) = p
-            .explicit_backing_field
-            .as_ref()
-            .and_then(|field| field.ty.as_ref())
-        {
-            collect_typeref_names(ty, out);
-        }
     }
+    let expression_roots = class
+        .annotation_args
+        .iter()
+        .flatten()
+        .copied()
+        .chain(class.props.iter().filter_map(|parameter| parameter.default))
+        .chain(
+            class
+                .props
+                .iter()
+                .flat_map(|parameter| parameter.annotation_args.iter().flatten().copied()),
+        )
+        .chain(class.base_args.iter().copied())
+        .chain(class.companion_base_args.iter().copied())
+        .chain(
+            class
+                .delegation_exprs
+                .iter()
+                .map(|(_, expression)| *expression),
+        )
+        .chain(
+            class
+                .body_props
+                .iter()
+                .chain(&class.companion_props)
+                .flat_map(property_expression_roots),
+        )
+        .chain(
+            class
+                .methods
+                .iter()
+                .chain(&class.companion_methods)
+                .flat_map(fun_expression_roots),
+        )
+        .chain(class.init_order.iter().filter_map(|init| match init {
+            crate::ast::ClassInit::Block(body) => Some(*body),
+            crate::ast::ClassInit::PropInit(_) => None,
+        }))
+        .chain(class.secondary_ctors.iter().flat_map(|constructor| {
+            constructor
+                .params
+                .iter()
+                .filter_map(|parameter| parameter.default)
+                .chain(
+                    constructor
+                        .params
+                        .iter()
+                        .flat_map(|parameter| parameter.annotation_args.iter().flatten().copied()),
+                )
+                .chain(match &constructor.delegation {
+                    crate::ast::CtorDelegation::This(arguments)
+                    | crate::ast::CtorDelegation::Super(arguments) => arguments.clone(),
+                    crate::ast::CtorDelegation::None => Vec::new(),
+                })
+                .chain(constructor.body)
+        }))
+        .chain(class.enum_entries.iter().flat_map(|entry| {
+            entry
+                .annotation_args
+                .iter()
+                .flatten()
+                .copied()
+                .chain(entry.args.iter().copied())
+                .chain(entry.methods.iter().flat_map(fun_expression_roots))
+                .chain(entry.props.iter().flat_map(property_expression_roots))
+        }));
+    collect_expression_type_names(file, expression_roots, out);
+}
+
+/// Collect names that signature inference may need to resolve through imports.
+fn collect_file_type_names(file: &File, out: &mut std::collections::HashSet<String>) {
     // Every bare VALUE reference (`val x = EmptyCoroutineContext` — an object singleton/top-level fun
     // used as a value) is a candidate too: a wildcard/explicit import resolves it no differently from a
     // type. Collecting all `Expr::Name`s over-approximates (locals, params), but a name that matches no
@@ -2486,7 +2747,7 @@ fn collect_file_type_names(file: &File, out: &mut std::collections::HashSet<Stri
             Stmt::Local { ty: Some(ty), .. } | Stmt::LocalDelegate { ty: Some(ty), .. } => {
                 collect_typeref_names(ty, out)
             }
-            Stmt::LocalFun(f) => fun_names(f, file, out),
+            Stmt::LocalFun(f) => collect_fun_type_names(f, out),
             _ => {}
         }
     }
@@ -2508,44 +2769,11 @@ fn collect_file_type_names(file: &File, out: &mut std::collections::HashSet<Stri
                 for a in &f.annotations {
                     out.insert(a.clone());
                 }
-                fun_names(f, file, out)
+                collect_fun_type_names(f, out)
             }
-            Decl::Property(p) => prop_names(p, out),
+            Decl::Property(p) => collect_property_type_names(p, out),
             Decl::Class(c) => {
-                for a in c
-                    .annotations
-                    .iter()
-                    .chain(c.methods.iter().flat_map(|m| &m.annotations))
-                {
-                    out.insert(a.clone());
-                }
-                // Supertypes/base/delegated-interface names (`class Done : Continuation<Unit>`) must be
-                // candidates too — they are names a wildcard/explicit import resolves, no different from a
-                // parameter type. Each interface supertype carries its type args, collected recursively.
-                for s in &c.supertypes {
-                    collect_typeref_names(s, out);
-                }
-                if let Some(b) = &c.base_class {
-                    out.insert(b.clone());
-                }
-                for (iface, _, _) in &c.delegations {
-                    out.insert(iface.clone());
-                }
-                for (iface, _) in &c.delegation_exprs {
-                    out.insert(iface.clone());
-                }
-                for (_, b) in &c.type_param_bounds {
-                    collect_typeref_names(b, out);
-                }
-                for pp in &c.props {
-                    collect_typeref_names(&pp.ty, out);
-                }
-                for p in c.body_props.iter().chain(&c.companion_props) {
-                    prop_names(p, out);
-                }
-                for m in c.methods.iter().chain(&c.companion_methods) {
-                    fun_names(m, file, out);
-                }
+                collect_class_type_names(file, c, out);
             }
         }
     }
@@ -3101,6 +3329,42 @@ pub fn collect_signatures_with_cp(
             names
         })
         .collect();
+    let source_classifier_visibility = files
+        .iter()
+        .flat_map(|file| {
+            file.decls.iter().filter_map(|&declaration| {
+                let Decl::Class(class) = file.decl(declaration) else {
+                    return None;
+                };
+                Some((
+                    type_name(&class_internal(file, &class.name)),
+                    class.visibility,
+                ))
+            })
+        })
+        .collect::<HashMap<_, _>>();
+    let mut source_direct_supertypes: HashMap<TypeName, Vec<TypeName>> = HashMap::new();
+    for (file_index, file) in files.iter().enumerate() {
+        let names = &file_class_names[file_index];
+        for &declaration in &file.decls {
+            let Decl::Class(class) = file.decl(declaration) else {
+                continue;
+            };
+            let internal = type_name(&class_internal(file, &class.name));
+            let mut supertypes = class
+                .supertypes
+                .iter()
+                .filter_map(|supertype| declared_supertype_name(class, &supertype.name, names))
+                .collect::<Vec<_>>();
+            supertypes.extend(
+                class
+                    .base_class
+                    .as_deref()
+                    .and_then(|base| declared_supertype_name(class, base, names)),
+            );
+            source_direct_supertypes.insert(internal, supertypes);
+        }
+    }
 
     let ty_of_ref = |r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut DiagSink| {
         ty_of_ref_with(r, classes, tparams, diags)
@@ -3129,13 +3393,23 @@ pub fn collect_signatures_with_cp(
 
     // Pass 2: resolve signatures/properties against the now-complete type universe.
     let mut table = SymbolTable::default();
-    // Pre-seed object names from ALL files so a property-initializer's inference recognizes a
-    // same-module `object` used as a value (`val h = Helper`) regardless of file order.
+    // Pre-seed object names and enum static values from ALL files so lightweight initializer
+    // inference is independent of declaration order.
     for file in files {
         for &d in &file.decls {
             if let Decl::Class(c) = file.decl(d) {
                 if c.is_object() {
                     table.objects.insert(c.name.clone());
+                }
+                if c.is_enum() {
+                    let internal = type_name(&class_internal(file, &c.name));
+                    for entry in &c.enum_entries {
+                        table
+                            .static_classifier_values
+                            .entry(internal)
+                            .or_default()
+                            .insert(entry.name.clone(), Ty::obj_name(internal));
+                    }
                 }
             }
         }
@@ -3474,6 +3748,71 @@ pub fn collect_signatures_with_cp(
                     // type is a hoisted top-level `Decl::Class` named `Outer.Inner`; map its last segment.
                     let class_names = {
                         let mut ext = class_names.clone();
+                        let inheritor = type_name(&class_internal(file, &c.name));
+                        let lexical_inheritors =
+                            crate::symbol_resolver::lexical_enclosing_classifier_names(
+                                inheritor,
+                                |candidate| source_direct_supertypes.contains_key(&candidate),
+                            );
+                        let mut referenced_types = std::collections::HashSet::new();
+                        collect_class_type_names(file, c, &mut referenced_types);
+                        for name in &referenced_types {
+                            let mut inherited =
+                                crate::symbol_resolver::InheritedNestedClassifier::NotFound;
+                            for &lexical_inheritor in &lexical_inheritors {
+                                let roots = source_direct_supertypes
+                                    .get(&lexical_inheritor)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                inherited =
+                                    crate::symbol_resolver::inherited_nested_classifier_name(
+                                        name,
+                                        roots,
+                                        |owner| {
+                                            source_direct_supertypes
+                                                .get(&owner)
+                                                .cloned()
+                                                .unwrap_or_else(|| {
+                                                    libraries
+                                                        .direct_supertypes(Ty::obj_name(owner))
+                                                        .into_iter()
+                                                        .filter_map(Ty::obj_internal)
+                                                        .collect()
+                                                })
+                                        },
+                                        |candidate| {
+                                            source_classifier_visibility
+                                                .get(&candidate)
+                                                .copied()
+                                                .is_some_and(|visibility| {
+                                                    visibility != Visibility::Private
+                                                })
+                                                || libraries
+                                                    .inherited_classifier_shape(
+                                                        candidate,
+                                                        lexical_inheritor,
+                                                    )
+                                                    .is_some()
+                                        },
+                                    );
+                                if inherited
+                                    != crate::symbol_resolver::InheritedNestedClassifier::NotFound
+                                {
+                                    break;
+                                }
+                            }
+                            match inherited {
+                                crate::symbol_resolver::InheritedNestedClassifier::Found(
+                                    inherited,
+                                ) => {
+                                    ext.insert_name(name.clone(), inherited);
+                                }
+                                crate::symbol_resolver::InheritedNestedClassifier::Ambiguous => {
+                                    ext.mark_ambiguous(name.clone());
+                                }
+                                crate::symbol_resolver::InheritedNestedClassifier::NotFound => {}
+                            }
+                        }
                         let prefix = format!("{}.", c.name);
                         for &nd in &file.decls {
                             if let Decl::Class(nc) = file.decl(nd) {
@@ -4187,25 +4526,10 @@ pub fn collect_signatures_with_cp(
                     // of those would be emitted as a bare default-package name → `NoClassDefFound`
                     // at load; reject (skip) instead — never emit an unresolved supertype.
                     let mut resolve_super = |s: &str| -> String {
-                        let resolved = class_names
-                            .get_qualified_supertype(s)
+                        let resolved = declared_supertype_name(c, s, &class_names)
                             .map(TypeName::render)
                             // An erased type parameter used as a supertype (degenerate) stays as-is.
-                            .or_else(|| ctp.contains(s).then(|| s.to_string()))
-                            // A supertype named by SIMPLE name from inside a nested class may be a SIBLING
-                            // (or enclosing-scope) nested type: `class Outer { interface Foo; class Impl: Foo }`.
-                            // Try the name qualified by each enclosing prefix of the current class
-                            // (`Outer.Impl` → `Outer.Foo`, then walk further out).
-                            .or_else(|| {
-                                let mut prefix = c.name.as_str();
-                                while let Some((p, _)) = prefix.rsplit_once('.') {
-                                    if let Some(internal) = class_names.get(&format!("{p}.{s}")) {
-                                        return Some(internal.render());
-                                    }
-                                    prefix = p;
-                                }
-                                None
-                            });
+                            .or_else(|| ctp.contains(s).then(|| s.to_string()));
                         match resolved {
                             Some(internal) => internal,
                             None => {
@@ -5630,6 +5954,7 @@ fn infer_lit_ty(
         up: &|_, _| None,
         inferring: &inferring,
         is_object: &|_| false,
+        static_classifier_value: &|_, _| None,
     };
     infer_lit_ty_p(file, e, class_names, fun_rets, &[], src, &env)
 }
@@ -5729,6 +6054,9 @@ struct InferEnv<'a> {
     /// True if a simple name is a SAME-MODULE `object` (`val h = Helper`) — the library source can't
     /// see it, so the `Name` arm's classpath object-check misses it; this closes that gap.
     is_object: &'a dyn Fn(&str) -> bool,
+    /// Resolve a static value declared by a same-module classifier. The lightweight inferer receives
+    /// only the external platform source, so source enum entries need this module-table bridge.
+    static_classifier_value: &'a dyn Fn(TypeName, &str) -> Option<Ty>,
 }
 
 /// Infer a declaration initializer's type with a fresh cycle-guard, using `table` to resolve
@@ -5744,11 +6072,19 @@ fn infer_lit_ty_scoped(
 ) -> Ty {
     let up = |ci: &str, cn: &str| table.prop_of(ci, cn).map(|(pt, _)| pt);
     let is_object = |name: &str| table.objects.contains(name);
+    let static_classifier_value = |internal: TypeName, name: &str| {
+        table
+            .static_classifier_values
+            .get(&internal)
+            .and_then(|values| values.get(name))
+            .copied()
+    };
     let inferring = std::cell::RefCell::new(std::collections::HashSet::new());
     let env = InferEnv {
         up: &up,
         inferring: &inferring,
         is_object: &is_object,
+        static_classifier_value: &static_classifier_value,
     };
     infer_lit_ty_p(file, e, class_names, fun_rets, props, src, &env)
 }
@@ -5859,10 +6195,13 @@ fn infer_lit_ty_p(
                     return c.ty;
                 }
             }
-            if let Some(field) = type_receiver(file, *receiver, class_names, props, src)
-                .and_then(|internal| resolver.static_field(internal, name))
+            if let Some(field) =
+                type_receiver(file, *receiver, class_names, props, src).and_then(|internal| {
+                    (env.static_classifier_value)(internal, name)
+                        .or_else(|| resolver.static_field(internal, name).map(|field| field.ty))
+                })
             {
-                return field.ty;
+                return field;
             }
             // Property read (`s.length`, `list.size`, `vc.value`). Use the scoped resolver so an
             // imported extension property such as `Char.code` can resolve through its getter.
@@ -9711,14 +10050,26 @@ impl<'a> Checker<'a> {
     }
 
     fn resolved_type(&self, internal: &str) -> Option<crate::libraries::LibraryType> {
-        self.resolver().resolve_type(internal)
+        self.resolved_type_name(type_name(internal))
+            .map(|classifier| (*classifier).clone())
     }
 
     fn resolved_type_name(
         &self,
         internal: TypeName,
     ) -> Option<std::rc::Rc<crate::libraries::LibraryType>> {
-        self.resolver().resolve_type_name(internal)
+        let source = self.fed_source();
+        source.resolve_type_name(internal).or_else(|| {
+            let rendered = internal.render();
+            let simple = rendered.rsplit('$').next()?;
+            let (inherited, inheritor) = self.inherited_nested_type_with_owner(simple);
+            if inherited.found() == Some(internal) {
+                let inheritor = inheritor?;
+                source.inherited_classifier_shape(internal, inheritor)
+            } else {
+                None
+            }
+        })
     }
 
     fn with_ret<R>(&mut self, ret_ty: Ty, f: impl FnOnce(&mut Self) -> R) -> R {
@@ -9817,6 +10168,10 @@ impl<'a> Checker<'a> {
             &*self.syms.libraries,
             &self.module,
             &self.function_import_scope,
+        )
+        .with_access_context(
+            self.source_package_name(),
+            self.lexical_source_class_names(),
         )
     }
 
@@ -10239,6 +10594,10 @@ impl<'a> Checker<'a> {
             &self.module,
             scope,
         )
+        .with_access_context(
+            self.source_package_name(),
+            self.lexical_source_class_names(),
+        )
     }
 
     /// Module-first symbol source used for receiver and extension ranking.
@@ -10616,6 +10975,17 @@ impl<'a> Checker<'a> {
     ) -> Option<crate::symbol_resolver::ResolvedMember> {
         self.resolve_instance_member_with_literal_args(recv, name, args, &[])
     }
+    fn resolve_implicit_instance_member(
+        &self,
+        recv: Ty,
+        name: &str,
+        args: &[Ty],
+    ) -> Option<crate::symbol_resolver::ResolvedMember> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol(SymRecv::ImplicitValue(recv), name, args, &[])
+            .and_then(Symbol::call)
+    }
     fn resolve_instance_member_with_literal_args(
         &self,
         recv: Ty,
@@ -10862,6 +11232,15 @@ impl<'a> Checker<'a> {
         self.resolver()
             .resolve_symbol(SymRecv::TypeName(internal), name, args, &[])
             .and_then(Symbol::instance)
+    }
+
+    fn resolve_super_instance_name(
+        &self,
+        internal: TypeName,
+        name: &str,
+        args: &[Ty],
+    ) -> Option<crate::libraries::LibraryMember> {
+        self.resolver().resolve_super_instance(internal, name, args)
     }
     fn resolve_companion(
         &self,
@@ -12448,11 +12827,24 @@ impl<'a> Checker<'a> {
         resolve_name_against_imports_name(name, &self.imports, &self.import_levels, &source)
     }
 
-    fn scoped_classifier_name(&self, name: &str) -> Option<TypeName> {
-        self.enclosing_nested_type_name(name)
-            .or_else(|| self.imported_type_name(name))
-            .or_else(|| self.syms.classes.get(name).map(ClassSig::internal_name))
-            .or_else(|| self.syms.class_names.get_class(name))
+    fn scoped_classifier_name(&self, name: &str) -> InheritedNestedClassifier {
+        if let Some(internal) = self.enclosing_nested_type_name(name) {
+            return InheritedNestedClassifier::Found(internal);
+        }
+        match self.inherited_nested_type_name(name) {
+            InheritedNestedClassifier::Found(internal) => {
+                InheritedNestedClassifier::Found(internal)
+            }
+            InheritedNestedClassifier::Ambiguous => InheritedNestedClassifier::Ambiguous,
+            InheritedNestedClassifier::NotFound => self
+                .imported_type_name(name)
+                .or_else(|| self.syms.classes.get(name).map(ClassSig::internal_name))
+                .or_else(|| self.syms.class_names.get_class(name))
+                .map_or(
+                    InheritedNestedClassifier::NotFound,
+                    InheritedNestedClassifier::Found,
+                ),
+        }
     }
 
     /// Resolve a dotted import flattened to slashes (`import lib.Scope.Ws` → `lib/Scope/Ws`) to the
@@ -12496,6 +12888,34 @@ impl<'a> Checker<'a> {
         None
     }
 
+    fn inherited_nested_type_with_owner(
+        &self,
+        name: &str,
+    ) -> (InheritedNestedClassifier, Option<TypeName>) {
+        let source = self.fed_source();
+        for internal in self.lexical_source_class_names() {
+            let roots = <Self as crate::assignable::TypeOracle>::direct_supertypes(self, internal);
+            let inherited = crate::symbol_resolver::inherited_nested_classifier_name(
+                name,
+                roots,
+                |owner| <Self as crate::assignable::TypeOracle>::direct_supertypes(self, owner),
+                |candidate| {
+                    source
+                        .inherited_classifier_shape(candidate, internal)
+                        .is_some()
+                },
+            );
+            if inherited != InheritedNestedClassifier::NotFound {
+                return (inherited, Some(internal));
+            }
+        }
+        (InheritedNestedClassifier::NotFound, None)
+    }
+
+    fn inherited_nested_type_name(&self, name: &str) -> InheritedNestedClassifier {
+        self.inherited_nested_type_with_owner(name).0
+    }
+
     fn source_enum_entry_owner(&self, name: &str, entry: &str) -> Option<TypeName> {
         let internal = self
             .enclosing_nested_type_name(name)
@@ -12525,21 +12945,28 @@ impl<'a> Checker<'a> {
         );
         let mut classes = Vec::new();
         for owner in roots {
-            let rendered = owner.render();
-            let mut candidate = rendered.as_str();
-            loop {
-                let internal = type_name(candidate);
-                if self.syms.class_by_type_name(internal).is_some() && !classes.contains(&internal)
-                {
+            for internal in
+                crate::symbol_resolver::lexical_enclosing_classifier_names(owner, |candidate| {
+                    self.syms.class_by_type_name(candidate).is_some()
+                })
+            {
+                if !classes.contains(&internal) {
                     classes.push(internal);
                 }
-                let Some((enclosing, _)) = candidate.rsplit_once('$') else {
-                    break;
-                };
-                candidate = enclosing;
             }
         }
         classes
+    }
+
+    fn source_package_name(&self) -> TypeName {
+        type_name(
+            &self
+                .file
+                .package
+                .as_deref()
+                .unwrap_or_default()
+                .replace('.', "/"),
+        )
     }
 
     /// If a bare type name `n` denotes a reference type usable as an unbound class literal `n::class`,
@@ -12553,7 +12980,10 @@ impl<'a> Checker<'a> {
             return None;
         }
         let scoped = self.scoped_classifier_name(n);
-        let ty = classifier_over_default(n, scoped)
+        if scoped == InheritedNestedClassifier::Ambiguous {
+            return None;
+        }
+        let ty = classifier_over_default(n, scoped.found())
             .map(Ty::obj_name)
             .or_else(|| Ty::from_name(n))
             .or_else(|| {
@@ -12596,9 +13026,14 @@ impl<'a> Checker<'a> {
         let scoped = if self.tparams.contains(&r.name) {
             Some(self.tparams.erase(&r.name))
         } else {
-            let internal = self.scoped_classifier_name(&r.name);
-            classifier_over_default(&r.name, internal)
-                .map(|internal| self.obj_with_targs_name(internal, r))
+            match self.scoped_classifier_name(&r.name) {
+                InheritedNestedClassifier::Found(internal) => {
+                    classifier_over_default(&r.name, Some(internal))
+                        .map(|internal| self.obj_with_targs_name(internal, r))
+                }
+                InheritedNestedClassifier::Ambiguous => Some(Ty::Error),
+                InheritedNestedClassifier::NotFound => None,
+            }
         };
         let base = if let Some(t) = scoped {
             t
@@ -12675,11 +13110,13 @@ impl<'a> Checker<'a> {
                 erased_type_key(tparams.erase(name))
             } else {
                 let internal = self.scoped_classifier_name(name);
-                if let Some(internal) = classifier_over_default(name, internal) {
+                if internal == InheritedNestedClassifier::Ambiguous {
+                    ErasedTypeKey::Unresolved(name.to_string())
+                } else if let Some(internal) = classifier_over_default(name, internal.found()) {
                     erased_type_key(Ty::obj_name(internal))
                 } else if let Some(t) = Ty::from_name(name) {
                     erased_type_key(t)
-                } else if let Some(internal) = internal {
+                } else if let Some(internal) = internal.found() {
                     erased_type_key(Ty::obj_name(internal))
                 } else {
                     ErasedTypeKey::Unresolved(name.to_string())
@@ -13061,7 +13498,9 @@ impl<'a> Checker<'a> {
         let internal = self.scoped_classifier_name(&r.name);
         let base = if self.tparams.contains(&r.name) {
             self.tparams.erase(&r.name)
-        } else if let Some(internal) = classifier_over_default(&r.name, internal) {
+        } else if internal == InheritedNestedClassifier::Ambiguous {
+            Ty::Error
+        } else if let Some(internal) = classifier_over_default(&r.name, internal.found()) {
             Ty::obj_name(internal)
         } else if let Some(t) = Ty::from_name(&r.name) {
             t
@@ -16336,7 +16775,21 @@ impl<'a> Checker<'a> {
                 // `EnumName.ENTRY` — a static enum entry access (receiver is the enum type name).
                 if let Expr::Name(en) = self.file.expr(receiver).clone() {
                     if !self.value_root_shadows_classifier(&en) {
-                        let has_lexical_classifier = self.enclosing_nested_type_name(&en).is_some();
+                        let inherited_classifier = self.inherited_nested_type_name(&en);
+                        if inherited_classifier == InheritedNestedClassifier::Ambiguous {
+                            return self.set(e, Ty::Error);
+                        }
+                        if let Some(internal) = inherited_classifier.found() {
+                            if self
+                                .resolved_type_name(internal)
+                                .is_some_and(|ty| ty.is_enum_entry(&name))
+                            {
+                                self.resolved_enum_entries.insert(e, internal);
+                                return self.set(e, Ty::obj_name(internal));
+                            }
+                        }
+                        let has_lexical_classifier = self.enclosing_nested_type_name(&en).is_some()
+                            || inherited_classifier.found().is_some();
                         if let Some(internal) = self.source_enum_entry_owner(&en, &name) {
                             self.resolved_enum_entries.insert(e, internal);
                             return self.set(e, Ty::obj_name(internal));
@@ -16802,8 +17255,12 @@ impl<'a> Checker<'a> {
                         }
                     }
                     // Constructor reference `::ClassName` → `Fun(ctor_params, ClassName)`.
-                    if let Some(cls) = self
-                        .scoped_classifier_name(&name)
+                    let scoped_classifier = self.scoped_classifier_name(&name);
+                    if scoped_classifier == InheritedNestedClassifier::Ambiguous {
+                        return self.set(e, Ty::Error);
+                    }
+                    if let Some(cls) = scoped_classifier
+                        .found()
                         .and_then(|internal| self.syms.class_by_type_name(internal))
                         .cloned()
                     {
@@ -17549,6 +18006,7 @@ impl<'a> Checker<'a> {
         name: &str,
         arg_tys: &[Ty],
         include_interfaces: bool,
+        implicit_receiver: bool,
     ) -> Option<crate::symbol_resolver::ResolvedMember> {
         self.syms
             .applied_type_hierarchy(sub_ty)
@@ -17561,8 +18019,12 @@ impl<'a> Checker<'a> {
                         .is_some_and(|ty| !ty.is_interface())
             })
             .filter_map(|(_, applied, depth)| {
-                self.resolve_instance_member(applied, name, arg_tys)
-                    .map(|member| (depth, member))
+                let member = if implicit_receiver {
+                    self.resolve_implicit_instance_member(applied, name, arg_tys)
+                } else {
+                    self.resolve_instance_member(applied, name, arg_tys)
+                };
+                member.map(|member| (depth, member))
             })
             .min_by_key(|(depth, _)| *depth)
             .map(|(_, member)| member)
@@ -17574,8 +18036,9 @@ impl<'a> Checker<'a> {
         sub_ty: Ty,
         name: &str,
         arg_tys: &[Ty],
+        implicit_receiver: bool,
     ) -> Option<Ty> {
-        let member = self.inherited_member(sub_ty, name, arg_tys, false)?;
+        let member = self.inherited_member(sub_ty, name, arg_tys, false, implicit_receiver)?;
         let ret = member.ret;
         self.resolved_calls
             .insert(call, ResolvedCall::Member(member));
@@ -17602,33 +18065,33 @@ impl<'a> Checker<'a> {
             return Some(Ty::String);
         }
         if rt == Ty::String {
-            match self.record_classpath_member_call_with_slots(call, rt, name, args) {
+            match self.record_classpath_member_call_with_slots(call, rt, name, args, true) {
                 ClasspathMemberSlotCall::Resolved(ret) => return Some(ret),
                 ClasspathMemberSlotCall::Ambiguous | ClasspathMemberSlotCall::Rejected => {
                     return Some(Ty::Error);
                 }
                 ClasspathMemberSlotCall::NoMatch => {}
             }
-            if let Some(m) = self.resolve_instance_member(rt, name, arg_tys) {
+            if let Some(m) = self.resolve_implicit_instance_member(rt, name, arg_tys) {
                 let ret = m.ret;
                 self.resolved_calls.insert(call, ResolvedCall::Member(m));
                 return Some(ret);
             }
         }
         if let Ty::Obj(_, _) = rt {
-            match self.record_classpath_member_call_with_slots(call, rt, name, args) {
+            match self.record_classpath_member_call_with_slots(call, rt, name, args, true) {
                 ClasspathMemberSlotCall::Resolved(ret) => return Some(ret),
                 ClasspathMemberSlotCall::Ambiguous | ClasspathMemberSlotCall::Rejected => {
                     return Some(Ty::Error);
                 }
                 ClasspathMemberSlotCall::NoMatch => {}
             }
-            if let Some(m) = self.resolve_instance_member(rt, name, arg_tys) {
+            if let Some(m) = self.resolve_implicit_instance_member(rt, name, arg_tys) {
                 let ret = m.ret;
                 self.resolved_calls.insert(call, ResolvedCall::Member(m));
                 return Some(ret);
             }
-            if let Some(ret) = self.inherited_member_ret(call, rt, name, arg_tys) {
+            if let Some(ret) = self.inherited_member_ret(call, rt, name, arg_tys, true) {
                 return Some(ret);
             }
         }
@@ -18268,7 +18731,7 @@ impl<'a> Checker<'a> {
         let internal = iterable_ty.obj_internal()?;
         let iterator = if let Some(member) = self
             .resolve_instance_member(iterable_ty, "iterator", &[])
-            .or_else(|| self.inherited_member(iterable_ty, "iterator", &[], true))
+            .or_else(|| self.inherited_member(iterable_ty, "iterator", &[], true, false))
         {
             IteratorDispatchTarget::Member {
                 owner_fallback: internal,
@@ -18940,6 +19403,154 @@ impl<'a> Checker<'a> {
         Some(target)
     }
 
+    fn record_inherited_library_constructor_name(
+        &mut self,
+        call: ExprId,
+        internal: TypeName,
+        classifier: &crate::libraries::LibraryType,
+        args: Vec<ExprId>,
+        arg_tys: &[Ty],
+    ) -> Option<ResolvedConstructor> {
+        let target = if let Some(member) = crate::symbol_resolver::resolve_constructor_from_type(
+            &*self.syms.libraries,
+            internal,
+            classifier,
+            arg_tys,
+        ) {
+            if !self.member_accessible(member.visibility, internal) {
+                return None;
+            }
+            ResolvedConstructor::Plain { member, args }
+        } else if let Some(ctor) = crate::symbol_resolver::resolve_synthetic_constructor_from_type(
+            &*self.syms.libraries,
+            internal,
+            classifier,
+            arg_tys,
+        ) {
+            if !self.member_accessible(ctor.visibility, internal) {
+                return None;
+            }
+            ResolvedConstructor::Synthetic { ctor, args }
+        } else {
+            // Declaration-only dependencies have no `$default` bytecode to inspect.
+            let params = classifier.constructor_named_params(args.len())?;
+            if args.len() >= params.names.len()
+                || !(args.len()..params.names.len())
+                    .all(|index| params.defaults[index] || params.vararg == Some(index))
+            {
+                return None;
+            }
+            let member = classifier.constructors.first()?.clone();
+            if !member.descriptor.is_empty()
+                || member.params.len() != params.names.len()
+                || !self.member_accessible(member.visibility, internal)
+                || !self.ctor_args_match(&member.params[..args.len()], arg_tys)
+            {
+                return None;
+            }
+            let mut slots = args.into_iter().map(Some).collect::<Vec<_>>();
+            slots.resize(member.params.len(), None);
+            ResolvedConstructor::PlainSlots { member, slots }
+        };
+        self.resolved_constructors.insert(call, target.clone());
+        Some(target)
+    }
+
+    fn record_named_inherited_library_constructor_name(
+        &mut self,
+        call: ExprId,
+        internal: TypeName,
+        classifier: &crate::libraries::LibraryType,
+        args: &[ExprId],
+        arg_names: Option<&[Option<String>]>,
+    ) -> Result<Option<ResolvedConstructor>, CallArgMappingFailure> {
+        let Some(ctor_params) = classifier.constructor_named_params(args.len()) else {
+            return Ok(None);
+        };
+        let slots = map_param_list_args(
+            args,
+            arg_names,
+            &ctor_params,
+            self.file.call_has_trailing_lambda.contains(&call.0),
+        )?;
+        for &argument in slots.iter().flatten() {
+            self.expr(argument);
+        }
+        let target = if let Some(ordered) = slots.iter().copied().collect::<Option<Vec<ExprId>>>() {
+            let types = ordered
+                .iter()
+                .map(|argument| self.expr_types[argument.0 as usize])
+                .collect::<Vec<_>>();
+            let Some(member) = crate::symbol_resolver::resolve_constructor_from_type(
+                &*self.syms.libraries,
+                internal,
+                classifier,
+                &types,
+            ) else {
+                return Ok(None);
+            };
+            if !self.member_accessible(member.visibility, internal) {
+                return Ok(None);
+            }
+            ResolvedConstructor::PlainSlots { member, slots }
+        } else {
+            if let Some((descriptor, real_params, visibility)) =
+                crate::symbol_resolver::synthetic_default_ctor_from_type(classifier, slots.len())
+            {
+                if !self.member_accessible(visibility, internal) {
+                    return Ok(None);
+                }
+                let supplied_match = slots.iter().zip(&real_params).all(|(slot, expected)| {
+                    slot.is_none_or(|argument| {
+                        constructor_argument_matches(
+                            self,
+                            *expected,
+                            self.expr_types[argument.0 as usize],
+                        )
+                    })
+                });
+                if !supplied_match {
+                    return Ok(None);
+                }
+                let mask = slots
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, slot)| slot.is_none())
+                    .map(|(index, _)| 1i32 << index)
+                    .sum();
+                ResolvedConstructor::NamedDefault {
+                    descriptor,
+                    real_params,
+                    slots,
+                    mask,
+                }
+            } else {
+                // Declaration-only dependencies expose the primary shape, not synthetic methods.
+                let Some(member) = classifier.constructors.first().cloned() else {
+                    return Ok(None);
+                };
+                if !member.descriptor.is_empty()
+                    || member.params.len() != slots.len()
+                    || !self.member_accessible(member.visibility, internal)
+                    || !slots.iter().zip(&member.params).all(|(slot, expected)| {
+                        slot.is_none_or(|argument| {
+                            constructor_argument_matches(
+                                self,
+                                *expected,
+                                self.expr_types[argument.0 as usize],
+                            )
+                        })
+                    })
+                {
+                    return Ok(None);
+                }
+                ResolvedConstructor::PlainSlots { member, slots }
+            }
+        };
+        self.resolved_constructors.insert(call, target.clone());
+        Ok(Some(target))
+    }
+
     fn record_named_library_constructor_name(
         &mut self,
         call: ExprId,
@@ -18980,11 +19591,14 @@ impl<'a> Checker<'a> {
             return Ok(Some(target));
         }
         let source = self.fed_source();
-        let Some((descriptor, real_params)) =
+        let Some((descriptor, real_params, visibility)) =
             crate::symbol_resolver::synthetic_default_ctor_name(&source, internal, slots.len())
         else {
             return Ok(None);
         };
+        if !self.member_accessible(visibility, internal) {
+            return Ok(None);
+        }
         let mask = slots
             .iter()
             .enumerate()
@@ -20137,15 +20751,21 @@ impl<'a> Checker<'a> {
         rt: Ty,
         name: &str,
         args: &[ExprId],
+        implicit_receiver: bool,
     ) -> ClasspathMemberSlotCall {
         let arg_names = self.file.call_arg_names.get(&call.0).cloned();
         let needs_slot_map = arg_names.is_some();
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         let mut mapping_errors = Vec::new();
         let mut direct_candidate = false;
+        let receiver = if implicit_receiver {
+            crate::symbol_resolver::SymRecv::ImplicitValue(rt)
+        } else {
+            crate::symbol_resolver::SymRecv::Value(rt)
+        };
         let mut candidates: Vec<_> = self
             .resolver()
-            .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
+            .resolve_symbol(receiver, name, &[], &[])
             .map(crate::symbol_resolver::Symbol::overloads)
             .unwrap_or_default()
             .into_iter()
@@ -20190,7 +20810,7 @@ impl<'a> Checker<'a> {
             let extension_applies = self
                 .resolver()
                 .resolve_symbol_with_literal_and_lambda_args(
-                    crate::symbol_resolver::SymRecv::Value(rt),
+                    receiver,
                     name,
                     &arg_tys,
                     &integer_literals,
@@ -20961,6 +21581,12 @@ impl<'a> Checker<'a> {
                             .and_then(|i| self.resolved_type_name(i))
                             .and_then(|t| t.constructor_named_params(args.len()))
                             .is_some()
+                        || self
+                            .inherited_nested_type_name(n)
+                            .found()
+                            .and_then(|i| self.resolved_type_name(i))
+                            .and_then(|t| t.constructor_named_params(args.len()))
+                            .is_some()
                 }
                 Expr::Member { receiver, name }
                     if self.same_file_nested_class_qname(*receiver, name).is_some() =>
@@ -21434,7 +22060,8 @@ impl<'a> Checker<'a> {
                                 return sig.ret;
                             }
                             // A classpath base-class method (`class C : ArrayList<…>() { … super.add(x) }`).
-                            if let Some(m) = self.resolve_instance_name(sup, &name, &arg_tys) {
+                            if let Some(m) = self.resolve_super_instance_name(sup, &name, &arg_tys)
+                            {
                                 self.resolved_super_calls.insert(
                                     call,
                                     ResolvedSuperCall {
@@ -21516,8 +22143,12 @@ impl<'a> Checker<'a> {
                 // path and let the receiver resolve as that property value below.
                 if let Expr::Name(cls) = self.file.expr(receiver).clone() {
                     if !self.value_root_shadows_classifier(&cls) {
-                        let source_class = self
-                            .scoped_classifier_name(&cls)
+                        let scoped_classifier = self.scoped_classifier_name(&cls);
+                        if scoped_classifier == InheritedNestedClassifier::Ambiguous {
+                            return Ty::Error;
+                        }
+                        let source_class = scoped_classifier
+                            .found()
                             .and_then(|internal| self.syms.class_by_type_name(internal))
                             .cloned();
                         let is_object =
@@ -22088,7 +22719,7 @@ impl<'a> Checker<'a> {
                     }
                     return Ty::String; // intrinsic on any type
                 }
-                match self.record_classpath_member_call_with_slots(call, rt, &name, args) {
+                match self.record_classpath_member_call_with_slots(call, rt, &name, args, false) {
                     ClasspathMemberSlotCall::Resolved(ret) => return ret,
                     ClasspathMemberSlotCall::Ambiguous | ClasspathMemberSlotCall::Rejected => {
                         return Ty::Error;
@@ -22148,7 +22779,7 @@ impl<'a> Checker<'a> {
                 // Instance method call on a class value: `p.method(args)` (own or inherited).
                 if matches!(rt, Ty::Obj(..)) {
                     // Runs after direct resolution, so the receiver's own override wins.
-                    if let Some(ret) = self.inherited_member_ret(call, rt, &name, &arg_tys) {
+                    if let Some(ret) = self.inherited_member_ret(call, rt, &name, &arg_tys, false) {
                         return ret;
                     }
                 }
@@ -23793,11 +24424,34 @@ impl<'a> Checker<'a> {
                 // (Kotlin nested-type scoping), preferred over a same-named top-level — consistent with
                 // `resolve_type`, so the construction's type matches the field/return-position type.
                 if !self.value_root_shadows_classifier(&fname) {
-                    let ctor_cls = self
+                    let (inherited, inherited_owner) =
+                        self.inherited_nested_type_with_owner(&fname);
+                    if inherited == InheritedNestedClassifier::Ambiguous {
+                        self.diags.error(
+                            self.span(call),
+                            format!(
+                                "overload resolution ambiguity for inherited classifier '{fname}'"
+                            ),
+                        );
+                        return Ty::Error;
+                    }
+                    let scoped_nested_internal = self
                         .enclosing_nested_type_name(&fname)
-                        .and_then(|internal| self.syms.class_by_type_name(internal).cloned())
-                        .or_else(|| self.syms.classes.get(&fname).cloned())
-                        .or_else(|| {
+                        .or_else(|| inherited.found());
+                    let inherited_shape = self
+                        .enclosing_nested_type_name(&fname)
+                        .is_none()
+                        .then(|| inherited.found())
+                        .flatten()
+                        .and_then(|internal| {
+                            let inheritor = inherited_owner?;
+                            self.fed_source()
+                                .inherited_classifier_shape(internal, inheritor)
+                        });
+                    let ctor_cls = if let Some(internal) = scoped_nested_internal {
+                        self.syms.class_by_type_name(internal).cloned()
+                    } else {
+                        self.syms.classes.get(&fname).cloned().or_else(|| {
                             // An IMPORTED nested class (`import demo.Outer.Inner` → `Inner`): the
                             // ClassSig is keyed by its hoisted name (`Outer.Inner`), not the simple
                             // name, so resolve the simple name through imports to its internal and find
@@ -23805,7 +24459,8 @@ impl<'a> Checker<'a> {
                             self.imported_type_name(&fname).and_then(|internal| {
                                 self.syms.class_by_type_name(internal).cloned()
                             })
-                        });
+                        })
+                    };
                     if let Some(cls) = ctor_cls {
                         if cls.is_interface() {
                             if let Some(ret) = self.check_source_companion_call(
@@ -23960,6 +24615,57 @@ impl<'a> Checker<'a> {
                             );
                         }
                         return self.ctor_result_name(call, cls.internal_name());
+                    }
+                    if let Some(internal) = scoped_nested_internal
+                        .filter(|internal| self.syms.class_by_type_name(*internal).is_none())
+                    {
+                        if arg_names.is_some()
+                            || self.file.call_has_trailing_lambda.contains(&call.0)
+                        {
+                            let resolved = if let Some(classifier) = inherited_shape.as_deref() {
+                                self.record_named_inherited_library_constructor_name(
+                                    call,
+                                    internal,
+                                    classifier,
+                                    args,
+                                    arg_names.as_deref(),
+                                )
+                            } else {
+                                self.record_named_library_constructor_name(
+                                    call,
+                                    internal,
+                                    args,
+                                    arg_names.as_deref(),
+                                )
+                            };
+                            match resolved {
+                                Ok(Some(_)) => return self.ctor_result_name(call, internal),
+                                Ok(None) => {}
+                                Err(error) => {
+                                    self.report_call_arg_mapping_error(call, args, error);
+                                    return Ty::Error;
+                                }
+                            }
+                        }
+                        let resolved = if let Some(classifier) = inherited_shape.as_deref() {
+                            self.record_inherited_library_constructor_name(
+                                call,
+                                internal,
+                                classifier,
+                                args.to_vec(),
+                                &arg_tys,
+                            )
+                        } else {
+                            self.record_library_constructor_name(
+                                call,
+                                internal,
+                                args.to_vec(),
+                                &arg_tys,
+                            )
+                        };
+                        if resolved.is_some() {
+                            return self.ctor_result_name(call, internal);
+                        }
                     }
                     // Named classpath constructors use metadata names/defaults; lowering selects
                     // either the plain constructor or the default-argument synthetic.
@@ -26066,6 +26772,13 @@ mod tests {
     fn ok(src: &str) {
         let (errs, _) = check(src);
         assert!(errs.is_empty(), "unexpected errors: {errs:?}");
+    }
+
+    #[test]
+    fn non_public_module_classifiers_keep_member_access() {
+        ok("private class Local { fun value(): Int = 1 }\n\
+             internal class Shared { fun value(): Int = 1 }\n\
+             fun use(): Int = Local().value() + Shared().value()");
     }
 
     #[test]
@@ -29426,6 +30139,131 @@ fun box(): String {
     #[test]
     fn unresolved_reference() {
         err_contains("fun f(): Int = q", "unresolved reference 'q'.");
+    }
+
+    #[test]
+    fn subclass_constructor_resolves_nested_type_from_superclass() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "class Category\n\
+             open class Parent { enum class Category { FIRST } }\n\
+             class Child(category: Category) : Parent()",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        assert_no_diags(&diagnostics);
+        assert_eq!(
+            symbols
+                .classes
+                .get("Child")
+                .expect("subclass signature")
+                .ctor_params,
+            [Ty::obj("Parent$Category")]
+        );
+    }
+
+    #[test]
+    fn subclass_resolves_nested_type_through_superclass_chain() {
+        ok("open class Root { class Category }\n\
+            open class Parent : Root()\n\
+            class Child(category: Category) : Parent()");
+    }
+
+    #[test]
+    fn subclass_infers_property_type_from_inherited_nested_classifier() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "open class Parent { enum class Category { FIRST } }\n\
+             class Child : Parent() { val category = Category.FIRST }",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        assert_no_diags(&diagnostics);
+        assert_eq!(
+            symbols
+                .classes
+                .get("Child")
+                .and_then(|class| class.declared_props.get("category"))
+                .map(|property| property.ty),
+            Some(Ty::obj("Parent$Category"))
+        );
+    }
+
+    #[test]
+    fn subclass_inference_is_independent_of_superclass_declaration_order() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "class Child : Parent() { val category = Category.FIRST }\n\
+             open class Parent { enum class Category { FIRST } }",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        assert_no_diags(&diagnostics);
+        assert_eq!(
+            symbols
+                .classes
+                .get("Child")
+                .and_then(|class| class.declared_props.get("category"))
+                .map(|property| property.ty),
+            Some(Ty::obj("Parent$Category"))
+        );
+    }
+
+    #[test]
+    fn private_inherited_nested_classifier_does_not_shadow_top_level_type() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "class Category\n\
+             open class Parent { private class Category }\n\
+             class Child(category: Category) : Parent()",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        assert_no_diags(&diagnostics);
+        assert_eq!(
+            symbols
+                .classes
+                .get("Child")
+                .expect("subclass signature")
+                .ctor_params,
+            [Ty::obj("Category")]
+        );
+    }
+
+    #[test]
+    fn protected_inherited_nested_classifier_is_visible_to_subclass() {
+        ok("open class Parent { protected class Category }\n\
+            class Child(category: Category) : Parent()");
+    }
+
+    #[test]
+    fn subclass_does_not_choose_between_peer_inherited_nested_types() {
+        let left = type_name("Left");
+        let right = type_name("Right");
+        assert_eq!(
+            crate::symbol_resolver::inherited_nested_classifier_name(
+                "Category",
+                vec![left, right],
+                |_| Vec::new(),
+                |candidate| {
+                    candidate == type_name("Left$Category")
+                        || candidate == type_name("Right$Category")
+                },
+            ),
+            InheritedNestedClassifier::Ambiguous
+        );
     }
 
     #[test]

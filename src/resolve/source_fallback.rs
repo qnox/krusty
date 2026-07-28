@@ -191,8 +191,12 @@ impl SymbolSource for SourceFallbackPlatform {
     }
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
-        let fallback = self
-            .source()
+        let source = self.source();
+        let visibility = source.classifier_visibility(crate::types::type_name(internal));
+        if visibility.is_some_and(|visibility| visibility != Visibility::Public) {
+            return None;
+        }
+        let fallback = source
             .resolve_type(internal)
             .filter(|shape| shape.is_public);
         match (self.platform.resolve_type(internal), fallback) {
@@ -204,6 +208,11 @@ impl SymbolSource for SourceFallbackPlatform {
     }
 
     fn resolve_type_name(&self, internal: TypeName) -> Option<Rc<LibraryType>> {
+        let source = self.source();
+        let visibility = source.classifier_visibility(internal);
+        if visibility.is_some_and(|visibility| visibility != Visibility::Public) {
+            return None;
+        }
         let fallback = self.public_source_type_name(internal);
         match (self.platform.resolve_type_name(internal), fallback) {
             (Some(primary), Some(fallback)) => {
@@ -213,6 +222,41 @@ impl SymbolSource for SourceFallbackPlatform {
             (None, Some(fallback)) => Some(fallback),
             (None, None) => None,
         }
+    }
+
+    fn classifier_visibility(&self, internal: TypeName) -> Option<Visibility> {
+        self.source()
+            .classifier_visibility(internal)
+            .or_else(|| self.platform.classifier_visibility(internal))
+    }
+
+    fn classifier_accessible_from_package(
+        &self,
+        internal: TypeName,
+        accessor_package: TypeName,
+    ) -> bool {
+        if let Some(visibility) = self.source().classifier_visibility(internal) {
+            return visibility == Visibility::Public;
+        }
+        self.platform
+            .classifier_accessible_from_package(internal, accessor_package)
+    }
+
+    fn inherited_classifier_shape(
+        &self,
+        internal: TypeName,
+        inheritor: TypeName,
+    ) -> Option<Rc<LibraryType>> {
+        if let Some(visibility) = self.source().classifier_visibility(internal) {
+            return match visibility {
+                Visibility::Public | Visibility::Protected => {
+                    self.source().resolve_type_name(internal)
+                }
+                Visibility::Internal | Visibility::Private => None,
+            };
+        }
+        self.platform
+            .inherited_classifier_shape(internal, inheritor)
     }
 
     fn resolve_symbols(&self, fqn: &str) -> ResolvedSymbols {

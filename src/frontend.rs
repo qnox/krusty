@@ -841,6 +841,148 @@ mod tests {
     }
 
     #[test]
+    fn dependency_fallback_exposes_inherited_nested_classifier_to_subclass() {
+        let features = LangFeatures::new();
+        let mut diagnostics = DiagSink::new();
+        let analysis = analyze_source_set_prefix_with_features(
+            &[
+                SourceInput::kotlin(
+                    "package consumer\n\
+                     import support.Parent\n\
+                     class Child(category: Category) : Parent()",
+                ),
+                SourceInput::kotlin(
+                    "package support\n\
+                     open class Parent { enum class Category { FIRST } }",
+                ),
+            ],
+            1,
+            1,
+            Box::new(EmptySymbolSource),
+            &features,
+            &mut diagnostics,
+        );
+
+        assert!(
+            analysis.types[0].is_some() && diagnostics.diags.is_empty(),
+            "{:?}",
+            diagnostics.diags
+        );
+        assert_eq!(
+            analysis
+                .symbols
+                .classes
+                .get("Child")
+                .expect("consumer class")
+                .ctor_params,
+            [Ty::obj("support/Parent$Category")]
+        );
+    }
+
+    #[test]
+    fn dependency_fallback_preserves_protected_classifier_for_subclass_only() {
+        let mut diagnostics = DiagSink::new();
+        let analysis = analyze_source_set_prefix_with_features(
+            &[
+                SourceInput::kotlin(
+                    "package consumer\n\
+                     import support.Parent\n\
+                     class Child : Parent() {\n\
+                         fun String.read(): String =\n\
+                             Category(\"O\").value() + Category(second = \"K\").value()\n\
+                         fun value(): String = \"\".read()\n\
+                     }",
+                ),
+                SourceInput::kotlin(
+                    "package support\n\
+                     open class Parent {\n\
+                         protected class Category(\n\
+                             private val first: String = \"O\",\n\
+                             private val second: String = \"K\",\n\
+                         ) { fun value(): String = first + second }\n\
+                     }",
+                ),
+            ],
+            1,
+            1,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert!(
+            analysis.types[0].is_some() && diagnostics.diags.is_empty(),
+            "{:?}",
+            diagnostics.diags
+        );
+    }
+
+    #[test]
+    fn dependency_fallback_does_not_globally_expose_protected_classifier() {
+        let mut diagnostics = DiagSink::new();
+        analyze_source_set_prefix_with_features(
+            &[
+                SourceInput::kotlin(
+                    "package consumer\n\
+                     import support.Parent\n\
+                     class Unrelated { fun make(): Any = Category() }",
+                ),
+                SourceInput::kotlin(
+                    "package support\n\
+                     open class Parent { protected class Category }",
+                ),
+            ],
+            1,
+            1,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert!(
+            diagnostics
+                .diags
+                .iter()
+                .any(|diagnostic| diagnostic.msg.contains("Category")),
+            "{:?}",
+            diagnostics.diags
+        );
+    }
+
+    #[test]
+    fn dependency_fallback_does_not_expose_nested_classifier_outside_subclass() {
+        let features = LangFeatures::new();
+        let mut diagnostics = DiagSink::new();
+        analyze_source_set_prefix_with_features(
+            &[
+                SourceInput::kotlin(
+                    "package consumer\n\
+                     import support.Parent\n\
+                     class Unrelated(category: Category)",
+                ),
+                SourceInput::kotlin(
+                    "package support\n\
+                     open class Parent { enum class Category { FIRST } }",
+                ),
+            ],
+            1,
+            1,
+            Box::new(EmptySymbolSource),
+            &features,
+            &mut diagnostics,
+        );
+
+        assert!(
+            diagnostics
+                .diags
+                .iter()
+                .any(|diagnostic| diagnostic.msg.contains("unresolved reference 'Category'")),
+            "{:?}",
+            diagnostics.diags
+        );
+    }
+
+    #[test]
     fn dependency_fallback_keeps_a_source_property_missing_from_the_public_api() {
         let features = LangFeatures::new();
         let inputs = [
