@@ -21,7 +21,7 @@ use super::super::{
 };
 use crate::uri::file_uri_to_path;
 use crate::worker::{source_set_fits, MAX_SOURCE_SET_BYTES};
-use krusty::diag::{Diagnostic, Severity};
+use krusty::diag::{Diagnostic, DiagnosticKind, Severity};
 
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_HEADER_BYTES: usize = 8 * 1024;
@@ -44,7 +44,8 @@ pub(super) const MAX_RENAME_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const RENAME_DOCUMENT_WIRE_FIXED_BYTES: usize = 128;
 const RENAME_EDIT_WIRE_FIXED_BYTES: usize = 192;
 const DIAGNOSTIC_WARNING_BIT: u32 = 1 << 31;
-const DIAGNOSTIC_MESSAGE_MASK: u32 = !DIAGNOSTIC_WARNING_BIT;
+const DIAGNOSTIC_INSPECTION_BIT: u32 = 1 << 30;
+const DIAGNOSTIC_MESSAGE_MASK: u32 = !(DIAGNOSTIC_WARNING_BIT | DIAGNOSTIC_INSPECTION_BIT);
 const CHANGE_DEBOUNCE: Duration = Duration::from_millis(150);
 const MAX_BATCH_DURATION: Duration = Duration::from_millis(500);
 const ANALYSIS_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -337,7 +338,12 @@ impl DiagnosticIndex {
                 Severity::Error => 0,
                 Severity::Warning => DIAGNOSTIC_WARNING_BIT,
             };
-            pending.push([span.lo, span.hi.max(span.lo), severity | message_id]);
+            let kind = if diagnostic.kind == DiagnosticKind::Inspection {
+                DIAGNOSTIC_INSPECTION_BIT
+            } else {
+                0
+            };
+            pending.push([span.lo, span.hi.max(span.lo), severity | kind | message_id]);
             budget.entries += 1;
             budget.text_bytes += retained_bytes;
             budget.wire_bytes += wire_bytes;
@@ -356,13 +362,18 @@ impl DiagnosticIndex {
             .iter()
             .map(|entry| {
                 let message_id = entry[4] & DIAGNOSTIC_MESSAGE_MASK;
+                let source = if entry[4] & DIAGNOSTIC_INSPECTION_BIT == 0 {
+                    Value::String("Kotlin".to_string())
+                } else {
+                    Value::Null
+                };
                 json!({
                     "range": {
                         "start": {"line": entry[0], "character": entry[1]},
                         "end": {"line": entry[2], "character": entry[3]},
                     },
                     "severity": if entry[4] & DIAGNOSTIC_WARNING_BIT == 0 { 1 } else { 2 },
-                    "source": "Kotlin",
+                    "source": source,
                     "message": self.messages[message_id as usize],
                 })
             })
@@ -588,6 +599,7 @@ where
                         span: krusty::diag::Span::new(0, 0),
                         editor_span: None,
                         severity: Severity::Error,
+                        kind: DiagnosticKind::Compiler,
                         msg: "analysis worker returned an incomplete source set".to_string(),
                         file: 0,
                     }],
@@ -1960,6 +1972,7 @@ fn analysis_limit_diagnostics() -> DiagnosticIndex {
             span: krusty::diag::Span::new(0, 0),
             editor_span: None,
             severity: Severity::Error,
+            kind: DiagnosticKind::Compiler,
             msg: format!(
                 "workspace analysis limit exceeded (maximum {} MiB across {} open documents)",
                 MAX_SOURCE_SET_BYTES / (1024 * 1024),
@@ -2426,6 +2439,7 @@ mod tests {
                 span: krusty::diag::Span::new(0, 1),
                 editor_span: None,
                 severity: Severity::Error,
+                kind: DiagnosticKind::Compiler,
                 msg: "same message".to_string(),
                 file: 0,
             },
@@ -2433,6 +2447,7 @@ mod tests {
                 span: krusty::diag::Span::new(2, 3),
                 editor_span: None,
                 severity: Severity::Warning,
+                kind: DiagnosticKind::Compiler,
                 msg: "same message".to_string(),
                 file: 0,
             },
@@ -2475,6 +2490,7 @@ mod tests {
             span: krusty::diag::Span::new(0, 0),
             editor_span: None,
             severity: Severity::Error,
+            kind: DiagnosticKind::Compiler,
             msg: "bounded".to_string(),
             file: 0,
         };
@@ -2520,6 +2536,7 @@ mod tests {
                 span: krusty::diag::Span::new(emoji, emoji + 4),
                 editor_span: None,
                 severity: Severity::Error,
+                kind: DiagnosticKind::Compiler,
                 msg: "late source diagnostic".to_string(),
                 file: 0,
             })
@@ -2535,6 +2552,7 @@ mod tests {
                 span: krusty::diag::Span::new(0, 0),
                 editor_span: None,
                 severity: Severity::Warning,
+                kind: DiagnosticKind::Compiler,
                 msg: large_message.clone(),
                 file: 0,
             })

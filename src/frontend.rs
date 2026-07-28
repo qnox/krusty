@@ -742,6 +742,7 @@ mod tests {
             span: Span::new(0, 0),
             editor_span: None,
             severity: Severity::Warning,
+            kind: crate::diag::DiagnosticKind::Compiler,
             msg: "existing warning".to_string(),
             file: 0,
         });

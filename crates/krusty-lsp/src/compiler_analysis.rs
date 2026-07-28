@@ -10,7 +10,7 @@ mod signature_help;
 mod source_scan;
 
 use krusty::ast::{File, FunBody, PropDecl};
-use krusty::diag::{DiagSink, Diagnostic};
+use krusty::diag::{DiagSink, Diagnostic, DiagnosticKind, Severity};
 use krusty::features::LangFeatures;
 use krusty::frontend;
 use krusty::libraries::SemanticPlatform;
@@ -31,6 +31,8 @@ pub use navigation::{DefinitionOccurrence, DefinitionSymbols, DefinitionTarget};
 pub(crate) use semantic::{hover_wire_cost, SemanticLimits};
 pub use semantic::{HighlightOccurrence, HighlightSymbols, HoverOccurrence};
 pub(crate) use signature_help::{SignatureCandidate, SignatureHelpCall, SignatureHelpSymbols};
+
+const BOOLEAN_EXPRESSION_SIMPLIFICATION: &str = "Boolean expression can be simplified";
 
 pub struct FileAnalysis {
     pub file: File,
@@ -158,13 +160,31 @@ pub fn analyze_source_inputs_prefix_with_features(
         .map(|((file, types), diagnostics)| FileAnalysis {
             file,
             types,
-            diagnostics,
+            diagnostics: with_ide_inspections(diagnostics),
         })
         .collect();
     SourceSetAnalysis {
         files,
         symbols: analysis.symbols,
     }
+}
+
+fn with_ide_inspections(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
+    let mut result = Vec::with_capacity(diagnostics.len());
+    for diagnostic in diagnostics {
+        if diagnostic.kind == DiagnosticKind::IncompatibleEquality {
+            result.push(Diagnostic {
+                span: diagnostic.span,
+                editor_span: None,
+                severity: Severity::Warning,
+                kind: DiagnosticKind::Inspection,
+                msg: BOOLEAN_EXPRESSION_SIMPLIFICATION.to_string(),
+                file: diagnostic.file,
+            });
+        }
+        result.push(diagnostic);
+    }
+    result
 }
 
 pub fn analyze_standalone_source_set(sources: &[&str]) -> SourceSetAnalysis {
@@ -188,6 +208,22 @@ mod tests {
             analysis.files[1].diagnostics
         );
         assert!(analysis.files[1].types.is_some());
+    }
+
+    #[test]
+    fn source_set_adds_equality_inspections_before_compiler_errors() {
+        let source = "fun equal(): Boolean = 1 == \"text\"\nfun unequal(): Boolean = 1 != \"text\"";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let diagnostics = &analysis.files[0].diagnostics;
+        assert_eq!(diagnostics.len(), 4, "{diagnostics:?}");
+
+        for pair in diagnostics.chunks_exact(2) {
+            assert_eq!(pair[0].severity, Severity::Warning);
+            assert_eq!(pair[0].kind, DiagnosticKind::Inspection);
+            assert_eq!(pair[0].msg, BOOLEAN_EXPRESSION_SIMPLIFICATION);
+            assert_eq!(pair[0].span, pair[1].span);
+            assert_eq!(pair[1].kind, DiagnosticKind::IncompatibleEquality);
+        }
     }
 
     #[test]

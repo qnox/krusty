@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use crate::ast::*;
-use crate::diag::{DiagSink, Span};
+use crate::diag::{DiagSink, DiagnosticKind, Span};
 use crate::libraries::{
     required_arity, CallSig, EmptySymbolSource, GenericSig, InlineKind, Origin, ParamList,
     SemanticPlatform,
@@ -16157,16 +16157,27 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn bin_err(&mut self, _op: BinOp, lt: Ty, rt: Ty, span: Span) -> Ty {
-        crate::trace_compiler!("resolve", "bin_err op={:?} lt={:?} rt={:?}", _op, lt, rt);
-        self.diags.error(
-            span,
-            format!(
+    fn bin_err(&mut self, op: BinOp, lt: Ty, rt: Ty, span: Span) -> Ty {
+        crate::trace_compiler!("resolve", "bin_err op={:?} lt={:?} rt={:?}", op, lt, rt);
+        let message = match op {
+            BinOp::Eq | BinOp::Ne => format!(
+                "operator '{}' cannot be applied to '{}' and '{}'.",
+                if op == BinOp::Eq { "==" } else { "!=" },
+                lt.name(),
+                rt.name()
+            ),
+            _ => format!(
                 "operator cannot be applied to '{}' and '{}'",
                 lt.name(),
                 rt.name()
             ),
-        );
+        };
+        if matches!(op, BinOp::Eq | BinOp::Ne) {
+            self.diags
+                .error_kind(span, DiagnosticKind::IncompatibleEquality, message);
+        } else {
+            self.diags.error(span, message);
+        }
         Ty::Error
     }
 

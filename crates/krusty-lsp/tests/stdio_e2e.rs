@@ -263,6 +263,75 @@ fn stdio_server_reports_bare_return_type_mismatch() {
 }
 
 #[test]
+fn stdio_server_reports_incompatible_equality_diagnostics() {
+    let messages = [
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": "file:///equality.kt",
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "fun equal(): Boolean = 1 == \"text\"\n\
+                             fun unequal(): Boolean = 1 != \"text\""
+                }
+            }
+        }),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": null}),
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    ];
+    let output = run_server(&[], &messages);
+    let diagnostics = output
+        .iter()
+        .find(|message| message["method"] == "textDocument/publishDiagnostics")
+        .and_then(|message| message["params"]["diagnostics"].as_array())
+        .expect("published diagnostics");
+    assert_eq!(
+        diagnostics,
+        &[
+            json!({
+                "range": {
+                    "start": {"line": 0, "character": 23},
+                    "end": {"line": 0, "character": 34}
+                },
+                "severity": 2,
+                "source": null,
+                "message": "Boolean expression can be simplified"
+            }),
+            json!({
+                "range": {
+                    "start": {"line": 0, "character": 23},
+                    "end": {"line": 0, "character": 34}
+                },
+                "severity": 1,
+                "source": "Kotlin",
+                "message": "Operator '==' cannot be applied to 'Int' and 'String'."
+            }),
+            json!({
+                "range": {
+                    "start": {"line": 1, "character": 25},
+                    "end": {"line": 1, "character": 36}
+                },
+                "severity": 2,
+                "source": null,
+                "message": "Boolean expression can be simplified"
+            }),
+            json!({
+                "range": {
+                    "start": {"line": 1, "character": 25},
+                    "end": {"line": 1, "character": 36}
+                },
+                "severity": 1,
+                "source": "Kotlin",
+                "message": "Operator '!=' cannot be applied to 'Int' and 'String'."
+            }),
+        ]
+    );
+}
+
+#[test]
 fn stdio_server_applies_configured_language_features() {
     let source = "\
 data class Entry(val first: String, val second: String)

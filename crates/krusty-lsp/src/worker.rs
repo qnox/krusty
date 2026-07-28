@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use krusty::diag::{Diagnostic, Severity, Span};
+use krusty::diag::{Diagnostic, DiagnosticKind, Severity, Span};
 use krusty::features::LangFeatures;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
@@ -61,6 +61,7 @@ struct WireDiagnostic {
     lo: u32,
     hi: u32,
     severity: u8,
+    kind: u8,
     message: String,
 }
 
@@ -91,6 +92,11 @@ impl From<DocumentAnalysis> for AnalysisResponse {
                         Severity::Error => 1,
                         Severity::Warning => 2,
                     },
+                    kind: match diagnostic.kind {
+                        DiagnosticKind::Compiler => 0,
+                        DiagnosticKind::IncompatibleEquality => 1,
+                        DiagnosticKind::Inspection => 2,
+                    },
                     message: diagnostic.msg,
                 })
                 .collect(),
@@ -120,6 +126,11 @@ impl AnalysisResponse {
                         Severity::Warning
                     } else {
                         Severity::Error
+                    },
+                    kind: match diagnostic.kind {
+                        1 => DiagnosticKind::IncompatibleEquality,
+                        2 => DiagnosticKind::Inspection,
+                        _ => DiagnosticKind::Compiler,
                     },
                     msg: diagnostic.message,
                     file: 0,
