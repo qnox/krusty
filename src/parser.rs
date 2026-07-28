@@ -1969,24 +1969,31 @@ impl<'a> Parser<'a> {
         // A bare `get`/`set` (default accessor with no body) was seen — the property then has a real
         // backing field and MUST be initialized (a bare accessor is not an abstract declaration).
         let mut saw_bare_accessor = false;
-        loop {
+        'accessors: loop {
             let save = self.i;
             self.skip_newlines();
-            // Optional modifiers on the accessor, in any order: a visibility (`private set`) and/or
-            // `inline` (`inline get()`, `private inline set(…)`). `inline` is erased here — krusty emits
-            // an ordinary accessor — so it only needs to be consumed so the `get`/`set` still parses.
             let mut is_private = false;
-            while self.at(TokenKind::Ident)
-                && matches!(
-                    self.text(),
-                    "private" | "protected" | "internal" | "public" | "inline"
-                )
-            {
-                if self.text() == "private" {
-                    is_private = true;
-                }
-                self.bump();
+            loop {
                 self.skip_newlines();
+                if self.at(TokenKind::At) {
+                    let Some(end) = self.annotation_end_at(self.i) else {
+                        self.i = save;
+                        break 'accessors;
+                    };
+                    self.i = end;
+                    continue;
+                }
+                if self.at(TokenKind::Ident)
+                    && matches!(
+                        self.text(),
+                        "private" | "protected" | "internal" | "public" | "inline"
+                    )
+                {
+                    is_private |= self.text() == "private";
+                    self.bump();
+                    continue;
+                }
+                break;
             }
             if self.explicit_backing_fields
                 && !is_private
@@ -2134,6 +2141,70 @@ impl<'a> Parser<'a> {
             explicit_backing_field,
             init,
             span: Span::new(start.lo, end.hi),
+        }
+    }
+
+    /// Return the first token after an annotation without mutating parser state.
+    fn annotation_end_at(&self, mut i: usize) -> Option<usize> {
+        if !self
+            .t
+            .get(i)
+            .is_some_and(|token| token.kind == TokenKind::At)
+        {
+            return None;
+        }
+        i += 1;
+        if self
+            .t
+            .get(i)
+            .is_some_and(|token| token.kind == TokenKind::Ident)
+            && self
+                .t
+                .get(i + 1)
+                .is_some_and(|token| token.kind == TokenKind::Colon)
+        {
+            i += 2;
+        }
+        if !self
+            .t
+            .get(i)
+            .is_some_and(|token| token.kind == TokenKind::Ident)
+        {
+            return None;
+        }
+        i += 1;
+        while self
+            .t
+            .get(i)
+            .is_some_and(|token| token.kind == TokenKind::Dot)
+            && self
+                .t
+                .get(i + 1)
+                .is_some_and(|token| token.kind == TokenKind::Ident)
+        {
+            i += 2;
+        }
+        if !self
+            .t
+            .get(i)
+            .is_some_and(|token| token.kind == TokenKind::LParen)
+        {
+            return Some(i);
+        }
+        let mut depth = 0usize;
+        loop {
+            match self.t.get(i).map(|token| token.kind) {
+                Some(TokenKind::LParen) => depth += 1,
+                Some(TokenKind::RParen) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i + 1);
+                    }
+                }
+                Some(TokenKind::Eof) | None => return None,
+                _ => {}
+            }
+            i += 1;
         }
     }
 
@@ -2943,34 +3014,10 @@ impl<'a> Parser<'a> {
             match self.t.get(j) {
                 Some(t) if t.kind == TokenKind::Newline => j += 1,
                 Some(t) if t.kind == TokenKind::At => {
-                    // Skip an annotation and its optional `(...)` argument list.
-                    j += 1;
-                    while self.t.get(j).is_some_and(|t| t.kind == TokenKind::Ident) {
-                        j += 1;
-                        if self.t.get(j).is_some_and(|t| t.kind == TokenKind::Dot) {
-                            j += 1;
-                        } else {
-                            break;
-                        }
-                    }
-                    if self.t.get(j).is_some_and(|t| t.kind == TokenKind::LParen) {
-                        let mut d = 0usize;
-                        loop {
-                            match self.t.get(j).map(|t| t.kind) {
-                                Some(TokenKind::LParen) => d += 1,
-                                Some(TokenKind::RParen) => {
-                                    d -= 1;
-                                    if d == 0 {
-                                        j += 1;
-                                        break;
-                                    }
-                                }
-                                Some(TokenKind::Eof) | None => return false,
-                                _ => {}
-                            }
-                            j += 1;
-                        }
-                    }
+                    let Some(end) = self.annotation_end_at(j) else {
+                        return false;
+                    };
+                    j = end;
                 }
                 Some(t) if t.kind == TokenKind::Ident && is_modifier(t.text(self.src)) => j += 1,
                 Some(t) => return t.kind == TokenKind::KwFun,
