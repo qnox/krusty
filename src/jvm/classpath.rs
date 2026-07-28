@@ -1257,14 +1257,8 @@ impl Classpath {
         let parts: Vec<std::sync::Arc<JarPackages>> = self
             .entries
             .iter()
-            .zip(&self.cache_key)
-            .map(|(e, entry_key)| {
-                global_jar_packages().get_or_build_if(
-                    entry_key,
-                    || build_jar_packages(e),
-                    |jp| jp.complete,
-                )
-            })
+            .enumerate()
+            .map(|(entry_id, _)| self.entry_packages(entry_id))
             .collect();
         let tree = std::sync::Arc::new(compose_package_tree(&parts));
         if tree.incomplete_entries.is_empty() {
@@ -1275,6 +1269,14 @@ impl Classpath {
             *self.pkg_tree.borrow_mut() = Some(tree.clone());
         }
         tree
+    }
+
+    fn entry_packages(&self, entry_id: usize) -> std::sync::Arc<JarPackages> {
+        global_jar_packages().get_or_build_if(
+            &self.cache_key[entry_id],
+            || build_jar_packages(&self.entries[entry_id]),
+            |packages| packages.complete,
+        )
     }
 
     /// Memoized `resolve_type` result for `internal` (the outer `Option` = cached-vs-not; the inner =
@@ -1946,11 +1948,13 @@ impl Classpath {
         // per-entry composition (d8bbc91).
         let mut idx = TypeIndex::default();
         for (entry_id, e) in self.entries.iter().enumerate() {
+            let packages = self.entry_packages(entry_id);
             let part = if tree.incomplete_entries.contains(&entry_id) {
-                std::sync::Arc::new(build_entry_types(e))
+                std::sync::Arc::new(build_entry_types(e, &packages))
             } else {
-                global_entry_types()
-                    .get_or_build(&self.cache_key[entry_id], || build_entry_types(e))
+                global_entry_types().get_or_build(&self.cache_key[entry_id], || {
+                    build_entry_types(e, &packages)
+                })
             };
             for (&alias, &target) in &part.type_aliases {
                 // First entry on the classpath wins — kotlinc/java class-resolution order (and this doc's
@@ -2441,14 +2445,9 @@ impl Classpath {
     /// lists — the callable public statics live on the facade, and `facade_statics` drops a non-public
     /// root's public statics (the `@InlineOnly` rule).
     fn jar_pkg_members_name(&self, entry_id: usize, pkg: TypeName) -> JarPkgMembers {
-        let entry = &self.entries[entry_id];
         let entry_key = &self.cache_key[entry_id];
         let key = (entry_key.clone(), pkg);
-        let jp = global_jar_packages().get_or_build_if(
-            entry_key,
-            || build_jar_packages(entry),
-            |jp| jp.complete,
-        );
+        let jp = self.entry_packages(entry_id);
         if jp.complete {
             let g = global_jar_pkg_members().lock().unwrap();
             if let Some(m) = g.get(&key) {
@@ -2536,14 +2535,10 @@ impl Classpath {
             return out;
         };
         for &jar_id in &node.jars {
-            let Some(entry) = self.entries.get(jar_id) else {
+            if self.entries.get(jar_id).is_none() {
                 continue;
-            };
-            let jp = global_jar_packages().get_or_build_if(
-                &self.cache_key[jar_id],
-                || build_jar_packages(entry),
-                |jp| jp.complete,
-            );
+            }
+            let jp = self.entry_packages(jar_id);
             if let Some(pe) = jp.entry(&pkg_rendered) {
                 for &part_id in &pe.facades {
                     let part = jp.names.render(part_id);
@@ -2831,11 +2826,13 @@ impl Classpath {
                 .iter()
                 .enumerate()
                 .map(|(entry_id, e)| {
+                    let packages = self.entry_packages(entry_id);
                     if tree.incomplete_entries.contains(&entry_id) {
-                        std::sync::Arc::new(build_entry_ext(e))
+                        std::sync::Arc::new(build_entry_ext(e, &packages))
                     } else {
-                        global_entry_ext()
-                            .get_or_build(&self.cache_key[entry_id], || build_entry_ext(e))
+                        global_entry_ext().get_or_build(&self.cache_key[entry_id], || {
+                            build_entry_ext(e, &packages)
+                        })
                     }
                 })
                 .collect(),
@@ -2861,12 +2858,12 @@ impl Classpath {
 /// and its `*___*Kt` part classes are compiled into the same jar, so the chain never crosses entries).
 /// The `toplevel_only` filter is a whole-classpath decision, so it is deferred to the per-name lookup
 /// ([`Classpath::ext_toplevel_only`]) — here every receiver-taking static is recorded raw in `by_recv_raw`.
-fn build_entry_ext(entry: &Entry) -> EntryExt {
+fn build_entry_ext(entry: &Entry, packages: &JarPackages) -> EntryExt {
     let mut names = NameTree::default();
     let mut all: HashMap<NameId, ClassLite> = HashMap::new();
     match entry {
         Entry::Dir(d) => collect_dir(d, &mut names, &mut all),
-        Entry::Jar(j) => collect_jar(j, &mut names, &mut all),
+        Entry::Jar(j) => collect_jar(j, packages, &mut names, &mut all),
         // No Kotlin extensions live in the JDK.
         Entry::Jimage(_) => {}
     }
@@ -3107,6 +3104,15 @@ impl JarPackages {
         let id = self.names.insert(pkg);
         self.packages.entry(id).or_default()
     }
+
+    fn contains_facade(&self, internal: &str) -> bool {
+        let package = internal.rsplit_once('/').map_or("", |(package, _)| package);
+        let Some(internal) = self.names.get(internal) else {
+            return false;
+        };
+        self.entry(package)
+            .is_some_and(|entry| entry.facades.contains(&internal))
+    }
 }
 
 /// A node in the composed classpath package table: every jar that declares THIS package (union across the
@@ -3231,11 +3237,10 @@ fn build_jar_packages_jar(jar: &Path, jp: &mut JarPackages) -> bool {
     let mut module_indices = Vec::new();
     let mut complete = true;
     for i in 0..archive.len() {
-        let Ok(e) = archive.by_index(i) else {
+        let Some(name) = archive.name_for_index(i) else {
             complete = false;
             continue;
         };
-        let name = e.name();
         if name.starts_with("META-INF/") && name.ends_with(".kotlin_module") {
             module_indices.push(i);
         } else {
@@ -3474,28 +3479,27 @@ fn collect_dir_visited(
     ancestors.remove(&canonical);
 }
 
-fn collect_jar(jar: &Path, names: &mut NameTree, all: &mut HashMap<NameId, ClassLite>) {
+fn collect_jar(
+    jar: &Path,
+    packages: &JarPackages,
+    names: &mut NameTree,
+    all: &mut HashMap<NameId, ClassLite>,
+) {
     let Ok(f) = File::open(jar) else { return };
     let Ok(mut archive) = zip::ZipArchive::new(f) else {
         return;
     };
     for i in 0..archive.len() {
+        let wanted = archive
+            .name_for_index(i)
+            .and_then(class_internal_from_entry)
+            .is_some_and(|internal| ext_scan_wanted(internal, packages));
+        if !wanted {
+            continue;
+        }
         let Ok(mut entry) = archive.by_index(i) else {
             continue;
         };
-        let name = entry.name();
-        if !name.ends_with(".class") {
-            continue;
-        }
-        // Kotlin top-level / extension functions are compiled to FILE-FACADE classes (`<File>Kt`) and
-        // their package-private multifile PART classes (`<Facade>__<Part>`, also `…Kt…`) — kotlinc's
-        // naming convention. The ext index only needs those, so skip every other class WITHOUT reading
-        // it (a regular class / JDK type holds no resolvable top-level statics here). This avoids
-        // parsing the thousands of non-facade stdlib classes — the dominant cost of building the index.
-        let simple = name.rsplit('/').next().unwrap_or(name);
-        if !simple.contains("Kt") {
-            continue;
-        }
         let mut buf = Vec::new();
         if entry.read_to_end(&mut buf).is_ok() {
             collect_class_bytes(&buf, names, all);
@@ -3543,6 +3547,21 @@ fn class_internal_from_entry(name: &str) -> Option<&str> {
     name.strip_suffix(".class").filter(|s| !s.is_empty())
 }
 
+fn ext_scan_wanted(internal: &str, packages: &JarPackages) -> bool {
+    if packages.contains_facade(internal) {
+        return true;
+    }
+    internal
+        .rsplit('/')
+        .next()
+        .unwrap_or(internal)
+        .contains("Kt")
+}
+
+fn type_alias_scan_wanted(internal: &str, packages: &JarPackages) -> bool {
+    packages.contains_facade(internal) || is_type_aliases_kt(internal)
+}
+
 /// Parse Kotlin type aliases from a file facade's `@Metadata` (the `Package.typeAlias` proto entries).
 /// A top-level `typealias` lands in its file facade (`Lib.kt` → `LibKt`), not only the stdlib's
 /// dedicated `*TypeAliasesKt` files, so every `*Kt` facade is parsed — the proto reader only emits real
@@ -3569,11 +3588,11 @@ fn is_type_aliases_kt(internal: &str) -> bool {
 
 /// Build ONE classpath entry's type-alias table — the per-entry unit `EntryCache` memoizes (built once
 /// per jar, race-free). The JDK jimage carries no Kotlin metadata, so it contributes nothing.
-fn build_entry_types(entry: &Entry) -> TypeIndex {
+fn build_entry_types(entry: &Entry, packages: &JarPackages) -> TypeIndex {
     let mut idx = TypeIndex::default();
     match entry {
         Entry::Dir(d) => scan_types_dir(d, &mut idx),
-        Entry::Jar(j) => scan_types_jar(j, &mut idx),
+        Entry::Jar(j) => scan_types_jar(j, packages, &mut idx),
         Entry::Jimage(_) => {}
     }
     idx
@@ -3622,25 +3641,25 @@ fn scan_types_dir_rooted(
     ancestors.remove(&canonical);
 }
 
-fn scan_types_jar(jar: &Path, idx: &mut TypeIndex) {
+fn scan_types_jar(jar: &Path, packages: &JarPackages, idx: &mut TypeIndex) {
     let Ok(f) = File::open(jar) else { return };
     let Ok(mut archive) = zip::ZipArchive::new(f) else {
         return;
     };
     for i in 0..archive.len() {
+        let wanted = archive
+            .name_for_index(i)
+            .and_then(class_internal_from_entry)
+            .is_some_and(|internal| type_alias_scan_wanted(internal, packages));
+        if !wanted {
+            continue;
+        }
         let Ok(mut entry) = archive.by_index(i) else {
             continue;
         };
-        let name = entry.name().to_string();
-        let Some(internal) = class_internal_from_entry(&name) else {
-            continue;
-        };
-        // Parse bytes only for the rare alias-carrier classes — everything else is skipped.
-        if is_type_aliases_kt(internal) {
-            let mut buf = Vec::new();
-            if entry.read_to_end(&mut buf).is_ok() {
-                parse_aliases_from_bytes(&buf, idx);
-            }
+        let mut buf = Vec::new();
+        if entry.read_to_end(&mut buf).is_ok() {
+            parse_aliases_from_bytes(&buf, idx);
         }
     }
 }
@@ -3747,6 +3766,26 @@ fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
 #[cfg(test)]
 mod fq_tests {
     use super::*;
+
+    #[test]
+    fn package_catalog_selects_jvmname_facades_for_entry_indexes() {
+        let module = crate::metadata::module::build_kotlin_module(&[(
+            "p".to_string(),
+            vec!["Utils".to_string(), "HelpersKt".to_string()],
+        )]);
+        let mut packages = JarPackages::default();
+        record_kotlin_module(&module, &mut packages);
+
+        assert!(packages.contains_facade("p/Utils"));
+        assert!(ext_scan_wanted("p/Utils", &packages));
+        assert!(type_alias_scan_wanted("p/Utils", &packages));
+        assert!(ext_scan_wanted("p/HelpersKt", &packages));
+        assert!(!ext_scan_wanted("p/Regular", &packages));
+
+        let empty = JarPackages::default();
+        assert!(ext_scan_wanted("p/HelpersKt", &empty));
+        assert!(!ext_scan_wanted("p/Regular", &empty));
+    }
 
     #[test]
     fn name_tree_shares_segments_and_renders_internal_names() {
