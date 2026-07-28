@@ -974,6 +974,8 @@ mod vararg_extension_overload_e2e;
 mod vc_mangled_default_e2e;
 #[path = "when_branch_if_no_else_e2e.rs"]
 mod when_branch_if_no_else_e2e;
+#[path = "when_classpath_java_enum_e2e.rs"]
+mod when_classpath_java_enum_e2e;
 #[path = "when_lambda_branch_e2e.rs"]
 mod when_lambda_branch_e2e;
 #[path = "when_multiple_else_check_e2e.rs"]
