@@ -17931,7 +17931,13 @@ impl<'a> Checker<'a> {
                     // `if (x == null) return` guard. Mirrors `smartcast_binding`'s `x != null` case:
                     // stable `val`/parameter only. Unsigned stays unnarrowed because its value-box
                     // unbox to `kotlin.UInt` is not modeled.
-                    if let Expr::Name(n) = self.file.expr(lhs).clone() {
+                    // A SAFE-CALL left side (`u?.javaPsi ?: return`) proves its ROOT receiver
+                    // non-null the same way — the chain only completes when the root held.
+                    let mut narrow_root = lhs;
+                    while let Expr::SafeCall { receiver, .. } = self.file.expr(narrow_root) {
+                        narrow_root = *receiver;
+                    }
+                    if let Expr::Name(n) = self.file.expr(narrow_root).clone() {
                         if let Some(l) = self.lookup(&n) {
                             if !l.is_var {
                                 if let Ty::Nullable(inner) = l.ty {
