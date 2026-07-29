@@ -46,7 +46,8 @@ const MAX_SOURCE_SET_DIAGNOSTIC_ENTRIES: usize = 32 * 1024;
 const MAX_SOURCE_SET_DIAGNOSTIC_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SOURCE_SET_DIAGNOSTIC_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const DIAGNOSTIC_WIRE_FIXED_BYTES: usize = 256;
-const MAX_PENDING_DIAGNOSTIC_REQUEST_BYTES: usize = 256 * 1024;
+const MAX_PENDING_ANALYSIS_REQUEST_BYTES: usize = 256 * 1024;
+const BOUNDED_EXACT_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RENAME_IDENTIFIER_BYTES: usize = 1024;
 const MAX_RENAME_SPELLINGS: usize = 8;
 pub(super) const MAX_RENAME_WIRE_BYTES: usize = 8 * 1024 * 1024;
@@ -728,10 +729,43 @@ impl OpenDocument {
     }
 }
 
-struct PendingDiagnosticRequest {
+enum PendingAnalysisRequestKind {
+    Diagnostic { uri: String },
+    Exact { method: String, params: Value },
+}
+
+struct PendingAnalysisRequest {
     id: Value,
-    uri: String,
+    kind: PendingAnalysisRequestKind,
     retained_bytes: usize,
+}
+
+impl PendingAnalysisRequest {
+    fn uri(&self) -> Option<&str> {
+        match &self.kind {
+            PendingAnalysisRequestKind::Diagnostic { uri } => Some(uri),
+            PendingAnalysisRequestKind::Exact { params, .. } => {
+                params.pointer("/textDocument/uri").and_then(Value::as_str)
+            }
+        }
+    }
+
+    fn exact_response_bytes(&self) -> usize {
+        match &self.kind {
+            PendingAnalysisRequestKind::Diagnostic { .. } => 0,
+            PendingAnalysisRequestKind::Exact { method, .. } => {
+                exact_analysis_response_bytes(method)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PendingAnalysisCancellation {
+    Client,
+    DocumentChanged,
+    DocumentClosed,
+    Shutdown,
 }
 
 const DIAGNOSTIC_REFRESH_REQUEST_ID: &str = "krusty/diagnosticRefresh";
@@ -755,8 +789,8 @@ pub struct LspService<B> {
     analysis_in_flight: bool,
     resubmit_pending: bool,
     discard_in_flight: bool,
-    pending_diagnostic_requests: VecDeque<PendingDiagnosticRequest>,
-    pending_diagnostic_request_bytes: usize,
+    pending_analysis_requests: VecDeque<PendingAnalysisRequest>,
+    pending_analysis_request_bytes: usize,
     next_materialize_token: u64,
     pending_materializations: HashMap<u64, Value>,
     status: StatusReporter,
@@ -792,8 +826,8 @@ where
             analysis_in_flight: false,
             resubmit_pending: false,
             discard_in_flight: false,
-            pending_diagnostic_requests: VecDeque::new(),
-            pending_diagnostic_request_bytes: 0,
+            pending_analysis_requests: VecDeque::new(),
+            pending_analysis_request_bytes: 0,
             next_materialize_token: 0,
             pending_materializations: HashMap::new(),
             status: StatusReporter::default(),
@@ -951,7 +985,7 @@ where
                 .collect::<Vec<_>>();
             messages.extend(self.diagnostic_refresh());
             if !resubmit {
-                messages.extend(self.complete_pending_diagnostic_requests());
+                messages.extend(self.complete_pending_analysis_requests());
             }
             return messages;
         }
@@ -997,7 +1031,7 @@ where
         if resubmit {
             self.analysis_dirty = true;
         } else {
-            messages.extend(self.complete_pending_diagnostic_requests());
+            messages.extend(self.complete_pending_analysis_requests());
         }
         messages
     }
@@ -1091,6 +1125,14 @@ where
                 }
                 None => Dispatch::none(),
             };
+        }
+        if let Some(uri) = exact_analysis_request_uri(&method, &params) {
+            if self.document_waits_for_analysis(uri) {
+                let Some(id) = id else {
+                    return Dispatch::none();
+                };
+                return self.queue_exact_analysis_request(id, method, params);
+            }
         }
 
         match method.as_str() {
@@ -1200,9 +1242,9 @@ where
                     return Dispatch::none();
                 };
                 self.shutdown_requested = true;
-                let mut messages = self.cancel_pending_diagnostic_requests(
-                    false,
-                    "diagnostic request was cancelled because the server is shutting down",
+                let mut messages = self.cancel_pending_analysis_requests(
+                    |_| true,
+                    PendingAnalysisCancellation::Shutdown,
                 );
                 messages.extend(self.status.finish());
                 messages.push(rpc_result(id, Value::Null));
@@ -1386,10 +1428,9 @@ where
         let replacing = self.documents.contains_key(&uri);
         let mut messages = if replacing {
             self.note_document_identity_change();
-            self.cancel_pending_diagnostic_requests_for_uri(
-                &uri,
-                true,
-                "diagnostic request was cancelled because the document changed",
+            self.cancel_pending_analysis_requests(
+                |request| request.uri() == Some(uri.as_str()),
+                PendingAnalysisCancellation::DocumentChanged,
             )
         } else {
             Vec::new()
@@ -1493,10 +1534,9 @@ where
             }
         };
         let push = !self.client_pulls_diagnostics;
-        let mut messages = self.cancel_pending_diagnostic_requests_for_uri(
-            &uri,
-            true,
-            "diagnostic request was cancelled because the document changed",
+        let mut messages = self.cancel_pending_analysis_requests(
+            |request| request.uri() == Some(uri.as_str()),
+            PendingAnalysisCancellation::DocumentChanged,
         );
         if !self.accepts_replacement(&uri, text.len()) {
             let open = self.documents.get_mut(&uri).unwrap();
@@ -1545,7 +1585,10 @@ where
             self.flush_analysis()
         };
         messages.extend(self.publish(&uri, None, &DiagnosticIndex::default()));
-        messages.extend(self.complete_pending_diagnostic_requests_for_uri(&uri));
+        messages.extend(self.cancel_pending_analysis_requests(
+            |request| request.uri() == Some(uri.as_str()),
+            PendingAnalysisCancellation::DocumentClosed,
+        ));
         Dispatch::messages(messages)
     }
 
@@ -2018,75 +2061,120 @@ where
         Dispatch::messages(vec![rpc_result(id, item)])
     }
 
-    fn complete_pending_diagnostic_requests(&mut self) -> Vec<Value> {
-        self.take_pending_diagnostic_requests_matching(|_| true)
-            .into_iter()
-            .map(|request| {
-                diagnostic_report(
-                    request.id,
-                    self.documents
-                        .get(&request.uri)
-                        .map(|open| &open.diagnostics),
-                )
-            })
-            .collect()
+    fn document_waits_for_analysis(&self, uri: &str) -> bool {
+        self.documents
+            .get(uri)
+            .is_some_and(|open| !open.analysis_blocked)
+            && (self.analysis_dirty
+                || self.analysis_in_flight
+                || self.resubmit_pending
+                || self.analysis_retry_at.is_some())
     }
 
-    fn complete_pending_diagnostic_requests_for_uri(&mut self, uri: &str) -> Vec<Value> {
-        self.take_pending_diagnostic_requests_matching(|request| request.uri == uri)
-            .into_iter()
-            .map(|request| {
-                diagnostic_report(
-                    request.id,
-                    self.documents
-                        .get(&request.uri)
-                        .map(|open| &open.diagnostics),
-                )
-            })
-            .collect()
-    }
-
-    fn cancel_pending_diagnostic_requests(
+    fn queue_exact_analysis_request(
         &mut self,
-        retrigger_request: bool,
-        message: &str,
+        id: Value,
+        method: String,
+        params: Value,
+    ) -> Dispatch {
+        let response_bytes = exact_analysis_response_bytes(&method);
+        let pending_response_bytes = self
+            .pending_analysis_requests
+            .iter()
+            .fold(0usize, |total, request| {
+                total.saturating_add(request.exact_response_bytes())
+            });
+        if response_bytes > MAX_RETAINED_ANALYSIS_BYTES.saturating_sub(pending_response_bytes) {
+            return Dispatch::messages(vec![rpc_error(
+                id,
+                -32802,
+                "analysis request queue is full",
+            )]);
+        }
+        let retained_bytes = retained_value_bytes(&id)
+            .saturating_add(retained_value_bytes(&params))
+            .saturating_add(std::mem::size_of::<PendingAnalysisRequest>())
+            .saturating_add(method.capacity());
+        if retained_bytes
+            > MAX_PENDING_ANALYSIS_REQUEST_BYTES.saturating_sub(self.pending_analysis_request_bytes)
+        {
+            return Dispatch::messages(vec![rpc_error(
+                id,
+                -32802,
+                "analysis request queue is full",
+            )]);
+        }
+        self.pending_analysis_request_bytes = self
+            .pending_analysis_request_bytes
+            .saturating_add(retained_bytes);
+        self.pending_analysis_requests
+            .push_back(PendingAnalysisRequest {
+                id,
+                kind: PendingAnalysisRequestKind::Exact { method, params },
+                retained_bytes,
+            });
+        Dispatch::none()
+    }
+
+    fn complete_pending_analysis_requests(&mut self) -> Vec<Value> {
+        let pending = self.take_pending_analysis_requests_matching(|_| true);
+        let mut messages = Vec::with_capacity(pending.len());
+        for request in pending {
+            match request.kind {
+                PendingAnalysisRequestKind::Diagnostic { uri } => {
+                    messages.push(diagnostic_report(
+                        request.id,
+                        self.documents.get(&uri).map(|open| &open.diagnostics),
+                    ));
+                }
+                PendingAnalysisRequestKind::Exact { method, params } => {
+                    messages.extend(
+                        self.handle_inner(
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": request.id,
+                                "method": method,
+                                "params": params,
+                            }),
+                            false,
+                        )
+                        .messages,
+                    );
+                }
+            }
+        }
+        messages
+    }
+
+    fn cancel_pending_analysis_requests(
+        &mut self,
+        matches: impl FnMut(&PendingAnalysisRequest) -> bool,
+        cancellation: PendingAnalysisCancellation,
     ) -> Vec<Value> {
-        self.take_pending_diagnostic_requests_matching(|_| true)
+        self.take_pending_analysis_requests_matching(matches)
             .into_iter()
-            .map(|request| diagnostic_server_cancelled(request.id, message, retrigger_request))
+            .map(|request| pending_analysis_cancellation(request, cancellation))
             .collect()
     }
 
-    fn cancel_pending_diagnostic_requests_for_uri(
+    fn take_pending_analysis_requests_matching(
         &mut self,
-        uri: &str,
-        retrigger_request: bool,
-        message: &str,
-    ) -> Vec<Value> {
-        self.take_pending_diagnostic_requests_matching(|request| request.uri == uri)
-            .into_iter()
-            .map(|request| diagnostic_server_cancelled(request.id, message, retrigger_request))
-            .collect()
-    }
-
-    fn take_pending_diagnostic_requests_matching(
-        &mut self,
-        mut matches: impl FnMut(&PendingDiagnosticRequest) -> bool,
-    ) -> Vec<PendingDiagnosticRequest> {
-        let pending = std::mem::take(&mut self.pending_diagnostic_requests);
+        mut matches: impl FnMut(&PendingAnalysisRequest) -> bool,
+    ) -> Vec<PendingAnalysisRequest> {
+        let pending = std::mem::take(&mut self.pending_analysis_requests);
         let mut retained = VecDeque::with_capacity(pending.len());
         let mut matched = Vec::new();
         for request in pending {
             if matches(&request) {
-                self.pending_diagnostic_request_bytes = self
-                    .pending_diagnostic_request_bytes
+                self.pending_analysis_request_bytes = self
+                    .pending_analysis_request_bytes
                     .saturating_sub(request.retained_bytes);
                 matched.push(request);
             } else {
                 retained.push_back(request);
             }
         }
-        self.pending_diagnostic_requests = retained;
+        self.pending_analysis_requests = retained;
         matched
     }
 
@@ -2094,11 +2182,10 @@ where
         let Some(id) = params.get("id").filter(|id| is_request_id(id)) else {
             return Dispatch::none();
         };
-        let messages = self
-            .take_pending_diagnostic_requests_matching(|request| request.id.eq(id))
-            .into_iter()
-            .map(|request| rpc_error(request.id, -32800, "request cancelled"))
-            .collect();
+        let messages = self.cancel_pending_analysis_requests(
+            |request| request.id.eq(id),
+            PendingAnalysisCancellation::Client,
+        );
         Dispatch::messages(messages)
     }
 
@@ -2110,15 +2197,7 @@ where
             return invalid_params(Some(id));
         };
         let uri = params.text_document.uri;
-        let waits_for_analysis = self
-            .documents
-            .get(&uri)
-            .is_some_and(|open| !open.analysis_blocked)
-            && (self.analysis_dirty
-                || self.analysis_in_flight
-                || self.resubmit_pending
-                || self.analysis_retry_at.is_some());
-        if !waits_for_analysis {
+        if !self.document_waits_for_analysis(&uri) {
             return Dispatch::messages(vec![diagnostic_report(
                 id,
                 self.documents.get(&uri).map(|open| &open.diagnostics),
@@ -2126,36 +2205,53 @@ where
         }
 
         let retained_bytes = retained_value_bytes(&id)
-            .saturating_add(std::mem::size_of::<PendingDiagnosticRequest>())
+            .saturating_add(std::mem::size_of::<PendingAnalysisRequest>())
             .saturating_add(uri.capacity());
-        let replaced = self
-            .pending_diagnostic_requests
-            .iter()
-            .find(|request| request.uri == uri);
-        let current_bytes = self.pending_diagnostic_request_bytes.saturating_sub(
+        let replaced = self.pending_analysis_requests.iter().find(|request| {
+            matches!(
+                &request.kind,
+                PendingAnalysisRequestKind::Diagnostic {
+                    uri: request_uri
+                } if request_uri == &uri
+            )
+        });
+        let current_bytes = self.pending_analysis_request_bytes.saturating_sub(
             replaced
                 .map(|request| request.retained_bytes)
                 .unwrap_or_default(),
         );
-        if retained_bytes > MAX_PENDING_DIAGNOSTIC_REQUEST_BYTES.saturating_sub(current_bytes) {
+        if retained_bytes > MAX_PENDING_ANALYSIS_REQUEST_BYTES.saturating_sub(current_bytes) {
             return Dispatch::messages(vec![diagnostic_server_cancelled(
                 id,
                 "diagnostic analysis request queue is full",
                 true,
             )]);
         }
-        let messages = self.cancel_pending_diagnostic_requests_for_uri(
-            &uri,
-            false,
-            "diagnostic request was superseded by a newer pull",
-        );
-        self.pending_diagnostic_request_bytes = self
-            .pending_diagnostic_request_bytes
+        let messages = self
+            .take_pending_analysis_requests_matching(|request| {
+                matches!(
+                    &request.kind,
+                    PendingAnalysisRequestKind::Diagnostic {
+                        uri: request_uri
+                    } if request_uri == &uri
+                )
+            })
+            .into_iter()
+            .map(|request| {
+                diagnostic_server_cancelled(
+                    request.id,
+                    "diagnostic request was superseded by a newer pull",
+                    false,
+                )
+            })
+            .collect();
+        self.pending_analysis_request_bytes = self
+            .pending_analysis_request_bytes
             .saturating_add(retained_bytes);
-        self.pending_diagnostic_requests
-            .push_back(PendingDiagnosticRequest {
+        self.pending_analysis_requests
+            .push_back(PendingAnalysisRequest {
                 id,
-                uri,
+                kind: PendingAnalysisRequestKind::Diagnostic { uri },
                 retained_bytes,
             });
         Dispatch::messages(messages)
@@ -2694,6 +2790,44 @@ fn diagnostic_server_cancelled(id: Value, message: &str, retrigger_request: bool
     })
 }
 
+fn pending_analysis_cancellation(
+    request: PendingAnalysisRequest,
+    cancellation: PendingAnalysisCancellation,
+) -> Value {
+    let diagnostic = matches!(&request.kind, PendingAnalysisRequestKind::Diagnostic { .. });
+    match (diagnostic, cancellation) {
+        (_, PendingAnalysisCancellation::Client) => {
+            rpc_error(request.id, -32800, "request cancelled")
+        }
+        (true, PendingAnalysisCancellation::DocumentChanged) => diagnostic_server_cancelled(
+            request.id,
+            "diagnostic request was cancelled because the document changed",
+            true,
+        ),
+        (true, PendingAnalysisCancellation::DocumentClosed) => diagnostic_report(request.id, None),
+        (true, PendingAnalysisCancellation::Shutdown) => diagnostic_server_cancelled(
+            request.id,
+            "diagnostic request was cancelled because the server is shutting down",
+            false,
+        ),
+        (false, PendingAnalysisCancellation::DocumentChanged) => rpc_error(
+            request.id,
+            -32801,
+            "analysis request was cancelled because the document changed",
+        ),
+        (false, PendingAnalysisCancellation::DocumentClosed) => rpc_error(
+            request.id,
+            -32801,
+            "analysis request was cancelled because the document was closed",
+        ),
+        (false, PendingAnalysisCancellation::Shutdown) => rpc_error(
+            request.id,
+            -32800,
+            "analysis request was cancelled because the server is shutting down",
+        ),
+    }
+}
+
 fn is_request_id(id: &Value) -> bool {
     match id {
         Value::Number(id) => id.is_i64() || id.is_u64(),
@@ -2899,6 +3033,33 @@ fn document_notification_identity(message: &Value) -> Option<(&str, &str)> {
         _ => return None,
     };
     Some((method, uri))
+}
+
+fn exact_analysis_request_uri<'a>(method: &str, params: &'a Value) -> Option<&'a str> {
+    if !matches!(
+        method,
+        "textDocument/definition"
+            | "textDocument/typeDefinition"
+            | "textDocument/implementation"
+            | "textDocument/references"
+            | "textDocument/rename"
+            | "textDocument/documentSymbol"
+            | "textDocument/foldingRange"
+            | "textDocument/semanticTokens/full"
+            | "textDocument/semanticTokens/range"
+    ) {
+        return None;
+    }
+    params.pointer("/textDocument/uri").and_then(Value::as_str)
+}
+
+fn exact_analysis_response_bytes(method: &str) -> usize {
+    match method {
+        "textDocument/rename" | "textDocument/documentSymbol" | "textDocument/foldingRange" => {
+            BOUNDED_EXACT_RESPONSE_BYTES
+        }
+        _ => MAX_RETAINED_ANALYSIS_BYTES,
+    }
 }
 
 fn retained_value_bytes(value: &Value) -> usize {
@@ -3921,14 +4082,14 @@ mod tests {
                 );
             }
             assert_eq!(
-                service.pending_diagnostic_requests.len(),
+                service.pending_analysis_requests.len(),
                 1,
                 "duplicate pulls must never retain duplicate full reports"
             );
         }
-        assert!(service.pending_diagnostic_request_bytes <= MAX_PENDING_DIAGNOSTIC_REQUEST_BYTES);
+        assert!(service.pending_analysis_request_bytes <= MAX_PENDING_ANALYSIS_REQUEST_BYTES);
 
-        let mut spare_capacity_id = String::with_capacity(MAX_PENDING_DIAGNOSTIC_REQUEST_BYTES + 1);
+        let mut spare_capacity_id = String::with_capacity(MAX_PENDING_ANALYSIS_REQUEST_BYTES + 1);
         spare_capacity_id.push('x');
         let overflow = service.pull_diagnostics(
             Some(Value::String(spare_capacity_id)),
@@ -3941,8 +4102,8 @@ mod tests {
             overflow.messages[0]["error"]["data"]["retriggerRequest"],
             true
         );
-        assert_eq!(service.pending_diagnostic_requests.len(), 1);
-        assert!(service.pending_diagnostic_request_bytes > 0);
+        assert_eq!(service.pending_analysis_requests.len(), 1);
+        assert!(service.pending_analysis_request_bytes > 0);
 
         let queued = service.pull_diagnostics(
             Some(json!(999)),
@@ -3959,7 +4120,7 @@ mod tests {
         assert_eq!(invalid_id.messages[0]["id"], Value::Null);
         assert_eq!(invalid_id.messages[0]["error"]["code"], -32600);
         assert_eq!(
-            service.pending_diagnostic_requests.len(),
+            service.pending_analysis_requests.len(),
             1,
             "an invalid request must not displace the valid queued pull"
         );
@@ -3971,7 +4132,7 @@ mod tests {
         }));
         assert_eq!(null_id.messages[0]["id"], Value::Null);
         assert_eq!(null_id.messages[0]["error"]["code"], -32600);
-        assert_eq!(service.pending_diagnostic_requests.len(), 1);
+        assert_eq!(service.pending_analysis_requests.len(), 1);
 
         let maximum_message = "x".repeat(MAX_SOURCE_SET_DIAGNOSTIC_TEXT_BYTES);
         let batch = AnalysisBatch {
@@ -4001,8 +4162,8 @@ mod tests {
                 .len(),
             MAX_SOURCE_SET_DIAGNOSTIC_TEXT_BYTES
         );
-        assert!(service.pending_diagnostic_requests.is_empty());
-        assert_eq!(service.pending_diagnostic_request_bytes, 0);
+        assert!(service.pending_analysis_requests.is_empty());
+        assert_eq!(service.pending_analysis_request_bytes, 0);
     }
 
     #[test]
@@ -4035,12 +4196,89 @@ mod tests {
         assert_eq!(cancelled.messages.len(), 1);
         assert_eq!(cancelled.messages[0]["id"], "pull-1");
         assert_eq!(cancelled.messages[0]["error"]["code"], -32800);
-        assert!(service.pending_diagnostic_requests.is_empty());
-        assert_eq!(service.pending_diagnostic_request_bytes, 0);
+        assert!(service.pending_analysis_requests.is_empty());
+        assert_eq!(service.pending_analysis_request_bytes, 0);
     }
 
     #[test]
-    fn document_change_cancels_a_pending_diagnostic_request() {
+    fn semantic_tokens_wait_for_the_current_analysis_batch() {
+        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut service = LspService::with_backend(RecordingBackend {
+            ready: true,
+            submitted,
+        });
+        service.force_initialized_for_test();
+        let uri = "file:///document.kt";
+        let source = "fun value() = 1\n";
+        service.open_document_for_test(uri, source, 1);
+        service.mark_analysis_dirty_for_test();
+        let _job = service
+            .dispatch_pending_analysis()
+            .expect("analysis starts for the open document");
+
+        let pending = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "tokens",
+            "method": "textDocument/semanticTokens/full",
+            "params": {"textDocument": {"uri": uri}}
+        }));
+        assert!(pending.messages.is_empty());
+
+        let messages = service.apply_analysis_batch(AnalysisBatch {
+            analyzed: vec![(uri.into(), 1)],
+            analyses: crate::analysis::analyze_for_lsp(&[source]),
+            support_documents: Vec::new(),
+            pending: false,
+        });
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["id"], "tokens");
+        assert!(messages[1]["result"]["data"]
+            .as_array()
+            .is_some_and(|data| !data.is_empty()));
+    }
+
+    #[test]
+    fn definition_waits_for_the_current_analysis_batch() {
+        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut service = LspService::with_backend(RecordingBackend {
+            ready: true,
+            submitted,
+        });
+        service.force_initialized_for_test();
+        let uri = "file:///document.kt";
+        let source = "val target = 1\nval use = target\n";
+        service.open_document_for_test(uri, source, 1);
+        service.mark_analysis_dirty_for_test();
+        let _job = service
+            .dispatch_pending_analysis()
+            .expect("analysis starts for the open document");
+
+        let pending = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "definition",
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": 1, "character": 10}
+            }
+        }));
+        assert!(pending.messages.is_empty());
+
+        let messages = service.apply_analysis_batch(AnalysisBatch {
+            analyzed: vec![(uri.into(), 1)],
+            analyses: crate::analysis::analyze_for_lsp(&[source]),
+            support_documents: Vec::new(),
+            pending: false,
+        });
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["id"], "definition");
+        assert!(messages[1]["result"]
+            .as_array()
+            .is_some_and(|locations| !locations.is_empty()));
+    }
+
+    #[test]
+    fn document_change_cancels_pending_analysis_requests() {
         let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let mut service = LspService::with_backend(RecordingBackend {
             ready: true,
@@ -4059,6 +4297,18 @@ mod tests {
             )
             .messages
             .is_empty());
+        assert!(service
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": 8,
+                "method": "textDocument/definition",
+                "params": {
+                    "textDocument": {"uri": "file:///a.kt"},
+                    "position": {"line": 0, "character": 0}
+                }
+            }))
+            .messages
+            .is_empty());
 
         let changed = service.did_change(
             None,
@@ -4069,19 +4319,21 @@ mod tests {
             true,
         );
 
-        assert_eq!(changed.messages.len(), 1);
+        assert_eq!(changed.messages.len(), 2);
         assert_eq!(changed.messages[0]["id"], 7);
         assert_eq!(changed.messages[0]["error"]["code"], -32802);
         assert_eq!(
             changed.messages[0]["error"]["data"]["retriggerRequest"],
             true
         );
-        assert!(service.pending_diagnostic_requests.is_empty());
-        assert_eq!(service.pending_diagnostic_request_bytes, 0);
+        assert_eq!(changed.messages[1]["id"], 8);
+        assert_eq!(changed.messages[1]["error"]["code"], -32801);
+        assert!(service.pending_analysis_requests.is_empty());
+        assert_eq!(service.pending_analysis_request_bytes, 0);
     }
 
     #[test]
-    fn pending_diagnostic_requests_share_the_byte_budget() {
+    fn pending_analysis_requests_share_the_byte_budget() {
         let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let mut service = LspService::with_backend(RecordingBackend {
             ready: true,
@@ -4096,17 +4348,22 @@ mod tests {
             .dispatch_pending_analysis()
             .expect("analysis starts for the open documents");
 
-        let id_bytes = MAX_PENDING_DIAGNOSTIC_REQUEST_BYTES / 3;
-        for (uri, id) in [
-            ("file:///a.kt", "a".repeat(id_bytes)),
-            ("file:///b.kt", "b".repeat(id_bytes)),
-        ] {
-            let queued = service.pull_diagnostics(
-                Some(Value::String(id)),
-                json!({"textDocument": {"uri": uri}}),
-            );
-            assert!(queued.messages.is_empty());
-        }
+        let id_bytes = MAX_PENDING_ANALYSIS_REQUEST_BYTES / 3;
+        let diagnostic = service.pull_diagnostics(
+            Some(Value::String("a".repeat(id_bytes))),
+            json!({"textDocument": {"uri": "file:///a.kt"}}),
+        );
+        assert!(diagnostic.messages.is_empty());
+        let definition = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "b".repeat(id_bytes),
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": {"uri": "file:///b.kt"},
+                "position": {"line": 0, "character": 0}
+            }
+        }));
+        assert!(definition.messages.is_empty());
 
         let rejected = service.pull_diagnostics(
             Some(Value::String("c".repeat(id_bytes))),
@@ -4114,8 +4371,44 @@ mod tests {
         );
         assert_eq!(rejected.messages.len(), 1);
         assert_eq!(rejected.messages[0]["error"]["code"], -32802);
-        assert_eq!(service.pending_diagnostic_requests.len(), 2);
-        assert!(service.pending_diagnostic_request_bytes <= MAX_PENDING_DIAGNOSTIC_REQUEST_BYTES);
+        assert_eq!(service.pending_analysis_requests.len(), 2);
+        assert!(service.pending_analysis_request_bytes <= MAX_PENDING_ANALYSIS_REQUEST_BYTES);
+    }
+
+    #[test]
+    fn pending_exact_requests_share_the_existing_response_budget() {
+        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut service = LspService::with_backend(RecordingBackend {
+            ready: true,
+            submitted,
+        });
+        service.force_initialized_for_test();
+        let uri = "file:///document.kt";
+        service.open_document_for_test(uri, "val value = 1\n", 1);
+        service.mark_analysis_dirty_for_test();
+        let _job = service
+            .dispatch_pending_analysis()
+            .expect("analysis starts for the open document");
+
+        let tokens = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "tokens",
+            "method": "textDocument/semanticTokens/full",
+            "params": {"textDocument": {"uri": uri}}
+        }));
+        assert!(tokens.messages.is_empty());
+
+        let definition = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "definition",
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": 0, "character": 4}
+            }
+        }));
+        assert_eq!(definition.messages[0]["error"]["code"], -32802);
+        assert_eq!(service.pending_analysis_requests.len(), 1);
     }
 
     #[test]
@@ -4153,8 +4446,8 @@ mod tests {
             false
         );
         assert_eq!(shutdown.messages[1], rpc_result(json!(8), Value::Null));
-        assert!(service.pending_diagnostic_requests.is_empty());
-        assert_eq!(service.pending_diagnostic_request_bytes, 0);
+        assert!(service.pending_analysis_requests.is_empty());
+        assert_eq!(service.pending_analysis_request_bytes, 0);
 
         let exited = service.handle(json!({
             "jsonrpc": "2.0",
@@ -4224,7 +4517,7 @@ mod tests {
             pending: false,
         });
         assert!(stale.is_empty());
-        assert_eq!(service.pending_diagnostic_requests.len(), 1);
+        assert_eq!(service.pending_analysis_requests.len(), 1);
 
         let _current_job = service
             .dispatch_pending_analysis()
@@ -4237,7 +4530,7 @@ mod tests {
         });
         assert_eq!(current.len(), 2, "publish plus the queued pull response");
         assert_eq!(current[1]["id"], 7);
-        assert!(service.pending_diagnostic_requests.is_empty());
+        assert!(service.pending_analysis_requests.is_empty());
     }
 
     #[test]
