@@ -687,6 +687,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nullable reference already reads as its non-null type. `var`s are not narrowed (a closure could reset
   them to null), and unsigned stays unnarrowed (its value-box unbox isn't modeled).
   `tests/elvis_return_smartcast_e2e.rs`.
+- **`u?.member ?: return` smart-casts the safe-call ROOT receiver** for the code that follows: the
+  elvis only completes when every `?.` in the left side held, which proves the chain's root non-null.
+  The root must be a stable `val`/parameter name; the same `var`/unsigned exclusions as the bare-name
+  form apply. (Intermediate results are not path-narrowed — only the root name is.)
+  `crates/krusty-lsp/src/compiler_analysis.rs::source_set_narrows_safe_call_root_after_elvis_return`.
+- **An `if`/`else if` chain of diverging guards narrows level by level** for the rest of the block:
+  `if (x is A) return …; else if (x !is B) return …` proves `x !is A && x is B` afterwards, because
+  falling through a level whose then-branch diverges means that level's condition was false. The walk
+  stops at the first non-diverging then-branch (control can fall through it with its condition true).
+  This is the statement form kotlinc handles via exhaustive flow typing; krusty walks the else-if
+  spine only. `crates/krusty-lsp/src/compiler_analysis.rs::source_set_narrows_after_else_if_return_chain`.
 - **`x is Int? && x != null` narrows to the non-null primitive** (either leaf order): the `is Int?` leaf
   narrows to the nullable-primitive wrapper and a `x != null` leaf anywhere in the same `&&` chain strips
   the `?`. The refinement is pushed last, so the innermost-last declare keeps it over the `Int?` binding.

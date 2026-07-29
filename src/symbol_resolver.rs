@@ -2304,7 +2304,7 @@ impl<'a> SymbolResolver<'a> {
             // lowerer which element type to PACK before the mask machinery — without it the
             // loose element lowers straight into the array slot (a VerifyError).
             if let Some(elem) = (!o.flags.suspend)
-                .then(|| o.call_sig.vararg_index)
+                .then_some(o.call_sig.vararg_index)
                 .flatten()
                 .and_then(|index| vparams.get(index))
                 .and_then(|param| param.array_elem())

@@ -980,6 +980,117 @@ mod tests {
     }
 
     #[test]
+    fn source_set_narrows_safe_call_root_after_elvis_return() {
+        let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
+            return;
+        };
+        let Some(jdk_modules) = krusty::toolchain::jdk_modules() else {
+            return;
+        };
+        let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+            stdlib,
+            jdk_modules,
+        ]));
+        classpath.prepare_for_source_analysis();
+        let java_sources = [(
+            String::new(),
+            "package p; public class Clazz { public String getJavaPsi() { return \"\"; } \
+             public int getSize() { return 0; } }"
+                .into(),
+        )];
+        let stubs = krusty::jvm::java_stub::stub_classes(
+            &java_sources,
+            krusty::jvm::java_stub::StubMode::Lenient,
+            &|candidate| {
+                classpath
+                    .find_name(krusty::types::type_name(candidate))
+                    .is_some()
+            },
+        )
+        .expect("Java stubs");
+        classpath.set_stub_overlay(stubs);
+
+        // `u?.javaPsi ?: return` proves the safe-call ROOT `u` non-null: the plain
+        // `u.size` afterwards must not report a nullable-receiver error.
+        let source = "package a\n\
+                      fun f(u: p.Clazz?): Int {\n\
+                      \u{20} val j = u?.javaPsi ?: return 0\n\
+                      \u{20} println(j)\n\
+                      \u{20} return u.size\n\
+                      }";
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let analysis = analyze_source_set(&[source], platform);
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+    }
+
+    #[test]
+    fn source_set_narrows_after_else_if_return_chain() {
+        let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
+            return;
+        };
+        let Some(jdk_modules) = krusty::toolchain::jdk_modules() else {
+            return;
+        };
+        let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+            stdlib,
+            jdk_modules,
+        ]));
+        classpath.prepare_for_source_analysis();
+
+        // The asQualifiedPath shape: an `if (this is A) return …; else if (this !is B)
+        // return …` head proves `this is B` for the rest of the body, so the narrowed
+        // receiver flows into the local function call and the when-arm recursion.
+        let source = "package a\n\
+                      interface Expr\n\
+                      interface Ref : Expr\n\
+                      interface Qualified : Ref {\n\
+                      \u{20} val receiver: Expr\n\
+                      \u{20} val selector: Expr\n\
+                      }\n\
+                      interface SimpleName : Ref {\n\
+                      \u{20} val identifier: String\n\
+                      }\n\
+                      fun Expr.path(): List<String>? {\n\
+                      \u{20} if (this is SimpleName) {\n\
+                      \u{20}\u{20} return listOf(this.identifier)\n\
+                      \u{20} }\n\
+                      \u{20} else if (this !is Qualified) {\n\
+                      \u{20}\u{20} return null\n\
+                      \u{20} }\n\
+                      \u{20} var error = false\n\
+                      \u{20} val list = mutableListOf<String>()\n\
+                      \u{20} fun add(expr: Qualified) {\n\
+                      \u{20}\u{20} val receiver = expr.receiver\n\
+                      \u{20}\u{20} val selector = expr.selector as? SimpleName ?: run { error = true; return }\n\
+                      \u{20}\u{20} when (receiver) {\n\
+                      \u{20}\u{20}\u{20} is Qualified -> add(receiver)\n\
+                      \u{20}\u{20}\u{20} is SimpleName -> list += receiver.identifier\n\
+                      \u{20}\u{20}\u{20} else -> {\n\
+                      \u{20}\u{20}\u{20}\u{20} error = true\n\
+                      \u{20}\u{20}\u{20}\u{20} return\n\
+                      \u{20}\u{20}\u{20} }\n\
+                      \u{20}\u{20} }\n\
+                      \u{20}\u{20} list += selector.identifier\n\
+                      \u{20} }\n\
+                      \u{20} add(this)\n\
+                      \u{20} return if (error) null else list\n\
+                      }";
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let analysis = analyze_source_set(&[source], platform);
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+    }
+
+    #[test]
     fn source_set_resolves_interface_nested_class_static_call() {
         let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
             return;
