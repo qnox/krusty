@@ -3,8 +3,10 @@ use crate::libraries::{
     PropertySet, ResolvedSymbols, SemanticPlatform, SemanticSupertype, StaticFieldRef,
 };
 use crate::module_symbols::ModuleSymbols;
+use crate::name_tree::FxHashMap;
 use crate::symbol_source::{InheritanceShape, SymbolSource};
 use crate::types::{Ty, TypeName, Visibility};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::SymbolTable;
@@ -13,16 +15,12 @@ pub(crate) struct SourceFallbackPlatform {
     platform: Box<dyn SemanticPlatform>,
     symbols: SymbolTable,
     /// Memoized merges over the immutable platform and source symbol tables.
-    symbols_memo: std::cell::RefCell<std::collections::HashMap<TypeName, Rc<ResolvedSymbols>>>,
-    types_memo: std::cell::RefCell<std::collections::HashMap<TypeName, Option<Rc<LibraryType>>>>,
-    members_memo: std::cell::RefCell<
-        std::collections::HashMap<Ty, std::collections::HashMap<String, FunctionSet>>,
-    >,
-    props_memo: std::cell::RefCell<
-        std::collections::HashMap<Ty, std::collections::HashMap<String, PropertySet>>,
-    >,
-    supertypes_memo: std::cell::RefCell<std::collections::HashMap<Ty, Vec<Ty>>>,
-    shape_memo: std::cell::RefCell<std::collections::HashMap<TypeName, Option<InheritanceShape>>>,
+    symbols_memo: std::cell::RefCell<FxHashMap<TypeName, Rc<ResolvedSymbols>>>,
+    types_memo: std::cell::RefCell<FxHashMap<TypeName, Option<Rc<LibraryType>>>>,
+    members_memo: std::cell::RefCell<FxHashMap<Ty, HashMap<String, FunctionSet>>>,
+    props_memo: std::cell::RefCell<FxHashMap<Ty, HashMap<String, PropertySet>>>,
+    supertypes_memo: std::cell::RefCell<FxHashMap<Ty, Vec<Ty>>>,
+    shape_memo: std::cell::RefCell<FxHashMap<TypeName, Option<InheritanceShape>>>,
 }
 
 impl SourceFallbackPlatform {
