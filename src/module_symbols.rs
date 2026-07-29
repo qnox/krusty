@@ -242,7 +242,7 @@ impl<'a> ModuleSymbols<'a> {
         arg_tys: &[Ty],
         packages: &[TypeName],
     ) -> Option<FunctionInfo> {
-        let overloads = self.top_level_overloads_in_scope(name, packages);
+        let overloads = self.top_level_overloads_accessible_in_scope(name, packages);
         let params = overloads
             .iter()
             .map(|fi| crate::frontend::Signature {
@@ -318,6 +318,23 @@ impl<'a> ModuleSymbols<'a> {
                         })
                     })
                     .is_some_and(|sig| packages.iter().any(|pkg| pkg.matches(&sig.package)))
+            })
+            .collect()
+    }
+
+    /// Package-scoped top-level overloads callable from this source file.
+    pub fn top_level_overloads_accessible_in_scope(
+        &self,
+        name: &str,
+        packages: &[TypeName],
+    ) -> Vec<FunctionInfo> {
+        self.top_level_overloads_in_scope(name, packages)
+            .into_iter()
+            .filter(|function| {
+                !function.visibility.is_private()
+                    || function
+                        .source_key
+                        .is_some_and(|(file, _)| Some(file) == self.source_file)
             })
             .collect()
     }

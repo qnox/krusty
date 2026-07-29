@@ -3021,6 +3021,7 @@ impl<'a> Parser<'a> {
                 non_null_type_params: Default::default(),
                 reified_type_params: Default::default(),
                 span: start,
+                signature_span: start,
                 flags: FdFlags::default(),
                 visibility: Visibility::Public,
                 annotations,
@@ -3130,6 +3131,7 @@ impl<'a> Parser<'a> {
             None
         };
         self.parse_where_clause();
+        let signature_end = self.t[self.i.saturating_sub(1)].span.hi;
         // A `=`-body or block body may sit on a following line (`fun f(): T\n{ … }`). Skip plain line
         // breaks to find it, restoring the position if what follows is neither — an abstract/no-body
         // function (no valid member/declaration begins with a bare `=` or `{`, so this is unambiguous).
@@ -3158,6 +3160,7 @@ impl<'a> Parser<'a> {
             non_null_type_params,
             reified_type_params,
             span: Span::new(start.lo, end.hi),
+            signature_span: Span::new(start.lo, signature_end),
             flags: FdFlags::default()
                 .with_is_inline(is_inline)
                 .with_is_final(is_final)

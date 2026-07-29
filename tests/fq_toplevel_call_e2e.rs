@@ -9,7 +9,8 @@ use super::common;
 const LIB: &str = "package a.b\n\
      fun helper(): Int = 42\n\
      fun scaled(n: Int): Int = n * 10\n\
-     fun greet(name: String): String = \"hi \" + name\n";
+     fun greet(name: String): String = \"hi \" + name\n\
+     fun join(first: String, second: String): String = first + second\n";
 
 #[test]
 fn fully_qualified_top_level_call() {
@@ -17,6 +18,11 @@ fn fully_qualified_top_level_call() {
         \x20 if (a.b.helper() != 42) return \"fail helper: ${a.b.helper()}\"\n\
         \x20 if (a.b.scaled(5) != 50) return \"fail scaled: ${a.b.scaled(5)}\"\n\
         \x20 if (a.b.greet(\"x\") != \"hi x\") return \"fail greet: ${a.b.greet(\"x\")}\"\n\
+        \x20 var trace = \"\"\n\
+        \x20 fun mark(value: String): String { trace += value; return value }\n\
+        \x20 val joined = a.b.join(second = mark(\"B\"), first = mark(\"A\"))\n\
+        \x20 if (joined != \"AB\") return \"fail joined: $joined\"\n\
+        \x20 if (trace != \"BA\") return \"fail order: $trace\"\n\
         \x20 return \"OK\"\n\
         }\n";
     if let Some(out) = common::run_box_against("fq_toplevel", LIB, main) {

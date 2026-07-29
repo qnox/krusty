@@ -624,6 +624,8 @@ pub struct FunDecl {
     /// may use them concretely (`is T`, `as T`, `T::class`) and codegen specializes them per call.
     pub reified_type_params: std::collections::HashSet<String>,
     pub span: Span,
+    /// Source range from `fun` through the optional `where` clause, excluding the body.
+    pub signature_span: Span,
     /// 1-based source line of the `fun` declaration (from `span.lo`), for its `LineNumberTable`.
     /// 0 = unknown (no debug table emitted). Filled by the same parser post-pass as `Class::decl_line`.
     pub decl_line: u32,
