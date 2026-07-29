@@ -1079,6 +1079,26 @@ impl ClassNames {
         src.resolve_type_name(fallback)
             .and_then(|t| t.companion_consts.get(const_name).cloned())
     }
+    fn into_shared(self) -> ClassNames {
+        let ClassNames {
+            base,
+            user,
+            ambiguous,
+        } = self;
+        let merged = if base.is_empty() {
+            user
+        } else {
+            let mut merged = (*base).clone();
+            merged.extend(user);
+            merged
+        };
+        ClassNames {
+            base: std::rc::Rc::new(merged),
+            user: HashMap::new(),
+            ambiguous,
+        }
+    }
+
     pub fn insert(&mut self, k: String, v: impl AsRef<str>) -> Option<TypeName> {
         self.ambiguous.remove(&k);
         self.user.insert(k, crate::types::type_name(v.as_ref()))
@@ -3318,6 +3338,7 @@ pub fn collect_signatures_with_cp(
         }
     }
     expand_type_aliases(&mut class_names, &alias_map);
+    let class_names = class_names.into_shared();
     let file_class_names: Vec<ClassNames> = imports_by_file
         .into_iter()
         .map(|imports| {
