@@ -783,26 +783,6 @@ impl JvmLibraries {
             // its record so a named-argument / omitted-`$default` member call resolves through the ONE
             // `resolve_type` member seam (the `instance_members` query), not a separate `functions()` walk.
             let meta_fns = metadata::class_functions(&ci);
-            let member_meta = |jvm_name: &str, value_arity: usize| {
-                meta_fns
-                    .iter()
-                    .find(|f| f.jvm_name == jvm_name && f.value_params.len() == value_arity)
-            };
-            let member_call_sig = |member: &LibraryMember, jvm_name: &str, jvm_vararg: bool| {
-                let value_arity = if member.suspend() && !member.params.is_empty() {
-                    member.params.len() - 1
-                } else {
-                    member.params.len()
-                };
-                member_meta(jvm_name, value_arity)
-                    .map(metadata::MetaFn::member_call_sig)
-                    .unwrap_or_else(|| {
-                        let vararg_index = jvm_vararg
-                            .then_some(value_arity)
-                            .and_then(|arity| arity.checked_sub(1));
-                        CallSig::metadata_member(value_arity, Vec::new(), Vec::new(), vararg_index)
-                    })
-            };
             for m in &ci.methods {
                 if m.is_bridge()
                     && ci.methods.iter().any(|target| {
@@ -823,6 +803,8 @@ impl JvmLibraries {
                 let Some((params, ret)) = parse_method_desc(&m.descriptor) else {
                     continue;
                 };
+                let member_metadata =
+                    super::classpath::aligned_member_metadata(meta_fns, &m.name, &m.descriptor);
                 let platform_nullable_params = params
                     .iter()
                     .enumerate()
@@ -845,20 +827,20 @@ impl JvmLibraries {
                 // The member's parsed generic signature — carries type-variable binding facts so a caller can
                 // infer a generic return from the receiver's type arguments (`Repo<Config>.load(): Config`).
                 member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
-                member.set_suspend(self.cp.is_suspend_method_name(internal_name, &m.name));
+                member.set_suspend(member_metadata.is_some_and(metadata::MetaFn::is_suspend));
                 let value_arity = member
                     .params
                     .len()
                     .saturating_sub(usize::from(member.suspend()));
-                if let Some(metadata) = member_meta(&m.name, value_arity) {
+                if let Some(metadata) = member_metadata {
                     member.visibility = metadata.visibility;
+                    member.set_ret_nullable(metadata.ret_nullable());
                 }
                 // A `suspend` member's descriptor erases its return to `Object` (the CPS convention). Recover
                 // the LOGICAL return from `@Metadata` (`Int`, not `Object`) so a caller unboxes the suspension
                 // result — keeping the erased type as `physical_ret` for the emitter.
                 if member.suspend() {
-                    let value_arity = member.params.len().saturating_sub(1);
-                    if let Some(f) = member_meta(&m.name, value_arity) {
+                    if let Some(f) = member_metadata {
                         member.physical_ret = member.ret;
                         let logical = metadata_return_info(f.ret_class, f.ret_nullable())
                             .apply(member.physical_ret);
@@ -881,7 +863,15 @@ impl JvmLibraries {
                 if is_map && member.name == "put" {
                     member.set_ret_nullable(true);
                 }
-                member.call_sig = member_call_sig(&member, &m.name, m.is_vararg());
+                member.call_sig = member_metadata
+                    .map(metadata::MetaFn::member_call_sig)
+                    .unwrap_or_else(|| {
+                        let vararg_index = m
+                            .is_vararg()
+                            .then_some(value_arity)
+                            .and_then(|arity| arity.checked_sub(1));
+                        CallSig::metadata_member(value_arity, Vec::new(), Vec::new(), vararg_index)
+                    });
                 member.call_sig.platform_nullable_params = platform_nullable_params;
                 if m.name == "<init>" {
                     // Parse the ctor's generic signature so the resolver can infer a construction's type
@@ -2301,7 +2291,7 @@ impl SymbolSource for JvmLibraries {
                         // continuation, recover the real return from the `Continuation<T>` type
                         // argument in the generic signature) so a normal call resolves. The coroutine
                         // pass re-derives the CPS form for the emit.
-                        let suspend = self.cp.is_suspend_method_name(cn, &m.name);
+                        let suspend = m.suspend();
                         let params: Vec<Ty> = if suspend {
                             m.params
                                 .split_last()
@@ -2315,19 +2305,18 @@ impl SymbolSource for JvmLibraries {
                         } else {
                             m.descriptor.clone()
                         };
-                        // Member metadata is keyed by the physical JVM name for value-class-param
-                        // mangled members (`copy` → `copy-<hash>`), and by the source/JVM name for
-                        // ordinary members.
                         let meta_name = m.physical_name.as_deref().unwrap_or(&m.name);
                         let member_facts =
                             self.cp
-                                .metadata_member_call_facts_name(cn, meta_name, params.len());
-                        // A `suspend` member's return facts are erased twice (to `Object`, then via the
-                        // `Continuation<T>` type argument), so recover nullability and exact source
-                        // classifier from the same class `@Metadata` member record.
-                        let member_ret_metadata = suspend.then_some(member_facts.ret);
-                        let suspend_ret_nullable =
-                            suspend && member_ret_metadata.is_some_and(|m| m.nullable);
+                                .metadata_member_call_facts_name(cn, meta_name, &m.descriptor);
+                        let member_ret_metadata = suspend.then(|| {
+                            member_facts
+                                .as_ref()
+                                .map(|facts| facts.ret)
+                                .unwrap_or_else(|| ReturnInfo::new(m.ret_nullable(), Some(m.ret)))
+                        });
+                        let suspend_ret_nullable = suspend
+                            && member_ret_metadata.is_some_and(|metadata| metadata.nullable);
                         let ret = if suspend {
                             // A generic `suspend` member returns a type parameter (`byId(): T`) via
                             // `Continuation<T>`; bind `T` to the receiver's concrete argument
@@ -2413,12 +2402,9 @@ impl SymbolSource for JvmLibraries {
                             );
                             recovered.unwrap_or(m.ret)
                         };
-                        // Preserve class-file call shape when metadata supplies the remaining facts.
-                        let mut call_sig = member_facts.call_sig;
-                        call_sig.vararg |= m.call_sig.vararg;
-                        call_sig
-                            .platform_nullable_params
-                            .clone_from(&m.call_sig.platform_nullable_params);
+                        let call_sig = member_facts
+                            .map(|facts| facts.call_sig)
+                            .unwrap_or_else(|| m.call_sig.clone());
                         // A generic-return builtin member (`Map.get(K): V?`) resolves to the erased
                         // classpath method (`java/util/Map.get` → `Object`), which carries no Kotlin
                         // nullability. Recover the source `V?` from the builtin `@Metadata`. Applied
