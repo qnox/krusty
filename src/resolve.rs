@@ -11218,10 +11218,41 @@ impl<'a> Checker<'a> {
             Some(self.file_index),
         )?;
         let (file, declaration) = selected.source_key?;
-        let (_, signature) = self
+        if let Some((_, signature)) = self
             .syms
-            .source_extension_function(file, DeclId(declaration))?;
-        Some((selected, signature.clone()))
+            .source_extension_function(file, DeclId(declaration))
+        {
+            return Some((selected.clone(), signature.clone()));
+        }
+        // A DECLARATION-ONLY-tier extension (a dependency-module source beyond the inferred
+        // prefix): its `Signature` lives in the fallback symbol table behind the platform seam,
+        // not in `syms`, so rebuild the checked shape from the resolved overload itself. The
+        // call checks and types exactly as an in-prefix extension; only the facade owner is
+        // unknown (`fn_facades_by_decl` has no entry), which the check phase never needs.
+        let signature = Signature {
+            params: selected.extension_value_params().to_vec(),
+            ret: selected.callable.ret,
+            generic_sig: selected.generic_sig.clone(),
+            projected_return_hazard: selected.projected_return_hazard,
+            flags: SigFlags::default()
+                .with_vararg(selected.call_sig.vararg_index.is_some())
+                .with_is_inline(selected.flags.inline.can_inline())
+                .with_is_suspend(selected.flags.suspend),
+            vararg_index: selected.call_sig.vararg_index,
+            required: selected.call_sig.required,
+            param_defaults: selected.call_sig.param_defaults.clone(),
+            param_default_values: Vec::new(),
+            param_names: selected.call_sig.param_names.clone(),
+            lambda_param_types: selected.call_sig.lambda_param_types.clone(),
+            lambda_recv: selected.call_sig.lambda_receiver_params.clone(),
+            visibility: selected.visibility,
+            context_count: selected.context_count,
+            source_decl: Some(DeclId(declaration)),
+            source_file: Some(file),
+            source_receiver: selected.receiver,
+            package: String::new(),
+        };
+        Some((selected, signature))
     }
 
     fn unique_visible_source_extension(&self, receiver: Ty, name: &str) -> Option<&Signature> {
