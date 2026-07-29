@@ -227,6 +227,15 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// Platform spelling for a physical zero-arg getter when Kotlin property metadata is unavailable.
     /// Common resolution asks for a semantic property name first; this hook is a fallback owned by the
     /// target because JVM uses JavaBean-style `getX`/`isX` while other targets need not.
+    /// Every plausible physical getter spelling for `property`, most-conventional first
+    /// (`id` → `getId`, `getID`; `urlPath` → `getUrlPath`, `getURLPath`) — the inverse of
+    /// Kotlin's decapitalize-smart getter-to-property mapping.
+    fn physical_property_getter_names(&self, property: &str) -> Vec<String> {
+        self.physical_property_getter_name(property)
+            .into_iter()
+            .collect()
+    }
+
     fn physical_property_getter_name(&self, _property: &str) -> Option<String> {
         None
     }

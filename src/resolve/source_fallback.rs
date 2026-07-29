@@ -648,6 +648,10 @@ impl SemanticPlatform for SourceFallbackPlatform {
         self.platform.physical_property_getter_name(property)
     }
 
+    fn physical_property_getter_names(&self, property: &str) -> Vec<String> {
+        self.platform.physical_property_getter_names(property)
+    }
+
     fn builtin_type_internal(&self, simple_name: &str) -> Option<String> {
         self.platform.builtin_type_internal(simple_name)
     }
