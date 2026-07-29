@@ -42,6 +42,311 @@ pub fn lex_name_tokens(src: &str, diags: &mut DiagSink) -> Vec<NameToken> {
     lexer(src, diags).run_names()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FormattingTokenKind {
+    Code(TokenKind),
+    Whitespace,
+    Newline,
+    LineComment,
+    BlockComment,
+    Shebang,
+    Opaque,
+    MarkerOpen,
+    MarkerClose,
+    TemplateExpressionStart,
+    TemplateExpressionEnd,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FormattingToken {
+    pub(crate) kind: FormattingTokenKind,
+    pub(crate) span: Span,
+}
+
+impl FormattingToken {
+    pub(crate) fn text<'a>(&self, source: &'a str) -> &'a str {
+        &source[self.span.lo as usize..self.span.hi as usize]
+    }
+}
+
+pub(crate) fn lex_formatting_tokens(
+    src: &str,
+    diags: &mut DiagSink,
+    max_tokens: usize,
+) -> Option<Vec<FormattingToken>> {
+    let lexed = lexer(src, diags).run_for_formatting(max_tokens)?;
+    FormattingTokenBuilder {
+        source: src,
+        semantic: &lexed.semantic,
+        retained: &lexed.retained,
+        index: 0,
+        retained_index: 0,
+        cursor: 0,
+        output: Vec::new(),
+        max_tokens,
+    }
+    .run()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetainedKind {
+    Whitespace,
+    Newline,
+    CarriageReturn,
+    LineComment,
+    BlockComment,
+    Shebang,
+    MarkerOpen,
+    MarkerClose,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RetainedToken {
+    kind: RetainedKind,
+    span: Span,
+}
+
+struct FormattingLexed {
+    semantic: Vec<Token>,
+    retained: Vec<RetainedToken>,
+}
+
+struct FormattingTokenBuilder<'a> {
+    source: &'a str,
+    semantic: &'a [Token],
+    retained: &'a [RetainedToken],
+    index: usize,
+    retained_index: usize,
+    cursor: usize,
+    output: Vec<FormattingToken>,
+    max_tokens: usize,
+}
+
+impl FormattingTokenBuilder<'_> {
+    fn run(mut self) -> Option<Vec<FormattingToken>> {
+        while let Some(token) = self.semantic.get(self.index).copied() {
+            match token.kind {
+                TokenKind::Eof => {
+                    self.emit_retained(self.source.len())?;
+                    break;
+                }
+                TokenKind::TemplateStart | TokenKind::RawTemplateStart => {
+                    self.emit_template()?;
+                }
+                _ => self.emit_code()?,
+            }
+        }
+        Some(self.output)
+    }
+
+    fn emit_template(&mut self) -> Option<()> {
+        let start = self.semantic[self.index];
+        let (lo, hi) = self.full_span(start);
+        self.emit_retained(lo)?;
+        self.push(FormattingTokenKind::Opaque, lo, hi)?;
+        self.discard_covered_retained(hi)?;
+        self.cursor = hi;
+        self.index += 1;
+
+        while let Some(token) = self.semantic.get(self.index).copied() {
+            match token.kind {
+                TokenKind::TemplateEnd => {
+                    let end = token.span.lo as usize;
+                    self.push(FormattingTokenKind::Opaque, self.cursor, end)?;
+                    self.cursor = end;
+                    self.index += 1;
+                    return Some(());
+                }
+                TokenKind::StrChunk => {
+                    self.push(
+                        FormattingTokenKind::Opaque,
+                        self.cursor,
+                        token.span.hi as usize,
+                    )?;
+                    self.cursor = token.span.hi as usize;
+                    self.index += 1;
+                }
+                TokenKind::Dollar
+                    if self
+                        .semantic
+                        .get(self.index + 1)
+                        .is_some_and(|next| next.kind == TokenKind::LBrace) =>
+                {
+                    let expression_open = self.semantic[self.index + 1];
+                    self.push(
+                        FormattingTokenKind::TemplateExpressionStart,
+                        self.cursor,
+                        expression_open.span.hi as usize,
+                    )?;
+                    self.cursor = expression_open.span.hi as usize;
+                    self.index += 2;
+                    self.emit_template_expression()?;
+                }
+                TokenKind::Dollar => {
+                    let Some(interpolation) = self.semantic.get(self.index + 1).copied() else {
+                        self.push(FormattingTokenKind::Opaque, self.cursor, self.source.len())?;
+                        self.cursor = self.source.len();
+                        return Some(());
+                    };
+                    let (_, hi) = self.full_span(interpolation);
+                    self.push(FormattingTokenKind::Opaque, self.cursor, hi)?;
+                    self.cursor = hi;
+                    self.index += 2;
+                }
+                TokenKind::Eof => {
+                    self.push(FormattingTokenKind::Opaque, self.cursor, self.source.len())?;
+                    self.cursor = self.source.len();
+                    return Some(());
+                }
+                _ => {
+                    let (_, hi) = self.full_span(token);
+                    self.push(FormattingTokenKind::Opaque, self.cursor, hi)?;
+                    self.cursor = hi;
+                    self.index += 1;
+                }
+            }
+        }
+        Some(())
+    }
+
+    fn emit_template_expression(&mut self) -> Option<()> {
+        let mut brace_depth = 1usize;
+        while let Some(token) = self.semantic.get(self.index).copied() {
+            match token.kind {
+                TokenKind::TemplateStart | TokenKind::RawTemplateStart => {
+                    self.emit_template()?;
+                }
+                TokenKind::LBrace => {
+                    brace_depth = brace_depth.saturating_add(1);
+                    self.emit_code()?;
+                }
+                TokenKind::RBrace if brace_depth == 1 => {
+                    let (lo, hi) = self.full_span(token);
+                    self.emit_retained(lo)?;
+                    self.push(FormattingTokenKind::TemplateExpressionEnd, lo, hi)?;
+                    self.discard_covered_retained(hi)?;
+                    self.cursor = hi;
+                    self.index += 1;
+                    return Some(());
+                }
+                TokenKind::RBrace => {
+                    brace_depth = brace_depth.saturating_sub(1);
+                    self.emit_code()?;
+                }
+                TokenKind::Eof => {
+                    self.emit_retained(self.source.len())?;
+                    self.cursor = self.source.len();
+                    return Some(());
+                }
+                _ => self.emit_code()?,
+            }
+        }
+        Some(())
+    }
+
+    fn emit_code(&mut self) -> Option<()> {
+        let token = self.semantic[self.index];
+        let (lo, hi) = self.full_span(token);
+        self.emit_retained(lo)?;
+        let kind = if token.kind == TokenKind::Newline && token.text(self.source) != ";" {
+            FormattingTokenKind::Newline
+        } else {
+            FormattingTokenKind::Code(token.kind)
+        };
+        self.push(kind, lo, hi)?;
+        self.discard_covered_retained(hi)?;
+        self.cursor = hi;
+        self.index += 1;
+        Some(())
+    }
+
+    fn emit_retained(&mut self, end: usize) -> Option<()> {
+        while let Some(token) = self.retained.get(self.retained_index).copied() {
+            let lo = token.span.lo as usize;
+            let hi = token.span.hi as usize;
+            if lo >= end {
+                break;
+            }
+            if lo != self.cursor || hi > end {
+                return None;
+            }
+            let kind = match token.kind {
+                RetainedKind::Whitespace => FormattingTokenKind::Whitespace,
+                RetainedKind::Newline => FormattingTokenKind::Newline,
+                RetainedKind::CarriageReturn => return None,
+                RetainedKind::LineComment => FormattingTokenKind::LineComment,
+                RetainedKind::BlockComment => FormattingTokenKind::BlockComment,
+                RetainedKind::Shebang => FormattingTokenKind::Shebang,
+                RetainedKind::MarkerOpen => FormattingTokenKind::MarkerOpen,
+                RetainedKind::MarkerClose => FormattingTokenKind::MarkerClose,
+            };
+            self.push(kind, lo, hi)?;
+            self.cursor = hi;
+            self.retained_index += 1;
+        }
+        (self.cursor == end).then_some(())
+    }
+
+    fn full_span(&self, token: Token) -> (usize, usize) {
+        let mut lo = token.span.lo as usize;
+        let mut hi = token.span.hi as usize;
+        if token.kind == TokenKind::Ident
+            && lo > 0
+            && lo - 1 >= self.cursor
+            && self.source.as_bytes().get(lo - 1) == Some(&b'`')
+        {
+            lo -= 1;
+            if self.source.as_bytes().get(hi) == Some(&b'`') {
+                hi += 1;
+            }
+        }
+        if token.kind == TokenKind::Newline
+            && self.source.as_bytes().get(lo) == Some(&b'\n')
+            && lo > 0
+            && self.source.as_bytes().get(lo - 1) == Some(&b'\r')
+        {
+            lo -= 1;
+        }
+        (lo, hi)
+    }
+
+    fn discard_covered_retained(&mut self, end: usize) -> Option<()> {
+        while let Some(token) = self
+            .retained
+            .get(self.retained_index)
+            .filter(|token| token.span.hi as usize <= end)
+        {
+            if token.kind != RetainedKind::CarriageReturn {
+                return None;
+            }
+            self.retained_index += 1;
+        }
+        Some(())
+    }
+
+    fn push(&mut self, kind: FormattingTokenKind, lo: usize, hi: usize) -> Option<()> {
+        if lo >= hi {
+            return Some(());
+        }
+        if kind == FormattingTokenKind::Opaque {
+            if let Some(previous) = self.output.last_mut() {
+                if previous.kind == FormattingTokenKind::Opaque && previous.span.hi as usize == lo {
+                    previous.span.hi = u32::try_from(hi).ok()?;
+                    return Some(());
+                }
+            }
+        }
+        if self.output.len() >= self.max_tokens {
+            return None;
+        }
+        self.output.push(FormattingToken {
+            kind,
+            span: Span::new(u32::try_from(lo).ok()?, u32::try_from(hi).ok()?),
+        });
+        Some(())
+    }
+}
+
 fn lexer<'a>(src: &'a str, diags: &'a mut DiagSink) -> Lexer<'a> {
     Lexer {
         s: src,
@@ -50,7 +355,18 @@ fn lexer<'a>(src: &'a str, diags: &'a mut DiagSink) -> Lexer<'a> {
         out: Vec::new(),
         diags,
         pending: std::collections::VecDeque::new(),
+        formatting: None,
     }
+}
+
+const MAX_FORMATTING_TEMPLATE_DEPTH: usize = 128;
+
+struct FormattingState {
+    retained: Vec<RetainedToken>,
+    remaining_result_tokens: usize,
+    remaining_template_allocations: usize,
+    template_depth: usize,
+    failed: bool,
 }
 
 struct Lexer<'a> {
@@ -62,6 +378,7 @@ struct Lexer<'a> {
     diags: &'a mut DiagSink,
     /// Tokens produced ahead of time (string-template expansion), drained before lexing more.
     pending: std::collections::VecDeque<Token>,
+    formatting: Option<FormattingState>,
 }
 
 impl<'a> Lexer<'a> {
@@ -75,6 +392,31 @@ impl<'a> Lexer<'a> {
             }
         }
         self.out
+    }
+
+    fn run_for_formatting(mut self, max_tokens: usize) -> Option<FormattingLexed> {
+        self.formatting = Some(FormattingState {
+            retained: Vec::new(),
+            remaining_result_tokens: max_tokens,
+            remaining_template_allocations: max_tokens,
+            template_depth: 0,
+            failed: false,
+        });
+        loop {
+            let token = self.next_token();
+            if self.formatting_failed() || !self.reserve_result_token() {
+                return None;
+            }
+            let is_eof = token.kind == TokenKind::Eof;
+            self.out.push(token);
+            if is_eof {
+                let formatting = self.formatting.take()?;
+                return Some(FormattingLexed {
+                    semantic: self.out,
+                    retained: formatting.retained,
+                });
+            }
+        }
     }
 
     fn run_names(mut self) -> Vec<NameToken> {
@@ -258,19 +600,63 @@ impl<'a> Lexer<'a> {
 
     fn skip_trivia(&mut self) {
         loop {
+            let start = self.i;
             match self.peek() {
-                b' ' | b'\t' | b'\r' => self.i += 1,
-                b'/' if self.peek2() == b'/' => {
-                    while self.i < self.b.len() && self.b[self.i] != b'\n' {
+                b'\r' if self.formatting.is_some() && self.peek2() == b'\n' => {
+                    self.i += 1;
+                    self.retain(RetainedKind::CarriageReturn, start, self.i);
+                }
+                b'\r' if self.formatting.is_some() => {
+                    self.i += 1;
+                    self.retain(RetainedKind::Newline, start, self.i);
+                }
+                b' ' | b'\t' | b'\r' => {
+                    self.i += 1;
+                    self.retain(RetainedKind::Whitespace, start, self.i);
+                }
+                b'#' if self.formatting.is_some() && self.i == 0 && self.peek2() == b'!' => {
+                    self.i += 2;
+                    while self.i < self.b.len() && !matches!(self.b[self.i], b'\r' | b'\n') {
                         self.i += 1;
                     }
+                    self.retain_line_suffix(RetainedKind::Shebang, start, self.i);
+                }
+                b'/' if self.peek2() == b'/' => {
+                    if self.formatting.is_some() {
+                        while self.i < self.b.len() && !matches!(self.b[self.i], b'\r' | b'\n') {
+                            self.i += 1;
+                        }
+                    } else {
+                        while self.i < self.b.len() && self.b[self.i] != b'\n' {
+                            self.i += 1;
+                        }
+                    }
+                    self.retain_line_suffix(RetainedKind::LineComment, start, self.i);
                 }
                 b'/' if self.peek2() == b'*' => {
                     self.i += 2;
-                    while self.i < self.b.len() && !(self.peek() == b'*' && self.peek2() == b'/') {
-                        self.i += 1;
+                    if self.formatting.is_some() {
+                        let mut depth = 1usize;
+                        while self.i < self.b.len() && depth > 0 {
+                            if self.peek() == b'/' && self.peek2() == b'*' {
+                                depth = depth.saturating_add(1);
+                                self.i += 2;
+                            } else if self.peek() == b'*' && self.peek2() == b'/' {
+                                depth -= 1;
+                                self.i += 2;
+                            } else {
+                                self.i += 1;
+                            }
+                        }
+                    } else {
+                        while self.i < self.b.len()
+                            && !(self.peek() == b'*' && self.peek2() == b'/')
+                        {
+                            self.i += 1;
+                        }
+                        self.i = (self.i + 2).min(self.b.len());
                     }
-                    self.i = (self.i + 2).min(self.b.len()); // consume */
+                    self.retain(RetainedKind::BlockComment, start, self.i);
                 }
                 // Diagnostic-test markers `<!DIAGNOSTIC_NAME!>` (open) and `<!>` (close) that wrap an
                 // expression/declaration in kotlinc's test corpus — strip them as trivia. The close
@@ -279,6 +665,7 @@ impl<'a> Lexer<'a> {
                 // unary `!`) is left intact (lowercase/expr operand, no `!>`), never eaten to EOF.
                 b'<' if self.peek2() == b'!' && self.peek3() == b'>' => {
                     self.i += 3; // `<!>`
+                    self.retain(RetainedKind::MarkerClose, start, self.i);
                 }
                 b'<' if self.peek2() == b'!'
                     && (self.peek3().is_ascii_uppercase() || self.peek3() == b'_') =>
@@ -292,13 +679,69 @@ impl<'a> Lexer<'a> {
                     }
                     if j + 1 < self.b.len() && self.b[j] == b'!' && self.b[j + 1] == b'>' {
                         self.i = j + 2; // consume through `!>`
+                        self.retain(RetainedKind::MarkerOpen, start, self.i);
                     } else {
                         break; // not a marker — a real `<` token follows
                     }
                 }
                 _ => break,
             }
+            if self.formatting_failed() {
+                break;
+            }
         }
+    }
+
+    fn retain(&mut self, kind: RetainedKind, lo: usize, hi: usize) {
+        if lo >= hi {
+            return;
+        }
+        let Some(state) = self.formatting.as_mut() else {
+            return;
+        };
+        if let Some(previous) = state.retained.last_mut() {
+            if previous.kind == kind && previous.span.hi as usize == lo {
+                previous.span.hi = hi as u32;
+                return;
+            }
+        }
+        if state.remaining_result_tokens == 0 {
+            state.failed = true;
+            return;
+        }
+        state.remaining_result_tokens -= 1;
+        state.retained.push(RetainedToken {
+            kind,
+            span: Span::new(lo as u32, hi as u32),
+        });
+    }
+
+    fn retain_line_suffix(&mut self, kind: RetainedKind, lo: usize, hi: usize) {
+        if self.formatting.is_none() {
+            return;
+        }
+        let mut suffix = hi;
+        while suffix > lo && matches!(self.b[suffix - 1], b' ' | b'\t') {
+            suffix -= 1;
+        }
+        self.retain(kind, lo, suffix);
+        self.retain(RetainedKind::Whitespace, suffix, hi);
+    }
+
+    fn reserve_result_token(&mut self) -> bool {
+        let Some(state) = self.formatting.as_mut() else {
+            return true;
+        };
+        if state.remaining_result_tokens == 0 {
+            state.failed = true;
+            return false;
+        }
+        state.remaining_result_tokens -= 1;
+        true
+    }
+
+    fn formatting_failed(&self) -> bool {
+        self.formatting.as_ref().is_some_and(|state| state.failed)
     }
 
     /// A backtick-quoted identifier (`` `in` ``, `` `is` ``, `` `name with spaces` ``) — Kotlin's escape
@@ -540,23 +983,48 @@ impl<'a> Lexer<'a> {
         raw: bool,
         interpolation_dollars: usize,
     ) -> Token {
-        let mut toks: Vec<Token> = vec![Token {
+        let first = Token {
             kind: if raw {
                 TokenKind::RawTemplateStart
             } else {
                 TokenKind::TemplateStart
             },
             span: Span::new(lo, (quote_start + if raw { 3 } else { 1 }) as u32),
-        }];
+        };
+        if !self.enter_template() {
+            return first;
+        }
+        let result = self.string_template_inner(first, lo, quote_start, raw, interpolation_dollars);
+        self.leave_template();
+        result
+    }
+
+    fn string_template_inner(
+        &mut self,
+        first: Token,
+        lo: u32,
+        quote_start: usize,
+        raw: bool,
+        interpolation_dollars: usize,
+    ) -> Token {
+        let mut toks = Vec::new();
+        if !self.push_template_token(&mut toks, first) {
+            return first;
+        }
         self.i = quote_start + if raw { 3 } else { 1 };
         let mut chunk_lo = self.i;
         loop {
             if self.i >= self.b.len() {
                 if self.i > chunk_lo {
-                    toks.push(Token {
-                        kind: TokenKind::StrChunk,
-                        span: Span::new(chunk_lo as u32, self.i as u32),
-                    });
+                    if !self.push_template_token(
+                        &mut toks,
+                        Token {
+                            kind: TokenKind::StrChunk,
+                            span: Span::new(chunk_lo as u32, self.i as u32),
+                        },
+                    ) {
+                        return first;
+                    }
                 }
                 self.diags
                     .error(Span::new(lo, self.i as u32), "unterminated string literal");
@@ -571,11 +1039,16 @@ impl<'a> Lexer<'a> {
                 let closes = if raw { quotes >= 3 } else { true };
                 if closes {
                     let content_hi = if raw { self.i + quotes - 3 } else { self.i };
-                    if content_hi > chunk_lo {
-                        toks.push(Token {
-                            kind: TokenKind::StrChunk,
-                            span: Span::new(chunk_lo as u32, content_hi as u32),
-                        });
+                    if content_hi > chunk_lo
+                        && !self.push_template_token(
+                            &mut toks,
+                            Token {
+                                kind: TokenKind::StrChunk,
+                                span: Span::new(chunk_lo as u32, content_hi as u32),
+                            },
+                        )
+                    {
+                        return first;
                     }
                     self.i += if raw { quotes } else { 1 };
                     break;
@@ -590,27 +1063,45 @@ impl<'a> Lexer<'a> {
             if let Some((marker_lo, after_dollars)) =
                 self.interpolation_marker_at(self.i, interpolation_dollars)
             {
-                if marker_lo > chunk_lo {
-                    toks.push(Token {
-                        kind: TokenKind::StrChunk,
-                        span: Span::new(chunk_lo as u32, marker_lo as u32),
-                    });
+                if marker_lo > chunk_lo
+                    && !self.push_template_token(
+                        &mut toks,
+                        Token {
+                            kind: TokenKind::StrChunk,
+                            span: Span::new(chunk_lo as u32, marker_lo as u32),
+                        },
+                    )
+                {
+                    return first;
                 }
                 self.i = after_dollars;
-                toks.push(Token {
-                    kind: TokenKind::Dollar,
-                    span: Span::new(marker_lo as u32, self.i as u32),
-                });
+                if !self.push_template_token(
+                    &mut toks,
+                    Token {
+                        kind: TokenKind::Dollar,
+                        span: Span::new(marker_lo as u32, self.i as u32),
+                    },
+                ) {
+                    return first;
+                }
                 if self.b[self.i] == b'{' {
                     let lb = self.i;
                     self.i += 1;
-                    toks.push(Token {
-                        kind: TokenKind::LBrace,
-                        span: Span::new(lb as u32, self.i as u32),
-                    });
+                    if !self.push_template_token(
+                        &mut toks,
+                        Token {
+                            kind: TokenKind::LBrace,
+                            span: Span::new(lb as u32, self.i as u32),
+                        },
+                    ) {
+                        return first;
+                    }
                     let mut depth = 1;
                     loop {
                         let t = self.next_token();
+                        if self.formatting_failed() {
+                            return first;
+                        }
                         if t.kind == TokenKind::Eof {
                             break;
                         }
@@ -619,23 +1110,35 @@ impl<'a> Lexer<'a> {
                         } else if t.kind == TokenKind::RBrace {
                             depth -= 1;
                             if depth == 0 {
-                                toks.push(t);
+                                if !self.push_template_token(&mut toks, t) {
+                                    return first;
+                                }
                                 break;
                             }
                         }
-                        toks.push(t);
+                        if !self.push_template_token(&mut toks, t) {
+                            return first;
+                        }
                     }
                 } else if self.b[self.i] == b'`' {
-                    toks.push(self.backtick_ident());
+                    let token = self.backtick_ident();
+                    if !self.push_template_token(&mut toks, token) {
+                        return first;
+                    }
                 } else {
                     let id_lo = self.i;
                     while self.i < self.b.len() && is_ident_continue_at(self.b, self.i) {
                         self.i += utf8_char_len(self.b[self.i]);
                     }
-                    toks.push(Token {
-                        kind: TokenKind::Ident,
-                        span: Span::new(id_lo as u32, self.i as u32),
-                    });
+                    if !self.push_template_token(
+                        &mut toks,
+                        Token {
+                            kind: TokenKind::Ident,
+                            span: Span::new(id_lo as u32, self.i as u32),
+                        },
+                    ) {
+                        return first;
+                    }
                 }
                 chunk_lo = self.i;
             } else if c == b'$' {
@@ -646,13 +1149,49 @@ impl<'a> Lexer<'a> {
                 self.i += utf8_char_len(c);
             }
         }
-        toks.push(Token {
-            kind: TokenKind::TemplateEnd,
-            span: Span::new(self.i as u32, self.i as u32),
-        });
-        let first = toks.remove(0);
-        self.pending.extend(toks);
+        if !self.push_template_token(
+            &mut toks,
+            Token {
+                kind: TokenKind::TemplateEnd,
+                span: Span::new(self.i as u32, self.i as u32),
+            },
+        ) {
+            return first;
+        }
+        let mut tokens = toks.into_iter();
+        let first = tokens.next().unwrap_or(first);
+        self.pending.extend(tokens);
         first
+    }
+
+    fn enter_template(&mut self) -> bool {
+        let Some(state) = self.formatting.as_mut() else {
+            return true;
+        };
+        if state.template_depth >= MAX_FORMATTING_TEMPLATE_DEPTH {
+            state.failed = true;
+            return false;
+        }
+        state.template_depth += 1;
+        true
+    }
+
+    fn leave_template(&mut self) {
+        if let Some(state) = self.formatting.as_mut() {
+            state.template_depth = state.template_depth.saturating_sub(1);
+        }
+    }
+
+    fn push_template_token(&mut self, tokens: &mut Vec<Token>, token: Token) -> bool {
+        if let Some(state) = self.formatting.as_mut() {
+            if state.remaining_template_allocations == 0 {
+                state.failed = true;
+                return false;
+            }
+            state.remaining_template_allocations -= 1;
+        }
+        tokens.push(token);
+        true
     }
 
     fn multi_dollar_prefix_len(&self) -> Option<usize> {
@@ -789,6 +1328,173 @@ mod tests {
         use TokenKind::*;
         let k = kinds("val x // line\n /* block */ = 1");
         assert_eq!(k, vec![KwVal, Ident, Eq, IntLit, Eof]);
+    }
+
+    #[test]
+    fn formatting_lexer_preserves_bytes_and_exposes_template_expressions() {
+        let source =
+            "val text = \"sum=${left+right}; raw=$left\" /* outer /* nested */ */ // tail  \r\n";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex_formatting_tokens(source, &mut diagnostics, 128).unwrap();
+        let reconstructed = tokens
+            .iter()
+            .map(|token| token.text(source))
+            .collect::<String>();
+        assert_eq!(reconstructed, source);
+        assert!(tokens
+            .iter()
+            .any(|token| token.kind == FormattingTokenKind::TemplateExpressionStart));
+        assert!(tokens
+            .iter()
+            .any(|token| token.kind == FormattingTokenKind::TemplateExpressionEnd));
+        assert!(tokens.iter().any(|token| token.kind
+            == FormattingTokenKind::Code(TokenKind::Plus)
+            && token.text(source) == "+"));
+        assert!(tokens
+            .iter()
+            .any(|token| token.kind == FormattingTokenKind::BlockComment));
+        assert!(tokens.iter().any(
+            |token| token.kind == FormattingTokenKind::Whitespace && token.text(source) == "  "
+        ));
+        assert!(tokens.iter().any(
+            |token| token.kind == FormattingTokenKind::Newline && token.text(source) == "\r\n"
+        ));
+        assert!(!diagnostics.has_errors());
+    }
+
+    #[test]
+    fn formatting_lexer_bounds_retained_and_template_tokens() {
+        let mut diagnostics = DiagSink::new();
+        assert!(lex_formatting_tokens("a+b+c", &mut diagnostics, 2).is_none());
+        let interpolations = format!("\"{}\"", "${value}".repeat(64));
+        assert!(lex_formatting_tokens(&interpolations, &mut diagnostics, 16).is_none());
+    }
+
+    #[test]
+    fn formatting_lexer_bounds_nested_template_expansion() {
+        let mut source = "value".to_string();
+        for _ in 0..=MAX_FORMATTING_TEMPLATE_DEPTH {
+            source = format!("\"${{{source}}}\"");
+        }
+        let mut diagnostics = DiagSink::new();
+        assert!(lex_formatting_tokens(
+            &source,
+            &mut diagnostics,
+            MAX_FORMATTING_TEMPLATE_DEPTH * MAX_FORMATTING_TEMPLATE_DEPTH * 16
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn formatting_lexer_partitions_adjacent_backticks_without_overlap() {
+        let source = "`a`b";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex_formatting_tokens(source, &mut diagnostics, 16).unwrap();
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| token.text(source))
+                .collect::<String>(),
+            source
+        );
+        assert!(tokens
+            .windows(2)
+            .all(|pair| pair[0].span.hi == pair[1].span.lo));
+    }
+
+    #[test]
+    fn formatting_lexer_reconstructs_malformed_backticks_and_multi_dollar_templates() {
+        let source = "val `broken\nval text = $$\"raw=$value; sum=$${left+right}\"";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex_formatting_tokens(source, &mut diagnostics, 64).unwrap();
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| token.text(source))
+                .collect::<String>(),
+            source
+        );
+        assert!(tokens.iter().any(|token| {
+            token.kind == FormattingTokenKind::Code(TokenKind::Plus) && token.text(source) == "+"
+        }));
+        assert!(tokens.iter().any(|token| {
+            token.kind == FormattingTokenKind::Opaque && token.text(source).contains("raw=$value")
+        }));
+    }
+
+    #[test]
+    fn formatting_lexer_retains_diagnostic_markers_as_exact_boundaries() {
+        let source = "listOf(1<!COMMA!>,<!><!OUTER!>call(2)<!>)";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex_formatting_tokens(source, &mut diagnostics, 64).unwrap();
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| token.text(source))
+                .collect::<String>(),
+            source
+        );
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|token| token.kind == FormattingTokenKind::MarkerOpen)
+                .count(),
+            2
+        );
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|token| token.kind == FormattingTokenKind::MarkerClose)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn ordinary_lexer_keeps_shebang_and_nested_comment_behavior() {
+        let source = "#!/bin\n/* outer /* inner */ tail */ val value = 1";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let token_text = tokens
+            .iter()
+            .filter(|token| token.kind != TokenKind::Eof)
+            .map(|token| (token.kind, token.text(source)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            token_text,
+            vec![
+                (TokenKind::Unknown, "#"),
+                (TokenKind::Not, "!"),
+                (TokenKind::Slash, "/"),
+                (TokenKind::Ident, "bin"),
+                (TokenKind::Newline, "\n"),
+                (TokenKind::Ident, "tail"),
+                (TokenKind::Star, "*"),
+                (TokenKind::Slash, "/"),
+                (TokenKind::KwVal, "val"),
+                (TokenKind::Ident, "value"),
+                (TokenKind::Eq, "="),
+                (TokenKind::IntLit, "1"),
+            ]
+        );
+
+        let names = lex_name_tokens(source, &mut diagnostics)
+            .into_iter()
+            .map(|token| (token.kind, token.text(source)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                (NameTokenKind::Operator, "!"),
+                (NameTokenKind::Operator, "/"),
+                (NameTokenKind::Ident, "bin"),
+                (NameTokenKind::Newline, "\n"),
+                (NameTokenKind::Ident, "tail"),
+                (NameTokenKind::Operator, "*"),
+                (NameTokenKind::Operator, "/"),
+                (NameTokenKind::Ident, "value"),
+            ]
+        );
     }
 
     #[test]

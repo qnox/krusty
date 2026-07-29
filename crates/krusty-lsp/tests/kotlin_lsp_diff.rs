@@ -265,6 +265,10 @@ impl LspProcess {
             }),
             "LSP must advertise the official server's workspace-symbol contract"
         );
+        assert_eq!(
+            response["result"]["capabilities"]["documentFormattingProvider"], true,
+            "LSP must advertise the official server's document-formatting contract"
+        );
         self.notify("initialized", json!({}));
         SemanticLegend {
             types: response["result"]["capabilities"]["semanticTokensProvider"]["legend"]
@@ -561,6 +565,29 @@ impl LspProcess {
         symbols.dedup();
         Value::Array(symbols)
     }
+
+    fn formatting(&mut self, uri: &str, tab_size: u32, insert_spaces: bool) -> Value {
+        self.formatting_options(
+            uri,
+            json!({
+                "tabSize": tab_size,
+                "insertSpaces": insert_spaces
+            }),
+        )
+    }
+
+    fn formatting_options(&mut self, uri: &str, options: Value) -> Value {
+        let request_id = self.next_request_id();
+        let response = self.request(
+            request_id,
+            "textDocument/formatting",
+            json!({
+                "textDocument": {"uri": uri},
+                "options": options
+            }),
+        );
+        response.get("result").cloned().unwrap_or(Value::Null)
+    }
 }
 
 impl Drop for LspProcess {
@@ -621,6 +648,50 @@ fn position_after_marker(source: &str, marker: &str) -> (u32, u32) {
     let line_start = prefix.rfind('\n').map_or(0, |newline| newline + 1);
     let character = prefix[line_start..].encode_utf16().count() as u32;
     (line, character)
+}
+
+fn apply_lsp_text_edits(source: &str, edits: &Value) -> String {
+    let mut edits = edits
+        .as_array()
+        .expect("formatting result must be a text-edit array")
+        .iter()
+        .map(|edit| {
+            let start = lsp_position_offset(source, &edit["range"]["start"]);
+            let end = lsp_position_offset(source, &edit["range"]["end"]);
+            let new_text = edit["newText"].as_str().expect("text edit newText");
+            (start, end, new_text)
+        })
+        .collect::<Vec<_>>();
+    edits.sort_by_key(|edit| std::cmp::Reverse((edit.0, edit.1)));
+    let mut result = source.to_string();
+    for (start, end, new_text) in edits {
+        assert!(start <= end, "text edit range");
+        result.replace_range(start..end, new_text);
+    }
+    result
+}
+
+fn lsp_position_offset(source: &str, position: &Value) -> usize {
+    let line = position["line"].as_u64().expect("position line") as usize;
+    let character = position["character"].as_u64().expect("position character") as usize;
+    let mut line_start = 0usize;
+    for _ in 0..line {
+        let newline = source[line_start..]
+            .find('\n')
+            .unwrap_or_else(|| panic!("position line beyond document"));
+        line_start += newline + 1;
+    }
+    let mut utf16 = 0usize;
+    for (relative, ch) in source[line_start..].char_indices() {
+        if utf16 == character {
+            return line_start + relative;
+        }
+        assert!(ch != '\n', "position beyond line");
+        utf16 += ch.len_utf16();
+        assert!(utf16 <= character, "position splits UTF-16 character");
+    }
+    assert_eq!(utf16, character, "position beyond document");
+    source.len()
 }
 
 #[test]
@@ -1147,6 +1218,217 @@ fn workspace_symbols_match_official_kotlin_lsp() {
     ];
 
     assert_eq!(actual, expected, "workspace-symbol mismatches");
+}
+
+#[test]
+fn document_formatting_matches_official_kotlin_lsp() {
+    let Ok(kotlin_lsp) = std::env::var("KRUSTY_KOTLIN_LSP") else {
+        eprintln!("skipping Kotlin LSP formatting differential: set KRUSTY_KOTLIN_LSP");
+        return;
+    };
+    let _official_guard = OFFICIAL_DIFFERENTIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let project = TempProject::new("formatting-differential");
+    let root = project.path();
+    let source_root = root.join("src/main/kotlin");
+    std::fs::create_dir_all(&source_root).unwrap();
+    std::fs::write(
+        root.join("settings.gradle"),
+        "rootProject.name = 'formatting-differential'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("build.gradle"),
+        format!(
+            "plugins {{ id 'org.jetbrains.kotlin.jvm' version '{}' }}\n\
+             repositories {{ mavenCentral() }}\n",
+            reference_kotlin_version()
+        ),
+    )
+    .unwrap();
+    let source = "package formattingparity\n\
+                  class FormattingBox{\n\
+                  fun sum(left:Int,right:Int):Int{\n\
+                  return left+right\n\
+                  }\n\
+                  }\n\
+                  fun formattingUse( ){\n\
+                  val box=FormattingBox( )\n\
+                  println(box.sum(1,2))\n\
+                  }\n\
+                  fun formattingAnalysisSentinel(): String = 1\n";
+    let complex_source = "@file:Suppress(\"UNUSED_PARAMETER\")\n\
+                          package formattingparity\n\
+	                          import kotlin.collections.List\n\
+	                          @Deprecated(\"old\")\n\
+	                          data class FormattingPair<T>(val left:T,val right:T)\n\
+	                          class lowerBox<t>(val value:t)\n\
+	                          fun <T> choose(flag:Boolean,left:T,right:T):T{\n\
+	                          return if(flag){left}else{right}\n\
+	                          }\n\
+	                          fun defaulted(value:Int=1){println(value)}\n\
+	                          fun defaultLambda(block:()->Unit={println(\"default\")}){block()}\n\
+	                          fun multilineGeneric(value:Map<\n\
+	                          String,\n\
+	                          Int\n\
+	                          >){println(value)}\n\
+	                          fun classify(value:Int):String{\n\
+                          return when(value){\n\
+                          1->\"one\"\n\
+                          else->\"other\"\n\
+                          }\n\
+                          }\n\
+                          fun transform(values:List<Int>):List<Int>{\n\
+                          return values.filter{value->value in 1..10}.map{it*2}\n\
+                          }\n";
+    let multiline_source = "package formattingparity\n\
+                            fun multiline( ):List<Int>{\n\
+                            return listOf(\n\
+                            1,\n\
+                            2,\n\
+                            ).map{\n\
+                            it+1\n\
+                            }\n\
+                            }\n\
+                            fun strings( ){\n\
+                            val text=\"a+b\"/* keep  x+y */\n\
+                            println( text )\n\
+                            }\n";
+    let lexical_source = "#!/usr/bin/env kotlin\n\
+                          @file:Suppress(\"UNUSED_VARIABLE\")\n\
+                          package formattingparity\n\
+                          @get:Deprecated(\"old\")\n\
+                          val annotated:Int=1\n\
+                          val raw=\"\"\"a+b\"\"\"\"\n\
+                          val interpolated=\"sum=${1+2}\"\n\
+                          fun exponent():Double=1e-3\n\
+                          fun adjacent(a:Int,b:Int)=a - -b + (a + +b)\n\
+                          fun labels(values:List<Int>):Int{\n\
+                          loop@ for(value in values){\n\
+                          if(value>0)break@loop\n\
+                          }\n\
+                          return values.map loop@{value->return@loop value+1}.sum()\n\
+                          }\n\
+                          fun inlineBlock(){println(\"x\")}\n\
+                          fun trailing(values:List<Int>)=values.map{value->value+1}\n\
+                          fun choose(value:Int)=when{value>0->1}\n";
+    let crlf_source =
+        "package formattingparity\r\nfun crlf( ){\r\nval raw=\"\"\"a\r\nb\"\"\"\r\n}\r\n";
+    let cases = [
+        ("common", "Formatting.kt", source),
+        ("complex", "ComplexFormatting.kt", complex_source),
+        ("multiline", "MultilineFormatting.kt", multiline_source),
+        ("lexical", "LexicalFormatting.kt", lexical_source),
+        ("crlf", "CrlfFormatting.kt", crlf_source),
+    ];
+    for (_, file, contents) in cases {
+        std::fs::write(source_root.join(file), contents).unwrap();
+    }
+    let root_uri = format!("file://{}", root.display());
+    let uris = cases.map(|(_, file, _)| format!("file://{}", source_root.join(file).display()));
+
+    let mut reference = LspProcess::spawn(&kotlin_lsp, &["--stdio"]);
+    reference.initialize(&root_uri);
+    let _ = reference.diagnostics(&uris[0], source);
+    let expected = cases
+        .iter()
+        .zip(&uris)
+        .enumerate()
+        .map(|(index, ((label, _, contents), uri))| {
+            if index != 0 {
+                reference.open_document(uri, contents);
+            }
+            let edits = reference.formatting(uri, 4, true);
+            assert!(
+                edits.is_array(),
+                "official {label} formatting result: {edits}"
+            );
+            apply_lsp_text_edits(contents, &edits)
+        })
+        .collect::<Vec<_>>();
+    let expected_alternate_options = reference.formatting(&uris[2], 2, false);
+    assert!(expected_alternate_options.is_array());
+    let expected_alternate_text =
+        apply_lsp_text_edits(multiline_source, &expected_alternate_options);
+    let expected_zero_tab = reference.formatting(&uris[2], 0, true);
+    assert!(
+        expected_zero_tab.is_array(),
+        "official zero-tab formatting result: {expected_zero_tab}"
+    );
+    let expected_zero_tab_text = apply_lsp_text_edits(multiline_source, &expected_zero_tab);
+    let expected_optional = reference.formatting_options(
+        &uris[2],
+        json!({
+            "tabSize": 2,
+            "insertSpaces": true,
+            "trimTrailingWhitespace": true,
+            "insertFinalNewline": true,
+            "trimFinalNewlines": true
+        }),
+    );
+    let expected_optional_text = apply_lsp_text_edits(multiline_source, &expected_optional);
+    reference.change_document(&uris[0], 2, json!([{"text": expected[0].clone()}]));
+    let expected_idempotent = reference.formatting(&uris[0], 4, true);
+    drop(reference);
+
+    let mut actual_server =
+        LspProcess::spawn(env!("CARGO_BIN_EXE_krusty-lsp"), &["--stdio", "-no-jdk"]);
+    actual_server.initialize(&root_uri);
+    let actual = cases
+        .iter()
+        .zip(&uris)
+        .map(|((label, _, contents), uri)| {
+            actual_server.open_document(uri, contents);
+            let edits = actual_server.formatting(uri, 4, true);
+            assert!(
+                edits.is_array(),
+                "actual {label} formatting result: {edits}"
+            );
+            apply_lsp_text_edits(contents, &edits)
+        })
+        .collect::<Vec<_>>();
+    let actual_alternate_options = actual_server.formatting(&uris[2], 2, false);
+    let actual_alternate_text = apply_lsp_text_edits(multiline_source, &actual_alternate_options);
+    let actual_zero_tab = actual_server.formatting(&uris[2], 0, true);
+    let actual_zero_tab_text = apply_lsp_text_edits(multiline_source, &actual_zero_tab);
+    let actual_optional = actual_server.formatting_options(
+        &uris[2],
+        json!({
+            "tabSize": 2,
+            "insertSpaces": true,
+            "trimTrailingWhitespace": true,
+            "insertFinalNewline": true,
+            "trimFinalNewlines": true
+        }),
+    );
+    let actual_optional_text = apply_lsp_text_edits(multiline_source, &actual_optional);
+    actual_server.change_document(&uris[0], 2, json!([{"text": actual[0].clone()}]));
+    let actual_idempotent = actual_server.formatting(&uris[0], 4, true);
+
+    for (index, (label, _, _)) in cases.iter().enumerate() {
+        assert_eq!(
+            actual[index], expected[index],
+            "{label} document-formatting mismatch"
+        );
+    }
+    assert_eq!(
+        actual_alternate_text, expected_alternate_text,
+        "formatting-option behavior mismatch"
+    );
+    assert_eq!(
+        actual_zero_tab_text, expected_zero_tab_text,
+        "zero-tab-size formatting behavior mismatch"
+    );
+    assert_eq!(
+        actual_optional_text, expected_optional_text,
+        "optional formatting-option behavior mismatch"
+    );
+    assert_eq!(
+        actual_idempotent, expected_idempotent,
+        "idempotent formatting edit mismatch"
+    );
 }
 
 #[test]
