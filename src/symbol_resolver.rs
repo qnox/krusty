@@ -665,10 +665,6 @@ fn bind_ext_ret(gsig: &GenericSig, receiver: Ty, args: &[Ty], targs: &[Ty]) -> T
     ty_subst(gsig.ret, &binds)
 }
 
-/// Bind an extension's generic return when OMITTED defaults leave the call args misaligned with the
-/// signature's value params. With a trailing lambda the provided args are a prefix and the last arg fills
-/// the LAST value-param (the omitted middle is skipped); otherwise the args are a leading prefix. Falls
-/// back to the plain positional binder when the overload has no generic signature.
 fn bind_defaulted_ext_ret(
     o: &FunctionInfo,
     receiver: Ty,
@@ -676,27 +672,25 @@ fn bind_defaulted_ext_ret(
     targs: &[Ty],
     trailing_lambda: bool,
 ) -> Ty {
-    let Some(gsig) = o.generic_sig.as_ref() else {
-        return o.callable.ret;
-    };
-    let mut binds = seeded_gsig_binds(gsig, targs);
-    if let Some(recv_sig) = gsig.receiver {
+    let semantic = o.semantic_signature();
+    let mut binds = seeded_gsig_binds(&semantic, targs);
+    if let Some(recv_sig) = semantic.receiver {
         unify_ty(recv_sig, receiver, &mut binds);
     }
     if trailing_lambda {
         let prefix = args.len().saturating_sub(1);
-        for (ps, a) in gsig.params.iter().take(prefix).zip(args) {
+        for (ps, a) in semantic.params.iter().take(prefix).zip(args) {
             unify_ty(*ps, *a, &mut binds);
         }
-        if let (Some(ls), Some(la)) = (gsig.params.last(), args.last()) {
+        if let (Some(ls), Some(la)) = (semantic.params.last(), args.last()) {
             unify_ty(*ls, *la, &mut binds);
         }
     } else {
-        for (ps, a) in gsig.params.iter().zip(args) {
+        for (ps, a) in semantic.params.iter().zip(args) {
             unify_ty(*ps, *a, &mut binds);
         }
     }
-    ty_subst(gsig.ret, &binds)
+    ty_subst(semantic.ret, &binds)
 }
 
 fn bind_defaulted_ext_ret_slots(
@@ -705,19 +699,17 @@ fn bind_defaulted_ext_ret_slots(
     slots: &[Option<Ty>],
     targs: &[Ty],
 ) -> Ty {
-    let Some(gsig) = o.generic_sig.as_ref() else {
-        return o.callable.ret;
-    };
-    let mut binds = seeded_gsig_binds(gsig, targs);
-    if let Some(recv_sig) = gsig.receiver {
+    let semantic = o.semantic_signature();
+    let mut binds = seeded_gsig_binds(&semantic, targs);
+    if let Some(recv_sig) = semantic.receiver {
         unify_ty(recv_sig, receiver, &mut binds);
     }
-    for (ps, slot) in gsig.params.iter().zip(slots) {
+    for (ps, slot) in semantic.params.iter().zip(slots) {
         if let Some(arg) = slot {
             unify_ty(*ps, *arg, &mut binds);
         }
     }
-    ty_subst(gsig.ret, &binds)
+    ty_subst(semantic.ret, &binds)
 }
 
 /// If `sig` is a function type, the substituted types of its lambda parameters. Empty for anything else.
@@ -1108,38 +1100,27 @@ fn best_companion_overload<'a>(
     }
 }
 
-/// Extension overloads of a receiver-filtered set, ordered most-specific-first by the SOURCE receiver rank
-/// (the same `ReceiverMro` ranking the overload selector uses) rather than the provider's baked
-/// `receiver_rank`. The provider ranks a primitive-array family by enumeration order — every `IntArray`/
-/// `CharArray`/… overload ties at the array rung — so `IntArray.any`'s block parameter would tie with
-/// `CharArray.any`'s and the wrong one (`(Char)->…`) could win. Ranking by the actual receiver drops the
-/// non-applicable siblings (a `CharArray` extension does not apply to an `IntArray`) and keeps only the
-/// exact match at rung 0.
 pub(crate) fn ranked_extension_overloads_by_recv<'a>(
     src: &dyn SymbolSource,
     receiver: Ty,
     fs: &'a FunctionSet,
     allow_must_inline: bool,
-) -> Vec<&'a FunctionInfo> {
+) -> Vec<(u32, Ty, &'a FunctionInfo)> {
     let mro = ReceiverMro::new(src, receiver);
-    let mut out: Vec<(u32, &FunctionInfo)> = fs
+    let mut out: Vec<(u32, Ty, &FunctionInfo)> = fs
         .overloads
         .iter()
         .filter(|o| {
             o.is_extension() && (o.public() || (allow_must_inline && o.flags.inline.must_inline()))
         })
         .filter_map(|o| {
-            // The `functions()` provider labels every candidate with the QUERIED receiver, not its
-            // own declared one — so `o.receiver` can't tell `IntArray.any` from `CharArray.any`. Rank by the
-            // real declared receiver on the parsed generic signature; a candidate with no signature is
-            // dropped (both callers gate on `generic_sig` anyway). This drops the non-applicable
-            // primitive-array siblings that `o.receiver` would falsely tie at rung 0.
-            let decl = o.generic_sig.as_ref().and_then(|g| g.receiver)?;
-            mro.rank(src, decl).map(|r| (r, o))
+            let decl = o.semantic_receiver()?;
+            mro.match_receiver(src, decl)
+                .map(|(rank, binding_receiver)| (rank, binding_receiver, o))
         })
         .collect();
-    out.sort_by_key(|(r, _)| *r);
-    out.into_iter().map(|(_, o)| o).collect()
+    out.sort_by_key(|(rank, _, _)| *rank);
+    out
 }
 
 /// Map each provided argument to a logical parameter index. Identity when the counts match; else, for a
@@ -1892,7 +1873,7 @@ impl<'a> SymbolResolver<'a> {
                             .into_iter()
                             .filter(|o| {
                                 o.is_extension()
-                                    && o.receiver
+                                    && o.semantic_receiver()
                                         .and_then(|dr| recv_mro.rank(&self.src, dr))
                                         .is_some()
                             }),
@@ -2273,11 +2254,8 @@ impl<'a> SymbolResolver<'a> {
         let args: &[Ty] = spread.as_ref().map_or(args, |(a, _)| a.as_slice());
         if vparams.len() == args.len() {
             let c = &o.callable;
-            let ret_ty = o
-                .generic_sig
-                .as_ref()
-                .map(|gsig| bind_ext_ret(gsig, binding_receiver, args, type_args))
-                .unwrap_or(c.ret);
+            let semantic = o.semantic_signature();
+            let ret_ty = bind_ext_ret(&semantic, binding_receiver, args, type_args);
             let ret_class = o
                 .ret
                 .class
@@ -2340,7 +2318,7 @@ impl<'a> SymbolResolver<'a> {
 
     fn extension_binding_receiver(&self, receiver: Ty, overload: &FunctionInfo) -> Ty {
         overload
-            .receiver
+            .semantic_receiver()
             .and_then(|declared| {
                 ReceiverMro::new(&self.src, receiver).binding_receiver(&self.src, declared)
             })
@@ -3941,7 +3919,7 @@ fn select_overload(
             "resolve",
             "  raw {name} kind={:?} recv={:?} pub={} rank={} origin={:?} owner={}",
             o.kind,
-            o.receiver,
+            o.semantic_receiver(),
             o.public(),
             o.receiver_rank,
             o.callable.origin,
@@ -3971,7 +3949,7 @@ fn select_overload(
         // does not apply — drop it. Members and lambda-return (`u32::MAX`) keep their provider rank.
         let (rank, binding_receiver) = if kind == FnKind::Extension {
             match o
-                .receiver
+                .semantic_receiver()
                 .and_then(|dr| recv_mro.as_ref()?.match_receiver(src, dr))
             {
                 Some(found) => found,
@@ -3979,7 +3957,7 @@ fn select_overload(
                     crate::trace_compiler!(
                         "resolve",
                         "  drop {name} decl_recv={:?} (not in recv MRO)",
-                        o.receiver
+                        o.semantic_receiver()
                     );
                     continue;
                 }
@@ -4123,26 +4101,21 @@ fn logical_value_params(
     recv: Ty,
     type_args: &[Ty],
 ) -> Vec<Ty> {
-    match o.generic_sig.as_ref() {
-        Some(gsig) => {
-            let mut binds = seeded_gsig_binds(gsig, type_args);
-            if let Some(recv_sig) = gsig.receiver {
-                unify_ty(recv_sig, recv, &mut binds);
-            }
-            let mut out = ty_subst_all(&gsig.params, &binds);
-            let physical_offset = usize::from(o.is_extension());
-            for (i, p) in out.iter_mut().enumerate() {
-                if let Some(cp) = o.callable.params.get(i + physical_offset) {
-                    if lib.value_underlying(*cp).is_some() {
-                        *p = *cp;
-                    }
-                }
-            }
-            out
-        }
-        None if o.is_extension() => o.extension_value_params().to_vec(),
-        None => o.callable.params.clone(),
+    let semantic = o.semantic_signature();
+    let mut binds = seeded_gsig_binds(&semantic, type_args);
+    if let Some(recv_sig) = semantic.receiver {
+        unify_ty(recv_sig, recv, &mut binds);
     }
+    let mut out = ty_subst_all(&semantic.params, &binds);
+    let physical_offset = usize::from(o.is_extension());
+    for (i, p) in out.iter_mut().enumerate() {
+        if let Some(cp) = o.callable.params.get(i + physical_offset) {
+            if lib.value_underlying(*cp).is_some() {
+                *p = *cp;
+            }
+        }
+    }
+    out
 }
 
 fn platform_arg_assignable(lib: &dyn SemanticPlatform, param: &Ty, arg: &Ty) -> bool {
