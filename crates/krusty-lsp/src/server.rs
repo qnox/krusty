@@ -426,7 +426,8 @@ mod tests {
         assert_eq!(recovered.len(), 2);
         assert_eq!(recovered[0]["params"]["diagnostics"], json!([]));
         assert_eq!(recovered[1]["id"], 4);
-        assert_eq!(recovered[1]["result"], json!({"kind": "full", "items": []}));
+        assert_eq!(recovered[1]["result"]["kind"], "full");
+        assert_eq!(recovered[1]["result"]["items"], json!([]));
         let recovered_hover = server.handle(request(
             6,
             "textDocument/hover",
@@ -4726,10 +4727,8 @@ mod tests {
                 "previousResultId": "ignored-like-the-official-full-report"
             }),
         ));
-        assert_eq!(
-            pulled.messages[0]["result"],
-            json!({"kind": "full", "items": published})
-        );
+        assert_eq!(pulled.messages[0]["result"]["kind"], "full");
+        assert_eq!(pulled.messages[0]["result"]["items"], json!(published));
         assert_eq!(calls.get(), 1, "pull requests must use cached diagnostics");
 
         server.handle(notification(
@@ -4744,10 +4743,8 @@ mod tests {
             "textDocument/diagnostic",
             json!({"textDocument": {"uri": "file:///main.kt"}}),
         ));
-        assert_eq!(
-            after_change.messages[0]["result"],
-            json!({"kind": "full", "items": []})
-        );
+        assert_eq!(after_change.messages[0]["result"]["kind"], "full");
+        assert_eq!(after_change.messages[0]["result"]["items"], json!([]));
         assert_eq!(calls.get(), 2);
 
         server.handle(notification(
@@ -4764,10 +4761,8 @@ mod tests {
             "textDocument/diagnostic",
             json!({"textDocument": {"uri": "file:///main.kt"}}),
         ));
-        assert_eq!(
-            after_close.messages[0]["result"],
-            json!({"kind": "full", "items": []})
-        );
+        assert_eq!(after_close.messages[0]["result"]["kind"], "full");
+        assert_eq!(after_close.messages[0]["result"]["items"], json!([]));
         assert_eq!(calls.get(), 3, "pull after close must not run analysis");
     }
 

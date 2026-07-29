@@ -5,7 +5,9 @@
 //! completion, navigation, and highlighting data for each open document; full compiler analysis is
 //! dropped after every open/change notification.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -597,6 +599,17 @@ impl DiagnosticIndex {
         Self { entries, messages }
     }
 
+    fn result_id(&self) -> String {
+        let mut hasher = DefaultHasher::new();
+        self.entries.hash(&mut hasher);
+        self.messages.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+
+    fn empty_result_id() -> String {
+        DiagnosticIndex::default().result_id()
+    }
+
     fn encode(&self) -> Vec<Value> {
         self.entries
             .iter()
@@ -731,8 +744,14 @@ impl OpenDocument {
 }
 
 enum PendingAnalysisRequestKind {
-    Diagnostic { uri: String },
-    Exact { method: String, params: Value },
+    Diagnostic {
+        uri: String,
+        previous_result_id: Option<String>,
+    },
+    Exact {
+        method: String,
+        params: Value,
+    },
 }
 
 struct PendingAnalysisRequest {
@@ -744,7 +763,7 @@ struct PendingAnalysisRequest {
 impl PendingAnalysisRequest {
     fn uri(&self) -> Option<&str> {
         match &self.kind {
-            PendingAnalysisRequestKind::Diagnostic { uri } => Some(uri),
+            PendingAnalysisRequestKind::Diagnostic { uri, .. } => Some(uri),
             PendingAnalysisRequestKind::Exact { params, .. } => {
                 params.pointer("/textDocument/uri").and_then(Value::as_str)
             }
@@ -858,13 +877,18 @@ where
         }))
     }
 
+    fn pushes_diagnostics(&self) -> bool {
+        !self.client_pulls_diagnostics || !self.client_refreshes_diagnostics
+    }
+
     fn publish(
         &self,
         uri: &str,
         version: Option<i64>,
         diagnostics: &DiagnosticIndex,
     ) -> Option<Value> {
-        (!self.client_pulls_diagnostics).then(|| publish_diagnostics(uri, version, diagnostics))
+        self.pushes_diagnostics()
+            .then(|| publish_diagnostics(uri, version, diagnostics))
     }
 
     fn analyzed_uris(&self) -> Vec<&str> {
@@ -996,7 +1020,7 @@ where
         }
         self.analysis_retry_at = None;
         self.analysis_retry_backoff = Duration::ZERO;
-        let push = !self.client_pulls_diagnostics;
+        let push = self.pushes_diagnostics();
         let mut messages = Vec::with_capacity(batch.analyses.len());
         let mut analyzed_documents = Vec::with_capacity(batch.analyzed.len());
         let mut workspace_symbols = WorkspaceSymbolIndex::default();
@@ -1566,7 +1590,7 @@ where
                 return invalid_params(id);
             }
         };
-        let push = !self.client_pulls_diagnostics;
+        let push = self.pushes_diagnostics();
         let mut messages = self.cancel_pending_analysis_requests(
             |request| request.uri() == Some(uri.as_str()),
             PendingAnalysisCancellation::DocumentChanged,
@@ -2211,10 +2235,14 @@ where
         let mut messages = Vec::with_capacity(pending.len());
         for request in pending {
             match request.kind {
-                PendingAnalysisRequestKind::Diagnostic { uri } => {
+                PendingAnalysisRequestKind::Diagnostic {
+                    uri,
+                    previous_result_id,
+                } => {
                     messages.push(diagnostic_report(
                         request.id,
                         self.documents.get(&uri).map(|open| &open.diagnostics),
+                        previous_result_id.as_deref(),
                     ));
                 }
                 PendingAnalysisRequestKind::Exact { method, params } => {
@@ -2287,21 +2315,24 @@ where
             return invalid_params(Some(id));
         };
         let uri = params.text_document.uri;
+        let previous_result_id = params.previous_result_id;
         if !self.document_waits_for_analysis(&uri) {
             return Dispatch::messages(vec![diagnostic_report(
                 id,
                 self.documents.get(&uri).map(|open| &open.diagnostics),
+                previous_result_id.as_deref(),
             )]);
         }
 
         let retained_bytes = retained_value_bytes(&id)
             .saturating_add(std::mem::size_of::<PendingAnalysisRequest>())
-            .saturating_add(uri.capacity());
+            .saturating_add(uri.capacity())
+            .saturating_add(previous_result_id.as_ref().map_or(0, String::capacity));
         let replaced = self.pending_analysis_requests.iter().find(|request| {
             matches!(
                 &request.kind,
                 PendingAnalysisRequestKind::Diagnostic {
-                    uri: request_uri
+                    uri: request_uri, ..
                 } if request_uri == &uri
             )
         });
@@ -2322,7 +2353,7 @@ where
                 matches!(
                     &request.kind,
                     PendingAnalysisRequestKind::Diagnostic {
-                        uri: request_uri
+                        uri: request_uri, ..
                     } if request_uri == &uri
                 )
             })
@@ -2341,7 +2372,10 @@ where
         self.pending_analysis_requests
             .push_back(PendingAnalysisRequest {
                 id,
-                kind: PendingAnalysisRequestKind::Diagnostic { uri },
+                kind: PendingAnalysisRequestKind::Diagnostic {
+                    uri,
+                    previous_result_id,
+                },
                 retained_bytes,
             });
         Dispatch::messages(messages)
@@ -2464,6 +2498,8 @@ struct FormattingOptions {
 #[serde(rename_all = "camelCase")]
 struct DocumentDiagnosticParams {
     text_document: TextDocumentIdentifier,
+    #[serde(default)]
+    previous_result_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2972,7 +3008,9 @@ fn pending_analysis_cancellation(
             "diagnostic request was cancelled because the document changed",
             true,
         ),
-        (true, PendingAnalysisCancellation::DocumentClosed) => diagnostic_report(request.id, None),
+        (true, PendingAnalysisCancellation::DocumentClosed) => {
+            diagnostic_report(request.id, None, None)
+        }
         (true, PendingAnalysisCancellation::Shutdown) => diagnostic_server_cancelled(
             request.id,
             "diagnostic request was cancelled because the server is shutting down",
@@ -3004,9 +3042,22 @@ fn is_request_id(id: &Value) -> bool {
     }
 }
 
-fn diagnostic_report(id: Value, diagnostics: Option<&DiagnosticIndex>) -> Value {
+fn diagnostic_report(
+    id: Value,
+    diagnostics: Option<&DiagnosticIndex>,
+    previous_result_id: Option<&str>,
+) -> Value {
+    let result_id = diagnostics
+        .map(DiagnosticIndex::result_id)
+        .unwrap_or_else(DiagnosticIndex::empty_result_id);
+    if previous_result_id == Some(result_id.as_str()) {
+        return rpc_result(id, json!({"kind": "unchanged", "resultId": result_id}));
+    }
     let items = diagnostics.map(DiagnosticIndex::encode).unwrap_or_default();
-    rpc_result(id, json!({"kind": "full", "items": items}))
+    rpc_result(
+        id,
+        json!({"kind": "full", "resultId": result_id, "items": items}),
+    )
 }
 
 fn publish_diagnostics(uri: &str, version: Option<i64>, diagnostics: &DiagnosticIndex) -> Value {
@@ -3722,6 +3773,18 @@ mod tests {
             messages.push(serde_json::from_slice(&body).unwrap());
         }
         messages
+    }
+
+    fn analysis_with_diagnostic(message: &str) -> DocumentAnalysis {
+        DocumentAnalysis::with_diagnostics(vec![Diagnostic {
+            span: krusty::diag::Span::new(0, 1),
+            editor_span: None,
+            identity: None,
+            severity: Severity::Error,
+            kind: DiagnosticKind::Compiler,
+            msg: message.to_string(),
+            file: 0,
+        }])
     }
 
     struct RecordingBackend {
@@ -4929,6 +4992,144 @@ mod tests {
         let messages = service.apply_analysis_batch(batch);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["method"], "textDocument/publishDiagnostics");
+    }
+
+    #[test]
+    fn matching_diagnostic_result_id_returns_unchanged() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        service.open_document_for_test("file:///a.kt", "fun a() {}", 1);
+        service.take_analysis_job();
+        service.apply_analysis_batch(AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), 1)],
+            analyses: vec![analysis_with_diagnostic("boom")],
+            support_documents: Vec::new(),
+            pending: false,
+        });
+
+        let first = service.pull_diagnostics(
+            Some(json!(1)),
+            json!({"textDocument": {"uri": "file:///a.kt"}}),
+        );
+        let report = &first.messages[0]["result"];
+        assert_eq!(report["kind"], "full");
+        let result_id = report["resultId"]
+            .as_str()
+            .expect("full diagnostic result id")
+            .to_string();
+
+        service.mark_analysis_dirty_for_test();
+        service
+            .dispatch_pending_analysis()
+            .expect("diagnostic refresh analysis");
+        let pending = service.pull_diagnostics(
+            Some(json!(2)),
+            json!({"textDocument": {"uri": "file:///a.kt"}, "previousResultId": result_id.clone()}),
+        );
+        assert!(pending.messages.is_empty());
+        let completed = service.apply_analysis_batch(AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), 1)],
+            analyses: vec![analysis_with_diagnostic("boom")],
+            support_documents: Vec::new(),
+            pending: false,
+        });
+        let response = completed
+            .iter()
+            .find(|message| message["id"] == 2)
+            .expect("pending diagnostic response");
+        assert_eq!(response["result"]["kind"], "unchanged");
+        assert_eq!(
+            response["result"]["resultId"].as_str(),
+            Some(result_id.as_str())
+        );
+    }
+
+    #[test]
+    fn stale_diagnostic_result_id_returns_full() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        service.open_document_for_test("file:///a.kt", "fun a() {}", 1);
+        service.take_analysis_job();
+        service.apply_analysis_batch(AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), 1)],
+            analyses: vec![analysis_with_diagnostic("before")],
+            support_documents: Vec::new(),
+            pending: false,
+        });
+        let initial = service.pull_diagnostics(
+            Some(json!(1)),
+            json!({"textDocument": {"uri": "file:///a.kt"}}),
+        );
+        let previous_result_id = initial.messages[0]["result"]["resultId"]
+            .as_str()
+            .expect("initial diagnostic result id")
+            .to_string();
+
+        service.mark_analysis_dirty_for_test();
+        service
+            .dispatch_pending_analysis()
+            .expect("replacement diagnostic analysis");
+        service.apply_analysis_batch(AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), 1)],
+            analyses: vec![analysis_with_diagnostic("after")],
+            support_documents: Vec::new(),
+            pending: false,
+        });
+
+        let report = service.pull_diagnostics(
+            Some(json!(2)),
+            json!({
+                "textDocument": {"uri": "file:///a.kt"},
+                "previousResultId": previous_result_id.clone()
+            }),
+        );
+        assert_eq!(report.messages[0]["result"]["kind"], "full");
+        assert_ne!(
+            report.messages[0]["result"]["resultId"].as_str(),
+            Some(previous_result_id.as_str())
+        );
+    }
+
+    #[test]
+    fn pull_without_refresh_support_keeps_diagnostic_push() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "capabilities": {
+                    "textDocument": { "diagnostic": { "dynamicRegistration": false } },
+                }
+            },
+        }));
+        service.open_document_for_test("file:///a.kt", "v1", 1);
+        service.take_analysis_job();
+
+        let messages = service.apply_analysis_batch(AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), 1)],
+            analyses: vec![DocumentAnalysis::empty()],
+            support_documents: Vec::new(),
+            pending: false,
+        });
+        assert!(messages
+            .iter()
+            .any(|message| message["method"] == "textDocument/publishDiagnostics"));
     }
 
     #[test]
