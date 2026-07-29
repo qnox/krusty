@@ -809,7 +809,7 @@ pub struct LspService<B> {
     pending_watched_globs: Vec<String>,
     analysis_in_flight: bool,
     resubmit_pending: bool,
-    discard_in_flight: bool,
+    changed_identities: HashSet<String>,
     pending_analysis_requests: VecDeque<PendingAnalysisRequest>,
     pending_analysis_request_bytes: usize,
     next_materialize_token: u64,
@@ -847,7 +847,7 @@ where
             pending_watched_globs: Vec::new(),
             analysis_in_flight: false,
             resubmit_pending: false,
-            discard_in_flight: false,
+            changed_identities: HashSet::new(),
             pending_analysis_requests: VecDeque::new(),
             pending_analysis_request_bytes: 0,
             next_materialize_token: 0,
@@ -917,9 +917,9 @@ where
         self.backend.accepts_document_set(&documents)
     }
 
-    fn note_document_identity_change(&mut self) {
+    fn note_document_identity_change(&mut self, uri: &str) {
         if self.analysis_in_flight {
-            self.discard_in_flight = true;
+            self.changed_identities.insert(uri.to_owned());
         }
     }
 
@@ -954,32 +954,49 @@ where
     }
 
     fn apply_analysis_batch(&mut self, batch: AnalysisBatch) -> Vec<Value> {
-        let stale = batch.analyzed.iter().any(|(uri, analyzed_version)| {
-            self.documents
-                .get(uri)
-                .is_none_or(|open| open.version != *analyzed_version)
-        });
         self.analysis_in_flight = false;
         let resubmit = std::mem::take(&mut self.resubmit_pending);
-        if std::mem::take(&mut self.discard_in_flight) {
+        let changed = std::mem::take(&mut self.changed_identities);
+        let fresh = batch
+            .analyzed
+            .iter()
+            .map(|(uri, analyzed_version)| {
+                !changed.contains(uri)
+                    && self
+                        .documents
+                        .get(uri)
+                        .is_some_and(|open| open.version == *analyzed_version)
+            })
+            .collect::<Vec<_>>();
+        if fresh.iter().any(|fresh| !fresh) {
             self.analysis_dirty = true;
+        }
+        if !fresh.is_empty() && !fresh.iter().any(|fresh| *fresh) {
             return Vec::new();
         }
-        if stale {
-            self.analysis_dirty = true;
-            return Vec::new();
-        }
+        let batch_is_fresh = fresh.iter().all(|fresh| *fresh);
         let uris = batch
             .analyzed
             .iter()
-            .map(|(uri, _)| uri.clone())
+            .zip(&fresh)
+            .filter(|(_, fresh)| **fresh)
+            .map(|((uri, _), _)| uri.clone())
             .collect::<Vec<_>>();
         if batch.pending {
-            self.schedule_analysis_retry(&uris);
+            let current_uris = self
+                .analyzed_uris()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            self.schedule_analysis_retry(&current_uris);
             return Vec::new();
         }
         let mut diagnostic_budget = DiagnosticBudget::default();
         if batch.analyses.len() != batch.analyzed.len() {
+            if !batch_is_fresh {
+                self.analysis_dirty = true;
+                return Vec::new();
+            }
             self.source_set.clear();
             self.workspace_symbols = WorkspaceSymbolIndex::default();
             for uri in &uris {
@@ -1024,29 +1041,48 @@ where
         let mut messages = Vec::with_capacity(batch.analyses.len());
         let mut analyzed_documents = Vec::with_capacity(batch.analyzed.len());
         let mut workspace_symbols = WorkspaceSymbolIndex::default();
-        for (mut analysis, (uri, _analyzed_version)) in
-            batch.analyses.into_iter().zip(batch.analyzed)
+        for ((analysis, (uri, _analyzed_version)), fresh) in
+            batch.analyses.into_iter().zip(batch.analyzed).zip(fresh)
         {
-            workspace_symbols.merge_from(std::mem::take(&mut analysis.workspace_symbols));
+            if !fresh {
+                continue;
+            }
+            let DocumentAnalysis {
+                diagnostics,
+                hover,
+                completion,
+                signature_help,
+                semantic_tokens,
+                definitions,
+                type_definitions,
+                implementations,
+                library_definitions,
+                document_symbols,
+                workspace_symbols: document_workspace_symbols,
+                folding_ranges,
+                implementation_relations: _,
+            } = analysis;
+            if batch_is_fresh {
+                workspace_symbols.merge_from(document_workspace_symbols);
+            }
             let open = self
                 .documents
                 .get_mut(&uri)
                 .expect("batch freshness checked before applying");
-            open.hover = analysis.hover;
-            open.completion = analysis.completion;
-            open.signature_help = analysis.signature_help;
-            open.semantic_tokens = analysis.semantic_tokens;
-            open.definitions = analysis.definitions;
-            open.type_definitions = analysis.type_definitions;
-            open.implementations = analysis.implementations;
-            open.library_definitions = analysis.library_definitions;
-            open.document_symbols = analysis.document_symbols;
-            open.folding_ranges = analysis.folding_ranges;
-            open.diagnostics = DiagnosticIndex::from_diagnostics(
-                analysis.diagnostics,
-                &open.text,
-                &mut diagnostic_budget,
-            );
+            open.hover = hover;
+            open.completion = completion;
+            open.signature_help = signature_help;
+            open.semantic_tokens = semantic_tokens;
+            open.library_definitions = library_definitions;
+            open.document_symbols = document_symbols;
+            open.folding_ranges = folding_ranges;
+            if batch_is_fresh {
+                open.definitions = definitions;
+                open.type_definitions = type_definitions;
+                open.implementations = implementations;
+            }
+            open.diagnostics =
+                DiagnosticIndex::from_diagnostics(diagnostics, &open.text, &mut diagnostic_budget);
             if push {
                 messages.push(publish_diagnostics(
                     &uri,
@@ -1054,17 +1090,22 @@ where
                     &open.diagnostics,
                 ));
             }
-            analyzed_documents.push((uri, open.text.clone()));
+            if batch_is_fresh {
+                analyzed_documents.push((uri, open.text.clone()));
+            }
         }
-        self.source_set = analyzed_documents
-            .into_iter()
-            .chain(batch.support_documents)
-            .collect();
-        self.workspace_symbols = workspace_symbols;
+        if batch_is_fresh {
+            self.source_set = analyzed_documents
+                .into_iter()
+                .chain(batch.support_documents)
+                .collect();
+            self.workspace_symbols = workspace_symbols;
+        }
         messages.extend(self.diagnostic_refresh());
         if resubmit {
             self.analysis_dirty = true;
-        } else {
+        }
+        if !self.analysis_dirty {
             messages.extend(self.complete_pending_analysis_requests());
         }
         messages
@@ -1484,7 +1525,7 @@ where
         let version = params.text_document.version;
         let replacing = self.documents.contains_key(&uri);
         let mut messages = if replacing {
-            self.note_document_identity_change();
+            self.note_document_identity_change(&uri);
             self.cancel_pending_analysis_requests(
                 |request| request.uri() == Some(uri.as_str()),
                 PendingAnalysisCancellation::DocumentChanged,
@@ -1633,7 +1674,7 @@ where
         };
         let uri = params.text_document.uri;
         if self.documents.remove(&uri).is_some() {
-            self.note_document_identity_change();
+            self.note_document_identity_change(&uri);
         }
         self.analysis_dirty = true;
         let mut messages = if defer_analysis {
@@ -4858,7 +4899,76 @@ mod tests {
     }
 
     #[test]
-    fn mixed_stale_batch_discards_entire_batch() {
+    fn mixed_stale_batch_applies_current_local_results_without_replacing_the_snapshot() {
+        let mut service = LspService::new(|s: &[&str]| {
+            s.iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        service.open_document_for_test("file:///a.kt", "v1", 1);
+        service.open_document_for_test("file:///b.kt", "v1", 1);
+        service.source_set = vec![
+            ("file:///a.kt".into(), "v1".into()),
+            ("file:///b.kt".into(), "v1".into()),
+        ];
+        service
+            .documents
+            .get_mut("file:///a.kt")
+            .unwrap()
+            .definitions = DefinitionIndex::wire_saturation_fixture(1);
+        service.mark_analysis_dirty_for_test();
+        service
+            .dispatch_pending_analysis()
+            .expect("job for the open documents");
+        assert!(service
+            .pull_diagnostics(
+                Some(json!(7)),
+                json!({"textDocument": {"uri": "file:///a.kt"}}),
+            )
+            .messages
+            .is_empty());
+
+        service.open_document_for_test("file:///b.kt", "v2", 2);
+
+        let mut a_analysis = analysis_with_diagnostic("current");
+        a_analysis.definitions = DefinitionIndex::wire_saturation_fixture(2);
+        let batch = AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), 1), ("file:///b.kt".into(), 1)],
+            analyses: vec![a_analysis, DocumentAnalysis::empty()],
+            support_documents: Vec::new(),
+            pending: false,
+        };
+        let messages = service.apply_analysis_batch(batch);
+        let published = messages
+            .iter()
+            .filter(|message| message["method"] == "textDocument/publishDiagnostics")
+            .map(|message| message["params"]["uri"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(published, vec![json!("file:///a.kt")]);
+        assert_eq!(
+            service.source_set,
+            vec![
+                ("file:///a.kt".into(), "v1".into()),
+                ("file:///b.kt".into(), "v1".into()),
+            ]
+        );
+        assert_eq!(
+            service.documents["file:///a.kt"].definitions.entry_count(),
+            1
+        );
+        assert_eq!(
+            service.document_diagnostic_count_for_test("file:///a.kt"),
+            1
+        );
+        assert_eq!(service.pending_analysis_requests.len(), 1);
+        assert!(!messages.iter().any(|message| message["id"] == 7));
+        assert!(service.analysis_dirty_for_test());
+        assert!(!service.analysis_in_flight_for_test());
+    }
+
+    #[test]
+    fn closing_one_document_keeps_the_in_flight_analysis_of_the_others() {
         let mut service = LspService::new(|s: &[&str]| {
             s.iter()
                 .map(|_| DocumentAnalysis::empty())
@@ -4868,22 +4978,28 @@ mod tests {
         service.open_document_for_test("file:///a.kt", "v1", 1);
         service.open_document_for_test("file:///b.kt", "v1", 1);
         service.mark_analysis_dirty_for_test();
-        let _job = service
+        service
             .dispatch_pending_analysis()
             .expect("job for the open documents");
 
-        service.open_document_for_test("file:///b.kt", "v2", 2);
+        service.handle(json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didClose",
+            "params": {"textDocument": {"uri": "file:///b.kt"}},
+        }));
 
-        let batch = AnalysisBatch {
+        let messages = service.apply_analysis_batch(AnalysisBatch {
             analyzed: vec![("file:///a.kt".into(), 1), ("file:///b.kt".into(), 1)],
             analyses: vec![DocumentAnalysis::empty(), DocumentAnalysis::empty()],
             support_documents: Vec::new(),
             pending: false,
-        };
-        let messages = service.apply_analysis_batch(batch);
-        assert!(messages.is_empty());
-        assert!(service.analysis_dirty_for_test());
-        assert!(!service.analysis_in_flight_for_test());
+        });
+        let published = messages
+            .iter()
+            .filter(|message| message["method"] == "textDocument/publishDiagnostics")
+            .map(|message| message["params"]["uri"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(published, vec![json!("file:///a.kt")]);
     }
 
     #[test]
