@@ -803,7 +803,14 @@ fn type_decl_with_access(
             || (p.peek() == Some(&Tok::Punct('@'))
                 && matches!(p.t.get(p.i + 1), Some(Tok::Ident(s)) if s == "interface"))
         {
-            type_decl_with_access(p, package, Some(&internal), out, macc)?;
+            // A type nested in an interface/annotation is implicitly public (JLS §9.5), like
+            // interface methods and fields.
+            let nested_access = if matches!(kind, DeclKind::Interface | DeclKind::Annotation) {
+                macc | ACC_PUBLIC
+            } else {
+                macc
+            };
+            type_decl_with_access(p, package, Some(&internal), out, nested_access)?;
             continue;
         }
         // Initializer block: `static { … }` (its `static` was eaten by `modifiers`) or `{ … }`.
@@ -936,7 +943,8 @@ fn annotation_type_decl(
             || (p.peek() == Some(&Tok::Punct('@'))
                 && matches!(p.t.get(p.i + 1), Some(Tok::Ident(s)) if s == "interface"))
         {
-            type_decl_with_access(p, package, Some(&internal), out, macc)?;
+            // Nested types of an annotation type are implicitly public (JLS §9.5).
+            type_decl_with_access(p, package, Some(&internal), out, macc | ACC_PUBLIC)?;
             continue;
         }
         let ty = src_type(p)?;
