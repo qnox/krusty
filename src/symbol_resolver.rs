@@ -3450,7 +3450,7 @@ fn resolve_property_setter(
     property: &str,
     member_access: Option<&MemberAccess<'_>>,
 ) -> Option<LibraryCallable> {
-    let setter = lib
+    let metadata_properties = lib
         .property_members(recv, property)
         .overloads
         .into_iter()
@@ -3458,18 +3458,42 @@ fn resolve_property_setter(
             property.context_count == 0
                 && member_visible(member_access, property.visibility, property.owner)
         })
-        .min_by_key(|p| p.receiver_rank)
-        .and_then(|p| p.setter)?;
-    if setter.name.contains('-') {
-        return None;
+        .collect::<Vec<_>>();
+    if let Some(p) = metadata_properties.iter().min_by_key(|p| p.receiver_rank) {
+        let setter = p.setter.clone()?;
+        if setter.name.contains('-') {
+            return None;
+        }
+        // A real setter takes exactly one parameter (the value). Anything else is malformed metadata —
+        // treat it as absent so the checker and lowerer agree (both consult `params[0]`) rather than the
+        // checker accepting permissively while the lowerer falls back to the inferred value type.
+        if setter.params.len() != 1 {
+            return None;
+        }
+        return Some(setter);
     }
-    // A real setter takes exactly one parameter (the value). Anything else is malformed metadata —
-    // treat it as absent so the checker and lowerer agree (both consult `params[0]`) rather than the
-    // checker accepting permissively while the lowerer falls back to the inferred value type.
-    if setter.params.len() != 1 {
-        return None;
+    // No `@Metadata` property: a JAVA accessor pair (`isX`/`getX` + `setX(v)`) IS a synthetic
+    // property (spec § Java synthetic properties). Kotlin only synthesizes a property when the
+    // GETTER exists, so require the read to resolve; then take the single-argument `void` member
+    // setter — preferring the overload whose parameter matches the getter's type, and refusing an
+    // ambiguous remainder (conservative: kotlinc pairs accessors per matching type).
+    let getter = resolve_property_member(lib, recv, property, member_access)?;
+    let setter_name = crate::names::property_setter_name(property);
+    let mut setters = lib
+        .member_overloads(recv, &setter_name)
+        .overloads
+        .into_iter()
+        .filter(|o| o.kind == FnKind::Member)
+        .map(|o| o.callable)
+        .filter(|c| c.params.len() == 1 && c.ret == Ty::Unit && !c.name.contains('-'))
+        .collect::<Vec<_>>();
+    if setters.len() > 1 {
+        setters.retain(|c| c.params[0] == getter.ret.non_null());
     }
-    Some(setter)
+    match setters.as_slice() {
+        [_] => setters.pop(),
+        _ => None,
+    }
 }
 
 fn select_instance_info(
