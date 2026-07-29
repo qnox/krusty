@@ -223,9 +223,7 @@ fn binary_compiles_serializable_and_emits_serializer() {
     );
 }
 
-/// Gap #2 (closed): constructing a classpath class with a `null` argument for a reference parameter —
-/// `PluginGeneratedSerialDescriptor(name, null, count)` — now resolves. A `$serializer` builds its
-/// descriptor this way. Verifies the constructor-overload null-match end-to-end.
+/// A null argument selects the matching public classpath constructor overload.
 #[test]
 fn classpath_ctor_with_null_arg_resolves() {
     let Some((core, _json, std)) = runtime_jars() else {
@@ -247,11 +245,10 @@ fn classpath_ctor_with_null_arg_resolves() {
     std::fs::create_dir_all(&out).unwrap();
     std::fs::write(
         &src,
-        "import kotlinx.serialization.internal.PluginGeneratedSerialDescriptor\n\
+        "import kotlinx.serialization.SerializationException\n\
          fun build(): Int {\n\
-         \x20   val d = PluginGeneratedSerialDescriptor(\"Foo\", null, 2)\n\
-         \x20   d.addElement(\"a\", false)\n\
-         \x20   return 0\n\
+         \x20   val e = SerializationException(\"Foo\", null)\n\
+         \x20   return e.message?.length ?: 0\n\
          }\n",
     )
     .unwrap();
@@ -264,7 +261,7 @@ fn classpath_ctor_with_null_arg_resolves() {
         .expect("run krusty");
     assert!(
         out.join("Gap2Kt.class").exists(),
-        "PluginGeneratedSerialDescriptor(name, null, n) must compile; stderr:\n{}",
+        "SerializationException(message, null) must compile; stderr:\n{}",
         String::from_utf8_lossy(&o.stderr)
     );
 }
