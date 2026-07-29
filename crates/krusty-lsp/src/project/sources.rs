@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,6 +19,8 @@ pub struct ProjectSources {
 
 struct Cache {
     module_indices: Vec<usize>,
+    /// Imports seed dependency-source selection and therefore the cache key.
+    import_seed: Vec<String>,
     documents: Vec<(String, String)>,
     java_documents: Vec<(String, String)>,
     inferred_count: usize,
@@ -126,8 +128,11 @@ impl ProjectSources {
             self.excluded_paths = excluded_paths;
             self.caches.clear();
         }
+        let import_seed = open_dependency_seed(documents);
         let cached = self.caches.iter().position(|cache| {
-            cache.module_indices == module_indices && cache.max_bytes == max_bytes
+            cache.module_indices == module_indices
+                && cache.max_bytes == max_bytes
+                && cache.import_seed == import_seed
         });
         if let Some(index) = cached {
             let cache = self.caches.remove(index);
@@ -172,9 +177,14 @@ impl ProjectSources {
         inferred_paths.extend(dependency_paths);
 
         let (documents, kotlin_bytes) = load_documents(inferred_paths, remaining, max_bytes)?;
-        let java_documents = load_documents_best_effort(java_paths, max_bytes - kotlin_bytes);
+        let java_documents = load_java_documents_by_import_closure(
+            java_paths,
+            &import_seed,
+            max_bytes - kotlin_bytes,
+        );
         let cache = Cache {
             module_indices,
+            import_seed,
             documents,
             java_documents,
             inferred_count,
@@ -259,6 +269,208 @@ fn load_documents(
         documents.push((uri.into(), source));
     }
     Ok((documents, bytes))
+}
+
+#[derive(Default)]
+struct ImportTargets {
+    files: Vec<Vec<String>>,
+    directories: Vec<Vec<String>>,
+}
+
+fn open_dependency_seed(documents: &[(&str, &str)]) -> Vec<String> {
+    let mut seed = Vec::new();
+    for (uri, source) in documents {
+        let kind = url::Url::parse(uri)
+            .ok()
+            .and_then(|url| url.to_file_path().ok())
+            .and_then(|path| {
+                if path
+                    .extension()
+                    .is_some_and(|extension| extension == "java")
+                {
+                    Some(krusty::source::SourceKind::Java)
+                } else {
+                    krusty::source::kind(&path)
+                }
+            })
+            .unwrap_or(krusty::source::SourceKind::Kotlin);
+        seed.extend(krusty::source::dependency_candidates(kind, source));
+    }
+    seed.sort();
+    seed.dedup();
+    seed
+}
+
+impl ImportTargets {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn add_import(&mut self, dotted: &str) {
+        let segments: Vec<&str> = dotted.split('.').collect();
+        let Some((last, package)) = segments.split_last() else {
+            return;
+        };
+        if *last == "*" {
+            self.directories
+                .push(package.iter().map(|s| s.to_string()).collect());
+        } else {
+            self.add_type(dotted);
+        }
+    }
+
+    fn add_type(&mut self, dotted: &str) {
+        let segments: Vec<&str> = dotted.split('.').collect();
+        for end in (2..=segments.len()).rev() {
+            let mut file = segments[..end - 1]
+                .iter()
+                .map(|segment| segment.to_string())
+                .collect::<Vec<_>>();
+            file.push(format!("{}.java", segments[end - 1]));
+            self.files.push(file);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.directories.is_empty()
+    }
+}
+
+fn add_java_dependencies(source: &str, targets: &mut ImportTargets) {
+    for dependency in
+        krusty::source::dependency_candidates(krusty::source::SourceKind::Java, source)
+    {
+        targets.add_import(&dependency);
+    }
+}
+
+fn path_ends_with(path: &Path, suffix: &[String]) -> bool {
+    !suffix.is_empty()
+        && path
+            .components()
+            .rev()
+            .zip(suffix.iter().rev())
+            .take(suffix.len())
+            .all(|(component, expected)| component.as_os_str() == expected.as_str())
+        && path.components().count() >= suffix.len()
+}
+
+fn take_targeted_paths(
+    pending: &mut BTreeSet<PathBuf>,
+    by_name: &HashMap<std::ffi::OsString, Vec<PathBuf>>,
+    targets: &ImportTargets,
+) -> Vec<PathBuf> {
+    let mut wave = BTreeSet::new();
+    for suffix in &targets.files {
+        let Some(name) = suffix.last() else {
+            continue;
+        };
+        if let Some(candidates) = by_name.get(std::ffi::OsStr::new(name)) {
+            for path in candidates {
+                if pending.contains(path) && path_ends_with(path, suffix) {
+                    wave.insert(path.clone());
+                }
+            }
+        }
+    }
+    if !targets.directories.is_empty() {
+        wave.extend(
+            pending
+                .iter()
+                .filter(|path| {
+                    path.parent().is_some_and(|directory| {
+                        targets
+                            .directories
+                            .iter()
+                            .any(|suffix| path_ends_with(directory, suffix))
+                    })
+                })
+                .cloned(),
+        );
+    }
+    for path in &wave {
+        pending.remove(path);
+    }
+    wave.into_iter().collect()
+}
+
+fn load_java_documents_by_import_closure(
+    paths: Vec<PathBuf>,
+    import_seed: &[String],
+    budget: usize,
+) -> Vec<(String, String)> {
+    let mut remaining = budget;
+    let mut loaded: Vec<(String, String)> = Vec::new();
+    let mut by_name: HashMap<std::ffi::OsString, Vec<PathBuf>> = HashMap::new();
+    for path in &paths {
+        if let Some(name) = path.file_name() {
+            by_name
+                .entry(name.to_owned())
+                .or_default()
+                .push(path.clone());
+        }
+    }
+    let mut pending = paths.into_iter().collect::<BTreeSet<_>>();
+    let mut seen_imports: HashSet<String> = import_seed.iter().cloned().collect();
+    let mut targets = ImportTargets::new();
+    for dotted in import_seed {
+        targets.add_import(dotted);
+    }
+    loop {
+        if targets.is_empty() {
+            break;
+        }
+        let wave = take_targeted_paths(&mut pending, &by_name, &targets);
+        if wave.is_empty() {
+            break;
+        }
+        targets = ImportTargets::new();
+        let mut progressed = false;
+        for path in wave {
+            let Some((uri, source)) = read_document_within(&path, &mut remaining) else {
+                continue;
+            };
+            let mut dependencies = ImportTargets::new();
+            add_java_dependencies(&source, &mut dependencies);
+            for file in dependencies.files {
+                let key = file.join(".");
+                if seen_imports.insert(key) {
+                    targets.files.push(file);
+                }
+            }
+            for directory in dependencies.directories {
+                let key = directory.join(".");
+                if seen_imports.insert(format!("{key}.*")) {
+                    targets.directories.push(directory);
+                }
+            }
+            loaded.push((uri, source));
+            progressed = true;
+        }
+        if !progressed {
+            break;
+        }
+    }
+    loaded.extend(load_documents_best_effort(
+        pending.into_iter().collect(),
+        remaining,
+    ));
+    loaded
+}
+
+fn read_document_within(path: &Path, remaining: &mut usize) -> Option<(String, String)> {
+    let metadata = fs::metadata(path).ok()?;
+    let len = usize::try_from(metadata.len()).ok()?;
+    if len > *remaining {
+        return None;
+    }
+    let source = fs::read_to_string(path).ok()?;
+    if source.len() > *remaining {
+        return None;
+    }
+    let uri = url::Url::from_file_path(path).ok()?;
+    *remaining -= source.len();
+    Some((uri.into(), source))
 }
 
 fn load_documents_best_effort(paths: Vec<PathBuf>, mut remaining: usize) -> Vec<(String, String)> {
@@ -433,6 +645,135 @@ mod tests {
         assert_eq!(loaded, [(file_uri(&support_kt), "val s=1".to_string())]);
         assert_eq!(inferred_count, 1);
         assert!(java_docs.is_empty());
+    }
+
+    #[test]
+    fn imported_java_sources_win_the_budget_over_alphabetical_order() {
+        let directory = temp_path("java-import-priority");
+        let package_dir = directory.join("p").join("q");
+        fs::create_dir_all(&package_dir).unwrap();
+        let use_kt = directory.join("Use.kt");
+        let open_text = "import p.q.Widget\nimport p.q.other.*\nfun f() {}";
+        fs::write(&use_kt, open_text).unwrap();
+        fs::write(
+            package_dir.join("Aaa.java"),
+            "package p.q; public class Aaa {}",
+        )
+        .unwrap();
+        fs::write(
+            package_dir.join("Widget.java"),
+            "package p.q; public class Widget {}",
+        )
+        .unwrap();
+        let star_dir = package_dir.join("other");
+        fs::create_dir_all(&star_dir).unwrap();
+        fs::write(
+            star_dir.join("Star.java"),
+            "package p.q.other; public class Star {}",
+        )
+        .unwrap();
+        let mut module = Module::new(ModuleId::new(":", "main"), directory.clone());
+        module.source_roots = vec![SourceRoot::source(directory.clone())];
+        let model =
+            ProjectModel::new(directory.clone(), ProviderKind::None).with_modules(vec![module]);
+        let uri = file_uri(&use_kt);
+        let documents = [(uri.as_str(), open_text)];
+        let open_uris = [uri.as_str()];
+        let mut sources = ProjectSources::default();
+
+        let imported_bytes = "package p.q; public class Widget {}".len()
+            + "package p.q.other; public class Star {}".len();
+        let max_bytes = open_text.len() + imported_bytes;
+        let (_, _, java_docs) = sources
+            .load(&model, &documents, &open_uris, max_bytes)
+            .unwrap();
+
+        fs::remove_dir_all(directory).ok();
+        assert!(java_docs.iter().any(|s| s.contains("class Widget")));
+        assert!(java_docs.iter().any(|s| s.contains("class Star")));
+        assert!(!java_docs.iter().any(|s| s.contains("class Aaa")));
+    }
+
+    #[test]
+    fn java_budget_prioritizes_open_source_type_references() {
+        let directory = temp_path("java-reference-priority");
+        let package_dir = directory.join("p");
+        let qualified_dir = directory.join("q");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::create_dir_all(&qualified_dir).unwrap();
+        let use_kt = package_dir.join("Use.kt");
+        let open_text =
+            "package p\n// q.Ignored is not code\nfun use(widget: Widget): q.Base = q.Base()";
+        fs::write(&use_kt, open_text).unwrap();
+        fs::write(
+            package_dir.join("Aaa.java"),
+            "package p; public class Aaa {}",
+        )
+        .unwrap();
+        let widget = "package p; public class Widget {}";
+        let base = "package q; public class Base {}";
+        fs::write(package_dir.join("Widget.java"), widget).unwrap();
+        fs::write(qualified_dir.join("Base.java"), base).unwrap();
+
+        let mut module = Module::new(ModuleId::new(":", "main"), directory.clone());
+        module.source_roots = vec![SourceRoot::source(directory.clone())];
+        let model =
+            ProjectModel::new(directory.clone(), ProviderKind::None).with_modules(vec![module]);
+        let uri = file_uri(&use_kt);
+        let documents = [(uri.as_str(), open_text)];
+        let open_uris = [uri.as_str()];
+        let mut sources = ProjectSources::default();
+        let (_, _, java_docs) = sources
+            .load(
+                &model,
+                &documents,
+                &open_uris,
+                open_text.len() + widget.len() + base.len(),
+            )
+            .unwrap();
+
+        fs::remove_dir_all(directory).ok();
+        assert!(java_docs.iter().any(|s| s.contains("class Widget")));
+        assert!(java_docs.iter().any(|s| s.contains("class Base")));
+        assert!(!java_docs.iter().any(|s| s.contains("class Aaa")));
+    }
+
+    #[test]
+    fn java_budget_follows_transitive_imports_and_supertypes() {
+        let directory = temp_path("java-transitive");
+        let package_dir = directory.join("p").join("q");
+        let base_dir = directory.join("r");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::create_dir_all(&base_dir).unwrap();
+        let use_kt = directory.join("Use.kt");
+        let open_text = "import p.q.Widget\nfun f() {}";
+        fs::write(&use_kt, open_text).unwrap();
+        let widget = "package p.q;\nimport r.Base;\npublic class Widget extends WidgetBase {}";
+        let widget_base = "package p.q; public class WidgetBase {}";
+        let base = "package r; public class Base {}";
+        fs::write(directory.join("Aaa.java"), "package s; public class Aaa {}").unwrap();
+        fs::write(package_dir.join("Widget.java"), widget).unwrap();
+        fs::write(package_dir.join("WidgetBase.java"), widget_base).unwrap();
+        fs::write(base_dir.join("Base.java"), base).unwrap();
+        let mut module = Module::new(ModuleId::new(":", "main"), directory.clone());
+        module.source_roots = vec![SourceRoot::source(directory.clone())];
+        let model =
+            ProjectModel::new(directory.clone(), ProviderKind::None).with_modules(vec![module]);
+        let uri = file_uri(&use_kt);
+        let documents = [(uri.as_str(), open_text)];
+        let open_uris = [uri.as_str()];
+        let mut sources = ProjectSources::default();
+
+        let max_bytes = open_text.len() + widget.len() + widget_base.len() + base.len();
+        let (_, _, java_docs) = sources
+            .load(&model, &documents, &open_uris, max_bytes)
+            .unwrap();
+
+        fs::remove_dir_all(directory).ok();
+        assert!(java_docs.iter().any(|s| s.contains("class Widget ")));
+        assert!(java_docs.iter().any(|s| s.contains("class WidgetBase")));
+        assert!(java_docs.iter().any(|s| s.contains("class Base")));
+        assert!(!java_docs.iter().any(|s| s.contains("class Aaa")));
     }
 
     #[test]
@@ -721,6 +1062,7 @@ mod tests {
     fn source_cache_eviction_is_byte_entry_and_metadata_bounded() {
         let cache = |module_index: usize, bytes: usize, entries: usize| Cache {
             module_indices: vec![module_index],
+            import_seed: Vec::new(),
             documents: (0..entries)
                 .map(|index| {
                     (
