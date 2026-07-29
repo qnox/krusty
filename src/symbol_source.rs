@@ -15,6 +15,26 @@ use crate::libraries::{FunctionSet, LibraryType, PropertySet, ResolvedSymbols};
 use crate::types::{Ty, TypeName, Visibility};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClassifierAccess {
+    Public,
+    Internal,
+    Protected,
+    Private,
+    PackagePrivate,
+}
+
+impl From<Visibility> for ClassifierAccess {
+    fn from(visibility: Visibility) -> Self {
+        match visibility {
+            Visibility::Public => Self::Public,
+            Visibility::Internal => Self::Internal,
+            Visibility::Protected => Self::Protected,
+            Visibility::Private => Self::Private,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InheritanceShape {
     pub is_interface: bool,
     pub is_extensible: bool,
@@ -78,6 +98,10 @@ pub trait SymbolSource {
                 Visibility::Private
             }
         })
+    }
+
+    fn classifier_access(&self, internal: TypeName) -> Option<ClassifierAccess> {
+        self.classifier_visibility(internal).map(Into::into)
     }
 
     /// Whether ordinary lookup may use a classifier from `accessor_package`.
@@ -212,6 +236,13 @@ impl SymbolSource for CompositeSource<'_> {
         self.children
             .iter()
             .find_map(|child| child.classifier_visibility(internal))
+    }
+
+    fn classifier_access(&self, internal: TypeName) -> Option<ClassifierAccess> {
+        self.children
+            .iter()
+            .find(|child| child.classifier_visibility(internal).is_some())
+            .and_then(|child| child.classifier_access(internal))
     }
 
     fn classifier_accessible_from_package(

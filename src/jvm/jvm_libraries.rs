@@ -2053,6 +2053,29 @@ impl SymbolSource for JvmLibraries {
         })
     }
 
+    fn classifier_access(
+        &self,
+        internal_name: TypeName,
+    ) -> Option<crate::symbol_source::ClassifierAccess> {
+        use crate::symbol_source::ClassifierAccess;
+
+        let jvm_name = super::jvm_class_map::to_jvm_type_name(internal_name);
+        let class = self.cp.find_name(jvm_name)?;
+        if let Some(visibility) = class.meta.class_visibility {
+            return Some(visibility.into());
+        }
+        let access = effective_class_access(&class);
+        Some(if access & 0x0001 != 0 {
+            ClassifierAccess::Public
+        } else if access & 0x0004 != 0 {
+            ClassifierAccess::Protected
+        } else if access & 0x0002 != 0 {
+            ClassifierAccess::Private
+        } else {
+            ClassifierAccess::PackagePrivate
+        })
+    }
+
     fn classifier_accessible_from_package(
         &self,
         internal_name: TypeName,
