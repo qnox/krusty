@@ -613,6 +613,21 @@ fn stdio_server_reports_non_exhaustive_when_keyword_range() {
 }
 
 #[test]
+fn stdio_server_accepts_non_exhaustive_when_in_expected_unit_lambda() {
+    let diagnostics = diagnostics_after_open(
+        &[],
+        "file:///statement-when.kt",
+        "fun consumeUnit(block: () -> Unit) { block() }\n\
+         fun statementWhen(value: Int) {\n\
+           when (value) { 1 -> println(value) }\n\
+           consumeUnit { when (value) { 2 -> println(value) } }\n\
+         }",
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
 fn stdio_server_applies_configured_language_features() {
     let source = "\
 data class Entry(val first: String, val second: String)
