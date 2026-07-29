@@ -12404,6 +12404,7 @@ impl<'a> Checker<'a> {
         args: &[Ty],
         integer_literals: &[bool],
         lambda_literals: &[bool],
+        type_args: &[Ty],
     ) -> Option<crate::libraries::LibraryMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
@@ -12413,7 +12414,7 @@ impl<'a> Checker<'a> {
                 args,
                 integer_literals,
                 lambda_literals,
-                &[],
+                type_args,
             )
             .and_then(Symbol::companion)
     }
@@ -16494,6 +16495,7 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &[ExprId],
         partial: &[Option<Ty>],
+        type_args: &[Ty],
     ) -> Option<Vec<Option<Vec<Ty>>>> {
         let lambda_literals = self.lambda_literal_args(args);
         let integer_literals = self.integer_literal_args(args);
@@ -16514,7 +16516,7 @@ impl<'a> Checker<'a> {
                 &provisional,
                 &integer_literals,
                 &lambda_literals,
-                &[],
+                type_args,
             )?
             .selected_member()?;
         Some(
@@ -16522,6 +16524,7 @@ impl<'a> Checker<'a> {
                 &candidate,
                 &provisional,
                 &lambda_literals,
+                type_args,
             )
             .into_iter()
             .enumerate()
@@ -16537,17 +16540,32 @@ impl<'a> Checker<'a> {
         )
     }
 
+    /// Explicit call-site type arguments (`create<String, Int>(…)`), resolved to `Ty`s.
+    /// Empty when the call spells none.
+    fn explicit_call_type_args(&mut self, call: ExprId) -> Vec<Ty> {
+        self.file
+            .call_type_args
+            .get(&call.0)
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|argument| self.resolve_ty(argument))
+            .collect()
+    }
+
     fn classpath_sam_arg_tys(
         &mut self,
         receiver: crate::symbol_resolver::SymRecv<'_>,
         name: &str,
         args: &[ExprId],
+        type_args: &[Ty],
     ) -> Vec<Ty> {
         let partial = args
             .iter()
             .map(|&arg| self.lambda_probe_ty(arg).is_none().then(|| self.expr(arg)))
             .collect::<Vec<_>>();
-        let lambda_params = self.classpath_sam_param_types(receiver, name, args, &partial);
+        let lambda_params =
+            self.classpath_sam_param_types(receiver, name, args, &partial, type_args);
         let mut types = Vec::with_capacity(args.len());
         for (index, &arg) in args.iter().enumerate() {
             if let Some(params) = lambda_params
@@ -24514,10 +24532,12 @@ impl<'a> Checker<'a> {
                 if let Expr::Member { .. } = self.file.expr(receiver) {
                     if let Some(internal) = self.classpath_type_receiver_internal(receiver) {
                         let fq = internal.render();
+                        let explicit_type_args = self.explicit_call_type_args(call);
                         let arg_tys = self.classpath_sam_arg_tys(
                             crate::symbol_resolver::SymRecv::Type(&fq),
                             &name,
                             args,
+                            &explicit_type_args,
                         );
                         let integer_literals = self.integer_literal_args(args);
                         let lambda_literals = self.lambda_literal_args(args);
@@ -24527,6 +24547,7 @@ impl<'a> Checker<'a> {
                             &arg_tys,
                             &integer_literals,
                             &lambda_literals,
+                            &explicit_type_args,
                         ) {
                             self.set(receiver, Ty::obj(&fq));
                             let ret = m.ret;
@@ -24647,10 +24668,12 @@ impl<'a> Checker<'a> {
                             .imported_type_internal(&cls)
                             .or_else(|| self.imports.get(&cls).cloned());
                         if let Some(internal) = receiver_class {
+                            let explicit_type_args = self.explicit_call_type_args(call);
                             let arg_tys = self.classpath_sam_arg_tys(
                                 crate::symbol_resolver::SymRecv::Type(&internal),
                                 &name,
                                 args,
+                                &explicit_type_args,
                             );
                             let integer_literals = self.integer_literal_args(args);
                             let lambda_literals = self.lambda_literal_args(args);
@@ -24660,6 +24683,7 @@ impl<'a> Checker<'a> {
                                 &arg_tys,
                                 &integer_literals,
                                 &lambda_literals,
+                                &explicit_type_args,
                             );
                             return match companion {
                                 Some(m) => {
@@ -24917,11 +24941,13 @@ impl<'a> Checker<'a> {
                     )
                 });
                 let classpath_sam_pts = if ext_lambda_pts.is_none() {
+                    let explicit_type_args = self.explicit_call_type_args(call);
                     self.classpath_sam_param_types(
                         crate::symbol_resolver::SymRecv::Value(rt),
                         &name,
                         args,
                         &generic_member_partial,
+                        &explicit_type_args,
                     )
                 } else {
                     None
@@ -26425,6 +26451,7 @@ impl<'a> Checker<'a> {
                     && this_member_ext_lambda_plan.is_none()
                     && implicit_library_ext_lambda_shape.is_none()
                 {
+                    let explicit_type_args = self.explicit_call_type_args(call);
                     let partial = this_member_partial.as_deref().unwrap_or_default();
                     self.implicit_receiver_types()
                         .into_iter()
@@ -26434,6 +26461,7 @@ impl<'a> Checker<'a> {
                                 &fname,
                                 args,
                                 partial,
+                                &explicit_type_args,
                             )
                         })
                 } else {

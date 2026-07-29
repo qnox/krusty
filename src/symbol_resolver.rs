@@ -573,12 +573,14 @@ pub(crate) fn specialized_sam_member_params(
     member: &LibraryMember,
     args: &[Ty],
     lambda_literals: &[bool],
+    type_args: &[Ty],
 ) -> Vec<Ty> {
     specialized_sam_params(
         &member.params,
         member.generic_sig.as_ref(),
         args,
         lambda_literals,
+        type_args,
     )
 }
 
@@ -587,11 +589,14 @@ fn specialized_sam_params(
     generic_sig: Option<&GenericSig>,
     args: &[Ty],
     lambda_literals: &[bool],
+    type_args: &[Ty],
 ) -> Vec<Ty> {
     let Some(gsig) = generic_sig.filter(|sig| sig.params.len() == params.len()) else {
         return params.to_vec();
     };
-    let mut binds = GSigBinds::new();
+    // Explicit call type arguments bind the formals up front (`create<String, Int>` fixes
+    // `K`/`V` before any argument unification).
+    let mut binds = seeded_gsig_binds(gsig, type_args);
     for (index, (&param, &arg)) in gsig.params.iter().zip(args).enumerate() {
         if lambda_literals.get(index) != Some(&true) {
             unify_inferred_ty(param, arg, &mut binds);
@@ -1012,6 +1017,7 @@ fn best_companion_overload<'a>(
     args: &[Ty],
     integer_literals: &[bool],
     lambda_literals: &[bool],
+    type_args: &[Ty],
 ) -> Option<&'a LibraryMember> {
     debug_assert!(integer_literals.is_empty() || integer_literals.len() == args.len());
     let adapts = |p: &Ty, a: &Ty, i: usize| {
@@ -1029,7 +1035,7 @@ fn best_companion_overload<'a>(
         }
     };
     let logical = |member: &LibraryMember| {
-        let params = specialized_sam_member_params(member, args, lambda_literals);
+        let params = specialized_sam_member_params(member, args, lambda_literals, type_args);
         apply_platform_call_parameter_nullability(
             params,
             &member.call_sig.platform_nullable_params,
@@ -1977,6 +1983,7 @@ impl<'a> SymbolResolver<'a> {
                             internal,
                             name,
                             CallArgs::new(args, integer_literals, lambda_literals),
+                            type_args,
                             Some(&access),
                         )
                         .map(Symbol::Companion)
@@ -3114,6 +3121,7 @@ fn resolve_companion_name(
     internal: TypeName,
     name: &str,
     args: CallArgs<'_>,
+    type_args: &[Ty],
     member_access: Option<&MemberAccess<'_>>,
 ) -> Option<LibraryMember> {
     let CallArgs {
@@ -3136,8 +3144,24 @@ fn resolve_companion_name(
         args,
         integer_literals,
         lambda_literals,
+        type_args,
     )
     .cloned()
+    .map(|mut member| {
+        // A generic STATIC's return erases in the descriptor (`<T> T read(Key<T>)` →
+        // `Object`); bind it from the arguments exactly as instance members do, so
+        // `Fields.read(Fields.PAYLOAD).message()` types as the field's argument.
+        if let Some(gsig) = member.generic_sig.as_ref() {
+            // Explicit call type arguments (`Maps.create<String, Int> { … }`) seed the
+            // formals positionally; argument unification fills the rest.
+            let mut binds = seeded_gsig_binds(gsig, type_args);
+            for (&parameter, &argument) in gsig.params.iter().zip(args) {
+                unify_ty(parameter, argument, &mut binds);
+            }
+            member.ret = merge_specialized_return(member.ret, ty_subst(gsig.ret, &binds));
+        }
+        member
+    })
 }
 
 /// Resolve an instance member `recv.name(args)` — the receiver's static type must be public, but the
@@ -4064,7 +4088,7 @@ fn select_overload(
             continue;
         }
         let lp = logical_value_params(lib, o, binding_receiver, type_args);
-        let lp = specialized_sam_params(&lp, o.generic_sig.as_ref(), args, lambda_literals);
+        let lp = specialized_sam_params(&lp, o.generic_sig.as_ref(), args, lambda_literals, type_args);
         let lp = apply_platform_call_parameter_nullability(
             lp,
             &o.call_sig.platform_nullable_params,
@@ -4878,6 +4902,7 @@ mod tests {
                 Ty::Error,
             ],
             &[false, true],
+            &[],
         );
 
         assert_eq!(params[0], Ty::obj("fixture/Duo"));
@@ -5047,6 +5072,7 @@ mod tests {
             &[Ty::obj("demo/Leaf")],
             &[],
             &[],
+            &[],
         )
         .expect("the most specific source supertype should be selected");
         assert_eq!(selected.params, vec![Ty::obj("demo/Mid")]);
@@ -5059,6 +5085,7 @@ mod tests {
             [&left, &right].into_iter(),
             "make",
             &[Ty::obj("demo/Leaf"), Ty::obj("demo/Leaf")],
+            &[],
             &[],
             &[],
         )
@@ -5095,6 +5122,7 @@ mod tests {
             &[Ty::obj("demo/Leaf")],
             &[],
             &[],
+            &[],
         )
         .expect("the defaulted source-supertype overload should resolve");
         assert_eq!(selected.params[0], Ty::obj("demo/Mid"));
@@ -5107,6 +5135,7 @@ mod tests {
             [&vararg_broad, &vararg_specific].into_iter(),
             "make",
             &[Ty::obj("demo/Leaf")],
+            &[],
             &[],
             &[],
         )
