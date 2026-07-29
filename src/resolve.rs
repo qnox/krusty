@@ -8428,6 +8428,7 @@ fn make_checker<'a>(
         companion_of: None,
         local_funs: Vec::new(),
         in_script_body: false,
+        recording_detached_refs: false,
         expr_lowers: HashMap::new(),
         inferred_fun_rets: HashMap::new(),
         inferred_ext_fun_rets: HashMap::new(),
@@ -9568,9 +9569,11 @@ fn check_file_at_impl(
         c.in_script_body = false;
         c.pop_local_funs();
     }
+    c.recording_detached_refs = true;
     for reference in &file.detached_type_refs {
         c.resolve_ty(reference);
     }
+    c.recording_detached_refs = false;
     let Checker {
         expr_types,
         resolved_type_refs,
@@ -9869,6 +9872,11 @@ struct Checker<'a> {
     local_funs: Vec<HashMap<String, Vec<(StmtId, Signature)>>>,
     /// Whether executable Kotlin-script statements are being checked.
     in_script_body: bool,
+    /// Whether DETACHED type references (import entries and other refs no AST node retains) are being
+    /// resolved purely to RECORD navigation targets — accessibility diagnostics are suppressed there:
+    /// the resolution-scope check already reports each inaccessible classifier once at its use site,
+    /// and an import path itself must still resolve for go-to-definition.
+    recording_detached_refs: bool,
     /// Accumulated output maps (moved into TypeInfo at the end of `check_file`).
     expr_lowers: HashMap<ExprId, ExprLowering>,
     inferred_fun_rets: HashMap<(u32, u32), Ty>,
@@ -13085,6 +13093,22 @@ impl<'a> Checker<'a> {
     }
 
     /// Resolve a syntactic type without erasing source nullability.
+    /// A CLASSPATH classifier in a TYPE position, checked for classifier accessibility: an `internal`
+    /// (or otherwise invisible) dependency class is not nameable from this module's source — kotlinc's
+    /// "cannot access 'Hidden': it is internal in file" — while a module-declared, public, or
+    /// package-accessible classifier resolves as before (docs/SPEC.md § classpath visibility).
+    fn accessible_classpath_ty(&mut self, internal: TypeName, r: &TypeRef) -> Ty {
+        if self.recording_detached_refs {
+            return self.obj_with_targs_name(internal, r);
+        }
+        if let Some(access) = self.resolver().inaccessible_classifier_access(internal) {
+            self.diags
+                .error(r.span, inaccessible_classifier_message(&r.name, access));
+            return Ty::Error;
+        }
+        self.obj_with_targs_name(internal, r)
+    }
+
     fn resolve_ty(&mut self, r: &TypeRef) -> Ty {
         let scoped = if self.tparams.contains(&r.name) {
             Some(self.tparams.erase(&r.name))
@@ -13092,7 +13116,7 @@ impl<'a> Checker<'a> {
             match self.scoped_classifier_name(&r.name) {
                 InheritedNestedClassifier::Found(internal) => {
                     classifier_over_default(&r.name, Some(internal))
-                        .map(|internal| self.obj_with_targs_name(internal, r))
+                        .map(|internal| self.accessible_classpath_ty(internal, r))
                 }
                 InheritedNestedClassifier::Ambiguous => Some(Ty::Error),
                 InheritedNestedClassifier::NotFound => None,
@@ -13133,16 +13157,16 @@ impl<'a> Checker<'a> {
             // `"__ty/<Prim>"` encodes an alias to a primitive/builtin.
             match internal.strip_prefix("__ty/") {
                 Some(prim) => Ty::from_name(&prim).unwrap_or(Ty::Error),
-                None => self.obj_with_targs_name(internal, r),
+                None => self.accessible_classpath_ty(internal, r),
             }
         } else if let Some(internal) = self.imported_type_name(&r.name) {
             // An explicit/wildcard import resolves a name whose simple form is ABSENT from the global
             // index — either never registered or pruned because it's ambiguous across the whole classpath
             // (`Continuation` collides with `jdk/internal/vm/Continuation`). The import names the package.
-            self.obj_with_targs_name(internal, r)
+            self.accessible_classpath_ty(internal, r)
         } else if let Some(internal) = self.resolve_qualified_nested_name(&r.name) {
             // A dotted CLASSPATH nested type (`Subject.User`, `SlugValidation.Ok`) → `Outer$Nested`.
-            self.obj_with_targs_name(internal, r)
+            self.accessible_classpath_ty(internal, r)
         } else {
             Ty::Error
         };

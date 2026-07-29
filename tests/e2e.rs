@@ -142,6 +142,8 @@ mod classpath_enum_regex_vc_e2e;
 mod classpath_function_reference_e2e;
 #[path = "classpath_inner_classes_e2e.rs"]
 mod classpath_inner_classes_e2e;
+#[path = "classpath_internal_classifier_e2e.rs"]
+mod classpath_internal_classifier_e2e;
 #[path = "classpath_is_smartcast_e2e.rs"]
 mod classpath_is_smartcast_e2e;
 #[path = "classpath_jdk_static_e2e.rs"]

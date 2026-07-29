@@ -1550,11 +1550,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`tests/serialization_conformance.rs::internal_classpath_class_is_not_constructible`, version-gated
   on the located core jar); the null-arg ctor coverage moved to the public
   `SerializationException(String?, Throwable?)` (`::classpath_ctor_with_null_arg_resolves`).
-  Deliberate scope cut: krusty reports the site as unresolved rather than kotlinc's dedicated
-  "cannot access" wording, and a bare type-position reference to an internal classpath classifier
-  (e.g. a parameter type) is not yet rejected — only use-sites that go through the member/constructor
-  resolver are. The serialization plugin is unaffected either way: its generated `$serializer`
-  references `PluginGeneratedSerialDescriptor` directly in IR with JVM descriptors (JVM-public).
+  TYPE positions are gated too: the checker's `resolve_ty` classpath branches (global index, import,
+  dotted-nested) ask the resolver's `inaccessible_classifier_access` and report the same
+  "cannot access '<name>': it is <kind>" diagnostic the call-site check uses
+  (`tests/classpath_internal_classifier_e2e.rs`; module-declared and public/package-accessible
+  classifiers are untouched, and same-module `internal` stays usable via the module path).
+  Deliberate scope cut: a package-qualified reference WITHOUT an import (`fun f(h: lib.Hidden)`)
+  types as silent `Error` — a pre-existing FQ-type gap that applies to public classes equally (any
+  USE of the value still errors; only an unused parameter compiles where kotlinc rejects). The
+  serialization plugin is unaffected either way: its generated `$serializer` references
+  `PluginGeneratedSerialDescriptor` directly in IR with JVM descriptors (JVM-public).
 
 ## 8. Success criteria for the PoC
 
