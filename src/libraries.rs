@@ -2,6 +2,7 @@
 
 pub use crate::types::Visibility;
 use crate::types::{Ty, TypeName, TypeNameList};
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// A parsed generic signature in Kotlin's logical shape: formal type-parameter names, an OPTIONAL
@@ -951,6 +952,41 @@ impl FunctionInfo {
         self.kind == FnKind::Extension
     }
 
+    pub fn semantic_receiver(&self) -> Option<Ty> {
+        self.generic_sig
+            .as_ref()
+            .and_then(|signature| signature.receiver)
+            .or(self.receiver)
+    }
+
+    pub fn semantic_params(&self) -> &[Ty] {
+        self.generic_sig.as_ref().map_or_else(
+            || {
+                if self.is_extension() {
+                    self.extension_value_params()
+                } else {
+                    &self.callable.params
+                }
+            },
+            |signature| signature.params.as_slice(),
+        )
+    }
+
+    pub fn semantic_signature(&self) -> Cow<'_, GenericSig> {
+        self.generic_sig.as_ref().map_or_else(
+            || {
+                Cow::Owned(GenericSig {
+                    formals: Vec::new(),
+                    formal_bounds: Vec::new(),
+                    receiver: self.receiver,
+                    params: self.semantic_params().to_vec(),
+                    ret: self.callable.ret,
+                })
+            },
+            Cow::Borrowed,
+        )
+    }
+
     pub fn extension_value_params(&self) -> &[Ty] {
         self.callable.params.get(1..).unwrap_or(&[])
     }
@@ -1083,7 +1119,8 @@ impl FunctionSet {
     }
 
     pub fn has_top_level_arity(&self, arity: usize) -> bool {
-        self.top_level().any(|o| o.callable.params.len() == arity)
+        self.top_level()
+            .any(|overload| overload.semantic_params().len() == arity)
     }
 }
 

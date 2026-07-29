@@ -1,6 +1,7 @@
 use crate::libraries::{
-    Callables, FunctionInfo, FunctionSet, LibraryMember, LibraryType, PropKind, PropertyInfo,
-    PropertySet, ResolvedSymbols, SemanticPlatform, SemanticSupertype, StaticFieldRef,
+    CallSig, Callables, FunctionInfo, FunctionSet, LibraryMember, LibraryType, PropKind,
+    PropertyInfo, PropertySet, ResolvedSymbols, SemanticPlatform, SemanticSupertype,
+    StaticFieldRef,
 };
 use crate::module_symbols::ModuleSymbols;
 use crate::name_tree::FxHashMap;
@@ -52,11 +53,164 @@ fn same_member(left: &LibraryMember, right: &LibraryMember) -> bool {
     left.name == right.name && left.params == right.params
 }
 
-fn same_function(left: &FunctionInfo, right: &FunctionInfo) -> bool {
+fn same_function(
+    platform: &dyn SemanticPlatform,
+    left: &FunctionInfo,
+    right: &FunctionInfo,
+) -> bool {
     left.kind == right.kind
-        && left.receiver == right.receiver
         && left.callable.name == right.callable.name
-        && left.callable.params == right.callable.params
+        && left.callable.suspend == right.callable.suspend
+        && left.callable.params.len() == right.callable.params.len()
+        && left
+            .callable
+            .params
+            .iter()
+            .zip(&right.callable.params)
+            .all(
+                |(&left, &right)| match (left.non_null(), right.non_null()) {
+                    (Ty::Fun(left), Ty::Fun(right)) => {
+                        left.params.len() == right.params.len() && left.suspend == right.suspend
+                    }
+                    _ => {
+                        platform.library_value_form(left.erased_recv())
+                            == platform.library_value_form(right.erased_recv())
+                    }
+                },
+            )
+}
+
+fn complete_slots<T>(primary: &mut Vec<T>, fallback: Vec<T>, param_count: usize) {
+    if primary.len() != param_count && fallback.len() == param_count {
+        *primary = fallback;
+    }
+}
+
+fn merge_call_shape(primary: &mut CallSig, fallback: CallSig, param_count: usize) {
+    let primary_arity_known = primary.param_names.len() == param_count
+        || primary.param_defaults.len() == param_count
+        || primary.required > 0
+        || primary.vararg_index.is_some();
+    let CallSig {
+        param_names,
+        param_defaults,
+        lambda_param_types,
+        lambda_receivers,
+        lambda_receiver_params,
+        lambda_context_counts,
+        lambda_materialized,
+        platform_nullable_params,
+        required,
+        vararg,
+        vararg_index,
+    } = fallback;
+
+    complete_slots(&mut primary.param_names, param_names, param_count);
+    complete_slots(&mut primary.param_defaults, param_defaults, param_count);
+    complete_slots(
+        &mut primary.platform_nullable_params,
+        platform_nullable_params,
+        param_count,
+    );
+
+    if primary.lambda_param_types.len() != param_count {
+        complete_slots(
+            &mut primary.lambda_param_types,
+            lambda_param_types,
+            param_count,
+        );
+    } else if lambda_param_types.len() == param_count {
+        for (current, fallback) in primary
+            .lambda_param_types
+            .iter_mut()
+            .zip(lambda_param_types)
+        {
+            if current.is_empty() {
+                *current = fallback;
+            }
+        }
+    }
+
+    if primary.lambda_receivers.len() != param_count {
+        primary.lambda_receivers.resize(param_count, None);
+    }
+    if lambda_receivers.len() == param_count {
+        for (current, fallback) in primary.lambda_receivers.iter_mut().zip(lambda_receivers) {
+            if current.is_none() {
+                *current = fallback;
+            }
+        }
+    }
+
+    if primary.lambda_receiver_params.len() != param_count {
+        primary.lambda_receiver_params.resize(param_count, false);
+    }
+    if lambda_receiver_params.len() == param_count {
+        for (current, fallback) in primary
+            .lambda_receiver_params
+            .iter_mut()
+            .zip(lambda_receiver_params)
+        {
+            *current |= fallback;
+        }
+    }
+
+    if primary.lambda_context_counts.len() != param_count {
+        primary.lambda_context_counts.resize(param_count, 0);
+    }
+    if lambda_context_counts.len() == param_count {
+        for (current, fallback) in primary
+            .lambda_context_counts
+            .iter_mut()
+            .zip(lambda_context_counts)
+        {
+            if *current == 0 {
+                *current = fallback;
+            }
+        }
+    }
+
+    if primary.lambda_materialized.len() != param_count {
+        primary.lambda_materialized.resize(param_count, false);
+    }
+    if lambda_materialized.len() == param_count {
+        for (current, fallback) in primary
+            .lambda_materialized
+            .iter_mut()
+            .zip(lambda_materialized)
+        {
+            *current |= fallback;
+        }
+    }
+
+    if !primary_arity_known {
+        primary.required = required;
+    }
+    if primary.vararg_index.is_none() {
+        primary.vararg_index = vararg_index;
+    }
+    primary.vararg |= vararg;
+}
+
+fn merge_function_shape(mut primary: FunctionInfo, fallback: FunctionInfo) -> FunctionInfo {
+    let param_count = primary
+        .callable
+        .params
+        .len()
+        .saturating_sub(usize::from(primary.is_extension()));
+    let valid_signature = primary.generic_sig.as_ref().is_some_and(|signature| {
+        signature.params.len() == param_count
+            && signature.ret != Ty::Error
+            && (!primary.is_extension() || signature.receiver.is_some())
+    });
+    if !valid_signature {
+        primary.generic_sig = Some(fallback.semantic_signature().into_owned());
+    }
+    merge_call_shape(&mut primary.call_sig, fallback.call_sig, param_count);
+    if primary.context_count == 0 {
+        primary.context_count = fallback.context_count;
+    }
+    primary
 }
 
 fn property_covers(
@@ -82,13 +236,20 @@ fn same_property_declaration(left: &PropertyInfo, right: &PropertyInfo) -> bool 
     left.kind == right.kind && left.receiver == right.receiver && left.owner == right.owner
 }
 
-fn merge_functions(mut primary: FunctionSet, fallback: FunctionSet) -> FunctionSet {
+fn merge_functions(
+    platform: &dyn SemanticPlatform,
+    mut primary: FunctionSet,
+    fallback: FunctionSet,
+) -> FunctionSet {
     for candidate in fallback.overloads {
-        if !primary
+        if let Some(index) = primary
             .overloads
             .iter()
-            .any(|existing| same_function(existing, &candidate))
+            .position(|existing| same_function(platform, existing, &candidate))
         {
+            let existing = primary.overloads[index].clone();
+            primary.overloads[index] = merge_function_shape(existing, candidate);
+        } else {
             primary.overloads.push(candidate);
         }
     }
@@ -218,6 +379,7 @@ impl SymbolSource for SourceFallbackPlatform {
             return hit.clone();
         }
         let merged = merge_functions(
+            self.platform.as_ref(),
             self.platform.member_overloads(recv, name),
             public_functions(self.source().member_overloads(recv, name)),
         );
@@ -345,7 +507,11 @@ impl SymbolSource for SourceFallbackPlatform {
         let merged = Rc::new(ResolvedSymbols {
             classifier,
             callables: join_callables(
-                merge_functions(primary_functions, public_functions(fallback_functions)),
+                merge_functions(
+                    self.platform.as_ref(),
+                    primary_functions,
+                    public_functions(fallback_functions),
+                ),
                 merge_properties(
                     self.platform.as_ref(),
                     primary_properties,

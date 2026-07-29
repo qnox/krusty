@@ -11319,10 +11319,11 @@ impl<'a> Checker<'a> {
             .find(|o| {
                 matches!(o.kind, crate::libraries::FnKind::Member | crate::libraries::FnKind::Extension)
                     && !matches!(o.callable.origin, crate::libraries::Origin::Module { .. })
-                    && o.callable.ret == lambda_ret
+                    && o.semantic_signature().ret == lambda_ret
                     && match o.kind {
                         crate::libraries::FnKind::Extension => {
-                            o.receiver.is_none_or(|dr| mro.rank(&src, dr).is_some())
+                            o.semantic_receiver()
+                                .is_none_or(|dr| mro.rank(&src, dr).is_some())
                         }
                         _ => true,
                     }
@@ -11352,15 +11353,18 @@ impl<'a> Checker<'a> {
             .unwrap_or_default()
             .iter()
             .filter(|o| {
-                o.is_extension() && o.receiver.is_none_or(|dr| mro.rank(&src, dr).is_some())
+                o.is_extension()
+                    && o.semantic_receiver()
+                        .is_none_or(|dr| mro.rank(&src, dr).is_some())
             })
             .find_map(|o| {
-                let gsig = o.generic_sig.as_ref()?;
+                let semantic = o.semantic_signature();
                 let mut binds = std::collections::HashMap::new();
-                if let Some(recv_sig) = gsig.receiver {
+                if let Some(recv_sig) = semantic.receiver {
                     crate::symbol_resolver::unify_ty(recv_sig, receiver, &mut binds);
                 }
-                gsig.params
+                semantic
+                    .params
                     .first()
                     .map(|selector| crate::symbol_resolver::function_input_types(*selector, &binds))
                     .filter(|params| !params.is_empty())
@@ -11375,6 +11379,188 @@ impl<'a> Checker<'a> {
         arg_tys: &[Option<Ty>],
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
         self.top_level_lambda_shape_in_scope(name, arg_tys, None)
+    }
+
+    fn lambda_overload_partially_applicable(
+        &self,
+        overload: &crate::libraries::FunctionInfo,
+        receiver: Option<Ty>,
+        arg_tys: &[Option<Ty>],
+        argument_map: &[usize],
+    ) -> bool {
+        let semantic = overload.semantic_signature();
+        let generic_params = argument_map
+            .iter()
+            .all(|&parameter| parameter < semantic.params.len())
+            .then(|| {
+                let mut bindings = std::collections::HashMap::new();
+                if let (Some(receiver), Some(receiver_shape)) = (receiver, semantic.receiver) {
+                    crate::symbol_resolver::unify_ty(receiver_shape, receiver, &mut bindings);
+                }
+                for (&parameter, actual) in argument_map.iter().zip(arg_tys) {
+                    if let Some(actual) = actual {
+                        crate::symbol_resolver::unify_ty(
+                            semantic.params[parameter],
+                            *actual,
+                            &mut bindings,
+                        );
+                    }
+                }
+                argument_map
+                    .iter()
+                    .map(|&parameter| {
+                        crate::symbol_resolver::ty_subst(semantic.params[parameter], &bindings)
+                    })
+                    .collect::<Vec<_>>()
+            });
+        let callable_params = overload.semantic_params();
+        argument_map
+            .iter()
+            .enumerate()
+            .zip(arg_tys)
+            .all(|((argument, &parameter), actual)| {
+                actual.is_none_or(|actual| {
+                    generic_params
+                        .as_ref()
+                        .and_then(|params| params.get(argument))
+                        .or_else(|| callable_params.get(parameter))
+                        .is_some_and(|expected| {
+                            crate::assignable::is_assignable(
+                                &crate::assignable::TyCtx::new(),
+                                self,
+                                actual,
+                                *expected,
+                            ) || (!expected.is_reference()
+                                && arg_assignable_simple(*expected, actual))
+                        })
+                })
+            })
+    }
+
+    fn lambda_shape_for_overload(
+        &self,
+        overload: &crate::libraries::FunctionInfo,
+        receiver: Option<Ty>,
+        arg_tys: &[Option<Ty>],
+        argument_map: &[usize],
+    ) -> Option<crate::symbol_resolver::LambdaCallShape> {
+        let mut shape = crate::symbol_resolver::LambdaCallShape::default();
+        let semantic = overload.semantic_signature();
+        let mut binds = std::collections::HashMap::new();
+        if let (Some(receiver), Some(receiver_sig)) = (receiver, semantic.receiver) {
+            crate::symbol_resolver::unify_ty(receiver_sig, receiver, &mut binds);
+        }
+        for (&parameter, actual) in argument_map.iter().zip(arg_tys) {
+            if let (Some(actual), Some(parameter)) = (actual, semantic.params.get(parameter)) {
+                crate::symbol_resolver::unify_ty(*parameter, *actual, &mut binds);
+            }
+        }
+        let param_types = argument_map
+            .iter()
+            .map(|&parameter| {
+                semantic
+                    .params
+                    .get(parameter)
+                    .map(|parameter| {
+                        crate::symbol_resolver::function_input_types(*parameter, &binds)
+                    })
+                    .filter(|types| !types.is_empty())
+                    .unwrap_or_else(|| {
+                        overload
+                            .call_sig
+                            .lambda_param_types
+                            .get(parameter)
+                            .into_iter()
+                            .flatten()
+                            .map(|ty| crate::symbol_resolver::ty_subst(*ty, &binds))
+                            .collect()
+                    })
+            })
+            .collect::<Vec<_>>();
+        if param_types
+            .iter()
+            .zip(arg_tys)
+            .any(|(parameters, actual)| actual.is_none() && !parameters.is_empty())
+        {
+            shape.param_types = Some(param_types);
+        }
+        let receivers = argument_map
+            .iter()
+            .enumerate()
+            .map(|(argument, &parameter)| {
+                overload
+                    .call_sig
+                    .lambda_receivers
+                    .get(parameter)
+                    .copied()
+                    .flatten()
+                    .map(|receiver| crate::symbol_resolver::ty_subst(receiver, &binds))
+                    .or_else(|| {
+                        overload
+                            .call_sig
+                            .lambda_receiver_params
+                            .get(parameter)
+                            .copied()
+                            .unwrap_or(false)
+                            .then(|| {
+                                let context_count = overload
+                                    .call_sig
+                                    .lambda_context_counts
+                                    .get(parameter)
+                                    .copied()
+                                    .unwrap_or_default();
+                                shape
+                                    .param_types
+                                    .as_ref()
+                                    .and_then(|types| types.get(argument))
+                                    .and_then(|types| types.get(context_count))
+                                    .copied()
+                            })
+                            .flatten()
+                    })
+            })
+            .collect::<Vec<_>>();
+        shape.receivers = Some(receivers);
+        shape.context_counts = Some(
+            argument_map
+                .iter()
+                .map(|&parameter| {
+                    overload
+                        .call_sig
+                        .lambda_context_counts
+                        .get(parameter)
+                        .copied()
+                        .unwrap_or_default()
+                })
+                .collect(),
+        );
+        shape.materialized = Some(
+            argument_map
+                .iter()
+                .map(|&parameter| {
+                    overload
+                        .call_sig
+                        .lambda_materialized
+                        .get(parameter)
+                        .copied()
+                        .unwrap_or(false)
+                })
+                .collect(),
+        );
+        (shape.param_types.is_some()
+            || shape
+                .receivers
+                .as_ref()
+                .is_some_and(|items| items.iter().any(Option::is_some))
+            || shape
+                .context_counts
+                .as_ref()
+                .is_some_and(|items| items.iter().any(|count| *count > 0))
+            || shape
+                .materialized
+                .as_ref()
+                .is_some_and(|items| items.iter().any(|item| *item)))
+        .then_some(shape)
     }
 
     fn top_level_lambda_shape_in_scope(
@@ -11394,156 +11580,26 @@ impl<'a> Checker<'a> {
                 .unwrap_or_default(),
         };
         let has_exact = fs.has_top_level_arity(arg_tys.len());
-        let mut candidate_shapes: [Vec<crate::symbol_resolver::LambdaCallShape>; 2] =
-            [Vec::new(), Vec::new()];
         for o in fs.top_level() {
-            if has_exact && o.callable.params.len() != arg_tys.len() {
+            if has_exact && o.semantic_params().len() != arg_tys.len() {
                 continue;
             }
             let Some(argument_map) = crate::symbol_resolver::trailing_default_arg_indices(
-                o.callable.params.len(),
+                o.semantic_params().len(),
                 arg_tys,
             ) else {
                 continue;
             };
-            let partially_applicable =
-                argument_map
-                    .iter()
-                    .zip(arg_tys)
-                    .all(|(&parameter, actual)| {
-                        actual.is_none_or(|actual| {
-                            o.callable.params.get(parameter).is_some_and(|expected| {
-                                arg_assignable_simple(*expected, actual)
-                                    || crate::assignable::is_assignable(
-                                        &crate::assignable::TyCtx::new(),
-                                        self,
-                                        actual,
-                                        *expected,
-                                    )
-                            })
-                        })
-                    });
-            if !partially_applicable {
+            if !self.lambda_overload_partially_applicable(o, None, arg_tys, &argument_map) {
                 continue;
             }
-            let mut shape = crate::symbol_resolver::LambdaCallShape::default();
-            if let Some(gsig) = o.generic_sig.as_ref() {
-                if !(has_exact && gsig.params.len() != arg_tys.len()) {
-                    if let Some(map) = crate::symbol_resolver::trailing_default_arg_indices(
-                        gsig.params.len(),
-                        arg_tys,
-                    ) {
-                        let mut binds = std::collections::HashMap::new();
-                        for (ai, at) in arg_tys.iter().enumerate() {
-                            if let (Some(t), Some(ps)) = (at, gsig.params.get(map[ai])) {
-                                crate::symbol_resolver::unify_ty(*ps, *t, &mut binds);
-                            }
-                        }
-                        let out: Vec<Vec<Ty>> = map
-                            .iter()
-                            .map(|&pi| {
-                                gsig.params
-                                    .get(pi)
-                                    .map(|ps| {
-                                        crate::symbol_resolver::function_input_types(*ps, &binds)
-                                    })
-                                    .unwrap_or_default()
-                            })
-                            .collect();
-                        if out
-                            .iter()
-                            .zip(arg_tys)
-                            .any(|(parameters, actual)| actual.is_none() && !parameters.is_empty())
-                        {
-                            shape.param_types = Some(out);
-                        }
-                    }
-                }
-            }
-            if shape.param_types.is_none() {
-                let out = argument_map
-                    .iter()
-                    .map(|&parameter| {
-                        o.call_sig
-                            .lambda_param_types
-                            .get(parameter)
-                            .cloned()
-                            .unwrap_or_default()
-                    })
-                    .collect::<Vec<_>>();
-                if out
-                    .iter()
-                    .zip(arg_tys)
-                    .any(|(parameters, actual)| actual.is_none() && !parameters.is_empty())
-                {
-                    shape.param_types = Some(out);
-                }
-            }
-            // Keep receiver and context facts from the same overload.
-            shape.receivers = Some(
-                argument_map
-                    .iter()
-                    .map(|&parameter| {
-                        o.call_sig
-                            .lambda_receivers
-                            .get(parameter)
-                            .copied()
-                            .flatten()
-                    })
-                    .collect(),
-            );
-            shape.context_counts = Some(
-                argument_map
-                    .iter()
-                    .map(|&parameter| {
-                        o.call_sig
-                            .lambda_context_counts
-                            .get(parameter)
-                            .copied()
-                            .unwrap_or_default()
-                    })
-                    .collect(),
-            );
-            shape.materialized = Some(
-                argument_map
-                    .iter()
-                    .map(|&parameter| {
-                        o.call_sig
-                            .lambda_materialized
-                            .get(parameter)
-                            .copied()
-                            .unwrap_or(false)
-                    })
-                    .collect(),
-            );
-            if shape.param_types.is_some()
-                || shape
-                    .receivers
-                    .as_ref()
-                    .is_some_and(|items| items.iter().any(Option::is_some))
-                || shape
-                    .context_counts
-                    .as_ref()
-                    .is_some_and(|items| items.iter().any(|count| *count > 0))
-                || shape
-                    .materialized
-                    .as_ref()
-                    .is_some_and(|items| items.iter().any(|item| *item))
-            {
-                let priority = usize::from(matches!(o.callable.origin, Origin::Module { .. }));
-                if !candidate_shapes[priority].contains(&shape) {
-                    candidate_shapes[priority].push(shape);
-                }
-            }
-        }
-        if !candidate_shapes[1].is_empty() {
-            // Ambiguous source shapes require full overload resolution.
-            return match candidate_shapes[1].as_slice() {
-                [shape] => Some(shape.clone()),
-                _ => None,
+            let Some(shape) = self.lambda_shape_for_overload(o, None, arg_tys, &argument_map)
+            else {
+                continue;
             };
+            return Some(shape);
         }
-        candidate_shapes[0].first().cloned()
+        None
     }
 
     fn extension_lambda_shape(
@@ -11569,78 +11625,37 @@ impl<'a> Checker<'a> {
                 .collect(),
         };
         for allow_must_inline in [false, true] {
-            for o in crate::symbol_resolver::ranked_extension_overloads_by_recv(
-                &src,
-                receiver,
-                &fs,
-                allow_must_inline,
-            ) {
-                let Some(gsig) = o.generic_sig.as_ref() else {
-                    continue;
-                };
-                let Some(param_indices) = crate::symbol_resolver::trailing_default_arg_indices(
-                    gsig.params.len(),
+            for (_, binding_receiver, o) in
+                crate::symbol_resolver::ranked_extension_overloads_by_recv(
+                    &src,
+                    receiver,
+                    &fs,
+                    allow_must_inline,
+                )
+            {
+                let Some(argument_map) = crate::symbol_resolver::trailing_default_arg_indices(
+                    o.semantic_params().len(),
                     arg_tys,
                 ) else {
                     continue;
                 };
-                let mapped: Vec<Ty> = param_indices.iter().map(|&i| gsig.params[i]).collect();
-                let mut binds = std::collections::HashMap::new();
-                if let Some(recv_sig) = gsig.receiver {
-                    crate::symbol_resolver::unify_ty(recv_sig, receiver, &mut binds);
-                }
-                for (parameter, actual) in mapped.iter().zip(arg_tys) {
-                    if let Some(actual) = actual {
-                        crate::symbol_resolver::unify_ty(*parameter, *actual, &mut binds);
-                    }
-                }
-                let param_types: Vec<Vec<Ty>> = mapped
-                    .iter()
-                    .map(|parameter| {
-                        crate::symbol_resolver::function_input_types(*parameter, &binds)
-                    })
-                    .collect();
-                if !param_types.iter().any(|types| !types.is_empty()) {
+                let partial = self.lambda_overload_partially_applicable(
+                    o,
+                    Some(binding_receiver),
+                    arg_tys,
+                    &argument_map,
+                );
+                if !partial {
                     continue;
                 }
-                let receivers = crate::symbol_resolver::trailing_default_arg_indices(
-                    o.call_sig.lambda_receivers.len(),
+                if let Some(shape) = self.lambda_shape_for_overload(
+                    o,
+                    Some(binding_receiver),
                     arg_tys,
-                )
-                .map(|indices| {
-                    indices
-                        .iter()
-                        .enumerate()
-                        .map(|(argument_index, &parameter_index)| {
-                            o.call_sig
-                                .lambda_receivers
-                                .get(parameter_index)
-                                .copied()
-                                .flatten()
-                                .or_else(|| {
-                                    o.call_sig
-                                        .lambda_receiver_params
-                                        .get(parameter_index)
-                                        .copied()
-                                        .unwrap_or(false)
-                                        .then(|| {
-                                            param_types
-                                                .get(argument_index)
-                                                .and_then(|types| types.first())
-                                                .copied()
-                                        })
-                                        .flatten()
-                                })
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .filter(|receivers| receivers.iter().any(Option::is_some));
-                return Some(crate::symbol_resolver::LambdaCallShape {
-                    param_types: Some(param_types),
-                    receivers,
-                    context_counts: None,
-                    materialized: None,
-                });
+                    &argument_map,
+                ) {
+                    return Some(shape);
+                }
             }
         }
         None
@@ -24351,70 +24366,6 @@ impl<'a> Checker<'a> {
                         }
                     }
                     None
-                });
-                // A USER extension taking a lambda (`inline fun String.withLen(f: (String)->Int)`): its
-                // `Signature` carries the lambda parameter types directly. For a GENERIC-receiver
-                // extension (keyed under `Any`), specialize the receiver type parameter to `rt` so the
-                // lambda's `it` types as the actual receiver, not the erased `Any`.
-                let ext_lambda_pts = ext_lambda_pts.or_else(|| {
-                    if rt == Ty::Error {
-                        return None;
-                    }
-                    let has_lam = |lpt: &[Vec<Ty>]| lpt.iter().any(|v| !v.is_empty());
-                    if let Some(fi) = self
-                        .resolver()
-                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
-                        .map(crate::symbol_resolver::Symbol::overloads)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .find(|o| o.is_extension() && o.receiver_rank == 0)
-                    {
-                        if has_lam(&fi.call_sig.lambda_param_types) {
-                            return Some(fi.call_sig.lambda_param_types);
-                        }
-                    }
-                    let fi = self
-                        .resolver()
-                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
-                        .map(crate::symbol_resolver::Symbol::overloads)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .find(|o| o.is_extension() && o.receiver_rank == 1)?;
-                    if !has_lam(&fi.call_sig.lambda_param_types) {
-                        return None;
-                    }
-                    let recv_tp = self
-                        .file
-                        .decls
-                        .iter()
-                        .find_map(|&d| match self.file.decl(d) {
-                            Decl::Fun(fd)
-                                if fd.name == name
-                                    && fd.receiver.as_ref().is_some_and(|r| {
-                                        fd.type_params.iter().any(|tp| tp == &r.name)
-                                    }) =>
-                            {
-                                fd.receiver.as_ref().map(|r| r.name.clone())
-                            }
-                            _ => None,
-                        });
-                    Some(
-                        fi.call_sig
-                            .lambda_param_types
-                            .iter()
-                            .map(|v| {
-                                v.iter()
-                                    .map(|t| {
-                                        if recv_tp.is_some() && t.is_erased_top() {
-                                            rt
-                                        } else {
-                                            *t
-                                        }
-                                    })
-                                    .collect()
-                            })
-                            .collect(),
-                    )
                 });
                 // A call selected by lambda RETURN type (`recv.sumOf { … }`): its source name has no JVM
                 // method, so the generic-signature passes above miss it — supply the selector's `it` from

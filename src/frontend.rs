@@ -600,8 +600,8 @@ mod tests {
     use super::*;
     use crate::diag::{Diagnostic, Span};
     use crate::libraries::{
-        Callables, LibraryCallable, LibraryMember, LibraryType, PropKind, PropertyInfo,
-        PropertySet, TypeKind,
+        CallSig, Callables, FnKind, FunctionInfo, FunctionSet, GenericSig, LibraryCallable,
+        LibraryMember, LibraryType, PropKind, PropertyInfo, PropertySet, ResolvedSymbols, TypeKind,
     };
     use crate::source::SourceInput;
     use crate::types::{Ty, TypeNameList, Visibility};
@@ -617,46 +617,103 @@ mod tests {
                     | "fixture/Qualified"
                     | "fixture/Container"
                     | "fixture/Container$Labels"
+                    | "support/BaseScope"
+                    | "support/BaseTarget"
+                    | "support/Target"
             )
-            .then(|| LibraryType {
-                is_public: true,
-                kind: if internal == "fixture/Container$Labels" {
-                    TypeKind::Object
-                } else {
-                    TypeKind::Class
-                },
-                supertypes: TypeNameList::new(),
-                constructors: Vec::new(),
-                members: Vec::new(),
-                companion: match internal {
-                    "fixture/Stable" => vec![LibraryMember::new(
-                        "current".to_string(),
-                        Vec::new(),
-                        Ty::Int,
-                        String::new(),
-                    )],
-                    "fixture/Qualified" => vec![LibraryMember::new(
-                        "select".to_string(),
-                        vec![Ty::obj("right/Token")],
-                        Ty::Int,
-                        String::new(),
-                    )],
-                    _ => Vec::new(),
-                },
-                companion_consts: std::collections::HashMap::new(),
-                sam_method: None,
-                companion_object: None,
-                value_companion_fns: Vec::new(),
-                value_underlying: None,
-                alias_target: None,
-                type_params: Vec::new(),
-                sealed_subclasses: TypeNameList::new(),
-                enum_entries: Vec::new(),
-                value_ctor_has_default: false,
-                ctor_named_params: Vec::new(),
-                value_class_properties: Vec::new(),
-                retention: None,
+            .then(|| {
+                let mut supertypes = TypeNameList::new();
+                if internal == "support/Target" {
+                    supertypes.push("support/BaseTarget");
+                }
+                LibraryType {
+                    is_public: true,
+                    kind: if internal == "fixture/Container$Labels" {
+                        TypeKind::Object
+                    } else {
+                        TypeKind::Class
+                    },
+                    supertypes,
+                    constructors: Vec::new(),
+                    members: Vec::new(),
+                    companion: match internal {
+                        "fixture/Stable" => vec![LibraryMember::new(
+                            "current".to_string(),
+                            Vec::new(),
+                            Ty::Int,
+                            String::new(),
+                        )],
+                        "fixture/Qualified" => vec![LibraryMember::new(
+                            "select".to_string(),
+                            vec![Ty::obj("right/Token")],
+                            Ty::Int,
+                            String::new(),
+                        )],
+                        _ => Vec::new(),
+                    },
+                    companion_consts: std::collections::HashMap::new(),
+                    sam_method: None,
+                    companion_object: None,
+                    value_companion_fns: Vec::new(),
+                    value_underlying: None,
+                    alias_target: None,
+                    type_params: Vec::new(),
+                    sealed_subclasses: TypeNameList::new(),
+                    enum_entries: Vec::new(),
+                    value_ctor_has_default: false,
+                    ctor_named_params: Vec::new(),
+                    value_class_properties: Vec::new(),
+                    retention: None,
+                }
             })
+        }
+
+        fn resolve_symbols(&self, fqn: &str) -> ResolvedSymbols {
+            let Some(name) = fqn
+                .strip_prefix("support/")
+                .filter(|name| matches!(*name, "adjust" | "configure" | "transform"))
+            else {
+                return ResolvedSymbols::default();
+            };
+            let receiver = Ty::obj("support/Target");
+            let lambda_receiver = Ty::obj("support/BaseScope");
+            let mut value_params = Vec::new();
+            if name == "adjust" {
+                value_params.push(Ty::Int);
+            }
+            value_params.push(Ty::fun(vec![lambda_receiver], Ty::Unit));
+            let mut physical_params = vec![receiver];
+            physical_params.extend(value_params.iter().copied());
+            let callable = LibraryCallable::library(
+                "support/SupportKt",
+                name,
+                physical_params,
+                Ty::Unit,
+                Ty::Unit,
+                "",
+            );
+            let mut function = FunctionInfo::plain(FnKind::Extension, Some(receiver), callable);
+            let mut lambda_param_types = vec![Vec::new(); value_params.len()];
+            *lambda_param_types.last_mut().unwrap() = vec![lambda_receiver];
+            function.call_sig = CallSig {
+                lambda_param_types,
+                lambda_receivers: vec![None; value_params.len()],
+                required: value_params.len(),
+                ..CallSig::default()
+            };
+            function.generic_sig = Some(GenericSig {
+                formals: Vec::new(),
+                formal_bounds: Vec::new(),
+                receiver: Some(receiver),
+                params: value_params,
+                ret: Ty::Unit,
+            });
+            ResolvedSymbols {
+                classifier: None,
+                callables: Callables::Functions(FunctionSet {
+                    overloads: vec![function],
+                }),
+            }
         }
 
         fn property_members(&self, recv: Ty, name: &str) -> PropertySet {
@@ -1312,6 +1369,51 @@ mod tests {
             panic!("missing source fallback function")
         };
         assert_eq!(functions.overloads[0].source_key.map(|key| key.0), Some(1));
+    }
+
+    #[test]
+    fn dependency_receiver_shape_beats_stale_library_shape() {
+        let inputs = [
+            SourceInput::kotlin(
+                "package consumer\n\
+                 import support.BaseScope\n\
+                 import support.Target\n\
+                 import support.adjust\n\
+                 import support.configure\n\
+                 import support.transform\n\
+                 object Owner {\n\
+                     fun create(target: Target) = target.configure { assign() }\n\
+                     fun update(target: Target) = target.transform { scope -> scope.assign() }\n\
+                     fun change(target: Target) = target.adjust(1) { scope -> scope.assign() }\n\
+                     private fun BaseScope.assign() {}\n\
+                 }",
+            ),
+            SourceInput::kotlin(
+                "package support\n\
+                 open class BaseTarget\n\
+                 class Target : BaseTarget()\n\
+                 open class BaseScope\n\
+                 inline fun Target.configure(block: BaseScope.() -> Unit) {}\n\
+                 inline fun BaseTarget.transform(block: BaseScope.() -> Unit) {}\n\
+                 inline fun Target.adjust(value: String, block: BaseScope.() -> Unit) {}",
+            ),
+        ];
+        let mut diagnostics = DiagSink::new();
+
+        let analysis = analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            1,
+            Box::new(ExistingLibrary),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert!(
+            analysis.types[0].is_some() && diagnostics.diags.is_empty(),
+            "{:?}",
+            diagnostics.diags
+        );
     }
 
     #[test]
