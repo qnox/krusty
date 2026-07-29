@@ -21,7 +21,7 @@ use crate::runtime::{
 };
 use crate::symbol_resolver::{ty_subst, ty_subst_all};
 use crate::symbol_source::{InheritanceShape, SymbolSource};
-use crate::types::{intern, type_name, Ty, TypeName, TypeNameList};
+use crate::types::{type_name, Ty, TypeName, TypeNameList};
 
 fn effective_class_access(class: &super::classreader::ClassInfo) -> u16 {
     class
@@ -1168,56 +1168,102 @@ impl JvmLibraries {
 /// Parse one JVM generic-signature type off the front of `s` into a signature [`Ty`], returning
 /// `(node, rest)`. A type variable becomes a [`Ty::TyParam`] (`kotlin/Any` bound).
 fn parse_gsig(s: &str) -> Option<(Ty, &str)> {
+    let parsed = parse_gsig_inner(s, false)?;
+    Some((parsed.ty, parsed.rest))
+}
+
+struct ParsedGsig<'a> {
+    ty: Ty,
+    erasure: Option<String>,
+    has_free: bool,
+    field_inexact: bool,
+    rest: &'a str,
+}
+
+fn parse_gsig_inner(s: &str, for_field: bool) -> Option<ParsedGsig<'_>> {
     let b = s.as_bytes();
     match *b.first()? {
         b'T' => {
             let end = s.find(';')?;
-            Some((
-                Ty::ty_param(&s[1..end], Ty::obj("kotlin/Any")),
-                &s[end + 1..],
-            ))
+            (end > 1).then(|| ParsedGsig {
+                ty: Ty::ty_param(&s[1..end], Ty::obj("kotlin/Any")),
+                erasure: for_field.then(|| "Ljava/lang/Object;".to_string()),
+                has_free: true,
+                field_inexact: false,
+                rest: &s[end + 1..],
+            })
         }
         b'[' => {
-            let (inner, rest) = parse_gsig(&s[1..])?;
-            Some((Ty::array(inner), rest))
+            if s[1..].trim_start_matches('[').starts_with('V') {
+                return None;
+            }
+            let parsed = parse_gsig_inner(&s[1..], for_field)?;
+            Some(ParsedGsig {
+                ty: Ty::array(parsed.ty),
+                erasure: parsed.erasure.map(|erased| format!("[{erased}")),
+                has_free: parsed.has_free,
+                field_inexact: parsed.field_inexact,
+                rest: parsed.rest,
+            })
         }
         b'L' => {
-            let lt = s.find('<');
-            let semi = s.find(';')?;
-            let name_end = match lt {
-                Some(i) if i < semi => i,
-                _ => semi,
-            };
-            let internal = intern(to_kotlin_internal(&s[1..name_end]));
-            if let Some(i) = lt.filter(|&i| i < semi) {
-                let mut rest = &s[i + 1..];
-                let mut args = Vec::new();
-                while !rest.starts_with('>') {
-                    if let Some(stripped) = rest.strip_prefix('*') {
-                        args.push(Ty::obj("kotlin/Any"));
-                        rest = stripped;
-                        continue;
-                    }
-                    let r2 = rest
-                        .strip_prefix('+')
-                        .or_else(|| rest.strip_prefix('-'))
-                        .unwrap_or(rest);
-                    let (a, tail) = parse_gsig(r2)?;
-                    args.push(a);
-                    rest = tail;
+            let mut rest = &s[1..];
+            let end = rest.find(['<', '.', ';'])?;
+            let first_component = &rest[..end];
+            if !valid_gsig_class_component(first_component, true) {
+                return None;
+            }
+            rest = &rest[end..];
+
+            let (mut args, mut has_free, mut field_inexact, tail) =
+                parse_gsig_type_args(rest, for_field)?;
+            rest = tail;
+            let mut binary_name = None;
+            while let Some(suffix) = rest.strip_prefix('.') {
+                let end = suffix.find(['<', '.', ';'])?;
+                let component = &suffix[..end];
+                if !valid_gsig_class_component(component, false) {
+                    return None;
                 }
-                let after = rest.strip_prefix('>')?.strip_prefix(';')?;
-                let node = if internal.starts_with("kotlin/jvm/functions/Function") {
+                field_inexact |= !args.is_empty();
+                let binary_name = binary_name.get_or_insert_with(|| first_component.to_string());
+                binary_name.push('$');
+                binary_name.push_str(component);
+                rest = &suffix[end..];
+                let (suffix_args, suffix_has_free, suffix_inexact, tail) =
+                    parse_gsig_type_args(rest, for_field)?;
+                has_free |= suffix_has_free;
+                field_inexact |= suffix_inexact;
+                args = suffix_args;
+                rest = tail;
+            }
+            let after = rest.strip_prefix(';')?;
+            let binary_name = binary_name.as_deref().unwrap_or(first_component);
+            let internal = to_kotlin_internal(binary_name);
+            let node = if let Some(arity) = jvm_function_arity(internal) {
+                if arity.checked_add(1) == Some(args.len()) {
                     let ret = gsig_unbox_wrapper(args.pop()?);
-                    let params: Vec<Ty> = args.into_iter().map(gsig_unbox_wrapper).collect();
+                    let params = args.into_iter().map(gsig_unbox_wrapper).collect();
                     Ty::fun(params, ret)
                 } else {
+                    field_inexact = true;
                     Ty::obj_args(internal, &args)
-                };
-                Some((node, after))
+                }
+            } else if internal.starts_with(JVM_FUNCTION_PREFIX) {
+                field_inexact = true;
+                Ty::obj_args(internal, &args)
+            } else if args.is_empty() {
+                kotlin_name_to_ty(internal)
             } else {
-                Some((kotlin_name_to_ty(internal), &s[semi + 1..]))
-            }
+                Ty::obj_args(internal, &args)
+            };
+            Some(ParsedGsig {
+                ty: node,
+                erasure: for_field.then(|| format!("L{binary_name};")),
+                has_free,
+                field_inexact,
+                rest: after,
+            })
         }
         c => {
             let t = match c {
@@ -1230,18 +1276,83 @@ fn parse_gsig(s: &str) -> Option<(Ty, &str)> {
                 b'V' => Ty::Unit,
                 _ => return None,
             };
-            Some((t, &s[1..]))
+            Some(ParsedGsig {
+                ty: t,
+                erasure: for_field.then(|| (c as char).to_string()),
+                has_free: false,
+                field_inexact: false,
+                rest: &s[1..],
+            })
         }
     }
 }
 
+fn valid_gsig_class_component(component: &str, allow_package: bool) -> bool {
+    if component.is_empty() || component.contains(['[', '>', ':']) {
+        return false;
+    }
+    if allow_package {
+        !component.starts_with('/') && !component.ends_with('/') && !component.contains("//")
+    } else {
+        !component.contains('/')
+    }
+}
+
+fn parse_gsig_type_args(s: &str, for_field: bool) -> Option<(Vec<Ty>, bool, bool, &str)> {
+    let Some(mut rest) = s.strip_prefix('<') else {
+        return Some((Vec::new(), false, false, s));
+    };
+    if rest.starts_with('>') {
+        return None;
+    }
+    let mut args = Vec::new();
+    let mut has_free = false;
+    let mut field_inexact = false;
+    while !rest.starts_with('>') {
+        if let Some(tail) = rest.strip_prefix('*') {
+            args.push(Ty::obj("kotlin/Any"));
+            field_inexact = true;
+            rest = tail;
+            continue;
+        }
+        let (arg, projected) = rest
+            .strip_prefix('+')
+            .or_else(|| rest.strip_prefix('-'))
+            .map_or((rest, false), |arg| (arg, true));
+        if !matches!(arg.as_bytes().first(), Some(b'L' | b'T' | b'[')) {
+            return None;
+        }
+        let parsed = parse_gsig_inner(arg, for_field)?;
+        has_free |= parsed.has_free;
+        field_inexact |= projected || parsed.field_inexact;
+        args.push(parsed.ty);
+        rest = parsed.rest;
+    }
+    Some((args, has_free, field_inexact, rest.strip_prefix('>')?))
+}
+
+const JVM_FUNCTION_PREFIX: &str = "kotlin/jvm/functions/Function";
+
+fn jvm_function_arity(internal: &str) -> Option<usize> {
+    let suffix = internal.strip_prefix(JVM_FUNCTION_PREFIX)?;
+    (!suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| suffix.parse::<usize>().ok())
+        .flatten()
+}
+
 fn gsig_unbox_wrapper(g: Ty) -> Ty {
-    let Ty::Obj(internal, _) = g else {
+    let Ty::Obj(internal, args) = g else {
         return g;
     };
     super::jvm_class_map::wrapper_to_kotlin_prim_name(internal)
         .map(super::classpath::kotlin_name_to_ty)
-        .unwrap_or_else(|| super::classpath::kotlin_type_name_to_ty(internal))
+        .unwrap_or_else(|| {
+            if args.is_empty() {
+                super::classpath::kotlin_type_name_to_ty(internal)
+            } else {
+                g
+            }
+        })
 }
 
 /// Parse a leading `<Name:Bound...>` formal-type-parameter block, returning the formal names and the
@@ -1314,18 +1425,36 @@ fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
     })
 }
 
-/// Return a generic result only when it contains no free type variables.
-fn concrete_generic_ret(gsig: &GenericSig) -> Option<Ty> {
-    fn is_concrete(g: Ty) -> bool {
-        match g {
-            Ty::TyParam(..) => false,
-            Ty::Fun(fsig) => fsig.params.iter().all(|p| is_concrete(*p)) && is_concrete(fsig.ret),
-            Ty::Obj(_, args) => args.iter().all(|a| is_concrete(*a)),
-            _ => true,
+fn has_free_ty_params(ty: Ty) -> bool {
+    match ty {
+        Ty::TyParam(..) => true,
+        Ty::Fun(sig) => {
+            sig.params.iter().any(|param| has_free_ty_params(*param)) || has_free_ty_params(sig.ret)
         }
+        Ty::Obj(_, args) => args.iter().any(|arg| has_free_ty_params(*arg)),
+        Ty::Nullable(inner) => has_free_ty_params(*inner),
+        _ => false,
     }
+}
+
+fn parse_concrete_field_gsig(signature: &str, erased_descriptor: &str) -> Option<Ty> {
+    if !matches!(signature.as_bytes().first(), Some(b'L' | b'T' | b'[')) {
+        return None;
+    }
+    let parsed = parse_gsig_inner(signature, true)?;
+    if !parsed.rest.is_empty()
+        || parsed.erasure.as_deref() != Some(erased_descriptor)
+        || parsed.has_free
+        || parsed.field_inexact
+    {
+        return None;
+    }
+    Some(canonicalize_jvm_collections(parsed.ty))
+}
+
+fn concrete_generic_ret(gsig: &GenericSig) -> Option<Ty> {
     match gsig.ret {
-        Ty::Obj(_, args) if !args.is_empty() && is_concrete(gsig.ret) => {
+        Ty::Obj(_, args) if !args.is_empty() && !has_free_ty_params(gsig.ret) => {
             // Canonicalize the recovered type to Kotlin form (`java/util/List<java/lang/Integer>` →
             // `kotlin/collections/List<kotlin/Int>`), so a member/`for`/extension keyed on the Kotlin
             // collection + a primitive element resolves and unboxes — mirroring the suspend path. Without
@@ -1407,6 +1536,22 @@ fn canonicalize_jvm_collections(ty: Ty) -> Ty {
                 .collect();
             Ty::obj_args_name(kname, &cargs)
         }
+        Ty::Fun(sig) => {
+            let params = sig
+                .params
+                .iter()
+                .map(|param| canonicalize_jvm_collections(*param))
+                .collect();
+            let ret = canonicalize_jvm_collections(sig.ret);
+            Ty::fun_with_shape(
+                params,
+                ret,
+                sig.context_count,
+                sig.has_receiver,
+                sig.suspend,
+            )
+        }
+        Ty::Nullable(inner) => Ty::nullable(canonicalize_jvm_collections(*inner)),
         other => other,
     }
 }
@@ -1459,10 +1604,7 @@ pub fn desc_to_ty(d: &str) -> Ty {
                 return Ty::Unit;
             }
             let internal = to_kotlin_internal(raw_internal);
-            if let Some(n) = internal
-                .strip_prefix("kotlin/jvm/functions/Function")
-                .and_then(|n| n.parse::<usize>().ok())
-            {
+            if let Some(n) = jvm_function_arity(internal) {
                 Ty::fun(vec![Ty::obj("kotlin/Any"); n], Ty::obj("kotlin/Any"))
             } else {
                 Ty::obj(internal)
@@ -2543,7 +2685,11 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                 .iter()
                 .find(|f| f.name == name && f.access & 0x0008 != 0 && f.access & 0x0001 != 0)
             {
-                let ty = field_desc_to_ty(&f.descriptor);
+                let ty = f
+                    .signature
+                    .as_deref()
+                    .and_then(|signature| parse_concrete_field_gsig(signature, &f.descriptor))
+                    .unwrap_or_else(|| field_desc_to_ty(&f.descriptor));
                 let constant = f.const_value.as_ref().map(|value| LibraryConst {
                     ty,
                     value: Self::library_const(value),
@@ -3260,7 +3406,10 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
 
 #[cfg(test)]
 mod tests {
-    use super::{desc_to_ty, parse_class_gsig, parse_method_desc, parse_method_gsig};
+    use super::{
+        desc_to_ty, parse_class_gsig, parse_concrete_field_gsig, parse_method_desc,
+        parse_method_gsig,
+    };
     use crate::libraries::SemanticPlatform;
     use crate::types::type_name;
     use crate::types::Ty;
@@ -3346,6 +3495,31 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_generic_signatures_retain_projection_and_inner_class_parsing() {
+        let method =
+            parse_method_gsig("(Ljava/util/List<+Ljava/lang/String;>;)Ljava/util/List<*>;")
+                .expect("method signature");
+        assert_eq!(
+            method.params,
+            [Ty::obj_args("java/util/List", &[Ty::String])]
+        );
+        assert_eq!(
+            method.ret,
+            Ty::obj_args("java/util/List", &[Ty::obj("kotlin/Any")])
+        );
+
+        let (_, supertypes) = parse_class_gsig(
+            "Ljava/lang/Object;\
+             Lfixture/Outer<Ljava/lang/Integer;>.Inner<Ljava/lang/Long;>;",
+        )
+        .expect("class signature");
+        assert_eq!(
+            supertypes[1],
+            Ty::obj_args("fixture/Outer$Inner", &[Ty::obj("java/lang/Long")])
+        );
+    }
+
+    #[test]
     fn class_generic_signature_canonicalizes_unsigned_arguments() {
         let (_, supertypes) =
             parse_class_gsig("Ljava/lang/Object;Ljava/lang/Iterable<Lkotlin/UInt;>;")
@@ -3365,6 +3539,151 @@ mod tests {
         let bottom = parse_method_gsig("(Lkotlin/jvm/functions/Function0<Lkotlin/Nothing;>;)V")
             .expect("Nothing function signature");
         assert_eq!(bottom.params, [Ty::fun(Vec::new(), Ty::Nothing)]);
+    }
+
+    #[test]
+    fn field_generic_signature_must_be_complete_and_concrete() {
+        assert_eq!(
+            parse_concrete_field_gsig(
+                "Ljava/util/List<Lkotlin/collections/Set<Ljava/lang/Integer;>;>;",
+                "Ljava/util/List;",
+            ),
+            Some(Ty::obj_args(
+                "kotlin/collections/List",
+                &[Ty::obj_args("kotlin/collections/Set", &[Ty::Int])],
+            ))
+        );
+        assert_eq!(
+            parse_concrete_field_gsig(
+                "Ljava/util/List<Ljava/lang/String;>;junk",
+                "Ljava/util/List;",
+            ),
+            None
+        );
+        assert_eq!(
+            parse_concrete_field_gsig("Ljava/util/List<Ljava/lang/String;", "Ljava/util/List;",),
+            None
+        );
+    }
+
+    #[test]
+    fn field_generic_signature_rejects_wildcards_and_projections() {
+        for signature in [
+            "Ljava/util/List<*>;",
+            "Ljava/util/List<+Ljava/lang/String;>;",
+            "Ljava/util/List<-Ljava/lang/String;>;",
+            "Ljava/util/List<Ljava/util/Set<+Ljava/lang/String;>;>;",
+            "Lkotlin/jvm/functions/Function1<-Ljava/lang/String;+Ljava/lang/Long;>;",
+        ] {
+            let descriptor = format!("L{};", &signature[1..signature.find('<').unwrap()]);
+            assert_eq!(
+                parse_concrete_field_gsig(signature, &descriptor),
+                None,
+                "accepted lossy field signature {signature}"
+            );
+        }
+    }
+
+    #[test]
+    fn field_generic_signature_recurses_through_function_types() {
+        assert_eq!(
+            parse_concrete_field_gsig(
+                "Lkotlin/jvm/functions/Function1<\
+                 Ljava/util/List<Ljava/lang/Integer;>;\
+                 Ljava/util/Set<Ljava/lang/Long;>;>;",
+                "Lkotlin/jvm/functions/Function1;",
+            ),
+            Some(Ty::fun(
+                vec![Ty::obj_args("kotlin/collections/List", &[Ty::Int])],
+                Ty::obj_args("kotlin/collections/Set", &[Ty::Long]),
+            ))
+        );
+        assert_eq!(
+            parse_concrete_field_gsig(
+                "Lkotlin/jvm/functions/Function1<\
+                 Ljava/util/List<TT;>;\
+                 Ljava/util/Set<Ljava/lang/Long;>;>;",
+                "Lkotlin/jvm/functions/Function1;",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn field_generic_signature_requires_unparameterized_inner_class_owners() {
+        assert_eq!(
+            parse_concrete_field_gsig(
+                "Lfixture/Outer<Ljava/lang/Integer;>.\
+                 Inner<Ljava/lang/Long;>.\
+                 Leaf<Ljava/lang/Double;>;",
+                "Lfixture/Outer$Inner$Leaf;",
+            ),
+            None
+        );
+        assert_eq!(
+            parse_concrete_field_gsig(
+                "Lfixture/Outer.Inner<Ljava/lang/Long;>.Leaf<Ljava/lang/Double;>;",
+                "Lfixture/Outer$Inner$Leaf;",
+            ),
+            None
+        );
+        assert_eq!(
+            parse_concrete_field_gsig(
+                "Lfixture/Outer.Inner.Leaf<Ljava/lang/Double;>;",
+                "Lfixture/Outer$Inner$Leaf;",
+            ),
+            Some(Ty::obj_args("fixture/Outer$Inner$Leaf", &[Ty::Double]))
+        );
+    }
+
+    #[test]
+    fn field_generic_signature_requires_exact_function_arity() {
+        assert_eq!(
+            parse_concrete_field_gsig(
+                "Lkotlin/jvm/functions/Function2<\
+                 Ljava/lang/Integer;\
+                 Ljava/lang/Long;\
+                 Ljava/lang/String;>;",
+                "Lkotlin/jvm/functions/Function2;",
+            ),
+            Some(Ty::fun(vec![Ty::Int, Ty::Long], Ty::String))
+        );
+
+        for signature in [
+            "Lkotlin/jvm/functions/Function1<Ljava/lang/String;>;",
+            "Lkotlin/jvm/functions/Function1<\
+             Ljava/lang/Integer;Ljava/lang/Long;Ljava/lang/String;>;",
+            "Lkotlin/jvm/functions/FunctionX<Ljava/lang/String;>;",
+            "Lkotlin/jvm/functions/Function1Extra<Ljava/lang/String;>;",
+            "Lkotlin/jvm/functions/Function+1<Ljava/lang/String;Ljava/lang/String;>;",
+            "Lkotlin/jvm/functions/Function<Ljava/lang/String;>;",
+        ] {
+            let descriptor = format!("L{};", &signature[1..signature.find('<').unwrap()]);
+            assert_eq!(
+                parse_concrete_field_gsig(signature, &descriptor),
+                None,
+                "accepted malformed function signature {signature}"
+            );
+        }
+    }
+
+    #[test]
+    fn field_generic_signature_requires_reference_and_matching_erasure() {
+        assert_eq!(parse_concrete_field_gsig("I", "I"), None);
+        assert_eq!(parse_concrete_field_gsig("V", "V"), None);
+        assert_eq!(parse_concrete_field_gsig("[V", "[V"), None);
+        assert_eq!(
+            parse_concrete_field_gsig("[I", "[I"),
+            Some(Ty::array(Ty::Int))
+        );
+        assert_eq!(
+            parse_concrete_field_gsig("Ljava/util/List<Ljava/lang/Integer;>;", "Ljava/util/Set;",),
+            None
+        );
+        assert_eq!(
+            parse_concrete_field_gsig("Ljava/util/List<TT;>;", "Ljava/util/List;"),
+            None
+        );
     }
 
     #[test]
