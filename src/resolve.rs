@@ -12068,9 +12068,28 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &[Ty],
     ) -> Option<crate::symbol_resolver::ResolvedMember> {
+        self.resolve_implicit_instance_member_with_lambda_args(recv, name, args, &[])
+    }
+    /// [`resolve_implicit_instance_member`] with the call's lambda-literal flags, so a SAM
+    /// parameter accepts a lambda argument exactly as on an explicit receiver
+    /// (`Button().apply { addActionListener { … } }`).
+    fn resolve_implicit_instance_member_with_lambda_args(
+        &self,
+        recv: Ty,
+        name: &str,
+        args: &[Ty],
+        lambda_literals: &[bool],
+    ) -> Option<crate::symbol_resolver::ResolvedMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::ImplicitValue(recv), name, args, &[])
+            .resolve_symbol_with_literal_and_lambda_args(
+                SymRecv::ImplicitValue(recv),
+                name,
+                args,
+                &[],
+                lambda_literals,
+                &[],
+            )
             .and_then(Symbol::call)
     }
     fn resolve_instance_member_with_literal_args(
@@ -20118,7 +20137,13 @@ impl<'a> Checker<'a> {
                 }
                 ClasspathMemberSlotCall::NoMatch => {}
             }
-            if let Some(m) = self.resolve_implicit_instance_member(rt, name, arg_tys) {
+            let lambda_literals = self.lambda_literal_args(args);
+            if let Some(m) = self.resolve_implicit_instance_member_with_lambda_args(
+                rt,
+                name,
+                arg_tys,
+                &lambda_literals,
+            ) {
                 let ret = m.ret;
                 self.resolved_calls.insert(call, ResolvedCall::Member(m));
                 return Some(ret);
@@ -20132,7 +20157,13 @@ impl<'a> Checker<'a> {
                 }
                 ClasspathMemberSlotCall::NoMatch => {}
             }
-            if let Some(m) = self.resolve_implicit_instance_member(rt, name, arg_tys) {
+            let lambda_literals = self.lambda_literal_args(args);
+            if let Some(m) = self.resolve_implicit_instance_member_with_lambda_args(
+                rt,
+                name,
+                arg_tys,
+                &lambda_literals,
+            ) {
                 let ret = m.ret;
                 self.resolved_calls.insert(call, ResolvedCall::Member(m));
                 return Some(ret);
@@ -26384,6 +26415,30 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
+                // A CLASSPATH member of an implicit receiver taking a SAM lambda
+                // (`Button().apply { addActionListener { … } }`): recover the SAM's parameter
+                // types the same way an explicit-receiver call does, so a lambda with no
+                // declared parameters types with the functional method's arity (`it` bound)
+                // instead of caching a zero-arity function type that no overload accepts.
+                let implicit_classpath_member_sam_pts = if implicit_member_lambda_enabled
+                    && ordinary_this_member_lambda_shape.is_none()
+                    && this_member_ext_lambda_plan.is_none()
+                    && implicit_library_ext_lambda_shape.is_none()
+                {
+                    let partial = this_member_partial.as_deref().unwrap_or_default();
+                    self.implicit_receiver_types()
+                        .into_iter()
+                        .find_map(|receiver| {
+                            self.classpath_sam_param_types(
+                                crate::symbol_resolver::SymRecv::Value(receiver),
+                                &fname,
+                                args,
+                                partial,
+                            )
+                        })
+                } else {
+                    None
+                };
                 let this_member_lambda_pts = this_member_ext_lambda_plan
                     .as_ref()
                     .map(|plan| plan.param_types.clone())
@@ -26391,6 +26446,16 @@ impl<'a> Checker<'a> {
                         implicit_library_ext_lambda_shape
                             .as_ref()
                             .and_then(|shape| shape.param_types.clone())
+                    })
+                    .or_else(|| {
+                        // Shape providers above carry `Vec<Vec<Ty>>` (every slot known); the SAM
+                        // probe knows only the lambda slots — default the rest to empty.
+                        implicit_classpath_member_sam_pts.map(|slots| {
+                            slots
+                                .into_iter()
+                                .map(Option::unwrap_or_default)
+                                .collect::<Vec<_>>()
+                        })
                     });
                 let this_member_lambda_recvs = this_member_ext_lambda_plan
                     .as_ref()

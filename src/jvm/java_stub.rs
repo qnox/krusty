@@ -75,17 +75,18 @@ pub fn stub_classes(
     let mut out = Vec::new();
     let mut emitted: HashSet<&str> = HashSet::new();
     for (ctx, decls) in &parsed {
-        let r = Resolver {
-            ctx,
-            resolve: &resolve_all,
-            mode,
-        };
         for raw in decls {
             if (raw.internal.contains('$') && raw.access & ACC_PRIVATE != 0)
                 || !emitted.insert(raw.internal.as_str())
             {
                 continue;
             }
+            let r = Resolver {
+                ctx,
+                resolve: &resolve_all,
+                mode,
+                owner: Some(raw.internal.as_str()),
+            };
             match r.emit(raw) {
                 Some(bytes) => out.push((raw.internal.clone(), bytes)),
                 None if mode.is_lenient() => continue,
@@ -100,10 +101,27 @@ struct Resolver<'a> {
     ctx: &'a FileCtx,
     resolve: &'a dyn Fn(&str) -> bool,
     mode: StubMode,
+    /// Internal name of the declaration being emitted — member types of the enclosing chain
+    /// shadow the package (`Proc` inside `Builder` is `Builder$Proc`, JLS scoping).
+    owner: Option<&'a str>,
 }
 
 impl Resolver<'_> {
     fn internal_of(&self, name: &str) -> Option<String> {
+        if let Some(owner) = self.owner {
+            let nested = name.replace('.', "$");
+            let mut scope = owner;
+            loop {
+                let candidate = format!("{scope}${nested}");
+                if (self.resolve)(&candidate) {
+                    return Some(candidate);
+                }
+                let Some((enclosing, _)) = scope.rsplit_once('$') else {
+                    break;
+                };
+                scope = enclosing;
+            }
+        }
         resolve_internal_name(&self.ctx.package, &self.ctx.imports, name, self.resolve)
     }
 
