@@ -394,9 +394,9 @@ mod tests {
             "textDocument/diagnostic",
             json!({"textDocument": {"uri": "file:///p/A.kt"}}),
         ));
-        assert_eq!(
-            stale_diagnostics.messages[0]["result"],
-            json!({"kind": "full", "items": []})
+        assert!(
+            stale_diagnostics.messages.is_empty(),
+            "the current-version pull waits while worker analysis is pending"
         );
         let stale_completion = server.handle(request(
             5,
@@ -423,8 +423,10 @@ mod tests {
         server.make_analysis_retry_due();
         let recovered = server.run_due_project_refresh();
         assert_eq!(analysis_calls.get(), 4);
-        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered.len(), 2);
         assert_eq!(recovered[0]["params"]["diagnostics"], json!([]));
+        assert_eq!(recovered[1]["id"], 4);
+        assert_eq!(recovered[1]["result"], json!({"kind": "full", "items": []}));
         let recovered_hover = server.handle(request(
             6,
             "textDocument/hover",
