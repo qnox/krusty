@@ -139,38 +139,43 @@ impl Drop for ProfGuard {
     }
 }
 
-/// Keep current scratch directories outside the top-level namespace swept by older test binaries.
+/// Allocate a unique directory below this process's private scratch root.
 #[allow(dead_code)]
-fn scratch_dir(name: &str) -> PathBuf {
-    let root = std::env::temp_dir().join("krusty_scratch");
-    let _ = std::fs::create_dir_all(&root);
-    root.join(name)
+fn scratch_dir() -> Option<PathBuf> {
+    static ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    let root = ROOT
+        .get_or_init(|| {
+            sweep_stale_temp_dirs();
+            let root = std::env::temp_dir()
+                .join("krusty_scratch")
+                .join(std::process::id().to_string());
+            // PID reuse can leave this process's root behind.
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).ok()?;
+            Some(root)
+        })
+        .as_ref()?;
+    let dir = root.join(NEXT.fetch_add(1, Ordering::Relaxed).to_string());
+    std::fs::create_dir(&dir).ok()?;
+    Some(dir)
 }
 
-/// Remove scratch directories whose trailing owner PID is no longer live.
+/// Remove scratch directories whose owner PID is no longer live.
 #[allow(dead_code)]
 fn sweep_stale_temp_dirs() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
-        for root in [
-            std::env::temp_dir().join("krusty_scratch"),
-            std::env::temp_dir(),
+        for (root, private) in [
+            (std::env::temp_dir().join("krusty_scratch"), true),
+            (std::env::temp_dir(), false),
         ] {
             let Ok(rd) = std::fs::read_dir(root) else {
                 continue;
             };
             for e in rd.flatten() {
-                let name = e.file_name();
-                let Some(pid) = name
-                    .to_str()
-                    .filter(|n| {
-                        n.starts_with("krusty_lib_")
-                            || n.starts_with("krusty_node_")
-                            || n.starts_with("krusty_javasrc_")
-                    })
-                    .and_then(|n| n.rsplit('_').next())
-                    .and_then(|p| p.parse::<i32>().ok())
-                else {
+                let Some(pid) = scratch_owner_pid(&e.file_name(), private) else {
                     continue;
                 };
                 if temp_dir_owner_is_dead(pid) {
@@ -179,6 +184,20 @@ fn sweep_stale_temp_dirs() {
             }
         }
     });
+}
+
+fn scratch_owner_pid(name: &std::ffi::OsStr, private: bool) -> Option<i32> {
+    let name = name.to_str()?;
+    if private {
+        if let Ok(pid) = name.parse() {
+            return Some(pid);
+        }
+    }
+    name.strip_prefix("krusty_")?
+        .rsplit('_')
+        .next()?
+        .parse()
+        .ok()
 }
 
 /// Only `ESRCH` proves that an owner is dead; `EPERM` can describe a live process.
@@ -686,8 +705,7 @@ pub fn front_end_diagnostics_files(
 #[allow(dead_code)]
 pub fn run_js(js: &str) -> Option<String> {
     let node = which_node()?;
-    let dir = scratch_dir(&format!("krusty_node_{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = scratch_dir()?;
     static JS_COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = JS_COUNTER.fetch_add(1, Ordering::Relaxed);
     let path = dir.join(format!("m_{:x}_{n}.mjs", hash_str(js)));
@@ -1358,21 +1376,18 @@ pub fn expect_front_end_ok_files_with_stdlib(sources: &[&str], stem: &str) {
     );
 }
 
-/// Compile Kotlin `lib_src` with the REAL kotlinc into a fresh classpath dir (tagged by `tag` +
-/// process id), returning the output dir for a `-classpath`. `None` (→ skip the test) when the kotlinc
-/// toolchain / stdlib isn't provisioned. The single shared "build a dependency jar" helper — classpath
-/// e2e tests use this instead of each re-implementing the kotlinc invocation.
+/// Compile Kotlin source into a temporary classpath directory.
+/// Returns `None` when the Kotlin toolchain is unavailable.
 #[allow(dead_code)]
 pub fn compile_lib(tag: &str, lib_src: &str) -> Option<PathBuf> {
     compile_libs(tag, &[("Lib.kt", lib_src)])
 }
 
-/// Compile one or more Kotlin source files with the REAL kotlinc into a fresh classpath dir.
+/// Compile Kotlin files into a temporary classpath directory.
 #[allow(dead_code)]
-pub fn compile_libs(tag: &str, sources: &[(&str, &str)]) -> Option<PathBuf> {
+pub fn compile_libs(_tag: &str, sources: &[(&str, &str)]) -> Option<PathBuf> {
     let stdlib = stdlib_jar()?;
-    let work = scratch_dir(&format!("krusty_lib_{tag}_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&work);
+    let work = scratch_dir()?;
     let out = work.join("libout");
     std::fs::create_dir_all(&out).ok()?;
     let mut args = vec![
@@ -2047,14 +2062,10 @@ pub fn javac_compile_proc(
     cp_jars: &[PathBuf],
     proc_path: &[PathBuf],
 ) -> Option<JavacOutput> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static UID: AtomicU64 = AtomicU64::new(0);
     if sources.is_empty() {
         return None;
     }
-    let uid = UID.fetch_add(1, Ordering::Relaxed);
-    // Pid LAST: `sweep_stale_temp_dirs` parses the trailing `_<pid>` to reap dirs of dead runs.
-    let root = scratch_dir(&format!("krusty_javasrc_{uid}_{}", std::process::id()));
+    let root = scratch_dir()?;
     let srcdir = root.join("src");
     let outdir = root.join("classes");
     std::fs::create_dir_all(&srcdir).ok()?;
@@ -2160,7 +2171,7 @@ pub fn byte_diff_against_kotlinc(name: &str, src: &str, class: &str) -> Option<R
 }
 
 #[cfg(test)]
-mod sweep_tests {
+mod scratch_tests {
     #[test]
     fn own_pid_is_not_dead() {
         assert!(!super::temp_dir_owner_is_dead(std::process::id() as i32));
@@ -2180,12 +2191,41 @@ mod sweep_tests {
 
     #[test]
     fn scratch_dirs_live_under_the_private_root() {
-        let dir = super::scratch_dir(&format!("krusty_lib_x_{}", std::process::id()));
-        assert_eq!(
-            dir.parent().and_then(|p| p.file_name()),
-            Some(std::ffi::OsStr::new("krusty_scratch")),
-            "{dir:?}"
-        );
-        assert!(dir.parent().is_some_and(std::path::Path::exists));
+        let dir = super::scratch_dir().expect("allocate scratch directory");
+        let root = std::env::temp_dir()
+            .join("krusty_scratch")
+            .join(std::process::id().to_string());
+        assert_eq!(dir.parent(), Some(root.as_path()));
+        assert!(dir.is_dir());
+    }
+
+    #[test]
+    fn concurrent_scratch_allocations_are_unique() {
+        const THREADS: usize = 8;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+        let dirs = std::thread::scope(|scope| {
+            let handles = (0..THREADS)
+                .map(|_| {
+                    let barrier = barrier.clone();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        super::scratch_dir().expect("allocate scratch directory")
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("allocator thread panicked"))
+                .collect::<Vec<_>>()
+        });
+
+        let unique = dirs.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), THREADS);
+        assert!(dirs.iter().all(|dir| dir.parent() == dirs[0].parent()));
+        assert!(dirs.iter().all(|dir| dir.is_dir()));
+        assert!(dirs.iter().all(|dir| dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.parse::<u64>().is_ok())));
     }
 }
