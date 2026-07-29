@@ -805,19 +805,22 @@ impl JvmLibraries {
                 };
                 let member_metadata =
                     super::classpath::aligned_member_metadata(meta_fns, &m.name, &m.descriptor);
-                let platform_nullable_params = params
-                    .iter()
-                    .enumerate()
-                    .map(|(index, parameter)| {
-                        is_java
-                            && parameter.is_reference()
-                            && m.parameter_nullability.get(index).copied().flatten()
-                                != Some(JavaNullability::NotNull)
-                    })
-                    .collect::<Vec<_>>();
+                let platform_nullable_params = is_java.then(|| {
+                    params
+                        .iter()
+                        .enumerate()
+                        .map(|(index, parameter)| {
+                            parameter.is_reference()
+                                && m.parameter_nullability.get(index).copied().flatten()
+                                    != Some(JavaNullability::NotNull)
+                        })
+                        .collect::<Vec<_>>()
+                });
                 let mut member =
                     LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
-                member.call_sig.platform_nullable_params = platform_nullable_params.clone();
+                if let Some(java_nullable) = platform_nullable_params.clone() {
+                    member.call_sig.platform_nullable_params = java_nullable;
+                }
                 member.visibility = if m.is_public() {
                     Visibility::Public
                 } else {
@@ -872,7 +875,9 @@ impl JvmLibraries {
                             .and_then(|arity| arity.checked_sub(1));
                         CallSig::metadata_member(value_arity, Vec::new(), Vec::new(), vararg_index)
                     });
-                member.call_sig.platform_nullable_params = platform_nullable_params;
+                if let Some(java_nullable) = platform_nullable_params {
+                    member.call_sig.platform_nullable_params = java_nullable;
+                }
                 if m.name == "<init>" {
                     // Parse the ctor's generic signature so the resolver can infer a construction's type
                     // arguments (`Pair(1, 2)` → `<Int, Int>`) without spelling backend signature strings.

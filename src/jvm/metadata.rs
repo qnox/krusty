@@ -1122,6 +1122,7 @@ impl MvpFlags {
     const MATERIALIZED: u8 = 1 << 1;
     const VARARG: u8 = 1 << 2;
     const RECV_FUN: u8 = 1 << 3;
+    const NULLABLE: u8 = 1 << 4;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -1153,6 +1154,10 @@ impl MvpFlags {
     pub const fn with_recv_fun(self, on: bool) -> Self {
         self.with(Self::RECV_FUN, on)
     }
+    #[inline]
+    pub const fn with_nullable(self, on: bool) -> Self {
+        self.with(Self::NULLABLE, on)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1179,6 +1184,10 @@ impl MetaValueParam {
     #[inline]
     pub fn vararg(&self) -> bool {
         self.flags.has(MvpFlags::VARARG)
+    }
+    #[inline]
+    pub fn nullable(&self) -> bool {
+        self.flags.has(MvpFlags::NULLABLE)
     }
     #[inline]
     pub fn recv_fun(&self) -> bool {
@@ -1285,12 +1294,14 @@ impl MetaFn {
     }
 
     pub fn member_call_sig(&self) -> CallSig {
-        CallSig::metadata_member(
+        let mut sig = CallSig::metadata_member(
             self.value_params.len(),
             self.value_params.iter().map(|p| p.name.clone()).collect(),
             self.value_params.iter().map(|p| p.has_default()).collect(),
             self.vararg_index(),
-        )
+        );
+        sig.platform_nullable_params = self.value_params.iter().map(|p| p.nullable()).collect();
+        sig
     }
 
     pub fn vararg_index(&self) -> Option<usize> {
@@ -1574,7 +1585,8 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64) -> Vec<MetaFn> {
                                     .with_has_default(p.has_default)
                                     .with_materialized(p.materialized)
                                     .with_vararg(p.vararg_elem_body.is_some())
-                                    .with_recv_fun(recv_fun),
+                                    .with_recv_fun(recv_fun)
+                                    .with_nullable(parse_type_nullable(&p.type_body)),
                                 recv_fun_receiver: if recv_fun {
                                     p.recv_fun
                                         .1

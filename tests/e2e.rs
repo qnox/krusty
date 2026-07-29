@@ -152,6 +152,8 @@ mod classpath_member_metadata_alignment_e2e;
 mod classpath_nested_ctor_reordered_named_valueclass_e2e;
 #[path = "classpath_nullable_extension_receiver_e2e.rs"]
 mod classpath_nullable_extension_receiver_e2e;
+#[path = "classpath_nullable_param_e2e.rs"]
+mod classpath_nullable_param_e2e;
 #[path = "classpath_number_conversion_e2e.rs"]
 mod classpath_number_conversion_e2e;
 #[path = "classpath_object_member_import_e2e.rs"]
