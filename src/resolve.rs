@@ -20407,6 +20407,16 @@ impl<'a> Checker<'a> {
         None
     }
 
+    fn inaccessible_classifier_access(
+        &self,
+        name: &str,
+    ) -> Option<crate::symbol_source::ClassifierAccess> {
+        let InheritedNestedClassifier::Found(internal) = self.scoped_classifier_name(name) else {
+            return None;
+        };
+        self.resolver().inaccessible_classifier_access(internal)
+    }
+
     /// Emit kotlinc's access diagnostic when a member of `owner` with visibility `vis` is NOT reachable
     /// from the current site. Shared by the property-read and member-call checks.
     fn reject_if_inaccessible(&mut self, vis: Visibility, name: &str, owner: TypeName, span: Span) {
@@ -26260,14 +26270,16 @@ impl<'a> Checker<'a> {
                             .member_extension_function_shapes(receiver, &fname)
                             .is_empty()
                     });
-                self.diags.error(
-                    span,
-                    if has_inapplicable_candidate {
-                        "none of the following candidates is applicable:".to_string()
-                    } else {
-                        format!("unresolved function '{fname}'")
-                    },
-                );
+                let message = if has_inapplicable_candidate {
+                    "none of the following candidates is applicable:".to_string()
+                } else if self.value_root_shadows_classifier(&fname) {
+                    format!("unresolved function '{fname}'")
+                } else if let Some(access) = self.inaccessible_classifier_access(&fname) {
+                    inaccessible_classifier_message(&fname, access)
+                } else {
+                    format!("unresolved function '{fname}'")
+                };
+                self.diags.error(span, message);
                 Ty::Error
             }
             _ => {
@@ -27391,6 +27403,22 @@ impl<'a> Checker<'a> {
             self.tparams.remove(&t);
         }
     }
+}
+
+fn inaccessible_classifier_message(
+    name: &str,
+    access: crate::symbol_source::ClassifierAccess,
+) -> String {
+    use crate::symbol_source::ClassifierAccess;
+
+    let kind = match access {
+        ClassifierAccess::Private => "private",
+        ClassifierAccess::Protected => "protected",
+        ClassifierAccess::Internal => "internal",
+        ClassifierAccess::PackagePrivate => "package-private",
+        ClassifierAccess::Public => "public",
+    };
+    format!("cannot access '{name}': it is {kind}")
 }
 
 #[cfg(test)]

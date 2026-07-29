@@ -1479,10 +1479,7 @@ impl<'a> SymbolResolver<'a> {
         self
     }
 
-    fn member_receiver_accessible(&self, receiver: Ty) -> bool {
-        let Some(internal) = receiver.kotlin_class_internal() else {
-            return false;
-        };
+    fn classifier_accessible(&self, internal: TypeName) -> bool {
         let visibility = self.src.classifier_visibility(internal);
         if visibility == Some(crate::types::Visibility::Public)
             || (visibility.is_none()
@@ -1531,6 +1528,14 @@ impl<'a> SymbolResolver<'a> {
                 },
             ) == InheritedNestedClassifier::Found(internal)
         })
+    }
+
+    pub(crate) fn inaccessible_classifier_access(
+        &self,
+        internal: TypeName,
+    ) -> Option<crate::symbol_source::ClassifierAccess> {
+        let access = self.src.classifier_access(internal)?;
+        (!self.classifier_accessible(internal)).then_some(access)
     }
 
     /// Whether `internal` names a `@JvmInline value`/inline class — resolved through the FEDERATED source
@@ -1792,8 +1797,10 @@ impl<'a> SymbolResolver<'a> {
                 // Resolve every facet the name supports on this receiver; a name can support several (a
                 // Java zero-arg method is a property read AND a callable). Each facet is exactly the
                 // former per-use resolution, so the caller's chosen facet behaves as before.
-                let member_receiver_accessible =
-                    !ty.is_nullable() && self.member_receiver_accessible(ty);
+                let member_receiver_accessible = !ty.is_nullable()
+                    && ty
+                        .kotlin_class_internal()
+                        .is_some_and(|internal| self.classifier_accessible(internal));
                 let member_access = MemberAccess {
                     source: &self.src,
                     module: self.module,
@@ -1942,7 +1949,7 @@ impl<'a> SymbolResolver<'a> {
                 type_args,
             ),
             SymRecv::TypeName(internal) => {
-                if !self.member_receiver_accessible(Ty::obj_name(internal)) {
+                if !self.classifier_accessible(internal) {
                     return None;
                 }
                 let access = MemberAccess {
