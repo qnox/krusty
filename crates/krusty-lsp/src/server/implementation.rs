@@ -743,6 +743,15 @@ pub struct LspService<B> {
     analysis_retry_backoff: Duration,
     initialized: bool,
     client_initialized: bool,
+    /// The client asks for diagnostics with `textDocument/diagnostic`. Editors keep pulled and
+    /// pushed diagnostics in separate sets (Zed retains one when the other arrives), so a server
+    /// that answers pulls *and* publishes shows every message twice. Publish only for clients that
+    /// cannot pull.
+    client_pulls_diagnostics: bool,
+    /// The client re-pulls diagnostics on `workspace/diagnostic/refresh`. Without a push
+    /// notification this is the only way to hand a pulling client results that landed after its
+    /// last request — analysis of one document also refreshes the others in its source set.
+    client_refreshes_diagnostics: bool,
     shutdown_requested: bool,
     pending_init_feedback: Option<ProjectFeedback>,
     pending_watched_globs: Vec<String>,
@@ -776,6 +785,8 @@ where
             analysis_retry_backoff: Duration::ZERO,
             initialized: false,
             client_initialized: false,
+            client_pulls_diagnostics: false,
+            client_refreshes_diagnostics: false,
             shutdown_requested: false,
             pending_init_feedback: None,
             pending_watched_globs: Vec::new(),
@@ -792,6 +803,29 @@ where
 
     pub fn open_document_count(&self) -> usize {
         self.documents.len()
+    }
+
+    /// A `workspace/diagnostic/refresh` request for clients that pull instead of being pushed to.
+    fn diagnostic_refresh(&self) -> Option<Value> {
+        (self.client_pulls_diagnostics && self.client_refreshes_diagnostics).then(|| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": "krusty/diagnosticRefresh",
+                "method": "workspace/diagnostic/refresh",
+                "params": {},
+            })
+        })
+    }
+
+    /// A `textDocument/publishDiagnostics` notification, unless the client pulls diagnostics — see
+    /// [`LspService::client_pulls_diagnostics`].
+    fn publish(
+        &self,
+        uri: &str,
+        version: Option<i64>,
+        diagnostics: &DiagnosticIndex,
+    ) -> Option<Value> {
+        (!self.client_pulls_diagnostics).then(|| publish_diagnostics(uri, version, diagnostics))
     }
 
     fn analyzed_uris(&self) -> Vec<&str> {
@@ -908,11 +942,12 @@ where
             }
             let mut messages = uris
                 .into_iter()
-                .map(|uri| {
+                .filter_map(|uri| {
                     let open = &self.documents[&uri];
-                    publish_diagnostics(&uri, Some(open.version), &open.diagnostics)
+                    self.publish(&uri, Some(open.version), &open.diagnostics)
                 })
                 .collect::<Vec<_>>();
+            messages.extend(self.diagnostic_refresh());
             if !resubmit {
                 messages.extend(self.complete_pending_diagnostic_requests());
             }
@@ -920,6 +955,7 @@ where
         }
         self.analysis_retry_at = None;
         self.analysis_retry_backoff = Duration::ZERO;
+        let push = !self.client_pulls_diagnostics;
         let mut messages = Vec::with_capacity(batch.analyses.len());
         let mut analyzed_documents = Vec::with_capacity(batch.analyzed.len());
         for (analysis, (uri, _analyzed_version)) in batch.analyses.into_iter().zip(batch.analyzed) {
@@ -942,17 +978,20 @@ where
                 &open.text,
                 &mut diagnostic_budget,
             );
-            messages.push(publish_diagnostics(
-                &uri,
-                Some(open.version),
-                &open.diagnostics,
-            ));
+            if push {
+                messages.push(publish_diagnostics(
+                    &uri,
+                    Some(open.version),
+                    &open.diagnostics,
+                ));
+            }
             analyzed_documents.push((uri, open.text.clone()));
         }
         self.source_set = analyzed_documents
             .into_iter()
             .chain(batch.support_documents)
             .collect();
+        messages.extend(self.diagnostic_refresh());
         if resubmit {
             self.analysis_dirty = true;
         } else {
@@ -1059,6 +1098,8 @@ where
                 self.initialized = true;
                 self.status
                     .set_supported(client_supports_work_done_progress(&params));
+                self.client_pulls_diagnostics = client_supports_pull_diagnostics(&params);
+                self.client_refreshes_diagnostics = client_supports_diagnostic_refresh(&params);
                 self.pending_init_feedback =
                     self.backend.set_workspace_root(workspace_root(&params));
                 Dispatch::messages(vec![rpc_result(
@@ -1377,7 +1418,7 @@ where
                 fallback_diagnostics = analysis_limit_diagnostics();
                 &fallback_diagnostics
             };
-            messages.push(publish_diagnostics(&uri, Some(version), diagnostics));
+            messages.extend(self.publish(&uri, Some(version), diagnostics));
             if !defer_analysis {
                 messages.extend(self.flush_analysis());
             }
@@ -1441,6 +1482,7 @@ where
                 return invalid_params(id);
             }
         };
+        let push = !self.client_pulls_diagnostics;
         let mut messages = self.cancel_pending_diagnostic_requests_for_uri(
             &uri,
             true,
@@ -1455,11 +1497,13 @@ where
             open.diagnostics = analysis_limit_diagnostics();
             open.analysis_blocked = true;
             self.analysis_dirty |= was_analyzed;
-            messages.push(publish_diagnostics(
-                &uri,
-                Some(params.text_document.version),
-                &open.diagnostics,
-            ));
+            if push {
+                messages.push(publish_diagnostics(
+                    &uri,
+                    Some(params.text_document.version),
+                    &open.diagnostics,
+                ));
+            }
             if !defer_analysis {
                 messages.extend(self.flush_analysis());
             }
@@ -1490,7 +1534,7 @@ where
         } else {
             self.flush_analysis()
         };
-        messages.push(publish_diagnostics(&uri, None, &DiagnosticIndex::default()));
+        messages.extend(self.publish(&uri, None, &DiagnosticIndex::default()));
         messages.extend(self.complete_pending_diagnostic_requests_for_uri(&uri));
         Dispatch::messages(messages)
     }
@@ -2555,6 +2599,26 @@ fn workspace_root(params: &Value) -> Option<PathBuf> {
                 .and_then(Value::as_str)
                 .map(PathBuf::from)
         })
+}
+
+/// Whether the client re-pulls diagnostics when asked (`workspace.diagnostics.refreshSupport`).
+fn client_supports_diagnostic_refresh(params: &Value) -> bool {
+    params
+        .get("capabilities")
+        .and_then(|capabilities| capabilities.get("workspace"))
+        .and_then(|workspace| workspace.get("diagnostics"))
+        .and_then(|diagnostics| diagnostics.get("refreshSupport"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Whether the client requests diagnostics itself (`textDocument/diagnostic`).
+fn client_supports_pull_diagnostics(params: &Value) -> bool {
+    params
+        .get("capabilities")
+        .and_then(|capabilities| capabilities.get("textDocument"))
+        .and_then(|text_document| text_document.get("diagnostic"))
+        .is_some_and(|diagnostic| !diagnostic.is_null())
 }
 
 fn client_supports_work_done_progress(params: &Value) -> bool {
@@ -4226,6 +4290,125 @@ mod tests {
             pending: false,
         };
         let messages = service.apply_analysis_batch(batch);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["method"], "textDocument/publishDiagnostics");
+    }
+
+    #[test]
+    fn pull_capable_client_is_not_also_pushed_diagnostics() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis {
+                    diagnostics: vec![Diagnostic {
+                        span: krusty::diag::Span::new(0, 1),
+                        editor_span: None,
+                        severity: Severity::Error,
+                        kind: DiagnosticKind::Compiler,
+                        msg: "boom".to_string(),
+                        file: 0,
+                    }],
+                    ..DocumentAnalysis::empty()
+                })
+                .collect::<Vec<_>>()
+        });
+        service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "capabilities": {
+                    "textDocument": { "diagnostic": { "dynamicRegistration": false } },
+                    "workspace": { "diagnostics": { "refreshSupport": true } },
+                }
+            },
+        }));
+        service.did_open(
+            None,
+            json!({
+                "textDocument": {
+                    "uri": "file:///a.kt", "languageId": "kotlin", "version": 1, "text": "fun a() {}"
+                }
+            }),
+            true,
+        );
+        service.take_analysis_job();
+
+        let messages = service.apply_analysis_batch(AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), 1)],
+            analyses: vec![DocumentAnalysis {
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(0, 1),
+                    editor_span: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: "boom".to_string(),
+                    file: 0,
+                }],
+                ..DocumentAnalysis::empty()
+            }],
+            support_documents: Vec::new(),
+            pending: false,
+        });
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message["method"] == "textDocument/publishDiagnostics"),
+            "a client that pulls diagnostics keeps both sets, so pushing duplicates every entry: \
+             {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message["method"] == "workspace/diagnostic/refresh"),
+            "fresh analysis must ask a pulling client to re-pull: {messages:?}"
+        );
+
+        let pulled = service.pull_diagnostics(
+            Some(json!(2)),
+            json!({ "textDocument": { "uri": "file:///a.kt" } }),
+        );
+        assert_eq!(
+            pulled.messages[0]["result"]["items"]
+                .as_array()
+                .map(Vec::len),
+            Some(1),
+            "the pull response still carries the diagnostics: {:?}",
+            pulled.messages
+        );
+    }
+
+    #[test]
+    fn push_only_client_still_receives_published_diagnostics() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "capabilities": { "textDocument": {} } },
+        }));
+        service.did_open(
+            None,
+            json!({
+                "textDocument": {
+                    "uri": "file:///a.kt", "languageId": "kotlin", "version": 1, "text": "fun a() {}"
+                }
+            }),
+            true,
+        );
+        service.take_analysis_job();
+
+        let messages = service.apply_analysis_batch(AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), 1)],
+            analyses: vec![DocumentAnalysis::empty()],
+            support_documents: Vec::new(),
+            pending: false,
+        });
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["method"], "textDocument/publishDiagnostics");
     }

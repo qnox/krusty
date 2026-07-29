@@ -17,6 +17,9 @@ use krusty::frontend;
 use krusty::libraries::SemanticPlatform;
 use krusty::source::SourceInput;
 use krusty::types::Ty;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 
 pub(crate) use completion::{CompletionDetails, CompletionKind, CompletionSymbols};
 pub(crate) use document_symbols::{document_symbol_occurrences, DocumentSymbolOccurrence};
@@ -146,6 +149,10 @@ pub fn analyze_source_inputs_prefix_with_features(
         &mut diags,
     );
     let mut diagnostics = vec![Vec::new(); inputs.len()];
+    // Signature collection resolves some declarations more than once, and the checker re-checks
+    // some bodies (lambda arguments, loop bodies), so the sink can hold several copies of one
+    // message on one span. The editor renders every copy, so keep only the first of each.
+    let mut seen = HashSet::<DiagnosticKey>::new();
     for mut diagnostic in diags.diags {
         let file = diagnostic.file as usize;
         if let Some(file_diagnostics) = diagnostics.get_mut(file) {
@@ -153,6 +160,9 @@ pub fn analyze_source_inputs_prefix_with_features(
                 diagnostic.span = editor_span;
             }
             diagnostic.file = 0;
+            if !seen.insert(diagnostic_key(file, &diagnostic)) {
+                continue;
+            }
             file_diagnostics.push(diagnostic);
         }
     }
@@ -171,6 +181,32 @@ pub fn analyze_source_inputs_prefix_with_features(
         files,
         symbols: analysis.symbols,
     }
+}
+
+/// `(file, span lo, span hi, severity, kind, message length, message hash)`. The message is hashed
+/// rather than cloned so de-duplicating a large source set does not retain a second copy of every
+/// diagnostic text.
+type DiagnosticKey = (usize, u32, u32, u8, u8, usize, u64);
+
+fn diagnostic_key(file: usize, diagnostic: &Diagnostic) -> DiagnosticKey {
+    let mut hasher = DefaultHasher::new();
+    diagnostic.msg.hash(&mut hasher);
+    (
+        file,
+        diagnostic.span.lo,
+        diagnostic.span.hi,
+        match diagnostic.severity {
+            Severity::Error => 0,
+            Severity::Warning => 1,
+        },
+        match diagnostic.kind {
+            DiagnosticKind::Compiler => 0,
+            DiagnosticKind::IncompatibleEquality => 1,
+            DiagnosticKind::Inspection => 2,
+        },
+        diagnostic.msg.len(),
+        hasher.finish(),
+    )
 }
 
 fn with_ide_inspections(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
@@ -221,6 +257,24 @@ mod tests {
             analysis.files[1].diagnostics
         );
         assert!(analysis.files[1].types.is_some());
+    }
+
+    #[test]
+    fn repeated_resolution_reports_each_diagnostic_once() {
+        // Signature collection resolves a member's declared type more than once, and the checker
+        // re-checks some bodies; without de-duplication the editor shows the same message stacked
+        // several times on one span.
+        let source = "class C {\n    fun f(): Gone = TODO()\n    fun g(): Gone = TODO()\n}";
+
+        let analysis = analyze_standalone_source_set(&[source]);
+
+        let unresolved = analysis.files[0]
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.msg.contains("'Gone'"))
+            .collect::<Vec<_>>();
+        assert_eq!(unresolved.len(), 2, "{unresolved:?}");
+        assert_ne!(unresolved[0].span.lo, unresolved[1].span.lo);
     }
 
     #[test]
