@@ -7879,6 +7879,7 @@ pub struct TypeInfo {
     resolved_source_calls: HashMap<ExprId, (u32, u32)>,
     source_extension_properties: HashMap<ExprId, crate::libraries::PropertyInfo>,
     source_extension_property_writes: HashMap<StmtId, crate::libraries::PropertyInfo>,
+    used_extension_receivers: std::collections::HashSet<(u32, u32)>,
     /// Synthetic operator calls selected while checking a source expression that does not itself contain
     /// a call node for every desugared operation. Example: reference `x in a..b` resolves both
     /// `a.rangeTo(b)` and `<range>.contains(x)` from one `Expr::InRange`; lowering reads these selections
@@ -8342,6 +8343,11 @@ impl TypeInfo {
         statement: StmtId,
     ) -> Option<&crate::libraries::PropertyInfo> {
         self.source_extension_property_writes.get(&statement)
+    }
+
+    pub fn extension_receiver_is_used(&self, receiver: &TypeRef) -> bool {
+        self.used_extension_receivers
+            .contains(&(receiver.span.lo, receiver.span.hi))
     }
 
     /// The resolved classpath instance member at call `e`, if the checker recorded one.
@@ -8903,8 +8909,10 @@ fn make_checker<'a>(
         tparams: Default::default(),
         reified_tparams: std::collections::HashSet::new(),
         this_ty: None,
+        this_extension_receiver: None,
         this_narrow: None,
         this_labels: Vec::new(),
+        extension_receiver_labels: Vec::new(),
         field_ty: None,
         companion_of: None,
         local_funs: Vec::new(),
@@ -8923,6 +8931,8 @@ fn make_checker<'a>(
         resolved_source_calls: HashMap::new(),
         source_extension_properties: HashMap::new(),
         source_extension_property_writes: HashMap::new(),
+        extension_receiver_expr_uses: vec![Vec::new(); file.expr_arena.len()],
+        extension_receiver_stmt_uses: vec![Vec::new(); file.stmt_arena.len()],
         resolved_operator_calls: HashMap::new(),
         resolved_stmt_operator_calls: HashMap::new(),
         resolved_index_store_get_returns: HashMap::new(),
@@ -9702,12 +9712,19 @@ fn check_file_at_impl(
                     // the backing-field type (the implicit-`this` scope of props is already active).
                     // A member extension accessor uses the extension receiver as `this`.
                     let dispatch_this = c.this_ty;
+                    let dispatch_extension_receiver = c.this_extension_receiver;
                     let outer_symbolic_signature_inference = c.symbolic_signature_inference;
                     let extension_receiver =
                         bp.receiver.as_ref().map(|receiver| c.resolve_ty(receiver));
                     if let Some(receiver) = extension_receiver {
                         c.this_ty = Some(receiver);
                         c.this_labels.push((bp.name.clone(), receiver, false));
+                        let label_index = c.this_labels.len() - 1;
+                        let receiver_span =
+                            bp.receiver.as_ref().expect("receiver was resolved").span;
+                        c.extension_receiver_labels
+                            .push((label_index, receiver_span));
+                        c.this_extension_receiver = Some(receiver_span);
                         c.symbolic_signature_inference = true;
                     }
                     // Cached class properties would bypass the extension receiver. Hide them while
@@ -9803,9 +9820,11 @@ fn check_file_at_impl(
                         .expect("class body scope")
                         .extend(hidden_dispatch_bindings);
                     if extension_receiver.is_some() {
+                        c.extension_receiver_labels.pop();
                         c.this_labels.pop();
                     }
                     c.this_ty = dispatch_this;
+                    c.this_extension_receiver = dispatch_extension_receiver;
                     c.symbolic_signature_inference = outer_symbolic_signature_inference;
                     c.tparams = outer_tparams;
                 }
@@ -9927,10 +9946,16 @@ fn check_file_at_impl(
                 // For an extension property (`val Recv.name: T get() = …`), `this` inside the
                 // accessors is the receiver.
                 let prev_this = c.this_ty;
+                let prev_extension_receiver = c.this_extension_receiver;
                 let recv_ty = p.receiver.as_ref().map(|r| c.resolve_ty(r));
                 if let Some(rt) = recv_ty {
                     c.this_ty = Some(rt);
                     c.this_labels.push((p.name.clone(), rt, false));
+                    let label_index = c.this_labels.len() - 1;
+                    let receiver_span = p.receiver.as_ref().expect("receiver was resolved").span;
+                    c.extension_receiver_labels
+                        .push((label_index, receiver_span));
+                    c.this_extension_receiver = Some(receiver_span);
                 }
                 let prop_ty =
                     p.ty.as_ref()
@@ -9989,9 +10014,11 @@ fn check_file_at_impl(
                     }
                 }
                 if recv_ty.is_some() {
+                    c.extension_receiver_labels.pop();
                     c.this_labels.pop();
                 }
                 c.this_ty = prev_this;
+                c.this_extension_receiver = prev_extension_receiver;
                 // A delegated property's delegate expression (`by Del()`) must be type-checked so its
                 // (and its sub-expressions') types are recorded for the lowering of `x$delegate`.
                 if let Some(de) = p.delegate {
@@ -10056,6 +10083,8 @@ fn check_file_at_impl(
         resolved_source_calls,
         source_extension_properties,
         source_extension_property_writes,
+        extension_receiver_expr_uses,
+        extension_receiver_stmt_uses,
         resolved_operator_calls,
         resolved_stmt_operator_calls,
         resolved_index_store_get_returns,
@@ -10124,6 +10153,12 @@ fn check_file_at_impl(
             signature.signature.ret = ret;
         }
     }
+    let used_extension_receivers = extension_receiver_expr_uses
+        .into_iter()
+        .chain(extension_receiver_stmt_uses)
+        .flatten()
+        .map(|span| (span.lo, span.hi))
+        .collect();
     TypeInfo {
         expr_types,
         resolved_type_refs,
@@ -10137,6 +10172,7 @@ fn check_file_at_impl(
         resolved_source_calls,
         source_extension_properties,
         source_extension_property_writes,
+        used_extension_receivers,
         resolved_operator_calls,
         resolved_stmt_operator_calls,
         resolved_index_store_get_returns,
@@ -10201,11 +10237,19 @@ struct ImplicitPropertyWriteResolution {
     source_owner: Option<TypeName>,
     classpath_getter: Option<crate::symbol_resolver::ResolvedMember>,
     classpath_setter: Option<crate::libraries::LibraryCallable>,
+    extension_receiver: Option<Span>,
+}
+
+#[derive(Clone, Copy)]
+struct ImplicitReceiver {
+    ty: Ty,
+    extension_receiver: Option<Span>,
 }
 
 #[derive(Clone)]
 struct MemberExtensionFunctionCandidate {
     priority: MemberExtensionPriority,
+    dispatch_receiver: ImplicitReceiver,
     score: (usize, std::cmp::Reverse<usize>, bool),
     physical_receiver: Ty,
     params: Vec<Ty>,
@@ -10239,6 +10283,7 @@ impl MemberExtensionFunctionCandidate {
 #[derive(Clone)]
 struct MemberExtensionFunctionShape {
     priority: MemberExtensionPriority,
+    dispatch_receiver: ImplicitReceiver,
     function: MemberExtFunSig,
     class_bindings: HashMap<String, Ty>,
     is_operator: bool,
@@ -10318,6 +10363,7 @@ struct Checker<'a> {
     reified_tparams: std::collections::HashSet<String>,
     /// The type of `this` when checking class members (`None` at top level).
     this_ty: Option<Ty>,
+    this_extension_receiver: Option<Span>,
     /// A flow-narrowing of the implicit receiver established by `if (this is B)`: `this` is known to
     /// be `B` (a subtype of `this_ty`) inside the guarded branch, so a bare member of `B` resolves.
     /// Separate from `this_ty` (which stays the DECLARED receiver type so `this` still types as it,
@@ -10331,6 +10377,7 @@ struct Checker<'a> {
     /// nothing but classes between) lowers via the inner class's `this$0`. Anything else type-checks but
     /// the lowerer skips it (it can't yet reach a captured / multi-level outer receiver).
     this_labels: Vec<(String, Ty, bool)>,
+    extension_receiver_labels: Vec<(usize, Span)>,
     /// The backing-field type while checking a property accessor body — makes the `field`
     /// soft-keyword resolve to the property's backing field. `None` outside an accessor.
     field_ty: Option<Ty>,
@@ -10365,6 +10412,8 @@ struct Checker<'a> {
     resolved_source_calls: HashMap<ExprId, (u32, u32)>,
     source_extension_properties: HashMap<ExprId, crate::libraries::PropertyInfo>,
     source_extension_property_writes: HashMap<StmtId, crate::libraries::PropertyInfo>,
+    extension_receiver_expr_uses: Vec<Vec<Span>>,
+    extension_receiver_stmt_uses: Vec<Vec<Span>>,
     resolved_operator_calls: HashMap<(ExprId, SyntheticOperatorCall), ResolvedCall>,
     resolved_stmt_operator_calls: HashMap<(StmtId, SyntheticOperatorCall), ResolvedCall>,
     resolved_index_store_get_returns: HashMap<StmtId, Ty>,
@@ -11847,17 +11896,86 @@ impl<'a> Checker<'a> {
         crate::module_symbols::ModuleSymbols::new(self.syms).declares_top_level(name)
     }
 
-    fn implicit_receiver_types(&self) -> Vec<Ty> {
+    fn implicit_receivers(&self) -> Vec<ImplicitReceiver> {
         let mut receivers = Vec::new();
         if let Some(receiver) = self.this_ty {
-            receivers.push(receiver);
+            receivers.push(ImplicitReceiver {
+                ty: receiver,
+                extension_receiver: self.this_extension_receiver,
+            });
         }
-        for (_, receiver, _) in self.this_labels.iter().rev() {
-            if !receivers.contains(receiver) {
-                receivers.push(*receiver);
+        for (index, (_, receiver, _)) in self.this_labels.iter().enumerate().rev() {
+            if !receivers
+                .iter()
+                .any(|existing: &ImplicitReceiver| existing.ty == *receiver)
+            {
+                receivers.push(ImplicitReceiver {
+                    ty: *receiver,
+                    extension_receiver: self
+                        .extension_receiver_labels
+                        .iter()
+                        .rev()
+                        .find_map(|(label_index, span)| (*label_index == index).then_some(*span)),
+                });
             }
         }
         receivers
+    }
+
+    fn implicit_receiver_types(&self) -> Vec<Ty> {
+        self.implicit_receivers()
+            .into_iter()
+            .map(|receiver| receiver.ty)
+            .collect()
+    }
+
+    fn mark_extension_receiver_used(&mut self, expression: ExprId, receiver: ImplicitReceiver) {
+        if let Some(span) = receiver.extension_receiver {
+            self.mark_extension_receiver_span_used(expression, span);
+        }
+    }
+
+    fn mark_extension_receiver_stmt_used(&mut self, statement: StmtId, receiver: ImplicitReceiver) {
+        if let Some(span) = receiver.extension_receiver {
+            self.mark_extension_receiver_stmt_span_used(statement, span);
+        }
+    }
+
+    fn mark_extension_receiver_span_used(&mut self, expression: ExprId, span: Span) {
+        let uses = &mut self.extension_receiver_expr_uses[expression.0 as usize];
+        if !uses.contains(&span) {
+            uses.push(span);
+        }
+    }
+
+    fn mark_extension_receiver_stmt_span_used(&mut self, statement: StmtId, span: Span) {
+        let uses = &mut self.extension_receiver_stmt_uses[statement.0 as usize];
+        if !uses.contains(&span) {
+            uses.push(span);
+        }
+    }
+
+    fn mark_extension_receiver_label_used(&mut self, expression: ExprId, label_index: usize) {
+        if let Some(span) = self
+            .extension_receiver_labels
+            .iter()
+            .rev()
+            .find_map(|(index, span)| (*index == label_index).then_some(*span))
+        {
+            self.mark_extension_receiver_span_used(expression, span);
+        }
+    }
+
+    fn mark_current_extension_receiver_used(&mut self, expression: ExprId) {
+        if let Some(span) = self.this_extension_receiver {
+            self.mark_extension_receiver_span_used(expression, span);
+        }
+    }
+
+    fn mark_context_extension_receiver_used(&mut self, call: ExprId, sources: &[String]) {
+        if sources.iter().any(|source| source == "this") {
+            self.mark_current_extension_receiver_used(call);
+        }
     }
 
     /// True when `e` is a call to the `kotlin.contracts.contract { … }` intrinsic — the erased
@@ -13324,13 +13442,13 @@ impl<'a> Checker<'a> {
         expected: Ty,
         value_parameter_count: usize,
         actual_argument_count: usize,
-    ) -> Option<Ty> {
+    ) -> Option<ImplicitReceiver> {
         if value_parameter_count != actual_argument_count {
             return None;
         }
-        self.implicit_receiver_types()
+        self.implicit_receivers()
             .into_iter()
-            .find(|&actual| self.receiver_is_assignable(actual, expected))
+            .find(|actual| self.receiver_is_assignable(actual.ty, expected))
     }
 
     fn lookup(&self, name: &str) -> Option<&Local> {
@@ -14525,10 +14643,15 @@ impl<'a> Checker<'a> {
         }
         // Extension function: look up in ext_funs table; set this_ty to the receiver type.
         let prev_this = self.this_ty;
+        let prev_extension_receiver = self.this_extension_receiver;
         if let Some(recv_ref) = &f.receiver {
             let recv_ty = self.resolve_ty(recv_ref);
             self.this_ty = Some(recv_ty);
             self.this_labels.push((f.name.clone(), recv_ty, false));
+            let label_index = self.this_labels.len() - 1;
+            self.extension_receiver_labels
+                .push((label_index, recv_ref.span));
+            self.this_extension_receiver = Some(recv_ref.span);
             // Pick THIS declaration's overload out of the receiver+name overload set by matching its
             // parameter list (an extension may be overloaded by arity — `fun R.f()` and `fun R.f(x)`).
             let want: Vec<Ty> = f
@@ -14633,9 +14756,11 @@ impl<'a> Checker<'a> {
         self.pop_scope();
         self.pop_local_funs();
         if f.receiver.is_some() {
+            self.extension_receiver_labels.pop();
             self.this_labels.pop();
         }
         self.this_ty = prev_this;
+        self.this_extension_receiver = prev_extension_receiver;
         self.allow_lambda_mutation = prev_allow;
     }
 
@@ -14654,10 +14779,15 @@ impl<'a> Checker<'a> {
             .cloned()
             .collect();
         let dispatch_this = self.this_ty;
+        let dispatch_extension_receiver = self.this_extension_receiver;
         if let Some(recv_ref) = &f.receiver {
             let receiver = self.resolve_ty(recv_ref);
             self.this_ty = Some(receiver);
             self.this_labels.push((f.name.clone(), receiver, false));
+            let label_index = self.this_labels.len() - 1;
+            self.extension_receiver_labels
+                .push((label_index, recv_ref.span));
+            self.this_extension_receiver = Some(recv_ref.span);
         }
         let object_contract_ret = match (f.receiver.is_none(), f.name.as_str(), f.params.len()) {
             (true, "compareTo", 1) => Some(Ty::Int),
@@ -14770,9 +14900,11 @@ impl<'a> Checker<'a> {
             self.reified_tparams.remove(&t);
         }
         if f.receiver.is_some() {
+            self.extension_receiver_labels.pop();
             self.this_labels.pop();
         }
         self.this_ty = dispatch_this;
+        self.this_extension_receiver = dispatch_extension_receiver;
     }
 
     fn check_fun_body(&mut self, f: &FunDecl) {
@@ -14867,7 +14999,8 @@ impl<'a> Checker<'a> {
     /// A read-only property on a nearer receiver is terminal and must not fall through to a farther
     /// writable receiver.
     fn implicit_property_write(&self, name: &str) -> Option<ImplicitPropertyWriteResolution> {
-        for receiver in self.implicit_receiver_types() {
+        for implicit_receiver in self.implicit_receivers() {
+            let receiver = implicit_receiver.ty;
             if let Some((owner, ty, is_var)) = receiver
                 .obj_internal()
                 .and_then(|internal| self.lookup_prop_with_owner_name(internal, name))
@@ -14879,6 +15012,7 @@ impl<'a> Checker<'a> {
                     source_owner: Some(owner),
                     classpath_getter: None,
                     classpath_setter: None,
+                    extension_receiver: implicit_receiver.extension_receiver,
                 });
             }
             let getter = self.resolve_property_member(receiver, name);
@@ -14892,6 +15026,7 @@ impl<'a> Checker<'a> {
                     source_owner: None,
                     classpath_getter: getter,
                     classpath_setter: Some(setter),
+                    extension_receiver: implicit_receiver.extension_receiver,
                 });
             }
             if let Some(property) = getter {
@@ -14902,6 +15037,7 @@ impl<'a> Checker<'a> {
                     source_owner: None,
                     classpath_getter: Some(property),
                     classpath_setter: None,
+                    extension_receiver: implicit_receiver.extension_receiver,
                 });
             }
         }
@@ -16607,6 +16743,7 @@ impl<'a> Checker<'a> {
     }
 
     fn expr_inner(&mut self, e: ExprId, expected: Option<Ty>, value_required: bool) -> Ty {
+        self.extension_receiver_expr_uses[e.0 as usize].clear();
         let t = match self.file.expr(e).clone() {
             Expr::IntLit(_) => Ty::Int,
             Expr::LongLit(_) => Ty::Long,
@@ -17587,6 +17724,7 @@ impl<'a> Checker<'a> {
                 // A smart-cast narrowing (`this != null` in a nullable-prim-receiver extension)
                 // declares a `"this"` scope entry; it wins over the declared receiver type. `this`
                 // is otherwise never a scope local.
+                self.mark_current_extension_receiver_used(e);
                 if let Some(l) = self.lookup("this") {
                     l.ty
                 } else {
@@ -17621,6 +17759,7 @@ impl<'a> Checker<'a> {
                         {
                             self.expr_lowers.insert(e, ExprLowering::LabeledThisOuter);
                         }
+                        self.mark_extension_receiver_label_used(e, idx);
                         ty
                     }
                     None => {
@@ -17641,18 +17780,19 @@ impl<'a> Checker<'a> {
                         if let Some(bi) = bt.obj_internal() {
                             if let Some((ty, _)) = self.lookup_prop_name(bi, &n) {
                                 self.narrowed_this_member.insert(e, bi);
+                                self.mark_current_extension_receiver_used(e);
                                 return self.set(e, ty);
                             }
                             if let Some(ty) = self.try_member_read(bt, &n, self.span(e), Some(e)) {
                                 self.narrowed_this_member.insert(e, bi);
+                                self.mark_current_extension_receiver_used(e);
                                 return self.set(e, ty);
                             }
                         }
                     }
-                    let implicit_receivers = self.implicit_receiver_types();
-                    // Unqualified property of the implicit/extension receiver: `fun Box.f() = v`
-                    // means `this.v` (sibling method calls already resolve via `this_ty`).
-                    for receiver in implicit_receivers.iter().copied() {
+                    let implicit_receivers = self.implicit_receivers();
+                    for implicit_receiver in implicit_receivers.iter().copied() {
+                        let receiver = implicit_receiver.ty;
                         if let Ty::Obj(internal, _) = receiver {
                             if self.lookup_prop_name(internal, &n).is_some() {
                                 if self.symbolic_signature_inference {
@@ -17662,19 +17802,18 @@ impl<'a> Checker<'a> {
                                         self.span(e),
                                         Some(e),
                                     ) {
+                                        self.mark_extension_receiver_used(e, implicit_receiver);
                                         return self.set(e, ty);
                                     }
                                 } else if let Some((ty, _)) = self.lookup_prop_name(internal, &n) {
+                                    self.mark_extension_receiver_used(e, implicit_receiver);
                                     return self.set(e, ty);
                                 }
                             }
                         }
-                    }
-                    // A bare name resolved against the implicit receiver (`this`) of arbitrary type —
-                    // e.g. `length` inside `"ab".run { length }` (`this` is `String`). Goes through the
-                    // general member read so builtin/library members (`String.length`) resolve too.
-                    for rt in implicit_receivers.iter().copied() {
-                        if let Some(ty) = self.try_member_read(rt, &n, self.span(e), Some(e)) {
+                        if let Some(ty) = self.try_member_read(receiver, &n, self.span(e), Some(e))
+                        {
+                            self.mark_extension_receiver_used(e, implicit_receiver);
                             return self.set(e, ty);
                         }
                     }
@@ -17688,6 +17827,7 @@ impl<'a> Checker<'a> {
                             if let Some(bi) = bt.obj_internal() {
                                 self.narrowed_this_member.insert(e, bi);
                             }
+                            self.mark_current_extension_receiver_used(e);
                             return self.set(e, ty);
                         }
                     }
@@ -17790,12 +17930,16 @@ impl<'a> Checker<'a> {
                         self.expr_lowers
                             .insert(e, ExprLowering::ObjectValue { internal });
                         Ty::obj_name(internal)
-                    } else if let Some(member) = implicit_receivers
-                        .iter()
-                        .copied()
-                        .find_map(|receiver| self.syms.libraries.intrinsic_property(receiver, &n))
+                    } else if let Some((implicit_receiver, member)) =
+                        implicit_receivers.iter().copied().find_map(|receiver| {
+                            self.syms
+                                .libraries
+                                .intrinsic_property(receiver.ty, &n)
+                                .map(|member| (receiver, member))
+                        })
                     {
                         let ret = member.ret;
+                        self.mark_extension_receiver_used(e, implicit_receiver);
                         self.expr_lowers
                             .insert(e, ExprLowering::IntrinsicProperty(Box::new(member)));
                         ret
@@ -18468,10 +18612,29 @@ impl<'a> Checker<'a> {
                     // `lower_implicit_this_method_ref` (member functions only, non-`Nothing` return — a
                     // member-property implicit ref isn't lowered, so it's NOT resolved here either, to keep
                     // the checker and lowerer in agreement).
-                    if let Some(Ty::Obj(internal, _)) = self.this_ty.clone() {
+                    if let Some(Ty::Obj(internal, _)) = self.this_ty {
                         if let Some(sig) = self.syms.method_of_name(internal, &name) {
                             if sig.requires_all_args() && sig.ret != Ty::Nothing {
+                                self.mark_current_extension_receiver_used(e);
                                 return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
+                            }
+                        }
+                    }
+                    if let Some(receiver) = self.this_ty {
+                        if let Some(member) = self.resolve_instance_ref(receiver, &name) {
+                            if !member.suspend() && member.ret != Ty::Nothing {
+                                let ty = Ty::fun(member.params.clone(), member.ret);
+                                self.mark_current_extension_receiver_used(e);
+                                return self.set(e, ty);
+                            }
+                        }
+                        if let Some(callable) =
+                            self.library_extension_callable(&name, receiver, &[], &[])
+                        {
+                            if callable.ret != Ty::Nothing {
+                                let ty = Ty::fun(callable.params.clone(), callable.ret);
+                                self.mark_current_extension_receiver_used(e);
+                                return self.set(e, ty);
                             }
                         }
                     }
@@ -18569,11 +18732,13 @@ impl<'a> Checker<'a> {
                             if let Some(Ty::Obj(internal, _)) = self.this_ty {
                                 if let Some(sig) = self.syms.method_of_name(internal, &name) {
                                     if sig.requires_all_args() {
+                                        self.mark_current_extension_receiver_used(e);
                                         return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                                     }
                                 }
                                 if let Some((_, is_var)) = self.lookup_prop_name(internal, &name) {
                                     if let Some(ty) = self.property_ref_ty(0, is_var) {
+                                        self.mark_current_extension_receiver_used(e);
                                         return self.set(e, ty);
                                     }
                                 }
@@ -19193,7 +19358,9 @@ impl<'a> Checker<'a> {
             return Ty::Error;
         }
         let prev_this = self.this_ty;
+        let prev_extension_receiver = self.this_extension_receiver;
         self.this_ty = Some(recv);
+        self.this_extension_receiver = None;
         let pushed = label.map(|l| {
             self.this_labels.push((l.to_string(), recv, false));
         });
@@ -19202,6 +19369,7 @@ impl<'a> Checker<'a> {
             self.this_labels.pop();
         }
         self.this_ty = prev_this;
+        self.this_extension_receiver = prev_extension_receiver;
         r
     }
 
@@ -20172,6 +20340,7 @@ impl<'a> Checker<'a> {
 
     fn destructure_component_target(
         &mut self,
+        statement: StmtId,
         recv: Ty,
         name: &str,
         params: &[Ty],
@@ -20187,7 +20356,7 @@ impl<'a> Checker<'a> {
         {
             return Ok(Some(target));
         }
-        if let Some(target) = self.member_extension_component_target(recv, name, span)? {
+        if let Some(target) = self.member_extension_component_target(statement, recv, name, span)? {
             return Ok(Some(target));
         }
         Ok(self
@@ -20198,6 +20367,7 @@ impl<'a> Checker<'a> {
 
     fn member_extension_component_target(
         &mut self,
+        statement: StmtId,
         recv: Ty,
         name: &str,
         span: Span,
@@ -20231,6 +20401,7 @@ impl<'a> Checker<'a> {
             .syms
             .class_by_type_name(candidate.owner)
             .is_some_and(|class| class.is_interface());
+        self.mark_extension_receiver_stmt_used(statement, candidate.dispatch_receiver);
         Ok(Some(DestructureComponentTarget::MemberExtension(Box::new(
             candidate.resolved_call(recv, name, interface),
         ))))
@@ -20513,6 +20684,7 @@ impl<'a> Checker<'a> {
                 self.mark_receiver_lambda(e, receiver);
             }
             let prev_this = self.this_ty;
+            let prev_extension_receiver = self.this_extension_receiver;
             let labels_depth = self.this_labels.len();
             let mut implicit_types = context_types.to_vec();
             implicit_types.extend(extension_receiver);
@@ -20522,6 +20694,7 @@ impl<'a> Checker<'a> {
                         .push((format!("$context{index}"), *receiver, false));
                 }
                 self.this_ty = Some(current);
+                self.this_extension_receiver = None;
                 if let Some(label) = label {
                     self.this_labels.push((label.to_string(), current, false));
                 }
@@ -20551,6 +20724,7 @@ impl<'a> Checker<'a> {
             self.pop_scope();
             self.this_labels.truncate(labels_depth);
             self.this_ty = prev_this;
+            self.this_extension_receiver = prev_extension_receiver;
             let mut pts = context_types.to_vec();
             pts.extend(extension_receiver);
             pts.extend_from_slice(value_types);
@@ -21289,10 +21463,13 @@ impl<'a> Checker<'a> {
         &self,
         extension_receiver: Ty,
         name: &str,
-    ) -> Result<Option<(Ty, bool, Visibility, TypeName)>, ()> {
+    ) -> Result<Option<(Ty, bool, Visibility, TypeName, ImplicitReceiver)>, ()> {
         let mut candidates = Vec::new();
-        for (dispatch_rank, dispatch) in self.implicit_receiver_types().into_iter().enumerate() {
-            for (owner, owner_ty, dispatch_depth) in self.syms.applied_type_hierarchy(dispatch) {
+        for (dispatch_rank, dispatch_receiver) in self.implicit_receivers().into_iter().enumerate()
+        {
+            for (owner, owner_ty, dispatch_depth) in
+                self.syms.applied_type_hierarchy(dispatch_receiver.ty)
+            {
                 let Some(class) = self.syms.class_by_type_name(owner) else {
                     continue;
                 };
@@ -21342,7 +21519,7 @@ impl<'a> Checker<'a> {
                             declared_receiver,
                             generic_receiver,
                         },
-                        (ty, sig.is_var, sig.visibility, owner),
+                        (ty, sig.is_var, sig.visibility, owner, dispatch_receiver),
                     ));
                 }
             }
@@ -21361,8 +21538,11 @@ impl<'a> Checker<'a> {
         name: &str,
     ) -> Vec<MemberExtensionFunctionShape> {
         let mut shapes = Vec::new();
-        for (dispatch_rank, dispatch) in self.implicit_receiver_types().into_iter().enumerate() {
-            for (owner, owner_ty, dispatch_depth) in self.syms.applied_type_hierarchy(dispatch) {
+        for (dispatch_rank, dispatch_receiver) in self.implicit_receivers().into_iter().enumerate()
+        {
+            for (owner, owner_ty, dispatch_depth) in
+                self.syms.applied_type_hierarchy(dispatch_receiver.ty)
+            {
                 let Some(class) = self.syms.class_by_type_name(owner) else {
                     continue;
                 };
@@ -21423,6 +21603,7 @@ impl<'a> Checker<'a> {
                             declared_receiver,
                             generic_receiver,
                         },
+                        dispatch_receiver,
                         function: function.clone(),
                         class_bindings: class_bindings.clone(),
                         is_operator,
@@ -21689,6 +21870,7 @@ impl<'a> Checker<'a> {
             };
             candidates.push(MemberExtensionFunctionCandidate {
                 priority: shape.priority,
+                dispatch_receiver: shape.dispatch_receiver,
                 score: instantiated.score,
                 physical_receiver: shape.function.receiver_ty,
                 params: instantiated.logical_params,
@@ -21784,6 +21966,7 @@ impl<'a> Checker<'a> {
                     call,
                     candidate.resolved_call(extension_receiver, name, interface),
                 );
+                self.mark_extension_receiver_used(call, candidate.dispatch_receiver);
                 Some(candidate.ret)
             }
             Ok(None) => None,
@@ -21864,9 +22047,12 @@ impl<'a> Checker<'a> {
             }
         }
         match self.member_extension_property(rt, name) {
-            Ok(Some((ty, _, visibility, owner))) => {
+            Ok(Some((ty, _, visibility, owner, dispatch_receiver))) => {
                 if visibility != Visibility::Public {
                     self.reject_if_inaccessible(visibility, name, owner, span);
+                }
+                if let Some(expression) = mexpr {
+                    self.mark_extension_receiver_used(expression, dispatch_receiver);
                 }
                 return Some(ty);
             }
@@ -21970,7 +22156,7 @@ impl<'a> Checker<'a> {
             }
         }
         match self.member_extension_property(rt, name) {
-            Ok(Some((ty, _, visibility, owner))) => {
+            Ok(Some((ty, _, visibility, owner, _))) => {
                 return Some(PropertyReadProbe::Found {
                     ty,
                     access: Some((visibility, owner)),
@@ -24825,6 +25011,7 @@ impl<'a> Checker<'a> {
                                     )
                                 {
                                     self.expect_call_args(params, false, args, &arg_tys);
+                                    self.mark_extension_receiver_used(call, implicit_receiver);
                                     self.expr_lowers.insert(
                                         call,
                                         ExprLowering::ReceiverFnInvoke {
@@ -24832,7 +25019,7 @@ impl<'a> Checker<'a> {
                                             params: signature.params.clone(),
                                             ret: signature.ret,
                                             origin,
-                                            implicit_receiver: Some(implicit_receiver),
+                                            implicit_receiver: Some(implicit_receiver.ty),
                                             suspend: signature.suspend,
                                         },
                                     );
@@ -24909,6 +25096,7 @@ impl<'a> Checker<'a> {
                                     )
                                 {
                                     self.expect_call_args(params, false, args, arg_tys);
+                                    self.mark_extension_receiver_used(call, implicit_receiver);
                                     self.expr_lowers.insert(
                                         call,
                                         ExprLowering::ReceiverFnInvoke {
@@ -24916,7 +25104,7 @@ impl<'a> Checker<'a> {
                                             params: signature.params.clone(),
                                             ret: signature.ret,
                                             origin,
-                                            implicit_receiver: Some(implicit_receiver),
+                                            implicit_receiver: Some(implicit_receiver.ty),
                                             suspend: signature.suspend,
                                         },
                                     );
@@ -25106,6 +25294,7 @@ impl<'a> Checker<'a> {
                             if let Some(slots) = mapped_slots {
                                 self.resolved_call_arg_slots.insert(call, slots);
                             }
+                            self.mark_context_extension_receiver_used(call, &sources);
                             self.mark_local_function_call(
                                 call,
                                 stmt_id,
@@ -26304,16 +26493,19 @@ impl<'a> Checker<'a> {
                         return Ty::obj("kotlin/Any");
                     }
                 }
-                let implicit_receivers = self.implicit_receiver_types();
-                for receiver in implicit_receivers.iter().copied() {
+                let implicit_receivers = self.implicit_receivers();
+                for implicit_receiver in implicit_receivers.iter().copied() {
+                    let receiver = implicit_receiver.ty;
                     if let Some(ret) = self
                         .check_applicable_module_member_call(call, receiver, &fname, args, &arg_tys)
                     {
+                        self.mark_extension_receiver_used(call, implicit_receiver);
                         return ret;
                     }
                     if let Some(ret) = self.check_member_extension_function_call(
                         call, receiver, &fname, args, &arg_tys,
                     ) {
+                        self.mark_extension_receiver_used(call, implicit_receiver);
                         return ret;
                     }
                 }
@@ -26328,7 +26520,10 @@ impl<'a> Checker<'a> {
                             })
                             .map(Ty::obj_name)
                     }) {
-                        if !implicit_receivers.contains(&outer) {
+                        if !implicit_receivers
+                            .iter()
+                            .any(|receiver| receiver.ty == outer)
+                        {
                             if let Some(ret) = self.check_applicable_module_member_call(
                                 call, outer, &fname, args, &arg_tys,
                             ) {
@@ -26342,6 +26537,7 @@ impl<'a> Checker<'a> {
                                 call, bt, &fname, args, &arg_tys,
                             ) {
                                 self.narrowed_this_member.insert(call, bi);
+                                self.mark_current_extension_receiver_used(call);
                                 return ret;
                             }
                         }
@@ -26374,8 +26570,15 @@ impl<'a> Checker<'a> {
                 // the same name: the receiver is a closer scope, so kotlinc binds the member. Attempt it
                 // FIRST — `this_member_call_ret` returns `None` when no member matches the arguments, so a
                 // genuine top-level call (no such member) still falls through to `module_top` below.
-                for rt in self.implicit_receiver_types() {
-                    if let Some(ret) = self.this_member_call_ret(call, rt, &fname, &arg_tys, args) {
+                for implicit_receiver in self.implicit_receivers() {
+                    if let Some(ret) = self.this_member_call_ret(
+                        call,
+                        implicit_receiver.ty,
+                        &fname,
+                        &arg_tys,
+                        args,
+                    ) {
+                        self.mark_extension_receiver_used(call, implicit_receiver);
                         return ret;
                     }
                 }
@@ -26392,6 +26595,7 @@ impl<'a> Checker<'a> {
                                 )
                             {
                                 self.expect_call_args(params, false, args, &arg_tys);
+                                self.mark_extension_receiver_used(call, implicit_receiver);
                                 self.expr_lowers.insert(
                                     call,
                                     ExprLowering::ReceiverFnInvoke {
@@ -26399,7 +26603,7 @@ impl<'a> Checker<'a> {
                                         params: signature.params.clone(),
                                         ret: signature.ret,
                                         origin,
-                                        implicit_receiver: Some(implicit_receiver),
+                                        implicit_receiver: Some(implicit_receiver.ty),
                                         suspend: signature.suspend,
                                     },
                                 );
@@ -26476,6 +26680,7 @@ impl<'a> Checker<'a> {
                         if let Some(slots) = mapped_slots {
                             self.resolved_call_arg_slots.insert(call, slots);
                         }
+                        self.mark_context_extension_receiver_used(call, &sources);
                         self.mark_module_top_level_call(call, &fi, ret_ty, sources);
                         return ret_ty;
                     }
@@ -26603,6 +26808,7 @@ impl<'a> Checker<'a> {
                             if let Some(slots) = mapped_slots {
                                 self.resolved_call_arg_slots.insert(call, slots);
                             }
+                            self.mark_context_extension_receiver_used(call, &sources);
                             self.mark_module_top_level_call(call, &fi, ret_ty, sources);
                             return self.finish_script_host_candidate(
                                 call,
@@ -27072,14 +27278,21 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                if let Some(receiver) = implicit_receivers.iter().copied().find(|receiver| {
-                    !crate::module_symbols::ModuleSymbols::new(self.syms)
-                        .instance_members(*receiver, &fname)
-                        .is_empty()
-                }) {
-                    if let Some(ret) =
-                        self.check_module_member_call(call, receiver, &fname, args, &arg_tys)
-                    {
+                if let Some(implicit_receiver) =
+                    implicit_receivers.iter().copied().find(|receiver| {
+                        !crate::module_symbols::ModuleSymbols::new(self.syms)
+                            .instance_members(receiver.ty, &fname)
+                            .is_empty()
+                    })
+                {
+                    if let Some(ret) = self.check_module_member_call(
+                        call,
+                        implicit_receiver.ty,
+                        &fname,
+                        args,
+                        &arg_tys,
+                    ) {
+                        self.mark_extension_receiver_used(call, implicit_receiver);
                         return ret;
                     }
                 }
@@ -27104,7 +27317,7 @@ impl<'a> Checker<'a> {
                     .is_empty()
                     || implicit_receivers.iter().copied().any(|receiver| {
                         !self
-                            .member_extension_function_shapes(receiver, &fname)
+                            .member_extension_function_shapes(receiver.ty, &fname)
                             .is_empty()
                     });
                 let message = if has_inapplicable_candidate {
@@ -27280,6 +27493,7 @@ impl<'a> Checker<'a> {
     }
 
     fn stmt(&mut self, s: StmtId) {
+        self.extension_receiver_stmt_uses[s.0 as usize].clear();
         match self.file.stmt(s).clone() {
             Stmt::Local {
                 is_var,
@@ -27464,7 +27678,7 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     let comp = format!("component{}", idx + 1);
-                    let target = match self.destructure_component_target(it, &comp, &[], span) {
+                    let target = match self.destructure_component_target(s, it, &comp, &[], span) {
                         Ok(target) => target.or_else(|| {
                             internal.and_then(|_| self.destructure_indexed_get_target(it))
                         }),
@@ -27504,6 +27718,9 @@ impl<'a> Checker<'a> {
                     .then(|| self.implicit_property_write(&name))
                     .flatten();
                 if let Some(resolution) = &implicit_property {
+                    if let Some(span) = resolution.extension_receiver {
+                        self.mark_extension_receiver_stmt_span_used(s, span);
+                    }
                     self.record_implicit_property_write(s, resolution);
                 }
                 let found = local
@@ -27641,6 +27858,9 @@ impl<'a> Checker<'a> {
                             let span = self.file.stmt_spans[s.0 as usize];
                             match implicit_property {
                                 Some(resolution) => {
+                                    if let Some(span) = resolution.extension_receiver {
+                                        self.mark_extension_receiver_stmt_span_used(s, span);
+                                    }
                                     if !resolution.is_var {
                                         self.diags.error(
                                             target_span,
@@ -27784,10 +28004,11 @@ impl<'a> Checker<'a> {
                     return;
                 }
                 match member_extension {
-                    Ok(Some((lty, is_var, visibility, owner))) => {
+                    Ok(Some((lty, is_var, visibility, owner, dispatch_receiver))) => {
                         if visibility != Visibility::Public {
                             self.reject_if_inaccessible(visibility, &name, owner, span);
                         }
+                        self.mark_extension_receiver_stmt_used(s, dispatch_receiver);
                         if !is_var {
                             self.diags
                                 .error(target_span, "'val' cannot be reassigned.".to_string());
@@ -28151,8 +28372,14 @@ impl<'a> Checker<'a> {
                 FunBody::Expr(e) => {
                     // Check expression in isolation to infer return type (before registering sig).
                     let previous_this = self.this_ty;
-                    if receiver.is_some() {
-                        self.this_ty = receiver;
+                    let previous_extension_receiver = self.this_extension_receiver;
+                    if let (Some(receiver), Some(receiver_ref)) = (receiver, f.receiver.as_ref()) {
+                        self.this_ty = Some(receiver);
+                        self.this_labels.push((f.name.clone(), receiver, false));
+                        let label_index = self.this_labels.len() - 1;
+                        self.extension_receiver_labels
+                            .push((label_index, receiver_ref.span));
+                        self.this_extension_receiver = Some(receiver_ref.span);
                     }
                     self.push_local_funs();
                     self.push_scope();
@@ -28162,7 +28389,12 @@ impl<'a> Checker<'a> {
                     let inferred = self.expr(*e);
                     self.pop_scope();
                     self.pop_local_funs();
+                    if receiver.is_some() {
+                        self.extension_receiver_labels.pop();
+                        self.this_labels.pop();
+                    }
                     self.this_ty = previous_this;
+                    self.this_extension_receiver = previous_extension_receiver;
                     inferred
                 }
                 _ => Ty::Unit,
@@ -28213,8 +28445,14 @@ impl<'a> Checker<'a> {
         // Check the body (for a block body or when return type was already inferred above for expr).
         self.with_ret(ret_ty, |c| {
             let previous_this = c.this_ty;
-            if receiver.is_some() {
-                c.this_ty = receiver;
+            let previous_extension_receiver = c.this_extension_receiver;
+            if let (Some(receiver), Some(receiver_ref)) = (receiver, f.receiver.as_ref()) {
+                c.this_ty = Some(receiver);
+                c.this_labels.push((f.name.clone(), receiver, false));
+                let label_index = c.this_labels.len() - 1;
+                c.extension_receiver_labels
+                    .push((label_index, receiver_ref.span));
+                c.this_extension_receiver = Some(receiver_ref.span);
             }
             c.push_local_funs();
             c.push_scope();
@@ -28234,7 +28472,12 @@ impl<'a> Checker<'a> {
             }
             c.pop_scope();
             c.pop_local_funs();
+            if receiver.is_some() {
+                c.extension_receiver_labels.pop();
+                c.this_labels.pop();
+            }
             c.this_ty = previous_this;
+            c.this_extension_receiver = previous_extension_receiver;
         });
         for t in added_tparams {
             self.tparams.remove(&t);

@@ -2101,36 +2101,7 @@ impl<'a> Parser<'a> {
         } else {
             Default::default()
         };
-        // Optional extension receiver: `val Recv[<…>][?].name` (like an extension function).
-        let (receiver, name) = if self.at(TokenKind::LParen) {
-            // A PARENTHESIZED receiver type — `val (Int.() -> String).valProp` — an extension property
-            // on a function type. parse_type handles the grouping parens and folded receiver form.
-            let recv_ty = self.parse_type();
-            self.expect(TokenKind::Dot, "'.'");
-            (Some(recv_ty), self.ident_or_error("property name"))
-        } else {
-            let first = self.ident_or_error("property name");
-            if self.at(TokenKind::Dot) || self.at(TokenKind::Lt) || self.at(TokenKind::Question) {
-                let span = self.tok().span;
-                let (recv_arg, recv_targs) = self.parse_extension_receiver_args(&first);
-                let nullable = self.eat_type_nullable();
-                self.expect(TokenKind::Dot, "'.'");
-                let recv = TypeRef {
-                    name: first,
-                    flags: TrFlags::default()
-                        .with_nullable(nullable)
-                        .with_definitely_non_null(false),
-                    arg: recv_arg,
-                    targs: recv_targs,
-                    span,
-                    fun_params: vec![],
-                    fun_context_count: 0,
-                };
-                (Some(recv), self.ident_or_error("property name"))
-            } else {
-                (None, first)
-            }
-        };
+        let (receiver, name) = self.parse_receiver_and_declaration_name("property name");
         let ty = if self.eat(TokenKind::Colon) {
             Some(self.parse_type())
         } else {
@@ -3042,79 +3013,7 @@ impl<'a> Parser<'a> {
             };
         let lexical_type_param_lens =
             self.push_lexical_type_params(&type_params, &type_param_bounds);
-        // Parse either `Name` (regular function) or `ReceiverType . Name` (extension function).
-        // Receiver type may itself be parameterized (`List<T>.foo`) or nullable (`String?.foo`).
-        let (receiver, name) = if self.at(TokenKind::LParen) {
-            // A PARENTHESIZED receiver type — `fun (Int.() -> String).foo(...)`, an extension on a
-            // function type. parse_type handles the grouping parens and the folded receiver form; the
-            // name follows the `.`.
-            let recv_ty = self.parse_type();
-            self.expect(TokenKind::Dot, "'.'");
-            (
-                Some(recv_ty),
-                self.ident_or_error("extension function name"),
-            )
-        } else {
-            let first_span = self.tok().span;
-            let first_name = if self.at(TokenKind::Ident) {
-                let n = self.text().to_string();
-                self.bump();
-                n
-            } else {
-                self.diags.error(self.tok().span, "expected function name");
-                "<error>".to_string()
-            };
-            if self.at(TokenKind::Dot) || self.at(TokenKind::Lt) || self.at(TokenKind::Question) {
-                // `fun RecvType<...>?.name(...)` — extension function.
-                let span = first_span;
-                let mut recv_nullable = false;
-                let (mut recv_arg, mut recv_targs) =
-                    self.parse_extension_receiver_args(&first_name);
-                if self.eat(TokenKind::Question) {
-                    recv_nullable = true;
-                }
-                self.expect(TokenKind::Dot, "'.'");
-                // The receiver type may be DOTTED (`fun Int.Companion.MAX()`, `fun Foo.Bar.baz()`):
-                // consume `Ident` segments while each is followed by another `.`; the final segment (the
-                // one NOT followed by a `.`) is the function name, the rest form the receiver type name.
-                let mut recv_name = first_name;
-                let mut fun_name = "<error>".to_string();
-                loop {
-                    let seg = if self.at(TokenKind::Ident) {
-                        let n = self.text().to_string();
-                        self.bump();
-                        n
-                    } else {
-                        self.diags
-                            .error(self.tok().span, "expected extension function name");
-                        break;
-                    };
-                    if self.eat(TokenKind::Dot) {
-                        recv_arg = None;
-                        recv_targs.clear();
-                        recv_name.push('.');
-                        recv_name.push_str(&seg);
-                    } else {
-                        fun_name = seg;
-                        break;
-                    }
-                }
-                let recv_ty = TypeRef {
-                    name: recv_name,
-                    flags: TrFlags::default()
-                        .with_nullable(recv_nullable)
-                        .with_definitely_non_null(false),
-                    arg: recv_arg,
-                    targs: recv_targs,
-                    span,
-                    fun_params: vec![],
-                    fun_context_count: 0,
-                };
-                (Some(recv_ty), fun_name)
-            } else {
-                (None, first_name)
-            }
-        };
+        let (receiver, name) = self.parse_receiver_and_declaration_name("extension function name");
         let mut params = self.parse_param_list();
         // Context parameters (`context(a: A) fun f()`), parsed at the declaration site into
         // `pending_context_params`, become LEADING value parameters (kotlinc's ABI) — prepend them and
@@ -4865,20 +4764,85 @@ impl<'a> Parser<'a> {
         args
     }
 
-    fn parse_extension_receiver_args(
+    fn parse_receiver_and_declaration_name(
         &mut self,
-        receiver_name: &str,
-    ) -> (Option<Box<TypeRef>>, Vec<TypeRef>) {
-        let args = if self.at(TokenKind::Lt) {
+        name_context: &'static str,
+    ) -> (Option<TypeRef>, String) {
+        if self.at(TokenKind::LParen) {
+            let receiver_start = self.tok().span.lo;
+            let mut receiver = self.parse_type();
+            let receiver_hi = self.t[self.i.saturating_sub(1)].span.hi;
+            receiver.span = Span::new(receiver_start, receiver_hi);
+            self.expect(TokenKind::Dot, "'.'");
+            return (Some(receiver), self.ident_or_error(name_context));
+        }
+
+        let receiver_start = self.tok().span.lo;
+        let first = self.ident_or_error(name_context);
+        if !self.at(TokenKind::Dot) && !self.at(TokenKind::Lt) && !self.at(TokenKind::Question) {
+            return (None, first);
+        }
+
+        let mut receiver_targs = if self.at(TokenKind::Lt) {
             self.parse_type_args()
         } else {
             Vec::new()
         };
-        if receiver_name == "Array" {
-            (args.into_iter().next().map(Box::new), Vec::new())
+        let mut nullable = self.eat_type_nullable();
+        let mut receiver_hi = self.t[self.i.saturating_sub(1)].span.hi;
+        self.expect(TokenKind::Dot, "'.'");
+        let mut receiver_name = first;
+
+        let declaration_name = loop {
+            let segment = self.ident_or_error(name_context);
+            if segment == "<error>" {
+                break segment;
+            }
+            let segment_hi = self.t[self.i.saturating_sub(1)].span.hi;
+            if self.at(TokenKind::Lt) || self.at(TokenKind::Question) {
+                let segment_targs = if self.at(TokenKind::Lt) {
+                    self.parse_type_args()
+                } else {
+                    Vec::new()
+                };
+                nullable = self.eat_type_nullable();
+                receiver_name.push('.');
+                receiver_name.push_str(&segment);
+                receiver_targs = segment_targs;
+                receiver_hi = self.t[self.i.saturating_sub(1)].span.hi;
+                self.expect(TokenKind::Dot, "'.'");
+            } else if self.eat(TokenKind::Dot) {
+                receiver_name.push('.');
+                receiver_name.push_str(&segment);
+                receiver_targs.clear();
+                nullable = false;
+                receiver_hi = segment_hi;
+            } else {
+                break segment;
+            }
+        };
+        let receiver_arg = if receiver_name == "Array" {
+            let argument = receiver_targs.drain(..).next().map(Box::new);
+            receiver_targs.clear();
+            argument
         } else {
-            (None, args)
-        }
+            None
+        };
+
+        (
+            Some(TypeRef {
+                name: receiver_name,
+                flags: TrFlags::default()
+                    .with_nullable(nullable)
+                    .with_definitely_non_null(false),
+                arg: receiver_arg,
+                targs: receiver_targs,
+                span: Span::new(receiver_start, receiver_hi),
+                fun_params: Vec::new(),
+                fun_context_count: 0,
+            }),
+            declaration_name,
+        )
     }
 
     /// Parse a `<T, reified U : Bound, out V>` type-parameter list, returning the parameter names,
@@ -8580,8 +8544,15 @@ mod tests {
     fn extension_receivers_keep_type_arguments() {
         let mut diagnostics = DiagSink::new();
         let source = "class Entry\n\
+                      class Outer { class Inner<T>; class Array<T> }\n\
                       fun Collection<Entry>.selected() {}\n\
-                      val Collection<Entry>.counted: Int get() = 0\n";
+                      val Collection<Entry>.counted: Int get() = 0\n\
+                      fun Outer.Inner<Entry>.dottedFunction() {}\n\
+                      val Outer.Inner<Entry>.dottedProperty: Int get() = 0\n\
+                      fun (() -> Unit).parenthesizedFunction() {}\n\
+                      val (() -> Unit).parenthesizedProperty: Int get() = 0\n\
+                      fun Outer.Array<Entry> /* gap */ .qualifiedArray() {}\n\
+                      fun Array<Entry> /* gap */ .builtinArray() {}\n";
         let tokens = lex(source, &mut diagnostics);
         let file = parse(source, &tokens, &mut diagnostics);
         assert!(
@@ -8598,12 +8569,33 @@ mod tests {
                 Decl::Class(_) => None,
             })
             .collect();
-        assert_eq!(receivers.len(), 2);
-        for receiver in receivers {
-            assert_eq!(receiver.name, "Collection");
-            assert_eq!(receiver.targs.len(), 1);
-            assert_eq!(receiver.targs[0].name, "Entry");
-        }
+        assert_eq!(receivers.len(), 8);
+        assert_eq!(
+            receivers
+                .iter()
+                .map(|receiver| { &source[receiver.span.lo as usize..receiver.span.hi as usize] })
+                .collect::<Vec<_>>(),
+            [
+                "Collection<Entry>",
+                "Collection<Entry>",
+                "Outer.Inner<Entry>",
+                "Outer.Inner<Entry>",
+                "(() -> Unit)",
+                "(() -> Unit)",
+                "Outer.Array<Entry>",
+                "Array<Entry>"
+            ]
+        );
+        assert_eq!(receivers[0].name, "Collection");
+        assert_eq!(receivers[0].targs[0].name, "Entry");
+        assert_eq!(receivers[2].name, "Outer.Inner");
+        assert_eq!(receivers[2].targs[0].name, "Entry");
+        assert_eq!(receivers[6].name, "Outer.Array");
+        assert_eq!(receivers[6].targs[0].name, "Entry");
+        assert!(receivers[6].arg.is_none());
+        assert_eq!(receivers[7].name, "Array");
+        assert_eq!(receivers[7].arg.as_deref().unwrap().name, "Entry");
+        assert!(receivers[7].targs.is_empty());
     }
 
     #[test]
