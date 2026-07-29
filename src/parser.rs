@@ -936,6 +936,7 @@ fn hoist_local_classes(file: &mut File) {
     for c in hoisted {
         let id = file.add_decl(Decl::Class(c));
         file.decls.push(id);
+        file.mark_local_declaration(id);
     }
 }
 

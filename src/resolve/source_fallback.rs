@@ -12,11 +12,31 @@ use super::SymbolTable;
 pub(crate) struct SourceFallbackPlatform {
     platform: Box<dyn SemanticPlatform>,
     symbols: SymbolTable,
+    /// Memoized merges over the immutable platform and source symbol tables.
+    symbols_memo: std::cell::RefCell<std::collections::HashMap<TypeName, Rc<ResolvedSymbols>>>,
+    types_memo: std::cell::RefCell<std::collections::HashMap<TypeName, Option<Rc<LibraryType>>>>,
+    members_memo: std::cell::RefCell<
+        std::collections::HashMap<Ty, std::collections::HashMap<String, FunctionSet>>,
+    >,
+    props_memo: std::cell::RefCell<
+        std::collections::HashMap<Ty, std::collections::HashMap<String, PropertySet>>,
+    >,
+    supertypes_memo: std::cell::RefCell<std::collections::HashMap<Ty, Vec<Ty>>>,
+    shape_memo: std::cell::RefCell<std::collections::HashMap<TypeName, Option<InheritanceShape>>>,
 }
 
 impl SourceFallbackPlatform {
     pub(crate) fn new(platform: Box<dyn SemanticPlatform>, symbols: SymbolTable) -> Self {
-        SourceFallbackPlatform { platform, symbols }
+        SourceFallbackPlatform {
+            platform,
+            symbols,
+            symbols_memo: Default::default(),
+            types_memo: Default::default(),
+            members_memo: Default::default(),
+            props_memo: Default::default(),
+            supertypes_memo: Default::default(),
+            shape_memo: Default::default(),
+        }
     }
 
     fn source(&self) -> ModuleSymbols<'_> {
@@ -173,21 +193,42 @@ fn merge_type(mut primary: LibraryType, fallback: LibraryType) -> LibraryType {
 
 impl SymbolSource for SourceFallbackPlatform {
     fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
-        if ty
+        if let Some(hit) = self.supertypes_memo.borrow().get(&ty) {
+            return hit.clone();
+        }
+        let supertypes = if ty
             .obj_internal()
             .is_some_and(|internal| self.public_source_type_name(internal).is_some())
         {
             self.source().direct_supertypes(ty)
         } else {
             self.platform.direct_supertypes(ty)
-        }
+        };
+        self.supertypes_memo
+            .borrow_mut()
+            .insert(ty, supertypes.clone());
+        supertypes
     }
 
     fn member_overloads(&self, recv: Ty, name: &str) -> FunctionSet {
-        merge_functions(
+        if let Some(hit) = self
+            .members_memo
+            .borrow()
+            .get(&recv)
+            .and_then(|by_name| by_name.get(name))
+        {
+            return hit.clone();
+        }
+        let merged = merge_functions(
             self.platform.member_overloads(recv, name),
             public_functions(self.source().member_overloads(recv, name)),
-        )
+        );
+        self.members_memo
+            .borrow_mut()
+            .entry(recv)
+            .or_default()
+            .insert(name.to_string(), merged.clone());
+        merged
     }
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
@@ -208,20 +249,28 @@ impl SymbolSource for SourceFallbackPlatform {
     }
 
     fn resolve_type_name(&self, internal: TypeName) -> Option<Rc<LibraryType>> {
+        if let Some(merged) = self.types_memo.borrow().get(&internal) {
+            return merged.clone();
+        }
         let source = self.source();
         let visibility = source.classifier_visibility(internal);
         if visibility.is_some_and(|visibility| visibility != Visibility::Public) {
+            self.types_memo.borrow_mut().insert(internal, None);
             return None;
         }
         let fallback = self.public_source_type_name(internal);
-        match (self.platform.resolve_type_name(internal), fallback) {
+        let merged = match (self.platform.resolve_type_name(internal), fallback) {
             (Some(primary), Some(fallback)) => {
                 Some(Rc::new(merge_type((*primary).clone(), (*fallback).clone())))
             }
             (Some(primary), None) => Some(primary),
             (None, Some(fallback)) => Some(fallback),
             (None, None) => None,
-        }
+        };
+        self.types_memo
+            .borrow_mut()
+            .insert(internal, merged.clone());
+        merged
     }
 
     fn classifier_visibility(&self, internal: TypeName) -> Option<Visibility> {
@@ -264,6 +313,9 @@ impl SymbolSource for SourceFallbackPlatform {
     }
 
     fn resolve_symbols_name(&self, fqn: TypeName) -> Rc<ResolvedSymbols> {
+        if let Some(merged) = self.symbols_memo.borrow().get(&fqn) {
+            return merged.clone();
+        }
         let primary = self.platform.resolve_symbols_name(fqn);
         let fallback = self.source().resolve_symbols_name(fqn);
         let fallback_classifier = fallback
@@ -281,7 +333,7 @@ impl SymbolSource for SourceFallbackPlatform {
         };
         let (primary_functions, primary_properties) = split_callables(primary.callables.clone());
         let (fallback_functions, fallback_properties) = split_callables(fallback.callables.clone());
-        Rc::new(ResolvedSymbols {
+        let merged = Rc::new(ResolvedSymbols {
             classifier,
             callables: join_callables(
                 merge_functions(primary_functions, public_functions(fallback_functions)),
@@ -291,15 +343,31 @@ impl SymbolSource for SourceFallbackPlatform {
                     public_properties(fallback_properties),
                 ),
             ),
-        })
+        });
+        self.symbols_memo.borrow_mut().insert(fqn, merged.clone());
+        merged
     }
 
     fn property_members(&self, recv: Ty, name: &str) -> PropertySet {
-        merge_properties(
+        if let Some(hit) = self
+            .props_memo
+            .borrow()
+            .get(&recv)
+            .and_then(|by_name| by_name.get(name))
+        {
+            return hit.clone();
+        }
+        let merged = merge_properties(
             self.platform.as_ref(),
             self.platform.property_members(recv, name),
             public_properties(self.source().property_members(recv, name)),
-        )
+        );
+        self.props_memo
+            .borrow_mut()
+            .entry(recv)
+            .or_default()
+            .insert(name.to_string(), merged.clone());
+        merged
     }
 
     fn member_is_property(&self, recv: Ty, name: &str) -> bool {
@@ -310,10 +378,15 @@ impl SymbolSource for SourceFallbackPlatform {
     }
 
     fn inheritance_shape_name(&self, internal: TypeName) -> Option<InheritanceShape> {
-        self.platform.inheritance_shape_name(internal).or_else(|| {
+        if let Some(hit) = self.shape_memo.borrow().get(&internal) {
+            return *hit;
+        }
+        let shape = self.platform.inheritance_shape_name(internal).or_else(|| {
             self.public_source_type_name(internal)
                 .and_then(|_| self.source().inheritance_shape_name(internal))
-        })
+        });
+        self.shape_memo.borrow_mut().insert(internal, shape);
+        shape
     }
 }
 
@@ -511,6 +584,21 @@ mod tests {
             receiver_rank: 0,
             source_key: None,
         }
+    }
+
+    #[test]
+    fn resolve_symbols_name_reuses_the_merged_record_for_a_repeated_query() {
+        let platform = SourceFallbackPlatform::new(
+            Box::new(TypeVisibility::default()),
+            crate::resolve::SymbolTable::default(),
+        );
+        let fqn = crate::types::type_name("demo/twice");
+        let first = platform.resolve_symbols_name(fqn);
+        let second = platform.resolve_symbols_name(fqn);
+        assert!(
+            Rc::ptr_eq(&first, &second),
+            "repeated queries must not re-merge the namespace record"
+        );
     }
 
     #[test]

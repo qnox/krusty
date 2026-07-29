@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use krusty::ast::{ClassDecl, ClassKind, Decl, FunDecl, PropDecl, Stmt};
+use krusty::ast::{ClassDecl, ClassKind, Decl, FunDecl, PropDecl};
 use krusty::diag::{DiagSink, Span};
 use krusty::frontend::lex_name_tokens;
 
@@ -69,30 +69,18 @@ pub(crate) fn document_symbol_occurrences(
     };
     let mut diagnostics = DiagSink::new();
     let tokens = lex_name_tokens(source, &mut diagnostics);
-    let local_classes = analysis
-        .file
-        .stmt_arena
-        .iter()
-        .filter_map(|statement| match statement {
-            Stmt::LocalClass(class) => Some((class.name.as_str(), class.span.lo, class.span.hi)),
-            _ => None,
-        })
-        .collect::<HashSet<_>>();
     let classes = analysis
         .file
         .decls
         .iter()
-        .filter_map(|&declaration| match analysis.file.decl(declaration) {
-            Decl::Class(class)
-                if !local_classes.contains(&(
-                    class.name.as_str(),
-                    class.span.lo,
-                    class.span.hi,
-                )) =>
-            {
-                Some(class)
+        .filter_map(|&declaration| {
+            if analysis.file.is_local_declaration(declaration) {
+                return None;
             }
-            _ => None,
+            match analysis.file.decl(declaration) {
+                Decl::Class(class) => Some(class),
+                _ => None,
+            }
         })
         .collect::<Vec<_>>();
     let class_names = classes
@@ -110,6 +98,9 @@ pub(crate) fn document_symbol_occurrences(
 
     let mut roots = Vec::new();
     for &declaration in &analysis.file.decls {
+        if analysis.file.is_local_declaration(declaration) {
+            continue;
+        }
         match analysis.file.decl(declaration) {
             Decl::Fun(function) => {
                 if let Some(node) = function_node(source, &tokens, function, false, &mut budget) {
@@ -122,9 +113,6 @@ pub(crate) fn document_symbol_occurrences(
                 }
             }
             Decl::Class(class) => {
-                if local_classes.contains(&(class.name.as_str(), class.span.lo, class.span.hi)) {
-                    continue;
-                }
                 let has_parent = class
                     .name
                     .rsplit_once('.')

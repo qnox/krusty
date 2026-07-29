@@ -562,6 +562,7 @@ dependencies = [
 name = "krusty-lsp"
 version = "0.0.1"
 dependencies = [
+ "dhat",
  "fs2",
  "krusty",
  "roxmltree",

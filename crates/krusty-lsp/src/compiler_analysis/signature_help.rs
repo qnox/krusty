@@ -1,9 +1,6 @@
 //! Source call sites and callable signatures reduced for compact LSP snapshots.
 
-use std::{
-    borrow::Cow,
-    collections::{HashMap, HashSet},
-};
+use std::{borrow::Cow, collections::HashMap};
 
 use krusty::ast::{
     ClassDecl, ClassKind, Decl, Expr, ExprId, File, FunBody, FunDecl, Param, SecondaryCtor, Stmt,
@@ -160,26 +157,12 @@ impl SignatureHelpSymbols {
             constructors_by_simple: HashMap::new(),
         };
         let mut budget = CatalogBudget::default();
-        let local_classes = files
-            .iter()
-            .map(|analysis| {
-                analysis
-                    .file
-                    .stmt_arena
-                    .iter()
-                    .filter_map(|statement| match statement {
-                        Stmt::LocalClass(class) => {
-                            Some((class.name.as_str(), class.span.lo, class.span.hi))
-                        }
-                        _ => None,
-                    })
-                    .collect::<HashSet<_>>()
-            })
-            .collect::<Vec<_>>();
-
         for (file_index, (source, analysis)) in sources.iter().zip(files).enumerate() {
             let package = analysis.file.package.clone().unwrap_or_default();
             for &declaration in &analysis.file.decls {
+                if analysis.file.is_local_declaration(declaration) {
+                    continue;
+                }
                 match analysis.file.decl(declaration) {
                     Decl::Fun(function) => {
                         let signature = symbols.source_function_signature(
@@ -227,11 +210,7 @@ impl SignatureHelpSymbols {
                             .insert((file_index as u32, declaration.0), (group, candidate_index));
                     }
                     Decl::Class(class)
-                        if !local_classes[file_index].contains(&(
-                            class.name.as_str(),
-                            class.span.lo,
-                            class.span.hi,
-                        )) && !result.add_class(
+                        if !result.add_class(
                             source,
                             analysis,
                             symbols,
@@ -811,7 +790,7 @@ fn render_parameter_parts(
     if let Some(default) = default {
         label.push_str(" = ");
         let value = file
-            .and_then(|file| file.expr_spans.get(default.0 as usize))
+            .and_then(|file| file.expr_span(default))
             .and_then(|span| source.get(span.lo as usize..span.hi as usize))
             .map(str::trim)
             .filter(|value| !value.is_empty())

@@ -91,24 +91,13 @@ impl CompletionSymbols {
         };
         for file in files {
             let package = file.file.package.clone().unwrap_or_default();
-            let local_classes: std::collections::HashSet<_> = file
-                .file
-                .stmt_arena
-                .iter()
-                .filter_map(|statement| match statement {
-                    Stmt::LocalClass(class) => {
-                        Some((class.name.as_str(), class.span.lo, class.span.hi))
-                    }
-                    _ => None,
-                })
-                .collect();
             for &declaration in &file.file.decls {
+                if file.file.is_local_declaration(declaration) {
+                    continue;
+                }
                 let Decl::Class(class) = file.file.decl(declaration) else {
                     continue;
                 };
-                if local_classes.contains(&(class.name.as_str(), class.span.lo, class.span.hi)) {
-                    continue;
-                }
                 let owner = qualified_name(&package, &class.name);
                 result
                     .class_owners
@@ -124,18 +113,10 @@ impl CompletionSymbols {
         for (file_index, file) in files.iter().enumerate() {
             let internal_visible = file_index < inferred_count;
             let package = file.file.package.clone().unwrap_or_default();
-            let local_classes: std::collections::HashSet<_> = file
-                .file
-                .stmt_arena
-                .iter()
-                .filter_map(|statement| match statement {
-                    Stmt::LocalClass(class) => {
-                        Some((class.name.as_str(), class.span.lo, class.span.hi))
-                    }
-                    _ => None,
-                })
-                .collect();
             for &declaration in &file.file.decls {
+                if file.file.is_local_declaration(declaration) {
+                    continue;
+                }
                 match file.file.decl(declaration) {
                     Decl::Fun(function) => {
                         let symbol = function_symbol(
@@ -154,13 +135,6 @@ impl CompletionSymbols {
                         }
                     }
                     Decl::Class(class) => {
-                        if local_classes.contains(&(
-                            class.name.as_str(),
-                            class.span.lo,
-                            class.span.hi,
-                        )) {
-                            continue;
-                        }
                         let owner = result.owner_for_name(&file.file, &class.name);
                         result.add_class(&package, &owner, file, class, internal_visible);
                         inheritance.extend(
