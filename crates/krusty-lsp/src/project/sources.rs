@@ -164,6 +164,44 @@ impl ProjectSources {
         });
         paths.sort();
         paths.dedup();
+        let mut newest_dependency_source: BTreeMap<usize, std::time::SystemTime> = BTreeMap::new();
+        for path in &paths {
+            let Some(index) = model
+                .module_index_for_source(path)
+                .filter(|index| !inferred_module_indices.contains(index))
+            else {
+                continue;
+            };
+            if let Ok(modified) = fs::metadata(path).and_then(|meta| meta.modified()) {
+                let newest = newest_dependency_source.entry(index).or_insert(modified);
+                *newest = (*newest).max(modified);
+            }
+        }
+        for (&index, newest) in &mut newest_dependency_source {
+            let Some(module) = model.modules.get(index) else {
+                continue;
+            };
+            for root in &module.source_roots {
+                if let Some(modified) = newest_directory_mtime(&root.path) {
+                    *newest = (*newest).max(modified);
+                }
+            }
+        }
+        let covered_modules = newest_dependency_source
+            .iter()
+            .filter(|(&index, &newest_source)| {
+                model
+                    .modules
+                    .get(index)
+                    .is_some_and(|module| module_build_is_current(module, newest_source))
+            })
+            .map(|(&index, _)| index)
+            .collect::<HashSet<_>>();
+        paths.retain(|path| {
+            !model
+                .module_index_for_source(path)
+                .is_some_and(|index| covered_modules.contains(&index))
+        });
         let (kotlin_paths, java_paths): (Vec<_>, Vec<_>) = paths
             .into_iter()
             .partition(|path| krusty::source::is_supported_path(path));
@@ -206,6 +244,61 @@ impl ProjectSources {
             sources_within_budget(&cache.java_documents, remaining - cache.kotlin_bytes);
         Ok((&cache.documents, cache.inferred_count, java_sources))
     }
+}
+
+fn module_build_is_current(
+    module: &crate::project::Module,
+    newest_source: std::time::SystemTime,
+) -> bool {
+    let mut class_outputs = 0usize;
+    for output in &module.outputs {
+        let crate::project::model::ModuleOutput::Classes(path) = output else {
+            continue;
+        };
+        class_outputs += 1;
+        match oldest_class_mtime(path) {
+            Some(oldest_output) if oldest_output >= newest_source => {}
+            _ => return false,
+        }
+    }
+    class_outputs > 0
+}
+
+fn oldest_class_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    let metadata = fs::metadata(path).ok()?;
+    if metadata.is_file() {
+        return if path
+            .extension()
+            .is_some_and(|extension| extension == "class")
+        {
+            metadata.modified().ok()
+        } else {
+            None
+        };
+    }
+    let mut oldest = None;
+    for entry in fs::read_dir(path).ok()?.flatten() {
+        if let Some(candidate) = oldest_class_mtime(&entry.path()) {
+            oldest = Some(oldest.map_or(candidate, |current: std::time::SystemTime| {
+                current.min(candidate)
+            }));
+        }
+    }
+    oldest
+}
+
+fn newest_directory_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_dir() {
+        return None;
+    }
+    let mut newest = metadata.modified().ok();
+    for entry in fs::read_dir(path).ok()?.flatten() {
+        if let Some(candidate) = newest_directory_mtime(&entry.path()) {
+            newest = Some(newest.map_or(candidate, |current| current.max(candidate)));
+        }
+    }
+    newest
 }
 
 fn retain_cache_budget(
@@ -589,6 +682,135 @@ mod tests {
 
     fn file_uri(path: &Path) -> String {
         url::Url::from_file_path(path).unwrap().into()
+    }
+
+    fn dependency_fixture(label: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, ProjectModel) {
+        let directory = temp_path(label);
+        let app = directory.join("app");
+        let lib = directory.join("lib");
+        let lib_classes = directory.join("lib-build").join("classes");
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&lib).unwrap();
+        let use_kt = app.join("Use.kt");
+        let lib_kt = lib.join("Lib.kt");
+        fs::write(&use_kt, "fun use() {}").unwrap();
+        fs::write(&lib_kt, "fun libFun() {}").unwrap();
+        let mut app_module = Module::new(ModuleId::new(":app", "main"), app.clone());
+        app_module.source_roots = vec![SourceRoot::source(app.clone())];
+        app_module.depends_on = vec![ModuleId::new(":lib", "main")];
+        let mut lib_module = Module::new(ModuleId::new(":lib", "main"), lib.clone());
+        lib_module.source_roots = vec![SourceRoot::source(lib.clone())];
+        lib_module.outputs = vec![ModuleOutput::classes(lib_classes.clone())];
+        let model = ProjectModel::new(directory.clone(), ProviderKind::None)
+            .with_modules(vec![app_module, lib_module]);
+        (directory, use_kt, lib_kt, lib_classes, model)
+    }
+
+    fn set_mtime(path: &Path, when: std::time::SystemTime) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(when))
+            .unwrap();
+    }
+
+    #[test]
+    fn built_dependency_modules_are_not_inlined_as_source() {
+        let (directory, use_kt, _lib_kt, lib_classes, model) =
+            dependency_fixture("dep-built-classpath");
+        fs::create_dir_all(&lib_classes).unwrap();
+        fs::write(lib_classes.join("LibKt.class"), b"\xca\xfe\xba\xbe").unwrap();
+        let uri = file_uri(&use_kt);
+        let documents = [(uri.as_str(), "fun use() {}")];
+        let open_uris = [uri.as_str()];
+        let mut sources = ProjectSources::default();
+
+        let (loaded, inferred_count, _java) = sources
+            .load(&model, &documents, &open_uris, MAX_BYTES)
+            .unwrap();
+        let loaded = loaded.to_vec();
+
+        fs::remove_dir_all(directory).ok();
+        assert_eq!(inferred_count, 0);
+        assert!(
+            loaded.is_empty(),
+            "a built dependency resolves from its compiled output, not inlined source: {loaded:?}"
+        );
+    }
+
+    #[test]
+    fn stale_dependency_output_falls_back_to_source_inlining() {
+        let (directory, use_kt, lib_kt, lib_classes, model) =
+            dependency_fixture("dep-stale-fallback");
+        fs::create_dir_all(&lib_classes).unwrap();
+        let class = lib_classes.join("LibKt.class");
+        fs::write(&class, b"\xca\xfe\xba\xbe").unwrap();
+        set_mtime(
+            &class,
+            std::time::SystemTime::now() - std::time::Duration::from_secs(3600),
+        );
+        let uri = file_uri(&use_kt);
+        let documents = [(uri.as_str(), "fun use() {}")];
+        let open_uris = [uri.as_str()];
+        let mut sources = ProjectSources::default();
+
+        let (loaded, _inferred, _java) = sources
+            .load(&model, &documents, &open_uris, MAX_BYTES)
+            .unwrap();
+        let loaded = loaded.to_vec();
+
+        fs::remove_dir_all(directory).ok();
+        assert_eq!(
+            loaded,
+            [(file_uri(&lib_kt), "fun libFun() {}".to_string())],
+            "a stale build must not shadow newer dependency source"
+        );
+    }
+
+    #[test]
+    fn one_stale_class_keeps_dependency_source_inlining() {
+        let (directory, use_kt, lib_kt, lib_classes, model) =
+            dependency_fixture("dep-partially-stale");
+        fs::create_dir_all(&lib_classes).unwrap();
+        let stale = lib_classes.join("Old.class");
+        let current = lib_classes.join("Current.class");
+        fs::write(&stale, b"\xca\xfe\xba\xbe").unwrap();
+        fs::write(&current, b"\xca\xfe\xba\xbe").unwrap();
+        set_mtime(
+            &stale,
+            std::time::SystemTime::now() - std::time::Duration::from_secs(3600),
+        );
+        let uri = file_uri(&use_kt);
+        let documents = [(uri.as_str(), "fun use() {}")];
+        let open_uris = [uri.as_str()];
+        let mut sources = ProjectSources::default();
+
+        let (loaded, _, _) = sources
+            .load(&model, &documents, &open_uris, MAX_BYTES)
+            .unwrap();
+        let loaded = loaded.to_vec();
+
+        fs::remove_dir_all(directory).ok();
+        assert_eq!(loaded, [(file_uri(&lib_kt), "fun libFun() {}".to_string())]);
+    }
+
+    #[test]
+    fn unbuilt_dependency_modules_keep_source_inlining() {
+        let (directory, use_kt, lib_kt, _lib_classes, model) =
+            dependency_fixture("dep-unbuilt-fallback");
+        let uri = file_uri(&use_kt);
+        let documents = [(uri.as_str(), "fun use() {}")];
+        let open_uris = [uri.as_str()];
+        let mut sources = ProjectSources::default();
+
+        let (loaded, _inferred, _java) = sources
+            .load(&model, &documents, &open_uris, MAX_BYTES)
+            .unwrap();
+        let loaded = loaded.to_vec();
+
+        fs::remove_dir_all(directory).ok();
+        assert_eq!(loaded, [(file_uri(&lib_kt), "fun libFun() {}".to_string())]);
     }
 
     #[test]

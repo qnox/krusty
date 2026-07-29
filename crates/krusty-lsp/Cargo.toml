@@ -13,3 +13,11 @@ roxmltree = "0.21"
 url = "2"
 fs2 = "0.4"
 zip = { version = "8", default-features = false, features = ["deflate"] }
+dhat = { version = "0.3", optional = true }
+
+[[bin]]
+name = "memprofile"
+path = "tools/memprofile.rs"
+
+[features]
+dhat-heap = ["dep:dhat"]

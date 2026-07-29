@@ -1078,6 +1078,8 @@ pub struct File {
     pub expr_arena: Vec<Expr>,
     pub stmt_arena: Vec<Stmt>,
     pub expr_spans: Vec<Span>,
+    pub(crate) retained_expr_spans: std::collections::HashMap<ExprId, Span>,
+    pub(crate) local_declarations: std::collections::HashSet<DeclId>,
     pub stmt_spans: Vec<Span>,
     /// Sparse source locations for the value-introducing `=` associated with an expression: property
     /// and local initializers, parameter defaults, and assignment RHS expressions. Diagnostics point
@@ -1182,7 +1184,107 @@ pub struct File {
     pub assert_always_disabled: bool,
 }
 
+fn retain_default_span(
+    default: Option<ExprId>,
+    expr_spans: &[Span],
+    retained: &mut std::collections::HashMap<ExprId, Span>,
+) {
+    let Some(default) = default else {
+        return;
+    };
+    if let Some(&span) = expr_spans.get(default.0 as usize) {
+        retained.insert(default, span);
+    }
+}
+
+fn retain_param_default_spans(
+    params: &[Param],
+    expr_spans: &[Span],
+    retained: &mut std::collections::HashMap<ExprId, Span>,
+) {
+    for param in params {
+        retain_default_span(param.default, expr_spans, retained);
+    }
+}
+
+fn retain_class_default_spans(
+    class: &ClassDecl,
+    expr_spans: &[Span],
+    retained: &mut std::collections::HashMap<ExprId, Span>,
+) {
+    for param in &class.props {
+        retain_default_span(param.default, expr_spans, retained);
+    }
+    for function in class.methods.iter().chain(&class.companion_methods) {
+        retain_param_default_spans(&function.params, expr_spans, retained);
+    }
+    for constructor in &class.secondary_ctors {
+        retain_param_default_spans(&constructor.params, expr_spans, retained);
+    }
+}
+
 impl File {
+    /// Release body arenas while retaining declaration metadata.
+    pub fn release_body_arenas(&mut self) {
+        let mut retained_expr_spans = std::collections::HashMap::new();
+        for declaration in &self.decl_arena {
+            match declaration {
+                Decl::Fun(function) => retain_param_default_spans(
+                    &function.params,
+                    &self.expr_spans,
+                    &mut retained_expr_spans,
+                ),
+                Decl::Class(class) => {
+                    retain_class_default_spans(class, &self.expr_spans, &mut retained_expr_spans)
+                }
+                Decl::Property(_) => {}
+            }
+        }
+        self.retained_expr_spans = retained_expr_spans;
+        self.script_body = None;
+        self.expr_arena = Vec::new();
+        self.stmt_arena = Vec::new();
+        self.expr_spans = Vec::new();
+        self.stmt_spans = Vec::new();
+        self.expr_lines = Vec::new();
+        self.expr_source_lines = Vec::new();
+        self.expr_end_lines = Vec::new();
+        self.stmt_lines = Vec::new();
+        self.value_operator_spans = Default::default();
+        self.assignment_target_spans = Default::default();
+        self.call_arg_names = Default::default();
+        self.call_arg_name_spans = Default::default();
+        self.empty_call_open_paren_spans = Default::default();
+        self.exact_member_name_spans = Default::default();
+        self.non_adjacent_member_dot_spans = Default::default();
+        self.call_has_trailing_lambda = Default::default();
+        self.trailing_call_close_paren_ends = Default::default();
+        self.infix_calls = Default::default();
+        self.call_type_args = Default::default();
+        self.lambda_param_types = Default::default();
+        self.anon_fun_lambdas = Default::default();
+        self.destructure_source_props = Default::default();
+        self.base_arg_names = Default::default();
+        self.anon_fun_ret = Default::default();
+        self.file_annotations = Default::default();
+        self.spread_arg_ids = Default::default();
+    }
+
+    pub fn expr_span(&self, id: ExprId) -> Option<Span> {
+        self.expr_spans
+            .get(id.0 as usize)
+            .copied()
+            .or_else(|| self.retained_expr_spans.get(&id).copied())
+    }
+
+    pub fn is_local_declaration(&self, id: DeclId) -> bool {
+        self.local_declarations.contains(&id)
+    }
+
+    pub(crate) fn mark_local_declaration(&mut self, id: DeclId) {
+        self.local_declarations.insert(id);
+    }
+
     /// Whether call argument `id` (the inner expr of `*expr`) was written with the spread operator.
     pub fn is_spread_arg(&self, id: ExprId) -> bool {
         self.spread_arg_ids.contains(&id.0)

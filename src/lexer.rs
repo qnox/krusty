@@ -44,6 +44,7 @@ pub fn lex_name_tokens(src: &str, diags: &mut DiagSink) -> Vec<NameToken> {
 
 fn lexer<'a>(src: &'a str, diags: &'a mut DiagSink) -> Lexer<'a> {
     Lexer {
+        s: src,
         b: src.as_bytes(),
         i: 0,
         out: Vec::new(),
@@ -53,6 +54,8 @@ fn lexer<'a>(src: &'a str, diags: &'a mut DiagSink) -> Lexer<'a> {
 }
 
 struct Lexer<'a> {
+    /// Valid UTF-8 view used for identifier slices.
+    s: &'a str,
     b: &'a [u8],
     i: usize,
     out: Vec<Token>,
@@ -329,7 +332,7 @@ impl<'a> Lexer<'a> {
             self.i += utf8_char_len(self.b[self.i]);
         }
         let span = Span::new(lo, self.i as u32);
-        let text = &std::str::from_utf8(self.b).unwrap()[lo as usize..self.i as usize];
+        let text = &self.s[lo as usize..self.i as usize];
         let kind = keyword(text).unwrap_or(TokenKind::Ident);
         Token { kind, span }
     }

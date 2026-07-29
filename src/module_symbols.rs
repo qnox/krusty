@@ -23,6 +23,9 @@ use std::collections::HashMap;
 pub struct ModuleSymbols<'a> {
     syms: &'a FrontendSymbols,
     source_file: Option<u32>,
+    /// Positive and negative queries against the immutable symbol table.
+    shapes: std::cell::RefCell<HashMap<TypeName, Option<std::rc::Rc<LibraryType>>>>,
+    symbols: std::cell::RefCell<HashMap<TypeName, std::rc::Rc<crate::libraries::ResolvedSymbols>>>,
 }
 
 impl<'a> ModuleSymbols<'a> {
@@ -30,6 +33,8 @@ impl<'a> ModuleSymbols<'a> {
         ModuleSymbols {
             syms,
             source_file: None,
+            shapes: Default::default(),
+            symbols: Default::default(),
         }
     }
 
@@ -37,6 +42,8 @@ impl<'a> ModuleSymbols<'a> {
         ModuleSymbols {
             syms,
             source_file: Some(source_file),
+            shapes: Default::default(),
+            symbols: Default::default(),
         }
     }
 
@@ -609,6 +616,9 @@ impl SymbolSource for ModuleSymbols<'_> {
         fqn: TypeName,
     ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
         use crate::libraries::{Callables, ResolvedSymbols};
+        if let Some(record) = self.symbols.borrow().get(&fqn) {
+            return record.clone();
+        }
         // Classifier: a module class at the fqn. Callables: `functions(name, receiver)` — members (always
         // visible on their type) plus the module's top-level/extension functions when the fqn's package is
         // their declaring package (a same-file function has no recorded facade — it lives in the file's own
@@ -712,10 +722,12 @@ impl SymbolSource for ModuleSymbols<'_> {
             }),
             (true, true) => Callables::None,
         };
-        std::rc::Rc::new(ResolvedSymbols {
+        let record = std::rc::Rc::new(ResolvedSymbols {
             classifier,
             callables,
-        })
+        });
+        self.symbols.borrow_mut().insert(fqn, record.clone());
+        record
     }
 
     fn member_overloads(&self, recv: Ty, name: &str) -> FunctionSet {
@@ -755,9 +767,14 @@ impl SymbolSource for ModuleSymbols<'_> {
     }
 
     fn resolve_type_name(&self, internal: TypeName) -> Option<std::rc::Rc<LibraryType>> {
-        self.syms
+        if let Some(shape) = self.shapes.borrow().get(&internal) {
+            return shape.clone();
+        }
+        let shape = self
             .class_by_type_name(internal)
-            .map(|c| std::rc::Rc::new(self.type_shape_for(c)))
+            .map(|c| std::rc::Rc::new(self.type_shape_for(c)));
+        self.shapes.borrow_mut().insert(internal, shape.clone());
+        shape
     }
 
     fn classifier_visibility(&self, internal: TypeName) -> Option<Visibility> {
@@ -879,6 +896,33 @@ mod tests {
         let phase = source.resolve_type("sample/Phase").unwrap();
         assert!(phase.is_enum());
         assert_eq!(phase.enum_entries, ["FIRST", "SECOND"]);
+    }
+
+    #[test]
+    fn resolve_type_name_reuses_the_shape_built_for_a_repeated_query() {
+        let mut st = FrontendSymbols::default();
+        st.insert_class("Widget".into(), class("demo/Widget"));
+        let m = ModuleSymbols::new(&st);
+        let first = m.resolve_type_name(type_name("demo/Widget")).unwrap();
+        let second = m.resolve_type_name(type_name("demo/Widget")).unwrap();
+        assert!(
+            std::rc::Rc::ptr_eq(&first, &second),
+            "repeated queries must not rebuild the class shape"
+        );
+    }
+
+    #[test]
+    fn resolve_symbols_name_reuses_the_record_built_for_a_repeated_query() {
+        let mut st = FrontendSymbols::default();
+        st.funs
+            .insert("twice".into(), vec![sig(vec![Ty::Int], Ty::Int)]);
+        let m = ModuleSymbols::new(&st);
+        let first = m.resolve_symbols_name(type_name("demo/twice"));
+        let second = m.resolve_symbols_name(type_name("demo/twice"));
+        assert!(
+            std::rc::Rc::ptr_eq(&first, &second),
+            "repeated queries must not rebuild the namespace record"
+        );
     }
 
     #[test]
