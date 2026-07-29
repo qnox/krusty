@@ -11534,7 +11534,8 @@ impl<'a> Lower<'a> {
             }
             self.append_default_masks_marker(&mut a, m, omitted);
             self.emit_local_default_call(fid, a)
-        } else if let Some(facade) = owner {
+        } else {
+            let facade = owner?;
             for (k, &pt) in target_params.iter().enumerate().skip(n) {
                 if k == m - 1 && target_vararg {
                     a.push(self.empty_array(ty_to_ir(pt)));
@@ -11553,8 +11554,6 @@ impl<'a> Lower<'a> {
                 target.physical_ret,
                 a,
             )
-        } else {
-            return None;
         };
         let unit_return = ret == Ty::Unit;
         let body = if unit_return {
