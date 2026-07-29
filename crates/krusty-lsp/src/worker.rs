@@ -156,6 +156,7 @@ impl AnalysisResponse {
                 .map(|diagnostic| Diagnostic {
                     span: Span::new(diagnostic.lo, diagnostic.hi),
                     editor_span: None,
+                    identity: None,
                     severity: if diagnostic.severity == 2 {
                         Severity::Warning
                     } else {

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fmt::{self, Write};
 
 use crate::ast::*;
-use crate::diag::{DiagSink, DiagnosticKind, Span};
+use crate::diag::{DiagSink, DiagnosticIdentity, DiagnosticKind, Span};
 use crate::libraries::{
     map_call_args, required_arity, CallArgMappingError, CallArgMappingFailure, CallSig,
     EmptySymbolSource, GenericSig, InlineKind, Origin, ParamList, SemanticPlatform,
@@ -14075,6 +14075,18 @@ impl<'a> Checker<'a> {
         };
         if !self.tparams.contains(&r.name) {
             if let Some(internal) = resolved.non_null().kotlin_class_internal() {
+                if !r.is_import() {
+                    if let Some(access) = self.resolver().inaccessible_classifier_access(internal) {
+                        self.diags.error_with_identity(
+                            r.span,
+                            DiagnosticIdentity::ClassifierAccess {
+                                reference: r.span,
+                                classifier: internal,
+                            },
+                            inaccessible_classifier_message(&r.name, access),
+                        );
+                    }
+                }
                 self.resolved_type_refs
                     .insert((r.span.lo, r.span.hi), internal);
             }
@@ -14735,6 +14747,9 @@ impl<'a> Checker<'a> {
         let prev_allow = self.allow_lambda_mutation;
         if f.is_inline() {
             self.allow_lambda_mutation = true;
+        }
+        if let Some(ret) = &f.ret {
+            self.resolve_ty(ret);
         }
         // Extension function: look up in ext_funs table; set this_ty to the receiver type.
         let prev_this = self.this_ty;
@@ -21472,14 +21487,16 @@ impl<'a> Checker<'a> {
         None
     }
 
-    fn inaccessible_classifier_access(
+    fn inaccessible_classifier(
         &self,
         name: &str,
-    ) -> Option<crate::symbol_source::ClassifierAccess> {
+    ) -> Option<(TypeName, crate::symbol_source::ClassifierAccess)> {
         let InheritedNestedClassifier::Found(internal) = self.scoped_classifier_name(name) else {
             return None;
         };
-        self.resolver().inaccessible_classifier_access(internal)
+        self.resolver()
+            .inaccessible_classifier_access(internal)
+            .map(|access| (internal, access))
     }
 
     /// Emit kotlinc's access diagnostic when a member of `owner` with visibility `vis` is NOT reachable
@@ -27415,16 +27432,29 @@ impl<'a> Checker<'a> {
                             .member_extension_function_shapes(receiver.ty, &fname)
                             .is_empty()
                     });
-                let message = if has_inapplicable_candidate {
-                    "none of the following candidates is applicable:".to_string()
+                let (message, identity) = if has_inapplicable_candidate {
+                    (
+                        "none of the following candidates is applicable:".to_string(),
+                        None,
+                    )
                 } else if self.value_root_shadows_classifier(&fname) {
-                    format!("unresolved function '{fname}'")
-                } else if let Some(access) = self.inaccessible_classifier_access(&fname) {
-                    inaccessible_classifier_message(&fname, access)
+                    (format!("unresolved function '{fname}'"), None)
+                } else if let Some((internal, access)) = self.inaccessible_classifier(&fname) {
+                    (
+                        inaccessible_classifier_message(&fname, access),
+                        Some(DiagnosticIdentity::ClassifierAccess {
+                            reference: span,
+                            classifier: internal,
+                        }),
+                    )
                 } else {
-                    format!("unresolved function '{fname}'")
+                    (format!("unresolved function '{fname}'"), None)
                 };
-                self.diags.error(span, message);
+                if let Some(identity) = identity {
+                    self.diags.error_with_identity(span, identity, message);
+                } else {
+                    self.diags.error(span, message);
+                }
                 Ty::Error
             }
             _ => {

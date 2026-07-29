@@ -964,6 +964,7 @@ where
                     vec![Diagnostic {
                         span: krusty::diag::Span::new(0, 0),
                         editor_span: None,
+                        identity: None,
                         severity: Severity::Error,
                         kind: DiagnosticKind::Compiler,
                         msg: "analysis worker returned an incomplete source set".to_string(),
@@ -2866,6 +2867,7 @@ fn analysis_limit_diagnostics() -> DiagnosticIndex {
         vec![Diagnostic {
             span: krusty::diag::Span::new(0, 0),
             editor_span: None,
+            identity: None,
             severity: Severity::Error,
             kind: DiagnosticKind::Compiler,
             msg: format!(
@@ -4140,6 +4142,7 @@ mod tests {
             analyses: vec![DocumentAnalysis::with_diagnostics(vec![Diagnostic {
                 span: krusty::diag::Span::new(0, 3),
                 editor_span: None,
+                identity: None,
                 severity: Severity::Error,
                 kind: DiagnosticKind::Compiler,
                 msg: maximum_message,
@@ -4604,6 +4607,7 @@ mod tests {
                     diagnostics: vec![Diagnostic {
                         span: krusty::diag::Span::new(0, 1),
                         editor_span: None,
+                        identity: None,
                         severity: Severity::Error,
                         kind: DiagnosticKind::Compiler,
                         msg: "boom".to_string(),
@@ -4641,6 +4645,7 @@ mod tests {
                 diagnostics: vec![Diagnostic {
                     span: krusty::diag::Span::new(0, 1),
                     editor_span: None,
+                    identity: None,
                     severity: Severity::Error,
                     kind: DiagnosticKind::Compiler,
                     msg: "boom".to_string(),
@@ -4747,6 +4752,7 @@ mod tests {
             diagnostics: vec![Diagnostic {
                 span: krusty::diag::Span::new(0, 0),
                 editor_span: None,
+                identity: None,
                 severity: Severity::Error,
                 kind: DiagnosticKind::Compiler,
                 msg: "from stale batch".to_string(),
@@ -4949,6 +4955,7 @@ mod tests {
             Diagnostic {
                 span: krusty::diag::Span::new(0, 1),
                 editor_span: None,
+                identity: None,
                 severity: Severity::Error,
                 kind: DiagnosticKind::Compiler,
                 msg: "same message".to_string(),
@@ -4957,6 +4964,7 @@ mod tests {
             Diagnostic {
                 span: krusty::diag::Span::new(2, 3),
                 editor_span: None,
+                identity: None,
                 severity: Severity::Warning,
                 kind: DiagnosticKind::Compiler,
                 msg: "same message".to_string(),
@@ -5000,6 +5008,7 @@ mod tests {
         let diagnostic = || Diagnostic {
             span: krusty::diag::Span::new(0, 0),
             editor_span: None,
+            identity: None,
             severity: Severity::Error,
             kind: DiagnosticKind::Compiler,
             msg: "bounded".to_string(),
@@ -5046,6 +5055,7 @@ mod tests {
             .map(|_| Diagnostic {
                 span: krusty::diag::Span::new(emoji, emoji + 4),
                 editor_span: None,
+                identity: None,
                 severity: Severity::Error,
                 kind: DiagnosticKind::Compiler,
                 msg: "late source diagnostic".to_string(),
@@ -5062,6 +5072,7 @@ mod tests {
             .map(|_| Diagnostic {
                 span: krusty::diag::Span::new(0, 0),
                 editor_span: None,
+                identity: None,
                 severity: Severity::Warning,
                 kind: DiagnosticKind::Compiler,
                 msg: large_message.clone(),

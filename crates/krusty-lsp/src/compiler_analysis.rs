@@ -220,6 +220,7 @@ fn with_ide_inspections(
             result.push(Diagnostic {
                 span: diagnostic.span,
                 editor_span: None,
+                identity: None,
                 severity: Severity::Warning,
                 kind: DiagnosticKind::Inspection,
                 msg: BOOLEAN_EXPRESSION_SIMPLIFICATION.to_string(),
@@ -289,6 +290,7 @@ fn add_unused_extension_receiver_inspection(
     diagnostics.push(Diagnostic {
         span: receiver.span,
         editor_span: None,
+        identity: None,
         severity: Severity::Warning,
         kind: DiagnosticKind::Inspection,
         msg: UNUSED_EXTENSION_RECEIVER.to_string(),
@@ -315,6 +317,7 @@ fn add_unused_extension_property_inspection(
     diagnostics.push(Diagnostic {
         span: receiver.span,
         editor_span: None,
+        identity: None,
         severity: Severity::Warning,
         kind: DiagnosticKind::Inspection,
         msg: UNUSED_EXTENSION_RECEIVER.to_string(),

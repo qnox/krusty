@@ -1,5 +1,7 @@
 //! Diagnostics: spans plus messages, with line/column rendering.
 
+use crate::types::TypeName;
+
 /// A byte range into the source file. `u32` offsets keep this 8 bytes (data-oriented).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Span {
@@ -27,6 +29,14 @@ pub enum DiagnosticKind {
     Inspection,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum DiagnosticIdentity {
+    ClassifierAccess {
+        reference: Span,
+        classifier: TypeName,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub struct Diagnostic {
     /// Compiler-facing source range.
@@ -36,6 +46,7 @@ pub struct Diagnostic {
     pub severity: Severity,
     pub kind: DiagnosticKind,
     pub msg: String,
+    pub identity: Option<DiagnosticIdentity>,
     /// Index of the source file this diagnostic belongs to (into the driver's `files`/`sources`
     /// lists). Diagnostics are produced one file at a time, so the sink stamps each with the file
     /// currently being processed — without it, a multi-file compile renders every error against the
@@ -80,6 +91,24 @@ impl DiagSink {
             severity: Severity::Error,
             kind,
             msg: msg.into(),
+            identity: None,
+            file: self.current_file,
+        });
+    }
+
+    pub fn error_with_identity(
+        &mut self,
+        span: Span,
+        identity: DiagnosticIdentity,
+        msg: impl Into<String>,
+    ) {
+        self.diags.push(Diagnostic {
+            span,
+            editor_span: None,
+            severity: Severity::Error,
+            kind: DiagnosticKind::Compiler,
+            msg: msg.into(),
+            identity: Some(identity),
             file: self.current_file,
         });
     }
@@ -96,12 +125,11 @@ impl DiagSink {
             severity: Severity::Error,
             kind: DiagnosticKind::Compiler,
             msg: msg.into(),
+            identity: None,
             file: self.current_file,
         });
     }
 
-    /// Keep the first diagnostic for each complete source/editor identity.
-    /// Run only after checking because speculative probes observe the sink length.
     pub fn collapse_duplicates(&mut self) {
         self.collapse_duplicates_from(0);
     }
@@ -110,15 +138,25 @@ impl DiagSink {
         let start = start.min(self.diags.len());
         let mut tail = self.diags.split_off(start);
         let mut seen = std::collections::HashSet::with_capacity(tail.len());
+        let mut seen_identities = std::collections::HashSet::new();
         tail.retain(|diagnostic| {
-            seen.insert((
-                diagnostic.file,
-                diagnostic.span,
-                diagnostic.editor_span,
-                diagnostic.severity,
-                diagnostic.kind,
-                diagnostic.msg.clone(),
-            ))
+            if let Some(identity) = diagnostic.identity {
+                seen_identities.insert((
+                    diagnostic.file,
+                    diagnostic.severity,
+                    diagnostic.kind,
+                    identity,
+                ))
+            } else {
+                seen.insert((
+                    diagnostic.file,
+                    diagnostic.span,
+                    diagnostic.editor_span,
+                    diagnostic.severity,
+                    diagnostic.kind,
+                    diagnostic.msg.clone(),
+                ))
+            }
         });
         self.diags.extend(tail);
     }
@@ -217,6 +255,35 @@ mod tests {
         s.collapse_duplicates();
 
         assert_eq!(s.diags.len(), 4, "{:?}", s.diags);
+    }
+
+    #[test]
+    fn semantic_identity_collapse_preserves_first_spelling() {
+        let mut s = DiagSink::new();
+        let identity = DiagnosticIdentity::ClassifierAccess {
+            reference: Span::new(3, 4),
+            classifier: crate::types::type_name("scope/Classifier"),
+        };
+        s.error_with_identity(Span::new(3, 4), identity, "cannot access 'Alias'");
+        s.error_with_identity(
+            Span::new(3, 4),
+            identity,
+            "cannot access 'scope.Classifier'",
+        );
+        s.error_with_identity(
+            Span::new(5, 6),
+            DiagnosticIdentity::ClassifierAccess {
+                reference: Span::new(5, 6),
+                classifier: crate::types::type_name("scope/Classifier"),
+            },
+            "cannot access 'SecondAlias'",
+        );
+
+        s.collapse_duplicates();
+
+        assert_eq!(s.diags.len(), 2);
+        assert_eq!(s.diags[0].msg, "cannot access 'Alias'");
+        assert_eq!(s.diags[1].msg, "cannot access 'SecondAlias'");
     }
 
     #[test]

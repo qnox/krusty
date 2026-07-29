@@ -660,6 +660,7 @@ pub fn front_end_diagnostics_files(
             }
         }
     }
+    diags.collapse_duplicates();
     diags.diags.iter().map(|d| d.msg.clone()).collect()
 }
 
