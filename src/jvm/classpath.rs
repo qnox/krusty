@@ -17,7 +17,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::jvm::classreader::{parse_class, read_method_code, ClassInfo, MethodCode};
-use crate::jvm::names::type_descriptor;
+use crate::jvm::names::{method_descriptor, parse_method_descriptor, type_descriptor};
 use crate::libraries::{CallSig, ReturnInfo};
 use crate::name_tree::{NameId, NameTree};
 use crate::types::{type_name, type_name_from, Ty, TypeName, TypeNameList};
@@ -976,6 +976,74 @@ fn meta_callable_aligns(f: &super::metadata::MetaFn, desc_params: &[Ty]) -> Opti
     Some((end, exact))
 }
 
+fn metadata_member_descriptor(function: &super::metadata::MetaFn) -> Option<String> {
+    let signature = function.generic_sig.as_ref()?;
+    let descriptor = if function.is_suspend() {
+        let mut params = signature.params.clone();
+        params.push(Ty::obj("kotlin/coroutines/Continuation"));
+        method_descriptor(&params, Ty::obj("kotlin/Any"))
+    } else {
+        method_descriptor(&signature.params, signature.ret)
+    };
+    Some(descriptor.replace('.', "$"))
+}
+
+fn metadata_member_shape_matches(function: &super::metadata::MetaFn, jvm_desc: &str) -> bool {
+    let Some((params, ret)) = parse_method_descriptor(jvm_desc) else {
+        return false;
+    };
+    let value_count = function.value_params.len();
+    if params.len() != value_count + usize::from(function.is_suspend()) {
+        return false;
+    }
+    if function
+        .value_params
+        .iter()
+        .zip(&params)
+        .any(|(parameter, actual)| match parameter.ty {
+            Some(class) => {
+                type_descriptor(kotlin_type_name_to_ty(class)).replace('.', "$") != *actual
+            }
+            None => !actual.starts_with('L') && !actual.starts_with('['),
+        })
+    {
+        return false;
+    }
+    if function.is_suspend() {
+        return params.last() == Some(&"Lkotlin/coroutines/Continuation;")
+            && ret == "Ljava/lang/Object;";
+    }
+    match function.ret_class {
+        Some(class) => type_descriptor(kotlin_type_name_to_ty(class)).replace('.', "$") == ret,
+        None => ret.starts_with('L') || ret.starts_with('['),
+    }
+}
+
+pub(super) fn aligned_member_metadata<'a>(
+    functions: &'a [super::metadata::MetaFn],
+    jvm_name: &str,
+    jvm_desc: &str,
+) -> Option<&'a super::metadata::MetaFn> {
+    let named = functions
+        .iter()
+        .filter(|function| function.jvm_name == jvm_name && !function.is_extension());
+    let mut exact = named.clone().filter(|function| {
+        function.jvm_desc == Some(jvm_desc)
+            || (function.jvm_desc.is_none()
+                && metadata_member_descriptor(function).as_deref() == Some(jvm_desc))
+    });
+    if let Some(selected) = exact.next() {
+        return exact.next().is_none().then_some(selected);
+    }
+    let mut compatible = named.filter(|function| {
+        function.jvm_desc.is_none()
+            && function.generic_sig.is_none()
+            && metadata_member_shape_matches(function, jvm_desc)
+    });
+    let selected = compatible.next()?;
+    compatible.next().is_none().then_some(selected)
+}
+
 /// Pick the metadata function whose signature corresponds to the JVM method with `desc_params`, returning
 /// `(kept-param end, index into `meta.fns`)`. Disambiguates OVERLOADS sharing a JVM name
 /// (`any()` vs `any(predicate)`, `IntArray.any` vs `CharArray.any`) by receiver + value-parameter match,
@@ -990,11 +1058,6 @@ fn aligned_meta_index(
         .filter_map(|i| {
             let f = meta.fn_at(i as usize);
             let (end, exact) = meta_callable_aligns(f, desc_params)?;
-            // Return match disambiguates overloads that differ ONLY by return (`sum` → `sumOfInt`/
-            // `sumOfLong`, same erased params). Soft tiebreaker: a concrete metadata return equal to the
-            // descriptor's return wins, but a generic/type-parameter return (`class` None) or one that
-            // erases differently (a value class vs its underlying) is left to the params match, so a sole
-            // candidate still wins.
             let ret_match = f
                 .ret_class
                 .is_some_and(|rc| meta_param_compat(Some(rc), desc_ret));
@@ -1545,30 +1608,20 @@ impl Classpath {
         }
     }
 
-    /// The source-level call and return facts of class MEMBER `internal.jvm_name/arity`, from the class's
-    /// own `@Metadata` function record. Names, default flags, return classifier, and nullability come
-    /// from the SAME member record, so a data-class `copy`, value-class-mangled member, or `suspend`
-    /// return cannot drift across separate metadata lookups.
     pub fn metadata_member_call_facts_name(
         &self,
         internal: TypeName,
         jvm_name: &str,
-        arity: usize,
-    ) -> MetadataCallFacts {
-        let Some(ci) = self.find_name(internal) else {
-            return MetadataCallFacts::fallback(CallSig::metadata_plain(arity));
-        };
-        let Some(f) = super::metadata::class_functions(&ci)
-            .iter()
-            .find(|f| f.jvm_name == jvm_name && f.value_params.len() == arity)
-        else {
-            return MetadataCallFacts::fallback(CallSig::metadata_plain(arity));
-        };
-        MetadataCallFacts {
+        jvm_desc: &str,
+    ) -> Option<MetadataCallFacts> {
+        let ci = self.find_name(internal)?;
+        let function =
+            aligned_member_metadata(super::metadata::class_functions(&ci), jvm_name, jvm_desc)?;
+        Some(MetadataCallFacts {
             kept_params: None,
-            call_sig: f.member_call_sig(),
-            ret: metadata_return_info(f.ret_class, f.ret_nullable()),
-        }
+            call_sig: function.member_call_sig(),
+            ret: metadata_return_info(function.ret_class, function.ret_nullable()),
+        })
     }
 
     /// A facade class's lambda-return-overload Kotlin names, cached (part-merged for a multifile facade).
@@ -1818,8 +1871,7 @@ impl Classpath {
                         inline: crate::libraries::InlineKind::None,
                         // Builtin (`.kotlin_builtins`) members are all public API.
                         visibility: crate::libraries::Visibility::Public,
-                        // Builtin members carry no source parameter-name metadata.
-                        call_sig: crate::libraries::CallSig::default(),
+                        call_sig: crate::libraries::CallSig::metadata_plain(m.params.len()),
                     }
                 })
             })
@@ -3919,6 +3971,99 @@ fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
 #[cfg(test)]
 mod fq_tests {
     use super::*;
+
+    #[test]
+    fn member_metadata_matches_the_jvm_descriptor() {
+        use crate::jvm::metadata::{MetaFn, MetaValueParam, MfnFlags, MvpFlags};
+        use crate::libraries::GenericSig;
+        use crate::types::Visibility;
+
+        let function = |param: Ty, ret: Ty, has_default: bool, suspend: bool| MetaFn {
+            kotlin_name: "emit".to_string(),
+            jvm_name: "emit".to_string(),
+            jvm_desc: None,
+            visibility: Visibility::Public,
+            flags: MfnFlags::default().with_is_suspend(suspend),
+            receiver_class: None,
+            ret_class: ret.obj_internal(),
+            value_params: vec![MetaValueParam {
+                ty: param.obj_internal(),
+                name: "value".to_string(),
+                flags: MvpFlags::default().with_has_default(has_default),
+                recv_fun_receiver: None,
+            }],
+            generic_sig: Some(GenericSig {
+                formals: Vec::new(),
+                formal_bounds: Vec::new(),
+                receiver: None,
+                params: vec![param],
+                ret,
+            }),
+        };
+
+        let narrow = [
+            function(Ty::Byte, Ty::Unit, true, false),
+            function(Ty::Int, Ty::Unit, false, false),
+        ];
+        let byte = aligned_member_metadata(&narrow, "emit", "(B)V").expect("Byte overload");
+        assert!(byte.member_call_sig().param_defaults[0]);
+        let int = aligned_member_metadata(&narrow, "emit", "(I)V").expect("Int overload");
+        assert_eq!(int.member_call_sig().required, 1);
+
+        let source = function(Ty::Int, Ty::String, false, false);
+        assert!(aligned_member_metadata(&[source], "emit", "(I)V").is_none());
+
+        let bounded = function(
+            Ty::ty_param("T", Ty::obj("kotlin/CharSequence")),
+            Ty::Unit,
+            true,
+            false,
+        );
+        assert!(
+            aligned_member_metadata(&[bounded], "emit", "(Ljava/lang/CharSequence;)V").is_some()
+        );
+
+        let nested = function(Ty::obj("fixture/Outer.Inner"), Ty::Unit, true, false);
+        assert!(aligned_member_metadata(&[nested], "emit", "(Lfixture/Outer$Inner;)V").is_some());
+
+        let suspended = function(Ty::Byte, Ty::String, true, true);
+        assert!(aligned_member_metadata(
+            &[suspended],
+            "emit",
+            "(BLkotlin/coroutines/Continuation;)Ljava/lang/Object;"
+        )
+        .is_some());
+
+        let mut value_class = function(
+            Ty::obj("fixture/Token"),
+            Ty::obj("fixture/Token"),
+            false,
+            false,
+        );
+        value_class.jvm_desc = Some("(Ljava/lang/String;)Ljava/lang/String;");
+        assert!(aligned_member_metadata(
+            &[value_class],
+            "emit",
+            "(Ljava/lang/String;)Ljava/lang/String;"
+        )
+        .is_some());
+
+        let mut generic = function(Ty::obj("kotlin/Any"), Ty::String, true, false);
+        generic.generic_sig = None;
+        generic.value_params[0].ty = None;
+        assert!(aligned_member_metadata(
+            &[generic.clone()],
+            "emit",
+            "(Ljava/lang/CharSequence;)Ljava/lang/String;"
+        )
+        .is_some());
+        assert!(aligned_member_metadata(
+            &[generic.clone(), generic],
+            "emit",
+            "(Ljava/lang/CharSequence;)Ljava/lang/String;"
+        )
+        .is_none());
+    }
 
     #[test]
     fn package_catalog_selects_jvmname_facades_for_entry_indexes() {
