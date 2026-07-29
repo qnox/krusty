@@ -1540,6 +1540,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   progress traffic. Project warnings and errors continue to use the existing `ProjectFeedback`
   message path.
 
+- **Classpath classifier visibility applies after name resolution.** Imported, aliased, indexed,
+  and package-qualified references use the same accessibility check. Public package-qualified types
+  and constructors resolve without imports, while inaccessible classifiers produce the diagnostic
+  for the source spelling. Exposed-visibility diagnostics for public declarations remain unsupported.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
