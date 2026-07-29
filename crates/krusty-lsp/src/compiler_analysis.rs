@@ -1341,6 +1341,10 @@ mod tests {
             (String::new(), "package p; public interface Fix {}".into()),
             (
                 String::new(),
+                "package p; public interface Fix {}".into(),
+            ),
+            (
+                String::new(),
                 "package p; public class Holder {\n\
                  \u{20} public void reg(String s, Fix... fixes) {}\n\
                  }"

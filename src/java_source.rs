@@ -9,6 +9,8 @@ const ACC_PROTECTED: u16 = 0x0004;
 const ACC_STATIC: u16 = 0x0008;
 const ACC_FINAL: u16 = 0x0010;
 const ACC_ABSTRACT: u16 = 0x0400;
+/// Real JVM flag: the method's last parameter is a `...` vararg (`ACC_VARARGS`).
+pub(crate) const ACC_VARARGS: u16 = 0x0080;
 pub(crate) const STUB_DEFAULT: u16 = 0x8000;
 
 // --- Tokenizer -------------------------------------------------------------
@@ -839,7 +841,7 @@ fn type_decl_with_access(
         {
             p.i += 1;
             p.eat_punct('(').then_some(())?;
-            let params = param_list(p)?;
+            let (params, varargs) = param_list(p)?;
             let throws = skip_throws_and_body(p)?;
             decl.ctors.push(Member {
                 name: "<init>".into(),
@@ -847,7 +849,8 @@ fn type_decl_with_access(
                 params,
                 ret: None,
                 throws,
-                access: macc & (ACC_PUBLIC | ACC_PROTECTED | ACC_PRIVATE),
+                access: (macc & (ACC_PUBLIC | ACC_PROTECTED | ACC_PRIVATE))
+                    | if varargs { ACC_VARARGS } else { 0 },
             });
             continue;
         }
@@ -855,7 +858,7 @@ fn type_decl_with_access(
         let ty = src_type(p)?;
         let name = p.ident()?;
         if p.eat_punct('(') {
-            let params = param_list(p)?;
+            let (params, varargs) = param_list(p)?;
             let throws = skip_throws_and_body(p)?;
             decl.methods.push(Member {
                 name,
@@ -863,7 +866,7 @@ fn type_decl_with_access(
                 params,
                 ret: Some(ty),
                 throws,
-                access: macc,
+                access: macc | if varargs { ACC_VARARGS } else { 0 },
             });
         } else {
             // Field, possibly a list (`int a, b = 1;`); initializers are skipped balancedly.
@@ -970,10 +973,11 @@ fn annotation_type_decl(
 
 /// `( Type name, Type... name )` — parameter list (opening paren consumed). Varargs `...` maps to
 /// an array, exactly as javac compiles it.
-fn param_list(p: &mut P) -> Option<Vec<SrcType>> {
+fn param_list(p: &mut P) -> Option<(Vec<SrcType>, bool)> {
     let mut out = Vec::new();
+    let mut varargs = false;
     if p.eat_punct(')') {
-        return Some(out);
+        return Some((out, varargs));
     }
     loop {
         let _ = modifiers(p)?; // `final`, annotations
@@ -982,6 +986,7 @@ fn param_list(p: &mut P) -> Option<Vec<SrcType>> {
             p.eat_punct('.').then_some(())?;
             p.eat_punct('.').then_some(())?;
             ty.array += 1;
+            varargs = true;
         }
         let _name = p.ident()?;
         // C-style array suffix on the NAME (`int a[]`).
@@ -994,7 +999,7 @@ fn param_list(p: &mut P) -> Option<Vec<SrcType>> {
             continue;
         }
         p.eat_punct(')').then_some(())?;
-        return Some(out);
+        return Some((out, varargs));
     }
 }
 

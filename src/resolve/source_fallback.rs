@@ -532,9 +532,36 @@ impl SymbolSource for SourceFallbackPlatform {
         {
             return hit.clone();
         }
+        let mut platform_properties = self.platform.property_members(recv, name);
+        // A Kotlin override of a Java-supertype getter keeps the Java synthetic property but
+        // REFINES its type: `UClass.getMethods(): Array<UMethod>` overrides
+        // `PsiClass.getMethods(): PsiMethod[]`, and `uClass.methods` reads as `Array<UMethod>`.
+        // The platform walk resolves the JAVA declaration (the source override is invisible to
+        // it), so rewrite each member property with the most-derived SOURCE override's return
+        // type. Only an EXISTING platform property is refined — a pure-Kotlin `getX()` still
+        // creates no synthetic property (kotlinc parity).
+        if platform_properties
+            .overloads
+            .iter()
+            .any(|property| property.kind == PropKind::Member)
+        {
+            if let Some(ret) = self
+                .physical_property_getter_names(name)
+                .iter()
+                .flat_map(|getter| self.source().instance_members(recv, getter))
+                .find(|member| member.params.is_empty() && member.ret != Ty::Unit)
+                .map(|member| member.ret)
+            {
+                for property in &mut platform_properties.overloads {
+                    if property.kind == PropKind::Member && property.setter.is_none() {
+                        property.ty = ret;
+                    }
+                }
+            }
+        }
         let merged = merge_properties(
             self.platform.as_ref(),
-            self.platform.property_members(recv, name),
+            platform_properties,
             public_properties(self.source().property_members(recv, name)),
         );
         self.props_memo
