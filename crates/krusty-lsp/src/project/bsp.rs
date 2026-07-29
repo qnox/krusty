@@ -408,6 +408,7 @@ fn source_roots_for(
             path: directory,
             kind,
             generated: source.generated,
+            package_prefix: String::new(),
         };
         roots.push(root);
     }
