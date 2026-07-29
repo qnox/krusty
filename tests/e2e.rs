@@ -448,6 +448,8 @@ mod generic_inferred_return_e2e;
 mod generic_return_inference_e2e;
 #[path = "generic_signature_e2e.rs"]
 mod generic_signature_e2e;
+#[path = "generic_static_field_e2e.rs"]
+mod generic_static_field_e2e;
 #[path = "generic_suspend_member_return_e2e.rs"]
 mod generic_suspend_member_return_e2e;
 #[path = "generic_vararg_inference_e2e.rs"]
