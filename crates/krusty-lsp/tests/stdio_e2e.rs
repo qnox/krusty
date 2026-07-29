@@ -233,20 +233,19 @@ fn pull_diagnostics_wait_for_the_current_open_document_analysis() {
         "textDocument/diagnostic",
         json!({"textDocument": {"uri": uri}}),
     );
+    assert_eq!(response["result"]["kind"], "full");
+    assert!(response["result"]["resultId"].is_string());
     assert_eq!(
-        response["result"],
-        json!({
-            "kind": "full",
-            "items": [{
-                "range": {
-                    "start": {"line": 0, "character": 31},
-                    "end": {"line": 0, "character": 32}
-                },
-                "severity": 1,
-                "source": "Kotlin",
-                "message": "Return type mismatch: expected 'String', actual 'Int'."
-            }]
-        })
+        response["result"]["items"],
+        json!([{
+            "range": {
+                "start": {"line": 0, "character": 31},
+                "end": {"line": 0, "character": 32}
+            },
+            "severity": 1,
+            "source": "Kotlin",
+            "message": "Return type mismatch: expected 'String', actual 'Int'."
+        }])
     );
     server.shutdown_and_exit();
 }
