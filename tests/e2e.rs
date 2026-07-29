@@ -132,6 +132,8 @@ mod classpath_companion;
 mod classpath_companion_invoke_e2e;
 #[path = "classpath_covariant_override_e2e.rs"]
 mod classpath_covariant_override_e2e;
+#[path = "classpath_ctor_vs_same_named_function_e2e.rs"]
+mod classpath_ctor_vs_same_named_function_e2e;
 #[path = "classpath_data_copy_e2e.rs"]
 mod classpath_data_copy_e2e;
 #[path = "classpath_default_args_e2e.rs"]

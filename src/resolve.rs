@@ -22761,6 +22761,19 @@ impl<'a> Checker<'a> {
         Some(score)
     }
 
+    fn same_named_callable_exists(&self, name: &str) -> bool {
+        self.module_declares(name)
+            || self
+                .resolver()
+                .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
+                .map(crate::symbol_resolver::Symbol::overloads)
+                .is_some_and(|overloads| {
+                    overloads
+                        .iter()
+                        .any(|o| o.kind == crate::libraries::FnKind::TopLevel)
+                })
+    }
+
     /// The classpath internal name a bare class name resolves to — an explicit import first, then the
     /// federated class-name seed (default/same-package/wildcard imports). Used to reach a classpath type's
     /// `@Metadata` (e.g. constructor parameter names) from a simple-name constructor call.
@@ -26577,7 +26590,11 @@ impl<'a> Checker<'a> {
                                     return self.ctor_result_name(call, internal);
                                 }
                                 Ok(None) => {}
-                                Err(error) => self.report_call_arg_mapping_error(call, args, error),
+                                Err(error) => {
+                                    if !self.same_named_callable_exists(&fname) {
+                                        self.report_call_arg_mapping_error(call, args, error);
+                                    }
+                                }
                             }
                         }
                     }
