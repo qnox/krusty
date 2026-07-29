@@ -27,7 +27,7 @@ use crate::java_source::{
     lex_java, parse_raw_file, primitive_desc, resolve_internal_name, DeclKind, FileCtx, Member,
     RawDecl, SrcType, STUB_DEFAULT,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 #[cfg(test)]
 use crate::java_source::parse_source_file;
@@ -53,7 +53,6 @@ pub fn stub_classes(
     // Two passes: collect every declared type's internal name first, so same-compilation Java
     // types resolve against each other regardless of file order.
     let mut parsed: Vec<(FileCtx, Vec<RawDecl>)> = Vec::new();
-    let mut declared: Vec<String> = Vec::new();
     for (_, src) in sources {
         let toks = lex_java(src);
         let (ctx, decls, _) = match parse_raw_file(&toks) {
@@ -61,29 +60,20 @@ pub fn stub_classes(
             None if mode.is_lenient() => continue,
             None => return None,
         };
-        for d in &decls {
-            declared.push(d.internal.clone());
-        }
         parsed.push((ctx, decls));
-    }
-    let mut declaration_counts = HashMap::new();
-    for internal in &declared {
-        *declaration_counts
-            .entry(internal.as_str())
-            .or_insert(0usize) += 1;
     }
     let emittable_declarations = parsed
         .iter()
         .flat_map(|(_, declarations)| declarations)
         .filter(|declaration| {
-            declaration_counts.get(declaration.internal.as_str()) == Some(&1)
-                && (!declaration.internal.contains('$') || declaration.access & ACC_PRIVATE == 0)
+            !declaration.internal.contains('$') || declaration.access & ACC_PRIVATE == 0
         })
         .map(|declaration| declaration.internal.as_str())
         .collect::<HashSet<_>>();
     let resolve_all = |cand: &str| emittable_declarations.contains(cand) || resolve(cand);
 
     let mut out = Vec::new();
+    let mut emitted: HashSet<&str> = HashSet::new();
     for (ctx, decls) in &parsed {
         let r = Resolver {
             ctx,
@@ -91,8 +81,8 @@ pub fn stub_classes(
             mode,
         };
         for raw in decls {
-            if declaration_counts.get(raw.internal.as_str()) != Some(&1)
-                || (raw.internal.contains('$') && raw.access & ACC_PRIVATE != 0)
+            if (raw.internal.contains('$') && raw.access & ACC_PRIVATE != 0)
+                || !emitted.insert(raw.internal.as_str())
             {
                 continue;
             }
@@ -800,7 +790,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_and_private_types_do_not_enter_the_overlay() {
+    fn duplicate_types_emit_once_and_private_nested_stay_out() {
         let sources = vec![
             ("First.java".to_string(), "public class Same {}".to_string()),
             (
@@ -822,7 +812,7 @@ mod tests {
             candidate == "java/lang/Object"
         })
         .expect("stubs");
-        assert!(!out.iter().any(|(name, _)| name == "Same"));
+        assert_eq!(out.iter().filter(|(name, _)| name == "Same").count(), 1);
         assert!(!out.iter().any(|(name, _)| name == "Outer$Secret"));
         let outer = out
             .iter()
@@ -841,7 +831,74 @@ mod tests {
             .find(|(name, _)| name == "Holder")
             .and_then(|(_, bytes)| parse_class(bytes).ok())
             .expect("Holder");
-        assert!(holder.method("value", "()Ljava/lang/Object;").is_some());
+        assert!(holder.method("value", "()LSame;").is_some());
+    }
+
+    #[test]
+    fn duplicate_declarations_keep_the_first_and_stay_resolvable() {
+        let sources = vec![
+            (
+                "first/Dup.java".to_string(),
+                "package p; public class Dup { public int first() { return 1; } }".to_string(),
+            ),
+            (
+                "second/Dup.java".to_string(),
+                "package p; public class Dup { public int second() { return 2; } }".to_string(),
+            ),
+            (
+                "Use.java".to_string(),
+                "package p; public class Use { public Dup get() { return null; } }".to_string(),
+            ),
+        ];
+        let out =
+            stub_classes(&sources, StubMode::Strict, &|c| c == "java/lang/Object").expect("stubs");
+        let dups: Vec<_> = out.iter().filter(|(name, _)| name == "p/Dup").collect();
+        assert_eq!(dups.len(), 1);
+        let ci = parse_class(&dups[0].1).expect("parse");
+        assert!(
+            ci.method("first", "()I").is_some(),
+            "first declaration wins"
+        );
+        let use_ci = out
+            .iter()
+            .find(|(name, _)| name == "p/Use")
+            .map(|(_, bytes)| parse_class(bytes).expect("parse"))
+            .expect("Use stub");
+        assert!(use_ci.method("get", "()Lp/Dup;").is_some());
+    }
+
+    #[test]
+    fn type_use_annotations_are_skipped_in_every_type_position() {
+        let out = stubs(
+            "import java.util.List; import java.util.function.Supplier;\n\
+             public class T {\n\
+             \u{20} private List<Supplier<@Deprecated String>> synonyms;\n\
+             \u{20} public String @Deprecated [] arr() { return null; }\n\
+             \u{20} public List<? extends @Deprecated CharSequence> bound() { return null; }\n\
+             }",
+            &[
+                "java/util/List",
+                "java/util/function/Supplier",
+                "java/lang/String",
+                "java/lang/CharSequence",
+                "java/lang/Object",
+            ],
+        )
+        .expect("type-annotated members stub");
+        let ci = parse_class(&out[0].1).expect("parse");
+        assert!(ci.method("arr", "()[Ljava/lang/String;").is_some());
+        assert!(ci.method("bound", "()Ljava/util/List;").is_some());
+    }
+
+    #[test]
+    fn annotated_enum_constants_parse() {
+        let out = stubs(
+            "public enum Thread { BGT, EDT, @Deprecated OLD_EDT }",
+            &["java/lang/Enum", "java/lang/Object", "java/lang/String"],
+        )
+        .expect("annotated enum constant stub");
+        let ci = parse_class(&out[0].1).expect("parse");
+        assert!(ci.fields.iter().any(|field| field.name == "OLD_EDT"));
     }
 
     #[test]

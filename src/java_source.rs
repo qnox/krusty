@@ -557,6 +557,7 @@ fn tparam_list(p: &mut P) -> Option<Vec<(String, Option<SrcType>)>> {
 
 /// A source type: `int`, `java.util.List<String>[]`, `E`, `Map.Entry<K,V>`, `?`, `? extends X`.
 fn src_type(p: &mut P) -> Option<SrcType> {
+    skip_type_annotations(p)?;
     if p.eat_punct('?') {
         // A wildcard is modeled as its bound (or Object) — sound for a stub's erasure/signature.
         if p.eat_ident("extends") || p.eat_ident("super") {
@@ -584,7 +585,11 @@ fn src_type(p: &mut P) -> Option<SrcType> {
         }
     }
     let mut array = 0;
-    while p.eat_punct('[') {
+    loop {
+        skip_type_annotations(p)?;
+        if !p.eat_punct('[') {
+            break;
+        }
         if !p.eat_punct(']') {
             return None;
         }
@@ -596,6 +601,13 @@ fn src_type(p: &mut P) -> Option<SrcType> {
         array,
         span: Some(span),
     })
+}
+
+fn skip_type_annotations(p: &mut P) -> Option<()> {
+    while p.eat_punct('@') {
+        p.skip_annotation()?;
+    }
+    Some(())
 }
 
 /// Parse one file: package/imports, then top-level type declarations.
@@ -749,6 +761,7 @@ fn type_decl_with_access(
             if p.peek() == Some(&Tok::Punct('}')) {
                 break;
             }
+            skip_type_annotations(p)?;
             let cname = p.ident()?;
             if p.eat_punct('(') {
                 let mut d = 1;

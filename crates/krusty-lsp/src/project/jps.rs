@@ -133,14 +133,22 @@ fn language_level_to_target(level: &str) -> Option<String> {
     None
 }
 
-/// One resolved dependency edge or classpath entry, tagged with whether it is
-/// test-scoped (`scope="TEST"`).
+/// One resolved dependency edge or classpath entry.
 struct OrderEntry {
     test_only: bool,
+    exported: bool,
     module: Option<ModuleId>,
     classpath: Vec<PathBuf>,
 }
 
+/// Compile-scope entries exported to dependent modules.
+#[derive(Default)]
+struct ExportedDeps {
+    modules: Vec<ModuleId>,
+    classpath: Vec<PathBuf>,
+}
+
+#[cfg(test)]
 fn parse_module(
     iml_path: &Path,
     project_dir: &Path,
@@ -148,19 +156,36 @@ fn parse_module(
     project_out: Option<&Path>,
     project_target: Option<&str>,
 ) -> Result<Vec<Module>, ProbeError> {
+    parse_module_with_exports(
+        iml_path,
+        project_dir,
+        libraries,
+        project_out,
+        project_target,
+    )
+    .map(|(modules, _)| modules)
+}
+
+fn parse_module_with_exports(
+    iml_path: &Path,
+    project_dir: &Path,
+    libraries: &HashMap<String, Vec<PathBuf>>,
+    project_out: Option<&Path>,
+    project_target: Option<&str>,
+) -> Result<(Vec<Module>, ExportedDeps), ProbeError> {
     // Listed modules may be absent from partial checkouts.
     let Some(document) = read_optional_xml(iml_path)? else {
-        return Ok(Vec::new());
+        return Ok(Default::default());
     };
     let Some(name) = iml_path.file_stem().and_then(|stem| stem.to_str()) else {
-        return Ok(Vec::new());
+        return Ok(Default::default());
     };
     let module_dir = iml_path.parent().unwrap_or(project_dir);
     let Some(manager) = document
         .children_named("component")
         .find(|component| component.attr("name") == Some("NewModuleRootManager"))
     else {
-        return Ok(Vec::new());
+        return Ok(Default::default());
     };
 
     // Source roots, partitioned by isTestSource; resource folders skipped.
@@ -205,11 +230,13 @@ fn parse_module(
             continue;
         }
         let test_only = order.attr("scope") == Some("TEST");
+        let exported = order.attr("exported").is_some();
         match order.attr("type") {
             Some("module") => {
                 if let Some(target) = order.attr("module-name") {
                     entries.push(OrderEntry {
                         test_only,
+                        exported,
                         module: Some(ModuleId::new(target, "main")),
                         classpath: Vec::new(),
                     });
@@ -219,6 +246,7 @@ fn parse_module(
                 if let Some(classpath) = order.attr("name").and_then(|name| libraries.get(name)) {
                     entries.push(OrderEntry {
                         test_only,
+                        exported,
                         module: None,
                         classpath: classpath.clone(),
                     });
@@ -238,6 +266,7 @@ fn parse_module(
                     .unwrap_or_default();
                 entries.push(OrderEntry {
                     test_only,
+                    exported,
                     module: None,
                     classpath,
                 });
@@ -250,6 +279,19 @@ fn parse_module(
         .attr("LANGUAGE_LEVEL")
         .and_then(language_level_to_target)
         .or_else(|| project_target.map(str::to_string));
+
+    let exports = ExportedDeps {
+        modules: entries
+            .iter()
+            .filter(|e| e.exported && !e.test_only)
+            .filter_map(|e| e.module.clone())
+            .collect(),
+        classpath: entries
+            .iter()
+            .filter(|e| e.exported && !e.test_only)
+            .flat_map(|e| e.classpath.clone())
+            .collect(),
+    };
 
     let production_output = module_output(
         manager,
@@ -295,7 +337,7 @@ fn parse_module(
 
     let has_test = !test_roots.is_empty() || entries.iter().any(|e| e.test_only);
     if !has_test {
-        return Ok(vec![main]);
+        return Ok((vec![main], exports));
     }
 
     // Test module: compile + test-scoped.
@@ -314,7 +356,31 @@ fn parse_module(
     test.friend_paths = production_output.into_iter().collect();
     test.jvm_target = jvm_target;
 
-    Ok(vec![main, test])
+    Ok((vec![main, test], exports))
+}
+
+fn expand_exported_deps(modules: &mut [Module], exported: &HashMap<ModuleId, ExportedDeps>) {
+    for module in modules.iter_mut() {
+        let mut queue: Vec<ModuleId> = module.depends_on.clone();
+        let mut visited: std::collections::HashSet<ModuleId> =
+            queue.iter().cloned().chain(module.id.clone()).collect();
+        while let Some(dependency) = queue.pop() {
+            let Some(exports) = exported.get(&dependency) else {
+                continue;
+            };
+            for jar in &exports.classpath {
+                if !module.classpath.contains(jar) {
+                    module.classpath.push(jar.clone());
+                }
+            }
+            for target in &exports.modules {
+                if visited.insert(target.clone()) {
+                    module.depends_on.push(target.clone());
+                    queue.push(target.clone());
+                }
+            }
+        }
+    }
 }
 
 /// The explicit `<output>`/`<output-test>` url, or `<project_out>/<kind>/<name>`
@@ -511,15 +577,21 @@ impl JpsProvider {
         let settings = project_settings(&self.root)?;
         let libraries = parse_library_table(&self.root)?;
         let mut modules = Vec::new();
+        let mut exported = HashMap::new();
         for iml in iml_paths(&self.root)? {
-            modules.extend(parse_module(
+            let (parsed, exports) = parse_module_with_exports(
                 &iml,
                 &self.root,
                 &libraries,
                 settings.output.as_deref(),
                 settings.jvm_target.as_deref(),
-            )?);
+            )?;
+            if let Some(id) = parsed.first().and_then(|module| module.id.clone()) {
+                exported.insert(id, exports);
+            }
+            modules.extend(parsed);
         }
+        expand_exported_deps(&mut modules, &exported);
         let jdk_home = settings
             .sdk_name
             .as_deref()
@@ -555,7 +627,7 @@ impl ProjectProvider for JpsProvider {
     }
 
     fn fingerprint_salt(&self) -> String {
-        "jps-1".to_string()
+        "jps-2".to_string()
     }
 
     fn additional_watch_globs(&self) -> &'static [&'static str] {
@@ -849,6 +921,100 @@ mod tests {
             app.outputs,
             vec![ModuleOutput::classes(tree.path("app/out/production/app"))]
         );
+    }
+
+    #[test]
+    fn exported_module_deps_propagate_transitively_to_dependents() {
+        let tree = crate::project::testing::TempTree::new("jps-exported");
+        tree.write(
+            ".idea/modules.xml",
+            r#"<project version="4">
+                 <component name="ProjectModuleManager">
+                   <modules>
+                     <module fileurl="file://$PROJECT_DIR$/impl/impl.iml" filepath="$PROJECT_DIR$/impl/impl.iml" />
+                     <module fileurl="file://$PROJECT_DIR$/java/java.iml" filepath="$PROJECT_DIR$/java/java.iml" />
+                     <module fileurl="file://$PROJECT_DIR$/ide/ide.iml" filepath="$PROJECT_DIR$/ide/ide.iml" />
+                     <module fileurl="file://$PROJECT_DIR$/editor/editor.iml" filepath="$PROJECT_DIR$/editor/editor.iml" />
+                     <module fileurl="file://$PROJECT_DIR$/xmldom/xmldom.iml" filepath="$PROJECT_DIR$/xmldom/xmldom.iml" />
+                   </modules>
+                 </component>
+               </project>"#,
+        );
+        tree.write(
+            ".idea/libraries/streamex.xml",
+            r#"<component name="libraryTable">
+                 <library name="StreamEx">
+                   <CLASSES><root url="jar://$PROJECT_DIR$/libs/streamex.jar!/" /></CLASSES>
+                 </library>
+               </component>"#,
+        );
+        let leaf_iml = r#"<module>
+                 <component name="NewModuleRootManager" inherit-compiler-output="true">
+                   <content url="file://$MODULE_DIR$">
+                     <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+                   </content>
+                 </component>
+               </module>"#;
+        tree.write("editor/editor.iml", leaf_iml);
+        tree.write("xmldom/xmldom.iml", leaf_iml);
+        tree.write(
+            "ide/ide.iml",
+            r#"<module>
+                 <component name="NewModuleRootManager" inherit-compiler-output="true">
+                   <content url="file://$MODULE_DIR$">
+                     <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+                   </content>
+                   <orderEntry type="module" module-name="editor" exported="" />
+                 </component>
+               </module>"#,
+        );
+        tree.write(
+            "java/java.iml",
+            r#"<module>
+                 <component name="NewModuleRootManager" inherit-compiler-output="true">
+                   <content url="file://$MODULE_DIR$">
+                     <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+                   </content>
+                   <orderEntry type="module" module-name="ide" exported="" />
+                   <orderEntry type="module" module-name="xmldom" />
+                   <orderEntry type="library" name="StreamEx" level="project" exported="" />
+                 </component>
+               </module>"#,
+        );
+        tree.write(
+            "impl/impl.iml",
+            r#"<module>
+                 <component name="NewModuleRootManager" inherit-compiler-output="true">
+                   <content url="file://$MODULE_DIR$">
+                     <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+                   </content>
+                   <orderEntry type="module" module-name="java" />
+                 </component>
+               </module>"#,
+        );
+
+        let model = JpsProvider::new(tree.root())
+            .probe_with_jdk_tables(&[])
+            .unwrap();
+
+        let implementation = model.module(&ModuleId::new("impl", "main")).unwrap();
+        assert!(implementation
+            .depends_on
+            .contains(&ModuleId::new("java", "main")));
+        assert!(implementation
+            .depends_on
+            .contains(&ModuleId::new("ide", "main")));
+        assert!(implementation
+            .depends_on
+            .contains(&ModuleId::new("editor", "main")));
+        assert!(!implementation
+            .depends_on
+            .contains(&ModuleId::new("xmldom", "main")));
+        assert!(implementation
+            .classpath
+            .contains(&tree.path("libs/streamex.jar")));
+        let java = model.module(&ModuleId::new("java", "main")).unwrap();
+        assert!(java.depends_on.contains(&ModuleId::new("xmldom", "main")));
     }
 
     #[test]
