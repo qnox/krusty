@@ -212,6 +212,46 @@ fn diagnostics_after_open(arguments: &[&str], uri: &str, text: &str) -> Vec<Valu
 }
 
 #[test]
+fn pull_diagnostics_wait_for_the_current_open_document_analysis() {
+    let uri = "file:///return.kt";
+    let mut server = ServerProcess::start(&[]);
+    server.request(1, "initialize", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "kotlin",
+                "version": 1,
+                "text": "fun returnMismatch(): String = 1"
+            }
+        }),
+    );
+
+    let response = server.request(
+        2,
+        "textDocument/diagnostic",
+        json!({"textDocument": {"uri": uri}}),
+    );
+    assert_eq!(
+        response["result"],
+        json!({
+            "kind": "full",
+            "items": [{
+                "range": {
+                    "start": {"line": 0, "character": 31},
+                    "end": {"line": 0, "character": 32}
+                },
+                "severity": 1,
+                "source": "Kotlin",
+                "message": "Return type mismatch: expected 'String', actual 'Int'."
+            }]
+        })
+    );
+    server.shutdown_and_exit();
+}
+
+#[test]
 fn stdio_server_uses_the_compiler_worker_and_exits_cleanly() {
     let mut server = ServerProcess::start(&[]);
     let initialize = server.request(1, "initialize", json!({}));
