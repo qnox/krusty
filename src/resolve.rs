@@ -262,6 +262,19 @@ pub fn adapted_ref_arity(vararg: bool, required: usize, param_count: usize) -> u
 }
 
 impl Signature {
+    fn set_inferred_return(&mut self, ret: Ty) -> bool {
+        let changed = self.ret != ret
+            || self
+                .generic_sig
+                .as_ref()
+                .is_some_and(|generic| generic.ret != ret);
+        self.ret = ret;
+        if let Some(generic) = self.generic_sig.as_mut() {
+            generic.ret = ret;
+        }
+        changed
+    }
+
     #[inline]
     pub fn vararg(&self) -> bool {
         self.flags.has(SigFlags::VARARG)
@@ -734,6 +747,44 @@ fn module_member_lambda_params(
 }
 
 impl ClassSig {
+    fn set_inferred_method_return(&mut self, name: &str, params: &[Ty], ret: Ty) -> bool {
+        let mut changed = false;
+        if let Some(signature) = self.methods.get_mut(name).and_then(|overloads| {
+            overloads
+                .iter_mut()
+                .find(|signature| same_erased_params(&signature.params, params))
+        }) {
+            changed |= signature.set_inferred_return(ret);
+        }
+        if let Some(method) = self.generic_methods.get_mut(name).and_then(|overloads| {
+            overloads
+                .iter_mut()
+                .find(|method| same_erased_params(&method.params, params))
+        }) {
+            changed |= method.ret_shape != ret;
+            method.ret_shape = ret;
+        }
+        changed
+    }
+
+    fn set_inferred_member_extension_return(
+        &mut self,
+        name: &str,
+        receiver: Ty,
+        params: &[Ty],
+        ret: Ty,
+    ) -> bool {
+        self.member_ext_funs
+            .get_mut(name)
+            .and_then(|overloads| {
+                overloads.iter_mut().find(|function| {
+                    erased_type_key(function.receiver_ty) == erased_type_key(receiver)
+                        && same_erased_params(&function.signature.params, params)
+                })
+            })
+            .is_some_and(|function| function.signature.set_inferred_return(ret))
+    }
+
     /// True if this is an `interface` (calls dispatch via `invokeinterface`).
     #[inline]
     pub fn is_interface(&self) -> bool {
@@ -2466,6 +2517,14 @@ fn erased_type_key(t: Ty) -> ErasedTypeKey {
         other => other,
     };
     ErasedTypeKey::Ty(key)
+}
+
+fn same_erased_params(left: &[Ty], right: &[Ty]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(&left, &right)| erased_type_key(left) == erased_type_key(right))
 }
 
 fn erased_params_semantic_key(sig: &Signature) -> Vec<ErasedTypeKey> {
@@ -4643,8 +4702,24 @@ pub fn collect_signatures_with_cp(
                                 }
                                 Ty::Unit
                             });
-                        let signature =
+                        let mut signature =
                             member_signature(file, m, ret, &class_names, &mtp, i as u32, diags);
+                        if method.receiver.is_some()
+                            && (!method.type_params.is_empty() || !c.type_params.is_empty())
+                        {
+                            let symbolic_mtp = symbolic_ctp.symbolic_extended_with(
+                                &method.type_params,
+                                &method.type_param_bounds,
+                                &|name| class_names.get(name),
+                            );
+                            signature.generic_sig = Some(source_generic_signature_from_tparams(
+                                method,
+                                &class_names,
+                                &symbolic_mtp,
+                                signature.ret,
+                                diags,
+                            ));
+                        }
                         let value_operand_slots = generic_value_operand_slots(m, &c.type_params);
                         if !value_operand_slots.is_empty() {
                             let physical_receiver = method
@@ -4692,13 +4767,13 @@ pub fn collect_signatures_with_cp(
                     let mut method_indices: HashMap<&str, usize> = HashMap::new();
                     for method in c.methods.iter().filter(|method| method.receiver.is_none()) {
                         let index = method_indices.entry(&method.name).or_default();
-                        let params = methods
+                        let signature_index = *index;
+                        let signature = methods
                             .get(&method.name)
-                            .and_then(|overloads| overloads.get(*index))
-                            .map(|signature| signature.params.clone())
-                            .unwrap_or_default();
+                            .and_then(|overloads| overloads.get(signature_index))
+                            .cloned();
                         *index += 1;
-                        let Some(ret) = method.ret.as_ref() else {
+                        let Some(signature) = signature else {
                             continue;
                         };
                         if method.type_params.is_empty() && c.type_params.is_empty() {
@@ -4709,6 +4784,24 @@ pub fn collect_signatures_with_cp(
                             &method.type_param_bounds,
                             &|name| class_names.get(name),
                         );
+                        let ret_shape = method
+                            .ret
+                            .as_ref()
+                            .map(|ret| ty_of_ref(ret, &class_names, &method_tparams, diags))
+                            .unwrap_or(signature.ret);
+                        if let Some(source_signature) = methods
+                            .get_mut(&method.name)
+                            .and_then(|overloads| overloads.get_mut(signature_index))
+                        {
+                            source_signature.generic_sig =
+                                Some(source_generic_signature_from_tparams(
+                                    method,
+                                    &class_names,
+                                    &method_tparams,
+                                    ret_shape,
+                                    diags,
+                                ));
+                        }
                         generic_methods
                             .entry(method.name.clone())
                             .or_default()
@@ -4736,13 +4829,13 @@ pub fn collect_signatures_with_cp(
                                         )
                                     })
                                     .collect(),
-                                params,
+                                params: signature.params,
                                 param_names: method
                                     .params
                                     .iter()
                                     .map(|parameter| parameter.name.clone())
                                     .collect(),
-                                ret_shape: ty_of_ref(ret, &class_names, &method_tparams, diags),
+                                ret_shape,
                             });
                     }
                     // `data class` synthesizes componentN() + copy(props...) callable members.
@@ -7669,8 +7762,24 @@ fn source_generic_signature(
         &function.type_param_bounds,
         &|name| classes.get(name),
     );
+    Some(source_generic_signature_from_tparams(
+        function,
+        classes,
+        &type_params,
+        resolved_ret,
+        diags,
+    ))
+}
+
+fn source_generic_signature_from_tparams(
+    function: &FunDecl,
+    classes: &ClassNames,
+    type_params: &TParams,
+    resolved_ret: Ty,
+    diags: &mut DiagSink,
+) -> GenericSig {
     let resolve = |reference: &TypeRef, diags: &mut DiagSink| {
-        ty_of_ref(reference, classes, &type_params, diags)
+        ty_of_ref(reference, classes, type_params, diags)
     };
     let receiver = function
         .receiver
@@ -7705,13 +7814,13 @@ fn source_generic_signature(
                 .collect()
         })
         .collect();
-    Some(GenericSig {
+    GenericSig {
         formals: function.type_params.clone(),
         formal_bounds,
         receiver,
         params,
         ret,
-    })
+    }
 }
 
 /// The phase-independent leaf of a `TypeRef`, resolved identically by every type resolver (signature
@@ -9042,9 +9151,11 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
             }
             for m in &cl.methods {
                 if m.ret.is_none() && matches!(m.body, FunBody::Expr(_)) {
-                    let resolve = class_internal_resolver(pre.syms);
-                    pre.tparams =
-                        TParams::from_decl_with(&m.type_params, &m.type_param_bounds, &resolve);
+                    pre.tparams = class_tparams.symbolic_extended_with(
+                        &m.type_params,
+                        &m.type_param_bounds,
+                        &class_internal_resolver(pre.syms),
+                    );
                     pre.reified_tparams = m.reified_type_params.iter().cloned().collect();
                     pre.check_method(m, &[]);
                     pre.tparams.clear();
@@ -9066,8 +9177,7 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
             sigs.iter_mut()
                 .find(|s| s.source_file == Some(file) && s.source_decl == Some(DeclId(decl)))
         }) {
-            changed |= sig.ret != ret;
-            sig.ret = ret;
+            changed |= sig.set_inferred_return(ret);
         }
     }
     for ((file, decl, name), ret) in ext_rets {
@@ -9079,32 +9189,17 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
                 })
             })
         }) {
-            changed |= sig.ret != ret;
-            sig.ret = ret;
+            changed |= sig.set_inferred_return(ret);
         }
     }
     for ((internal, name, params), ret) in method_rets {
-        if let Some(sig) = syms
-            .class_by_type_name_mut(internal)
-            .and_then(|c| c.methods.get_mut(&name))
-            .and_then(|ov| ov.iter_mut().find(|s| s.params == params))
-        {
-            changed |= sig.ret != ret;
-            sig.ret = ret;
+        if let Some(class) = syms.class_by_type_name_mut(internal) {
+            changed |= class.set_inferred_method_return(&name, &params, ret);
         }
     }
     for ((internal, name, receiver, params), ret) in member_ext_fun_rets {
-        if let Some(signature) = syms
-            .class_by_type_name_mut(internal)
-            .and_then(|class| class.member_ext_funs.get_mut(&name))
-            .and_then(|overloads| {
-                overloads.iter_mut().find(|signature| {
-                    signature.receiver_ty == receiver && signature.signature.params == params
-                })
-            })
-        {
-            changed |= signature.signature.ret != ret;
-            signature.signature.ret = ret;
+        if let Some(class) = syms.class_by_type_name_mut(internal) {
+            changed |= class.set_inferred_member_extension_return(&name, receiver, &params, ret);
         }
     }
     for (internal, name, index, ret) in inferred_member_ext_rets {
