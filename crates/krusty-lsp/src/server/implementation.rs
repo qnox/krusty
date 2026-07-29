@@ -734,6 +734,8 @@ struct PendingDiagnosticRequest {
     retained_bytes: usize,
 }
 
+const DIAGNOSTIC_REFRESH_REQUEST_ID: &str = "krusty/diagnosticRefresh";
+
 pub struct LspService<B> {
     documents: HashMap<String, OpenDocument>,
     source_set: Vec<(String, String)>,
@@ -743,15 +745,10 @@ pub struct LspService<B> {
     analysis_retry_backoff: Duration,
     initialized: bool,
     client_initialized: bool,
-    /// The client asks for diagnostics with `textDocument/diagnostic`. Editors keep pulled and
-    /// pushed diagnostics in separate sets (Zed retains one when the other arrives), so a server
-    /// that answers pulls *and* publishes shows every message twice. Publish only for clients that
-    /// cannot pull.
     client_pulls_diagnostics: bool,
-    /// The client re-pulls diagnostics on `workspace/diagnostic/refresh`. Without a push
-    /// notification this is the only way to hand a pulling client results that landed after its
-    /// last request — analysis of one document also refreshes the others in its source set.
     client_refreshes_diagnostics: bool,
+    diagnostic_refresh_pending: bool,
+    diagnostic_refresh_queued: bool,
     shutdown_requested: bool,
     pending_init_feedback: Option<ProjectFeedback>,
     pending_watched_globs: Vec<String>,
@@ -787,6 +784,8 @@ where
             client_initialized: false,
             client_pulls_diagnostics: false,
             client_refreshes_diagnostics: false,
+            diagnostic_refresh_pending: false,
+            diagnostic_refresh_queued: false,
             shutdown_requested: false,
             pending_init_feedback: None,
             pending_watched_globs: Vec::new(),
@@ -805,20 +804,23 @@ where
         self.documents.len()
     }
 
-    /// A `workspace/diagnostic/refresh` request for clients that pull instead of being pushed to.
-    fn diagnostic_refresh(&self) -> Option<Value> {
-        (self.client_pulls_diagnostics && self.client_refreshes_diagnostics).then(|| {
-            json!({
-                "jsonrpc": "2.0",
-                "id": "krusty/diagnosticRefresh",
-                "method": "workspace/diagnostic/refresh",
-                "params": {},
-            })
-        })
+    fn diagnostic_refresh(&mut self) -> Option<Value> {
+        if !self.client_pulls_diagnostics || !self.client_refreshes_diagnostics {
+            return None;
+        }
+        if self.diagnostic_refresh_pending {
+            self.diagnostic_refresh_queued = true;
+            return None;
+        }
+        self.diagnostic_refresh_pending = true;
+        Some(json!({
+            "jsonrpc": "2.0",
+            "id": DIAGNOSTIC_REFRESH_REQUEST_ID,
+            "method": "workspace/diagnostic/refresh",
+            "params": {},
+        }))
     }
 
-    /// A `textDocument/publishDiagnostics` notification, unless the client pulls diagnostics — see
-    /// [`LspService::client_pulls_diagnostics`].
     fn publish(
         &self,
         uri: &str,
@@ -1043,9 +1045,17 @@ where
             .remove("method")
             .and_then(|method| method.as_str().map(str::to_owned))
         else {
-            // A message with an id but no method is the client's response to a request the server
-            // made (e.g. our `client/registerCapability`). There is nothing to reply to.
             if id.is_some() && (object.contains_key("result") || object.contains_key("error")) {
+                if id
+                    .as_ref()
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id == DIAGNOSTIC_REFRESH_REQUEST_ID)
+                {
+                    self.diagnostic_refresh_pending = false;
+                    if std::mem::take(&mut self.diagnostic_refresh_queued) {
+                        return Dispatch::messages(self.diagnostic_refresh().into_iter().collect());
+                    }
+                }
                 return Dispatch::none();
             }
             return Dispatch::messages(vec![rpc_error(
@@ -2601,7 +2611,6 @@ fn workspace_root(params: &Value) -> Option<PathBuf> {
         })
 }
 
-/// Whether the client re-pulls diagnostics when asked (`workspace.diagnostics.refreshSupport`).
 fn client_supports_diagnostic_refresh(params: &Value) -> bool {
     params
         .get("capabilities")
@@ -2612,7 +2621,6 @@ fn client_supports_diagnostic_refresh(params: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether the client requests diagnostics itself (`textDocument/diagnostic`).
 fn client_supports_pull_diagnostics(params: &Value) -> bool {
     params
         .get("capabilities")
@@ -4354,14 +4362,13 @@ mod tests {
             !messages
                 .iter()
                 .any(|message| message["method"] == "textDocument/publishDiagnostics"),
-            "a client that pulls diagnostics keeps both sets, so pushing duplicates every entry: \
-             {messages:?}"
+            "{messages:?}"
         );
         assert!(
             messages
                 .iter()
                 .any(|message| message["method"] == "workspace/diagnostic/refresh"),
-            "fresh analysis must ask a pulling client to re-pull: {messages:?}"
+            "{messages:?}"
         );
 
         let pulled = service.pull_diagnostics(
@@ -4373,8 +4380,29 @@ mod tests {
                 .as_array()
                 .map(Vec::len),
             Some(1),
-            "the pull response still carries the diagnostics: {:?}",
+            "{:?}",
             pulled.messages
+        );
+    }
+
+    #[test]
+    fn diagnostic_refresh_requests_are_coalesced() {
+        let mut service = LspService::new(|_: &[&str]| Vec::new());
+        service.client_pulls_diagnostics = true;
+        service.client_refreshes_diagnostics = true;
+
+        assert!(service.diagnostic_refresh().is_some());
+        assert!(service.diagnostic_refresh().is_none());
+
+        let response = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": DIAGNOSTIC_REFRESH_REQUEST_ID,
+            "result": null,
+        }));
+        assert_eq!(response.messages.len(), 1);
+        assert_eq!(
+            response.messages[0]["method"],
+            "workspace/diagnostic/refresh"
         );
     }
 
