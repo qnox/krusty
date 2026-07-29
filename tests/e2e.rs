@@ -284,6 +284,8 @@ mod dep_resolution;
 mod destructure_component_extension_e2e;
 #[path = "destructure_e2e.rs"]
 mod destructure_e2e;
+#[path = "diagnostic_duplication_e2e.rs"]
+mod diagnostic_duplication_e2e;
 #[path = "diagnostic_markers_e2e.rs"]
 mod diagnostic_markers_e2e;
 #[path = "diagnostics_match_kotlinc.rs"]

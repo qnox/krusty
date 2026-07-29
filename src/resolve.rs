@@ -3390,6 +3390,10 @@ pub fn collect_signatures_with_cp(
     let ty_of_ref = |r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut DiagSink| {
         ty_of_ref_with(r, classes, tparams, diags)
     };
+    // Helper tables are rebuilt by the authoritative pass, which owns their diagnostics.
+    let ty_of_ref_silent = |r: &TypeRef, classes: &ClassNames, tparams: &TParams| {
+        ty_of_ref_with(r, classes, tparams, &mut DiagSink::new())
+    };
 
     // Top-level function return types (explicit annotations only), collected first so a property
     // initializer `val v = f()` can infer its type from `f`'s return type regardless of decl order.
@@ -3909,7 +3913,7 @@ pub fn collect_signatures_with_cp(
                         .map(|p| {
                             (
                                 p.name.clone(),
-                                ty_of_ref(&p.ty, &class_names, &ctp, diags),
+                                ty_of_ref_silent(&p.ty, &class_names, &ctp),
                                 p.is_var,
                             )
                         })
@@ -3922,7 +3926,7 @@ pub fn collect_signatures_with_cp(
                             (
                                 property.name.clone(),
                                 DeclaredPropertySig {
-                                    ty: ty_of_ref(&property.ty, &class_names, &ctp, diags),
+                                    ty: ty_of_ref_silent(&property.ty, &class_names, &ctp),
                                     storage_ty: None,
                                     visibility: property.visibility,
                                     getter_name: property_getter_name(&property.name),
@@ -3947,7 +3951,7 @@ pub fn collect_signatures_with_cp(
                         .map(|p| {
                             (
                                 p.name.clone(),
-                                ty_of_ref(&p.ty, &class_names, &ctp, diags),
+                                ty_of_ref_silent(&p.ty, &class_names, &ctp),
                                 p.is_var,
                             )
                         })
@@ -4296,7 +4300,7 @@ pub fn collect_signatures_with_cp(
                                 );
                                 local_rets.insert(
                                     m.name.clone(),
-                                    ty_of_ref(r, &class_names, &mtp, diags),
+                                    ty_of_ref_silent(r, &class_names, &mtp),
                                 );
                             }
                         }
@@ -4309,7 +4313,7 @@ pub fn collect_signatures_with_cp(
                                     class_names.get(n)
                                 });
                             local_rets
-                                .insert(m.name.clone(), ty_of_ref(r, &class_names, &mtp, diags));
+                                .insert(m.name.clone(), ty_of_ref_silent(r, &class_names, &mtp));
                         }
                     }
                     let mut methods: MethodMap = MethodMap::new();
@@ -4750,7 +4754,7 @@ pub fn collect_signatures_with_cp(
                     }
                     let mut generic_function_props = HashMap::new();
                     for property in c.props.iter().filter(|property| property.is_property) {
-                        let shape = ty_of_ref(&property.ty, &class_names, &symbolic_ctp, diags);
+                        let shape = ty_of_ref_silent(&property.ty, &class_names, &symbolic_ctp);
                         if is_function_property_shape(shape)
                             && ty_mentions_param(shape, &tparam_names)
                         {
@@ -4763,7 +4767,7 @@ pub fn collect_signatures_with_cp(
                         .filter(|property| property.receiver.is_none())
                     {
                         if let Some(type_ref) = &property.ty {
-                            let shape = ty_of_ref(type_ref, &class_names, &symbolic_ctp, diags);
+                            let shape = ty_of_ref_silent(type_ref, &class_names, &symbolic_ctp);
                             if is_function_property_shape(shape)
                                 && ty_mentions_param(shape, &tparam_names)
                             {
@@ -4822,11 +4826,10 @@ pub fn collect_signatures_with_cp(
                                 .iter()
                                 .map(|parameter| {
                                     (
-                                        ty_of_ref(
+                                        ty_of_ref_silent(
                                             &parameter.ty,
                                             &class_names,
                                             &symbolic_ctp,
-                                            diags,
                                         ),
                                         parameter.ty.definitely_non_null(),
                                     )

@@ -13,13 +13,13 @@ impl Span {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Severity {
     Error,
     Warning,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum DiagnosticKind {
     #[default]
     Compiler,
@@ -98,6 +98,29 @@ impl DiagSink {
             msg: msg.into(),
             file: self.current_file,
         });
+    }
+
+    /// Keep the first diagnostic for each complete source/editor identity.
+    /// Run only after checking because speculative probes observe the sink length.
+    pub fn collapse_duplicates(&mut self) {
+        self.collapse_duplicates_from(0);
+    }
+
+    pub(crate) fn collapse_duplicates_from(&mut self, start: usize) {
+        let start = start.min(self.diags.len());
+        let mut tail = self.diags.split_off(start);
+        let mut seen = std::collections::HashSet::with_capacity(tail.len());
+        tail.retain(|diagnostic| {
+            seen.insert((
+                diagnostic.file,
+                diagnostic.span,
+                diagnostic.editor_span,
+                diagnostic.severity,
+                diagnostic.kind,
+                diagnostic.msg.clone(),
+            ))
+        });
+        self.diags.extend(tail);
     }
 
     pub fn has_errors(&self) -> bool {
@@ -179,6 +202,49 @@ mod tests {
         let r = s.render("X.kt", "ab\ncde");
         assert!(r.contains("X.kt:2:1: error: boom"), "got: {r}");
         assert!(s.has_errors());
+    }
+
+    #[test]
+    fn identical_diagnostics_collapse() {
+        let mut s = DiagSink::new();
+        s.error(Span::new(3, 4), "boom");
+        s.error(Span::new(3, 4), "boom");
+        s.error(Span::new(5, 6), "boom");
+        s.error(Span::new(3, 4), "other");
+        s.set_file(1);
+        s.error(Span::new(3, 4), "boom");
+
+        s.collapse_duplicates();
+
+        assert_eq!(s.diags.len(), 4, "{:?}", s.diags);
+    }
+
+    #[test]
+    fn speculative_probes_still_see_every_emission() {
+        let mut s = DiagSink::new();
+        s.error(Span::new(3, 4), "boom");
+        let checkpoint = s.diags.len();
+        s.error(Span::new(3, 4), "boom");
+        assert!(
+            s.diags.len() > checkpoint,
+            "the probe must observe its own error"
+        );
+        s.diags.truncate(checkpoint);
+        assert_eq!(s.diags.len(), 1);
+    }
+
+    #[test]
+    fn ranged_collapse_preserves_existing_diagnostics() {
+        let mut s = DiagSink::new();
+        s.error(Span::new(3, 4), "boom");
+        s.error(Span::new(3, 4), "boom");
+        let start = s.diags.len();
+        s.error(Span::new(5, 6), "later");
+        s.error(Span::new(5, 6), "later");
+
+        s.collapse_duplicates_from(start);
+
+        assert_eq!(s.diags.len(), 3);
     }
 
     #[test]

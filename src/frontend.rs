@@ -455,6 +455,7 @@ fn analyze_source_set_impl<F>(
 where
     F: FnOnce(&[File], &mut FrontendSymbols),
 {
+    let diagnostics_start = diags.diags.len();
     let mut files = Vec::with_capacity(sources.len());
     let mut parse_errors = Vec::with_capacity(sources.len());
     let mut multiplatform = project_features.has("MultiPlatformProjects");
@@ -506,6 +507,7 @@ where
     }
     let types =
         check_source_set_skipping(&files, &mut symbols, &parse_errors, checked_count, diags);
+    diags.collapse_duplicates_from(diagnostics_start);
     SourceSetAnalysis {
         files,
         symbols,
@@ -545,8 +547,11 @@ pub fn check_source_set(
     symbols: &mut FrontendSymbols,
     diags: &mut DiagSink,
 ) -> Vec<Option<FrontendTypeInfo>> {
+    let diagnostics_start = diags.diags.len();
     preinfer_module_returns(files, symbols, diags);
-    check_source_set_skipping(files, symbols, &[], files.len(), diags)
+    let types = check_source_set_skipping(files, symbols, &[], files.len(), diags);
+    diags.collapse_duplicates_from(diagnostics_start);
+    types
 }
 
 /// Analyze a source set using only per-source feature directives.
