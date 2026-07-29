@@ -20,12 +20,8 @@ fn krusty_bytes(src: &str, class_internal: &str, cp: &[PathBuf]) -> Option<Vec<u
 
 /// kotlinc's reference bytes for `class_internal` (server-backed). `None` ⇒ toolchain unavailable.
 fn kotlinc_bytes(src: &str, stem: &str, class_internal: &str, cp: &[PathBuf]) -> Option<Vec<u8>> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NONCE: AtomicU64 = AtomicU64::new(0);
     common::java_home()?;
-    // Unique per call — parallel tests must not share a scratch dir (several compile `demo/C`).
-    let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("krusty_ref_{}_{stem}_{uniq}", std::process::id()));
+    let dir = common::scratch_dir()?;
     let out = dir.join("out");
     std::fs::create_dir_all(&out).ok()?;
     let kt = dir.join(format!("{stem}.kt"));
