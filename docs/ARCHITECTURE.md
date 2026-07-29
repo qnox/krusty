@@ -54,13 +54,9 @@ boundary.
   process-lifetime name/type interners while amortizing JVM classpath initialization across edits.
   The request also carries the bounded set of enabled language-feature names derived from project
   compilation arguments and explicit LSP flags; per-source directives are applied inside the worker.
-- Diagnostics reach the client one way only. A client that advertises `textDocument.diagnostic`
-  gets pull responses and a `workspace/diagnostic/refresh` request when analysis lands; a client
-  without that capability gets `textDocument/publishDiagnostics`. Editors keep pulled and pushed
-  results in separate sets (Zed retains one when the other arrives), so answering both would show
-  every message twice. The compiler's sink can also hold several copies of one message for a span —
-  signature collection re-resolves some declarations and the checker re-checks some bodies — so
-  `compiler_analysis` keeps only the first of each `(span, severity, kind, message)`.
+- Diagnostics use either pull responses with refresh requests or
+  `textDocument/publishDiagnostics`, according to the client's capabilities. Compiler diagnostics
+  are deduplicated by `(span, severity, kind, message)` before entering the LSP indexes.
 - An open document retains its source text, a bounded compact diagnostic cache for published and
   pull diagnostics, and compact indexes for hover, completion, definitions, document symbols,
   signature help, folding ranges, and semantic highlighting. The compiler's full diagnostic vector
