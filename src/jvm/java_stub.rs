@@ -301,7 +301,15 @@ impl Resolver<'_> {
             } else {
                 None
             };
-            w.add_field_sig(*acc & !STUB_DEFAULT, name, &desc, fsig.as_deref());
+            // Interface fields are implicitly public static final (JLS §9.3) — the
+            // `PsiModifier.STATIC` / `CommonClassNames.*` constant-holder pattern.
+            let acc = (*acc & !STUB_DEFAULT)
+                | if d.is_interface() {
+                    ACC_PUBLIC | ACC_STATIC | ACC_FINAL
+                } else {
+                    0
+                };
+            w.add_field_sig(acc, name, &desc, fsig.as_deref());
         }
 
         if is_record {
@@ -832,6 +840,67 @@ mod tests {
             .and_then(|(_, bytes)| parse_class(bytes).ok())
             .expect("Holder");
         assert!(holder.method("value", "()LSame;").is_some());
+    }
+
+    #[test]
+    fn interface_nested_types_are_implicitly_public() {
+        // JLS §9.5: member types of an interface are implicitly public even without a modifier.
+        let out = stubs(
+            "public interface Notifications { final class Bus { public static void go() {} } }",
+            &["java/lang/Object"],
+        )
+        .expect("interface with nested class");
+        let bus = out
+            .iter()
+            .find(|(name, _)| name == "Notifications$Bus")
+            .map(|(_, bytes)| parse_class(bytes).expect("parse"))
+            .expect("Bus stub");
+        assert!(bus.is_public(), "interface member types are public");
+    }
+
+    #[test]
+    fn java_varargs_parameters_emit_acc_varargs() {
+        // `Fix... fixes` must carry ACC_VARARGS so member resolution accepts element-style
+        // calls and spreads; without it the parameter is an ordinary array.
+        let out = stubs(
+            "public class Holder {\n\
+             \u{20} public void reg(String s, Object... fixes) {}\n\
+             \u{20} public Holder(int... ns) {}\n\
+             }",
+            &["java/lang/Object", "java/lang/String"],
+        )
+        .expect("varargs stub");
+        let ci = parse_class(&out[0].1).expect("parse");
+        let reg = ci
+            .method("reg", "(Ljava/lang/String;[Ljava/lang/Object;)V")
+            .expect("reg method");
+        assert!(reg.is_vararg(), "method varargs flag");
+        let ctor = ci.method("<init>", "([I)V").expect("varargs ctor");
+        assert!(ctor.is_vararg(), "constructor varargs flag");
+    }
+
+    #[test]
+    fn interface_fields_are_implicitly_public_static_final() {
+        // JLS §9.3: every interface field is public static final — the constant-holder
+        // pattern (`interface PsiModifier { String STATIC = "static"; }`).
+        let out = stubs(
+            "public interface Mods { String STATIC = \"static\"; int LEVEL = 3; }",
+            &["java/lang/Object", "java/lang/String"],
+        )
+        .expect("interface constants stub");
+        let ci = parse_class(&out[0].1).expect("parse");
+        for name in ["STATIC", "LEVEL"] {
+            let field = ci
+                .fields
+                .iter()
+                .find(|field| field.name == name)
+                .expect("constant field");
+            assert_eq!(
+                field.access & (ACC_PUBLIC | ACC_STATIC | ACC_FINAL),
+                ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+                "{name} must be public static final"
+            );
+        }
     }
 
     #[test]
