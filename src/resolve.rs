@@ -21543,6 +21543,7 @@ impl<'a> Checker<'a> {
     ) -> Option<ResolvedConstructor> {
         let target = if let Some(member) = crate::symbol_resolver::resolve_constructor_from_type(
             &*self.syms.libraries,
+            &*self.syms.libraries,
             internal,
             classifier,
             arg_tys,
@@ -21612,6 +21613,7 @@ impl<'a> Checker<'a> {
                 .map(|argument| self.expr_types[argument.0 as usize])
                 .collect::<Vec<_>>();
             let Some(member) = crate::symbol_resolver::resolve_constructor_from_type(
+                &*self.syms.libraries,
                 &*self.syms.libraries,
                 internal,
                 classifier,

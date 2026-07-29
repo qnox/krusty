@@ -1947,7 +1947,7 @@ impl<'a> SymbolResolver<'a> {
                 };
                 if name.is_empty() {
                     // `Type(args)` — the type's constructor, real or synthesized.
-                    resolve_constructor_name(self.lib, internal, args)
+                    resolve_constructor_name(self.lib, &self.src, internal, args)
                         .filter(|member| access.allows(member.visibility, internal))
                         .map(Symbol::Constructor)
                         .or_else(|| {
@@ -2773,6 +2773,7 @@ fn resolve_vararg_constructor<'a>(
 /// Resolve a constructor on a library type by argument types (with the type's own widening).
 fn resolve_constructor_name(
     lib: &dyn SemanticPlatform,
+    src: &dyn SymbolSource,
     internal: TypeName,
     args: &[Ty],
 ) -> Option<LibraryMember> {
@@ -2783,11 +2784,12 @@ fn resolve_constructor_name(
         );
         return None;
     };
-    resolve_constructor_from_type(lib, internal, &t, args)
+    resolve_constructor_from_type(lib, src, internal, &t, args)
 }
 
 pub(crate) fn resolve_constructor_from_type(
     lib: &dyn SemanticPlatform,
+    src: &dyn SymbolSource,
     internal: TypeName,
     t: &crate::libraries::LibraryType,
     args: &[Ty],
@@ -2853,11 +2855,13 @@ pub(crate) fn resolve_constructor_from_type(
                 &m.call_sig.platform_nullable_params,
                 args,
             );
+            // A module-declared argument class reaches its library supertype only through the
+            // SOURCE federation (`class V : Visitor()` into `Holder(Visitor)`), mirroring member
+            // overload selection: the platform oracle walks classpath supertypes only.
             (params.len() == args.len()
-                && params
-                    .iter()
-                    .zip(args)
-                    .all(|(p, a)| abi_arg_assignable_to_param(lib, *a, *p)))
+                && params.iter().zip(args).all(|(p, a)| {
+                    abi_arg_assignable_to_param(lib, *a, *p) || source_arg_assignable(src, p, a)
+                }))
             .then_some((params, m))
         }),
         |_, left, right| abi_param_subtype(lib, left, right),
