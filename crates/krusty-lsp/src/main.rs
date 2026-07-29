@@ -45,6 +45,7 @@ fn finish_analysis(
                     DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
                         span: krusty::diag::Span::new(0, 0),
                         editor_span: None,
+                        identity: None,
                         severity: krusty::diag::Severity::Error,
                         kind: krusty::diag::DiagnosticKind::Compiler,
                         msg: format!("analysis worker failed: {error}"),
@@ -995,6 +996,7 @@ fn project_source_error_analysis(message: &str) -> DocumentAnalysis {
     DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
         span: krusty::diag::Span::new(0, 0),
         editor_span: None,
+        identity: None,
         severity: krusty::diag::Severity::Error,
         kind: krusty::diag::DiagnosticKind::Compiler,
         msg: message.to_string(),

@@ -4332,6 +4332,7 @@ mod tests {
                         vec![Diagnostic {
                             span: Span::new(0, source.len() as u32),
                             editor_span: None,
+                            identity: None,
                             severity: Severity::Error,
                             kind: krusty::diag::DiagnosticKind::Compiler,
                             msg: "bad document".to_string(),
@@ -4423,6 +4424,7 @@ mod tests {
                         vec![Diagnostic {
                             span: Span::new(5, 8),
                             editor_span: None,
+                            identity: None,
                             severity: Severity::Error,
                             kind: krusty::diag::DiagnosticKind::Compiler,
                             msg: "bad document".to_string(),

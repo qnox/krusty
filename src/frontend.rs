@@ -1576,6 +1576,7 @@ mod tests {
             severity: Severity::Warning,
             kind: crate::diag::DiagnosticKind::Compiler,
             msg: "existing warning".to_string(),
+            identity: None,
             file: 0,
         });
         let inputs = [SourceInput::kotlin("fun value(): Int = 1")];
