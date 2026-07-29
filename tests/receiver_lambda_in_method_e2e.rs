@@ -88,3 +88,25 @@ fn receiver_lambda_without_outer_use_in_value_class() {
     fun box(): String = V(9).items().joinToString(\",\")\n";
     assert_eq!(run(SRC), Some("1,2".to_string()));
 }
+
+#[test]
+fn nested_generic_receiver_lambda_keeps_inferred_return() {
+    const SRC: &str = "class Outer<A> {\n\
+            inner class Scope<B>\n\
+            fun <B> nested(block: Scope<B>.() -> String) = Scope<B>().block()\n\
+        }\n\
+        fun <A> outer(block: Outer<A>.() -> String) = Outer<A>().block()\n\
+        fun box() = outer<Int> { nested<Boolean> { \"OK\" } }\n";
+    assert_eq!(run(SRC), Some("OK".to_string()));
+}
+
+#[test]
+fn inherited_generic_method_keeps_inferred_return() {
+    const SRC: &str = "abstract class Base<T> {\n\
+            fun convert(value: T?, transform: (T) -> Any?) = value?.let { transform(it) }\n\
+        }\n\
+        @JvmInline value class Wrapped<T : Any>(val value: T?)\n\
+        class Derived : Base<Wrapped<String>>()\n\
+        fun box() = Derived().convert(Wrapped(\"OK\")) { it.value } as String\n";
+    assert_eq!(run(SRC), Some("OK".to_string()));
+}

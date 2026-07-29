@@ -467,6 +467,7 @@ impl<'a> ModuleSymbols<'a> {
 fn lib_member(name: &str, sig: &Signature, owner: TypeName, is_interface: bool) -> LibraryMember {
     let mut m = LibraryMember::new(name.to_string(), sig.params.clone(), sig.ret, String::new());
     m.owner = Some(owner);
+    m.generic_sig = sig.generic_sig.clone();
     m.set_is_interface(is_interface);
     m.set_suspend(sig.is_suspend());
     m.visibility = sig.visibility;
