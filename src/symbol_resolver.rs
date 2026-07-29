@@ -3893,6 +3893,12 @@ fn select_overload(
     ext: ExtCtx<'_, '_>,
 ) -> Option<FunctionInfo> {
     let src = ext.source;
+    // Argument ASSIGNABILITY must see MODULE-declared classes (`class V : Thread()`, or an
+    // anonymous object over a declaration-only Kotlin base, passed to `take(Thread)`): the
+    // caller's member-access record carries the module-first source federation. Candidate
+    // ENUMERATION stays on `ext.source` — widening it would surface module members through the
+    // library path and skip module-side checks (e.g. the `operator` modifier requirement).
+    let assign_src: &dyn SymbolSource = ext.member_access.map_or(src, |access| access.source);
     let CallArgs {
         types: args,
         integer_literals,
@@ -4045,21 +4051,29 @@ fn select_overload(
         by_rank.entry(rank).or_default().push((o, lp));
     }
     for cands in by_rank.values() {
-        match best_by_args(lib, cands, args, integer_literals, lambda_literals) {
+        match best_by_args(
+            lib,
+            assign_src,
+            cands,
+            args,
+            integer_literals,
+            lambda_literals,
+        ) {
             CandidateSelection::Selected(overload) => return Some(overload.clone()),
             CandidateSelection::Ambiguous => return None,
             CandidateSelection::None => {}
         }
     }
     // Platform assignability pass: subtype closure, erased `Any`, and value-class underlying matching.
+    // A module-declared argument class reaches its library supertype only through the SOURCE
+    // federation (`class V : Thread()` into `take(Thread)`), so admit that walk too.
     // The ordered applicability pass above stays stricter so exact/defaulted calls still win first.
     for cands in by_rank.values() {
         let mut applicable = cands.iter().filter(|(_, lp)| {
             lp.len() == args.len()
-                && lp
-                    .iter()
-                    .zip(args)
-                    .all(|(p, a)| platform_arg_assignable(lib, p, a))
+                && lp.iter().zip(args).all(|(p, a)| {
+                    platform_arg_assignable(lib, p, a) || source_arg_assignable(assign_src, p, a)
+                })
         });
         if let Some((o, _)) = applicable.next() {
             if applicable.next().is_some() {
@@ -4195,6 +4209,18 @@ fn logical_value_params(
     out
 }
 
+/// Assignability through the SOURCE symbol federation (module classes first): a module-declared
+/// class passed where a library member expects its (library) supertype — `class V : Thread()` into
+/// `take(Thread)` — is invisible to the platform oracle, which only walks classpath supertypes.
+fn source_arg_assignable(src: &dyn SymbolSource, param: &Ty, arg: &Ty) -> bool {
+    crate::assignable::is_assignable(
+        &crate::assignable::TyCtx::new(),
+        &SourceOracle(src),
+        *arg,
+        *param,
+    )
+}
+
 fn platform_arg_assignable(lib: &dyn SemanticPlatform, param: &Ty, arg: &Ty) -> bool {
     (*arg == Ty::Null && param.is_reference())
         || crate::assignable::is_assignable(
@@ -4262,6 +4288,7 @@ where
 /// must be optional), then a trailing-lambda call that omits leading DEFAULTED params (`m.withLock { … }`).
 fn best_by_args<'a>(
     lib: &dyn SemanticPlatform,
+    src: &dyn SymbolSource,
     cands: &[(&'a FunctionInfo, Vec<Ty>)],
     args: &[Ty],
     integer_literals: &[bool],
@@ -4286,6 +4313,7 @@ fn best_by_args<'a>(
         } else {
             fun_arg_matches(lib, p, a, lambda_literals.get(position) == Some(&true))
                 || platform_arg_assignable(lib, p, a)
+                || source_arg_assignable(src, p, a)
                 || function_like_fits(p, a)
         }
     };
@@ -4962,7 +4990,7 @@ mod tests {
         ];
         let argument = Ty::fun(vec![Ty::Error], Ty::String);
 
-        let selected = best_by_args(&source, &candidates, &[argument], &[], &[true]);
+        let selected = best_by_args(&source, &source, &candidates, &[argument], &[], &[true]);
 
         let CandidateSelection::Selected(selected) = selected else {
             panic!("concrete lambda return should select one overload");
