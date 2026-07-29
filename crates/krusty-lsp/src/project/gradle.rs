@@ -417,6 +417,7 @@ fn module_of(project: &GradleProject, source_set: &GradleSourceSet) -> Module {
             path: PathBuf::from(root),
             kind,
             generated: false,
+            package_prefix: String::new(),
         })
         .collect();
     module.classpath = source_set.classpath.iter().map(PathBuf::from).collect();
@@ -473,6 +474,7 @@ fn kmp_module_of(project: &GradleProject, compilation: &KotlinCompilation) -> Mo
             path: PathBuf::from(root),
             kind,
             generated: false,
+            package_prefix: String::new(),
         })
         .collect();
     module.classpath = compilation.classpath.iter().map(PathBuf::from).collect();
@@ -515,6 +517,7 @@ fn android_module_of(project: &GradleProject, variant: &AndroidVariant) -> Modul
             path: PathBuf::from(root),
             kind,
             generated: false,
+            package_prefix: String::new(),
         })
         .collect();
     module.classpath = variant.classpath.iter().map(PathBuf::from).collect();

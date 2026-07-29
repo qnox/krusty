@@ -214,6 +214,9 @@ fn parse_module_with_exports(
             if folder.attr("generated") == Some("true") {
                 root = root.generated();
             }
+            if let Some(prefix) = folder.attr("packagePrefix").filter(|p| !p.is_empty()) {
+                root = root.with_package_prefix(prefix);
+            }
             if is_test {
                 test_roots.push(root)
             } else {
@@ -648,7 +651,7 @@ mod tests {
         r#"<module type="JAVA_MODULE" version="4">
              <component name="NewModuleRootManager" inherit-compiler-output="true" LANGUAGE_LEVEL="JDK_17">
                <content url="file://$MODULE_DIR$">
-                 <sourceFolder url="file://$MODULE_DIR$/src/main/kotlin" isTestSource="false" />
+                 <sourceFolder url="file://$MODULE_DIR$/src/main/kotlin" isTestSource="false" packagePrefix="com.acme" />
                  <sourceFolder url="file://$MODULE_DIR$/build/generated" isTestSource="false" generated="true" />
                  <sourceFolder url="file://$MODULE_DIR$/src/test/kotlin" isTestSource="true" />
                  <sourceFolder url="file://$MODULE_DIR$/src/main/resources" type="java-resource" />
@@ -698,7 +701,8 @@ mod tests {
         assert_eq!(
             main.source_roots,
             vec![
-                SourceRoot::source(tree.path("app/src/main/kotlin")),
+                SourceRoot::source(tree.path("app/src/main/kotlin"))
+                    .with_package_prefix("com.acme"),
                 SourceRoot::source(tree.path("app/build/generated")).generated(),
                 SourceRoot::source(tree.path("app/shared/src")),
             ]

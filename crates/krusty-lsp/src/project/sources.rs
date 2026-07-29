@@ -231,6 +231,24 @@ impl ProjectSources {
         let (kotlin_paths, java_paths): (Vec<_>, Vec<_>) = paths
             .into_iter()
             .partition(|path| krusty::source::is_supported_path(path));
+        let java_paths = java_paths
+            .into_iter()
+            .map(|path| {
+                let (_, root) = model
+                    .module_source_root_for_source(&path)
+                    .expect("inventoried source must have an owning source root");
+                let relative = path
+                    .strip_prefix(&root.path)
+                    .expect("owning source root must contain the source");
+                let mut logical = root
+                    .package_prefix
+                    .split('.')
+                    .filter(|segment| !segment.is_empty())
+                    .collect::<PathBuf>();
+                logical.push(relative);
+                (path, logical)
+            })
+            .collect::<Vec<_>>();
         let (mut inferred_paths, dependency_paths): (Vec<_>, Vec<_>) =
             kotlin_paths.into_iter().partition(|path| {
                 model
@@ -496,6 +514,7 @@ fn path_ends_with(path: &Path, suffix: &[String]) -> bool {
 fn take_targeted_paths(
     pending: &mut BTreeSet<PathBuf>,
     by_name: &HashMap<std::ffi::OsString, Vec<PathBuf>>,
+    logical: &HashMap<PathBuf, PathBuf>,
     targets: &ImportTargets,
 ) -> Vec<PathBuf> {
     let mut wave = BTreeSet::new();
@@ -505,7 +524,11 @@ fn take_targeted_paths(
         };
         if let Some(candidates) = by_name.get(std::ffi::OsStr::new(name)) {
             for path in candidates {
-                if pending.contains(path) && path_ends_with(path, suffix) {
+                if pending.contains(path)
+                    && logical
+                        .get(path)
+                        .is_some_and(|path| path_ends_with(path, suffix))
+                {
                     wave.insert(path.clone());
                 }
             }
@@ -516,11 +539,13 @@ fn take_targeted_paths(
             pending
                 .iter()
                 .filter(|path| {
-                    path.parent().is_some_and(|directory| {
-                        targets
-                            .directories
-                            .iter()
-                            .any(|suffix| path_ends_with(directory, suffix))
+                    logical.get(*path).is_some_and(|path| {
+                        path.parent().is_some_and(|directory| {
+                            targets
+                                .directories
+                                .iter()
+                                .any(|suffix| path_ends_with(directory, suffix))
+                        })
                     })
                 })
                 .cloned(),
@@ -533,14 +558,14 @@ fn take_targeted_paths(
 }
 
 fn load_java_documents_by_import_closure(
-    paths: Vec<PathBuf>,
+    paths: Vec<(PathBuf, PathBuf)>,
     import_seed: &[String],
     budget: usize,
 ) -> Vec<(String, String)> {
     let mut remaining = budget;
     let mut loaded: Vec<(String, String)> = Vec::new();
     let mut by_name: HashMap<std::ffi::OsString, Vec<PathBuf>> = HashMap::new();
-    for path in &paths {
+    for (path, _) in &paths {
         if let Some(name) = path.file_name() {
             by_name
                 .entry(name.to_owned())
@@ -548,7 +573,11 @@ fn load_java_documents_by_import_closure(
                 .push(path.clone());
         }
     }
-    let mut pending = paths.into_iter().collect::<BTreeSet<_>>();
+    let logical = paths.iter().cloned().collect::<HashMap<_, _>>();
+    let mut pending = paths
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect::<BTreeSet<_>>();
     let mut seen_imports: HashSet<String> = import_seed.iter().cloned().collect();
     let mut targets = ImportTargets::new();
     for dotted in import_seed {
@@ -558,7 +587,7 @@ fn load_java_documents_by_import_closure(
         if targets.is_empty() {
             break;
         }
-        let wave = take_targeted_paths(&mut pending, &by_name, &targets);
+        let wave = take_targeted_paths(&mut pending, &by_name, &logical, &targets);
         if wave.is_empty() {
             break;
         }
@@ -1007,6 +1036,46 @@ mod tests {
         fs::remove_dir_all(directory).ok();
         assert!(java_docs.iter().any(|s| s.contains("class Widget")));
         assert!(java_docs.iter().any(|s| s.contains("class Base")));
+        assert!(!java_docs.iter().any(|s| s.contains("class Aaa")));
+    }
+
+    #[test]
+    fn imported_java_sources_use_their_owning_root_package_prefix() {
+        let directory = temp_path("java-package-prefix");
+        let prefixed_root = directory.join("src");
+        let nested_root = prefixed_root.join("plain");
+        let package_dir = prefixed_root.join("p");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::create_dir_all(nested_root.join("p")).unwrap();
+        let use_kt = directory.join("Use.kt");
+        let open_text = "import com.acme.p.Widget\nimport p.Plain\nfun f() {}";
+        fs::write(&use_kt, open_text).unwrap();
+        fs::write(prefixed_root.join("Aaa.java"), "public class Aaa {}").unwrap();
+        let widget = "package com.acme.p; public class Widget {}";
+        let plain = "package p; public class Plain {}";
+        fs::write(package_dir.join("Widget.java"), widget).unwrap();
+        fs::write(nested_root.join("p").join("Plain.java"), plain).unwrap();
+        let mut module = Module::new(ModuleId::new(":", "main"), directory.clone());
+        module.source_roots = vec![
+            SourceRoot::source(directory.clone()),
+            SourceRoot::source(prefixed_root.clone()).with_package_prefix("com.acme"),
+            SourceRoot::source(nested_root),
+        ];
+        let model =
+            ProjectModel::new(directory.clone(), ProviderKind::None).with_modules(vec![module]);
+        let uri = file_uri(&use_kt);
+        let documents = [(uri.as_str(), open_text)];
+        let open_uris = [uri.as_str()];
+        let mut sources = ProjectSources::default();
+
+        let max_bytes = open_text.len() + widget.len() + plain.len();
+        let (_, _, java_docs) = sources
+            .load_model(&model, &documents, &open_uris, max_bytes)
+            .unwrap();
+
+        fs::remove_dir_all(directory).ok();
+        assert!(java_docs.iter().any(|s| s.contains("class Widget")));
+        assert!(java_docs.iter().any(|s| s.contains("class Plain")));
         assert!(!java_docs.iter().any(|s| s.contains("class Aaa")));
     }
 
