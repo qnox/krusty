@@ -1119,12 +1119,8 @@ mod tests {
             .filter(|diagnostic| diagnostic.file == 0)
             .map(|diagnostic| diagnostic.msg.as_str())
             .collect::<Vec<_>>();
-        assert!(target_messages
-            .iter()
-            .any(|message| *message == "no parameter with name 'unknown' found."));
-        assert!(!target_messages
-            .iter()
-            .any(|message| *message == "none of the following candidates is applicable:"));
+        assert!(target_messages.contains(&"no parameter with name 'unknown' found."));
+        assert!(!target_messages.contains(&"none of the following candidates is applicable:"));
         assert!(!target_messages
             .iter()
             .any(|message| message.starts_with("unresolved reference")));

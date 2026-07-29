@@ -241,24 +241,13 @@ type CompletionEntry = [u32; 6];
 type CompletionMemberEntry = [u32; 4];
 
 /// Compact completion catalog retained after compiler analysis is dropped.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct CompletionIndex {
     entries: Vec<CompletionEntry>,
     members: Vec<CompletionMemberEntry>,
     strings: Vec<String>,
     #[serde(default)]
     complete: bool,
-}
-
-impl Default for CompletionIndex {
-    fn default() -> Self {
-        Self {
-            entries: Vec::new(),
-            members: Vec::new(),
-            strings: Vec::new(),
-            complete: false,
-        }
-    }
 }
 
 pub struct Completion<'a> {
@@ -5519,6 +5508,7 @@ mod tests {
         assert!(tokens.contains(&(0, 45, 3, 21, 0))); // cross-file operator member
     }
 
+    #[test]
     fn semantic_tokens_keep_type_alias_metadata_package_qualified() {
         let deprecated = "package old\n\
                           @Deprecated(\"old\") data class Record(val value: Int)\n\
