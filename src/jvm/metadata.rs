@@ -1311,12 +1311,14 @@ impl MetaFn {
     }
 
     pub fn extension_call_sig(&self) -> CallSig {
-        CallSig::metadata_extension(
+        let mut sig = CallSig::metadata_extension(
             self.value_params.len() + 1,
             self.value_params.iter().map(|p| p.name.clone()).collect(),
             self.value_params.iter().map(|p| p.has_default()).collect(),
             self.vararg_index(),
-        )
+        );
+        sig.platform_nullable_params = self.value_params.iter().map(|p| p.nullable()).collect();
+        sig
     }
 }
 

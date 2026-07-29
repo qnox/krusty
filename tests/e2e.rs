@@ -156,6 +156,8 @@ mod classpath_nullable_arg_defaults_e2e;
 mod classpath_nullable_extension_receiver_e2e;
 #[path = "classpath_nullable_param_e2e.rs"]
 mod classpath_nullable_param_e2e;
+#[path = "classpath_nullable_param_toplevel_e2e.rs"]
+mod classpath_nullable_param_toplevel_e2e;
 #[path = "classpath_number_conversion_e2e.rs"]
 mod classpath_number_conversion_e2e;
 #[path = "classpath_object_member_import_e2e.rs"]

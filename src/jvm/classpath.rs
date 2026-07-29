@@ -1586,24 +1586,30 @@ impl Classpath {
         let names = c.value_params.iter().map(|p| p.name.clone()).collect();
         let defaults = c.value_params.iter().map(|p| p.has_default()).collect();
         let vararg = c.vararg_index();
+        let mut call_sig = if extension {
+            CallSig::metadata_extension(end, names, defaults, vararg)
+        } else {
+            CallSig::metadata_top_level(
+                end,
+                names,
+                defaults,
+                c.value_params
+                    .iter()
+                    .map(|p| p.recv_fun_receiver.map(Ty::obj_name))
+                    .collect(),
+                c.value_params.iter().map(|p| p.recv_fun()).collect(),
+                c.value_params.iter().map(|p| p.materialized()).collect(),
+                vararg,
+            )
+        };
+        let logical_param_count = end.saturating_sub(usize::from(extension));
+        let leading_params = logical_param_count.saturating_sub(c.value_params.len());
+        call_sig.platform_nullable_params = std::iter::repeat_n(false, leading_params)
+            .chain(c.value_params.iter().map(|p| p.nullable()))
+            .collect();
         MetadataCallFacts {
             kept_params: Some(end),
-            call_sig: if extension {
-                CallSig::metadata_extension(end, names, defaults, vararg)
-            } else {
-                CallSig::metadata_top_level(
-                    end,
-                    names,
-                    defaults,
-                    c.value_params
-                        .iter()
-                        .map(|p| p.recv_fun_receiver.map(Ty::obj_name))
-                        .collect(),
-                    c.value_params.iter().map(|p| p.recv_fun()).collect(),
-                    c.value_params.iter().map(|p| p.materialized()).collect(),
-                    vararg,
-                )
-            },
+            call_sig,
             ret: metadata_return_info(c.ret_class, c.ret_nullable()),
         }
     }

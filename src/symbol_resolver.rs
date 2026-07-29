@@ -2059,7 +2059,15 @@ impl<'a> SymbolResolver<'a> {
         let parsed: Vec<(&FunctionInfo, Vec<Ty>, Ty)> = fs
             .top_level()
             .filter(|o| o.public())
-            .map(|o| (o, o.callable.params.clone(), o.callable.ret))
+            .map(|o| {
+                let params = apply_platform_call_parameter_nullability(
+                    o.callable.params.clone(),
+                    &o.call_sig.platform_nullable_params,
+                    args,
+                    o.call_sig.vararg,
+                );
+                (o, params, o.callable.ret)
+            })
             .collect();
         let fits = |p: &Ty, a: &Ty| self.arg_fits_or_subtype(p, a);
         let adapts = |p: &Ty, a: &Ty, i: usize| {
