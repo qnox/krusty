@@ -139,6 +139,10 @@ impl Drop for ProfGuard {
     }
 }
 
+fn scratch_namespace() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("target/scratch")
+}
+
 /// Allocate a unique directory below this process's private scratch root.
 #[allow(dead_code)]
 fn scratch_dir() -> Option<PathBuf> {
@@ -148,13 +152,24 @@ fn scratch_dir() -> Option<PathBuf> {
     let root = ROOT
         .get_or_init(|| {
             sweep_stale_temp_dirs();
-            let root = std::env::temp_dir()
-                .join("krusty_scratch")
-                .join(std::process::id().to_string());
-            // PID reuse can leave this process's root behind.
-            let _ = std::fs::remove_dir_all(&root);
-            std::fs::create_dir_all(&root).ok()?;
-            Some(root)
+            let base = scratch_namespace();
+            std::fs::create_dir_all(&base).ok()?;
+            let pid = std::process::id();
+            let mut suffix = 0u64;
+            loop {
+                let root = base.join(if suffix == 0 {
+                    pid.to_string()
+                } else {
+                    format!("{pid}_{suffix}")
+                });
+                match std::fs::create_dir(&root) {
+                    Ok(()) => break Some(root),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        suffix += 1;
+                    }
+                    Err(_) => break None,
+                }
+            }
         })
         .as_ref()?;
     let dir = root.join(NEXT.fetch_add(1, Ordering::Relaxed).to_string());
@@ -168,6 +183,7 @@ fn sweep_stale_temp_dirs() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
         for (root, private) in [
+            (scratch_namespace(), true),
             (std::env::temp_dir().join("krusty_scratch"), true),
             (std::env::temp_dir(), false),
         ] {
@@ -189,9 +205,16 @@ fn sweep_stale_temp_dirs() {
 fn scratch_owner_pid(name: &std::ffi::OsStr, private: bool) -> Option<i32> {
     let name = name.to_str()?;
     if private {
-        if let Ok(pid) = name.parse() {
-            return Some(pid);
-        }
+        let pid = match name.split_once('_') {
+            Some((pid, suffix))
+                if !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                pid
+            }
+            Some(_) => return None,
+            None => name,
+        };
+        return pid.parse().ok();
     }
     name.strip_prefix("krusty_")?
         .rsplit('_')
@@ -2132,8 +2155,7 @@ fn collect_class_files(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>
 /// Byte-compare one class emitted by krusty and kotlinc.
 #[allow(dead_code)]
 pub fn byte_diff_against_kotlinc(name: &str, src: &str, class: &str) -> Option<Result<(), String>> {
-    let dir = std::env::temp_dir().join(format!("krusty_bdiff_{name}_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch_dir()?;
     let kref = dir.join("ref");
     std::fs::create_dir_all(&kref).ok()?;
     let src_path = dir.join(format!("{name}.kt"));
@@ -2192,11 +2214,26 @@ mod scratch_tests {
     #[test]
     fn scratch_dirs_live_under_the_private_root() {
         let dir = super::scratch_dir().expect("allocate scratch directory");
-        let root = std::env::temp_dir()
-            .join("krusty_scratch")
-            .join(std::process::id().to_string());
-        assert_eq!(dir.parent(), Some(root.as_path()));
+        let root = dir.parent().expect("scratch dir has a root");
+        assert_eq!(root.parent(), Some(super::scratch_namespace().as_path()));
+        assert_eq!(
+            super::scratch_owner_pid(root.file_name().unwrap(), true),
+            Some(std::process::id() as i32)
+        );
         assert!(dir.is_dir());
+    }
+
+    #[test]
+    fn scratch_owner_accepts_only_reserved_root_names() {
+        use std::ffi::OsStr;
+
+        assert_eq!(super::scratch_owner_pid(OsStr::new("123"), true), Some(123));
+        assert_eq!(
+            super::scratch_owner_pid(OsStr::new("123_4"), true),
+            Some(123)
+        );
+        assert_eq!(super::scratch_owner_pid(OsStr::new("123_bad"), true), None);
+        assert_eq!(super::scratch_owner_pid(OsStr::new("123_"), true), None);
     }
 
     #[test]

@@ -1,7 +1,6 @@
 //! Signature-phase inference for top-level property initializers that read earlier properties,
 //! including nested calls and imported extension properties.
-mod common;
-use common::assert_box_ok_with_stdlib;
+use super::common::assert_box_ok_with_stdlib;
 
 #[test]
 fn toplevel_property_cross_reference() {

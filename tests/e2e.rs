@@ -558,6 +558,8 @@ mod lambda_e2e;
 mod lambda_vs_block_fun_type_e2e;
 #[path = "lateinit_local_e2e.rs"]
 mod lateinit_local_e2e;
+#[path = "lib_fixture_parallel_e2e.rs"]
+mod lib_fixture_parallel_e2e;
 #[path = "list_fold_e2e.rs"]
 mod list_fold_e2e;
 #[path = "literal_escapes_coverage_e2e.rs"]
@@ -774,6 +776,8 @@ mod require_check_smartcast_e2e;
 mod resolve_parse_deep_coverage_e2e;
 #[path = "resolve_parser_diag_coverage_e2e.rs"]
 mod resolve_parser_diag_coverage_e2e;
+#[path = "resolve_reject_coverage_e2e.rs"]
+mod resolve_reject_coverage_e2e;
 #[path = "resolver_errors_coverage_e2e.rs"]
 mod resolver_errors_coverage_e2e;
 #[path = "resolver_regression_e2e.rs"]

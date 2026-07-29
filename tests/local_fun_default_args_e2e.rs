@@ -1,8 +1,7 @@
 //! A LOCAL function with default parameters may be called with the trailing defaulted arguments
 //! omitted (`fun bar(x: Int = 1); bar()`). krusty emits local functions as plain methods (no `$default`
 //! synthetic), so the omitted defaults are filled at the call site.
-mod common;
-use common::assert_box_ok_with_stdlib;
+use super::common::assert_box_ok_with_stdlib;
 
 #[test]
 fn local_fun_omitted_defaults() {

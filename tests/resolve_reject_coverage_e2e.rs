@@ -2,7 +2,7 @@
 //! property with a custom accessor (unsupported), and two extension properties with the same erased
 //! receiver. Each drives a distinct `diags.error` branch.
 
-mod common;
+use super::common;
 
 fn diags(src: &str) -> Vec<String> {
     let stdlib = match common::stdlib_jar() {

@@ -1,7 +1,6 @@
 //! `is`/`!is` against a function type — the named `FunctionN<…>` form (`x is Function1<*, *>`) and its
 //! nullable variant, plus nullable-primitive `is`. Lowers to `instanceof kotlin/jvm/functions/FunctionN`.
-mod common;
-use common::assert_box_ok_with_stdlib;
+use super::common::assert_box_ok_with_stdlib;
 
 #[test]
 fn is_function_type_named() {
