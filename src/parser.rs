@@ -4877,7 +4877,13 @@ impl<'a> Parser<'a> {
                 self.bump(); // '@'
             }
         }
-        if self.is_script {
+        // A modifier-prefixed LOCAL function (`tailrec fun f(…)`, `suspend fun g(…)`) is a
+        // declaration statement in any body, not just scripts — without the prefix scan the
+        // leading soft keyword parses as an expression name and reports itself unresolved.
+        let modifier_prefixed_local_fun = !self.is_script
+            && matches!(self.kind(), TokenKind::Ident | TokenKind::At)
+            && self.local_declaration_after_prefix() == Some(TokenKind::KwFun);
+        if self.is_script || modifier_prefixed_local_fun {
             if let Some(kind) = self.local_declaration_after_prefix() {
                 let start = self.tok().span;
                 if kind == TokenKind::KwFun {
