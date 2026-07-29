@@ -7368,7 +7368,13 @@ impl<'a> Lower<'a> {
                         .filter_map(|(index, slot)| slot.is_none().then_some(index)),
                 );
             } else {
-                self.append_default_call_args(&mut a, &c.params, args, has_trailing_lambda)?;
+                self.append_default_call_args(
+                    &mut a,
+                    &c.params,
+                    args,
+                    has_trailing_lambda,
+                    c.vararg_elem,
+                )?;
             }
         } else {
             if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
@@ -13475,7 +13481,34 @@ impl<'a> Lower<'a> {
         params: &[Ty],
         args: &[AstExprId],
         trailing_lambda: bool,
+        vararg_elem: Option<Ty>,
     ) -> Option<()> {
+        // Element-form vararg into a `$default` (`split('.')` → `split$default(recv, char[],
+        // boolean, int, mask, marker)`): PACK the trailing provided arguments into the vararg
+        // slot's array, then placeholder+mask the name-only-defaulted tail.
+        if let Some(elem) = vararg_elem {
+            let slot = params
+                .iter()
+                .position(|param| param.array_elem() == Some(elem))?;
+            if args.len() < slot {
+                return None;
+            }
+            for (index, &arg) in args[..slot].iter().enumerate() {
+                out.push(self.lower_arg(arg, &ty_to_ir(params[index]))?);
+            }
+            let elem_ir = ty_to_ir(elem);
+            let mut elements = Vec::new();
+            for &arg in &args[slot..] {
+                elements.push(self.lower_arg(arg, &elem_ir)?);
+            }
+            out.push(self.emit_vararg(ty_to_ir(params[slot]), elements));
+            for &param in &params[slot + 1..] {
+                out.push(self.zero_placeholder(param));
+            }
+            let mask: i32 = (slot + 1..params.len()).map(|j| 1i32 << j).sum();
+            self.append_default_mask_marker(out, mask);
+            return Some(());
+        }
         let mask: i32 = if trailing_lambda && args.len() < params.len() {
             let prefix_len = args.len().checked_sub(1)?;
             let last = params.len() - 1;
@@ -21899,6 +21932,7 @@ impl<'a> Lower<'a> {
                                 &c.params,
                                 &args,
                                 trailing_lambda,
+                                c.vararg_elem,
                             )?;
                         } else {
                             // `ctx_n` leading context arguments are already in `a`; the explicit source
@@ -23265,6 +23299,7 @@ impl<'a> Lower<'a> {
                                 explicit_params,
                                 &args,
                                 trailing_lambda,
+                                c.vararg_elem,
                             )?;
                         } else if let Some((fixed, arr_ty, elem)) = c
                             .vararg_elem

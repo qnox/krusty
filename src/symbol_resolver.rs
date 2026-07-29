@@ -2299,7 +2299,27 @@ impl<'a> SymbolResolver<'a> {
                 c.name,
                 c.descriptor
             );
-            return Some(callable_with_return(&c, ret_ty, true));
+            let mut c = callable_with_return(&c, ret_ty, true);
+            // An element-form vararg call reaching the `$default` (`split('.')`): tell the
+            // lowerer which element type to PACK before the mask machinery — without it the
+            // loose element lowers straight into the array slot (a VerifyError).
+            if let Some(elem) = o
+                .call_sig
+                .vararg_index
+                .and_then(|index| vparams.get(index))
+                .and_then(|param| param.array_elem())
+            {
+                if args
+                    .get(o.call_sig.vararg_index.unwrap_or_default())
+                    .copied()
+                    != vparams
+                        .get(o.call_sig.vararg_index.unwrap_or_default())
+                        .copied()
+                {
+                    c.vararg_elem = Some(elem);
+                }
+            }
+            return Some(c);
         }
         if o.flags.inline.can_inline() {
             let mut callable = callable_with_return(&o.callable, ret_ty, true);
@@ -2402,6 +2422,14 @@ impl<'a> SymbolResolver<'a> {
             }
             if base.callable.params.first() != params.first() {
                 continue;
+            }
+            // The `$default` synthetic mirrors its base's physical parameters exactly. When
+            // the base overload was already SELECTED with element-form vararg arguments
+            // (`split('.')` against `split(vararg delimiters: Char, …)`), pair the synthetic
+            // by parameter identity — re-fitting the caller's elements against the ARRAY
+            // parameter below would reject it (Char does not fit CharArray).
+            if base.call_sig.vararg && *params == base.callable.params {
+                return Some(o.callable.clone());
             }
             let real_count = params.len() - 1;
             let fits = if trailing_lambda {
@@ -3373,9 +3401,12 @@ fn resolve_property_member(
         .or_else(|| resolve_instance_member(lib, recv, property, &[], &[], &[], member_access))
         .filter(|m| m.ret.is_read_value_result())
         .or_else(|| {
-            let getter = lib.physical_property_getter_name(property)?;
-            resolve_instance_member(lib, recv, &getter, &[], &[], &[], member_access)
-                .filter(|m| m.ret.is_read_value_result())
+            lib.physical_property_getter_names(property)
+                .into_iter()
+                .find_map(|getter| {
+                    resolve_instance_member(lib, recv, &getter, &[], &[], &[], member_access)
+                        .filter(|m| m.ret.is_read_value_result())
+                })
         })
         .or_else(|| {
             // A property whose declared type is a `@JvmInline value class`: its getter is
@@ -4035,6 +4066,47 @@ fn select_overload(
                 return None;
             }
             return Some((*o).clone());
+        }
+    }
+    // Vararg ELEMENT-expansion pass: a call passing loose elements (or nothing) where a
+    // candidate declares a vararg (`"a.b".trim('.')` against `trim(vararg chars: Char)` — the
+    // logical param is the ARRAY; `split('.')` against `split(vararg delimiters: Char,
+    // ignoreCase: Boolean = false, limit: Int = 0)` — params after the vararg are reachable
+    // only by name, so they must be defaulted). Two tiers per rank: EXACT element matches
+    // first (`Char` argument selects the `Char` vararg over the `String` one, mirroring
+    // most-specific selection), then platform/source-assignable elements.
+    let vararg_applicable = |o: &FunctionInfo, lp: &[Ty], exact: bool| -> bool {
+        let Some(vararg_index) = o.call_sig.vararg_index else {
+            return false;
+        };
+        let Some(elem) = lp.get(vararg_index).and_then(|p| p.array_elem()) else {
+            return false;
+        };
+        args.len() >= vararg_index
+            && lp[..vararg_index].iter().zip(args).all(|(p, a)| {
+                fun_arg_matches(lib, p, a, false)
+                    || platform_arg_assignable(lib, p, a)
+                    || source_arg_assignable(assign_src, p, a)
+            })
+            && args[vararg_index..].iter().all(|a| {
+                *a == elem
+                    || (!exact
+                        && (platform_arg_assignable(lib, &elem, a)
+                            || source_arg_assignable(assign_src, &elem, a)))
+            })
+            && (vararg_index + 1..lp.len()).all(|index| o.call_sig.param_has_default(index))
+    };
+    for exact in [true, false] {
+        for cands in by_rank.values() {
+            let mut applicable = cands
+                .iter()
+                .filter(|(o, lp)| vararg_applicable(o, lp, exact));
+            if let Some((o, _)) = applicable.next() {
+                if applicable.next().is_some() {
+                    return None;
+                }
+                return Some((*o).clone());
+            }
         }
     }
     // ABI-form pass, shared with constructor resolution: bridge target collection identity and
