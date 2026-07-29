@@ -413,7 +413,7 @@ impl AnalysisBackend for EngineBackend {
             reanalyze: false,
             uris: vec![uri.to_string()],
         });
-        false
+        true
     }
 
     fn note_watched_file_changes(&mut self, uris: &[String]) -> bool {
@@ -422,7 +422,7 @@ impl AnalysisBackend for EngineBackend {
             reanalyze: false,
             uris: uris.to_vec(),
         });
-        false
+        true
     }
 
     fn project_refresh_due_in(&self) -> Option<std::time::Duration> {
@@ -1029,7 +1029,10 @@ mod tests {
 
         let uris: Vec<String> = (0..20).map(|i| format!("file:///p/File{i}.kt")).collect();
         let now = backend.note_watched_file_changes(&uris);
-        assert!(!now, "the async backend defers the reanalyze decision");
+        assert!(
+            now,
+            "the async backend invalidates cached analysis immediately"
+        );
 
         let mut reanalyze = 0;
         loop {
