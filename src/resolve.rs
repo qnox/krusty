@@ -22499,6 +22499,14 @@ impl<'a> Checker<'a> {
                         return None;
                     }
                 };
+                let params = crate::symbol_resolver::apply_platform_parameter_nullability(
+                    params,
+                    &o.call_sig.platform_nullable_params,
+                    &slots
+                        .iter()
+                        .map(|slot| slot.map_or(Ty::Error, |a| self.expr_types[a.0 as usize]))
+                        .collect::<Vec<_>>(),
+                );
                 let score = self.call_slot_score(&params, &slots);
                 Some((score, o, params, slots))
             })
