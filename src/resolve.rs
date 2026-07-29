@@ -22782,6 +22782,12 @@ impl<'a> Checker<'a> {
         receiver: TypeName,
         name: &str,
     ) -> Option<crate::symbol_resolver::ResolvedMember> {
+        // A Kotlin override of a Java-supertype getter keeps the Java synthetic property but
+        // REFINES its type (`UClass.getMethods(): Array<UMethod>` over `PsiClass.getMethods():
+        // PsiMethod[]`): remember the most-derived SOURCE override's return before the walk
+        // crosses into the classpath, and stamp it on the resolved Java accessor.
+        let getter_names = self.syms.libraries.physical_property_getter_names(name);
+        let mut source_override_ret: Option<Ty> = None;
         let mut work = vec![receiver];
         let mut seen = Vec::new();
         while let Some(current) = work.pop() {
@@ -22791,13 +22797,27 @@ impl<'a> Checker<'a> {
             seen.push(current);
             let Some(class) = self.syms.class_by_type_name(current) else {
                 if current != receiver {
-                    if let Some(member) = self.resolve_property_member(Ty::obj_name(current), name)
+                    if let Some(mut member) =
+                        self.resolve_property_member(Ty::obj_name(current), name)
                     {
+                        if let Some(ret) = source_override_ret {
+                            member.ret = ret;
+                        }
                         return Some(member);
                     }
                 }
                 continue;
             };
+            if source_override_ret.is_none() {
+                source_override_ret = getter_names.iter().find_map(|getter| {
+                    class
+                        .method(getter)
+                        .filter(|signature| {
+                            signature.params.is_empty() && signature.ret != Ty::Unit
+                        })
+                        .map(|signature| signature.ret)
+                });
+            }
             if let Some(superclass) = class.super_internal {
                 work.push(superclass);
             }

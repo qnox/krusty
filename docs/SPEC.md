@@ -1544,6 +1544,124 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Lenient mode skips malformed declarations and erases unresolved member types; strict compiler
   callers still reject them.
 
+
+
+- **JPS `packagePrefix` roots match imports through package-qualified logical paths.** A source
+  root declaring `packagePrefix="com.intellij"` stores `com.intellij.p.X` at `<root>/p/X.java`; the
+  LSP's import-driven Java loader matches import paths against `com/intellij/p/X.java` (prefix
+  directories + root-relative path), so prefixed dependencies keep their budget priority
+  (`crates/krusty-lsp/src/project/sources.rs::imported_java_sources_match_through_package_prefixed_roots`).
+
+- **Java `...` parameters are varargs in stubs.** The signature stubs emit `ACC_VARARGS` for a
+  trailing `Type... name` parameter (methods and constructors), so element-style calls
+  (`h.reg("x", fix)`, zero-element `h.reg("y")`) and Kotlin spreads (`reg(s, *fixes)`) resolve
+  against source-stubbed Java members exactly as against compiled ones
+  (`src/jvm/java_stub.rs::java_varargs_parameters_emit_acc_varargs`,
+  `crates/krusty-lsp/src/compiler_analysis.rs::source_set_spreads_kotlin_vararg_into_java_vararg_member`).
+
+- **A generic static's return binds from the call arguments.** `<T extends PsiElement> T
+  findSameElementInCopy(T, PsiFile)` called with a `PsiElement` returns `PsiElement`, not the
+  erased `Object` — the companion-member path binds the generic signature against the arguments
+  exactly as instance members do (`tests/generic_static_field_e2e.rs`).
+
+- **Member types resolve from their enclosing class chain in stubs.** A Java source referencing a
+  sibling member type without qualification (`Proc` inside `class Builder { interface Proc {…} }`)
+  resolves through the enclosing declarations (`Builder$Proc`) before the package, per JLS scoping —
+  previously the reference silently erased to `Object` in lenient stubbing, so nested SAM parameters
+  (`DependenciesBuilder.DependencyProcessor`) never matched
+  (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_converts_sam_lambdas_on_implicit_receivers_and_nested_interfaces`).
+
+- **SAM conversion works on implicit receivers.** A trailing lambda passed to a Java member of an
+  implicit receiver (`Button().apply { addActionListener { … } }`) types against the functional
+  method's parameters — including a lambda with no declared parameters (`it` bound) — and member
+  selection receives the lambda-literal flags, exactly as on an explicit receiver (same test).
+
+- **Explicit type arguments bind generic static SAM calls.** `Maps.create<String, Int> { s -> … }`
+  (the `FactoryMap.create<K, V>` shape) seeds `K`/`V` from the call's type-argument list before any
+  argument unification: the SAM lambda's parameter types substitute through (`s: String`) and the
+  return types as `Map<String, Int>`, matching kotlinc
+  (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_binds_explicit_type_args_on_generic_static_sam_call`).
+
+- **Interface fields are implicitly public static final (JLS §9.3).** Signature stubs stamp the
+  implicit flags, so the constant-holder pattern (`PsiModifier.STATIC`,
+  `CommonClassNames.JAVA_LANG_STRING`) resolves as a static field read
+  (`src/jvm/java_stub.rs::interface_fields_are_implicitly_public_static_final`).
+
+- **All-caps Java getters map to decapitalize-smart properties.** `getID()` reads as `id`,
+  `getURLPath()` as `urlPath` — the physical-getter fallback tries the re-uppercased leading-run
+  spelling after the conventional `getX`
+  (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_maps_all_caps_java_getters_to_properties`).
+
+- **Modifier-prefixed local functions parse in any body.** `tailrec fun`/`suspend fun` local
+  declarations are statements everywhere, not only in scripts; the soft-keyword prefix no longer
+  parses as an expression name (`src/frontend.rs::modifier_prefixed_local_functions_parse_in_bodies`).
+
+- **Element-form vararg calls select and lower against classpath extensions.** `"a.b".trim('.')`
+  expands `trim(vararg chars: Char)` element-wise (an exact element type beats an assignable one, so
+  the `Char` overload wins over `String`); `fq.split('.')` additionally requires every parameter
+  after the vararg to be defaulted and pairs the base's `$default` synthetic by parameter identity,
+  with the lowering PACKING the elements into the array before the mask machinery
+  (`tests/vararg_element_default_e2e.rs` — runtime-verified; the packing bug was a VerifyError).
+
+- **A plain constructor initializer types a capturable local.** `val sb = StringBuilder()` is
+  capturable by an anonymous object exactly like an annotated local — the capture list infers the
+  type from the capitalized bare-name constructor call, and the checker verifies the name like an
+  explicit annotation; a function-call initializer (`val xs = listOf(…)`) stays uncaptured
+  (skip-not-wrong) (`tests/anon_object_capture_e2e.rs::captures_constructor_initialized_local` —
+  runtime-verified mutation visibility).
+
+- **A Java accessor pair without `@Metadata` is a writable synthetic property.** `x.text = v` on a
+  Java receiver resolves the write to the single-argument `void` setter named by Kotlin's accessor
+  rules (`text` → `setText`, `isOpen` → `setOpen`) — but only when the getter also resolves
+  (kotlinc synthesizes the property from the getter; a setter alone creates none), and never when
+  the receiver has a real `@Metadata` property (a Kotlin `val` stays read-only even if a `setX`
+  exists). Among setter overloads, the one whose parameter matches the getter's type wins; an
+  ambiguous remainder resolves to none
+  (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_resolves_java_setter_backed_property_write`).
+
+- **Member types of a Java interface or annotation are implicitly public (JLS §9.5).** The Java
+  signature stubs emit `interface Notifications { final class Bus {…} }` with `ACC_PUBLIC` on
+  `Notifications$Bus`, so `Notifications.Bus.notify(…)` resolves like kotlinc
+  (`src/jvm/java_stub.rs::interface_nested_types_are_implicitly_public`).
+
+- **A Kotlin override of a Java-supertype getter refines the synthetic property's type.**
+  `interface UClass : PsiClass { override fun getMethods(): Array<UMethod> }` keeps the Java
+  synthetic property `methods` (the property exists because a JAVA base declares the accessor;
+  a pure-Kotlin `getX()` still creates none), but reads as the most-derived SOURCE override's
+  return — `uClass.methods` is `Array<UMethod>`, not `PsiMethod[]`. Applied on both the checked
+  tier (`resolve_external_inherited_property`) and the declaration-only tier
+  (`SourceFallbackPlatform::property_members`)
+  (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_refines_java_getter_property_via_kotlin_override`).
+
+- **A qualified static call resolves nested types through in-scope outers.** `Outer.Nested.m(args)`
+  where `Outer` is imported/in scope resolves the receiver chain to `pkg/Outer$Nested` (an in-scope
+  type shadows a package path, as in kotlinc), then dispatches `m` as a static/companion member
+  (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_resolves_interface_nested_class_static_call`).
+
+- **A static field's generic type comes from its `Signature`, not its erased descriptor.** A read of
+  `Keys.NAME : DataKey<PsiFile>` types with its arguments so a generic callee binds from it
+  (`<T> T getData(DataKey<T>)` returns `PsiFile`); a signature carrying free type variables falls
+  back to the erased descriptor
+  (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_binds_generic_return_from_generic_static_field`).
+
+- **A module-declared argument class reaches a library parameter through its source supertypes.**
+  Library-member overload selection admits an argument whose supertype walk runs through MODULE
+  declarations (`class V : Thread()` — or an anonymous object over a declaration-only Kotlin base —
+  passed to `take(Thread)`): the platform oracle alone only walks classpath supertypes and cannot
+  see source classes. Applied in the ordered applicability pass and the assignability pass via the
+  module-first source federation
+  (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_passes_module_subclass_to_java_member_parameter`).
+  CONSTRUCTOR resolution admits the same walk in its assignability pass (`class V : Visitor()` into
+  `Holder(Visitor)`): `resolve_constructor_name` threads the resolver's source federation next to
+  the platform oracle
+  (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_passes_module_subclass_to_java_constructor_parameter`).
+
+- **Extensions from declaration-only source tiers resolve like in-prefix ones.** A call to an
+  imported extension whose declaring file sits beyond the inferred prefix (LSP dependency modules)
+  selects through the fallback platform seam and synthesizes the checked signature from the
+  resolved overload — defaulted parameters included; only the emit-facade owner is unknown, which
+  checking never needs (`src/frontend.rs::declaration_only_extension_calls_resolve_and_type`).
+
 - **krusty-lsp reports project and analysis work through server-initiated work-done progress.**
   When the client advertises `capabilities.window.workDoneProgress`, the async engine opens one
   token for project loading or analysis, updates that token when the current work changes, and ends

@@ -1091,6 +1091,69 @@ mod tests {
     }
 
     #[test]
+    fn source_set_refines_java_getter_property_via_kotlin_override() {
+        let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
+            return;
+        };
+        let Some(jdk_modules) = krusty::toolchain::jdk_modules() else {
+            return;
+        };
+        let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+            stdlib,
+            jdk_modules,
+        ]));
+        classpath.prepare_for_source_analysis();
+        let java_sources = [
+            (String::new(), "package p; public class PsiM {}".into()),
+            (
+                String::new(),
+                "package p; public interface PsiCls { PsiM[] getMethods(); }".into(),
+            ),
+        ];
+        let stubs = krusty::jvm::java_stub::stub_classes(
+            &java_sources,
+            krusty::jvm::java_stub::StubMode::Lenient,
+            &|candidate| {
+                classpath
+                    .find_name(krusty::types::type_name(candidate))
+                    .is_some()
+            },
+        )
+        .expect("Java stubs");
+        classpath.set_stub_overlay(stubs);
+
+        // The Kotlin override refines the Java synthetic property: `x.methods` must read as
+        // `Array<UMethod2>` (the override's return), not the Java base's `PsiM[]` — otherwise
+        // the element member `javaPsi` fails to resolve.
+        let support = "package u4\n\
+                       import p.PsiCls\n\
+                       import p.PsiM\n\
+                       interface UMethod2 : PsiM {\n\
+                       \u{20} val javaPsi: String\n\
+                       }\n\
+                       interface UClass2 : PsiCls {\n\
+                       \u{20} override fun getMethods(): Array<UMethod2>\n\
+                       }";
+        let source = "package a\n\
+                      import u4.UClass2\n\
+                      import u4.UMethod2\n\
+                      fun pred(m: UMethod2): Boolean = true\n\
+                      fun f(u: UClass2?): String? {\n\
+                      \u{20} val x = u ?: return null\n\
+                      \u{20} x.methods.find(::pred)?.javaPsi?.let { return it }\n\
+                      \u{20} return null\n\
+                      }";
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let analysis = analyze_source_set(&[source, support], platform);
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+    }
+
+    #[test]
     fn source_set_resolves_interface_nested_class_static_call() {
         let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
             return;
@@ -1339,10 +1402,7 @@ mod tests {
         classpath.prepare_for_source_analysis();
         let java_sources = [
             (String::new(), "package p; public interface Fix {}".into()),
-            (
-                String::new(),
-                "package p; public interface Fix {}".into(),
-            ),
+            (String::new(), "package p; public interface Fix {}".into()),
             (
                 String::new(),
                 "package p; public class Holder {\n\
