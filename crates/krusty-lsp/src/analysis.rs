@@ -43,6 +43,11 @@ const MAX_SOURCE_SET_HOVER_ENTRIES: usize = 256 * 1024;
 const MAX_SOURCE_SET_HOVER_WIRE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SOURCE_SET_DOCUMENT_SYMBOL_ENTRIES: usize = 32 * 1024;
 const MAX_SOURCE_SET_DOCUMENT_SYMBOL_WIRE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_SOURCE_SET_WORKSPACE_SYMBOL_ENTRIES: usize = 32 * 1024;
+pub const MAX_WORKSPACE_SYMBOL_WIRE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_WORKSPACE_SYMBOL_QUERY_BYTES: usize = 1024;
+const MAX_WORKSPACE_SYMBOL_PACKAGE_BYTES: usize = 1024 * 1024;
+const MAX_WORKSPACE_SYMBOL_CONTAINER_DEPTH: usize = 128;
 const MAX_SOURCE_SET_FOLDING_RANGE_ENTRIES: usize = 32 * 1024;
 const MAX_SOURCE_SET_FOLDING_RANGE_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const FOLDING_RANGE_WIRE_FIXED_BYTES: usize = 192;
@@ -349,6 +354,14 @@ type DocumentSymbolEntry = [u32; 10];
 pub struct DocumentSymbolIndex {
     entries: Vec<DocumentSymbolEntry>,
     names: Vec<String>,
+}
+
+type WorkspaceSymbolEntry = [u32; 10];
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+pub struct WorkspaceSymbolIndex {
+    entries: Vec<WorkspaceSymbolEntry>,
+    packages: Vec<String>,
 }
 
 /// `(argument-list lo, hi, signature start/count, selected signature, argument start/count,
@@ -707,6 +720,268 @@ impl DocumentSymbolIndex {
     pub fn name_count(&self) -> usize {
         self.names.len()
     }
+}
+
+impl WorkspaceSymbolIndex {
+    pub(crate) fn from_source_set(sources: &[&str], files: &[FileAnalysis]) -> Self {
+        let mut result = Self::default();
+        let mut package_ids = HashMap::<String, u32>::new();
+        let mut package_bytes = 0usize;
+
+        'files: for (file_index, (source, analysis)) in sources.iter().zip(files).enumerate() {
+            let package = analysis.file.package.as_deref().unwrap_or("");
+            let Some(package_id) = intern_workspace_package(
+                package,
+                &mut result.packages,
+                &mut package_ids,
+                &mut package_bytes,
+            ) else {
+                break;
+            };
+            let occurrences = document_symbol_occurrences(
+                source,
+                analysis,
+                MAX_SOURCE_SET_WORKSPACE_SYMBOL_ENTRIES.saturating_sub(result.entries.len()),
+            );
+            let mut retained = Vec::with_capacity(occurrences.len());
+            let mut retained_indices = vec![None; occurrences.len()];
+            for (occurrence_index, occurrence) in occurrences.iter().enumerate() {
+                let Some(name) = source
+                    .get(occurrence.selection.lo as usize..occurrence.selection.hi as usize)
+                    .map(|name| name.trim_matches('`'))
+                    .filter(|name| !name.is_empty())
+                else {
+                    continue;
+                };
+                if name != occurrence.name {
+                    continue;
+                }
+                let parent = match occurrence.parent {
+                    Some(parent) => {
+                        let Some(parent) = retained_indices.get(parent).copied().flatten() else {
+                            continue;
+                        };
+                        Some(parent)
+                    }
+                    None => None,
+                };
+                retained_indices[occurrence_index] = Some(retained.len());
+                retained.push((occurrence, parent));
+            }
+            let positions = selected_positions(
+                source,
+                retained
+                    .iter()
+                    .flat_map(|(occurrence, _)| [occurrence.selection.lo, occurrence.selection.hi]),
+            );
+            let position = |offset| {
+                let index = positions
+                    .binary_search_by_key(&offset, |(offset, _)| *offset)
+                    .expect("workspace-symbol offset must be positioned");
+                positions[index].1
+            };
+            let entry_offset = result.entries.len();
+
+            for (occurrence, parent) in retained {
+                if result.entries.len() >= MAX_SOURCE_SET_WORKSPACE_SYMBOL_ENTRIES {
+                    break 'files;
+                }
+                let start = position(occurrence.selection.lo);
+                let end = position(occurrence.selection.hi);
+                let parent = parent
+                    .and_then(|parent| entry_offset.checked_add(parent))
+                    .and_then(|parent| u32::try_from(parent).ok())
+                    .and_then(|parent| parent.checked_add(1))
+                    .unwrap_or(0);
+                result.entries.push([
+                    file_index as u32,
+                    occurrence.selection.lo,
+                    occurrence.selection.hi,
+                    start[0],
+                    start[1],
+                    end[0],
+                    end[1],
+                    u32::from(occurrence.kind),
+                    parent,
+                    package_id,
+                ]);
+            }
+        }
+        result
+    }
+
+    pub fn remap_files(&mut self, remaps: &[(u32, u32)]) {
+        for entry in &mut self.entries {
+            if let Ok(index) = remaps.binary_search_by_key(&entry[0], |(candidate, _)| *candidate) {
+                entry[0] = remaps[index].1;
+            }
+        }
+    }
+
+    pub fn merge_from(&mut self, other: Self) {
+        let mut package_bytes = self.packages.iter().map(String::len).sum::<usize>();
+        let mut package_ids = self
+            .packages
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (value.clone(), index as u32))
+            .collect::<HashMap<_, _>>();
+        let mut identities = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (workspace_symbol_identity(entry), index as u32))
+            .collect::<HashMap<_, _>>();
+        let mut remapped_entries = Vec::with_capacity(other.entries.len());
+        for mut entry in other.entries {
+            if let Some(&index) = identities.get(&workspace_symbol_identity(&entry)) {
+                remapped_entries.push(Some(index));
+                continue;
+            }
+            if self.entries.len() >= MAX_SOURCE_SET_WORKSPACE_SYMBOL_ENTRIES {
+                break;
+            }
+            let Some(package) = other.packages.get(entry[9] as usize) else {
+                remapped_entries.push(None);
+                continue;
+            };
+            let Some(package_id) = intern_workspace_package(
+                package,
+                &mut self.packages,
+                &mut package_ids,
+                &mut package_bytes,
+            ) else {
+                break;
+            };
+            entry[8] = entry[8]
+                .checked_sub(1)
+                .and_then(|parent| remapped_entries.get(parent as usize).copied().flatten())
+                .and_then(|parent| parent.checked_add(1))
+                .unwrap_or(0);
+            entry[9] = package_id;
+            let index = self.entries.len() as u32;
+            identities.insert(workspace_symbol_identity(&entry), index);
+            self.entries.push(entry);
+            remapped_entries.push(Some(index));
+        }
+    }
+
+    pub fn encode(&self, query: &str, source_set: &[(String, String)]) -> Vec<Value> {
+        if query.len() > MAX_WORKSPACE_SYMBOL_QUERY_BYTES {
+            return Vec::new();
+        }
+        let folded_query = query.to_lowercase();
+        let mut result = Vec::new();
+        let mut wire_bytes = 2usize;
+        for (entry_index, entry) in self.entries.iter().enumerate() {
+            let Some((uri, source)) = source_set.get(entry[0] as usize) else {
+                continue;
+            };
+            let Some(name) = workspace_source_name(source, entry) else {
+                continue;
+            };
+            if !name.to_lowercase().contains(&folded_query) {
+                continue;
+            }
+            let container = self.container_name(entry_index, source_set);
+            let symbol = json!({
+                "name": name,
+                "kind": entry[7],
+                "containerName": container,
+                "location": {
+                    "uri": uri,
+                    "range": {
+                        "start": {"line": entry[3], "character": entry[4]},
+                        "end": {"line": entry[5], "character": entry[6]},
+                    },
+                },
+            });
+            let symbol_bytes = serde_json::to_vec(&symbol).map_or(usize::MAX, |wire| wire.len());
+            let next_bytes = wire_bytes.saturating_add(symbol_bytes).saturating_add(1);
+            if next_bytes > MAX_WORKSPACE_SYMBOL_WIRE_BYTES {
+                break;
+            }
+            wire_bytes = next_bytes;
+            result.push(symbol);
+        }
+        result
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn container_name(&self, entry_index: usize, source_set: &[(String, String)]) -> String {
+        let entry = self.entries[entry_index];
+        let mut names = Vec::new();
+        let mut parent = entry[8];
+        while names.len() < MAX_WORKSPACE_SYMBOL_CONTAINER_DEPTH {
+            let Some(parent_index) = parent.checked_sub(1).map(|parent| parent as usize) else {
+                break;
+            };
+            let Some(parent_entry) = self.entries.get(parent_index) else {
+                break;
+            };
+            let Some((_, source)) = source_set.get(parent_entry[0] as usize) else {
+                break;
+            };
+            let Some(name) = workspace_source_name(source, parent_entry) else {
+                break;
+            };
+            names.push(name);
+            parent = parent_entry[8];
+        }
+        names.reverse();
+        let package = self
+            .packages
+            .get(entry[9] as usize)
+            .map(String::as_str)
+            .unwrap_or("");
+        if names.is_empty() {
+            return package.to_string();
+        }
+        if package.is_empty() {
+            return names.join(".");
+        }
+        format!("{package}.{}", names.join("."))
+    }
+}
+
+fn workspace_symbol_identity(entry: &WorkspaceSymbolEntry) -> (DefinitionTarget, u32) {
+    (
+        DefinitionTarget {
+            file: entry[0],
+            span: Span::new(entry[1], entry[2]),
+        },
+        entry[7],
+    )
+}
+
+fn workspace_source_name<'a>(source: &'a str, entry: &WorkspaceSymbolEntry) -> Option<&'a str> {
+    source
+        .get(entry[1] as usize..entry[2] as usize)
+        .map(|name| name.trim_matches('`'))
+        .filter(|name| !name.is_empty())
+}
+
+fn intern_workspace_package(
+    value: &str,
+    packages: &mut Vec<String>,
+    ids: &mut HashMap<String, u32>,
+    retained_bytes: &mut usize,
+) -> Option<u32> {
+    if let Some(&id) = ids.get(value) {
+        return Some(id);
+    }
+    if value.len() > MAX_WORKSPACE_SYMBOL_PACKAGE_BYTES.saturating_sub(*retained_bytes) {
+        return None;
+    }
+    let id = packages.len() as u32;
+    let value = value.to_string();
+    ids.insert(value.clone(), id);
+    *retained_bytes += value.len();
+    packages.push(value);
+    Some(id)
 }
 
 fn selected_positions(
@@ -1505,6 +1780,7 @@ pub struct DocumentAnalysis {
     pub implementations: DefinitionIndex,
     pub library_definitions: LibraryDefinitionIndex,
     pub document_symbols: DocumentSymbolIndex,
+    pub workspace_symbols: WorkspaceSymbolIndex,
     pub folding_ranges: FoldingRangeIndex,
     pub implementation_relations: Vec<[u32; 6]>,
 }
@@ -1663,6 +1939,7 @@ impl DocumentAnalysis {
                 type_definitions: DefinitionIndex::default(),
                 implementations: DefinitionIndex::default(),
                 document_symbols,
+                workspace_symbols: WorkspaceSymbolIndex::default(),
                 folding_ranges,
                 implementation_relations: Vec::new(),
             },
@@ -1683,6 +1960,7 @@ impl DocumentAnalysis {
             implementations: DefinitionIndex::default(),
             library_definitions: LibraryDefinitionIndex::default(),
             document_symbols: DocumentSymbolIndex::default(),
+            workspace_symbols: WorkspaceSymbolIndex::default(),
             folding_ranges: FoldingRangeIndex::default(),
             implementation_relations: Vec::new(),
         }
@@ -1696,6 +1974,7 @@ impl DocumentAnalysis {
         self.definitions.remap_files(remaps);
         self.type_definitions.remap_files(remaps);
         self.implementations.remap_files(remaps);
+        self.workspace_symbols.remap_files(remaps);
         for relation in &mut self.implementation_relations {
             for file in [0, 3] {
                 if let Ok(index) =
@@ -1733,6 +2012,7 @@ impl DocumentAnalysis {
             &self.implementations,
             &self.library_definitions,
             &self.document_symbols,
+            &self.workspace_symbols,
             &self.folding_ranges,
             &self.implementation_relations,
         ))
@@ -1749,6 +2029,7 @@ impl DocumentAnalysis {
         self.implementations = DefinitionIndex::default();
         self.library_definitions = LibraryDefinitionIndex::default();
         self.document_symbols = DocumentSymbolIndex::default();
+        self.workspace_symbols = WorkspaceSymbolIndex::default();
         self.folding_ranges = FoldingRangeIndex::default();
         self.implementation_relations.clear();
     }
@@ -1996,6 +2277,7 @@ fn analyze_source_inputs_for_lsp(
     let completion_symbols = CompletionSymbols::from_source_set(&analysis.files);
     let signature_help_symbols =
         SignatureHelpSymbols::from_source_set(&sources, &analysis.files, &analysis.symbols);
+    let workspace_symbols = WorkspaceSymbolIndex::from_source_set(&sources, &analysis.files);
     let indexes = SourceSetIndexes::new(
         &analysis.symbols,
         &highlight_symbols,
@@ -2027,6 +2309,9 @@ fn analyze_source_inputs_for_lsp(
         &definition_symbols,
         &mut budgets,
     );
+    if let Some(first) = analyses.first_mut() {
+        first.workspace_symbols = workspace_symbols;
+    }
     analyses
 }
 
@@ -2034,6 +2319,133 @@ fn analyze_source_inputs_for_lsp(
 mod tests {
     use super::*;
     use crate::compiler_analysis::CompletionKind;
+
+    #[test]
+    fn workspace_symbols_use_source_names_and_declaration_containers() {
+        let source = "package workspaceparity\n\
+                      class KrustyWorkspaceParityBox {\n\
+                      \u{20}\u{20}fun nestedNeedle(): Int = 1\n\
+                      }\n\
+                      fun krustyWorkspaceParityNeedle(): Int = 2\n\
+                      val krustyWorkspaceParityValue: Int = 3\n\
+                      fun `when`(): Int = 4\n\
+                      class Constructed(val value: Int)\n";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        let source_set = vec![(
+            "file:///WorkspaceSymbols.kt".to_string(),
+            source.to_string(),
+        )];
+
+        assert_eq!(
+            index.encode("KrustyWorkspaceParityBox", &source_set),
+            vec![json!({
+                "name": "KrustyWorkspaceParityBox",
+                "kind": 5,
+                "containerName": "workspaceparity",
+                "location": {
+                    "uri": "file:///WorkspaceSymbols.kt",
+                    "range": {
+                        "start": {"line": 1, "character": 6},
+                        "end": {"line": 1, "character": 30},
+                    },
+                },
+            })]
+        );
+        assert_eq!(
+            index.encode("krustyworkspaceparitybox", &source_set).len(),
+            1
+        );
+        assert!(index.encode("KWPB", &source_set).is_empty());
+        assert_eq!(
+            index.encode("nestedNeedle", &source_set),
+            vec![json!({
+                "name": "nestedNeedle",
+                "kind": 6,
+                "containerName": "workspaceparity.KrustyWorkspaceParityBox",
+                "location": {
+                    "uri": "file:///WorkspaceSymbols.kt",
+                    "range": {
+                        "start": {"line": 2, "character": 6},
+                        "end": {"line": 2, "character": 18},
+                    },
+                },
+            })]
+        );
+        assert_eq!(
+            index
+                .encode("krustyWorkspaceParityNeedle", &source_set)
+                .len(),
+            1
+        );
+        assert_eq!(
+            index
+                .encode("krustyWorkspaceParityValue", &source_set)
+                .len(),
+            1
+        );
+        assert_eq!(index.encode("when", &source_set)[0]["name"], "when");
+        assert_eq!(index.encode("Constructed", &source_set).len(), 1);
+
+        let default_source = "class DefaultPackageMarker\n";
+        let default_analysis = analyze_standalone_source_set(&[default_source]);
+        let default_index =
+            WorkspaceSymbolIndex::from_source_set(&[default_source], &default_analysis.files);
+        let encoded = default_index.encode(
+            "DefaultPackageMarker",
+            &[("file:///Default.kt".into(), default_source.into())],
+        );
+        assert_eq!(encoded[0]["containerName"], "");
+    }
+
+    #[test]
+    fn workspace_symbol_merge_deduplicates_module_overlap_after_file_remapping() {
+        let source = "package demo\nclass OverlapType\nfun sharedFunction() = 1\n";
+        let first_analysis = analyze_standalone_source_set(&[source]);
+        let second_analysis = analyze_standalone_source_set(&[source]);
+        let mut first = WorkspaceSymbolIndex::from_source_set(&[source], &first_analysis.files);
+        let mut second = WorkspaceSymbolIndex::from_source_set(&[source], &second_analysis.files);
+        first.remap_files(&[(0, 3)]);
+        second.remap_files(&[(0, 3)]);
+        first.merge_from(second);
+        let mut source_set = vec![
+            ("file:///unused.kt".to_string(), String::new()),
+            ("file:///unused2.kt".to_string(), String::new()),
+            ("file:///unused3.kt".to_string(), String::new()),
+            ("file:///Shared.kt".to_string(), source.to_string()),
+        ];
+
+        assert_eq!(first.encode("OverlapType", &source_set).len(), 1);
+        assert_eq!(first.encode("sharedFunction", &source_set).len(), 1);
+        source_set.truncate(3);
+        assert!(first.encode("OverlapType", &source_set).is_empty());
+    }
+
+    #[test]
+    fn workspace_symbol_snapshot_and_expanded_response_are_bounded() {
+        let source = "Needle\n".repeat(MAX_SOURCE_SET_WORKSPACE_SYMBOL_ENTRIES);
+        let entries = (0..MAX_SOURCE_SET_WORKSPACE_SYMBOL_ENTRIES)
+            .map(|line| {
+                let lo = (line * 7) as u32;
+                [0, lo, lo + 6, line as u32, 0, line as u32, 6, 5, 0, 0]
+            })
+            .collect();
+        let index = WorkspaceSymbolIndex {
+            entries,
+            packages: vec!["package".into()],
+        };
+        assert!(
+            serde_json::to_vec(&index).unwrap().len() <= MAX_WORKSPACE_SYMBOL_WIRE_BYTES,
+            "retained workspace-symbol index exceeded its wire budget"
+        );
+        let long_uri = format!("file:///{}.kt", "u".repeat(2048));
+        let encoded = index.encode("needle", &[(long_uri, source)]);
+        assert!(encoded.len() < MAX_SOURCE_SET_WORKSPACE_SYMBOL_ENTRIES);
+        assert!(
+            serde_json::to_vec(&encoded).unwrap().len() <= MAX_WORKSPACE_SYMBOL_WIRE_BYTES,
+            "expanded workspace-symbol result exceeded its wire budget"
+        );
+    }
 
     #[test]
     fn duplicate_and_private_java_classes_are_not_global_targets() {
