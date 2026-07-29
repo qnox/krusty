@@ -1,8 +1,7 @@
 //! Property-signature inference of a primitive numeric/char CONVERSION initializer
 //! (`val ten = 10.toLong()`) — the target primitive is fixed by the conversion method name, so the
 //! signature phase can type the property without an explicit annotation (mirrors the full checker).
-mod common;
-use common::assert_box_ok_with_stdlib;
+use super::common::assert_box_ok_with_stdlib;
 
 #[test]
 fn property_from_numeric_conversion() {
