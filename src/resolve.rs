@@ -18889,26 +18889,35 @@ impl<'a> Checker<'a> {
                 for s in &stmts {
                     self.stmt(*s);
                     diverged = diverged || self.stmt_diverges(*s);
-                    // Early-return guard: `if (x !is T) return …` (a diverging then, no else) narrows
-                    // a stable `x` to `T` for the remaining statements of this block.
+                    // Early-return guard: `if (x !is T) return …` (a diverging then) narrows a
+                    // stable `x` to `T` for the remaining statements of this block. An `else if`
+                    // CHAIN narrows level by level — `if (x is A) return …; else if (x !is B)
+                    // return …` proves `x !is A && x is B` afterwards, because falling through a
+                    // level whose then-branch diverges means that level's condition was false. The
+                    // walk stops at the first non-diverging then-branch: control can fall through
+                    // it with its condition TRUE, so neither its negation nor anything deeper holds.
                     if let Stmt::Expr(ie) = self.file.stmt(*s).clone() {
-                        if let Expr::If {
+                        let mut level = ie;
+                        while let Expr::If {
                             cond,
                             then_branch,
-                            else_branch: None,
-                        } = self.file.expr(ie).clone()
+                            else_branch,
+                        } = self.file.expr(level).clone()
                         {
-                            if self.expr_diverges(then_branch) {
-                                let casts = self.condition_narrowings(cond, false);
-                                let compound = matches!(
-                                    self.file.expr(cond),
-                                    Expr::Binary { op: BinOp::Or, .. }
-                                );
-                                for (name, ty) in casts {
-                                    if self.narrowing_is_supported(&name, ty, compound) {
-                                        self.declare(&name, ty, false);
-                                    }
+                            if !self.expr_diverges(then_branch) {
+                                break;
+                            }
+                            let casts = self.condition_narrowings(cond, false);
+                            let compound =
+                                matches!(self.file.expr(cond), Expr::Binary { op: BinOp::Or, .. });
+                            for (name, ty) in casts {
+                                if self.narrowing_is_supported(&name, ty, compound) {
+                                    self.declare(&name, ty, false);
                                 }
+                            }
+                            match else_branch {
+                                Some(eb) => level = eb,
+                                None => break,
                             }
                         }
                         // `require(x is T)` / `check(x is T)` — a stdlib precondition that throws when the
@@ -18916,7 +18925,7 @@ impl<'a> Checker<'a> {
                         // holds for the rest of the block. Narrow a stable binding in the FIRST argument
                         // (the condition), exactly as the `if (…) return` guard above does. Gated on the
                         // stdlib name not being shadowed by a lexical local or module-declared function.
-                        else if let Expr::Call { callee, args } = self.file.expr(ie).clone() {
+                        if let Expr::Call { callee, args } = self.file.expr(ie).clone() {
                             if let Expr::Name(fname) = self.file.expr(callee).clone() {
                                 if (fname == "require" || fname == "check")
                                     && !args.is_empty()
