@@ -10,7 +10,7 @@ mod semantic;
 mod signature_help;
 mod source_scan;
 
-use krusty::ast::{File, FunBody, PropDecl};
+use krusty::ast::{Decl, File, FunBody, FunDecl, PropDecl, Stmt};
 use krusty::diag::{DiagSink, Diagnostic, DiagnosticKind, Severity};
 use krusty::features::LangFeatures;
 use krusty::frontend;
@@ -36,6 +36,7 @@ pub use semantic::{HighlightOccurrence, HighlightSymbols, HoverOccurrence};
 pub(crate) use signature_help::{SignatureCandidate, SignatureHelpCall, SignatureHelpSymbols};
 
 const BOOLEAN_EXPRESSION_SIMPLIFICATION: &str = "Boolean expression can be simplified";
+const UNUSED_EXTENSION_RECEIVER: &str = "Receiver parameter is never used";
 
 pub struct FileAnalysis {
     pub file: File,
@@ -175,10 +176,13 @@ pub fn analyze_source_inputs_prefix_with_features(
         .into_iter()
         .zip(analysis.types)
         .zip(diagnostics)
-        .map(|((file, types), diagnostics)| FileAnalysis {
-            file,
-            types,
-            diagnostics: with_ide_inspections(diagnostics),
+        .map(|((file, types), diagnostics)| {
+            let diagnostics = with_ide_inspections(&file, types.as_ref(), diagnostics);
+            FileAnalysis {
+                file,
+                types,
+                diagnostics,
+            }
         })
         .collect();
     SourceSetAnalysis {
@@ -205,7 +209,11 @@ fn diagnostic_key(diagnostic: &Diagnostic) -> DiagnosticKey {
     )
 }
 
-fn with_ide_inspections(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
+fn with_ide_inspections(
+    file: &File,
+    types: Option<&FrontendTypeInfo>,
+    diagnostics: Vec<Diagnostic>,
+) -> Vec<Diagnostic> {
     let mut result = Vec::with_capacity(diagnostics.len());
     for diagnostic in diagnostics {
         if diagnostic.kind == DiagnosticKind::IncompatibleEquality {
@@ -220,7 +228,98 @@ fn with_ide_inspections(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
         }
         result.push(diagnostic);
     }
+    if let Some(types) = types {
+        add_unused_extension_receiver_inspections(file, types, &mut result);
+    }
     result
+}
+
+fn add_unused_extension_receiver_inspections(
+    file: &File,
+    types: &FrontendTypeInfo,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut inspections = Vec::new();
+    for &declaration in &file.decls {
+        match file.decl(declaration) {
+            Decl::Fun(function) => {
+                add_unused_extension_receiver_inspection(types, function, &mut inspections);
+            }
+            Decl::Class(class) => {
+                for function in class.methods.iter().chain(&class.companion_methods) {
+                    add_unused_extension_receiver_inspection(types, function, &mut inspections);
+                }
+                for entry in &class.enum_entries {
+                    for function in &entry.methods {
+                        add_unused_extension_receiver_inspection(types, function, &mut inspections);
+                    }
+                    for property in &entry.props {
+                        add_unused_extension_property_inspection(types, property, &mut inspections);
+                    }
+                }
+                for property in class.body_props.iter().chain(&class.companion_props) {
+                    add_unused_extension_property_inspection(types, property, &mut inspections);
+                }
+            }
+            Decl::Property(property) => {
+                add_unused_extension_property_inspection(types, property, &mut inspections);
+            }
+        }
+    }
+    for statement in &file.stmt_arena {
+        if let Stmt::LocalFun(function) = statement {
+            add_unused_extension_receiver_inspection(types, function, &mut inspections);
+        }
+    }
+    inspections.sort_by_key(|diagnostic| (diagnostic.span.lo, diagnostic.span.hi));
+    diagnostics.extend(inspections);
+}
+
+fn add_unused_extension_receiver_inspection(
+    types: &FrontendTypeInfo,
+    function: &FunDecl,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(receiver) = function.receiver.as_ref() else {
+        return;
+    };
+    if matches!(function.body, FunBody::None) || types.extension_receiver_is_used(receiver) {
+        return;
+    }
+    diagnostics.push(Diagnostic {
+        span: receiver.span,
+        editor_span: None,
+        severity: Severity::Warning,
+        kind: DiagnosticKind::Inspection,
+        msg: UNUSED_EXTENSION_RECEIVER.to_string(),
+        file: 0,
+    });
+}
+
+fn add_unused_extension_property_inspection(
+    types: &FrontendTypeInfo,
+    property: &PropDecl,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(receiver) = property.receiver.as_ref() else {
+        return;
+    };
+    let has_accessor_body = property.getter.is_some()
+        || property
+            .setter
+            .as_ref()
+            .is_some_and(|setter| setter.body.is_some());
+    if !has_accessor_body || types.extension_receiver_is_used(receiver) {
+        return;
+    }
+    diagnostics.push(Diagnostic {
+        span: receiver.span,
+        editor_span: None,
+        severity: Severity::Warning,
+        kind: DiagnosticKind::Inspection,
+        msg: UNUSED_EXTENSION_RECEIVER.to_string(),
+        file: 0,
+    });
 }
 
 #[cfg(test)]
@@ -360,6 +459,168 @@ mod tests {
             assert_eq!(pair[0].span, pair[1].span);
             assert_eq!(pair[1].kind, DiagnosticKind::IncompatibleEquality);
         }
+    }
+
+    #[test]
+    fn source_set_adds_unused_extension_receiver_inspections_at_receiver_types() {
+        let source = "interface Parser\n\
+                      interface JsonParser : Parser\n\
+                      const val ANSWER = 42\n\
+                      class Used(val length: Int) { fun trim(): String = \"\" }\n\
+                      class Mutable(var value: Int)\n\
+                      class Container(val answer: Int) {\n\
+                        fun helper(): Int = 1\n\
+                        fun String.dispatchPropertyOnly(): Int = answer\n\
+                        fun String.dispatchCallOnly(): Int = helper()\n\
+                      }\n\
+                      class Collision(val length: Int) {\n\
+                        fun String.extensionReceiverWins(): Int = length\n\
+                        fun String.labelledDispatchOnly(): Int = this@Collision.length\n\
+                      }\n\
+                      fun <T, R> applyValue(value: T, block: (T) -> R): R = block(value)\n\
+                      fun <T, R> T.scopeValue(block: T.() -> R): R = block()\n\
+                      fun JsonParser.decode(source: String): Any = source\n\
+                      fun Parser.decode(source: String): Any = source\n\
+                      fun Parser.decode(value: Int): Any = value\n\
+                      fun String.topLevelPropertyOnly(): Int = ANSWER\n\
+                      fun String.implicitLambdaParameterOnly(): Int = applyValue(1) { it }\n\
+                      fun String.nestedReceiverOnly(): Int = Used(1).run { length }\n\
+                      fun String.labelledOuterUse(): Int = 1.scopeValue { this@labelledOuterUse.length }\n\
+                      fun Used.explicitUse(): Int = this.length\n\
+                      fun Used.implicitPropertyUse(): Int = length\n\
+                      fun Used.implicitCallUse(): String = trim()\n\
+                      fun Used.implicitCallableUse(): () -> String = ::trim\n\
+                      fun Used.explicitCallableUse(): () -> String = this::trim\n\
+                      fun Mutable.assignmentUse() { value = 1 }\n\
+                      fun Mutable.incrementUse() { value++ }\n\
+                      fun localExtensions() {\n\
+                        fun String.localUnused(): Int = 1\n\
+                        fun String.localUsed(): Int = length\n\
+                      }";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let diagnostics = &analysis.files[0].diagnostics;
+
+        assert_eq!(diagnostics.len(), 10, "{diagnostics:?}");
+        assert!(diagnostics.iter().all(|diagnostic| {
+            diagnostic.severity == Severity::Warning
+                && diagnostic.kind == DiagnosticKind::Inspection
+                && diagnostic.msg == "Receiver parameter is never used"
+        }));
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| {
+                    &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize]
+                })
+                .collect::<Vec<_>>(),
+            [
+                "String",
+                "String",
+                "String",
+                "JsonParser",
+                "Parser",
+                "Parser",
+                "String",
+                "String",
+                "String",
+                "String"
+            ]
+        );
+    }
+
+    #[test]
+    fn member_extensions_mark_their_extension_dispatch_receiver_used() {
+        let source = "class Host {\n\
+                      \u{20} fun String.render(): Int = length\n\
+                      \u{20} val String.rendered: Int get() = length\n\
+                      \u{20} var String.rank: Int\n\
+                      \u{20}   get() = length\n\
+                      \u{20}   set(value) {}\n\
+                      }\n\
+                      fun Host.call(value: String): Int = value.render()\n\
+                      fun Host.read(value: String): Int = value.rendered\n\
+                      fun Host.write(value: String) { value.rank = 1 }";
+        let analysis = analyze_standalone_source_set(&[source]);
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+    }
+
+    #[test]
+    fn one_expression_marks_each_selected_extension_receiver_used() {
+        let source = "class Host {\n\
+                      \u{20} fun String.member(): Int = length\n\
+                      }\n\
+                      fun Host.outer(): Int {\n\
+                      \u{20} fun String.local(): Int = member()\n\
+                      \u{20} return \"\".local()\n\
+                      }";
+        let analysis = analyze_standalone_source_set(&[source]);
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+    }
+
+    #[test]
+    fn member_extension_destructuring_marks_dispatch_receiver_used() {
+        let source = "class Box(val value: Int)\n\
+                      class Host {\n\
+                      \u{20} operator fun Box.component1(): Int = value\n\
+                      }\n\
+                      fun Host.read(box: Box): Int {\n\
+                      \u{20} val (value) = box\n\
+                      \u{20} return value\n\
+                      }";
+        let analysis = analyze_standalone_source_set(&[source]);
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+    }
+
+    #[test]
+    fn unused_extension_receiver_inspections_ignore_nested_bindings_and_cover_full_type_spans() {
+        let source = "class Entry\n\
+                      class Outer { class Inner<T> }\n\
+                      fun <T, R> applyValue(value: T, block: (T) -> R): R = block(value)\n\
+                      fun Outer.Inner<Entry>?.dottedFunction(): Int = 1\n\
+                      val Outer.Inner<Entry>?.dottedProperty: Int get() = 1\n\
+                      fun (() -> Unit).parenthesizedFunction(): Int = 1\n\
+                      val (() -> Unit).parenthesizedProperty: Int get() = 1\n\
+                      fun String.lambdaBindingOnly(): Int = applyValue(1) { it }\n\
+                      fun String.catchBindingOnly(): Int = try { 1 } catch (error: Throwable) { error.hashCode() }";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let inspections = analysis.files[0]
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.kind == DiagnosticKind::Inspection)
+            .collect::<Vec<_>>();
+
+        assert_eq!(inspections.len(), 6, "{inspections:?}");
+        assert_eq!(
+            inspections
+                .iter()
+                .map(|diagnostic| {
+                    &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize]
+                })
+                .collect::<Vec<_>>(),
+            [
+                "Outer.Inner<Entry>?",
+                "Outer.Inner<Entry>?",
+                "(() -> Unit)",
+                "(() -> Unit)",
+                "String",
+                "String"
+            ]
+        );
     }
 
     #[test]

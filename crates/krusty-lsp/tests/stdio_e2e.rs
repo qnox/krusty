@@ -393,7 +393,20 @@ fn stdio_server_accepts_expected_type_selected_callable_reference_overloads() {
          fun valid(parser: JsonParser) { consume(parser::decode) }\n",
     );
 
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        diagnostics,
+        [(2, 4, 14), (3, 4, 10), (4, 4, 10),].map(|(line, start, end)| {
+            json!({
+                "range": {
+                    "start": {"line": line, "character": start},
+                    "end": {"line": line, "character": end}
+                },
+                "severity": 2,
+                "source": null,
+                "message": "Receiver parameter is never used"
+            })
+        })
+    );
 }
 
 #[test]
@@ -447,15 +460,35 @@ fn stdio_server_reports_official_callable_reference_ambiguity_on_the_name() {
 
     assert_eq!(
         diagnostics,
-        vec![json!({
-            "range": {
-                "start": {"line": 5, "character": 24},
-                "end": {"line": 5, "character": 30}
-            },
-            "severity": 1,
-            "source": "Kotlin",
-            "message": "Overload resolution ambiguity between candidates:\nfun Parser.decode(source: String): String\nfun Parser.decode(value: Int): String"
-        })]
+        vec![
+            json!({
+                "range": {
+                    "start": {"line": 5, "character": 24},
+                    "end": {"line": 5, "character": 30}
+                },
+                "severity": 1,
+                "source": "Kotlin",
+                "message": "Overload resolution ambiguity between candidates:\nfun Parser.decode(source: String): String\nfun Parser.decode(value: Int): String"
+            }),
+            json!({
+                "range": {
+                    "start": {"line": 1, "character": 4},
+                    "end": {"line": 1, "character": 10}
+                },
+                "severity": 2,
+                "source": null,
+                "message": "Receiver parameter is never used"
+            }),
+            json!({
+                "range": {
+                    "start": {"line": 2, "character": 4},
+                    "end": {"line": 2, "character": 10}
+                },
+                "severity": 2,
+                "source": null,
+                "message": "Receiver parameter is never used"
+            }),
+        ]
     );
 }
 
@@ -625,6 +658,28 @@ fn stdio_server_accepts_non_exhaustive_when_in_expected_unit_lambda() {
     );
 
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn stdio_server_reports_unused_extension_receiver_as_an_inspection() {
+    let diagnostics = diagnostics_after_open(
+        &[],
+        "file:///unused-receiver.kt",
+        "fun String.unused(value: Int): Int = value",
+    );
+
+    assert_eq!(
+        diagnostics,
+        vec![json!({
+            "range": {
+                "start": {"line": 0, "character": 4},
+                "end": {"line": 0, "character": 10}
+            },
+            "severity": 2,
+            "source": null,
+            "message": "Receiver parameter is never used"
+        })]
+    );
 }
 
 #[test]

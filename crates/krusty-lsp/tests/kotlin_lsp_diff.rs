@@ -713,6 +713,131 @@ fn cross_file_conflicting_overloads_match_official_kotlin_lsp() {
 }
 
 #[test]
+fn unused_extension_receiver_inspections_match_official_kotlin_lsp() {
+    let Ok(kotlin_lsp) = std::env::var("KRUSTY_KOTLIN_LSP") else {
+        eprintln!("skipping Kotlin LSP unused-receiver differential: set KRUSTY_KOTLIN_LSP");
+        return;
+    };
+    let _official_guard = OFFICIAL_DIFFERENTIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let project = TempProject::new("unused-receiver-diagnostic-differential");
+    let root = project.path();
+    let source_root = root.join("src/main/kotlin");
+    std::fs::create_dir_all(&source_root).unwrap();
+    std::fs::write(
+        root.join("settings.gradle"),
+        "rootProject.name = 'krusty-lsp-unused-receiver-diff'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("build.gradle"),
+        format!(
+            "plugins {{ id 'org.jetbrains.kotlin.jvm' version '{}' }}\n\
+             repositories {{ mavenCentral() }}\n",
+            reference_kotlin_version()
+        ),
+    )
+    .unwrap();
+    let source = "interface Parser\n\
+                  interface JsonParser : Parser\n\
+                  const val ANSWER = 42\n\
+                  class Used(val length: Int) { fun member(): Int = length }\n\
+                  class Mutable(var value: Int)\n\
+                  class Outer { class Inner<T> }\n\
+                  class Container(val answer: Int) {\n\
+                    class Nested\n\
+                    fun helper(): Int = 1\n\
+                    fun String.dispatchPropertyOnly(): Int = answer\n\
+                    fun String.dispatchCallOnly(): Int = helper()\n\
+                    fun String.dispatchClassifierOnly(): Any = Nested()\n\
+                  }\n\
+                  class Collision(val length: Int) {\n\
+                    fun String.extensionReceiverWins(): Int = length\n\
+                    fun String.labelledDispatchOnly(): Int = this@Collision.length\n\
+                  }\n\
+                  fun <T, R> applyValue(value: T, block: (T) -> R): R = block(value)\n\
+                  fun <T, R> T.scopeValue(block: T.() -> R): R = block()\n\
+                  fun JsonParser.decode(source: String): Any = source\n\
+                  fun Parser.decode(source: String): Any = source\n\
+                  fun Parser.decode(value: Int): Any = value\n\
+                  fun String.topLevelPropertyOnly(): Int = ANSWER\n\
+                  fun String.explicitUse(): Int = this.length\n\
+                  fun String.implicitPropertyUse(): Int = length\n\
+                  fun String.implicitCallUse(): String = trim()\n\
+                  fun Used.implicitCallableUse(): () -> Int = ::member\n\
+                  fun Used.explicitCallableUse(): () -> Int = this::member\n\
+                  fun Used.explicitPropertyCallableUse() = this::length\n\
+                  fun String.boundProperty() = this::length\n\
+                  fun String.implicitMethod(): () -> String = ::trim\n\
+                  fun String.implicitLambdaParameterOnly(): Int = applyValue(1) { it }\n\
+                  fun String.catchParameterOnly(): Int = try { 1 } catch (error: Throwable) { error.hashCode() }\n\
+                  fun String.nestedReceiverOnly(): Int = Used(1).run { length }\n\
+                  fun String.labelledOuterUse(): Int = 1.scopeValue { this@labelledOuterUse.length }\n\
+                  fun Mutable.assignmentUse() { value = 1 }\n\
+                  fun Mutable.incrementUse() { value++ }\n\
+                  context(s: String) fun consumeContext(): Int = s.length\n\
+                  fun String.contextArgumentUse(): Int = consumeContext()\n\
+                  fun localExtensions() {\n\
+                    fun String.localUnused(): Int = 1\n\
+                    fun String.localUsed(): Int = length\n\
+                  }\n\
+                  class Extensions {\n\
+                    fun String.memberUnused(value: Int): Int = value\n\
+                    fun String.memberUsed(): Int = length\n\
+                    companion object {\n\
+                      fun String.companionUnused(value: Int): Int = value\n\
+                      fun String.companionUsed(): Int = length\n\
+                    }\n\
+                  }\n\
+                  val String.unusedProperty: Int get() = 1\n\
+                  val String.usedProperty: Int get() = length\n\
+                  fun Outer.Inner<String>.dottedFunction(): Int = 1\n\
+                  val Outer.Inner<String>.dottedProperty: Int get() = 1\n\
+                  fun (() -> Unit).parenthesizedFunction(): Int = 1\n\
+                  val (() -> Unit).parenthesizedProperty: Int get() = 1\n";
+    let source_path = source_root.join("UnusedReceiver.kt");
+    std::fs::write(&source_path, source).unwrap();
+    let root_uri = format!("file://{}", root.display());
+    let uri = format!("file://{}", source_path.display());
+
+    let mut reference = LspProcess::spawn(&kotlin_lsp, &["--stdio"]);
+    reference.initialize(&root_uri);
+    reference.open_document(&uri, source);
+    let deadline = Instant::now() + ANALYSIS_TIMEOUT;
+    let expected = loop {
+        let diagnostics = normalized_diagnostics(reference.pull_diagnostics(&uri))
+            .into_iter()
+            .filter(|diagnostic| {
+                diagnostic.get("message").and_then(Value::as_str)
+                    == Some("Receiver parameter is never used")
+            })
+            .collect::<Vec<_>>();
+        if diagnostics.len() == 19 {
+            break diagnostics;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "official Kotlin LSP did not stabilize at nineteen unused-receiver diagnostics: {diagnostics:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    drop(reference);
+
+    let mut krusty = LspProcess::spawn(env!("CARGO_BIN_EXE_krusty-lsp"), &["--stdio", "-no-jdk"]);
+    krusty.initialize(&root_uri);
+    let actual = normalized_diagnostics(krusty.diagnostics_allow_empty(&uri, source))
+        .into_iter()
+        .filter(|diagnostic| {
+            diagnostic.get("message").and_then(Value::as_str)
+                == Some("Receiver parameter is never used")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn implementation_locations_match_official_kotlin_lsp_exactly() {
     let Ok(kotlin_lsp) = std::env::var("KRUSTY_KOTLIN_LSP") else {
         eprintln!("skipping Kotlin LSP implementation differential: set KRUSTY_KOTLIN_LSP");
