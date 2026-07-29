@@ -432,12 +432,10 @@ fn resolve_alias_highlight(
         return None;
     }
     let &(file_index, target) = aliases.get(alias)?;
-    let target = match contextual_source_classifier(&files[file_index].file, target, |candidate| {
+    let target = contextual_source_classifier(&files[file_index].file, target, |candidate| {
         classes.contains_key(candidate) || aliases.contains_key(candidate)
-    }) {
-        Ok(target) => target,
-        Err(()) => None,
-    };
+    })
+    .unwrap_or_default();
     let highlight = target.and_then(|target| {
         classes.get(&target).copied().or_else(|| {
             resolve_alias_highlight(&target, files, aliases, classes, resolved, visiting)
@@ -3198,20 +3196,6 @@ fn variable_modifier(is_var: bool) -> u16 {
 
 fn default_library_member_owner(symbols: &FrontendSymbols, owner: krusty::types::TypeName) -> bool {
     symbols.libraries.is_default_library_owner(owner)
-}
-
-fn terminal_alias_target<'a>(
-    mut target: &'a str,
-    aliases: &HashMap<&'a str, &'a str>,
-) -> Option<&'a str> {
-    let mut seen = std::collections::HashSet::new();
-    while let Some(next) = aliases.get(target).copied() {
-        if !seen.insert(target) {
-            return None;
-        }
-        target = next;
-    }
-    Some(target)
 }
 
 fn is_deprecated(annotations: &[String]) -> bool {

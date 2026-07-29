@@ -360,7 +360,7 @@ fn preserve_eof_whitespace(output: &mut String, source: &str, tokens: &[Token]) 
 }
 
 fn horizontal_suffix(text: &str) -> &str {
-    let prefix = text.trim_end_matches(|character| matches!(character, ' ' | '\t'));
+    let prefix = text.trim_end_matches([' ', '\t']);
     &text[prefix.len()..]
 }
 

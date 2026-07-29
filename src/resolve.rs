@@ -111,7 +111,7 @@ fn retain_conflict_candidate(
     retained_display_bytes: &mut usize,
     declaration: TopLevelFunctionConflictDecl,
 ) {
-    if candidates.len() >= MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES + 1
+    if candidates.len() > MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES
         || candidates.iter().any(|candidate| {
             candidate.file == declaration.file && candidate.declaration == declaration.declaration
         })
@@ -1345,6 +1345,10 @@ pub struct ContextPropSig {
 type GenericMemberValueOperandShape = (Option<Ty>, Vec<Ty>, Vec<u32>);
 type GenericMemberValueOperandSlots =
     HashMap<TypeName, HashMap<String, Vec<GenericMemberValueOperandShape>>>;
+
+type MappedNamedArgs = (Vec<ExprId>, Vec<Ty>, Vec<Option<ExprId>>);
+
+type MemberExtensionProperty = (Ty, bool, Visibility, TypeName, ImplicitReceiver);
 
 pub struct SymbolTable {
     pub funs: HashMap<String, Vec<Signature>>,
@@ -5526,10 +5530,8 @@ pub fn collect_signatures_with_cp(
                     private_by_file: group
                         .files
                         .iter()
-                        .filter_map(|(&file, state)| {
-                            (!state.private_candidates.is_empty())
-                                .then(|| (file, state.private_candidates.clone()))
-                        })
+                        .filter(|&(_, state)| !state.private_candidates.is_empty())
+                        .map(|(&file, state)| (file, state.private_candidates.clone()))
                         .collect(),
                 },
             )
@@ -5668,7 +5670,7 @@ fn report_conflicting_top_level_overloads(
                 message.push_str(CONFLICTING_OVERLOAD_PREFIX);
                 for display in displays {
                     message.push('\n');
-                    message.push_str(&display);
+                    message.push_str(display);
                 }
                 message
             };
@@ -10325,6 +10327,15 @@ struct DiagnosticFunction<'a> {
     source_display: Option<String>,
 }
 
+struct InapplicableTopLevelCall<'a> {
+    call: ExprId,
+    name: &'a str,
+    args: &'a [ExprId],
+    argument_names: Option<&'a [Option<String>]>,
+    trailing_lambda: bool,
+    mapping_error_reported: bool,
+}
+
 struct ImplicitPropertyWriteResolution {
     receiver: Ty,
     property_ty: Ty,
@@ -12773,14 +12784,17 @@ impl<'a> Checker<'a> {
 
     fn report_inapplicable_module_top_level_candidates(
         &mut self,
-        call: ExprId,
-        name: &str,
+        site: InapplicableTopLevelCall<'_>,
         candidates: Vec<crate::libraries::FunctionInfo>,
-        args: &[ExprId],
-        argument_names: Option<&[Option<String>]>,
-        trailing_lambda: bool,
-        mapping_error_reported: bool,
     ) -> bool {
+        let InapplicableTopLevelCall {
+            call,
+            name,
+            args,
+            argument_names,
+            trailing_lambda,
+            mapping_error_reported,
+        } = site;
         let candidates = candidates
             .into_iter()
             .filter(|candidate| {
@@ -12913,7 +12927,7 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         names: &[Option<String>],
         trailing_lambda: bool,
-    ) -> Result<Option<(Vec<ExprId>, Vec<Ty>, Vec<Option<ExprId>>)>, ()> {
+    ) -> Result<Option<MappedNamedArgs>, ()> {
         let diagnostic_candidates = candidates.clone();
         let overloads = crate::libraries::FunctionSet {
             overloads: candidates,
@@ -12986,13 +13000,15 @@ impl<'a> Checker<'a> {
                 error,
             );
             self.report_inapplicable_module_top_level_candidates(
-                call,
-                name,
+                InapplicableTopLevelCall {
+                    call,
+                    name,
+                    args,
+                    argument_names: Some(names),
+                    trailing_lambda,
+                    mapping_error_reported: true,
+                },
                 diagnostic_candidates,
-                args,
-                Some(names),
-                trailing_lambda,
-                true,
             );
             return Err(());
         }
@@ -21652,7 +21668,7 @@ impl<'a> Checker<'a> {
         &self,
         extension_receiver: Ty,
         name: &str,
-    ) -> Result<Option<(Ty, bool, Visibility, TypeName, ImplicitReceiver)>, ()> {
+    ) -> Result<Option<MemberExtensionProperty>, ()> {
         let mut candidates = Vec::new();
         for (dispatch_rank, dispatch_receiver) in self.implicit_receivers().into_iter().enumerate()
         {
@@ -23653,13 +23669,18 @@ impl<'a> Checker<'a> {
                                 .resolver_in_scope(&pkg_scope)
                                 .top_level_candidates(&name);
                             if self.report_inapplicable_module_top_level_candidates(
-                                call,
-                                &name,
+                                InapplicableTopLevelCall {
+                                    call,
+                                    name: &name,
+                                    args,
+                                    argument_names: arg_names.as_deref(),
+                                    trailing_lambda: self
+                                        .file
+                                        .call_has_trailing_lambda
+                                        .contains(&call.0),
+                                    mapping_error_reported: false,
+                                },
                                 candidates,
-                                args,
-                                arg_names.as_deref(),
-                                self.file.call_has_trailing_lambda.contains(&call.0),
-                                false,
                             ) {
                                 return Ty::Error;
                             }
@@ -26982,13 +27003,15 @@ impl<'a> Checker<'a> {
                                     self.report_call_arg_mapping_error(call, args, error);
                                     let candidates = self.resolver().top_level_candidates(&fname);
                                     self.report_inapplicable_module_top_level_candidates(
-                                        call,
-                                        &fname,
+                                        InapplicableTopLevelCall {
+                                            call,
+                                            name: &fname,
+                                            args,
+                                            argument_names: arg_names.as_deref(),
+                                            trailing_lambda,
+                                            mapping_error_reported: true,
+                                        },
                                         candidates,
-                                        args,
-                                        arg_names.as_deref(),
-                                        trailing_lambda,
-                                        true,
                                     );
                                     return self.finish_script_host_candidate(
                                         call,
@@ -27451,13 +27474,15 @@ impl<'a> Checker<'a> {
                 }
                 let candidates = self.resolver().top_level_candidates(&fname);
                 if self.report_inapplicable_module_top_level_candidates(
-                    call,
-                    &fname,
+                    InapplicableTopLevelCall {
+                        call,
+                        name: &fname,
+                        args,
+                        argument_names: arg_names.as_deref(),
+                        trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
+                        mapping_error_reported: false,
+                    },
                     candidates,
-                    args,
-                    arg_names.as_deref(),
-                    self.file.call_has_trailing_lambda.contains(&call.0),
-                    false,
                 ) {
                     return Ty::Error;
                 }
