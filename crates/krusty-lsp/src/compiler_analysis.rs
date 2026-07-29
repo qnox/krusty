@@ -137,7 +137,7 @@ pub fn analyze_source_inputs_prefix_with_features(
     project_features: &LangFeatures,
 ) -> SourceSetAnalysis {
     let mut diags = DiagSink::new();
-    let analysis = frontend::analyze_source_set_prefix_with_features(
+    let analysis = frontend::analyze_source_set_prefix_with_features_trimmed(
         inputs,
         checked_count,
         inferred_count,
@@ -375,6 +375,72 @@ mod tests {
             analysis.files[1].types.is_none(),
             "support declarations must not diagnose dependency bodies as part of the consumer module"
         );
+    }
+
+    #[test]
+    fn support_files_release_body_arenas_after_analysis() {
+        let sources = [
+            "package fixture\nfun use(): Int = inferred() + declared()",
+            "package fixture\nfun inferred() = compute()\nprivate fun compute(): Int { val x = 20\n return x + 1 }",
+            "package fixture\nfun declared(): Int { val y = 1\n return y }\n\
+             fun host() { class Hidden(val local: Int = 9) }\n\
+             class Visible(val value: Int = 7)",
+        ];
+        let inputs = sources.map(SourceInput::kotlin);
+        let analysis = analyze_source_inputs_prefix_with_features(
+            &inputs,
+            1,
+            2,
+            Box::new(krusty::libraries::EmptySymbolSource),
+            &LangFeatures::new(),
+        );
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+        assert!(
+            !analysis.files[0].file.expr_arena.is_empty(),
+            "open documents keep their full AST"
+        );
+        for support in [1, 2] {
+            assert!(
+                analysis.files[support].file.expr_arena.is_empty()
+                    && analysis.files[support].file.stmt_arena.is_empty(),
+                "support file {support} must release its body arenas once analysis is done with them"
+            );
+            assert!(
+                !analysis.files[support].file.decl_arena.is_empty(),
+                "support file {support} keeps declarations for navigation"
+            );
+        }
+
+        let completion = CompletionSymbols::from_source_set(&analysis.files);
+        let completion_labels = analysis.files[0]
+            .scoped_completion_symbols(sources[0], &completion)
+            .into_iter()
+            .map(|symbol| symbol.label)
+            .collect::<Vec<_>>();
+        assert!(completion_labels.iter().any(|label| label == "Visible"));
+        assert!(!completion_labels.iter().any(|label| label == "Hidden"));
+
+        let signatures =
+            SignatureHelpSymbols::from_source_set(&sources, &analysis.files, &analysis.symbols);
+        let mut signature_labels = Vec::new();
+        for group in 0.. {
+            let candidates = signatures.group(group);
+            if candidates.is_empty() {
+                break;
+            }
+            signature_labels.extend(candidates.iter().map(|candidate| candidate.label.as_str()));
+        }
+        assert!(signature_labels
+            .iter()
+            .any(|label| label.starts_with("Visible(") && label.contains("value: Int = 7")));
+        assert!(!signature_labels
+            .iter()
+            .any(|label| label.starts_with("Hidden(")));
     }
 
     #[test]

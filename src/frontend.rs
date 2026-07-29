@@ -375,6 +375,27 @@ pub fn analyze_source_set_prefix_with_features(
     )
 }
 
+/// Analyze an LSP source set and release support-file bodies after their final use.
+pub fn analyze_source_set_prefix_with_features_trimmed(
+    sources: &[SourceInput<'_>],
+    checked_count: usize,
+    inferred_count: usize,
+    platform: Box<dyn SemanticPlatform>,
+    project_features: &LangFeatures,
+    diags: &mut DiagSink,
+) -> SourceSetAnalysis {
+    analyze_source_set_impl(
+        sources,
+        checked_count,
+        inferred_count,
+        platform,
+        project_features,
+        |_, _| {},
+        diags,
+        true,
+    )
+}
+
 pub fn analyze_source_set_with_features_and_prepare<F>(
     sources: &[SourceInput<'_>],
     platform: Box<dyn SemanticPlatform>,
@@ -404,6 +425,32 @@ fn analyze_source_set_with_features_and_prepare_prefix<F>(
     project_features: &LangFeatures,
     prepare_symbols: F,
     diags: &mut DiagSink,
+) -> SourceSetAnalysis
+where
+    F: FnOnce(&[File], &mut FrontendSymbols),
+{
+    analyze_source_set_impl(
+        sources,
+        checked_count,
+        inferred_count,
+        platform,
+        project_features,
+        prepare_symbols,
+        diags,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_source_set_impl<F>(
+    sources: &[SourceInput<'_>],
+    checked_count: usize,
+    inferred_count: usize,
+    platform: Box<dyn SemanticPlatform>,
+    project_features: &LangFeatures,
+    prepare_symbols: F,
+    diags: &mut DiagSink,
+    trim_support_bodies: bool,
 ) -> SourceSetAnalysis
 where
     F: FnOnce(&[File], &mut FrontendSymbols),
@@ -443,16 +490,22 @@ where
     } else {
         platform
     };
-    let mut symbols = collect_signatures_with_cp(&files[..inferred_count], platform, diags);
+    let inferred_end = inferred_count.min(files.len());
+    if trim_support_bodies {
+        for file in &mut files[inferred_end..] {
+            file.release_body_arenas();
+        }
+    }
+    let mut symbols = collect_signatures_with_cp(&files[..inferred_end], platform, diags);
     prepare_symbols(&files, &mut symbols);
-    let types = check_source_set_skipping(
-        &files,
-        &mut symbols,
-        &parse_errors,
-        checked_count,
-        inferred_count,
-        diags,
-    );
+    preinfer_module_returns(&files[..inferred_end], &mut symbols, diags);
+    if trim_support_bodies {
+        for file in &mut files[checked_count.min(inferred_end)..inferred_end] {
+            file.release_body_arenas();
+        }
+    }
+    let types =
+        check_source_set_skipping(&files, &mut symbols, &parse_errors, checked_count, diags);
     SourceSetAnalysis {
         files,
         symbols,
@@ -465,10 +518,8 @@ fn check_source_set_skipping(
     symbols: &mut FrontendSymbols,
     skip: &[bool],
     checked_count: usize,
-    inferred_count: usize,
     diags: &mut DiagSink,
 ) -> Vec<Option<FrontendTypeInfo>> {
-    preinfer_module_returns(&files[..inferred_count.min(files.len())], symbols, diags);
     files
         .iter()
         .enumerate()
@@ -494,7 +545,8 @@ pub fn check_source_set(
     symbols: &mut FrontendSymbols,
     diags: &mut DiagSink,
 ) -> Vec<Option<FrontendTypeInfo>> {
-    check_source_set_skipping(files, symbols, &[], files.len(), files.len(), diags)
+    preinfer_module_returns(files, symbols, diags);
+    check_source_set_skipping(files, symbols, &[], files.len(), diags)
 }
 
 /// Analyze a source set using only per-source feature directives.
