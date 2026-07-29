@@ -1540,6 +1540,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   progress traffic. Project warnings and errors continue to use the existing `ProjectFeedback`
   message path.
 
+- **An `internal` classpath classifier is not accessible from user source.** The symbol resolver's
+  receiver-accessibility gate reads the classifier's `@Metadata` visibility
+  (`classifier_visibility`); a non-public classpath class resolves neither as a constructor call nor
+  as a member/property receiver from another module. kotlinc parity: kotlinc 2.4.0 rejects
+  `PluginGeneratedSerialDescriptor("Foo", null, 2)` against kotlinx-serialization-core ≥ 1.9.0
+  ("cannot access … it is internal"), where 1.9.0 made that class `internal` — earlier cores had it
+  public, which is why the ctor-null-arg conformance test originally used it. krusty rejects it too
+  (`tests/serialization_conformance.rs::internal_classpath_class_is_not_constructible`, version-gated
+  on the located core jar); the null-arg ctor coverage moved to the public
+  `SerializationException(String?, Throwable?)` (`::classpath_ctor_with_null_arg_resolves`).
+  Deliberate scope cut: krusty reports the site as unresolved rather than kotlinc's dedicated
+  "cannot access" wording, and a bare type-position reference to an internal classpath classifier
+  (e.g. a parameter type) is not yet rejected — only use-sites that go through the member/constructor
+  resolver are. The serialization plugin is unaffected either way: its generated `$serializer`
+  references `PluginGeneratedSerialDescriptor` directly in IR with JVM descriptors (JVM-public).
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

@@ -1481,6 +1481,11 @@ impl<'a> SymbolResolver<'a> {
 
     fn classifier_accessible(&self, internal: TypeName) -> bool {
         let visibility = self.src.classifier_visibility(internal);
+        crate::trace_compiler!(
+            "resolve",
+            "classifier_accessible {} visibility={visibility:?}",
+            internal.render()
+        );
         if visibility == Some(crate::types::Visibility::Public)
             || (visibility.is_none()
                 && self

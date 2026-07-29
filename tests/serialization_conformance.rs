@@ -223,7 +223,9 @@ fn binary_compiles_serializable_and_emits_serializer() {
     );
 }
 
-/// A null argument selects the matching public classpath constructor overload.
+/// A null argument selects the matching public classpath constructor overload. (This originally
+/// exercised `PluginGeneratedSerialDescriptor(name, null, count)`, but serialization-core 1.9.0 made
+/// that class `internal` — see `internal_classpath_class_is_not_constructible`.)
 #[test]
 fn classpath_ctor_with_null_arg_resolves() {
     let Some((core, _json, std)) = runtime_jars() else {
@@ -262,6 +264,72 @@ fn classpath_ctor_with_null_arg_resolves() {
     assert!(
         out.join("Gap2Kt.class").exists(),
         "SerializationException(message, null) must compile; stderr:\n{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
+/// An `internal` classpath classifier is NOT accessible from another module's source — kotlinc 2.4.0
+/// rejects `PluginGeneratedSerialDescriptor(name, null, count)` against serialization-core ≥ 1.9.0
+/// ("cannot access 'class PluginGeneratedSerialDescriptor': it is internal") because 1.9.0 made the
+/// class `internal`; krusty must reject it too (docs/SPEC.md § classpath visibility). The plugin's
+/// generated `$serializer` is unaffected: it references the class straight from IR with JVM
+/// descriptors, where the class is JVM-public. Version-gated — against a pre-1.9.0 core jar (class
+/// still public) the program legitimately compiles, and the test skips.
+#[test]
+fn internal_classpath_class_is_not_constructible() {
+    let Some((core, _json, std)) = runtime_jars() else {
+        eprintln!("skipping: serialization runtime jars not in local cache");
+        return;
+    };
+    let internal_since_190 = core
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_prefix("kotlinx-serialization-core-jvm-"))
+        .and_then(|v| {
+            let mut it = v.trim_end_matches(".jar").split('.');
+            Some((
+                it.next()?.parse::<u32>().ok()?,
+                it.next()?.parse::<u32>().ok()?,
+            ))
+        })
+        .is_some_and(|(major, minor)| (major, minor) >= (1, 9));
+    if !internal_since_190 {
+        eprintln!("skipping: core jar predates 1.9.0 (class was still public): {core:?}");
+        return;
+    }
+    let Some(jimage) = jimage() else {
+        eprintln!("skipping: no JAVA_HOME/lib/modules");
+        return;
+    };
+    let bin = krusty_binary();
+    if !bin.exists() {
+        eprintln!("skipping: krusty binary not built");
+        return;
+    }
+    let out = std::env::temp_dir().join(format!("krusty_ctorinternal_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    let src = out.join("GapInt.kt");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(
+        &src,
+        "import kotlinx.serialization.internal.PluginGeneratedSerialDescriptor\n\
+         fun build(): Int {\n\
+         \x20   val d = PluginGeneratedSerialDescriptor(\"Foo\", null, 2)\n\
+         \x20   d.addElement(\"a\", false)\n\
+         \x20   return 0\n\
+         }\n",
+    )
+    .unwrap();
+    let cp = format!("{}:{}:{}", core.display(), std.display(), jimage.display());
+    let o = Command::new(&bin)
+        .args(["-cp", &cp, "-d"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("run krusty");
+    assert!(
+        !o.status.success() && !out.join("GapIntKt.class").exists(),
+        "constructing the internal PluginGeneratedSerialDescriptor must be rejected (kotlinc parity); stderr:\n{}",
         String::from_utf8_lossy(&o.stderr)
     );
 }
