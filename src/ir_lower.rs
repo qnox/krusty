@@ -4394,6 +4394,11 @@ pub fn lower_file_at_reporting(
         })
         .collect();
     for (stmt_id, f) in &local_funs {
+        // A `tailrec` LOCAL function isn't loop-transformed (only top-level functions are) —
+        // skip the file rather than emit stack-overflowing recursion, mirroring the member case.
+        if f.is_tailrec() && !matches!(f.body, ast::FunBody::None) {
+            return None;
+        }
         let Some(&fid) = lo.local_fun_ids.get(stmt_id) else {
             continue;
         };

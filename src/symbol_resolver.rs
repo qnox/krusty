@@ -2303,9 +2303,9 @@ impl<'a> SymbolResolver<'a> {
             // An element-form vararg call reaching the `$default` (`split('.')`): tell the
             // lowerer which element type to PACK before the mask machinery — without it the
             // loose element lowers straight into the array slot (a VerifyError).
-            if let Some(elem) = o
-                .call_sig
-                .vararg_index
+            if let Some(elem) = (!o.flags.suspend)
+                .then(|| o.call_sig.vararg_index)
+                .flatten()
                 .and_then(|index| vparams.get(index))
                 .and_then(|param| param.array_elem())
             {
@@ -2428,7 +2428,7 @@ impl<'a> SymbolResolver<'a> {
             // (`split('.')` against `split(vararg delimiters: Char, …)`), pair the synthetic
             // by parameter identity — re-fitting the caller's elements against the ARRAY
             // parameter below would reject it (Char does not fit CharArray).
-            if base.call_sig.vararg && *params == base.callable.params {
+            if base.call_sig.vararg && !base.flags.suspend && *params == base.callable.params {
                 return Some(o.callable.clone());
             }
             let real_count = params.len() - 1;
@@ -4076,6 +4076,11 @@ fn select_overload(
     // first (`Char` argument selects the `Char` vararg over the `String` one, mirroring
     // most-specific selection), then platform/source-assignable elements.
     let vararg_applicable = |o: &FunctionInfo, lp: &[Ty], exact: bool| -> bool {
+        // A suspend callee's element-form vararg call would route the $default emission
+        // outside the CPS pass's coverage — skip (unresolved), never ICE.
+        if o.flags.suspend {
+            return false;
+        }
         let Some(vararg_index) = o.call_sig.vararg_index else {
             return false;
         };

@@ -4882,6 +4882,15 @@ impl<'a> Parser<'a> {
                 let start = self.tok().span;
                 if kind == TokenKind::KwFun {
                     let mods = self.parse_member_decl_prefix();
+                    // A local `suspend fun` needs its own CPS lowering, which krusty does not
+                    // model for `Stmt::LocalFun` — reject cleanly (skip, never a wrong body or
+                    // a backend ICE). Scripts keep their historical acceptance.
+                    if !self.is_script && mods.iter().any(|modifier| modifier == "suspend") {
+                        self.diags.error(
+                            start,
+                            "krusty: local 'suspend' functions are not supported".to_string(),
+                        );
+                    }
                     let mut function = self.parse_fun(
                         mods.iter().any(|modifier| modifier == "inline"),
                         mods.iter().any(|modifier| modifier == "final"),
