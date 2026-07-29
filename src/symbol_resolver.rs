@@ -1014,11 +1014,14 @@ fn best_companion_overload<'a>(
     src: &dyn SymbolSource,
     candidates: impl Iterator<Item = &'a LibraryMember> + Clone,
     name: &str,
-    args: &[Ty],
-    integer_literals: &[bool],
-    lambda_literals: &[bool],
+    args: CallArgs<'_>,
     type_args: &[Ty],
 ) -> Option<&'a LibraryMember> {
+    let CallArgs {
+        types: args,
+        integer_literals,
+        lambda_literals,
+    } = args;
     debug_assert!(integer_literals.is_empty() || integer_literals.len() == args.len());
     let adapts = |p: &Ty, a: &Ty, i: usize| {
         integer_literal_adapts(*p, *a, integer_literals.get(i).copied().unwrap_or(false))
@@ -3124,11 +3127,8 @@ fn resolve_companion_name(
     type_args: &[Ty],
     member_access: Option<&MemberAccess<'_>>,
 ) -> Option<LibraryMember> {
-    let CallArgs {
-        types: args,
-        integer_literals,
-        lambda_literals,
-    } = args;
+    let call_args = args;
+    let args = call_args.types;
     let t = lib.resolve_type_name(internal)?;
     best_companion_overload(
         lib,
@@ -3141,9 +3141,7 @@ fn resolve_companion_name(
             )
         }),
         name,
-        args,
-        integer_literals,
-        lambda_literals,
+        call_args,
         type_args,
     )
     .cloned()
@@ -5075,9 +5073,7 @@ mod tests {
             &source,
             [&broad, &specific, &specific_duplicate].into_iter(),
             "make",
-            &[Ty::obj("demo/Leaf")],
-            &[],
-            &[],
+            CallArgs::new(&[Ty::obj("demo/Leaf")], &[], &[]),
             &[],
         )
         .expect("the most specific source supertype should be selected");
@@ -5090,9 +5086,7 @@ mod tests {
             &source,
             [&left, &right].into_iter(),
             "make",
-            &[Ty::obj("demo/Leaf"), Ty::obj("demo/Leaf")],
-            &[],
-            &[],
+            CallArgs::new(&[Ty::obj("demo/Leaf"), Ty::obj("demo/Leaf")], &[], &[]),
             &[],
         )
         .is_none());
@@ -5125,9 +5119,7 @@ mod tests {
             &source,
             [&default_broad, &default_specific].into_iter(),
             "make",
-            &[Ty::obj("demo/Leaf")],
-            &[],
-            &[],
+            CallArgs::new(&[Ty::obj("demo/Leaf")], &[], &[]),
             &[],
         )
         .expect("the defaulted source-supertype overload should resolve");
@@ -5140,9 +5132,7 @@ mod tests {
             &source,
             [&vararg_broad, &vararg_specific].into_iter(),
             "make",
-            &[Ty::obj("demo/Leaf")],
-            &[],
-            &[],
+            CallArgs::new(&[Ty::obj("demo/Leaf")], &[], &[]),
             &[],
         )
         .expect("the vararg source-supertype overload should resolve");
