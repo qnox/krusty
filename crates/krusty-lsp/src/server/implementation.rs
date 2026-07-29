@@ -17,8 +17,8 @@ use serde_json::{json, Value};
 use super::super::{
     CompletionIndex, DefinitionIndex, DocumentAnalysis, DocumentSymbolIndex, FoldingRangeIndex,
     HoverIndex, LibraryDefinitionIndex, MaterializedDefinition, SemanticTokenIndex,
-    SemanticTokenRange, SignatureHelpIndex, MAX_RETAINED_ANALYSIS_BYTES, SEMANTIC_TOKEN_MODIFIERS,
-    SEMANTIC_TOKEN_TYPES,
+    SemanticTokenRange, SignatureHelpIndex, WorkspaceSymbolIndex, MAX_RETAINED_ANALYSIS_BYTES,
+    SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
 };
 use crate::compiler_analysis::LibraryRef;
 use crate::server::engine::{
@@ -773,6 +773,7 @@ const DIAGNOSTIC_REFRESH_REQUEST_ID: &str = "krusty/diagnosticRefresh";
 pub struct LspService<B> {
     documents: HashMap<String, OpenDocument>,
     source_set: Vec<(String, String)>,
+    workspace_symbols: WorkspaceSymbolIndex,
     backend: B,
     analysis_dirty: bool,
     analysis_retry_at: Option<Instant>,
@@ -810,6 +811,7 @@ where
         Self {
             documents: HashMap::new(),
             source_set: Vec::new(),
+            workspace_symbols: WorkspaceSymbolIndex::default(),
             backend,
             analysis_dirty: false,
             analysis_retry_at: None,
@@ -954,6 +956,7 @@ where
         let mut diagnostic_budget = DiagnosticBudget::default();
         if batch.analyses.len() != batch.analyzed.len() {
             self.source_set.clear();
+            self.workspace_symbols = WorkspaceSymbolIndex::default();
             for uri in &uris {
                 let open = self
                     .documents
@@ -995,7 +998,11 @@ where
         let push = !self.client_pulls_diagnostics;
         let mut messages = Vec::with_capacity(batch.analyses.len());
         let mut analyzed_documents = Vec::with_capacity(batch.analyzed.len());
-        for (analysis, (uri, _analyzed_version)) in batch.analyses.into_iter().zip(batch.analyzed) {
+        let mut workspace_symbols = WorkspaceSymbolIndex::default();
+        for (mut analysis, (uri, _analyzed_version)) in
+            batch.analyses.into_iter().zip(batch.analyzed)
+        {
+            workspace_symbols.merge_from(std::mem::take(&mut analysis.workspace_symbols));
             let open = self
                 .documents
                 .get_mut(&uri)
@@ -1028,6 +1035,7 @@ where
             .into_iter()
             .chain(batch.support_documents)
             .collect();
+        self.workspace_symbols = workspace_symbols;
         messages.extend(self.diagnostic_refresh());
         if resubmit {
             self.analysis_dirty = true;
@@ -1039,6 +1047,7 @@ where
 
     fn schedule_analysis_retry(&mut self, uris: &[String]) {
         self.source_set.clear();
+        self.workspace_symbols = WorkspaceSymbolIndex::default();
         self.analysis_dirty = false;
         for uri in uris {
             if let Some(open) = self.documents.get_mut(uri) {
@@ -1127,13 +1136,21 @@ where
                 None => Dispatch::none(),
             };
         }
-        if let Some(uri) = exact_analysis_request_uri(&method, &params) {
-            if self.document_waits_for_analysis(uri) {
-                let Some(id) = id else {
-                    return Dispatch::none();
-                };
-                return self.queue_exact_analysis_request(id, method, params);
-            }
+        let waits_for_analysis = if method == "workspace/symbol" {
+            (!self.documents.is_empty() || !self.source_set.is_empty())
+                && (self.analysis_dirty
+                    || self.analysis_in_flight
+                    || self.resubmit_pending
+                    || self.analysis_retry_at.is_some())
+        } else {
+            exact_analysis_request_uri(&method, &params)
+                .is_some_and(|uri| self.document_waits_for_analysis(uri))
+        };
+        if waits_for_analysis {
+            let Some(id) = id else {
+                return Dispatch::none();
+            };
+            return self.queue_exact_analysis_request(id, method, params);
         }
 
         match method.as_str() {
@@ -1166,6 +1183,10 @@ where
                             "referencesProvider": true,
                             "renameProvider": true,
                             "documentSymbolProvider": true,
+                            "workspaceSymbolProvider": {
+                                "resolveProvider": false,
+                                "workDoneProgress": true,
+                            },
                             "foldingRangeProvider": true,
                             "diagnosticProvider": {
                                 "interFileDependencies": true,
@@ -1231,6 +1252,7 @@ where
             "textDocument/references" => self.references(id, params),
             "textDocument/rename" => self.rename(id, params),
             "textDocument/documentSymbol" => self.document_symbols(id, params),
+            "workspace/symbol" => self.workspace_symbols(id, params),
             "textDocument/foldingRange" => self.folding_ranges(id, params),
             "textDocument/diagnostic" => self.pull_diagnostics(id, params),
             "textDocument/completion" => self.completion(id, params),
@@ -1638,6 +1660,22 @@ where
         Dispatch::messages(vec![rpc_result(
             id,
             Value::Array(open.document_symbols.encode()),
+        )])
+    }
+
+    fn workspace_symbols(&self, id: Option<Value>, params: Value) -> Dispatch {
+        let Some(id) = id else {
+            return Dispatch::none();
+        };
+        let Ok(params) = serde_json::from_value::<WorkspaceSymbolParams>(params) else {
+            return invalid_params(Some(id));
+        };
+        Dispatch::messages(vec![rpc_result(
+            id,
+            Value::Array(
+                self.workspace_symbols
+                    .encode(&params.query, &self.source_set),
+            ),
         )])
     }
 
@@ -2344,6 +2382,11 @@ struct TextDocumentIdentifier {
 #[serde(rename_all = "camelCase")]
 struct DocumentSymbolParams {
     text_document: TextDocumentIdentifier,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceSymbolParams {
+    query: String,
 }
 
 #[derive(Deserialize)]
@@ -3057,9 +3100,10 @@ fn exact_analysis_request_uri<'a>(method: &str, params: &'a Value) -> Option<&'a
 
 fn exact_analysis_response_bytes(method: &str) -> usize {
     match method {
-        "textDocument/rename" | "textDocument/documentSymbol" | "textDocument/foldingRange" => {
-            BOUNDED_EXACT_RESPONSE_BYTES
-        }
+        "textDocument/rename"
+        | "textDocument/documentSymbol"
+        | "textDocument/foldingRange"
+        | "workspace/symbol" => BOUNDED_EXACT_RESPONSE_BYTES,
         _ => MAX_RETAINED_ANALYSIS_BYTES,
     }
 }
@@ -4238,6 +4282,111 @@ mod tests {
         assert!(messages[1]["result"]["data"]
             .as_array()
             .is_some_and(|data| !data.is_empty()));
+    }
+
+    #[test]
+    fn workspace_symbols_wait_for_analysis_and_include_unopened_support_sources() {
+        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut service = LspService::with_backend(RecordingBackend {
+            ready: true,
+            submitted,
+        });
+        service.force_initialized_for_test();
+        let open_uri = "file:///Open.kt";
+        let support_uri = "file:///Support.kt";
+        let open_source = "package demo\nclass Open\n";
+        let support_source = "package demo\nclass UnopenedSupport\n";
+        service.open_document_for_test(open_uri, open_source, 1);
+        service.mark_analysis_dirty_for_test();
+        let _job = service
+            .dispatch_pending_analysis()
+            .expect("analysis starts for the open document");
+
+        let pending = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "workspace-1",
+            "method": "workspace/symbol",
+            "params": {"query": "UnopenedSupport"}
+        }));
+        assert!(
+            pending.messages.is_empty(),
+            "workspace symbols must not observe the empty pre-analysis snapshot"
+        );
+
+        let mut analyses = crate::analysis::analyze_for_lsp(&[open_source, support_source]);
+        analyses.truncate(1);
+        let messages = service.apply_analysis_batch(AnalysisBatch {
+            analyzed: vec![(open_uri.into(), 1)],
+            analyses,
+            support_documents: vec![(support_uri.into(), support_source.into())],
+            pending: false,
+        });
+
+        assert_eq!(messages.len(), 2, "one publish plus one symbol response");
+        assert_eq!(
+            messages[1]["result"],
+            json!([{
+                "name": "UnopenedSupport",
+                "kind": 5,
+                "containerName": "demo",
+                "location": {
+                    "uri": support_uri,
+                    "range": {
+                        "start": {"line": 1, "character": 6},
+                        "end": {"line": 1, "character": 21},
+                    },
+                },
+            }])
+        );
+    }
+
+    #[test]
+    fn workspace_symbols_do_not_observe_the_snapshot_after_the_last_document_closes() {
+        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut service = LspService::with_backend(RecordingBackend {
+            ready: true,
+            submitted,
+        });
+        service.force_initialized_for_test();
+        let uri = "file:///Closed.kt";
+        let source = "class ClosedMarker\n";
+        service.open_document_for_test(uri, source, 1);
+        let _ = service.apply_analysis_batch(AnalysisBatch {
+            analyzed: vec![(uri.into(), 1)],
+            analyses: crate::analysis::analyze_for_lsp(&[source]),
+            support_documents: Vec::new(),
+            pending: false,
+        });
+
+        let _ = service.handle_deferred(json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didClose",
+            "params": {"textDocument": {"uri": uri}}
+        }));
+        let pending = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "workspace-after-close",
+            "method": "workspace/symbol",
+            "params": {"query": "ClosedMarker"}
+        }));
+        assert!(
+            pending.messages.is_empty(),
+            "the request must wait rather than observe the closed snapshot"
+        );
+
+        let job = service
+            .dispatch_pending_analysis()
+            .expect("closing the final document schedules an empty replacement snapshot");
+        assert!(job.documents.is_empty());
+        let messages = service.apply_analysis_batch(AnalysisBatch {
+            analyzed: Vec::new(),
+            analyses: Vec::new(),
+            support_documents: Vec::new(),
+            pending: false,
+        });
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["id"], "workspace-after-close");
+        assert_eq!(messages[0]["result"], json!([]));
     }
 
     #[test]

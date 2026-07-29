@@ -257,6 +257,14 @@ impl LspProcess {
             response["result"]["capabilities"]["implementationProvider"], true,
             "LSP must advertise the official server's implementation contract"
         );
+        assert_eq!(
+            response["result"]["capabilities"]["workspaceSymbolProvider"],
+            json!({
+                "resolveProvider": false,
+                "workDoneProgress": true
+            }),
+            "LSP must advertise the official server's workspace-symbol contract"
+        );
         self.notify("initialized", json!({}));
         SemanticLegend {
             types: response["result"]["capabilities"]["semanticTokensProvider"]["legend"]
@@ -537,6 +545,21 @@ impl LspProcess {
             "isIncomplete": is_incomplete,
             "items": items,
         })
+    }
+
+    fn workspace_symbols(&mut self, query: &str) -> Value {
+        let request_id = self.next_request_id();
+        let result = self
+            .request(request_id, "workspace/symbol", json!({"query": query}))
+            .get("result")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let Some(mut symbols) = result.as_array().cloned() else {
+            return result;
+        };
+        symbols.sort_by_key(Value::to_string);
+        symbols.dedup();
+        Value::Array(symbols)
     }
 }
 
@@ -992,6 +1015,138 @@ fn implementation_locations_match_official_kotlin_lsp_exactly() {
         actual_leaf, expected_leaf,
         "negative implementation mismatch"
     );
+}
+
+#[test]
+fn workspace_symbols_match_official_kotlin_lsp() {
+    let Ok(kotlin_lsp) = std::env::var("KRUSTY_KOTLIN_LSP") else {
+        eprintln!("skipping Kotlin LSP workspace-symbol differential: set KRUSTY_KOTLIN_LSP");
+        return;
+    };
+    let _official_guard = OFFICIAL_DIFFERENTIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let project = TempProject::new("workspace-symbol-differential");
+    let root = project.path();
+    let source_root = root.join("src/main/kotlin");
+    std::fs::create_dir_all(&source_root).unwrap();
+    std::fs::write(
+        root.join("settings.gradle"),
+        "rootProject.name = 'krusty-lsp-workspace-symbol-diff'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("build.gradle"),
+        format!(
+            "plugins {{ id 'org.jetbrains.kotlin.jvm' version '{}' }}\n\
+             repositories {{ mavenCentral() }}\n",
+            reference_kotlin_version()
+        ),
+    )
+    .unwrap();
+    let source = "package workspaceparity\n\
+                  class KrustyWorkspaceParityBox {\n\
+                  \u{20}\u{20}fun nestedNeedle(): Int = 1\n\
+                  }\n\
+                  fun krustyWorkspaceParityNeedle(): Int = 2\n\
+                  val krustyWorkspaceParityValue: Int = 3\n\
+                  typealias KrustyWorkspaceParityAlias = String\n\
+                  @Deprecated(\"old\")\n\
+                  class KrustyWorkspaceDeprecatedMarker\n";
+    let warmup = "package workspaceparity\nfun warmup(): String = 1\n";
+    let unopened_source = "class KrustyUnopenedWorkspaceMarker\n";
+    let source_path = source_root.join("WorkspaceSymbols.kt");
+    let warmup_path = source_root.join("Warmup.kt");
+    std::fs::write(&source_path, source).unwrap();
+    std::fs::write(&warmup_path, warmup).unwrap();
+    std::fs::write(
+        source_root.join("UnopenedWorkspaceSymbols.kt"),
+        unopened_source,
+    )
+    .unwrap();
+    let root_uri = format!("file://{}", root.display());
+    let source_uri = format!("file://{}", source_path.display());
+    let warmup_uri = format!("file://{}", warmup_path.display());
+
+    let mut reference = LspProcess::spawn(&kotlin_lsp, &["--stdio"]);
+    reference.initialize(&root_uri);
+    let _ = reference.diagnostics(&warmup_uri, warmup);
+    let expected = [
+        (
+            "class",
+            reference.workspace_symbols("KrustyWorkspaceParityBox"),
+        ),
+        (
+            "top-level function",
+            reference.workspace_symbols("krustyWorkspaceParityNeedle"),
+        ),
+        (
+            "member function",
+            reference.workspace_symbols("nestedNeedle"),
+        ),
+        (
+            "top-level property",
+            reference.workspace_symbols("krustyWorkspaceParityValue"),
+        ),
+        (
+            "type alias",
+            reference.workspace_symbols("KrustyWorkspaceParityAlias"),
+        ),
+        (
+            "unopened default-package class",
+            reference.workspace_symbols("KrustyUnopenedWorkspaceMarker"),
+        ),
+        (
+            "deprecated class",
+            reference.workspace_symbols("KrustyWorkspaceDeprecatedMarker"),
+        ),
+        (
+            "case-folded class",
+            reference.workspace_symbols("krustyworkspaceparitybox"),
+        ),
+        ("camel-case class", reference.workspace_symbols("KWPB")),
+    ];
+    drop(reference);
+
+    let mut krusty = LspProcess::spawn(env!("CARGO_BIN_EXE_krusty-lsp"), &["--stdio", "-no-jdk"]);
+    krusty.initialize(&root_uri);
+    krusty.open_document(&warmup_uri, warmup);
+    krusty.open_document(&source_uri, source);
+    let actual = [
+        (
+            "class",
+            krusty.workspace_symbols("KrustyWorkspaceParityBox"),
+        ),
+        (
+            "top-level function",
+            krusty.workspace_symbols("krustyWorkspaceParityNeedle"),
+        ),
+        ("member function", krusty.workspace_symbols("nestedNeedle")),
+        (
+            "top-level property",
+            krusty.workspace_symbols("krustyWorkspaceParityValue"),
+        ),
+        (
+            "type alias",
+            krusty.workspace_symbols("KrustyWorkspaceParityAlias"),
+        ),
+        (
+            "unopened default-package class",
+            krusty.workspace_symbols("KrustyUnopenedWorkspaceMarker"),
+        ),
+        (
+            "deprecated class",
+            krusty.workspace_symbols("KrustyWorkspaceDeprecatedMarker"),
+        ),
+        (
+            "case-folded class",
+            krusty.workspace_symbols("krustyworkspaceparitybox"),
+        ),
+        ("camel-case class", krusty.workspace_symbols("KWPB")),
+    ];
+
+    assert_eq!(actual, expected, "workspace-symbol mismatches");
 }
 
 #[test]

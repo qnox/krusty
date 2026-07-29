@@ -422,6 +422,7 @@ impl krusty_lsp::Analysis for WorkerHost {
         let mut analyses = (0..documents.len())
             .map(|_| DocumentAnalysis::empty())
             .collect::<Vec<_>>();
+        let mut workspace_symbols = krusty_lsp::WorkspaceSymbolIndex::default();
         self.analysis_pending = false;
 
         let mut retained_support_bytes = 0usize;
@@ -594,6 +595,10 @@ impl krusty_lsp::Analysis for WorkerHost {
                 for analysis in &mut group_analyses {
                     analysis.remap_navigation_files(&group.navigation_file_remaps);
                 }
+                let mut workspace_symbols = krusty_lsp::WorkspaceSymbolIndex::default();
+                for analysis in &mut group_analyses {
+                    workspace_symbols.merge_from(std::mem::take(&mut analysis.workspace_symbols));
+                }
                 let implementation_relations = group_analyses
                     .iter_mut()
                     .flat_map(|analysis| std::mem::take(&mut analysis.implementation_relations))
@@ -605,6 +610,7 @@ impl krusty_lsp::Analysis for WorkerHost {
                     .collect::<Vec<_>>();
                 if let Some(first) = selected.first_mut() {
                     first.implementation_relations = implementation_relations;
+                    first.workspace_symbols = workspace_symbols;
                 }
                 if cacheable {
                     self.analysis_cache
@@ -636,9 +642,15 @@ impl krusty_lsp::Analysis for WorkerHost {
                 .map(DocumentAnalysis::retained_wire_bytes)
                 .sum::<usize>();
             remaining_analysis_bytes = remaining_analysis_bytes.saturating_sub(selected_bytes);
+            for analysis in &mut selected {
+                workspace_symbols.merge_from(std::mem::take(&mut analysis.workspace_symbols));
+            }
             for (&index, analysis) in group.document_indices.iter().zip(selected) {
                 analyses[index] = analysis;
             }
+        }
+        if let Some(first) = analyses.first_mut() {
+            first.workspace_symbols = workspace_symbols;
         }
         krusty_lsp::merge_cross_document_implementations(&mut analyses);
         krusty_lsp::retain_analysis_wire_budget(

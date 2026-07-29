@@ -26,6 +26,7 @@ use crate::{
     finalize_navigation, read_framed, write_framed, AnalysisBudgets, CompletionIndex,
     DefinitionIndex, DocumentAnalysis, DocumentSymbolIndex, FoldingRangeIndex, HoverIndex,
     LibraryDefinitionIndex, SemanticTokenIndex, SignatureHelpIndex, SourceSetIndexes,
+    WorkspaceSymbolIndex,
 };
 
 pub const DEFAULT_ANALYSES_PER_WORKER: usize = 64;
@@ -106,6 +107,8 @@ struct AnalysisResponse {
     #[serde(default)]
     library_definitions: LibraryDefinitionIndex,
     document_symbols: DocumentSymbolIndex,
+    #[serde(default)]
+    workspace_symbols: WorkspaceSymbolIndex,
     folding_ranges: FoldingRangeIndex,
     #[serde(default)]
     implementation_relations: Vec<[u32; 6]>,
@@ -141,6 +144,7 @@ impl From<DocumentAnalysis> for AnalysisResponse {
             implementations: analysis.implementations,
             library_definitions: analysis.library_definitions,
             document_symbols: analysis.document_symbols,
+            workspace_symbols: analysis.workspace_symbols,
             folding_ranges: analysis.folding_ranges,
             implementation_relations: analysis.implementation_relations,
         }
@@ -180,6 +184,7 @@ impl AnalysisResponse {
             implementations: self.implementations,
             library_definitions: self.library_definitions,
             document_symbols: self.document_symbols,
+            workspace_symbols: self.workspace_symbols,
             folding_ranges: self.folding_ranges,
             implementation_relations: self.implementation_relations,
         }
@@ -836,6 +841,7 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             CompletionSymbols::from_source_set_prefix(&source_set.files, inferred_count);
         let signature_help_symbols =
             SignatureHelpSymbols::from_source_set(&sources, &source_set.files, &source_set.symbols);
+        let workspace_symbols = WorkspaceSymbolIndex::from_source_set(&sources, &source_set.files);
         let indexes = SourceSetIndexes::new(
             &source_set.symbols,
             &highlight_symbols,
@@ -870,6 +876,9 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             &definition_symbols,
             &mut budgets,
         );
+        if let Some(first) = analyses.first_mut() {
+            first.workspace_symbols = workspace_symbols;
+        }
         let mut analyses = analyses
             .into_iter()
             .map(AnalysisResponse::from)
@@ -1027,6 +1036,7 @@ mod tests {
             implementations: DefinitionIndex::wire_saturation_fixture(implementations),
             library_definitions: LibraryDefinitionIndex::default(),
             document_symbols: DocumentSymbolIndex::default(),
+            workspace_symbols: WorkspaceSymbolIndex::default(),
             folding_ranges: FoldingRangeIndex::default(),
             implementation_relations: Vec::new(),
         }
