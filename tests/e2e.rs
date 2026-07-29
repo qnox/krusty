@@ -502,6 +502,8 @@ mod interface_delegation_e2e;
 mod interface_delegation_expr_e2e;
 #[path = "interface_supertype_members_e2e.rs"]
 mod interface_supertype_members_e2e;
+#[path = "internal_classpath_access_e2e.rs"]
+mod internal_classpath_access_e2e;
 #[path = "invoke_operator_extension_e2e.rs"]
 mod invoke_operator_extension_e2e;
 #[path = "ir_edge_coverage_e2e.rs"]

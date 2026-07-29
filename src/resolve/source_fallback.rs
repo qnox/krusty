@@ -277,6 +277,17 @@ impl SymbolSource for SourceFallbackPlatform {
             .or_else(|| self.platform.classifier_visibility(internal))
     }
 
+    fn classifier_access(
+        &self,
+        internal: TypeName,
+    ) -> Option<crate::symbol_source::ClassifierAccess> {
+        if self.source().classifier_visibility(internal).is_some() {
+            self.source().classifier_access(internal)
+        } else {
+            self.platform.classifier_access(internal)
+        }
+    }
+
     fn classifier_accessible_from_package(
         &self,
         internal: TypeName,
