@@ -705,6 +705,7 @@ type GenericMemberPlan = (GenericMethod, HashMap<String, Ty>, Vec<Vec<Ty>>);
 
 struct ModuleMemberLambdaShape {
     param_types: Vec<Option<Vec<Ty>>>,
+    signatures: Vec<Option<&'static crate::types::FnSig>>,
     receivers: Vec<Option<Ty>>,
     is_inline: bool,
 }
@@ -5657,6 +5658,13 @@ fn module_member_lambda_shape(
                     .or_else(|| module_member_lambda_params(member, parameter))
             })
             .collect(),
+        signatures: indices
+            .iter()
+            .map(|&parameter| match member.params.get(parameter) {
+                Some(Ty::Fun(signature)) => Some(*signature),
+                _ => None,
+            })
+            .collect(),
         receivers: indices
             .iter()
             .map(|&parameter| {
@@ -10268,6 +10276,12 @@ struct MemberExtensionLambdaPlan {
     score: (usize, std::cmp::Reverse<usize>, bool),
     param_types: Vec<Vec<Ty>>,
     receivers: Vec<Option<Ty>>,
+}
+
+#[derive(Clone, Copy)]
+struct LambdaCheckMode {
+    suspend: bool,
+    coerce_return_to_unit: bool,
 }
 
 struct Checker<'a> {
@@ -15968,6 +15982,26 @@ impl<'a> Checker<'a> {
                         } else {
                             receivers.and_then(|items| items.get(i)).copied().flatten()
                         };
+                        if module_pt.is_some() {
+                            if let Some(signature) = module_shape
+                                .as_ref()
+                                .and_then(|shape| shape.signatures.get(i))
+                                .copied()
+                                .flatten()
+                            {
+                                let is_inline =
+                                    module_shape.as_ref().is_some_and(|shape| shape.is_inline);
+                                return self.with_lambda_mutation(is_inline, |checker| {
+                                    checker.check_lambda_with_function_type_and_params_labeled(
+                                        x,
+                                        signature,
+                                        pt,
+                                        lambda_receiver.is_some(),
+                                        Some(name),
+                                    )
+                                });
+                            }
+                        }
                         if let Some(lambda_receiver) = lambda_receiver {
                             self.check_lambda_with_receiver_labeled(
                                 x,
@@ -20342,9 +20376,26 @@ impl<'a> Checker<'a> {
         has_receiver: bool,
         label: Option<&str>,
     ) -> Ty {
-        let context_count = signature.context_count.min(signature.params.len());
-        let context_types = &signature.params[..context_count];
-        let remaining = &signature.params[context_count..];
+        self.check_lambda_with_function_type_and_params_labeled(
+            e,
+            signature,
+            &signature.params,
+            has_receiver,
+            label,
+        )
+    }
+
+    fn check_lambda_with_function_type_and_params_labeled(
+        &mut self,
+        e: ExprId,
+        signature: &'static crate::types::FnSig,
+        specialized_params: &[Ty],
+        has_receiver: bool,
+        label: Option<&str>,
+    ) -> Ty {
+        let context_count = signature.context_count.min(specialized_params.len());
+        let context_types = &specialized_params[..context_count];
+        let remaining = &specialized_params[context_count..];
         let (receiver, value_types) = if has_receiver || signature.has_receiver {
             match remaining.split_first() {
                 Some((&receiver, value_types)) => (Some(receiver), value_types),
@@ -20354,16 +20405,19 @@ impl<'a> Checker<'a> {
             (None, remaining)
         };
         if !context_types.is_empty() || receiver.is_some() {
-            return self.check_lambda_with_implicit_receivers_labeled(
+            return self.check_lambda_with_implicit_receivers_and_return_labeled(
                 e,
                 context_types,
                 receiver,
                 value_types,
-                signature.suspend,
                 label,
+                LambdaCheckMode {
+                    suspend: signature.suspend,
+                    coerce_return_to_unit: signature.ret == Ty::Unit,
+                },
             );
         }
-        let ty = self.check_lambda_with_types(e, value_types);
+        let ty = self.check_lambda_with_types_and_return(e, value_types, signature.ret == Ty::Unit);
         if !signature.suspend {
             return ty;
         }
@@ -20402,6 +20456,17 @@ impl<'a> Checker<'a> {
         self.expr_expected(expression, expected)
     }
 
+    fn check_lambda_body(&mut self, body: ExprId, coerce_return_to_unit: bool) -> Ty {
+        if !coerce_return_to_unit {
+            return self.expr(body);
+        }
+        match self.expr_statement(body) {
+            Ty::Nothing => Ty::Nothing,
+            Ty::Error => Ty::Error,
+            _ => Ty::Unit,
+        }
+    }
+
     fn check_lambda_with_implicit_receivers_labeled(
         &mut self,
         e: ExprId,
@@ -20410,6 +20475,28 @@ impl<'a> Checker<'a> {
         value_types: &[Ty],
         suspend: bool,
         label: Option<&str>,
+    ) -> Ty {
+        self.check_lambda_with_implicit_receivers_and_return_labeled(
+            e,
+            context_types,
+            extension_receiver,
+            value_types,
+            label,
+            LambdaCheckMode {
+                suspend,
+                coerce_return_to_unit: false,
+            },
+        )
+    }
+
+    fn check_lambda_with_implicit_receivers_and_return_labeled(
+        &mut self,
+        e: ExprId,
+        context_types: &[Ty],
+        extension_receiver: Option<Ty>,
+        value_types: &[Ty],
+        label: Option<&str>,
+        mode: LambdaCheckMode,
     ) -> Ty {
         if self.allow_lambda_mutation {
             self.mark_inline_lambda(e);
@@ -20459,7 +20546,7 @@ impl<'a> Checker<'a> {
                 self.declare(name, pty, false);
             }
             let saved_field = self.field_ty.take();
-            let bret = self.expr(body);
+            let bret = self.check_lambda_body(body, mode.coerce_return_to_unit);
             self.field_ty = saved_field;
             self.pop_scope();
             self.this_labels.truncate(labels_depth);
@@ -20472,7 +20559,7 @@ impl<'a> Checker<'a> {
                 bret,
                 context_types.len(),
                 extension_receiver.is_some(),
-                suspend,
+                mode.suspend,
             );
             return self.set(e, ty);
         }
@@ -20480,6 +20567,15 @@ impl<'a> Checker<'a> {
     }
 
     fn check_lambda_with_types(&mut self, e: ExprId, param_types: &[Ty]) -> Ty {
+        self.check_lambda_with_types_and_return(e, param_types, false)
+    }
+
+    fn check_lambda_with_types_and_return(
+        &mut self,
+        e: ExprId,
+        param_types: &[Ty],
+        coerce_return_to_unit: bool,
+    ) -> Ty {
         if self.allow_lambda_mutation {
             self.mark_inline_lambda(e);
         }
@@ -20498,7 +20594,7 @@ impl<'a> Checker<'a> {
             }
             // `field` cannot be read from inside a lambda closure (see the `Expr::Lambda` arm).
             let saved_field = self.field_ty.take();
-            let bret = self.expr(body);
+            let bret = self.check_lambda_body(body, coerce_return_to_unit);
             self.field_ty = saved_field;
             self.pop_scope();
             // Carry the declared parameter types and the inferred body return type.
@@ -24009,12 +24105,27 @@ impl<'a> Checker<'a> {
                                     .and_then(|shape| shape.param_types.get(i))
                                     .and_then(Option::as_deref)
                                 {
-                                    if let Some(receiver) = module_lambda_shape
+                                    let receiver = module_lambda_shape
                                         .as_ref()
                                         .and_then(|shape| shape.receivers.get(i))
                                         .copied()
+                                        .flatten();
+                                    if let Some(signature) = module_lambda_shape
+                                        .as_ref()
+                                        .and_then(|shape| shape.signatures.get(i))
+                                        .copied()
                                         .flatten()
                                     {
+                                        return c
+                                            .check_lambda_with_function_type_and_params_labeled(
+                                                a,
+                                                signature,
+                                                pt,
+                                                receiver.is_some(),
+                                                call_fn_name.as_deref(),
+                                            );
+                                    }
+                                    if let Some(receiver) = receiver {
                                         return c.check_lambda_with_receiver_labeled(
                                             a,
                                             receiver,
@@ -25515,7 +25626,7 @@ impl<'a> Checker<'a> {
                             }
                         }
                         if matches!(self.file.expr(a), Expr::Lambda { .. }) {
-                            if let Some((pt, receiver, is_inline)) =
+                            if let Some((pt, receiver, signature, is_inline)) =
                                 ordinary_this_member_lambda_shape
                                     .as_ref()
                                     .and_then(|shape| {
@@ -25524,12 +25635,24 @@ impl<'a> Checker<'a> {
                                                 (
                                                     types.clone(),
                                                     shape.receivers.get(i).copied().flatten(),
+                                                    shape.signatures.get(i).copied().flatten(),
                                                     shape.is_inline,
                                                 )
                                             },
                                         )
                                     })
                             {
+                                if let Some(signature) = signature {
+                                    return self.with_lambda_mutation(is_inline, |checker| {
+                                        checker.check_lambda_with_function_type_and_params_labeled(
+                                            a,
+                                            signature,
+                                            &pt,
+                                            receiver.is_some(),
+                                            call_fn_name.as_deref(),
+                                        )
+                                    });
+                                }
                                 if let Some(receiver) = receiver {
                                     return self.with_lambda_mutation(is_inline, |checker| {
                                         checker.check_lambda_with_receiver_labeled(
@@ -28169,6 +28292,105 @@ mod tests {
     fn ok(src: &str) {
         let (errs, _) = check(src);
         assert!(errs.is_empty(), "unexpected errors: {errs:?}");
+    }
+
+    #[test]
+    fn expected_unit_lambda_checks_trailing_when_as_a_statement() {
+        ok("fun consumeUnit(block: () -> Unit) { block() }\n\
+            fun statementWhen(value: Int) {\n\
+                consumeUnit { when (value) { 2 -> println(value) } }\n\
+            }\n\
+            fun consumeReceiver(block: String.() -> Unit) { \"value\".block() }\n\
+            fun receiverStatementWhen(value: Int) {\n\
+                consumeReceiver { when (value) { 2 -> println(length) } }\n\
+            }");
+    }
+
+    #[test]
+    fn expected_unit_member_lambda_checks_trailing_when_as_a_statement() {
+        ok("class Consumer {\n\
+                fun consume(block: () -> Unit) { block() }\n\
+                fun consumeReceiver(block: String.() -> Unit) { \"value\".block() }\n\
+                fun consumeSuspend(block: suspend () -> Unit) {}\n\
+            }\n\
+            fun memberStatementWhen(consumer: Consumer, value: Int) {\n\
+                consumer.consume { when (value) { 2 -> println(value) } }\n\
+                consumer.consumeReceiver { when (value) { 2 -> println(length) } }\n\
+                consumer.consumeSuspend { when (value) { 2 -> println(value) } }\n\
+            }");
+    }
+
+    #[test]
+    fn expected_unit_context_member_lambda_checks_trailing_when_as_a_statement() {
+        let errors = check_with_detected_features(
+            "// LANGUAGE: +ContextParameters\n\
+             class Consumer {\n\
+                 fun consumeContext(block: context(String) () -> Unit) {}\n\
+             }\n\
+             fun memberStatementWhen(consumer: Consumer, value: Int) {\n\
+                 consumer.consumeContext { when (value) { 2 -> println(length) } }\n\
+             }",
+        );
+
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[test]
+    fn expected_unit_safe_call_member_lambda_checks_trailing_when_as_a_statement() {
+        ok("class Consumer {\n\
+                fun consume(block: () -> Unit) { block() }\n\
+                fun consumeReceiver(block: String.() -> Unit) { \"value\".block() }\n\
+            }\n\
+            fun safeMemberStatementWhen(consumer: Consumer?, value: Int) {\n\
+                consumer?.consume { when (value) { 2 -> println(value) } }\n\
+                consumer?.consumeReceiver { when (value) { 2 -> println(length) } }\n\
+            }");
+    }
+
+    #[test]
+    fn non_unit_lambda_still_requires_an_exhaustive_trailing_when() {
+        let (errors, _) = check(
+            "fun consumeInt(block: () -> Int): Int = block()\n\
+             fun valueWhen(value: Int): Int =\n\
+                 consumeInt { when (value) { 2 -> value } }",
+        );
+
+        assert_eq!(
+            errors,
+            ["'when' expression must be exhaustive. Add an 'else' branch."]
+        );
+    }
+
+    #[test]
+    fn non_unit_member_lambda_still_requires_an_exhaustive_trailing_when() {
+        let (errors, _) = check(
+            "class Consumer {\n\
+                 fun consumeInt(block: () -> Int): Int = block()\n\
+             }\n\
+             fun valueWhen(consumer: Consumer, value: Int): Int =\n\
+                 consumer.consumeInt { when (value) { 2 -> value } }",
+        );
+
+        assert_eq!(
+            errors,
+            ["'when' expression must be exhaustive. Add an 'else' branch."]
+        );
+    }
+
+    #[test]
+    fn non_unit_safe_call_member_lambda_still_requires_an_exhaustive_trailing_when() {
+        let (errors, _) = check(
+            "class Consumer {\n\
+                 fun consumeInt(block: () -> Int): Int = block()\n\
+             }\n\
+             fun valueWhen(consumer: Consumer?, value: Int): Int? =\n\
+                 consumer?.consumeInt { when (value) { 2 -> value } }",
+        );
+
+        assert_eq!(
+            errors,
+            ["'when' expression must be exhaustive. Add an 'else' branch."]
+        );
     }
 
     #[test]

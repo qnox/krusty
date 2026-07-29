@@ -31,3 +31,14 @@ fun w(x: Int) { when (x) { 1 -> r = \"a\"; 2 -> r = \"b\"; else -> throw Asserti
 fun box(): String { w(1); val a = r; w(2); return if (a == \"a\" && r == \"b\") \"OK\" else \"fail\" }\n";
     common::expect_box_ok_with_stdlib(SRC, "Main");
 }
+
+#[test]
+fn expected_unit_lambda_discards_a_non_exhaustive_trailing_when() {
+    const SRC: &str = "var result = \"fail\"\n\
+fun consumeUnit(block: () -> Unit) { block() }\n\
+fun box(): String {\n\
+    consumeUnit { when (2) { 2 -> { result = \"OK\"; 42 } } }\n\
+    return result\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "Main");
+}
