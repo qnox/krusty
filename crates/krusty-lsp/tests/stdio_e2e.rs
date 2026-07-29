@@ -696,6 +696,80 @@ fn stdio_server_indexes_unopened_project_sources() {
 }
 
 #[test]
+fn stdio_server_reports_official_cross_file_conflicting_overloads() {
+    let project = TempProject::new("conflicting-overloads");
+    project.write(
+        "src/OtherOne.kt",
+        "fun namedPair(left: Int, right: String): String = right\n",
+    );
+    project.write(
+        "src/OtherTwo.kt",
+        "fun namedPair(left: Int, right: String): String = right\n",
+    );
+    let target = "fun namedPair(left: Int, right: String): Int = left\n\
+                  fun missingNamedArgument(): Int = namedPair(left = 1)\n";
+    let target_uri = project.uri("src/Target.kt");
+    let root_uri: String = url::Url::from_directory_path(project.path())
+        .expect("temporary project root is a file URI")
+        .into();
+
+    let mut server = ServerProcess::start(&[]);
+    server.request(1, "initialize", json!({"rootUri": root_uri}));
+    server.notify("initialized", json!({}));
+    server.receive_until(|message| message["method"] == "client/registerCapability");
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": target_uri,
+                "languageId": "kotlin",
+                "version": 1,
+                "text": target
+            }
+        }),
+    );
+
+    assert_eq!(
+        server.await_diagnostics(&target_uri),
+        vec![
+            json!({
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 44}
+                },
+                "severity": 1,
+                "source": "Kotlin",
+                "message": "Conflicting overloads:\n\
+                            fun namedPair(left: Int, right: String): String\n\
+                            fun namedPair(left: Int, right: String): String"
+            }),
+            json!({
+                "range": {
+                    "start": {"line": 1, "character": 34},
+                    "end": {"line": 1, "character": 43}
+                },
+                "severity": 1,
+                "source": "Kotlin",
+                "message": "No value passed for parameter 'right'."
+            }),
+            json!({
+                "range": {
+                    "start": {"line": 1, "character": 34},
+                    "end": {"line": 1, "character": 43}
+                },
+                "severity": 1,
+                "source": "Kotlin",
+                "message": "None of the following candidates is applicable:\n\n\
+                            fun namedPair(left: Int, right: String): Int\n\
+                            fun namedPair(left: Int, right: String): String\n\
+                            fun namedPair(left: Int, right: String): String"
+            }),
+        ]
+    );
+    server.shutdown_and_exit();
+}
+
+#[test]
 fn stdio_server_merges_navigation_across_dependent_modules() {
     let project = TempProject::new("module-navigation");
     project.write(

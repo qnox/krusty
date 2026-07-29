@@ -7310,17 +7310,37 @@ impl<'a> Lower<'a> {
             return None;
         }
         let mut a = Vec::new();
+        let mut arg_prelude = Vec::new();
         if c.default_call {
-            // A `name$default` FQ call: fill the provided prefix, place a TRAILING LAMBDA in the last slot
-            // (middle parameters default) or append trailing placeholders, then an `int` bit-mask (a bit
-            // per omitted parameter) and a `null` marker. Mirrors the bare-name top-level `$default` path.
-            self.append_default_call_args(&mut a, &c.params, args, has_trailing_lambda)?;
-        } else {
-            if c.params.len() != args.len() {
-                return None;
+            if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
+                let (slot_args, prelude) =
+                    self.lower_call_slot_args_source_order(args, &slots, &c.params, true)?;
+                a = slot_args;
+                arg_prelude = prelude;
+                self.append_default_masks_marker(
+                    &mut a,
+                    c.params.len(),
+                    slots
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, slot)| slot.is_none().then_some(index)),
+                );
+            } else {
+                self.append_default_call_args(&mut a, &c.params, args, has_trailing_lambda)?;
             }
-            for (i, &arg) in args.iter().enumerate() {
-                a.push(self.lower_arg(arg, &ty_to_ir(c.params[i]))?);
+        } else {
+            if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
+                let (slot_args, prelude) =
+                    self.lower_call_slot_args_source_order(args, &slots, &c.params, false)?;
+                a = slot_args;
+                arg_prelude = prelude;
+            } else {
+                if c.params.len() != args.len() {
+                    return None;
+                }
+                for (i, &arg) in args.iter().enumerate() {
+                    a.push(self.lower_arg(arg, &ty_to_ir(c.params[i]))?);
+                }
             }
         }
         let call_inline = c.inline.can_inline();
@@ -7329,6 +7349,11 @@ impl<'a> Lower<'a> {
         let erased_generic_ret = physical_ret.is_erased_top() && logical_ret != physical_ret;
         let suspend = c.suspend;
         let call = self.emit_library_static_call(c, a, suspend);
+        let call = if arg_prelude.is_empty() {
+            call
+        } else {
+            self.wrap_arg_prelude(call, arg_prelude)
+        };
         // Inline calls and non-inline FQ calls with an ERASED generic return (`Object`) both need the
         // substituted static result type the checker inferred, mirroring the bare-name path.
         Some(if call_inline || erased_generic_ret {

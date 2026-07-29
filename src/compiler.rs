@@ -149,6 +149,92 @@ mod tests {
     }
 
     #[test]
+    fn oversized_conflicting_overload_signature_still_blocks_lowering() {
+        let parameter = "value".repeat(14 * 1024);
+        let source = format!("fun crowded({parameter}: Int): Int = 0");
+        let mut diags = DiagSink::new();
+        let files = vec![
+            parse_source_with_detected_features(&source, &mut diags),
+            parse_source_with_detected_features(&source, &mut diags),
+        ];
+        let stems = vec!["First".to_string(), "Second".to_string()];
+        let mut syms = collect_signatures(&files, &mut diags);
+        let outputs = compile(
+            &files,
+            &stems,
+            &mut syms,
+            &RecordingBackend,
+            "main",
+            &mut diags,
+        );
+
+        assert!(diags.has_errors());
+        assert!(diags
+            .diags
+            .iter()
+            .any(|diagnostic| diagnostic.msg.starts_with("conflicting overloads:")));
+        assert!(outputs.is_empty());
+    }
+
+    #[test]
+    fn same_file_private_and_public_signature_conflict_blocks_lowering() {
+        let source = "fun crowded(value: Int): Int = value\n\
+                      private fun crowded(value: Int): Int = value";
+        let mut diags = DiagSink::new();
+        let files = vec![parse_source_with_detected_features(source, &mut diags)];
+        let stems = vec!["Main".to_string()];
+        let mut syms = collect_signatures(&files, &mut diags);
+        let outputs = compile(
+            &files,
+            &stems,
+            &mut syms,
+            &RecordingBackend,
+            "main",
+            &mut diags,
+        );
+
+        assert!(diags.has_errors());
+        assert_eq!(
+            diags
+                .diags
+                .iter()
+                .filter(|diagnostic| diagnostic.msg.starts_with("conflicting overloads:"))
+                .count(),
+            2
+        );
+        assert!(outputs.is_empty());
+    }
+
+    #[test]
+    fn cross_file_private_context_function_cannot_reach_lowering() {
+        let mut diags = DiagSink::new();
+        let files = vec![
+            parse_source_with_detected_features(
+                "class Scope\n\
+                 fun use(scope: Scope): Int = with(scope) { hidden(1) }",
+                &mut diags,
+            ),
+            parse_source_with_detected_features(
+                "private context(scope: Scope) fun hidden(value: Int): Int = value",
+                &mut diags,
+            ),
+        ];
+        let stems = vec!["Caller".to_string(), "Hidden".to_string()];
+        let mut syms = collect_signatures(&files, &mut diags);
+        let outputs = compile(
+            &files,
+            &stems,
+            &mut syms,
+            &RecordingBackend,
+            "main",
+            &mut diags,
+        );
+
+        assert!(diags.has_errors());
+        assert!(outputs.is_empty());
+    }
+
+    #[test]
     fn compiler_does_not_emit_kotlin_scripts() {
         let source = "val value = 1";
         let mut diags = DiagSink::new();

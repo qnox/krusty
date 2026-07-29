@@ -1718,6 +1718,12 @@ impl<'a> SymbolResolver<'a> {
         self.pick_top_level(name, &fs, args, integer_literals, type_args, Some(expected))
     }
 
+    pub(crate) fn top_level_candidates(&self, name: &str) -> Vec<FunctionInfo> {
+        function_set_from_symbols(self.symbols_in_scope(name))
+            .into_top_level()
+            .collect()
+    }
+
     /// Infer expected argument types from the selected extension's generic bounds.
     pub(crate) fn extension_argument_expectations(
         &self,

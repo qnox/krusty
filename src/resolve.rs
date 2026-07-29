@@ -8,6 +8,7 @@
 //! concat if either side is `String`; `if` with both branches needs a common type.
 
 use std::collections::HashMap;
+use std::fmt::{self, Write};
 
 use crate::ast::*;
 use crate::diag::{DiagSink, DiagnosticKind, Span};
@@ -22,6 +23,125 @@ use crate::types::{existing_type_name, type_name, Ty, TypeName, Visibility};
 
 mod source_fallback;
 pub(crate) use source_fallback::SourceFallbackPlatform;
+
+const MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES: usize = 64;
+const MAX_OVERLOAD_DIAGNOSTIC_BYTES: usize = 64 * 1024;
+const MAX_CONFLICTING_OVERLOAD_DIAGNOSTIC_BYTES: usize = 4 * 1024 * 1024;
+const CONFLICTING_OVERLOAD_PREFIX: &str = "conflicting overloads:";
+const INAPPLICABLE_OVERLOAD_PREFIX: &str = "none of the following candidates is applicable:";
+type TopLevelFunctionConflictKey = (String, String, Vec<ErasedTypeKey>);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct TopLevelFunctionConflictDecl {
+    file: u32,
+    declaration: DeclId,
+}
+
+#[derive(Clone)]
+struct TopLevelFunctionConflictCandidate {
+    file: u32,
+    declaration: DeclId,
+    display: String,
+}
+
+#[derive(Default)]
+struct TopLevelFunctionConflictGroup {
+    public_candidates: Vec<TopLevelFunctionConflictCandidate>,
+    public_count: usize,
+    retained_public_count: usize,
+    first_public: Option<TopLevelFunctionConflictDecl>,
+    conflicts: bool,
+    files: HashMap<u32, TopLevelFunctionConflictFile>,
+}
+
+#[derive(Default)]
+struct TopLevelFunctionConflictFile {
+    declaration_count: usize,
+    private_count: usize,
+    retained_private_count: usize,
+    first_public: Option<TopLevelFunctionConflictDecl>,
+    first_private: Option<TopLevelFunctionConflictDecl>,
+    private_candidates: Vec<TopLevelFunctionConflictCandidate>,
+}
+
+#[derive(Default)]
+struct TopLevelFunctionConflictGroups {
+    indexes: HashMap<TopLevelFunctionConflictKey, usize>,
+    groups: Vec<(TopLevelFunctionConflictKey, TopLevelFunctionConflictGroup)>,
+}
+
+impl TopLevelFunctionConflictGroups {
+    fn get_or_insert(&mut self, key: TopLevelFunctionConflictKey) -> usize {
+        if let Some(&index) = self.indexes.get(&key) {
+            return index;
+        }
+        let index = self.groups.len();
+        self.indexes.insert(key.clone(), index);
+        self.groups
+            .push((key, TopLevelFunctionConflictGroup::default()));
+        index
+    }
+}
+
+#[derive(Clone, Default)]
+struct TopLevelFunctionConflictCandidates {
+    public: Vec<TopLevelFunctionConflictCandidate>,
+    private_by_file: HashMap<u32, Vec<TopLevelFunctionConflictCandidate>>,
+}
+
+fn retain_conflict_diagnostic(
+    pending: &mut HashMap<TopLevelFunctionConflictDecl, usize>,
+    reserved_bytes: &mut usize,
+    declaration: TopLevelFunctionConflictDecl,
+    group: usize,
+) {
+    if pending.contains_key(&declaration)
+        || reserved_bytes.saturating_add(CONFLICTING_OVERLOAD_PREFIX.len())
+            > MAX_CONFLICTING_OVERLOAD_DIAGNOSTIC_BYTES
+    {
+        return;
+    }
+    *reserved_bytes += CONFLICTING_OVERLOAD_PREFIX.len();
+    pending.insert(declaration, group);
+}
+
+fn retain_conflict_candidate(
+    files: &[File],
+    candidates: &mut Vec<TopLevelFunctionConflictCandidate>,
+    retained_display_bytes: &mut usize,
+    declaration: TopLevelFunctionConflictDecl,
+) {
+    if candidates.len() >= MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES + 1
+        || candidates.iter().any(|candidate| {
+            candidate.file == declaration.file && candidate.declaration == declaration.declaration
+        })
+        || *retained_display_bytes >= MAX_CONFLICTING_OVERLOAD_DIAGNOSTIC_BYTES
+    {
+        return;
+    }
+    let Some(file) = files.get(declaration.file as usize) else {
+        return;
+    };
+    let Decl::Fun(function) = file.decl(declaration.declaration) else {
+        return;
+    };
+    let remaining_bytes =
+        MAX_CONFLICTING_OVERLOAD_DIAGNOSTIC_BYTES.saturating_sub(*retained_display_bytes);
+    let per_message_bytes =
+        MAX_OVERLOAD_DIAGNOSTIC_BYTES.saturating_sub(INAPPLICABLE_OVERLOAD_PREFIX.len() + 2);
+    let Some(display) =
+        source_function_conflict_display(file, function, remaining_bytes.min(per_message_bytes))
+    else {
+        *retained_display_bytes = MAX_CONFLICTING_OVERLOAD_DIAGNOSTIC_BYTES;
+        return;
+    };
+    *retained_display_bytes += display.len();
+    candidates.push(TopLevelFunctionConflictCandidate {
+        file: declaration.file,
+        declaration: declaration.declaration,
+        display,
+    });
+}
 
 pub type ResolvedMember = crate::symbol_resolver::ResolvedMember;
 pub(crate) use crate::symbol_resolver::FunctionImportScope;
@@ -1175,11 +1295,11 @@ type GenericMemberValueOperandSlots =
     HashMap<TypeName, HashMap<String, Vec<GenericMemberValueOperandShape>>>;
 
 pub struct SymbolTable {
-    /// Top-level functions by name. A name maps to ALL its overloads (Kotlin allows same-name functions
-    /// distinguished by parameter signature); a call selects one via [`pick_overload`]. Most names have
-    /// exactly one. Two overloads with the SAME erased parameter descriptors are a real JVM collision and
-    /// are rejected at collection.
     pub funs: HashMap<String, Vec<Signature>>,
+    conflicting_top_level_keys: std::collections::HashSet<TopLevelFunctionConflictKey>,
+    conflicting_top_level_key_by_source: HashMap<(u32, u32), TopLevelFunctionConflictKey>,
+    conflicting_top_level_candidates:
+        HashMap<TopLevelFunctionConflictKey, TopLevelFunctionConflictCandidates>,
     /// Declared classes by simple name (e.g. `Point`).
     pub classes: HashMap<String, ClassSig>,
     /// Top-level properties (name → type, is_var, is_const), backed by static fields on the file facade.
@@ -1237,6 +1357,9 @@ impl Default for SymbolTable {
     fn default() -> SymbolTable {
         SymbolTable {
             funs: HashMap::new(),
+            conflicting_top_level_keys: std::collections::HashSet::new(),
+            conflicting_top_level_key_by_source: HashMap::new(),
+            conflicting_top_level_candidates: HashMap::new(),
             classes: HashMap::new(),
             props: HashMap::new(),
             context_props: HashMap::new(),
@@ -1270,6 +1393,25 @@ impl SymbolTable {
         };
         for signature in self.funs.values_mut().flatten() {
             offset_signature(signature);
+        }
+        self.conflicting_top_level_key_by_source =
+            std::mem::take(&mut self.conflicting_top_level_key_by_source)
+                .into_iter()
+                .map(|((file, declaration), key)| ((file + offset, declaration), key))
+                .collect();
+        for candidates in self.conflicting_top_level_candidates.values_mut() {
+            for candidate in &mut candidates.public {
+                candidate.file += offset;
+            }
+            candidates.private_by_file = std::mem::take(&mut candidates.private_by_file)
+                .into_iter()
+                .map(|(file, mut private)| {
+                    for candidate in &mut private {
+                        candidate.file += offset;
+                    }
+                    (file + offset, private)
+                })
+                .collect();
         }
         for signature in self
             .ext_funs
@@ -3442,8 +3584,10 @@ pub fn collect_signatures_with_cp(
     // Same-name top-level functions are kept as overloads; a real "conflicting declarations" clash
     // is a same-*package* same-erasure duplicate. Keyed by (package, name, erased params) so a
     // cross-package homonym (a star-imported function shadowed by a local one) is not a conflict.
-    let mut seen_fun_keys: std::collections::HashSet<(String, String, Vec<ErasedTypeKey>)> =
-        std::collections::HashSet::new();
+    let mut top_level_fun_groups = TopLevelFunctionConflictGroups::default();
+    let mut pending_conflict_diagnostics = HashMap::new();
+    let mut reserved_conflict_diagnostic_bytes = 0usize;
+    let mut retained_conflict_display_bytes = 0usize;
     let mut seen_ext_fun_keys: std::collections::HashSet<(
         String,
         ErasedTypeKey,
@@ -3717,17 +3861,140 @@ pub fn collect_signatures_with_cp(
                             }
                         }
                     } else {
-                        // Overloading: keep ALL same-name functions, keyed by name. Only an exact
-                        // erased-parameter duplicate *in the same package* is a real conflict — a
-                        // same-name/same-erasure function from another package (e.g. a star-imported
-                        // `helpers.runBlocking` shadowed by a local top-level `runBlocking`) is a
-                        // distinct declaration, not a clash. Use a Kotlin-level erasure key here
-                        // instead of formatting JVM descriptors in the checker.
                         let key = erased_params_semantic_key(&sig);
                         let overloads = table.funs.entry(f.name.clone()).or_default();
-                        if !seen_fun_keys.insert((package, f.name.clone(), key)) {
-                            diags.error(f.span, format!("conflicting declarations: {}", f.name));
+                        let group_index =
+                            top_level_fun_groups.get_or_insert((package, f.name.clone(), key));
+                        let group = &mut top_level_fun_groups.groups[group_index].1;
+                        let private = f.visibility.is_private();
+                        let current = TopLevelFunctionConflictDecl {
+                            file: i as u32,
+                            declaration: d,
+                        };
+                        let (
+                            file_declaration_count,
+                            file_private_count,
+                            first_file_public,
+                            first_file_private,
+                            retained_private_count,
+                        ) = group
+                            .files
+                            .get(&(i as u32))
+                            .map(|state| {
+                                (
+                                    state.declaration_count,
+                                    state.private_count,
+                                    state.first_public,
+                                    state.first_private,
+                                    state.retained_private_count,
+                                )
+                            })
+                            .unwrap_or_default();
+                        let conflicts_existing = if private {
+                            file_declaration_count > 0
                         } else {
+                            group.public_count > 0 || file_private_count > 0
+                        };
+                        let retained = if private {
+                            retained_private_count < MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES
+                        } else {
+                            group.retained_public_count < MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES
+                        };
+                        if conflicts_existing {
+                            group.conflicts = true;
+                            if private {
+                                if let Some(first) = first_file_public {
+                                    retain_conflict_diagnostic(
+                                        &mut pending_conflict_diagnostics,
+                                        &mut reserved_conflict_diagnostic_bytes,
+                                        first,
+                                        group_index,
+                                    );
+                                    retain_conflict_candidate(
+                                        files,
+                                        &mut group.public_candidates,
+                                        &mut retained_conflict_display_bytes,
+                                        first,
+                                    );
+                                }
+                                let file_state = group.files.entry(i as u32).or_default();
+                                if let Some(first) = first_file_private {
+                                    retain_conflict_diagnostic(
+                                        &mut pending_conflict_diagnostics,
+                                        &mut reserved_conflict_diagnostic_bytes,
+                                        first,
+                                        group_index,
+                                    );
+                                    retain_conflict_candidate(
+                                        files,
+                                        &mut file_state.private_candidates,
+                                        &mut retained_conflict_display_bytes,
+                                        first,
+                                    );
+                                }
+                                retain_conflict_candidate(
+                                    files,
+                                    &mut file_state.private_candidates,
+                                    &mut retained_conflict_display_bytes,
+                                    current,
+                                );
+                            } else {
+                                if let Some(first) = group.first_public {
+                                    retain_conflict_diagnostic(
+                                        &mut pending_conflict_diagnostics,
+                                        &mut reserved_conflict_diagnostic_bytes,
+                                        first,
+                                        group_index,
+                                    );
+                                    retain_conflict_candidate(
+                                        files,
+                                        &mut group.public_candidates,
+                                        &mut retained_conflict_display_bytes,
+                                        first,
+                                    );
+                                }
+                                retain_conflict_candidate(
+                                    files,
+                                    &mut group.public_candidates,
+                                    &mut retained_conflict_display_bytes,
+                                    current,
+                                );
+                                if let Some(first) = first_file_private {
+                                    retain_conflict_diagnostic(
+                                        &mut pending_conflict_diagnostics,
+                                        &mut reserved_conflict_diagnostic_bytes,
+                                        first,
+                                        group_index,
+                                    );
+                                    let file_state = group.files.entry(i as u32).or_default();
+                                    retain_conflict_candidate(
+                                        files,
+                                        &mut file_state.private_candidates,
+                                        &mut retained_conflict_display_bytes,
+                                        first,
+                                    );
+                                }
+                            }
+                            retain_conflict_diagnostic(
+                                &mut pending_conflict_diagnostics,
+                                &mut reserved_conflict_diagnostic_bytes,
+                                current,
+                                group_index,
+                            );
+                        }
+                        let file_state = group.files.entry(i as u32).or_default();
+                        file_state.declaration_count += 1;
+                        if private {
+                            file_state.first_private.get_or_insert(current);
+                            file_state.private_count += 1;
+                            file_state.retained_private_count += usize::from(retained);
+                        } else {
+                            file_state.first_public.get_or_insert(current);
+                            group.public_count += 1;
+                            group.retained_public_count += usize::from(retained);
+                            group.first_public.get_or_insert(current);
+                        }
+                        if retained {
                             overloads.push(sig);
                         }
                     }
@@ -5146,6 +5413,62 @@ pub fn collect_signatures_with_cp(
         }
     }
 
+    table.conflicting_top_level_keys = report_conflicting_top_level_overloads(
+        files,
+        &top_level_fun_groups,
+        &pending_conflict_diagnostics,
+        reserved_conflict_diagnostic_bytes,
+        diags,
+    );
+    table.conflicting_top_level_candidates = top_level_fun_groups
+        .groups
+        .iter()
+        .filter(|(key, _)| table.conflicting_top_level_keys.contains(key))
+        .map(|(key, group)| {
+            (
+                key.clone(),
+                TopLevelFunctionConflictCandidates {
+                    public: group.public_candidates.clone(),
+                    private_by_file: group
+                        .files
+                        .iter()
+                        .filter_map(|(&file, state)| {
+                            (!state.private_candidates.is_empty())
+                                .then(|| (file, state.private_candidates.clone()))
+                        })
+                        .collect(),
+                },
+            )
+        })
+        .collect();
+    for (name, signatures) in &table.funs {
+        for signature in signatures {
+            let Some((file, declaration)) = signature
+                .source_file
+                .zip(signature.source_decl.map(|declaration| declaration.0))
+            else {
+                continue;
+            };
+            let key = (
+                signature.package.clone(),
+                name.clone(),
+                erased_params_semantic_key(signature),
+            );
+            let retained_for_recovery = table
+                .conflicting_top_level_candidates
+                .get(&key)
+                .is_some_and(|candidates| {
+                    !signature.visibility.is_private()
+                        || candidates.private_by_file.contains_key(&file)
+                });
+            if retained_for_recovery {
+                table
+                    .conflicting_top_level_key_by_source
+                    .insert((file, declaration), key);
+            }
+        }
+    }
+
     // Add ClassSig aliases so that `typealias Bar = Foo` allows `Bar(...)` constructor calls.
     for (alias, target) in &alias_map {
         if !table.classes.contains_key(alias.as_str()) {
@@ -5158,6 +5481,109 @@ pub fn collect_signatures_with_cp(
     table.libraries = libraries;
     table.class_names = class_names;
     table
+}
+
+fn report_conflicting_top_level_overloads(
+    files: &[File],
+    groups: &TopLevelFunctionConflictGroups,
+    pending: &HashMap<TopLevelFunctionConflictDecl, usize>,
+    reserved_message_bytes: usize,
+    diags: &mut DiagSink,
+) -> std::collections::HashSet<TopLevelFunctionConflictKey> {
+    let conflicting_keys = groups
+        .groups
+        .iter()
+        .filter(|(_, group)| group.conflicts)
+        .map(|(key, _)| key.clone())
+        .collect();
+    let mut retained_message_bytes = reserved_message_bytes;
+    let saved_file = diags.current_file();
+    for (file_index, file) in files.iter().enumerate() {
+        diags.set_file(file_index as u32);
+        for &declaration in &file.decls {
+            let current = TopLevelFunctionConflictDecl {
+                file: file_index as u32,
+                declaration,
+            };
+            let Some(&group_index) = pending.get(&current) else {
+                continue;
+            };
+            let Some((_, group)) = groups.groups.get(group_index) else {
+                continue;
+            };
+            let Decl::Fun(function) = file.decl(declaration) else {
+                continue;
+            };
+            let current_private = function.visibility.is_private();
+            let private_candidates = group
+                .files
+                .get(&current.file)
+                .map(|state| state.private_candidates.as_slice())
+                .unwrap_or_default();
+            let public_candidates = group
+                .public_candidates
+                .iter()
+                .filter(|candidate| !current_private || candidate.file == current.file);
+            let first_public = public_candidates.clone().find(|candidate| {
+                candidate.file != current.file || candidate.declaration != current.declaration
+            });
+            let first_private = private_candidates.iter().find(|candidate| {
+                candidate.file != current.file || candidate.declaration != current.declaration
+            });
+            let mut displays = Vec::with_capacity(MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES);
+            let mut seen = std::collections::HashSet::new();
+            let mut display_bytes = 0usize;
+            for candidate in first_public
+                .into_iter()
+                .chain(first_private)
+                .chain(public_candidates)
+                .chain(private_candidates)
+            {
+                if displays.len() >= MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES {
+                    break;
+                }
+                if candidate.file == current.file && candidate.declaration == current.declaration {
+                    continue;
+                }
+                if !seen.insert((candidate.file, candidate.declaration)) {
+                    continue;
+                }
+                if CONFLICTING_OVERLOAD_PREFIX
+                    .len()
+                    .saturating_add(display_bytes)
+                    .saturating_add(1)
+                    .saturating_add(candidate.display.len())
+                    > MAX_OVERLOAD_DIAGNOSTIC_BYTES
+                    || retained_message_bytes
+                        .saturating_add(display_bytes)
+                        .saturating_add(1)
+                        .saturating_add(candidate.display.len())
+                        > MAX_CONFLICTING_OVERLOAD_DIAGNOSTIC_BYTES
+                {
+                    break;
+                }
+                display_bytes += 1 + candidate.display.len();
+                displays.push(candidate.display.as_str());
+            }
+            let message = if displays.is_empty() {
+                CONFLICTING_OVERLOAD_PREFIX.to_string()
+            } else {
+                displays.sort_unstable();
+                let mut message =
+                    String::with_capacity(CONFLICTING_OVERLOAD_PREFIX.len() + display_bytes);
+                message.push_str(CONFLICTING_OVERLOAD_PREFIX);
+                for display in displays {
+                    message.push('\n');
+                    message.push_str(&display);
+                }
+                message
+            };
+            retained_message_bytes += display_bytes;
+            diags.error(function.signature_span, message);
+        }
+    }
+    diags.set_file(saved_file);
+    conflicting_keys
 }
 
 pub fn map_call_sig_args(
@@ -6952,159 +7378,206 @@ fn definitely_non_null_binding(binding: Ty) -> Ty {
     }
 }
 
-fn source_type_display(ty: &TypeRef) -> String {
-    let mut display = if ty.name == "<fun>" {
+struct BoundedSourceDisplay {
+    text: String,
+    max_bytes: usize,
+}
+
+impl BoundedSourceDisplay {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            text: String::with_capacity(max_bytes.min(256)),
+            max_bytes,
+        }
+    }
+
+    fn finish(self) -> String {
+        self.text
+    }
+}
+
+impl fmt::Write for BoundedSourceDisplay {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        if self
+            .text
+            .len()
+            .checked_add(text.len())
+            .is_none_or(|len| len > self.max_bytes)
+        {
+            return Err(fmt::Error);
+        }
+        self.text.push_str(text);
+        Ok(())
+    }
+}
+
+fn write_source_type_display(out: &mut BoundedSourceDisplay, ty: &TypeRef) -> fmt::Result {
+    if ty.name == "<fun>" {
         let context_count = (ty.fun_context_count as usize).min(ty.fun_params.len());
-        let contexts = ty.fun_params[..context_count]
-            .iter()
-            .map(source_type_display)
-            .collect::<Vec<_>>()
-            .join(", ");
         let (receiver, params) = if ty.fun_has_receiver() && ty.fun_params.len() > context_count {
             (
-                Some(source_type_display(&ty.fun_params[context_count])),
+                Some(&ty.fun_params[context_count]),
                 &ty.fun_params[context_count + 1..],
             )
         } else {
             (None, &ty.fun_params[context_count..])
         };
-        let params = params
-            .iter()
-            .map(source_type_display)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let ret = ty
-            .arg
-            .as_deref()
-            .map(source_type_display)
-            .unwrap_or_else(|| "Unit".to_string());
-        let suspend = if ty.fun_suspend() { "suspend " } else { "" };
-        let context = if contexts.is_empty() {
-            String::new()
+        if ty.fun_suspend() {
+            out.write_str("suspend ")?;
+        }
+        if context_count > 0 {
+            out.write_str("context(")?;
+            write_source_type_list(out, &ty.fun_params[..context_count])?;
+            out.write_str(") ")?;
+        }
+        if let Some(receiver) = receiver {
+            write_source_type_display(out, receiver)?;
+            out.write_str(".")?;
+        }
+        out.write_str("(")?;
+        write_source_type_list(out, params)?;
+        out.write_str(") -> ")?;
+        if let Some(ret) = ty.arg.as_deref() {
+            write_source_type_display(out, ret)?;
         } else {
-            format!("context({contexts}) ")
-        };
-        match receiver {
-            Some(receiver) => format!("{suspend}{context}{receiver}.({params}) -> {ret}"),
-            None => format!("{suspend}{context}({params}) -> {ret}"),
+            out.write_str("Unit")?;
         }
     } else {
-        let mut name = ty.name.replace('/', ".");
-        if !ty.targs.is_empty() {
-            let args = ty
-                .targs
-                .iter()
-                .map(source_type_display)
-                .collect::<Vec<_>>()
-                .join(", ");
-            name.push('<');
-            name.push_str(&args);
-            name.push('>');
-        } else if let Some(arg) = ty.arg.as_deref() {
-            name.push('<');
-            name.push_str(&source_type_display(arg));
-            name.push('>');
+        for (index, segment) in ty.name.split('/').enumerate() {
+            if index > 0 {
+                out.write_str(".")?;
+            }
+            out.write_str(segment)?;
         }
-        name
-    };
-    if ty.nullable() {
-        display.push('?');
+        if !ty.targs.is_empty() {
+            out.write_str("<")?;
+            write_source_type_list(out, &ty.targs)?;
+            out.write_str(">")?;
+        } else if let Some(arg) = ty.arg.as_deref() {
+            out.write_str("<")?;
+            write_source_type_display(out, arg)?;
+            out.write_str(">")?;
+        }
     }
-    display
+    if ty.nullable() {
+        out.write_str("?")?;
+    }
+    Ok(())
+}
+
+fn write_source_type_list(out: &mut BoundedSourceDisplay, types: &[TypeRef]) -> fmt::Result {
+    for (index, ty) in types.iter().enumerate() {
+        if index > 0 {
+            out.write_str(", ")?;
+        }
+        write_source_type_display(out, ty)?;
+    }
+    Ok(())
 }
 
 fn source_function_display(file: &File, function: &FunDecl, resolved_ret: Ty) -> String {
-    let type_params = function
-        .type_params
-        .iter()
-        .map(|name| {
-            let bound = function
-                .type_param_bounds
-                .iter()
-                .find_map(|(parameter, bound)| {
-                    (parameter == name).then(|| format!("{name} : {}", source_type_display(bound)))
-                })
-                .or_else(|| {
-                    function
-                        .non_null_type_params
-                        .contains(name)
-                        .then(|| format!("{name} : Any"))
-                })
-                .unwrap_or_else(|| name.clone());
-            if function.reified_type_params.contains(name) {
-                format!("reified {bound}")
-            } else {
-                bound
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+    render_source_function_display(file, function, Some(resolved_ret), usize::MAX)
+        .expect("unbounded source display")
+}
+
+fn source_function_conflict_display(
+    file: &File,
+    function: &FunDecl,
+    max_bytes: usize,
+) -> Option<String> {
+    render_source_function_display(file, function, None, max_bytes)
+}
+
+fn render_source_function_display(
+    file: &File,
+    function: &FunDecl,
+    resolved_ret: Option<Ty>,
+    max_bytes: usize,
+) -> Option<String> {
+    let mut out = BoundedSourceDisplay::new(max_bytes);
+    let mut type_param_bounds = function.type_param_bounds.iter().peekable();
     let context_count = function.context_count.min(function.params.len());
-    let render_params = |params: &[Param]| {
-        params
+    if context_count > 0 {
+        out.write_str("context(").ok()?;
+        write_source_params(&mut out, &function.params[..context_count]).ok()?;
+        out.write_str(") ").ok()?;
+    }
+    if function.is_suspend() {
+        out.write_str("suspend ").ok()?;
+    }
+    out.write_str("fun ").ok()?;
+    if !function.type_params.is_empty() {
+        out.write_str("<").ok()?;
+        for (index, name) in function.type_params.iter().enumerate() {
+            if index > 0 {
+                out.write_str(", ").ok()?;
+            }
+            if function.reified_type_params.contains(name) {
+                out.write_str("reified ").ok()?;
+            }
+            out.write_str(name).ok()?;
+            let bound = match type_param_bounds.peek() {
+                Some((bound_name, _)) if bound_name == name => {
+                    type_param_bounds.next().map(|(_, bound)| bound)
+                }
+                _ => None,
+            };
+            if let Some(bound) = bound {
+                out.write_str(" : ").ok()?;
+                write_source_type_display(&mut out, bound).ok()?;
+            } else if function.non_null_type_params.contains(name) {
+                out.write_str(" : Any").ok()?;
+            }
+        }
+        out.write_str("> ").ok()?;
+    }
+    if let Some(receiver) = &function.receiver {
+        write_source_type_display(&mut out, receiver).ok()?;
+        out.write_str(".").ok()?;
+    }
+    out.write_str(&function.name).ok()?;
+    out.write_str("(").ok()?;
+    write_source_params(&mut out, &function.params[context_count..]).ok()?;
+    out.write_str(")").ok()?;
+    let source_ret = function.ret.as_ref().or_else(|| {
+        let FunBody::Expr(body) = function.body else {
+            return None;
+        };
+        let Expr::Name(name) = file.expr(body) else {
+            return None;
+        };
+        function
+            .params
             .iter()
-            .map(|parameter| {
-                let vararg = if parameter.is_vararg { "vararg " } else { "" };
-                let default = if parameter.default.is_some() {
-                    " = ..."
-                } else {
-                    ""
-                };
-                format!(
-                    "{vararg}{}: {}{default}",
-                    parameter.name,
-                    source_type_display(&parameter.ty)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let context = if context_count == 0 {
-        String::new()
-    } else {
-        format!(
-            "context({}) ",
-            render_params(&function.params[..context_count])
-        )
-    };
-    let receiver = function
-        .receiver
-        .as_ref()
-        .map(|receiver| format!("{}.", source_type_display(receiver)))
-        .unwrap_or_default();
-    let params = render_params(&function.params[context_count..]);
-    let ret = function
-        .ret
-        .as_ref()
-        .map(source_type_display)
-        .or_else(|| {
-            let FunBody::Expr(body) = function.body else {
-                return None;
-            };
-            let Expr::Name(name) = file.expr(body) else {
-                return None;
-            };
-            function
-                .params
-                .iter()
-                .find(|parameter| parameter.name == *name)
-                .map(|parameter| source_type_display(&parameter.ty))
-        })
-        .unwrap_or_else(|| resolved_ret.source_name());
-    let suspend = if function.is_suspend() {
-        "suspend "
-    } else {
-        ""
-    };
-    let generics = if type_params.is_empty() {
-        String::new()
-    } else {
-        format!("<{type_params}> ")
-    };
-    format!(
-        "{context}{suspend}fun {generics}{receiver}{}({params}): {ret}",
-        function.name,
-    )
+            .find(|parameter| parameter.name == *name)
+            .map(|parameter| &parameter.ty)
+    });
+    if let Some(ret) = source_ret {
+        out.write_str(": ").ok()?;
+        write_source_type_display(&mut out, ret).ok()?;
+    } else if let Some(ret) = resolved_ret {
+        out.write_str(": ").ok()?;
+        out.write_str(&ret.source_name()).ok()?;
+    }
+    Some(out.finish())
+}
+
+fn write_source_params(out: &mut BoundedSourceDisplay, params: &[Param]) -> fmt::Result {
+    for (index, parameter) in params.iter().enumerate() {
+        if index > 0 {
+            out.write_str(", ")?;
+        }
+        if parameter.is_vararg {
+            out.write_str("vararg ")?;
+        }
+        out.write_str(&parameter.name)?;
+        out.write_str(": ")?;
+        write_source_type_display(out, &parameter.ty)?;
+        if parameter.default.is_some() {
+            out.write_str(" = ...")?;
+        }
+    }
+    Ok(())
 }
 
 /// Build a member method's [`Signature`] from its declaration, given an already-resolved return type
@@ -8684,19 +9157,6 @@ fn check_file_at_impl(
     }
 
     let mut c = make_checker(file, file_index, source_files, &*syms, diags);
-    // Top-level functions that erase to the same JVM signature collide in the facade class.
-    let top_funs: Vec<&FunDecl> = file
-        .decls
-        .iter()
-        .filter_map(|&d| {
-            if let Decl::Fun(f) = file.decl(d) {
-                Some(f)
-            } else {
-                None
-            }
-        })
-        .collect();
-    c.check_no_erased_clash(&top_funs);
 
     // Each top-level declaration is checked in its OWN scope. Reset to the base depth (file-level
     // scope, e.g. top-level properties) before each one so a prior decl's leftover scope can't leak —
@@ -11640,7 +12100,7 @@ impl<'a> Checker<'a> {
         let mut best: Option<(usize, usize, crate::libraries::FunctionInfo, Vec<String>)> = None;
         for (idx, fi) in self
             .module
-            .top_level_overloads_in_scope(name, &self.fn_scope)
+            .top_level_overloads_accessible_in_scope(name, &self.fn_scope)
             .into_iter()
             .enumerate()
         {
@@ -12027,6 +12487,241 @@ impl<'a> Checker<'a> {
             return None;
         };
         Some(source_function_display(file, function, resolved_ret))
+    }
+
+    fn report_inapplicable_module_top_level_candidates(
+        &mut self,
+        call: ExprId,
+        name: &str,
+        candidates: Vec<crate::libraries::FunctionInfo>,
+        args: &[ExprId],
+        argument_names: Option<&[Option<String>]>,
+        trailing_lambda: bool,
+        mapping_error_reported: bool,
+    ) -> bool {
+        let candidates = candidates
+            .into_iter()
+            .filter(|candidate| {
+                candidate.source_key.is_some()
+                    && (!candidate.visibility.is_private()
+                        || candidate
+                            .source_key
+                            .is_some_and(|(file, _)| file == self.file_index))
+            })
+            .collect::<Vec<_>>();
+        if candidates.len() <= 1 {
+            return false;
+        }
+        let mut seen_keys = std::collections::HashSet::new();
+        let conflict_keys = candidates
+            .iter()
+            .filter_map(|candidate| {
+                let source = candidate.source_key?;
+                self.syms
+                    .conflicting_top_level_key_by_source
+                    .get(&source)
+                    .filter(|key| seen_keys.insert((*key).clone()))
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        if conflict_keys.is_empty() {
+            return false;
+        }
+        let mut mapping_errors = Vec::new();
+        for (index, candidate) in candidates.iter().enumerate() {
+            let context_count = candidate.context_count.min(candidate.callable.params.len());
+            let value_signature = call_sig_without_context(&candidate.call_sig, context_count);
+            match map_call_sig_args_with_trailing(
+                args,
+                argument_names,
+                &value_signature,
+                trailing_lambda,
+            ) {
+                Ok(_) => {}
+                Err(error) => mapping_errors.push((error, index)),
+            }
+        }
+        let mut reported_mapping_error = false;
+        if !mapping_error_reported && mapping_errors.len() == candidates.len() {
+            if let Some((error, candidate_index)) =
+                take_unanimous_mapping_error(&mut mapping_errors)
+            {
+                let candidate = &candidates[candidate_index];
+                self.report_callable_arg_mapping_error(
+                    call,
+                    args,
+                    DiagnosticFunction {
+                        name,
+                        params: &candidate.callable.params,
+                        param_names: &candidate.call_sig.param_names,
+                        param_defaults: &candidate.call_sig.param_defaults,
+                        required: candidate.call_sig.required,
+                        vararg: candidate.call_sig.vararg,
+                        context_count: candidate.context_count,
+                        ret: candidate.callable.ret,
+                        source_display: self
+                            .module_source_display(candidate, candidate.callable.ret),
+                    },
+                    error,
+                );
+                reported_mapping_error = true;
+            }
+        }
+
+        let prefix = INAPPLICABLE_OVERLOAD_PREFIX;
+        let mut displays = Vec::with_capacity(MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES);
+        let mut display_bytes = 0usize;
+        let mut seen = std::collections::HashSet::new();
+        for key in conflict_keys {
+            let Some(conflicts) = self.syms.conflicting_top_level_candidates.get(&key) else {
+                continue;
+            };
+            let private = conflicts
+                .private_by_file
+                .get(&self.file_index)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            for candidate in conflicts
+                .public
+                .first()
+                .into_iter()
+                .chain(private.first())
+                .chain(&conflicts.public)
+                .chain(private)
+            {
+                if displays.len() >= MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES {
+                    break;
+                }
+                if !seen.insert((candidate.file, candidate.declaration)) {
+                    continue;
+                }
+                let separator_bytes = if displays.is_empty() { 2 } else { 1 };
+                if prefix
+                    .len()
+                    .saturating_add(display_bytes)
+                    .saturating_add(separator_bytes)
+                    .saturating_add(candidate.display.len())
+                    > MAX_OVERLOAD_DIAGNOSTIC_BYTES
+                {
+                    break;
+                }
+                display_bytes += separator_bytes + candidate.display.len();
+                displays.push(candidate.display.as_str());
+            }
+        }
+        if displays.is_empty() {
+            return reported_mapping_error;
+        }
+        displays.sort_unstable();
+        let mut message = String::with_capacity(prefix.len() + display_bytes);
+        message.push_str(prefix);
+        for (index, display) in displays.iter().enumerate() {
+            message.push_str(if index == 0 { "\n\n" } else { "\n" });
+            message.push_str(display);
+        }
+        self.diags.error(self.call_callee_name_span(call), message);
+        true
+    }
+
+    fn map_named_top_level_args(
+        &mut self,
+        call: ExprId,
+        name: &str,
+        candidates: Vec<crate::libraries::FunctionInfo>,
+        args: &[ExprId],
+        names: &[Option<String>],
+        trailing_lambda: bool,
+    ) -> Result<Option<(Vec<ExprId>, Vec<Ty>, Vec<Option<ExprId>>)>, ()> {
+        let diagnostic_candidates = candidates.clone();
+        let overloads = crate::libraries::FunctionSet {
+            overloads: candidates,
+        }
+        .into_top_level_with_param_names()
+        .collect::<Vec<_>>();
+        let mut mapped = Vec::new();
+        let mut failures = Vec::new();
+        for candidate in overloads {
+            match map_call_sig_args_with_trailing(
+                args,
+                Some(names),
+                &candidate.call_sig,
+                trailing_lambda,
+            ) {
+                Ok(slots) => mapped.push((
+                    self.call_slot_score(&candidate.callable.params, &slots),
+                    slots,
+                    candidate,
+                )),
+                Err(error) => failures.push((error, candidate)),
+            }
+        }
+        if !mapped.is_empty() && mapped.iter().all(|(score, _, _)| score.is_none()) {
+            if mapped.len() == 1 {
+                let (_, slots, candidate) = mapped.pop().unwrap();
+                for (parameter, argument) in candidate.callable.params.iter().zip(&slots) {
+                    if let Some(argument) = argument {
+                        self.expect_assignable(
+                            *parameter,
+                            self.expr_types[argument.0 as usize],
+                            self.span(*argument),
+                            "argument",
+                        );
+                    }
+                }
+            } else {
+                self.diags.error(
+                    self.call_callee_name_span(call),
+                    INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
+                );
+            }
+            return Err(());
+        }
+        mapped.retain(|(score, _, _)| score.is_some());
+        mapped.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
+        if let Some((_, slots, _)) = mapped.into_iter().next() {
+            let selected_args = slots.iter().copied().flatten().collect::<Vec<_>>();
+            let selected_types = selected_args
+                .iter()
+                .map(|argument| self.expr_types[argument.0 as usize])
+                .collect();
+            return Ok(Some((selected_args, selected_types, slots)));
+        }
+        if let Some((error, candidate)) = take_unanimous_mapping_error(&mut failures) {
+            self.report_callable_arg_mapping_error(
+                call,
+                args,
+                DiagnosticFunction {
+                    name,
+                    params: &candidate.callable.params,
+                    param_names: &candidate.call_sig.param_names,
+                    param_defaults: &candidate.call_sig.param_defaults,
+                    required: candidate.call_sig.required,
+                    vararg: candidate.call_sig.vararg,
+                    context_count: candidate.context_count,
+                    ret: candidate.callable.ret,
+                    source_display: self.module_source_display(&candidate, candidate.callable.ret),
+                },
+                error,
+            );
+            self.report_inapplicable_module_top_level_candidates(
+                call,
+                name,
+                diagnostic_candidates,
+                args,
+                Some(names),
+                trailing_lambda,
+                true,
+            );
+            return Err(());
+        }
+        if !failures.is_empty() {
+            self.diags.error(
+                self.call_callee_name_span(call),
+                INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
+            );
+            return Err(());
+        }
+        Ok(None)
     }
 
     fn source_function_decl(
@@ -13861,10 +14556,15 @@ impl<'a> Checker<'a> {
                 .iter()
                 .map(|p| erased_type_key(self.resolve_ty(&p.ty)))
                 .collect();
-            let own_ret = self.syms.fun_ret_by_erased_params(&f.name, &want);
-            self.ret_ty = own_ret
+            let own_ret = source_decl
+                .and_then(|declaration| {
+                    self.syms
+                        .source_function_signature(&f.name, self.file_index, declaration)
+                })
+                .map(|signature| signature.ret)
                 .or_else(|| f.ret.as_ref().map(|r| self.resolve_ty(r)))
-                .unwrap_or(Ty::Unit);
+                .or_else(|| self.syms.fun_ret_by_erased_params(&f.name, &want));
+            self.ret_ty = own_ret.unwrap_or(Ty::Unit);
         }
         // For expression-body functions with no explicit return type, infer the return type from the
         // body expression and write it back to the canonical signature table. Later call resolution and
@@ -22222,21 +22922,40 @@ impl<'a> Checker<'a> {
                         .is_some()
                 }
                 Expr::Member { receiver, name } => {
-                    // A method with default parameters (e.g. data-class `copy`) — `required < params` —
-                    // queried through the module source.
-                    let rt = self.expr(*receiver);
-                    // A member with recorded parameter names supports named arguments: one with defaults
-                    // (`required < params`, e.g. data-class `copy`) maps labels + fills omitted slots; one
-                    // with all-required parameters (a plain method) reorders the labelled arguments onto
-                    // positions (the lowerer evaluates the receiver + args in source order). Members and
-                    // extensions (module + classpath) both resolve through the federated resolver.
-                    self.resolver()
-                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
-                        .map(crate::symbol_resolver::Symbol::overloads)
-                        .unwrap_or_default()
-                        .iter()
-                        .any(|o| o.call_sig.has_param_names())
-                        || self.member_extension_supports_named(rt, name)
+                    let qualified_top_level = if let Some(root) = self.dotted_root(*receiver) {
+                        if !self.value_root_shadows_classifier(&root)
+                            && self.classpath_type_receiver_internal(*receiver).is_none()
+                        {
+                            if let Some(package) = qualified_path(self.file, *receiver) {
+                                let scope = [type_name(&package)];
+                                self.resolver_in_scope(&scope)
+                                    .top_level_candidates(name)
+                                    .iter()
+                                    .any(|candidate| candidate.call_sig.has_param_names())
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    qualified_top_level || {
+                        let rt = self.expr(*receiver);
+                        self.resolver()
+                            .resolve_symbol(
+                                crate::symbol_resolver::SymRecv::Value(rt),
+                                name,
+                                &[],
+                                &[],
+                            )
+                            .map(crate::symbol_resolver::Symbol::overloads)
+                            .unwrap_or_default()
+                            .iter()
+                            .any(|o| o.call_sig.has_param_names())
+                            || self.member_extension_supports_named(rt, name)
+                    }
                 }
                 _ => false,
             };
@@ -22288,12 +23007,39 @@ impl<'a> Checker<'a> {
                                 .map(|ts| ts.iter().map(|r| self.resolve_ty(r)).collect())
                                 .unwrap_or_default();
                             let pkg_scope = [type_name(&pkg)];
+                            let mut selected_arg_tys = arg_tys.clone();
+                            let mut resolved_slots = None;
+                            if let Some(names) = arg_names
+                                .as_deref()
+                                .filter(|names| names.iter().any(Option::is_some))
+                            {
+                                let candidates = self
+                                    .resolver_in_scope(&pkg_scope)
+                                    .top_level_candidates(&name);
+                                let trailing_lambda =
+                                    self.file.call_has_trailing_lambda.contains(&call.0);
+                                match self.map_named_top_level_args(
+                                    call,
+                                    &name,
+                                    candidates,
+                                    args,
+                                    names,
+                                    trailing_lambda,
+                                ) {
+                                    Ok(Some((_, mapped_types, slots))) => {
+                                        selected_arg_tys = mapped_types;
+                                        resolved_slots = Some(slots);
+                                    }
+                                    Ok(None) => {}
+                                    Err(()) => return Ty::Error,
+                                }
+                            }
                             if let Some(c) = self
                                 .resolver_in_scope(&pkg_scope)
                                 .resolve_symbol(
                                     crate::symbol_resolver::SymRecv::TopLevel,
                                     &name,
-                                    &arg_tys,
+                                    &selected_arg_tys,
                                     &targs,
                                 )
                                 .and_then(crate::symbol_resolver::Symbol::top_level_call)
@@ -22304,15 +23050,31 @@ impl<'a> Checker<'a> {
                                         "fully-qualified top-level call {pkg}.{name} -> {}",
                                         c.owner.render()
                                     );
-                                    for (i, a) in args.iter().enumerate() {
-                                        if let Some(p) = c.params.get(i) {
-                                            self.expect_assignable(
-                                                *p,
-                                                arg_tys[i],
-                                                self.span(*a),
-                                                "argument",
-                                            );
+                                    if let Some(slots) = &resolved_slots {
+                                        for (parameter, argument) in c.params.iter().zip(slots) {
+                                            if let Some(argument) = argument {
+                                                self.expect_assignable(
+                                                    *parameter,
+                                                    self.expr_types[argument.0 as usize],
+                                                    self.span(*argument),
+                                                    "argument",
+                                                );
+                                            }
                                         }
+                                    } else {
+                                        for (i, a) in args.iter().enumerate() {
+                                            if let Some(p) = c.params.get(i) {
+                                                self.expect_assignable(
+                                                    *p,
+                                                    arg_tys[i],
+                                                    self.span(*a),
+                                                    "argument",
+                                                );
+                                            }
+                                        }
+                                    }
+                                    if let Some(slots) = resolved_slots {
+                                        self.resolved_call_arg_slots.insert(call, slots);
                                     }
                                     // Record for the lowerer (sole resolver): a FQ top-level call.
                                     let ret = c.ret;
@@ -22394,6 +23156,20 @@ impl<'a> Checker<'a> {
                                         }
                                     }
                                 }
+                            }
+                            let candidates = self
+                                .resolver_in_scope(&pkg_scope)
+                                .top_level_candidates(&name);
+                            if self.report_inapplicable_module_top_level_candidates(
+                                call,
+                                &name,
+                                candidates,
+                                args,
+                                arg_names.as_deref(),
+                                self.file.call_has_trailing_lambda.contains(&call.0),
+                                false,
+                            ) {
+                                return Ty::Error;
                             }
                         }
                     }
@@ -25454,7 +26230,8 @@ impl<'a> Checker<'a> {
                 // the classpath set — the federation precedence (module > implicit-receiver > library) made
                 // explicit, replacing the scattered `syms.funs.contains_key` guards.
                 let user_shadows = self.module_declares(&fname);
-                let module = crate::module_symbols::ModuleSymbols::new(self.syms);
+                let module =
+                    crate::module_symbols::ModuleSymbols::for_file(self.syms, self.file_index);
                 let module_top = self
                     .imports
                     .get(&fname)
@@ -25724,6 +26501,16 @@ impl<'a> Checker<'a> {
                                 Ok(slots) => Some(slots),
                                 Err(error) => {
                                     self.report_call_arg_mapping_error(call, args, error);
+                                    let candidates = self.resolver().top_level_candidates(&fname);
+                                    self.report_inapplicable_module_top_level_candidates(
+                                        call,
+                                        &fname,
+                                        candidates,
+                                        args,
+                                        arg_names.as_deref(),
+                                        trailing_lambda,
+                                        true,
+                                    );
                                     return self.finish_script_host_candidate(
                                         call,
                                         host_checkpoint,
@@ -25889,10 +26676,6 @@ impl<'a> Checker<'a> {
                 // library set (vararg-aware), checking each argument against the resolved parameters.
                 if !user_shadows {
                     let call_targs = self.resolved_explicit_type_args(call);
-                    // NAMED arguments to a classpath function (`describe(count = 3, name = "hi")`): map
-                    // labels through the callee's `@Metadata` names so overload resolution and
-                    // per-argument checking pair against parameter slots. Lowering uses the recorded slots
-                    // to preserve source evaluation order while emitting parameter order.
                     let (sel_args, arg_tys, resolved_slots): (
                         Vec<ExprId>,
                         Vec<Ty>,
@@ -25902,103 +26685,22 @@ impl<'a> Checker<'a> {
                         .filter(|ns| ns.iter().any(Option::is_some))
                     {
                         Some(names) => {
-                            let overloads: Vec<_> = crate::libraries::FunctionSet {
-                                overloads: self
-                                    .resolver()
-                                    .resolve_symbol(
-                                        crate::symbol_resolver::SymRecv::TopLevel,
-                                        &fname,
-                                        &[],
-                                        &[],
-                                    )
-                                    .map(crate::symbol_resolver::Symbol::overloads)
-                                    .unwrap_or_default(),
-                            }
-                            .into_top_level_with_param_names()
-                            .collect();
+                            let candidates = self.resolver().top_level_candidates(&fname);
                             let trailing_lambda =
                                 self.file.call_has_trailing_lambda.contains(&call.0);
-                            let mut mapped = Vec::new();
-                            let mut mapping_errors = Vec::new();
-                            for overload in overloads {
-                                match map_call_sig_args_with_trailing(
-                                    args,
-                                    Some(names),
-                                    &overload.call_sig,
-                                    trailing_lambda,
-                                ) {
-                                    Ok(slots) => {
-                                        let score =
-                                            self.call_slot_score(&overload.callable.params, &slots);
-                                        mapped.push((score, slots, overload));
-                                    }
-                                    Err(error) => mapping_errors.push((error, overload)),
+                            match self.map_named_top_level_args(
+                                call,
+                                &fname,
+                                candidates,
+                                args,
+                                names,
+                                trailing_lambda,
+                            ) {
+                                Ok(Some((selected_args, selected_types, slots))) => {
+                                    (selected_args, selected_types, Some(slots))
                                 }
-                            }
-                            if !mapped.is_empty()
-                                && mapped.iter().all(|(score, _, _)| score.is_none())
-                            {
-                                if mapped.len() == 1 {
-                                    let (_, slots, candidate) = mapped.pop().unwrap();
-                                    for (parameter, argument) in
-                                        candidate.callable.params.iter().zip(&slots)
-                                    {
-                                        if let Some(argument) = argument {
-                                            self.expect_assignable(
-                                                *parameter,
-                                                self.expr_types[argument.0 as usize],
-                                                self.span(*argument),
-                                                "argument",
-                                            );
-                                        }
-                                    }
-                                } else {
-                                    self.diags.error(
-                                        self.span(call),
-                                        "none of the following candidates is applicable:"
-                                            .to_string(),
-                                    );
-                                }
-                                return Ty::Error;
-                            }
-                            mapped.retain(|(score, _, _)| score.is_some());
-                            mapped.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
-                            if let Some((_, slots, _)) = mapped.into_iter().next() {
-                                let selected_args: Vec<ExprId> =
-                                    slots.iter().copied().flatten().collect();
-                                let selected_types = selected_args
-                                    .iter()
-                                    .map(|argument| self.expr_types[argument.0 as usize])
-                                    .collect();
-                                (selected_args, selected_types, Some(slots))
-                            } else if let Some((error, candidate)) =
-                                take_unanimous_mapping_error(&mut mapping_errors)
-                            {
-                                self.report_callable_arg_mapping_error(
-                                    call,
-                                    args,
-                                    DiagnosticFunction {
-                                        name: &fname,
-                                        params: &candidate.callable.params,
-                                        param_names: &candidate.call_sig.param_names,
-                                        param_defaults: &candidate.call_sig.param_defaults,
-                                        required: candidate.call_sig.required,
-                                        vararg: candidate.call_sig.vararg,
-                                        context_count: 0,
-                                        ret: candidate.callable.ret,
-                                        source_display: None,
-                                    },
-                                    error,
-                                );
-                                return Ty::Error;
-                            } else if !mapping_errors.is_empty() {
-                                self.diags.error(
-                                    self.call_callee_name_span(call),
-                                    "none of the following candidates is applicable:".to_string(),
-                                );
-                                return Ty::Error;
-                            } else {
-                                (args.to_vec(), arg_tys.clone(), None)
+                                Ok(None) => (args.to_vec(), arg_tys.clone(), None),
+                                Err(()) => return Ty::Error,
                             }
                         }
                         None => (args.to_vec(), arg_tys.clone(), None),
@@ -26259,6 +26961,18 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if self.script_host_may_declare_call(&fname) {
+                    return Ty::Error;
+                }
+                let candidates = self.resolver().top_level_candidates(&fname);
+                if self.report_inapplicable_module_top_level_candidates(
+                    call,
+                    &fname,
+                    candidates,
+                    args,
+                    arg_names.as_deref(),
+                    self.file.call_has_trailing_lambda.contains(&call.0),
+                    false,
+                ) {
                     return Ty::Error;
                 }
                 let has_inapplicable_candidate = !self
@@ -27462,6 +28176,33 @@ mod tests {
         ok("private class Local { fun value(): Int = 1 }\n\
              internal class Shared { fun value(): Int = 1 }\n\
              fun use(): Int = Local().value() + Shared().value()");
+    }
+
+    #[test]
+    fn conflict_display_bounds_identifiers_and_type_bounds() {
+        let parameter = "p".repeat(MAX_OVERLOAD_DIAGNOSTIC_BYTES);
+        let type_params = (0..4096)
+            .map(|index| format!("T{index}: Any"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        for source in [
+            format!("fun crowded({parameter}: Int): Int = 0"),
+            format!("fun <{type_params}> crowded(): Int = 0"),
+        ] {
+            let mut diagnostics = DiagSink::new();
+            let file = parse_file(&source, &mut diagnostics);
+            assert_no_diags(&diagnostics);
+            let function = file
+                .decls
+                .iter()
+                .find_map(|&declaration| match file.decl(declaration) {
+                    Decl::Fun(function) => Some(function),
+                    _ => None,
+                })
+                .expect("source should contain a function");
+
+            assert!(source_function_conflict_display(&file, function, 128).is_none());
+        }
     }
 
     #[test]
@@ -28854,8 +29595,7 @@ fun box(): String {
             "expected class conflict, got {errs:?}"
         );
         assert!(
-            errs.iter()
-                .any(|e| e.contains("conflicting declarations: f")),
+            errs.iter().any(|e| e == "conflicting overloads:\nfun f()"),
             "expected fun conflict, got {errs:?}"
         );
     }
@@ -30648,7 +31388,7 @@ fun box(): String {
         // would collide as the same backend method even though they are distinct Kotlin surface types.
         err_contains(
             "fun f(x: Int): Int = x\nfun f(x: UInt): UInt = x\nfun box(): String = \"OK\"",
-            "conflicting declarations",
+            "conflicting overloads",
         );
     }
 

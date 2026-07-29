@@ -712,6 +712,484 @@ mod tests {
     }
 
     #[test]
+    fn checked_prefix_reports_cross_file_conflicting_overloads_and_candidates() {
+        let target = "fun namedPair(left: Int, right: String): Int = left\n\
+                      fun missingNamedArgument(): Int = namedPair(left = 1)";
+        let inputs = [
+            SourceInput::kotlin(target),
+            SourceInput::kotlin("fun namedPair(left: Int, right: String): String = right"),
+            SourceInput::kotlin("fun namedPair(left: Int, right: String): String = right"),
+        ];
+        let mut diagnostics = DiagSink::new();
+
+        let analysis = analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            inputs.len(),
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert!(analysis.types[0].is_some());
+        assert_eq!(
+            diagnostics
+                .diags
+                .iter()
+                .filter(|diagnostic| diagnostic.file == 0)
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "conflicting overloads:\n\
+                 fun namedPair(left: Int, right: String): String\n\
+                 fun namedPair(left: Int, right: String): String",
+                "no value passed for parameter 'right'.",
+                "none of the following candidates is applicable:\n\n\
+                 fun namedPair(left: Int, right: String): Int\n\
+                 fun namedPair(left: Int, right: String): String\n\
+                 fun namedPair(left: Int, right: String): String",
+            ]
+        );
+        let target_diagnostics = diagnostics
+            .diags
+            .iter()
+            .filter(|diagnostic| diagnostic.file == 0)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &target[target_diagnostics[0].span.lo as usize..target_diagnostics[0].span.hi as usize],
+            "fun namedPair(left: Int, right: String): Int"
+        );
+        for diagnostic in &target_diagnostics[1..] {
+            let editor_span = diagnostic.editor_span.unwrap_or(diagnostic.span);
+            assert_eq!(
+                &target[editor_span.lo as usize..editor_span.hi as usize],
+                "namedPair"
+            );
+        }
+    }
+
+    #[test]
+    fn conflicting_top_level_bodies_use_their_own_declared_return_types() {
+        let inputs = [
+            SourceInput::kotlin("fun choose(value: Int): Int = value"),
+            SourceInput::kotlin("fun choose(value: Int): String = \"ok\""),
+        ];
+        let mut diagnostics = DiagSink::new();
+
+        analyze_source_set_prefix_with_features(
+            &inputs,
+            inputs.len(),
+            inputs.len(),
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert_eq!(
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "conflicting overloads:\nfun choose(value: Int): String",
+                "conflicting overloads:\nfun choose(value: Int): Int",
+            ]
+        );
+    }
+
+    #[test]
+    fn inferred_conflict_displays_only_source_signature_types() {
+        let inputs = [
+            SourceInput::kotlin("package sample\nclass Result\nfun choose(value: Int) = Result()"),
+            SourceInput::kotlin("package sample\nfun choose(value: Int) = Result()"),
+        ];
+        let mut diagnostics = DiagSink::new();
+
+        analyze_source_set_prefix_with_features(
+            &inputs,
+            inputs.len(),
+            inputs.len(),
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert_eq!(
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "conflicting overloads:\nfun choose(value: Int)",
+                "conflicting overloads:\nfun choose(value: Int)",
+            ]
+        );
+    }
+
+    #[test]
+    fn mixed_private_public_conflicts_retain_visible_representatives_in_either_order() {
+        for public_first in [false, true] {
+            let private_declarations = (0..64)
+                .map(|index| {
+                    format!(
+                        "private fun crowded(value: Int, required: String): Int = value // {index}\n"
+                    )
+                })
+                .collect::<String>();
+            let public_declarations = (0..64)
+                .map(|index| {
+                    format!(
+                        "fun crowded(value: Int, required: String): String = required // {index}\n"
+                    )
+                })
+                .collect::<String>();
+            let source = if public_first {
+                format!(
+                    "{public_declarations}{private_declarations}\
+                     fun use(): Int = crowded(value = 1)"
+                )
+            } else {
+                format!(
+                    "{private_declarations}{public_declarations}\
+                     fun use(): Int = crowded(value = 1)"
+                )
+            };
+            let inputs = [SourceInput::kotlin(&source)];
+            let mut diagnostics = DiagSink::new();
+
+            analyze_source_set_prefix_with_features(
+                &inputs,
+                inputs.len(),
+                inputs.len(),
+                Box::new(EmptySymbolSource),
+                &LangFeatures::new(),
+                &mut diagnostics,
+            );
+
+            let candidate_report = diagnostics
+                .diags
+                .iter()
+                .find(|diagnostic| {
+                    diagnostic
+                        .msg
+                        .starts_with("none of the following candidates is applicable:")
+                })
+                .expect("conflicting call should report its retained candidates");
+            assert!(
+                candidate_report
+                    .msg
+                    .contains("fun crowded(value: Int, required: String): String"),
+                "public declaration must survive private candidates when public_first={public_first}"
+            );
+            assert!(
+                candidate_report
+                    .msg
+                    .contains("private fun crowded(value: Int, required: String): Int")
+                    || candidate_report
+                        .msg
+                        .contains("fun crowded(value: Int, required: String): Int"),
+                "private declaration must survive public candidates when public_first={public_first}"
+            );
+            assert!(candidate_report.msg.lines().skip(2).count() <= 64);
+        }
+    }
+
+    #[test]
+    fn conflicting_overload_diagnostics_sort_candidate_displays_stably() {
+        let inputs = [
+            SourceInput::kotlin(
+                "fun namedPair(left: Int, right: String): String = right\n\
+                 fun use(): String = namedPair(left = 1, unknown = 2, right = \"ok\")",
+            ),
+            SourceInput::kotlin("fun namedPair(left: Int, right: String): String = right"),
+            SourceInput::kotlin("fun namedPair(left: Int, right: String): Int = left"),
+        ];
+        let mut diagnostics = DiagSink::new();
+
+        analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            inputs.len(),
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert_eq!(
+            diagnostics
+                .diags
+                .iter()
+                .filter(|diagnostic| diagnostic.file == 0)
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "conflicting overloads:\n\
+                 fun namedPair(left: Int, right: String): Int\n\
+                 fun namedPair(left: Int, right: String): String",
+                "no parameter with name 'unknown' found.",
+                "none of the following candidates is applicable:\n\n\
+                 fun namedPair(left: Int, right: String): Int\n\
+                 fun namedPair(left: Int, right: String): String\n\
+                 fun namedPair(left: Int, right: String): String",
+            ]
+        );
+    }
+
+    #[test]
+    fn conflict_recovery_uses_alias_and_qualified_scopes() {
+        let target = "package use\n\
+                      import a.pick as choose\n\
+                      fun aliasUse(): Int = choose(value = 1)\n\
+                      fun qualifiedUse(): Int = a.pick(value = 1)";
+        let inputs = [
+            SourceInput::kotlin(target),
+            SourceInput::kotlin("package a\nfun pick(value: Int, other: String): Int = value"),
+            SourceInput::kotlin("package a\nfun pick(value: Int, other: String): String = other"),
+            SourceInput::kotlin("package b\nfun pick(value: Int, other: String): Boolean = true"),
+        ];
+        let mut diagnostics = DiagSink::new();
+
+        analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            inputs.len(),
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        let messages = diagnostics
+            .diags
+            .iter()
+            .filter(|diagnostic| diagnostic.file == 0)
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.starts_with("no value passed"))
+                .count(),
+            2
+        );
+        let candidates = messages
+            .iter()
+            .filter(|message| {
+                message.starts_with("none of the following candidates is applicable:")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().all(|message| {
+            message.contains("fun pick(value: Int, other: String): Int")
+                && message.contains("fun pick(value: Int, other: String): String")
+                && !message.contains("Boolean")
+        }));
+    }
+
+    #[test]
+    fn conflicting_overload_diagnostics_are_deterministic_and_bounded() {
+        let sources = (0..70)
+            .map(|index| format!("fun crowded(value: Int): Int = value // {index}"))
+            .collect::<Vec<_>>();
+        let inputs = sources
+            .iter()
+            .map(|source| SourceInput::kotlin(source))
+            .collect::<Vec<_>>();
+        let mut diagnostics = DiagSink::new();
+
+        analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            inputs.len(),
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        let conflicts = diagnostics
+            .diags
+            .iter()
+            .filter(|diagnostic| diagnostic.msg.starts_with("conflicting overloads:"))
+            .collect::<Vec<_>>();
+        assert_eq!(conflicts.len(), 70);
+        assert_eq!(
+            conflicts
+                .iter()
+                .map(|diagnostic| diagnostic.file)
+                .collect::<Vec<_>>(),
+            (0..70).collect::<Vec<_>>()
+        );
+        assert_eq!(conflicts[0].msg.lines().skip(1).count(), 64);
+        assert!(conflicts
+            .iter()
+            .all(|diagnostic| diagnostic.msg.len() <= 64 * 1024));
+        assert!(
+            conflicts
+                .iter()
+                .map(|diagnostic| diagnostic.msg.len())
+                .sum::<usize>()
+                <= 4 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn exhausted_conflict_display_budget_preserves_qualified_call_fallback() {
+        let parameter = "p".repeat(70 * 1024);
+        let declarations = [
+            format!("package sample\nfun crowded({parameter}: Int): Int = {parameter}"),
+            format!("package sample\nfun crowded({parameter}: Int): String = \"value\""),
+        ];
+        let inputs = [
+            SourceInput::kotlin("package use\nfun use(): Int = sample.crowded(unknown = 1)"),
+            SourceInput::kotlin(&declarations[0]),
+            SourceInput::kotlin(&declarations[1]),
+        ];
+        let mut diagnostics = DiagSink::new();
+
+        analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            inputs.len(),
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        let target_messages = diagnostics
+            .diags
+            .iter()
+            .filter(|diagnostic| diagnostic.file == 0)
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>();
+        assert!(target_messages
+            .iter()
+            .any(|message| *message == "no parameter with name 'unknown' found."));
+        assert!(!target_messages
+            .iter()
+            .any(|message| *message == "none of the following candidates is applicable:"));
+        assert!(!target_messages
+            .iter()
+            .any(|message| message.starts_with("unresolved reference")));
+    }
+
+    #[test]
+    fn unrelated_inferred_return_arity_diagnostic_keeps_return_type() {
+        let inputs = [SourceInput::kotlin(
+            "fun inferred() = 1\nfun use(): Int = inferred(1)",
+        )];
+        let mut diagnostics = DiagSink::new();
+
+        analyze_source_set_prefix_with_features(
+            &inputs,
+            inputs.len(),
+            inputs.len(),
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert!(diagnostics.diags.iter().any(|diagnostic| {
+            diagnostic.msg == "too many arguments for 'fun inferred(): Int'."
+        }));
+    }
+
+    #[test]
+    fn cross_file_private_top_level_functions_do_not_conflict_or_escape_scope() {
+        let target = "fun namedPair(left: Int, right: String): Int = left\n\
+                      fun missingNamedArgument(): Int = namedPair(left = 1)";
+        let inputs = [
+            SourceInput::kotlin(target),
+            SourceInput::kotlin("private fun namedPair(left: Int, right: String): String = right"),
+        ];
+        let mut diagnostics = DiagSink::new();
+
+        analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            inputs.len(),
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert_eq!(
+            diagnostics
+                .diags
+                .iter()
+                .filter(|diagnostic| diagnostic.file == 0)
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>(),
+            ["no value passed for parameter 'right'."]
+        );
+        assert!(
+            diagnostics
+                .diags
+                .iter()
+                .all(|diagnostic| !diagnostic.msg.starts_with("conflicting overloads:")),
+            "{:?}",
+            diagnostics.diags
+        );
+    }
+
+    #[test]
+    fn cross_file_private_top_level_callable_reference_reports_visibility() {
+        let inputs = [
+            SourceInput::kotlin("val reference: (Int) -> Int = ::hidden"),
+            SourceInput::kotlin("private fun hidden(value: Int): Int = value"),
+        ];
+        let mut diagnostics = DiagSink::new();
+
+        analyze_source_set_prefix_with_features(
+            &inputs,
+            inputs.len(),
+            inputs.len(),
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert_eq!(
+            diagnostics
+                .diags
+                .iter()
+                .filter(|diagnostic| diagnostic.file == 0)
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>(),
+            ["cannot access 'hidden': it is private in its file"]
+        );
+    }
+
+    #[test]
+    fn unavailable_context_does_not_hide_inapplicable_candidate_family() {
+        let source = "class Scope\n\
+                      context(scope: Scope) fun choose(value: Int): Int = value\n\
+                      context(scope: Scope) fun choose(other: Int): String = \"\"\n\
+                      fun use(): Int = choose(value = 1)";
+        let mut diagnostics = DiagSink::new();
+
+        analyze_source_set_prefix_with_features(
+            &[SourceInput::kotlin(source)],
+            1,
+            1,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert!(
+            diagnostics.diags.iter().any(|diagnostic| {
+                diagnostic.msg
+                    == "none of the following candidates is applicable:\n\n\
+                        context(scope: Scope) fun choose(other: Int): String\n\
+                        context(scope: Scope) fun choose(value: Int): Int"
+            }),
+            "{:?}",
+            diagnostics.diags
+        );
+    }
+
+    #[test]
     fn script_analysis_respects_declaration_order() {
         let mut diags = DiagSink::new();
         let inputs = [SourceInput::new(

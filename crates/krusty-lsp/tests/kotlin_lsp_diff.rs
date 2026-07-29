@@ -277,18 +277,22 @@ impl LspProcess {
     }
 
     fn diagnostics(&mut self, uri: &str, text: &str) -> Vec<Value> {
+        self.diagnostics_at_least(uri, text, 1)
+    }
+
+    fn diagnostics_at_least(&mut self, uri: &str, text: &str, minimum: usize) -> Vec<Value> {
         self.open_document(uri, text);
 
         // The first opt-in run may need to download Gradle and import/index a cold project.
         let deadline = Instant::now() + ANALYSIS_TIMEOUT;
         loop {
             let items = self.pull_diagnostics(uri);
-            if !items.is_empty() {
+            if items.len() >= minimum {
                 return items;
             }
             assert!(
                 Instant::now() < deadline,
-                "LSP produced no diagnostics for {uri}"
+                "LSP produced fewer than {minimum} diagnostics for {uri}"
             );
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -547,16 +551,41 @@ fn normalized_diagnostics(diagnostics: Vec<Value>) -> Vec<Value> {
     let mut diagnostics = diagnostics
         .into_iter()
         .map(|diagnostic| {
+            let message = diagnostic["message"]
+                .as_str()
+                .map(normalized_diagnostic_message)
+                .map(Value::String)
+                .unwrap_or_else(|| diagnostic["message"].clone());
             json!({
                 "range": diagnostic["range"],
                 "severity": diagnostic["severity"],
                 "source": diagnostic["source"],
-                "message": diagnostic["message"],
+                "message": message,
             })
         })
         .collect::<Vec<_>>();
     diagnostics.sort_by_key(Value::to_string);
     diagnostics
+}
+
+fn normalized_diagnostic_message(message: &str) -> String {
+    for prefix in [
+        "Conflicting overloads:\n",
+        "None of the following candidates is applicable:\n\n",
+    ] {
+        if let Some(candidates) = message.strip_prefix(prefix) {
+            if candidates.is_empty()
+                || candidates.ends_with('\n')
+                || candidates.lines().any(str::is_empty)
+            {
+                return message.to_string();
+            }
+            let mut candidates = candidates.lines().collect::<Vec<_>>();
+            candidates.sort_unstable();
+            return format!("{prefix}{}", candidates.join("\n"));
+        }
+    }
+    message.to_string()
 }
 
 fn position_after_marker(source: &str, marker: &str) -> (u32, u32) {
@@ -602,6 +631,85 @@ fn diagnostic_comparison_preserves_the_exact_range_and_text() {
             "message": "Argument type mismatch."
         })]
     );
+}
+
+#[test]
+fn diagnostic_comparison_canonicalizes_only_overload_candidate_order() {
+    assert_eq!(
+        normalized_diagnostic_message(
+            "None of the following candidates is applicable:\n\nfun pick(): String\nfun pick(): Int"
+        ),
+        "None of the following candidates is applicable:\n\nfun pick(): Int\nfun pick(): String"
+    );
+    assert_eq!(
+        normalized_diagnostic_message("Argument type mismatch."),
+        "Argument type mismatch."
+    );
+    assert_ne!(
+        normalized_diagnostic_message(
+            "None of the following candidates is applicable:\n\nfun pick(): String\n"
+        ),
+        normalized_diagnostic_message(
+            "None of the following candidates is applicable:\n\nfun pick(): String"
+        )
+    );
+}
+
+#[test]
+fn cross_file_conflicting_overloads_match_official_kotlin_lsp() {
+    let Ok(kotlin_lsp) = std::env::var("KRUSTY_KOTLIN_LSP") else {
+        eprintln!("skipping Kotlin LSP overload differential: set KRUSTY_KOTLIN_LSP");
+        return;
+    };
+    let _official_guard = OFFICIAL_DIFFERENTIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let project = TempProject::new("overload-diagnostic-differential");
+    let root = project.path();
+    let source_root = root.join("src/main/kotlin");
+    std::fs::create_dir_all(&source_root).unwrap();
+    std::fs::write(
+        root.join("settings.gradle"),
+        "rootProject.name = 'krusty-lsp-overload-diff'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("build.gradle"),
+        format!(
+            "plugins {{ id 'org.jetbrains.kotlin.jvm' version '{}' }}\n\
+             repositories {{ mavenCentral() }}\n",
+            reference_kotlin_version()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        source_root.join("OtherOne.kt"),
+        "fun namedPair(left: Int, right: String): String = right\n",
+    )
+    .unwrap();
+    std::fs::write(
+        source_root.join("OtherTwo.kt"),
+        "fun namedPair(left: Int, right: String): String = right\n",
+    )
+    .unwrap();
+    let source = "fun namedPair(left: Int, right: String): Int = left\n\
+                  fun missingNamedArgument(): Int = namedPair(left = 1)\n";
+    let source_path = source_root.join("Target.kt");
+    std::fs::write(&source_path, source).unwrap();
+    let root_uri = format!("file://{}", root.display());
+    let uri = format!("file://{}", source_path.display());
+
+    let mut reference = LspProcess::spawn(&kotlin_lsp, &["--stdio"]);
+    reference.initialize(&root_uri);
+    let expected = normalized_diagnostics(reference.diagnostics_at_least(&uri, source, 3));
+    assert_eq!(expected.len(), 3, "official Kotlin LSP diagnostics");
+    drop(reference);
+
+    let mut krusty = LspProcess::spawn(env!("CARGO_BIN_EXE_krusty-lsp"), &["--stdio", "-no-jdk"]);
+    krusty.initialize(&root_uri);
+    let actual = normalized_diagnostics(krusty.diagnostics_allow_empty(&uri, source));
+    assert_eq!(actual, expected);
 }
 
 #[test]
