@@ -404,6 +404,7 @@ impl TrFlags {
     const FUN_SUSPEND: u8 = 1 << 3;
     const IN_PROJECTION: u8 = 1 << 4;
     const OUT_PROJECTION: u8 = 1 << 5;
+    const IMPORT: u8 = 1 << 6;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -442,6 +443,10 @@ impl TrFlags {
     #[inline]
     pub const fn with_out_projection(self, on: bool) -> Self {
         self.with(Self::OUT_PROJECTION, on)
+    }
+    #[inline]
+    pub const fn with_import(self, on: bool) -> Self {
+        self.with(Self::IMPORT, on)
     }
 }
 
@@ -488,6 +493,10 @@ impl TypeRef {
     #[inline]
     pub fn out_projection(&self) -> bool {
         self.flags.has(TrFlags::OUT_PROJECTION)
+    }
+    #[inline]
+    pub fn is_import(&self) -> bool {
+        self.flags.has(TrFlags::IMPORT)
     }
     #[inline]
     pub fn set_nullable(&mut self, on: bool) {

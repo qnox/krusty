@@ -188,3 +188,81 @@ fn classifier_access_diagnostics_follow_resolution_scope() {
         ["cannot access 'PackageBox': it is package-private"]
     );
 }
+
+#[test]
+fn classifier_access_diagnostics_cover_type_positions() {
+    let Some(fixture) = Fixture::new() else {
+        return;
+    };
+
+    assert_eq!(
+        fixture.diagnostics(
+            "import lib.Hidden\n\
+             fun use(value: Hidden): Int = 0\n"
+        ),
+        ["cannot access 'Hidden': it is internal"]
+    );
+    assert_eq!(
+        fixture.diagnostics(
+            "import lib.Hidden\n\
+             fun use(): Hidden? = null\n"
+        ),
+        ["cannot access 'Hidden': it is internal"]
+    );
+    assert_eq!(
+        fixture.diagnostics(
+            "import lib.Visible\n\
+             fun use(value: Visible): Int = value.value\n"
+        ),
+        Vec::<String>::new()
+    );
+
+    let alias_diagnostics = fixture.diagnostics(
+        "import lib.Hidden as Alias\n\
+         fun use(value: Alias): Int = 0\n",
+    );
+    assert_eq!(alias_diagnostics, ["cannot access 'Alias': it is internal"]);
+    assert_no_underlying_name(&alias_diagnostics, "Hidden");
+
+    let nested_alias_diagnostics = fixture.diagnostics(
+        "import lib.Parent.ProtectedBox as Guard\n\
+         fun use(value: Guard): Int = 0\n",
+    );
+    assert_eq!(
+        nested_alias_diagnostics,
+        ["cannot access 'Guard': it is protected"]
+    );
+    assert_no_underlying_name(&nested_alias_diagnostics, "ProtectedBox");
+
+    assert_eq!(
+        fixture.diagnostics(
+            "import lib.Parent\n\
+             class Child : Parent() {\n\
+                 private fun use(value: ProtectedBox): ProtectedBox = value\n\
+             }\n"
+        ),
+        Vec::<String>::new()
+    );
+
+    assert_eq!(
+        fixture.diagnostics(
+            "import lib.Hidden\n\
+             class Owner {\n\
+                 class Hidden\n\
+                 fun use(value: Hidden): Hidden = value\n\
+             }\n"
+        ),
+        Vec::<String>::new()
+    );
+
+    assert_eq!(
+        fixture.diagnostics(
+            "import lib.Hidden\n\
+             fun use(): Int {\n\
+                 val value: Hidden? = null\n\
+                 return 0\n\
+             }\n"
+        ),
+        ["cannot access 'Hidden': it is internal"]
+    );
+}

@@ -1457,9 +1457,9 @@ impl<'a> Parser<'a> {
                     }
                     if !fq.is_empty() {
                         if !fq.ends_with(".*") {
-                            self.file
-                                .detached_type_refs
-                                .push(simple_type_ref(&fq, import_span));
+                            let mut reference = simple_type_ref(&fq, import_span);
+                            reference.flags = reference.flags.with_import(true);
+                            self.file.detached_type_refs.push(reference);
                         }
                         if let Some(alias) = alias {
                             self.file.import_aliases.push((alias, fq.clone()));
