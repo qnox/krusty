@@ -292,7 +292,7 @@ impl FormattingTokenBuilder<'_> {
         let mut hi = token.span.hi as usize;
         if token.kind == TokenKind::Ident
             && lo > 0
-            && lo - 1 >= self.cursor
+            && lo > self.cursor
             && self.source.as_bytes().get(lo - 1) == Some(&b'`')
         {
             lo -= 1;
@@ -1015,16 +1015,16 @@ impl<'a> Lexer<'a> {
         let mut chunk_lo = self.i;
         loop {
             if self.i >= self.b.len() {
-                if self.i > chunk_lo {
-                    if !self.push_template_token(
+                if self.i > chunk_lo
+                    && !self.push_template_token(
                         &mut toks,
                         Token {
                             kind: TokenKind::StrChunk,
                             span: Span::new(chunk_lo as u32, self.i as u32),
                         },
-                    ) {
-                        return first;
-                    }
+                    )
+                {
+                    return first;
                 }
                 self.diags
                     .error(Span::new(lo, self.i as u32), "unterminated string literal");
