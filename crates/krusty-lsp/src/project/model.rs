@@ -35,6 +35,7 @@ pub struct SourceRoot {
     pub path: PathBuf,
     pub kind: SourceRootKind,
     pub generated: bool,
+    pub package_prefix: String,
 }
 
 impl SourceRoot {
@@ -43,6 +44,7 @@ impl SourceRoot {
             path: path.into(),
             kind: SourceRootKind::Source,
             generated: false,
+            package_prefix: String::new(),
         }
     }
 
@@ -51,11 +53,17 @@ impl SourceRoot {
             path: path.into(),
             kind: SourceRootKind::Test,
             generated: false,
+            package_prefix: String::new(),
         }
     }
 
     pub fn generated(mut self) -> Self {
         self.generated = true;
+        self
+    }
+
+    pub fn with_package_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.package_prefix = prefix.into();
         self
     }
 }
@@ -354,20 +362,30 @@ impl ProjectModel {
     }
 
     pub fn module_index_for_source(&self, path: &Path) -> Option<usize> {
+        self.module_source_root_for_source(path)
+            .map(|(module_index, _)| module_index)
+    }
+
+    pub fn module_source_root_for_source(&self, path: &Path) -> Option<(usize, &SourceRoot)> {
         self.modules
             .iter()
             .enumerate()
-            .filter_map(|(index, module)| {
+            .flat_map(|(module_index, module)| {
                 module
                     .source_roots
                     .iter()
-                    .filter(|root| path.starts_with(&root.path))
-                    .map(|root| root.path.components().count())
-                    .max()
-                    .map(|depth| (depth, index))
+                    .enumerate()
+                    .filter_map(move |(root_index, root)| {
+                        path.starts_with(&root.path).then_some((
+                            root.path.components().count(),
+                            module_index,
+                            root_index,
+                            root,
+                        ))
+                    })
             })
-            .max()
-            .map(|(_, index)| index)
+            .max_by_key(|(depth, module_index, root_index, _)| (*depth, *module_index, *root_index))
+            .map(|(_, module_index, _, root)| (module_index, root))
     }
 
     pub fn module_for_source(&self, path: &Path) -> Option<&Module> {
@@ -463,7 +481,14 @@ mod tests {
 
     #[test]
     fn source_paths_select_the_module_with_the_most_specific_root() {
-        let model = model();
+        let mut model = model();
+        model.modules[2]
+            .source_roots
+            .push(SourceRoot::source("/p/shared").with_package_prefix("first"));
+        model.modules[3].source_roots.extend([
+            SourceRoot::source("/p/shared").with_package_prefix("second"),
+            SourceRoot::source("/p/shared/generated"),
+        ]);
 
         assert_eq!(
             model
@@ -476,6 +501,15 @@ mod tests {
             model.module_index_for_source(Path::new("/p/app/src/test/kotlin/Example.kt")),
             Some(3)
         );
+        let (module_index, root) = model
+            .module_source_root_for_source(Path::new("/p/shared/Example.java"))
+            .unwrap();
+        assert_eq!(module_index, 3);
+        assert_eq!(root.package_prefix, "second");
+        let (_, root) = model
+            .module_source_root_for_source(Path::new("/p/shared/generated/Example.java"))
+            .unwrap();
+        assert!(root.package_prefix.is_empty());
         assert!(model
             .module_for_source(Path::new("/p/unowned/Example.kt"))
             .is_none());
