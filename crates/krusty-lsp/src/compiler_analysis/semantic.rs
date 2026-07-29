@@ -185,12 +185,18 @@ struct MemberHighlight {
     modifiers: u16,
 }
 
+const PLAIN_CLASS_HIGHLIGHT: MemberHighlight = MemberHighlight {
+    kind: HighlightKind::Class,
+    modifiers: 0,
+};
+
 /// Source-set semantic metadata that compiler signatures intentionally do not retain (for example,
 /// `data`, `operator`, and source deprecation). One shared table keeps cross-file editor
 /// classification exact without adding editor concerns to the compiler's public symbol ABI.
 pub struct HighlightSymbols {
     class_kinds: HashMap<String, HighlightKind>,
     class_modifiers: HashMap<String, u16>,
+    source_classes: HashMap<String, MemberHighlight>,
     members: HashMap<(String, String), MemberHighlight>,
 }
 
@@ -216,60 +222,66 @@ impl HighlightSymbols {
                 })
                 .collect(),
             class_modifiers: HashMap::new(),
+            source_classes: HashMap::new(),
             members: HashMap::new(),
         };
         for file in files {
             for &declaration in &file.file.decls {
                 if let Decl::Class(class) = file.file.decl(declaration) {
                     metadata.collect_class(class);
+                    metadata.source_classes.insert(
+                        source_classifier_name(&file.file, &class.name),
+                        class_highlight(class),
+                    );
                 }
             }
         }
         let aliases = files
             .iter()
-            .flat_map(|file| file.file.type_aliases.iter())
-            .map(|(alias, target)| (alias.as_str(), target.rsplit('.').next().unwrap_or(target)))
+            .enumerate()
+            .flat_map(|(file_index, analysis)| {
+                analysis
+                    .file
+                    .type_aliases
+                    .iter()
+                    .map(move |(alias, target)| {
+                        (
+                            source_classifier_name(&analysis.file, alias),
+                            (file_index, target.as_str()),
+                        )
+                    })
+            })
             .collect::<HashMap<_, _>>();
-        for (&alias, &target) in &aliases {
-            let target = terminal_alias_target(target, &aliases);
-            let kind = target
-                .and_then(|target| metadata.class_kinds.get(target).copied())
-                .unwrap_or(HighlightKind::Class);
-            metadata.class_kinds.insert(alias.to_string(), kind);
-            if let Some(modifiers) = target
-                .and_then(|target| metadata.class_modifiers.get(target))
-                .copied()
-            {
-                metadata
-                    .class_modifiers
-                    .insert(alias.to_string(), modifiers);
-            }
+        let mut resolved = HashMap::with_capacity(aliases.len());
+        for alias in aliases.keys() {
+            let mut visiting = HashSet::new();
+            let _ = resolve_alias_highlight(
+                alias,
+                files,
+                &aliases,
+                &metadata.source_classes,
+                &mut resolved,
+                &mut visiting,
+            );
+        }
+        for alias in aliases.keys() {
+            metadata.source_classes.insert(
+                alias.clone(),
+                resolved
+                    .get(alias)
+                    .copied()
+                    .unwrap_or(PLAIN_CLASS_HIGHLIGHT),
+            );
         }
         metadata
     }
 
     fn collect_class(&mut self, class: &ClassDecl) {
-        self.class_kinds.insert(
-            class.name.clone(),
-            match class.kind {
-                ClassKind::Enum => HighlightKind::Enum,
-                ClassKind::Interface => HighlightKind::Interface,
-                ClassKind::Annotation => HighlightKind::Decorator,
-                ClassKind::Object => HighlightKind::Type,
-                ClassKind::Class if class.is_data => HighlightKind::Struct,
-                ClassKind::Class => HighlightKind::Class,
-            },
-        );
-        let mut class_modifiers = 0;
-        if class.kind == ClassKind::Interface || class.modality.is_abstract() {
-            class_modifiers |= HighlightModifiers::ABSTRACT;
-        }
-        if is_deprecated(&class.annotations) {
-            class_modifiers |= HighlightModifiers::DEPRECATED;
-        }
-        if class_modifiers != 0 {
+        let highlight = class_highlight(class);
+        self.class_kinds.insert(class.name.clone(), highlight.kind);
+        if highlight.modifiers != 0 {
             self.class_modifiers
-                .insert(class.name.clone(), class_modifiers);
+                .insert(class.name.clone(), highlight.modifiers);
         }
         for property in &class.props {
             self.members.insert(
@@ -322,6 +334,120 @@ impl HighlightSymbols {
             );
         }
     }
+
+    fn contextual_class(&self, file: &File, name: &str) -> Result<Option<MemberHighlight>, ()> {
+        contextual_source_classifier(file, name, |candidate| {
+            self.source_classes.contains_key(candidate)
+        })
+        .map(|qualified| {
+            qualified.and_then(|qualified| self.source_classes.get(&qualified).copied())
+        })
+    }
+}
+
+fn class_highlight(class: &ClassDecl) -> MemberHighlight {
+    let kind = match class.kind {
+        ClassKind::Enum => HighlightKind::Enum,
+        ClassKind::Interface => HighlightKind::Interface,
+        ClassKind::Annotation => HighlightKind::Decorator,
+        ClassKind::Object => HighlightKind::Type,
+        ClassKind::Class if class.is_data => HighlightKind::Struct,
+        ClassKind::Class => HighlightKind::Class,
+    };
+    let modifiers = if class.kind == ClassKind::Interface || class.modality.is_abstract() {
+        HighlightModifiers::ABSTRACT
+    } else {
+        0
+    } | if is_deprecated(&class.annotations) {
+        HighlightModifiers::DEPRECATED
+    } else {
+        0
+    };
+    MemberHighlight { kind, modifiers }
+}
+
+fn source_classifier_name(file: &File, name: &str) -> String {
+    match &file.package {
+        Some(package) if !package.is_empty() => format!("{package}.{name}"),
+        _ => name.to_owned(),
+    }
+}
+
+fn contextual_source_classifier(
+    file: &File,
+    name: &str,
+    exists: impl Fn(&str) -> bool,
+) -> Result<Option<String>, ()> {
+    if name.contains('.') {
+        return Ok(exists(name).then(|| name.to_owned()));
+    }
+    let local = source_classifier_name(file, name);
+    if exists(&local) {
+        return Ok(Some(local));
+    }
+    let explicit = file
+        .imports
+        .iter()
+        .filter(|import| !import.ends_with(".*") && import.rsplit('.').next() == Some(name))
+        .filter(|import| exists(import))
+        .cloned()
+        .collect::<Vec<_>>();
+    match unique_source_classifier(explicit) {
+        Ok(Some(result)) => return Ok(Some(result)),
+        Err(()) => return Err(()),
+        Ok(None) => {}
+    }
+    unique_source_classifier(
+        file.imports
+            .iter()
+            .filter_map(|import| import.strip_suffix(".*"))
+            .map(|package| format!("{package}.{name}"))
+            .filter(|candidate| exists(candidate))
+            .collect(),
+    )
+}
+
+fn unique_source_classifier(mut candidates: Vec<String>) -> Result<Option<String>, ()> {
+    candidates.sort_unstable();
+    candidates.dedup();
+    match candidates.len() {
+        0 => Ok(None),
+        1 => Ok(candidates.pop()),
+        _ => Err(()),
+    }
+}
+
+fn resolve_alias_highlight(
+    alias: &str,
+    files: &[FileAnalysis],
+    aliases: &HashMap<String, (usize, &str)>,
+    classes: &HashMap<String, MemberHighlight>,
+    resolved: &mut HashMap<String, MemberHighlight>,
+    visiting: &mut HashSet<String>,
+) -> Option<MemberHighlight> {
+    if let Some(highlight) = resolved.get(alias).copied() {
+        return Some(highlight);
+    }
+    if !visiting.insert(alias.to_owned()) {
+        return None;
+    }
+    let &(file_index, target) = aliases.get(alias)?;
+    let target = match contextual_source_classifier(&files[file_index].file, target, |candidate| {
+        classes.contains_key(candidate) || aliases.contains_key(candidate)
+    }) {
+        Ok(target) => target,
+        Err(()) => None,
+    };
+    let highlight = target.and_then(|target| {
+        classes.get(&target).copied().or_else(|| {
+            resolve_alias_highlight(&target, files, aliases, classes, resolved, visiting)
+        })
+    });
+    visiting.remove(alias);
+    if let Some(highlight) = highlight {
+        resolved.insert(alias.to_owned(), highlight);
+    }
+    highlight
 }
 
 impl FileAnalysis {
@@ -1832,11 +1958,22 @@ impl<'a> SemanticClassifier<'a> {
                         } else {
                             MemberKind::StaticValue
                         };
-                        let targets = self
-                            .definition_symbols
-                            .top_level_targets(self.file, name, kind);
-                        for target in targets {
+                        let selected = self
+                            .type_info
+                            .and_then(|types| types.resolved_source_call(id))
+                            .and_then(|(file, declaration)| {
+                                self.definition_symbols
+                                    .declaration_target(file, declaration)
+                            });
+                        if let Some(target) = selected {
                             self.push_definition(source_span, target);
+                        } else {
+                            let targets = self
+                                .definition_symbols
+                                .top_level_targets(self.file, name, kind);
+                            for target in targets {
+                                self.push_definition(source_span, target);
+                            }
                         }
                     }
                 }
@@ -2247,6 +2384,17 @@ impl<'a> SemanticClassifier<'a> {
         if let Some(expression) = resolved_expression {
             if let Some(target) = self
                 .type_info
+                .and_then(|types| types.resolved_source_call(expression))
+                .and_then(|(file, declaration)| {
+                    self.definition_symbols
+                        .declaration_target(file, declaration)
+                })
+            {
+                self.push_definition(source_span, target);
+                return;
+            }
+            if let Some(target) = self
+                .type_info
                 .and_then(|types| types.resolved_super_call(expression))
                 .and_then(|resolved| {
                     self.definition_symbols.member_target(
@@ -2274,18 +2422,6 @@ impl<'a> SemanticClassifier<'a> {
                 })
             {
                 self.push_definition(source_span, target);
-                return;
-            }
-            if let Some((file, declaration)) = self
-                .type_info
-                .and_then(|types| types.resolved_source_call(expression))
-            {
-                if let Some(target) = self
-                    .definition_symbols
-                    .declaration_target(file, declaration)
-                {
-                    self.push_definition(source_span, target);
-                }
                 return;
             }
             if let Some((owner, resolved_name, params)) = self
@@ -2704,19 +2840,27 @@ impl<'a> SemanticClassifier<'a> {
         {
             return (HighlightKind::TypeParameter, 0);
         }
-        (
-            self.highlight_symbols
-                .class_kinds
-                .get(name)
-                .copied()
-                .unwrap_or(HighlightKind::Class),
-            self.default_library_modifier(name)
-                | self
+        let highlight = match self.highlight_symbols.contextual_class(self.file, name) {
+            Ok(Some(highlight)) => highlight,
+            Err(()) => PLAIN_CLASS_HIGHLIGHT,
+            Ok(None) => MemberHighlight {
+                kind: self
+                    .highlight_symbols
+                    .class_kinds
+                    .get(name)
+                    .copied()
+                    .unwrap_or(HighlightKind::Class),
+                modifiers: self
                     .highlight_symbols
                     .class_modifiers
                     .get(name)
                     .copied()
                     .unwrap_or(0),
+            },
+        };
+        (
+            highlight.kind,
+            self.default_library_modifier(name) | highlight.modifiers,
         )
     }
 
