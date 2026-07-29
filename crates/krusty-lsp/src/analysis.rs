@@ -1087,7 +1087,11 @@ impl CompletionIndex {
                 })
                 .collect();
             result.sort_unstable_by_key(|(index, candidate)| {
-                (completion_kind_group(candidate.kind), *index)
+                (
+                    !candidate.label.starts_with(context.prefix),
+                    completion_kind_group(candidate.kind),
+                    *index,
+                )
             });
             let mut seen = HashSet::new();
             result.retain(|(_, candidate)| seen.insert(candidate.label));
@@ -1132,6 +1136,7 @@ impl CompletionIndex {
             .collect();
         result.sort_unstable_by_key(|(candidate, width, priority, index)| {
             (
+                !candidate.label.starts_with(context.prefix),
                 completion_kind_group(candidate.kind),
                 std::cmp::Reverse(*priority),
                 *width,
@@ -1189,6 +1194,7 @@ fn pack_completion_details(details: &CompletionDetails) -> String {
 
 struct CompletionContext<'a> {
     receiver: Option<&'a str>,
+    prefix: &'a str,
 }
 
 fn completion_context(source: &str, offset: usize) -> Option<CompletionContext<'_>> {
@@ -1196,6 +1202,7 @@ fn completion_context(source: &str, offset: usize) -> Option<CompletionContext<'
         return None;
     }
     let prefix_start = identifier_start(source, offset);
+    let prefix = &source[prefix_start..offset];
     let before_prefix = &source[..prefix_start];
     let before_dot = before_prefix
         .strip_suffix("?.")
@@ -1205,7 +1212,7 @@ fn completion_context(source: &str, offset: usize) -> Option<CompletionContext<'
         let receiver_start = identifier_start(before_receiver, receiver_end);
         (receiver_start != receiver_end).then_some(&before_receiver[receiver_start..receiver_end])
     });
-    Some(CompletionContext { receiver })
+    Some(CompletionContext { receiver, prefix })
 }
 
 fn identifier_start(source: &str, end: usize) -> usize {
@@ -4188,6 +4195,29 @@ mod tests {
     }
 
     #[test]
+    fn completion_ranks_prefix_matches_before_other_candidate_kinds() {
+        let source =
+            "fun alphaFunction(): Int = 1\nfun use(): Int { val betaVariable = 2; return al }";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let symbols = CompletionSymbols::from_source_set(&analysis.files);
+        let index = CompletionIndex::from_file_analysis(source, &analysis.files[0], &symbols);
+        let candidates = index.complete(source, source.len() as u32 - 2);
+        let alpha = candidates
+            .iter()
+            .position(|candidate| candidate.label == "alphaFunction")
+            .expect("matching function completion");
+        let beta = candidates
+            .iter()
+            .position(|candidate| candidate.label == "betaVariable")
+            .expect("non-matching variable completion");
+
+        assert!(
+            alpha < beta,
+            "prefix matches must receive earlier completion ranks"
+        );
+    }
+
+    #[test]
     fn completion_member_list_is_prefix_independent() {
         let source = concat!(
             "class Box(val alpha: Int, val beta: Int)\n",
@@ -5075,6 +5105,152 @@ mod tests {
         assert!(tokens.contains(&(0, 15, 5, 4, 16))); // cross-file data/deprecated parameter type
         assert!(tokens.contains(&(0, 33, 5, 4, 16))); // cross-file data/deprecated return type
         assert!(tokens.contains(&(0, 45, 3, 21, 0))); // cross-file operator member
+    }
+
+    fn semantic_tokens_keep_type_alias_metadata_package_qualified() {
+        let deprecated = "package old\n\
+                          @Deprecated(\"old\") data class Record(val value: Int)\n\
+                          typealias Alias = Record\n\
+                          fun use(value: Alias): Alias = value\n";
+        let plain = "package plain\n\
+                     data class Record(val value: Int)\n\
+                     typealias Alias = Record\n";
+        let sources = [deprecated, plain];
+        let analysis = analyze_standalone_source_set(&sources);
+        let highlight_symbols =
+            HighlightSymbols::from_source_set(&analysis.files, &analysis.symbols);
+        let index = SemanticTokenIndex::from_source_set_file_analysis(
+            deprecated,
+            &analysis.files[0],
+            &analysis.symbols,
+            &highlight_symbols,
+        );
+        let tokens = decoded_tokens(&index);
+
+        assert!(tokens.contains(&(3, 15, 5, 4, 16)), "{tokens:?}");
+        assert!(tokens.contains(&(3, 23, 5, 4, 16)), "{tokens:?}");
+    }
+
+    #[test]
+    fn semantic_tokens_do_not_resolve_alias_cycles_through_bare_name_collisions() {
+        let cycle = "package cycle\n\
+                     typealias A = B\n\
+                     typealias B = A\n\
+                     fun use(value: A): A = value\n";
+        let unrelated = "package other\n@Deprecated(\"old\") data class A(val value: Int)\n";
+        let sources = [cycle, unrelated];
+        let analysis = analyze_standalone_source_set(&sources);
+        let highlight_symbols =
+            HighlightSymbols::from_source_set(&analysis.files, &analysis.symbols);
+        let index = SemanticTokenIndex::from_source_set_file_analysis(
+            cycle,
+            &analysis.files[0],
+            &analysis.symbols,
+            &highlight_symbols,
+        );
+        let tokens = decoded_tokens(&index);
+
+        for expected in [
+            (1, 10, 1, 1, 1),
+            (1, 14, 1, 1, 0),
+            (2, 10, 1, 1, 1),
+            (2, 14, 1, 1, 0),
+            (3, 15, 1, 1, 0),
+            (3, 19, 1, 1, 0),
+        ] {
+            assert!(tokens.contains(&expected), "{tokens:?}");
+        }
+    }
+
+    #[test]
+    fn semantic_tokens_do_not_escape_alias_cycles_through_default_imports() {
+        let cycle = "package cycle\n\
+                     typealias Trap = Other\n\
+                     typealias Other = Trap\n\
+                     fun use(value: Other): Other = value\n";
+        let default_import =
+            "package kotlin\n@Deprecated(\"old\") data class Trap(val value: Int)\n";
+        let sources = [cycle, default_import];
+        let analysis = analyze_standalone_source_set(&sources);
+        let highlight_symbols =
+            HighlightSymbols::from_source_set(&analysis.files, &analysis.symbols);
+        let index = SemanticTokenIndex::from_source_set_file_analysis(
+            cycle,
+            &analysis.files[0],
+            &analysis.symbols,
+            &highlight_symbols,
+        );
+        let tokens = decoded_tokens(&index);
+
+        for expected in [
+            (1, 10, 4, 1, 513),
+            (1, 17, 5, 1, 512),
+            (2, 10, 5, 1, 513),
+            (2, 18, 4, 1, 512),
+            (3, 15, 5, 1, 512),
+            (3, 23, 5, 1, 512),
+        ] {
+            assert!(tokens.contains(&expected), "{tokens:?}");
+        }
+    }
+
+    #[test]
+    fn semantic_tokens_follow_imported_alias_chains() {
+        let model = "package model\n\
+                     @Deprecated(\"old\") data class Record(val value: Int)\n\
+                     typealias Alias = Record\n";
+        let bridge = "package bridge\n\
+                      import model.Alias\n\
+                      typealias Alias2 = Alias\n";
+        let consumer = "package consumer\n\
+                        import bridge.Alias2\n\
+                        fun use(value: Alias2): Alias2 = value\n";
+        let sources = [model, bridge, consumer];
+        let analysis = analyze_standalone_source_set(&sources);
+        let highlight_symbols =
+            HighlightSymbols::from_source_set(&analysis.files, &analysis.symbols);
+        let index = SemanticTokenIndex::from_source_set_file_analysis(
+            consumer,
+            &analysis.files[2],
+            &analysis.symbols,
+            &highlight_symbols,
+        );
+        let tokens = decoded_tokens(&index);
+
+        assert!(tokens.contains(&(2, 15, 6, 4, 16)), "{tokens:?}");
+        assert!(tokens.contains(&(2, 24, 6, 4, 16)), "{tokens:?}");
+    }
+
+    #[test]
+    fn semantic_tokens_preserve_ambiguous_alias_targets() {
+        let deprecated = "package left\n@Deprecated(\"old\") data class Target(val value: Int)\n";
+        let plain = "package right\ndata class Target(val value: Int)\n";
+        let default_import = "package kotlin\n@Deprecated(\"old\") annotation class Target\n";
+        let consumer = "package consumer\n\
+                        import left.*\n\
+                        import right.*\n\
+                        typealias Alias = Target\n\
+                        fun use(value: Alias): Alias = value\n";
+        let sources = [deprecated, plain, default_import, consumer];
+        let analysis = analyze_standalone_source_set(&sources);
+        let highlight_symbols =
+            HighlightSymbols::from_source_set(&analysis.files, &analysis.symbols);
+        let index = SemanticTokenIndex::from_source_set_file_analysis(
+            consumer,
+            &analysis.files[3],
+            &analysis.symbols,
+            &highlight_symbols,
+        );
+        let tokens = decoded_tokens(&index);
+
+        for expected in [
+            (3, 10, 5, 1, 513),
+            (3, 18, 6, 1, 512),
+            (4, 15, 5, 1, 512),
+            (4, 23, 5, 1, 512),
+        ] {
+            assert!(tokens.contains(&expected), "{tokens:?}");
+        }
     }
 
     #[test]

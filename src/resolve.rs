@@ -11256,6 +11256,8 @@ impl<'a> Checker<'a> {
                     })?,
             )
         };
+        self.resolved_source_calls
+            .insert(expression, (source_file, source_declaration));
         self.expr_lowers.insert(
             expression,
             ExprLowering::ModuleFunctionRef {
@@ -11752,7 +11754,13 @@ impl<'a> Checker<'a> {
             .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
             .and_then(Symbol::method_ref)
     }
-    fn source_extension_ref(&mut self, expression: ExprId, recv: Ty, name: &str) -> Option<Ty> {
+    fn source_extension_ref(
+        &mut self,
+        expression: ExprId,
+        recv: Ty,
+        name: &str,
+        expected: Option<&'static crate::types::FnSig>,
+    ) -> Option<Ty> {
         use crate::libraries::{FnKind, Origin};
         use crate::symbol_resolver::{SymRecv, Symbol};
 
@@ -11771,6 +11779,16 @@ impl<'a> Checker<'a> {
                         .requires_all_args(candidate.callable.params.len().saturating_sub(1))
                     && !candidate.flags.suspend
                     && candidate.callable.ret != Ty::Nothing
+                    && expected.is_none_or(|expected| {
+                        let mut params = vec![recv];
+                        params.extend(candidate.callable.params.iter().skip(1).copied());
+                        self.callable_ref_is_compatible(
+                            &params,
+                            candidate.callable.ret,
+                            expected,
+                            true,
+                        )
+                    })
             })
             .collect::<Vec<_>>();
         if candidates.is_empty() {
@@ -11819,9 +11837,29 @@ impl<'a> Checker<'a> {
                     let Some(other_declared) = other.receiver else {
                         return false;
                     };
-                    other_declared != declared
-                        && crate::assignable::is_subtype(&context, self, other_declared, declared)
-                        && !crate::assignable::is_subtype(&context, self, declared, other_declared)
+                    let receiver_at_least =
+                        crate::assignable::is_subtype(&context, self, other_declared, declared);
+                    let receiver_reverse =
+                        crate::assignable::is_subtype(&context, self, declared, other_declared);
+                    let (shape_at_least, shape_reverse) = if expected.is_some() {
+                        (
+                            self.callable_ref_shape_at_least_as_specific(
+                                &other.callable.params,
+                                other.callable.ret,
+                                &candidate.callable.params,
+                                candidate.callable.ret,
+                            ),
+                            self.callable_ref_shape_at_least_as_specific(
+                                &candidate.callable.params,
+                                candidate.callable.ret,
+                                &other.callable.params,
+                                other.callable.ret,
+                            ),
+                        )
+                    } else {
+                        (true, true)
+                    };
+                    receiver_at_least && shape_at_least && !(receiver_reverse && shape_reverse)
                 });
                 (!dominated).then_some(index)
             })
@@ -11857,6 +11895,8 @@ impl<'a> Checker<'a> {
         let mut params = vec![recv];
         params.extend(target.params.iter().skip(1).copied());
         let ret = target.ret;
+        self.resolved_source_calls
+            .insert(expression, (source_file, source_decl));
         self.expr_lowers.insert(
             expression,
             ExprLowering::ModuleFunctionRef {
@@ -11864,7 +11904,7 @@ impl<'a> Checker<'a> {
                 owner,
             },
         );
-        Some(Ty::fun(params, ret))
+        Some(expected.map_or_else(|| Ty::fun(params, ret), Ty::Fun))
     }
 
     fn visible_source_extension_property(
@@ -16671,6 +16711,7 @@ impl<'a> Checker<'a> {
         outer_generic: Option<&crate::libraries::GenericSig>,
         generic_bindings: &mut crate::symbol_resolver::GSigBinds,
     ) -> Option<Ty> {
+        self.resolved_source_calls.remove(&ref_expr);
         if exp.suspend {
             return None;
         }
@@ -16837,6 +16878,8 @@ impl<'a> Checker<'a> {
         };
         *generic_bindings = selected.bindings;
         let resolved_type = crate::symbol_resolver::ty_subst(Ty::Fun(exp), generic_bindings);
+        self.resolved_source_calls
+            .insert(ref_expr, (selected.source_file, selected.source_decl));
         self.expr_lowers.insert(
             ref_expr,
             ExprLowering::AdaptedRef {
@@ -16854,6 +16897,7 @@ impl<'a> Checker<'a> {
 
     fn expr_inner(&mut self, e: ExprId, expected: Option<Ty>, value_required: bool) -> Ty {
         self.extension_receiver_expr_uses[e.0 as usize].clear();
+        self.resolved_source_calls.remove(&e);
         let t = match self.file.expr(e).clone() {
             Expr::IntLit(_) => Ty::Int,
             Expr::LongLit(_) => Ty::Long,
@@ -18909,7 +18953,13 @@ impl<'a> Checker<'a> {
                                     }
                                 }
                                 let recv_ty = Ty::obj(&cls.internal());
-                                if let Some(ty) = self.source_extension_ref(e, recv_ty, &name) {
+                                let expected_function = match expected {
+                                    Some(Ty::Fun(function)) => Some(function),
+                                    _ => None,
+                                };
+                                if let Some(ty) =
+                                    self.source_extension_ref(e, recv_ty, &name, expected_function)
+                                {
                                     return self.set(e, ty);
                                 }
                                 // unbound property reference `Type::prop` keeps property-reference APIs.
@@ -18951,7 +19001,13 @@ impl<'a> Checker<'a> {
                                         return self.set(e, Ty::fun(params, member.ret));
                                     }
                                 }
-                                if let Some(ty) = self.source_extension_ref(e, recv_ty, &name) {
+                                let expected_function = match expected {
+                                    Some(Ty::Fun(function)) => Some(function),
+                                    _ => None,
+                                };
+                                if let Some(ty) =
+                                    self.source_extension_ref(e, recv_ty, &name, expected_function)
+                                {
                                     return self.set(e, ty);
                                 }
                                 if let Ok(Some(property)) =
@@ -19075,6 +19131,12 @@ impl<'a> Checker<'a> {
                                 || Ty::fun(signature.params.clone(), signature.ret),
                                 Ty::Fun,
                             );
+                            if let (Some(source_file), Some(source_decl)) =
+                                (signature.source_file, signature.source_decl)
+                            {
+                                self.resolved_source_calls
+                                    .insert(e, (source_file, source_decl.0));
+                            }
                             self.expr_lowers
                                 .insert(e, ExprLowering::ModuleBoundExtensionRef { target, owner });
                             return self.set(e, function_ty);
@@ -31718,6 +31780,150 @@ fun box(): String {
         assert!(callable.owner.matches("test/TopKt"));
         assert_eq!(callable.name, "knownTop");
         assert_eq!(callable.params, vec![Ty::String, Ty::Int]);
+    }
+
+    #[test]
+    fn source_callable_refs_retain_the_checker_selected_declaration() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "fun pick(value: Int, marker: Any): Int = value\n\
+             fun pick(value: Any, marker: Int): Int = marker\n\
+             val ref: (Int, Any) -> Unit = ::pick\n",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols =
+            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert!(
+            diagnostics.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
+        );
+        let function_ref = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| match expression {
+                Expr::CallableRef {
+                    receiver: None,
+                    name,
+                } if name == "pick" => Some(ExprId(index as u32)),
+                _ => None,
+            })
+            .expect("source should contain ::pick");
+
+        assert_eq!(
+            info.resolved_source_call(function_ref),
+            Some((0, files[0].decls[0].0))
+        );
+    }
+
+    #[test]
+    fn direct_adapted_ref_recheck_clears_a_stale_source_selection() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "fun consume(block: (String) -> String): String = block(\"x\")\n\
+             fun pick(value: Int): Int = value\n\
+             fun use(): String = consume(::pick)\n",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let symbols =
+            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let reference = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| match expression {
+                Expr::CallableRef {
+                    receiver: None,
+                    name,
+                } if name == "pick" => Some(ExprId(index as u32)),
+                _ => None,
+            })
+            .expect("source should contain ::pick");
+        let outer_call = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| match expression {
+                Expr::Call { args, .. } if args.contains(&reference) => Some(ExprId(index as u32)),
+                _ => None,
+            })
+            .expect("source should contain consume(::pick)");
+        let mut checker = make_checker(&files[0], 0, Some(&files), &symbols, &mut diagnostics);
+        checker
+            .resolved_source_calls
+            .insert(reference, (0, files[0].decls[1].0));
+        let Ty::Fun(expected) = Ty::fun(vec![Ty::String], Ty::String) else {
+            unreachable!()
+        };
+        let mut bindings = Default::default();
+
+        assert_eq!(
+            checker.try_adapt_toplevel_ref(
+                outer_call,
+                reference,
+                "missing",
+                expected,
+                None,
+                &mut bindings,
+            ),
+            None
+        );
+        assert_eq!(checker.resolved_source_calls.get(&reference).copied(), None);
+    }
+
+    #[test]
+    fn bound_and_unbound_source_extension_refs_retain_selected_declarations() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "class C\n\
+             fun C.pick(value: Int): Unit {}\n\
+             fun C.pick(value: Any): Unit {}\n\
+             val c = C()\n\
+             val bound: (Int) -> Unit = c::pick\n\
+             val unbound: (C, Int) -> Unit = C::pick\n",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols =
+            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert!(
+            diagnostics.diags.is_empty(),
+            "unexpected diagnostics: {:?}",
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
+        );
+        let references = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .filter_map(|(index, expression)| match expression {
+                Expr::CallableRef {
+                    receiver: Some(_),
+                    name,
+                } if name == "pick" => Some(ExprId(index as u32)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(references.len(), 2);
+        for reference in references {
+            assert_eq!(
+                info.resolved_source_call(reference),
+                Some((0, files[0].decls[1].0))
+            );
+        }
     }
 
     #[test]

@@ -2437,6 +2437,19 @@ mod tests {
                 }
             }),
         ));
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": "file:///TopLevelOverloadReference.kt",
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "fun pick(value: Int, marker: Any): Int = value\n\
+                             fun pick(value: Any, marker: Int): Int = marker\n\
+                             fun reference(): (Int, Any) -> Unit = ::pick\n"
+                }
+            }),
+        ));
 
         let response = server.handle(request(
             2,
@@ -2462,6 +2475,86 @@ mod tests {
                     "range": {
                         "start": {"line": 2, "character": 17},
                         "end": {"line": 2, "character": 21}
+                    }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn callable_reference_navigation_uses_selected_source_extension_overloads() {
+        let mut server = LspService::new(super::super::analyze_for_lsp);
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///ExtensionReferences.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "class C\n\
+                             fun C.pick(value: Int): Unit {}\n\
+                             fun C.pick(value: Any): Unit {}\n\
+                             val c = C()\n\
+                             val bound: (Int) -> Unit = c::pick\n\
+                             val unbound: (C, Int) -> Unit = C::pick\n"
+                }
+            }),
+        ));
+
+        for (request_id, line, character) in [(2, 4, 31), (3, 5, 36)] {
+            let response = server.handle(request(
+                request_id,
+                "textDocument/definition",
+                json!({
+                    "textDocument": {"uri": uri},
+                    "position": {"line": line, "character": character}
+                }),
+            ));
+            assert_eq!(
+                response.messages[0]["result"],
+                json!([{
+                    "uri": uri,
+                    "range": {
+                        "start": {"line": 1, "character": 6},
+                        "end": {"line": 1, "character": 10}
+                    }
+                }])
+            );
+        }
+
+        let references = server.handle(request(
+            4,
+            "textDocument/references",
+            json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": 1, "character": 7},
+                "context": {"includeDeclaration": true}
+            }),
+        ));
+        assert_eq!(
+            references.messages[0]["result"],
+            json!([
+                {
+                    "uri": uri,
+                    "range": {
+                        "start": {"line": 1, "character": 6},
+                        "end": {"line": 1, "character": 10}
+                    }
+                },
+                {
+                    "uri": uri,
+                    "range": {
+                        "start": {"line": 4, "character": 30},
+                        "end": {"line": 4, "character": 34}
+                    }
+                },
+                {
+                    "uri": uri,
+                    "range": {
+                        "start": {"line": 5, "character": 35},
+                        "end": {"line": 5, "character": 39}
                     }
                 }
             ])
