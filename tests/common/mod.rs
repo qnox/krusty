@@ -139,38 +139,55 @@ impl Drop for ProfGuard {
     }
 }
 
-/// Best-effort removal of `krusty_lib_*` / `krusty_node_*` temp dirs left by DEAD test processes — a
-/// crashed or gate-killed prior run can't clean up after itself, so its compiled-class scratch dirs would
-/// accumulate. Runs once per binary. A dir owned by a LIVE pid is left alone (a concurrent test binary may
-/// still be using it). `_` in a tag name means the pid is the trailing `_`-segment.
+/// Keep current scratch directories outside the top-level namespace swept by older test binaries.
+#[allow(dead_code)]
+fn scratch_dir(name: &str) -> PathBuf {
+    let root = std::env::temp_dir().join("krusty_scratch");
+    let _ = std::fs::create_dir_all(&root);
+    root.join(name)
+}
+
+/// Remove scratch directories whose trailing owner PID is no longer live.
 #[allow(dead_code)]
 fn sweep_stale_temp_dirs() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
-        let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) else {
-            return;
-        };
-        for e in rd.flatten() {
-            let name = e.file_name();
-            let Some(pid) = name
-                .to_str()
-                .filter(|n| {
-                    n.starts_with("krusty_lib_")
-                        || n.starts_with("krusty_node_")
-                        || n.starts_with("krusty_javasrc_")
-                })
-                .and_then(|n| n.rsplit('_').next())
-                .and_then(|p| p.parse::<i32>().ok())
-            else {
+        for root in [
+            std::env::temp_dir().join("krusty_scratch"),
+            std::env::temp_dir(),
+        ] {
+            let Ok(rd) = std::fs::read_dir(root) else {
                 continue;
             };
-            // `kill(pid, 0)` succeeds iff the process is alive; a failure (ESRCH) ⇒ dead ⇒ safe to remove.
-            let alive = unsafe { libc::kill(pid, 0) } == 0;
-            if !alive {
-                let _ = std::fs::remove_dir_all(e.path());
+            for e in rd.flatten() {
+                let name = e.file_name();
+                let Some(pid) = name
+                    .to_str()
+                    .filter(|n| {
+                        n.starts_with("krusty_lib_")
+                            || n.starts_with("krusty_node_")
+                            || n.starts_with("krusty_javasrc_")
+                    })
+                    .and_then(|n| n.rsplit('_').next())
+                    .and_then(|p| p.parse::<i32>().ok())
+                else {
+                    continue;
+                };
+                if temp_dir_owner_is_dead(pid) {
+                    let _ = std::fs::remove_dir_all(e.path());
+                }
             }
         }
     });
+}
+
+/// Only `ESRCH` proves that an owner is dead; `EPERM` can describe a live process.
+#[allow(dead_code)]
+fn temp_dir_owner_is_dead(pid: i32) -> bool {
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return false;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
 fn parse_source_set(
@@ -669,7 +686,7 @@ pub fn front_end_diagnostics_files(
 #[allow(dead_code)]
 pub fn run_js(js: &str) -> Option<String> {
     let node = which_node()?;
-    let dir = std::env::temp_dir().join(format!("krusty_node_{}", std::process::id()));
+    let dir = scratch_dir(&format!("krusty_node_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     static JS_COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = JS_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1354,7 +1371,7 @@ pub fn compile_lib(tag: &str, lib_src: &str) -> Option<PathBuf> {
 #[allow(dead_code)]
 pub fn compile_libs(tag: &str, sources: &[(&str, &str)]) -> Option<PathBuf> {
     let stdlib = stdlib_jar()?;
-    let work = std::env::temp_dir().join(format!("krusty_lib_{tag}_{}", std::process::id()));
+    let work = scratch_dir(&format!("krusty_lib_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
     let out = work.join("libout");
     std::fs::create_dir_all(&out).ok()?;
@@ -2037,7 +2054,7 @@ pub fn javac_compile_proc(
     }
     let uid = UID.fetch_add(1, Ordering::Relaxed);
     // Pid LAST: `sweep_stale_temp_dirs` parses the trailing `_<pid>` to reap dirs of dead runs.
-    let root = std::env::temp_dir().join(format!("krusty_javasrc_{uid}_{}", std::process::id()));
+    let root = scratch_dir(&format!("krusty_javasrc_{uid}_{}", std::process::id()));
     let srcdir = root.join("src");
     let outdir = root.join("classes");
     std::fs::create_dir_all(&srcdir).ok()?;
@@ -2140,4 +2157,35 @@ pub fn byte_diff_against_kotlinc(name: &str, src: &str, class: &str) -> Option<R
         krusty_bytes.len(),
         ref_bytes.len()
     )))
+}
+
+#[cfg(test)]
+mod sweep_tests {
+    #[test]
+    fn own_pid_is_not_dead() {
+        assert!(!super::temp_dir_owner_is_dead(std::process::id() as i32));
+    }
+
+    #[test]
+    fn reaped_pid_is_dead() {
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe { libc::_exit(0) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(super::temp_dir_owner_is_dead(pid));
+    }
+
+    #[test]
+    fn scratch_dirs_live_under_the_private_root() {
+        let dir = super::scratch_dir(&format!("krusty_lib_x_{}", std::process::id()));
+        assert_eq!(
+            dir.parent().and_then(|p| p.file_name()),
+            Some(std::ffi::OsStr::new("krusty_scratch")),
+            "{dir:?}"
+        );
+        assert!(dir.parent().is_some_and(std::path::Path::exists));
+    }
 }
