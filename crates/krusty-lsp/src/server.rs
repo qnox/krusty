@@ -538,6 +538,158 @@ mod tests {
     }
 
     #[test]
+    fn formatting_matches_the_official_capability_and_uses_cached_open_text() {
+        let analysis_calls = Rc::new(Cell::new(0));
+        let host = RecordingHost {
+            analysis_calls: analysis_calls.clone(),
+            ..RecordingHost::default()
+        };
+        let mut server = LspService::new(host);
+        let initialized = server.handle(request(1, "initialize", json!({})));
+        let capabilities = &initialized.messages[0]["result"]["capabilities"];
+        assert_eq!(capabilities["documentFormattingProvider"], true);
+
+        let uri = "file:///Formatting.kt";
+        let source = "fun emoji( ){\nval value=\"😀\"\n}";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": source
+                }
+            }),
+        ));
+        assert_eq!(analysis_calls.get(), 1);
+
+        let formatted = server.handle(request(
+            2,
+            "textDocument/formatting",
+            json!({
+                "textDocument": {"uri": uri},
+                "options": {
+                    "tabSize": 0,
+                    "insertSpaces": true,
+                    "trimTrailingWhitespace": true,
+                    "insertFinalNewline": true,
+                    "trimFinalNewlines": true
+                }
+            }),
+        ));
+        assert_eq!(analysis_calls.get(), 1, "formatting must not run analysis");
+        assert_eq!(
+            formatted.messages[0]["result"],
+            json!([{
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 2, "character": 1}
+                },
+                "newText": "fun emoji() {\nval value = \"😀\"\n}\n"
+            }])
+        );
+
+        let current_source = "fun current( ){val value=\"😀\"}";
+        server.handle(notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [{"text": current_source}]
+            }),
+        ));
+        assert_eq!(analysis_calls.get(), 2);
+        let current = server.handle(request(
+            3,
+            "textDocument/formatting",
+            json!({
+                "textDocument": {"uri": uri},
+                "options": {"tabSize": 2, "insertSpaces": true}
+            }),
+        ));
+        assert_eq!(analysis_calls.get(), 2, "formatting must not run analysis");
+        assert_eq!(
+            current.messages[0]["result"],
+            json!([{
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 30}
+                },
+                "newText": "fun current() {\n  val value = \"😀\"\n}"
+            }])
+        );
+
+        server.handle(notification(
+            "textDocument/didClose",
+            json!({"textDocument": {"uri": uri}}),
+        ));
+        let calls_after_close = analysis_calls.get();
+        let closed = server.handle(request(
+            4,
+            "textDocument/formatting",
+            json!({
+                "textDocument": {"uri": uri},
+                "options": {"tabSize": 4, "insertSpaces": true}
+            }),
+        ));
+        assert_eq!(closed.messages[0]["result"], Value::Null);
+        assert_eq!(analysis_calls.get(), calls_after_close);
+
+        let blocked_uri = "file:///BlockedFormatting.kt";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": blocked_uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "fun blocked( ){}"
+                }
+            }),
+        ));
+        server.block_document_text_for_test(blocked_uri);
+        let blocked = server.handle(request(
+            5,
+            "textDocument/formatting",
+            json!({
+                "textDocument": {"uri": blocked_uri},
+                "options": {"tabSize": 4, "insertSpaces": true}
+            }),
+        ));
+        assert_eq!(blocked.messages[0]["result"], Value::Null);
+    }
+
+    #[test]
+    fn unchanged_formatting_returns_an_empty_edit_array() {
+        let mut server = LspService::new(RecordingHost::default());
+        server.handle(request(1, "initialize", json!({})));
+        let uri = "file:///UnchangedFormatting.kt";
+        let source = "val value = 1\n";
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": source
+                }
+            }),
+        ));
+        let response = server.handle(request(
+            2,
+            "textDocument/formatting",
+            json!({
+                "textDocument": {"uri": uri},
+                "options": {"tabSize": 4, "insertSpaces": true}
+            }),
+        ));
+        assert_eq!(response.messages[0]["id"], 2);
+        assert_eq!(response.messages[0]["result"], json!([]));
+        assert_ne!(response.messages[0]["result"], Value::Null);
+    }
+
+    #[test]
     fn signature_help_matches_official_overloads_parameters_and_active_argument() {
         let mut server = LspService::new(super::super::analyze_for_lsp);
         let initialized = server.handle(request(1, "initialize", json!({})));

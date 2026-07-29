@@ -1,5 +1,9 @@
 use std::path::Path;
 
+mod formatting;
+
+pub use formatting::{format_kotlin, FormattingOptions};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceKind {
     Kotlin,

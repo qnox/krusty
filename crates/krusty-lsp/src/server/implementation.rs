@@ -53,6 +53,7 @@ const MAX_RENAME_SPELLINGS: usize = 8;
 pub(super) const MAX_RENAME_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const RENAME_DOCUMENT_WIRE_FIXED_BYTES: usize = 128;
 const RENAME_EDIT_WIRE_FIXED_BYTES: usize = 192;
+const MAX_FORMATTING_RESULT_BYTES: usize = BOUNDED_EXACT_RESPONSE_BYTES;
 const DIAGNOSTIC_WARNING_BIT: u32 = 1 << 31;
 const DIAGNOSTIC_INSPECTION_BIT: u32 = 1 << 30;
 const DIAGNOSTIC_MESSAGE_MASK: u32 = !(DIAGNOSTIC_WARNING_BIT | DIAGNOSTIC_INSPECTION_BIT);
@@ -1187,6 +1188,7 @@ where
                                 "resolveProvider": false,
                                 "workDoneProgress": true,
                             },
+                            "documentFormattingProvider": true,
                             "foldingRangeProvider": true,
                             "diagnosticProvider": {
                                 "interFileDependencies": true,
@@ -1253,6 +1255,7 @@ where
             "textDocument/rename" => self.rename(id, params),
             "textDocument/documentSymbol" => self.document_symbols(id, params),
             "workspace/symbol" => self.workspace_symbols(id, params),
+            "textDocument/formatting" => self.formatting(id, params),
             "textDocument/foldingRange" => self.folding_ranges(id, params),
             "textDocument/diagnostic" => self.pull_diagnostics(id, params),
             "textDocument/completion" => self.completion(id, params),
@@ -1374,6 +1377,13 @@ where
     #[cfg(test)]
     fn analysis_dirty_for_test(&self) -> bool {
         self.analysis_dirty
+    }
+
+    #[cfg(test)]
+    pub(super) fn block_document_text_for_test(&mut self, uri: &str) {
+        let open = self.documents.get_mut(uri).unwrap();
+        open.text.clear();
+        open.analysis_blocked = true;
     }
 
     fn mark_analysis_dirty(&mut self) {
@@ -1677,6 +1687,47 @@ where
                     .encode(&params.query, &self.source_set),
             ),
         )])
+    }
+
+    fn formatting(&self, id: Option<Value>, params: Value) -> Dispatch {
+        let Some(id) = id else {
+            return Dispatch::none();
+        };
+        let Ok(params) = serde_json::from_value::<DocumentFormattingParams>(params) else {
+            return invalid_params(Some(id));
+        };
+        let Some(open) = self
+            .documents
+            .get(&params.text_document.uri)
+            .filter(|open| !open.analysis_blocked)
+        else {
+            return formatting_response(id, Value::Null);
+        };
+        let Some(formatted) = krusty::source::format_kotlin(
+            &open.text,
+            krusty::source::FormattingOptions {
+                tab_size: params.options.tab_size,
+                insert_spaces: params.options.insert_spaces,
+                trim_trailing_whitespace: params.options.trim_trailing_whitespace,
+                insert_final_newline: params.options.insert_final_newline,
+                trim_final_newlines: params.options.trim_final_newlines,
+            },
+        ) else {
+            return formatting_response(id, Value::Null);
+        };
+        if formatted == open.text {
+            return formatting_response(id, json!([]));
+        }
+        formatting_response(
+            id,
+            json!([{
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": byte_offset_to_position(&open.text, open.text.len()),
+                },
+                "newText": formatted,
+            }]),
+        )
     }
 
     fn folding_ranges(&self, id: Option<Value>, params: Value) -> Dispatch {
@@ -2391,6 +2442,26 @@ struct WorkspaceSymbolParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct DocumentFormattingParams {
+    text_document: TextDocumentIdentifier,
+    options: FormattingOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FormattingOptions {
+    tab_size: u32,
+    insert_spaces: bool,
+    #[serde(default)]
+    trim_trailing_whitespace: bool,
+    #[serde(default)]
+    insert_final_newline: bool,
+    #[serde(default)]
+    trim_final_newlines: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DocumentDiagnosticParams {
     text_document: TextDocumentIdentifier,
 }
@@ -2719,6 +2790,59 @@ fn rpc_result(id: Value, result: Value) -> Value {
     object.insert("id".to_string(), id);
     object.insert("result".to_string(), result);
     response
+}
+
+struct BoundedJsonWriter {
+    written: usize,
+    limit: usize,
+}
+
+impl Write for BoundedJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.written) {
+            return Err(io::Error::other("JSON response exceeds byte limit"));
+        }
+        self.written += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_value_fits(value: &Value, limit: usize) -> bool {
+    serde_json::to_writer(BoundedJsonWriter { written: 0, limit }, value).is_ok()
+}
+
+fn formatting_rpc_result_with_limits(
+    id: Value,
+    result: Value,
+    result_limit: usize,
+    response_limit: usize,
+) -> Value {
+    let mut response = rpc_result(id, result);
+    let result_fits = response
+        .get("result")
+        .is_some_and(|result| serialized_value_fits(result, result_limit));
+    if result_fits && serialized_value_fits(&response, response_limit) {
+        return response;
+    }
+    response
+        .as_object_mut()
+        .expect("the RPC response envelope is an object")
+        .insert("result".to_string(), Value::Null);
+    debug_assert!(serialized_value_fits(&response, response_limit));
+    response
+}
+
+fn formatting_response(id: Value, result: Value) -> Dispatch {
+    Dispatch::messages(vec![formatting_rpc_result_with_limits(
+        id,
+        result,
+        MAX_FORMATTING_RESULT_BYTES,
+        MAX_MESSAGE_BYTES,
+    )])
 }
 
 fn rpc_notification(method: &str, params: Value) -> Value {
@@ -3530,6 +3654,66 @@ fn json_io(error: serde_json::Error) -> io::Error {
 mod tests {
     use super::*;
     use crate::server::engine::{EngineCommand, EngineEvent, ServerStatus};
+
+    #[test]
+    fn formatting_response_bounds_cover_the_complete_rpc_envelope() {
+        let id = Value::String("request-with-escapes-\"-\\".to_string());
+        let unchanged = rpc_result(id.clone(), json!([]));
+        let unchanged_bytes = serde_json::to_vec(&unchanged).unwrap().len();
+        assert_eq!(
+            formatting_rpc_result_with_limits(id.clone(), json!([]), 2, unchanged_bytes),
+            unchanged
+        );
+
+        let edit = json!([{
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 1}
+            },
+            "newText": "formatted"
+        }]);
+        let edit_response = rpc_result(id.clone(), edit.clone());
+        let edit_result_bytes = serde_json::to_vec(&edit).unwrap().len();
+        let edit_bytes = serde_json::to_vec(&edit_response).unwrap().len();
+        assert_eq!(
+            formatting_rpc_result_with_limits(
+                id.clone(),
+                edit.clone(),
+                edit_result_bytes,
+                edit_bytes
+            ),
+            edit_response
+        );
+
+        let null_response = rpc_result(id.clone(), Value::Null);
+        let null_bytes = serde_json::to_vec(&null_response).unwrap().len();
+        assert_eq!(
+            formatting_rpc_result_with_limits(
+                id.clone(),
+                edit.clone(),
+                edit_result_bytes - 1,
+                null_bytes
+            ),
+            null_response
+        );
+        let envelope_fallback =
+            formatting_rpc_result_with_limits(id.clone(), edit, edit_result_bytes, null_bytes);
+        assert_eq!(envelope_fallback["id"], id);
+        assert_eq!(envelope_fallback["result"], Value::Null);
+        assert_eq!(
+            serde_json::to_vec(&envelope_fallback).unwrap().len(),
+            null_bytes
+        );
+        assert_eq!(
+            formatting_rpc_result_with_limits(
+                id.clone(),
+                json!([{"newText": "larger than the bounded response"}]),
+                1,
+                null_bytes
+            ),
+            rpc_result(id, Value::Null)
+        );
+    }
 
     fn decode_messages(bytes: &[u8]) -> Vec<Value> {
         let mut reader = io::Cursor::new(bytes);
