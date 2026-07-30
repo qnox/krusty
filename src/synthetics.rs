@@ -169,6 +169,7 @@ fn vararg_of(lw: &mut dyn SyntheticIrBuilder, elem: Ty, args: &[AstExprId]) -> O
     // emitter — a boxed `Array<Int>` becomes `Integer[]`, a primitive `IntArray` stays `[I`.
     Some(lw.emit(IrExpr::Vararg {
         array_type: Ty::array(elem),
+        spreads: vec![false; elements.len()],
         elements,
     }))
 }

@@ -803,7 +803,7 @@ fn integer_literal_adapts(param: Ty, arg: Ty, is_literal: bool) -> bool {
     is_literal && arg == Ty::Int && param == Ty::Long
 }
 
-enum CandidateSelection<T> {
+pub(crate) enum CandidateSelection<T> {
     None,
     Selected(T),
     Ambiguous,
@@ -1143,18 +1143,41 @@ pub(crate) fn ranked_extension_overloads_by_recv<'a>(
     receiver: Ty,
     fs: &'a FunctionSet,
     allow_must_inline: bool,
+    current_source_file: Option<u32>,
+) -> Vec<(u32, Ty, &'a FunctionInfo)> {
+    ranked_extension_candidates(
+        src,
+        receiver,
+        fs.overloads.iter(),
+        allow_must_inline,
+        current_source_file,
+    )
+}
+
+fn ranked_extension_candidates<'a>(
+    src: &dyn SymbolSource,
+    receiver: Ty,
+    overloads: impl Iterator<Item = &'a FunctionInfo>,
+    allow_must_inline: bool,
+    current_source_file: Option<u32>,
 ) -> Vec<(u32, Ty, &'a FunctionInfo)> {
     let mro = ReceiverMro::new(src, receiver);
-    let mut out: Vec<(u32, Ty, &FunctionInfo)> = fs
-        .overloads
-        .iter()
+    let mut out: Vec<(u32, Ty, &FunctionInfo)> = overloads
         .filter(|o| {
-            o.is_extension() && (o.public() || (allow_must_inline && o.flags.inline.must_inline()))
+            o.is_extension()
+                && o.receiver_rank != u32::MAX
+                && (source_extension_visible_from(o, current_source_file)
+                    || (allow_must_inline && o.flags.inline.must_inline()))
         })
         .filter_map(|o| {
             let decl = o.semantic_receiver()?;
-            mro.match_receiver(src, decl)
-                .map(|(rank, binding_receiver)| (rank, binding_receiver, o))
+            let (rank, binding_receiver) = mro.match_receiver(src, decl)?;
+            if matches!(o.receiver, Some(Ty::Obj(n, args)) if n.matches("kotlin/Any") && args.is_empty())
+                && !physical_receiver_admits(src, Some(&mro), receiver, &o.callable.descriptor)
+            {
+                return None;
+            }
+            Some((rank, binding_receiver, o))
         })
         .collect();
     out.sort_by_key(|(rank, _, _)| *rank);
@@ -1187,10 +1210,18 @@ fn is_default_ctor_marker(ty: Ty) -> bool {
     )
 }
 
-fn has_default_tail(params: &[Ty], mask_idx: usize, marker: impl FnOnce(Ty) -> bool) -> bool {
-    params.len() == mask_idx + 2
-        && params[mask_idx] == Ty::Int
-        && params.get(mask_idx + 1).copied().is_some_and(marker)
+fn has_default_tail(
+    params: &[Ty],
+    prefix_len: usize,
+    masked_params: usize,
+    marker: impl FnOnce(Ty) -> bool,
+) -> bool {
+    let mask_count = masked_params.div_ceil(32).max(1);
+    params.len() == prefix_len + mask_count + 1
+        && params[prefix_len..prefix_len + mask_count]
+            .iter()
+            .all(|&parameter| parameter == Ty::Int)
+        && params.last().copied().is_some_and(marker)
 }
 
 fn callable_with_return(c: &LibraryCallable, ret: Ty, default_call: bool) -> LibraryCallable {
@@ -2403,7 +2434,11 @@ impl<'a> SymbolResolver<'a> {
         o: &FunctionInfo,
         slots: &[Option<Ty>],
     ) -> Option<LibraryCallable> {
-        let vparams = logical_value_params(self.lib, o, receiver, type_args);
+        let binding_receiver = self.extension_binding_receiver(receiver, o);
+        if !self.extension_slots_admit_bounds(receiver, type_args, o, slots) {
+            return None;
+        }
+        let vparams = logical_value_params(self.lib, o, binding_receiver, type_args);
         if vparams.len() != slots.len() {
             return None;
         }
@@ -2419,9 +2454,12 @@ impl<'a> SymbolResolver<'a> {
             return self.build_extension_callable(name, receiver, &args, type_args, o);
         }
 
-        let ret_ty = o
-            .ret
-            .apply(bind_defaulted_ext_ret_slots(o, receiver, slots, type_args));
+        let ret_ty = o.ret.apply(bind_defaulted_ext_ret_slots(
+            o,
+            binding_receiver,
+            slots,
+            type_args,
+        ));
         if let Some(c) = self.default_synthetic_callable_for_slots(name, o, slots) {
             crate::trace_compiler!(
                 "resolve",
@@ -2438,6 +2476,23 @@ impl<'a> SymbolResolver<'a> {
             return Some(callable);
         }
         None
+    }
+
+    pub(crate) fn extension_slots_admit_bounds(
+        &self,
+        receiver: Ty,
+        type_args: &[Ty],
+        overload: &FunctionInfo,
+        slots: &[Option<Ty>],
+    ) -> bool {
+        generic_bounds_admit_slots(
+            self.lib,
+            &self.src,
+            overload.generic_sig.as_ref(),
+            self.extension_binding_receiver(receiver, overload),
+            slots,
+            type_args,
+        )
     }
 
     /// Find the `name$default` synthetic callable for a defaulted extension call — the emit-shaped callable
@@ -2986,8 +3041,7 @@ pub(crate) fn resolve_constructor_from_type(
 /// `DefaultConstructorMarker` — two shapes krusty must fill at the call site:
 ///   * a VALUE-CLASS-typed parameter forces `<init>(<erased-params…>, DefaultConstructorMarker)` (the
 ///     real `<init>` is private), and the caller passes every arg plus a `null` marker (`mask: None`);
-///   * an omitted DEFAULT parameter uses `<init>(<params…>, int mask, DefaultConstructorMarker)`, and the
-///     caller passes the provided args, a placeholder per omitted param, the `mask`, then the `null` marker.
+///   * an omitted DEFAULT parameter uses `<init>(<params…>, int masks…, DefaultConstructorMarker)`.
 #[derive(Clone, Debug)]
 pub struct SyntheticCtorCall {
     /// The synthetic `<init>` descriptor to invoke.
@@ -3003,13 +3057,13 @@ pub struct SyntheticCtorCall {
     pub visibility: crate::types::Visibility,
 }
 
-/// The classpath default-value synthetic constructor `<init>(<params…>, int mask, DefaultConstructorMarker)`
+/// The classpath default-value synthetic constructor `<init>(<params…>, int masks…, DefaultConstructorMarker)`
 /// for `internal`, as `(descriptor, real_params)` — the (erased) parameter types BEFORE the mask+marker.
 /// Matched by `arity` (the source parameter count): the default synthetic has exactly `arity` real params
-/// then an `int` mask then the marker (`arity + 2` total). Matching by arity — not by a public non-marker
+/// then its mask words and the marker. Matching by arity — not by a public non-marker
 /// sibling — is required because a class with a VALUE-CLASS parameter has a PRIVATE primary constructor
 /// (absent from the public `constructors`) and ALSO a separate value-class marker overload
-/// `<init>(<params…>, marker)` (no mask); only the `arity + 2` shape is the default synthetic.
+/// `<init>(<params…>, marker)` (no masks); only the full default tail is accepted.
 pub(crate) fn synthetic_default_ctor_name(
     source: &dyn SymbolSource,
     internal: TypeName,
@@ -3024,7 +3078,8 @@ pub(crate) fn synthetic_default_ctor_from_type(
     arity: usize,
 ) -> Option<(String, Vec<Ty>, crate::types::Visibility)> {
     let m = t.constructors.iter().find(|m| {
-        !m.descriptor.is_empty() && has_default_tail(&m.params, arity, is_default_ctor_marker)
+        !m.descriptor.is_empty()
+            && has_default_tail(&m.params, arity, arity, is_default_ctor_marker)
     })?;
     Some((
         m.descriptor.clone(),
@@ -3033,7 +3088,7 @@ pub(crate) fn synthetic_default_ctor_from_type(
     ))
 }
 
-/// The classpath default-value synthetic for a MEMBER — `name$default(Owner, <params…>, int mask,
+/// The classpath default-value synthetic for a MEMBER — `name$default(Owner, <params…>, int masks…,
 /// Object marker): Ret` (a static, e.g. a data class's `copy$default`) — as `(descriptor, real_params,
 /// ret)`, the parameter types being the source method's (WITHOUT the leading receiver and trailing
 /// mask/marker). Lets a call omit a defaulted argument. `None` when the class has no such synthetic.
@@ -3045,14 +3100,11 @@ pub(crate) fn synthetic_default_member(
 ) -> Option<(String, Vec<Ty>, Ty, bool)> {
     let t = source.resolve_type(owner)?;
     let dname = format!("{name}$default");
-    // Shape `(Owner receiver, <real params…>, int mask, Object marker)`: exactly `arity` real params, an
-    // `int` mask, and a reference marker. Match by `arity` (not just name) so an overloaded `name$default`
+    // Shape `(Owner receiver, <real params…>, int masks…, Object marker)`. Match by `arity` so an overloaded `name$default`
     // of a different parameter count can't be picked.
-    if let Some(m) = t
-        .companion
-        .iter()
-        .find(|m| m.name == dname && has_default_tail(&m.params, arity + 1, Ty::is_reference))
-    {
+    if let Some(m) = t.companion.iter().find(|m| {
+        m.name == dname && has_default_tail(&m.params, arity + 1, arity, Ty::is_reference)
+    }) {
         return Some((
             m.descriptor.clone(),
             m.params[1..arity + 1].to_vec(),
@@ -3061,7 +3113,7 @@ pub(crate) fn synthetic_default_member(
         ));
     }
     // A `suspend` method's `$default` carries the `Continuation` as a real trailing parameter of the
-    // original method, so its shape is `(Owner, <real params…>, Continuation, int mask, Object marker)` —
+    // original method, so its shape is `(Owner, <real params…>, Continuation, int masks…, Object marker)` —
     // one longer, with the `Continuation` BEFORE the mask/marker. The descriptor already spells the
     // continuation in place; the coroutine pass threads the value there (see `append_continuation`).
     let m = t.companion.iter().find(|m| {
@@ -3069,7 +3121,7 @@ pub(crate) fn synthetic_default_member(
             && m.params.get(arity + 1).copied().is_some_and(
                 |p| matches!(p, Ty::Obj(n, _) if n.matches("kotlin/coroutines/Continuation")),
             )
-            && has_default_tail(&m.params, arity + 2, Ty::is_reference)
+            && has_default_tail(&m.params, arity + 2, arity, Ty::is_reference)
     })?;
     Some((
         m.descriptor.clone(),
@@ -4053,62 +4105,31 @@ fn select_overload(
             o.callable.owner.render(),
         );
     }
-    // Candidates as `(overload, logical value params)`, grouped by receiver rank. An extension admits only
-    // public overloads unless the caller is the bytecode inliner (which splices non-public `@InlineOnly`).
-    // The receiver's supertype closure is BFS-walked once here and probed per candidate below.
-    let recv_mro =
-        (kind == FnKind::Extension && !overloads.is_empty()).then(|| ReceiverMro::new(src, recv));
     let mut by_rank: std::collections::BTreeMap<u32, Vec<(&FunctionInfo, Vec<Ty>)>> =
         std::collections::BTreeMap::new();
-    for o in overloads.iter().copied().filter(|&o| {
-        o.kind == kind
-            && (kind != FnKind::Member
-                || member_visible(ext.member_access, o.visibility, o.callable.owner_type()))
-            && (kind != FnKind::Extension
-                || (o.receiver_rank != u32::MAX
-                    && (source_extension_visible_from(o, ext.current_source_file)
-                        || (allow_must_inline && o.flags.inline.must_inline()))
-                    && (pre_scoped || fn_in_scope(o, ext.fn_scope))))
-    }) {
-        // A receiver-agnostic `resolve_symbols` extension carries rank `0`; recover the real receiver-MRO
-        // rung from the actual receiver so most-specific selection (a `List` extension over an `Iterable`
-        // one) still holds. A candidate whose declared receiver is NOT in the receiver's supertype closure
-        // does not apply — drop it. Members and lambda-return (`u32::MAX`) keep their provider rank.
-        let (rank, binding_receiver) = if kind == FnKind::Extension {
-            match o
-                .semantic_receiver()
-                .and_then(|dr| recv_mro.as_ref()?.match_receiver(src, dr))
-            {
-                Some(found) => found,
-                None => {
-                    crate::trace_compiler!(
-                        "resolve",
-                        "  drop {name} decl_recv={:?} (not in recv MRO)",
-                        o.semantic_receiver()
-                    );
-                    continue;
-                }
-            }
-        } else {
-            (o.receiver_rank, recv)
-        };
-        // A TyParam receiver erased to `Any` still has its REAL bound in the JVM descriptor's first
-        // parameter (`Array<out T>.ifEmpty` → `[Ljava/lang/Object;`; `C.ifEmpty` where
-        // `C : CharSequence` → `Ljava/lang/CharSequence;`). The four stdlib `ifEmpty`s all reach
-        // here as identical `Any`-receiver candidates, so the descriptor is the only remaining
-        // discriminator — drop one whose PHYSICAL receiver can't hold the actual receiver, else the
-        // tie breaks on declaration order and the inliner splices the wrong overload's body.
-        if kind == FnKind::Extension
-            && matches!(o.receiver, Some(Ty::Obj(n, args)) if n.matches("kotlin/Any") && args.is_empty())
-            && !physical_receiver_admits(src, recv_mro.as_ref(), recv, &o.callable.descriptor)
-        {
-            crate::trace_compiler!(
-                "resolve",
-                "  drop {name} physical receiver of {} rejects {recv:?}",
-                o.callable.descriptor
-            );
-            continue;
-        }
+    let ranked: Vec<(u32, Ty, &FunctionInfo)> = match kind {
+        FnKind::Extension => ranked_extension_candidates(
+            src,
+            recv,
+            overloads
+                .iter()
+                .copied()
+                .filter(|o| pre_scoped || fn_in_scope(o, ext.fn_scope)),
+            allow_must_inline,
+            ext.current_source_file,
+        ),
+        FnKind::Member => overloads
+            .iter()
+            .copied()
+            .filter(|o| {
+                o.kind == FnKind::Member
+                    && member_visible(ext.member_access, o.visibility, o.callable.owner_type())
+            })
+            .map(|o| (o.receiver_rank, recv, o))
+            .collect(),
+        FnKind::TopLevel => Vec::new(),
+    };
+    for (rank, binding_receiver, o) in ranked {
         if kind == FnKind::Extension
             && !generic_bounds_admit(
                 lib,
@@ -4277,6 +4298,38 @@ fn generic_bounds_admit(
     })
 }
 
+fn generic_bounds_admit_slots(
+    lib: &dyn SemanticPlatform,
+    src: &dyn SymbolSource,
+    generic_sig: Option<&GenericSig>,
+    receiver: Ty,
+    slots: &[Option<Ty>],
+    type_args: &[Ty],
+) -> bool {
+    let Some(gsig) = generic_sig else {
+        return true;
+    };
+    let mut binds = seeded_gsig_binds(gsig, type_args);
+    if let Some(declared_receiver) = gsig.receiver {
+        unify_ty(declared_receiver, receiver, &mut binds);
+    }
+    for (&parameter, argument) in gsig.params.iter().zip(slots) {
+        if let Some(argument) = argument {
+            unify_ty(parameter, *argument, &mut binds);
+        }
+    }
+    generic_bindings_satisfy_bounds(gsig, &binds, |actual, bound| {
+        actual == bound
+            || crate::assignable::is_assignable(
+                &crate::assignable::TyCtx::new(),
+                &SourceOracle(src),
+                actual,
+                bound,
+            )
+            || platform_arg_assignable(lib, &bound, &actual)
+    })
+}
+
 /// LOGICAL value parameters of an overload — what a call site's arguments are matched against, with the
 /// receiver excluded (it is an attribute). Member/top-level `callable.params` are already value-only; an
 /// extension's `callable.params` prepend the receiver in the JVM emit shape, so bind the generic signature
@@ -4382,7 +4435,7 @@ where
 /// Pick the best overload whose logical value parameters accept `args`, in Kotlin applicability order:
 /// exact, then `Any`-widened / function-arity, then a prefix under-application (omitted trailing params
 /// must be optional), then a trailing-lambda call that omits leading DEFAULTED params (`m.withLock { … }`).
-fn best_by_args<'a>(
+pub(crate) fn best_by_args<'a>(
     lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
     cands: &[(&'a FunctionInfo, Vec<Ty>)],
@@ -4480,6 +4533,28 @@ fn best_by_args<'a>(
     }
     let specificity =
         |_: usize, left: Ty, right: Ty| parameter_at_least_as_specific(lib, left, right, false);
+
+    // Exact arity, judged by ASSIGNABILITY, before the erased pass below. `erased_fits` admits a
+    // `kotlin/Any` parameter for any argument but nothing else that is merely assignable, so with
+    // `pick(value: Any)` and `pick(value: CharSequence)` in scope it dropped the CharSequence overload
+    // and selected the widest one — the opposite of Kotlin's most-specific rule. Judging by
+    // assignability first lets both compete and specificity decide; when only the `Any` overload fits,
+    // this pass finds nothing and the erased pass answers exactly as before.
+    match source_aware_most_specific(
+        cands.iter().filter_map(|(candidate, params)| {
+            fixed_parameter_shape(params, args, |position, param, arg| {
+                fits(position, param, arg)
+            })
+            .map(|shape| (shape, *candidate))
+        }),
+        specificity,
+    ) {
+        CandidateSelection::Selected(candidate) => {
+            return CandidateSelection::Selected(candidate);
+        }
+        CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
+        CandidateSelection::None => {}
+    }
 
     match source_aware_most_specific(
         cands.iter().filter_map(|(candidate, params)| {
