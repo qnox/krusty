@@ -24429,6 +24429,45 @@ impl<'a> Checker<'a> {
     /// positionally, so `copy(resources = x)` type-checked `x` against the FIRST parameter.
     ///
     /// `None` when no module member matches (the caller falls through to its classpath/other paths).
+    /// How well `actual` fits a member parameter declared `expected`, or `None` when it cannot.
+    ///
+    /// A parameter declared with the method's own type parameter reaches here ERASED — `body: () -> T`
+    /// is `() -> Any`, non-null. Judging the argument against that erasure rejects a lambda returning a
+    /// NULLABLE type (`{ convert(it) }: () -> Item?`), because `Item?` is not assignable to a non-null
+    /// `Any`; the call is then reported as having no applicable member even though `T` is exactly what
+    /// the argument is there to bind. So a function-typed parameter is matched on ARITY, and only its
+    /// components that are NOT the erased top are judged.
+    fn member_argument_score(&self, expected: Ty, actual: Ty) -> Option<usize> {
+        if expected == actual {
+            return Some(4);
+        }
+        if expected.is_erased_top()
+            || crate::assignable::is_assignable(
+                &crate::assignable::TyCtx::new(),
+                self,
+                actual,
+                expected,
+            )
+        {
+            return Some(1);
+        }
+        let (Ty::Fun(expected), Ty::Fun(actual)) = (expected, actual) else {
+            return None;
+        };
+        let component = |expected: Ty, actual: Ty| {
+            expected.is_erased_top() || self.member_argument_score(expected, actual).is_some()
+        };
+        (expected.params.len() == actual.params.len()
+            && expected.suspend == actual.suspend
+            && expected
+                .params
+                .iter()
+                .zip(&actual.params)
+                .all(|(expected, actual)| component(*expected, *actual))
+            && component(expected.ret, actual.ret))
+        .then_some(1)
+    }
+
     fn module_member_candidate_score(
         &self,
         member: &crate::libraries::LibraryMember,
@@ -24437,22 +24476,7 @@ impl<'a> Checker<'a> {
         arg_names: Option<&[Option<String>]>,
         trailing_lambda: bool,
     ) -> Option<(usize, std::cmp::Reverse<usize>, bool)> {
-        let score = |expected: Ty, actual: Ty| {
-            if expected == actual {
-                Some(4)
-            } else if expected.is_erased_top()
-                || crate::assignable::is_assignable(
-                    &crate::assignable::TyCtx::new(),
-                    self,
-                    actual,
-                    expected,
-                )
-            {
-                Some(1)
-            } else {
-                None
-            }
-        };
+        let score = |expected: Ty, actual: Ty| self.member_argument_score(expected, actual);
         if arg_names.is_none() && !trailing_lambda {
             if !member.call_sig.vararg {
                 if args
