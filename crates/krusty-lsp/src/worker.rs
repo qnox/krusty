@@ -69,6 +69,9 @@ enum OwnedWorkerRequest {
     Materialize {
         materialize: OwnedMaterializeRequest,
     },
+    Dump {
+        dump: OwnedDumpRequest,
+    },
     Analyze(OwnedAnalysisRequest),
 }
 
@@ -83,6 +86,34 @@ struct MaterializeResponse {
     text: String,
     lo: u32,
     hi: u32,
+}
+
+/// A dump request as the worker receives it: an analysis payload plus which of its files to render.
+#[derive(Deserialize)]
+struct OwnedDumpRequest {
+    analysis: OwnedAnalysisRequest,
+    target: usize,
+    label: String,
+    cache_root: PathBuf,
+}
+
+/// A dump request as the supervisor sends it, borrowing the retained source texts.
+#[derive(Serialize)]
+struct DumpRequest<'a> {
+    analysis: AnalysisRequest<'a>,
+    target: usize,
+    label: &'a str,
+    cache_root: &'a Path,
+}
+
+/// Where the worker wrote a rendered dump.
+///
+/// Only the path crosses the channel: a dump document carries every AST node, typed expression, and
+/// IR instruction of a file, which would put the response at risk of the worker frame cap and then
+/// the LSP message cap.
+#[derive(Deserialize, Serialize)]
+pub struct DumpResponse {
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -310,6 +341,13 @@ fn encode_materialize_request(reference: &LibraryRef, use_sources: bool) -> io::
     Ok(request.bytes)
 }
 
+fn encode_dump_request(request: &DumpRequest<'_>) -> io::Result<Vec<u8>> {
+    let mut encoded = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
+    serde_json::to_writer(&mut encoded, &serde_json::json!({ "dump": request }))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    Ok(encoded.bytes)
+}
+
 fn framed_read_receiver<R>(
     mut reader: R,
     max_bytes: usize,
@@ -464,6 +502,13 @@ impl WorkerProcess {
         let response = self.read_response()?;
         serde_json::from_slice(&response).map_err(json_io)
     }
+
+    fn dump(&mut self, request: &DumpRequest<'_>) -> io::Result<Option<DumpResponse>> {
+        let request = encode_dump_request(request)?;
+        write_framed(&mut self.stdin, &request)?;
+        let response = self.read_response()?;
+        serde_json::from_slice(&response).map_err(json_io)
+    }
 }
 
 impl Drop for WorkerProcess {
@@ -603,6 +648,40 @@ impl AnalysisWorker {
             })
     }
 
+    /// Render the dump for `sources[target]` in the worker and return where it was written.
+    ///
+    /// `result_count` and `inferred_count` replay the prefix the session analyzed, so the dump sees
+    /// the same checked source set the editor did.
+    pub fn dump(
+        &mut self,
+        sources: &[String],
+        target: usize,
+        label: &str,
+        cache_root: &Path,
+        result_count: usize,
+        inferred_count: usize,
+    ) -> io::Result<Option<DumpResponse>> {
+        let texts = sources.iter().map(String::as_str).collect::<Vec<_>>();
+        let features = self.language_features.clone();
+        let mut language_features = features.iter().collect::<Vec<_>>();
+        language_features.sort_unstable();
+        let request = DumpRequest {
+            analysis: AnalysisRequest {
+                sources: &texts,
+                source_kinds: &[],
+                result_count,
+                inferred_count,
+                language_features: &language_features,
+                java_sources: &[],
+                classpath: None,
+            },
+            target,
+            label,
+            cache_root,
+        };
+        self.request(|process| process.dump(&request))
+    }
+
     fn request<T>(
         &mut self,
         mut operation: impl FnMut(&mut WorkerProcess) -> io::Result<T>,
@@ -740,6 +819,13 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
                         hi: span.hi,
                     }
                 });
+                let mut encoded = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
+                serde_json::to_writer(&mut encoded, &response).map_err(json_io)?;
+                write_framed(writer, &encoded.bytes)?;
+                continue;
+            }
+            OwnedWorkerRequest::Dump { dump } => {
+                let response = render_dump_request(&default_classpath, dump);
                 let mut encoded = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
                 serde_json::to_writer(&mut encoded, &response).map_err(json_io)?;
                 write_framed(writer, &encoded.bytes)?;
@@ -912,6 +998,94 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
         write_framed(writer, &response)?;
     }
     Ok(())
+}
+
+/// Analyze the payload, lower the target file, and store the rendered dump.
+///
+/// Returns `None` when the target index is out of range or the dump cannot be written. Lowering
+/// failures are not errors: the bail reason is the most valuable line in the document, so it is
+/// rendered into the IR section instead of discarding the dump.
+fn render_dump_request(
+    default_classpath: &Rc<Classpath>,
+    request: OwnedDumpRequest,
+) -> Option<DumpResponse> {
+    let sources = request.analysis.sources;
+    if request.target >= sources.len() {
+        return None;
+    }
+    let inputs = sources
+        .iter()
+        .map(|source| SourceInput::kotlin(source))
+        .collect::<Vec<_>>();
+
+    let mut features = LangFeatures::new();
+    for feature in &request.analysis.language_features {
+        features.enable(feature);
+    }
+    let classpath = request.analysis.classpath.as_ref().map_or_else(
+        || default_classpath.clone(),
+        |entries| {
+            let classpath = Rc::new(Classpath::new(entries.clone()));
+            classpath.prepare_for_source_analysis();
+            classpath
+        },
+    );
+    // Replay the prefix the session analyzed, widened when needed so the dumped file is always
+    // checked — an unchecked target would render neither types nor IR.
+    let result_count = request
+        .analysis
+        .result_count
+        .max(request.target + 1)
+        .min(sources.len());
+    let inferred_count = request
+        .analysis
+        .inferred_count
+        .unwrap_or(sources.len())
+        .max(result_count)
+        .min(sources.len());
+    let platform = Box::new(JvmLibraries::new(classpath.clone()));
+    let analysis = compiler_analysis::analyze_source_inputs_prefix_with_features(
+        &inputs,
+        result_count,
+        inferred_count,
+        platform,
+        &features,
+    );
+
+    let file_analysis = analysis.files.get(request.target)?;
+    // A second handle over the same `Rc<Classpath>`: the semantic platform was moved into the
+    // analysis as a `Box<dyn SemanticPlatform>`, which cannot be re-borrowed as a `TargetRuntime`.
+    let runtime = JvmLibraries::new(classpath);
+    let bail = std::cell::RefCell::new(String::new());
+    let lowered = file_analysis.types.as_ref().and_then(|info| {
+        krusty::ir_lower::lower_file_at_reporting(
+            &file_analysis.file,
+            request.target as u32,
+            info,
+            &analysis.symbols,
+            &runtime,
+            &bail,
+        )
+    });
+    let bail_reason = bail.borrow();
+    let ir = match lowered.as_ref() {
+        Some(ir) => Ok(ir),
+        None if file_analysis.types.is_none() => Err("file was not checked"),
+        None if bail_reason.is_empty() => Err("lowering produced no IR and no reason"),
+        None => Err(bail_reason.as_str()),
+    };
+
+    let text = krusty::dump::render_dump(&krusty::dump::DumpInput {
+        label: &request.label,
+        source: &sources[request.target],
+        file: &file_analysis.file,
+        info: file_analysis.types.as_ref(),
+        diagnostics: &file_analysis.diagnostics,
+        ir,
+    });
+
+    let path = crate::dump_cache::store(&request.cache_root, &request.label, &text).ok()?;
+    Some(DumpResponse { path })
 }
 
 fn json_io(error: serde_json::Error) -> io::Error {
@@ -1337,6 +1511,99 @@ mod tests {
             "value"
         );
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn worker_protocol_dumps_a_target_file_to_a_markdown_path() {
+        let root = std::env::temp_dir().join(format!("krusty-worker-dump-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let request = serde_json::json!({
+            "dump": {
+                "analysis": {
+                    "sources": ["fun box(): String = \"OK\"\n"],
+                    "result_count": 1,
+                },
+                "target": 0,
+                "label": "src/Main.kt",
+                "cache_root": root,
+            }
+        });
+        let mut input = Vec::new();
+        write_framed(&mut input, &serde_json::to_vec(&request).unwrap()).unwrap();
+        let mut output = Vec::new();
+
+        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
+
+        let mut output = Cursor::new(output);
+        assert_eq!(
+            read_framed(&mut output, WORKER_READY.len())
+                .unwrap()
+                .as_deref(),
+            Some(WORKER_READY)
+        );
+        let body = read_framed(&mut output, MAX_WORKER_MESSAGE_BYTES)
+            .unwrap()
+            .expect("worker dump response");
+        let response: Option<DumpResponse> = serde_json::from_slice(&body).unwrap();
+        let path = response.expect("dump produced").path;
+
+        assert!(path.starts_with(&root), "{path:?}");
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("md"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# krusty dump — src/Main.kt"), "{text}");
+        assert!(text.contains("## AST"), "{text}");
+        assert!(text.contains("## Checker"), "{text}");
+        assert!(text.contains("## IR"), "{text}");
+        assert!(
+            !text.contains("<file not checked>"),
+            "the dumped file must carry its checker result: {text}"
+        );
+        assert!(
+            !text.contains("not lowered:"),
+            "the dumped file must carry lowered IR: {text}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn worker_protocol_reports_no_dump_for_a_target_outside_the_source_set() {
+        let root =
+            std::env::temp_dir().join(format!("krusty-worker-dump-range-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let request = serde_json::json!({
+            "dump": {
+                "analysis": {
+                    "sources": ["fun answer(): Int = 42\n"],
+                    "result_count": 1,
+                },
+                "target": 4,
+                "label": "src/Main.kt",
+                "cache_root": root,
+            }
+        });
+        let mut input = Vec::new();
+        write_framed(&mut input, &serde_json::to_vec(&request).unwrap()).unwrap();
+        let mut output = Vec::new();
+
+        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
+
+        let mut output = Cursor::new(output);
+        assert_eq!(
+            read_framed(&mut output, WORKER_READY.len())
+                .unwrap()
+                .as_deref(),
+            Some(WORKER_READY)
+        );
+        let body = read_framed(&mut output, MAX_WORKER_MESSAGE_BYTES)
+            .unwrap()
+            .expect("worker dump response");
+        let response: Option<DumpResponse> = serde_json::from_slice(&body).unwrap();
+
+        assert!(response.is_none(), "out-of-range target must not dump");
+        assert!(!root.exists(), "a rejected dump must not write anything");
     }
 
     #[test]
