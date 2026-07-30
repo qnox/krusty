@@ -800,7 +800,20 @@ pub fn lower_file_at_reporting(
             };
             let module = crate::module_symbols::ModuleSymbols::new(lo.syms);
             let symbols = SymbolResolver::new_scoped_with_module(&*lo.syms.libraries, &module, &[]);
-            let super_internal: Option<TypeName> = match &c.base_class {
+            // A parenless supertype naming a CLASSPATH class is the base class, not an interface — the
+            // parser can only promote a base declared in the same file. Same probe the checker uses, so
+            // the two agree on which supertype is the base.
+            let parenless_base = crate::resolve::parenless_base_supertype(c, |name| {
+                lo.syms.class_names.get(name).is_some_and(|internal| {
+                    lo.syms
+                        .libraries
+                        .resolve_type_name(internal)
+                        .is_some_and(|ty| !ty.is_interface() && !ty.is_object())
+                })
+            })
+            .map(str::to_string);
+            let base_class = c.base_class.as_deref().or(parenless_base.as_deref());
+            let super_internal: Option<TypeName> = match base_class {
                 Some(base) => {
                     let file_base = resolve_file_supertype(base, false);
                     let resolved = file_base.as_deref().map(type_name).unwrap_or_else(|| {
@@ -829,6 +842,9 @@ pub fn lower_file_at_reporting(
             let mut iface_internals = Vec::new();
             for st_ref in &c.supertypes {
                 let st = &st_ref.name;
+                if parenless_base.as_deref() == Some(st.as_str()) {
+                    continue;
+                }
                 let resolved = if let Some(internal) = resolve_file_supertype(st, true) {
                     type_name(&internal)
                 } else {

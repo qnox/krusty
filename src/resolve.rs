@@ -3456,6 +3456,35 @@ fn generic_value_operand_slots(function: &FunDecl, owner_type_params: &[String])
 
 /// Like `collect_signatures` but also seeds class names and type aliases from the target's
 /// libraries (a JVM classpath, a klib), eliminating the need for any hardcoded type lists.
+/// A class with NO primary constructor names its base class WITHOUT parentheses — `class D : Base {
+/// constructor(): super(…) }` — because the base arguments come from each secondary `super(…)`. The
+/// parser parks every parenless supertype in `supertypes` and promotes only the ones naming a class
+/// declared in the SAME FILE (`fixup_parenless_base_classes`); it cannot see the classpath, where a
+/// base class and an interface look identical. Callers that do have a classpath pass `is_base_class`
+/// and get back the supertype that is really the base.
+pub(crate) fn parenless_base_supertype(
+    class: &ClassDecl,
+    mut is_base_class: impl FnMut(&str) -> bool,
+) -> Option<&str> {
+    if class.has_primary_ctor || class.base_class.is_some() {
+        return None;
+    }
+    let delegates_to_super = class.secondary_ctors.iter().any(|constructor| {
+        matches!(
+            constructor.delegation,
+            crate::ast::CtorDelegation::Super(_) | crate::ast::CtorDelegation::None
+        )
+    });
+    if !delegates_to_super {
+        return None;
+    }
+    class
+        .supertypes
+        .iter()
+        .map(|supertype| supertype.name.as_str())
+        .find(|name| is_base_class(name))
+}
+
 pub fn collect_signatures_with_cp(
     files: &[File],
     libraries: Box<dyn SemanticPlatform>,
@@ -4962,14 +4991,28 @@ pub fn collect_signatures_with_cp(
                             }
                         }
                     };
+                    // A parenless supertype that names a CLASSPATH class is the base class, not an
+                    // interface (`class D : Base { constructor(): super(…) }`). The parser's own fixup
+                    // can only recognize a base declared in the same FILE — there, `Base` and an
+                    // interface are syntactically identical. The classpath is in hand here, so ask it.
+                    let parenless_base = parenless_base_supertype(c, |name| {
+                        declared_supertype_name(c, name, &class_names).is_some_and(|internal| {
+                            libraries
+                                .resolve_type_name(internal)
+                                .is_some_and(|ty| !ty.is_interface() && !ty.is_object())
+                        })
+                    })
+                    .map(str::to_string);
                     let interfaces: Vec<String> = c
                         .supertypes
                         .iter()
+                        .filter(|t| parenless_base.as_deref() != Some(t.name.as_str()))
                         .map(|t| resolve_super(&t.name))
                         .collect();
                     let super_internal = c
                         .base_class
                         .as_deref()
+                        .or(parenless_base.as_deref())
                         .map(&mut resolve_super)
                         .or_else(|| c.is_enum().then(|| "kotlin/Enum".to_string()));
                     // A `companion object`'s OWN supertypes, resolved like the class's — so the synthesized
