@@ -700,6 +700,46 @@ fn cache_limit_message() -> String {
         .to_string()
 }
 
+/// Every Kotlin source the project model knows about, for background indexing.
+///
+/// Reuses `find_sources`, so the ignore rules and entry budget that govern open-document source
+/// discovery govern the sweep too; a second walk here would be a second, divergent definition of
+/// what counts as a workspace source.
+pub fn workspace_sources(model: &super::model::ProjectModel) -> (Vec<PathBuf>, bool) {
+    let mut roots: Vec<PathBuf> = model
+        .modules
+        .iter()
+        .flat_map(|module| module.source_roots.iter().map(|root| root.path.clone()))
+        .collect();
+    roots.sort();
+    roots.dedup();
+    let all_roots = roots.clone();
+    let mut sources = Vec::new();
+    let mut truncated = false;
+    for root in &roots {
+        // A root nested inside another would otherwise be walked twice and charged twice.
+        let excluded: Vec<PathBuf> = all_roots
+            .iter()
+            .filter(|other| *other != root && other.starts_with(root))
+            .cloned()
+            .collect();
+        // Budget per root rather than shared across the workspace: one large module must not
+        // starve every module after it in iteration order, silently and with no report.
+        let mut remaining = MAX_INVENTORY_ENTRIES;
+        match find_sources(root, true, &excluded, &mut remaining) {
+            Ok(found) => sources.extend(
+                found
+                    .into_iter()
+                    .filter(|path| krusty::source::is_supported_path(path)),
+            ),
+            Err(_) => truncated = true,
+        }
+    }
+    sources.sort();
+    sources.dedup();
+    (sources, truncated)
+}
+
 fn find_sources(
     root: &Path,
     ignore_workspace_directories: bool,

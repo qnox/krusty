@@ -2293,6 +2293,30 @@ pub struct MaterializedDefinition {
     pub hi: u32,
 }
 
+/// One chunk's indexing result.
+///
+/// `conclusive` separates "the analysis ran and these files produced nothing" from "the analysis
+/// could not run". Only the former may delete retained data; conflating them lets a worker restart
+/// silently erase a whole chunk's diagnostics.
+#[derive(Clone, Debug, Default)]
+pub struct IndexOutcome {
+    pub files: Vec<IndexedFile>,
+    pub conclusive: bool,
+}
+
+/// One workspace file's indexing result. Only diagnostics and the text hash are retained; the
+/// rich per-document indices are derived while indexing and dropped, because a swept file is
+/// re-analysed interactively the moment it is opened.
+#[derive(Clone, Debug)]
+pub struct IndexedFile {
+    pub uri: String,
+    pub diagnostics: Vec<Diagnostic>,
+    pub text_hash: u64,
+    /// Retained only until the store resolves byte spans to line and UTF-16 column, then dropped.
+    /// Resolving later would need the text again, and re-reading would race the sweep.
+    pub text: String,
+}
+
 #[derive(Clone)]
 pub struct DocumentAnalysis {
     pub diagnostics: Vec<Diagnostic>,

@@ -173,6 +173,9 @@ struct WorkerHost {
     clock: Instant,
     root: Option<PathBuf>,
     jdk_warning_shown: bool,
+    /// Set when the source inventory hit its per-root limit, so the shortfall is reported rather
+    /// than looking like a fully indexed workspace.
+    truncated_inventory: bool,
     project_sources: ProjectSources,
     analysis_cache: Vec<CachedProjectAnalysis>,
     analysis_pending: bool,
@@ -199,6 +202,7 @@ impl WorkerHost {
             clock: Instant::now(),
             root: None,
             jdk_warning_shown: false,
+            truncated_inventory: false,
             project_sources: ProjectSources::default(),
             analysis_cache: Vec::new(),
             analysis_pending: false,
@@ -363,7 +367,90 @@ impl WorkerHost {
     }
 }
 
+/// Bytes one index chunk may read. Mirrors the open-document budget in spirit: a count of files is
+/// not a memory bound.
+const MAX_INDEX_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+
 impl krusty_lsp::Analysis for WorkerHost {
+    fn index_workspace_files(&mut self, uris: &[&str]) -> krusty_lsp::IndexOutcome {
+        let mut budget = MAX_INDEX_CHUNK_BYTES;
+        let readable: Vec<(String, String)> = uris
+            .iter()
+            .filter_map(|uri| {
+                let path = krusty_lsp::uri::file_uri_to_path(uri)?;
+                let text = std::fs::read_to_string(path).ok()?;
+                // The open-document path is byte-bounded; indexing has to be too, or a generated
+                // multi-hundred-megabyte source would sit in memory twice per chunk.
+                budget = budget.checked_sub(text.len())?;
+                Some(((*uri).to_string(), text))
+            })
+            .collect();
+        if readable.is_empty() {
+            return krusty_lsp::IndexOutcome::default();
+        }
+        // Deliberately NOT analyze_open_documents: that treats its argument as the open set and
+        // evicts the interactive analysis cache, so every chunk would turn the user's next
+        // keystroke into a cold recompile -- the regression the priority queue exists to avoid.
+        let texts: Vec<&str> = readable.iter().map(|(_, text)| text.as_str()).collect();
+        let analyses = self.analyze(&texts);
+        // A short result means the worker did not answer; report it as inconclusive so the store
+        // keeps what it already has rather than treating the gap as deletions.
+        let conclusive = analyses.len() == readable.len();
+        let files = analyses
+            .into_iter()
+            .zip(readable)
+            .map(|(analysis, (uri, text))| krusty_lsp::IndexedFile {
+                uri,
+                diagnostics: analysis.diagnostics,
+                text_hash: krusty_lsp::workspace_text_hash(&text),
+                text,
+            })
+            .collect();
+        krusty_lsp::IndexOutcome { files, conclusive }
+    }
+
+    fn neighborhood_index_candidates(&mut self, open_uris: &[&str]) -> Vec<String> {
+        let Some(snapshot) = self.sync.as_ref().and_then(ProjectSync::snapshot) else {
+            return Vec::new();
+        };
+        let model = snapshot.model();
+        let open_modules: std::collections::HashSet<usize> = open_uris
+            .iter()
+            .filter_map(|uri| krusty_lsp::uri::file_uri_to_path(uri))
+            .filter_map(|path| model.module_index_for_source(&path))
+            .collect();
+        if open_modules.is_empty() {
+            return Vec::new();
+        }
+        let (sources, _truncated) = krusty_lsp::project::workspace_sources(model);
+        sources
+            .into_iter()
+            .filter(|path| {
+                model
+                    .module_index_for_source(path)
+                    .is_some_and(|module| open_modules.contains(&module))
+            })
+            .filter_map(|path| krusty_lsp::uri::path_to_file_uri(&path))
+            .collect()
+    }
+
+    /// Candidates come from the project model's own source inventory. Walking the tree separately
+    /// here would be a second, divergent definition of what counts as a workspace source.
+    fn workspace_index_candidates(&mut self) -> Vec<String> {
+        let Some(snapshot) = self.sync.as_ref().and_then(ProjectSync::snapshot) else {
+            return Vec::new();
+        };
+        let (sources, truncated) = krusty_lsp::project::workspace_sources(snapshot.model());
+        if truncated {
+            // Silent truncation would look identical to a fully indexed workspace.
+            self.truncated_inventory = true;
+        }
+        sources
+            .into_iter()
+            .filter_map(|path| krusty_lsp::uri::path_to_file_uri(&path))
+            .collect()
+    }
+
     fn document_admission(&self) -> krusty_lsp::DocumentAdmission {
         self.sync
             .as_ref()
