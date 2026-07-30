@@ -234,6 +234,33 @@ pub enum IrExpr {
     /// part → `String.valueOf(part)`; multiple parts → one `StringBuilder` with a typed `append` per part
     /// and a final `toString()` (vs the old `String.plus` chain, which made one StringBuilder per `+`).
     StringConcat(Vec<ExprId>),
+    /// Read a PROPERTY of `owner` — the Kotlin operation, with no accessor in it. A property is a
+    /// declaration, not a method: `Dispatchers.IO` names the property `IO` on `kotlinx/coroutines/
+    /// Dispatchers`, and there is no `getIO` anywhere in the language. HOW the read is realized — a field
+    /// load, an instance accessor, a receiverless static accessor, a `@JvmName`-spelled or value-class-
+    /// mangled one — is the target's business, derived by the backend from the owner's declaration. The
+    /// node is the same whatever the owner is (this file, a sibling file, the classpath) and whatever the
+    /// receiver is; there is no per-origin property node. `ty` is the property's LOGICAL Kotlin type; a
+    /// realization whose physical result is erased/boxed is bridged to it by the backend. `receiver` is
+    /// the value the property is read on, and stays an expression the program evaluates even when the
+    /// realization takes no receiver.
+    PropertyRead {
+        receiver: ExprId,
+        owner: TypeName,
+        name: String,
+        ty: Ty,
+    },
+    /// Write a PROPERTY of `owner` (statement) — the write analogue of [`IrExpr::PropertyRead`], and the
+    /// same rule: it names the property, and how the target writes it (a field store, an instance setter,
+    /// a receiverless one) is derived by the backend from the owner's declaration. `ty` is the property's
+    /// Kotlin type, which the assigned `value` is bridged to.
+    PropertyWrite {
+        receiver: ExprId,
+        owner: TypeName,
+        name: String,
+        value: ExprId,
+        ty: Ty,
+    },
     /// Read an instance field (`IrGetField`): `receiver.<fields[index]>` of class `class`.
     GetField {
         receiver: ExprId,
@@ -645,6 +672,40 @@ pub struct IrCtorArg {
     pub check: Option<String>,
 }
 
+/// A property a class DECLARES. A property is a declaration, not a pair of methods: `val a: Int` is one
+/// thing, and the `getA()` a target may emit for it is a realization of it. The front end lowers only
+/// what is genuinely Kotlin — a source-written accessor's BODY — and leaves naming, descriptors and
+/// dispatch to the backend.
+#[derive(Clone, Debug)]
+pub struct IrProperty {
+    pub name: String,
+    pub ty: Ty,
+    /// Index into [`IrClass::fields`] for the backing field, `None` for a computed/delegated property
+    /// (which stores nothing).
+    pub backing_field: Option<u32>,
+    pub is_var: bool,
+    /// Non-final: the accessor a backend emits for it must be overridable.
+    pub is_open: bool,
+    /// A `private` property. kotlinc emits NO accessor for one — in-class reads go straight to the
+    /// backing field — so a use from outside the declaring class has nothing to call, and whichever
+    /// path is lowering it does not own the access.
+    pub is_private: bool,
+    /// The lowered body of a source-written getter/setter (a computed, `field`-using, or delegated
+    /// property). `None` for a plain backing-field property, whose accessor has no source body at all.
+    pub getter: Option<FunId>,
+    pub setter: Option<FunId>,
+    /// The JVM name a backend must use for the synthesized accessor when the plain spelling is wrong —
+    /// a value-class-typed property's accessor is `@JvmName`-mangled. Stamped by the pass that knows the
+    /// value classes; `None` means the ordinary spelling applies.
+    pub getter_jvm_name: Option<String>,
+    pub setter_jvm_name: Option<String>,
+    /// Some use of this PRIVATE property reaches it from outside the declaring class — an `inline`
+    /// function's body, spliced into its caller. The declaring class must then expose a synthetic
+    /// accessor for it (`access$get<X>$p` on the JVM); without one the splice would be illegal, and
+    /// silently degrading the `inline` call instead would change what the program does.
+    pub needs_access_bridge: bool,
+}
+
 /// A class/interface/object declaration (`IrClass`). Instance fields come from the primary
 /// constructor's `val`/`var` parameters (in order); the constructor stores each.
 #[derive(Clone, Debug)]
@@ -670,6 +731,9 @@ pub struct IrClass {
     pub supertypes: Vec<Ty>,
     /// Instance fields. The first `ctor_param_count` are the primary-constructor parameters (stored
     /// directly from args, in order); any after them are class-body properties initialized by `init_body`.
+    /// The properties this class declares — the DECLARATION, alongside the backing `fields` that store
+    /// them and (for now) the accessor methods the front end still synthesizes into `methods`.
+    pub properties: Vec<IrProperty>,
     pub fields: Vec<IrField>,
     /// How many leading `fields` are property constructor parameters (`val`/`var`) — the rest are body
     /// properties. NOTE: this is the count of constructor params that BACK A FIELD, not the total
@@ -1615,6 +1679,9 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         IrExpr::SetField {
             receiver, value, ..
         }
+        | IrExpr::PropertyWrite {
+            receiver, value, ..
+        }
         | IrExpr::RefSet {
             holder: receiver,
             value,
@@ -1624,7 +1691,7 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
             f(*value);
         }
         IrExpr::Variable { init, .. } => init.iter().for_each(|&i| f(i)),
-        IrExpr::GetField { receiver, .. } => f(*receiver),
+        IrExpr::GetField { receiver, .. } | IrExpr::PropertyRead { receiver, .. } => f(*receiver),
         IrExpr::Call {
             args,
             dispatch_receiver,
@@ -1684,6 +1751,18 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         | IrExpr::UnitInstance
         | IrExpr::CurrentContinuation => {}
     }
+}
+
+/// Whether evaluating `expr` can run NO code at all — a literal or a local read. Strictly conservative:
+/// anything that touches a type (a static read, an enum entry, a singleton) can trigger that type's
+/// initializer, which is arbitrary user code, so it is NOT in this set. Used where a value the source
+/// program computes is discarded by the target form and the consumer must decide whether it still has to
+/// be evaluated.
+pub fn expr_runs_no_code(ir: &IrFile, expr: ExprId) -> bool {
+    matches!(
+        ir.expr(expr),
+        IrExpr::Const(_) | IrExpr::ClassConst { .. } | IrExpr::GetValue(_) | IrExpr::UnitInstance
+    )
 }
 
 /// Whether a top-level `foo$default` synthetic can be SAFELY emitted for `fid`. The function name must be
@@ -2022,6 +2101,7 @@ mod tests {
             type_param_bounds: Vec::new(),
             type_params: Vec::new(),
             supertypes: Vec::new(),
+            properties: Vec::new(),
             fields: Vec::new(),
             field_annotations: Vec::new(),
             ctor_param_count: 0,

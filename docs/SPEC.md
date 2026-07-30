@@ -1097,6 +1097,79 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   when it matches, resolve/emit an `invokestatic` on the object class (the instance receiver is dropped,
   as kotlinc does). Test: `tests/interface_supertype_members_e2e.rs::jvmstatic_object_member`.
 
+- **A property read is a property read; how it is READ is the target's business.** `Dispatchers.IO` was
+  reported as `unresolved reference 'IO'`, and the cause was a category error rather than a missing case:
+  a Kotlin property has no accessor — `getIO()` exists only in the class file — yet the accessor was
+  carried all the way into resolution and lowering, and a read that could not be expressed as a zero-arg
+  MEMBER METHOD therefore failed to resolve at all. `@JvmStatic` (which `Dispatchers` puts on every
+  member) is an annotation for the JVM emitter: it moves the accessor off the singleton to a static of
+  the object class, so the accessor is not an instance member and the lookup found nothing.
+  The model now stops at the declaration. Resolution answers only what it owns — the receiver declares a
+  property of this name (`SymbolResolver::member_property_type`), recorded as
+  `ExprLowering::MemberPropertyRead` so lowering never re-decides what the member is — and lowering emits
+  one node, `IrExpr::PropertyRead { receiver, owner, name, ty }`, the same whatever the owner (this file,
+  a sibling file, the classpath) and whatever the receiver. `ty` is the front end's answer for the read's
+  Kotlin type, after substituting the receiver's type arguments; nothing else about the read reaches the
+  IR. Members still beat extensions, which matters here: `kotlinx.coroutines` also ships a binary-compat
+  `DispatchersKt.getIO(Dispatchers)` EXTENSION property of the same name.
+  The JVM backend decides the rest, and is the only layer that knows what `@JvmStatic` means.
+  `Classpath::property_read_access` reads the owner's declaration for the realization — `@Metadata`'s
+  `JvmPropertySignature` for a Kotlin class (so a `@JvmName` or value-class-mangled accessor is honoured,
+  never guessed), a mapped-builtin/bean accessor or public field for a Java one — and `ir_emit`'s
+  `emit_property_read` emits `getfield`/`getstatic`/`invokevirtual`/`invokeinterface`/`invokestatic`,
+  bridging the physical result to the logical type (box, unbox, narrow). A realization that takes no
+  receiver still evaluates one: a bare singleton or local read is elided, anything that can have an EFFECT
+  is evaluated and popped — byte-for-byte kotlinc for `Cfg.p`, `local.p` and `side().p`. A value class's
+  sole property is its erased underlying, so `value_classes` rewrites that read to identity rather than
+  any accessor.
+  Writes are the same shape: `IrExpr::PropertyWrite`, recorded by the checker as
+  `StmtLowering::MemberPropertyWrite`, with `Classpath::property_write_access` /
+  `declared_property_write_access` choosing the store (a field write inside the declaring class, the setter
+  outside, and always the setter for a property with no backing field — a custom setter, a delegated
+  `x$delegate`). This is what fixed the `@JvmStatic var` write, which emitted `invokevirtual` on the
+  singleton and died at run time with `IncompatibleClassChangeError` — a miscompile, not a diagnostic.
+  A property of a class this compilation declares goes through the same node — `GetField`/`SetField` are
+  left to what they should mean, storage that is NOT a Kotlin property (coroutine state-machine slots,
+  captured values, constructor field init, synthesized data/value-class members). The backend picks the
+  direct field load only where it is legal, inside the declaring class, and reads the accessor's
+  descriptor off the accessor itself: an accessor may return what the field's declared type does not
+  spell, so a descriptor built from the field is a `NoSuchMethodError`, and a value-class-typed
+  property's accessor is `@JvmName`-mangled (`getId-<hash>`), so missing that spelling falls through to a
+  private field — an `IllegalAccessError`. A `Unit` property is stored as `Lkotlin/Unit;` but read
+  through a `()V` accessor, so what the read leaves on the stack comes from the chosen realization
+  (`descriptor_ret_words`), not from the declared type.
+  The node carries the property's DECLARED type: substituting it to the type the site sees stays in the
+  IR as before, because a pass that rewrites the read away still needs that bridging. And nothing ever
+  narrows to a value class — it has no runtime type of its own, its values ARE the erased underlying — in
+  the receiver narrowing or in the backend's physical-to-logical bridge.
+  The cost of a realization-shaped IR is paid by every pass that pattern-matches one, and each had to be
+  taught the node: `suspend` walks it structurally, `ir_emit` tracks stack frames per node kind, and
+  `value_classes` recognizes it in five places (the sole-property read that is the erased underlying, the
+  plain-field getter identified by the read in its body, `constructor-impl`'s init inlining, and the
+  nullability/boxing analyses) while erasing the type a WRITE carries.
+
+- **A property's ACCESSORS are synthesized by the backend, not by lowering.** `getA()` is a realization of
+  `val a`, so `ir_lower` records the declaration (`IrClass::properties`, an `IrProperty` per declared
+  property: type, backing-field index, visibility, modality, and the lowered BODY of a source-written
+  accessor) and `ir_emit::emit_declared_property_accessors` emits the method — its name, descriptor,
+  dispatch, `getfield`/`putfield` body, generic `Signature`, and the `checkNotNullParameter` guard kotlinc
+  puts on a non-null reference setter. Only a source-written accessor (computed, delegated, `field`-using)
+  is lowered as a method, because only its body is Kotlin. Details that bit, all now driven off the
+  declaration: the accessor descriptor comes from the ACCESSOR, never the field (an accessor may return
+  what the field's type does not spell); a `Unit` property is stored as `Lkotlin/Unit;` but read through a
+  `()V` accessor, so its stack effect comes from `descriptor_ret_words`; a value-class-typed property's
+  accessor is `@JvmName`-mangled, and an OVERRIDE of one keeps the plain spelling while its BRIDGE takes
+  the supertype's mangled name — read from the supertype's actual accessor, never a recomputed hash; and a
+  class of this compilation is always answered from its declaration, never from the naming-convention
+  fallback, which has no class file and would mistake an interface for a class.
+
+- **A private property reached from outside its class gets kotlinc's `access$get<X>$p` bridge.** An
+  `inline` body is spliced into its caller, where the private backing field is unreachable. krusty used to
+  decline the read, which made the splice bail and emit an ordinary call — silently turning an `inline`
+  call into a non-inline one, a different program. `IrProperty::needs_access_bridge` records the need
+  during lowering and the backend emits the synthetic static, so the splice stays legal.
+  Test: `tests/classpath_jvmstatic_object_property_e2e.rs`.
+
 - **INSTANCE member of a classpath `object`, and dotted classpath nested types.** A plain (non-`@JvmStatic`)
   member call on a classpath `object` (`Ids.generate()`, `L.logger { }`) is an instance call on the
   singleton — `getstatic <Object>.INSTANCE; invokevirtual`. The qualified-name path previously errored it

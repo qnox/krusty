@@ -8783,6 +8783,11 @@ pub enum ExprLowering {
     LabeledThisOuter,
     /// A platform property implemented by an intrinsic getter.
     IntrinsicProperty(Box<crate::libraries::LibraryMember>),
+    /// `recv.name` resolved to a MEMBER PROPERTY the receiver's type declares. Recorded by the checker,
+    /// which is what resolves the name; lowering reads this instead of re-deciding what the member is, and
+    /// emits [`crate::ir::IrExpr::PropertyRead`]. Absent when the read resolved to something else (an
+    /// intrinsic, a zero-arg method read, an implicit receiver), so lowering keeps its other paths.
+    MemberPropertyRead,
     /// A property-read `recv.name` resolved to a classpath extension property getter.
     ExtensionPropertyGet {
         getter: Box<crate::libraries::LibraryCallable>,
@@ -8872,6 +8877,11 @@ pub enum StmtLowering {
         classpath_getter: Option<Box<crate::symbol_resolver::ResolvedMember>>,
         classpath_setter: Option<Box<crate::libraries::LibraryCallable>>,
     },
+    /// `recv.name = value` resolved to a MEMBER PROPERTY the receiver's type declares — the write
+    /// analogue of [`ExprLowering::MemberPropertyRead`]. `ty` is the property's type, which the assigned
+    /// value is bridged to. Lowering emits [`crate::ir::IrExpr::PropertyWrite`] and decides nothing about
+    /// the store form.
+    MemberPropertyWrite { ty: Ty },
     /// A `kotlin.contracts.contract { … }` statement: erased metadata, never executed and emits no
     /// bytecode (kotlinc drops it at codegen). The lowerer skips it entirely.
     Erased,
@@ -22590,12 +22600,32 @@ impl<'a> Checker<'a> {
             }
         }
         if !rt.is_nullable() {
+            // Whether the receiver DECLARES a property of this name is a resolution question, so it is
+            // answered here and recorded. Lowering must not re-ask it: `recv.name` is then a property
+            // read, and only how the target realizes it is left to decide.
+            let is_property = self.syms.libraries.member_is_property(rt, name);
             if let Some(m) = self.resolve_property_member(rt, name) {
                 let ret = m.ret;
                 if let Some(me) = mexpr {
+                    if is_property {
+                        self.expr_lowers
+                            .insert(me, ExprLowering::MemberPropertyRead);
+                    }
                     self.resolved_calls.insert(me, ResolvedCall::Member(m));
                 }
                 return Some(ret);
+            }
+            // A member property the receiver declares, whose read the lookup above could not express as a
+            // zero-arg member. That is not a resolution failure: a property is a declaration, and reading
+            // it need not go through any method — the backend realizes the read from the owner's own
+            // declaration. Resolution owes the site only the property's type. It stays a MEMBER, so it is
+            // decided here, ahead of any extension property of the same name.
+            if let Some(ty) = self.resolver().member_property_type(rt, name) {
+                if let Some(me) = mexpr {
+                    self.expr_lowers
+                        .insert(me, ExprLowering::MemberPropertyRead);
+                }
+                return Some(ty);
             }
         }
         match self.member_extension_property(rt, name) {
@@ -28582,6 +28612,17 @@ impl<'a> Checker<'a> {
                         self.value_diagnostic_span(value, vt),
                         "assignment",
                     );
+                    // Whether the receiver DECLARES this property is a resolution question, answered here
+                    // and recorded — the write analogue of `MemberPropertyRead`. Lowering then names the
+                    // property and leaves the store form to the backend.
+                    if self.syms.libraries.member_is_property(rt, &name) {
+                        self.stmt_lowers.insert(
+                            s,
+                            StmtLowering::MemberPropertyWrite {
+                                ty: setter.params.first().copied().unwrap_or(pty),
+                            },
+                        );
+                    }
                     self.property_setters.insert(s, setter);
                     return;
                 }

@@ -8,6 +8,38 @@ use super::classfile::ClassWriter;
 use super::classreader::{MethodCode, C};
 use std::collections::HashMap;
 
+/// How a compiled class realizes a PROPERTY read. Kotlin has no accessors — `Dispatchers.IO` is a
+/// property — so the emitter asks the class file what reading it actually compiles to. `is_static` means
+/// the realization takes no receiver (a `@JvmStatic` accessor, or a `static` field): the receiver is an
+/// expression the program still evaluates, but it is not passed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PropertyAccess {
+    /// `getfield` / `getstatic <owner>.<name>:<descriptor>`.
+    Field {
+        owner: String,
+        name: String,
+        descriptor: String,
+        is_static: bool,
+    },
+    /// `invokevirtual` / `invokeinterface` / `invokestatic <owner>.<name><descriptor>`.
+    Accessor {
+        owner: String,
+        name: String,
+        descriptor: String,
+        is_static: bool,
+        is_interface: bool,
+    },
+    /// `invokestatic <owner>.<name>(<owner>)<ret>` — a synthetic static that takes the receiver as its
+    /// ARGUMENT. This is how a private member is reached from outside its class: an `inline` function's
+    /// body is spliced into the caller, where the private backing field is unreachable, so kotlinc emits
+    /// an `access$get<X>$p` bridge on the declaring class and the splice calls that.
+    AccessBridge {
+        owner: String,
+        name: String,
+        descriptor: String,
+    },
+}
+
 /// The narrow capability the bytecode inliner needs from the classpath (interface segregation /
 /// least-knowledge): read a method's compiled body by owner/name/descriptor. *Whether* a callee is
 /// `inline` is function metadata that travels with the resolved signature (decoded once, alongside the
@@ -22,6 +54,28 @@ pub trait MethodBodies {
     /// the classpath overrides it. Only meaningful for a resolved-classpath `Callee::Static` owner.
     fn owner_is_interface(&self, _owner: &str) -> bool {
         false
+    }
+    /// Whether `owner.name descriptor` is `ACC_STATIC`. A Kotlin `@JvmStatic` member of an `object` or
+    /// companion is an ordinary MEMBER in the language — the front end resolves and lowers it as one, with
+    /// a receiver — but kotlinc emits its method as a static that takes no receiver. Only the emitter can
+    /// see that, and only it needs to: it drops the receiver and uses `invokestatic`. Default `false` (a
+    /// virtual method); the classpath overrides it.
+    fn method_is_static(&self, _owner: &str, _name: &str, _descriptor: &str) -> bool {
+        false
+    }
+    /// How reading the Kotlin property `property` of `owner` is realized by that class file — the
+    /// accessor or field the emitter must use, and whether it takes a receiver. Walks supertypes, since a
+    /// property may be declared above the receiver's own class. `None` when `owner` isn't a compiled class
+    /// this source can see, or declares no such property; the caller then falls back to the JVM naming
+    /// convention. Default `None`; the classpath overrides it.
+    fn property_read_access(&self, _owner: &str, _property: &str) -> Option<PropertyAccess> {
+        None
+    }
+    /// The write analogue of [`Self::property_read_access`] — the setter or field a `var` property's
+    /// assignment compiles to. `None` when `owner` isn't a compiled class this source can see, declares no
+    /// such property, or the property is read-only.
+    fn property_write_access(&self, _owner: &str, _property: &str) -> Option<PropertyAccess> {
+        None
     }
 }
 

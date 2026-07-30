@@ -267,6 +267,11 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             let name = &ir.classes[*class as usize].fields[*index as usize].name;
             format!("{}.{}", emit_expr(ir, *receiver, inst), name)
         }
+        // JS has no accessors: reading a property IS reading the object's field. (The JVM's `getX()` is
+        // one realization of this operation; this is the other.)
+        IrExpr::PropertyRead { receiver, name, .. } => {
+            format!("{}.{}", emit_expr(ir, *receiver, inst), name)
+        }
         IrExpr::New { internal, args, .. } => {
             let fq = internal.render();
             let name = class_simple(&fq);
@@ -452,6 +457,17 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 emit_expr(ir, *value, inst)
             )
         }
+        IrExpr::PropertyWrite {
+            receiver,
+            name,
+            value,
+            ..
+        } => format!(
+            "({}.{} = {})",
+            emit_expr(ir, *receiver, inst),
+            name,
+            emit_expr(ir, *value, inst)
+        ),
         IrExpr::SetStatic { index, value } => {
             format!(
                 "({} = {})",
@@ -459,8 +475,23 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 emit_expr(ir, *value, inst)
             )
         }
-        _ => "undefined".to_string(),
+        // The JS backend covers a subset of the IR. A node it cannot represent must NOT masquerade as a
+        // value: `undefined` silently compiles a wrong program (a property read read back as `undefined`
+        // instead of the value, with no error anywhere). JS has no compile step of its own, so the honest
+        // realization is a throw at the point of use.
+        other => format!(
+            "(() => {{ throw new Error(\"krusty: JS backend cannot emit {}\"); }})()",
+            expr_kind(other)
+        ),
     }
+}
+
+/// Variant name of an IR node, for the unsupported-node message.
+fn expr_kind(e: &IrExpr) -> String {
+    format!("{e:?}")
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect()
 }
 
 fn js_op(op: IrBinOp) -> &'static str {

@@ -1104,6 +1104,39 @@ fn hoist_expr(
             };
             e
         }
+        IrExpr::PropertyRead {
+            receiver,
+            owner,
+            name,
+            ty,
+        } => {
+            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, prelude);
+            ir.exprs[e as usize] = IrExpr::PropertyRead {
+                receiver: nr,
+                owner,
+                name,
+                ty,
+            };
+            e
+        }
+        IrExpr::PropertyWrite {
+            receiver,
+            owner,
+            name,
+            value,
+            ty,
+        } => {
+            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, prelude);
+            let nv = hoist_expr(ir, value, suspend_set, orig_rets, prelude);
+            ir.exprs[e as usize] = IrExpr::PropertyWrite {
+                receiver: nr,
+                owner,
+                name,
+                value: nv,
+                ty,
+            };
+            e
+        }
         // A STATEMENT-LESS `Block` in VALUE position — an INLINE function's body spliced into a `return`/
         // `val =`/argument position collapses to `{ <value> }` (`return myRun { await() }` →
         // `return { await() }`). Hoist a suspension in its trailing value; the block is just grouping. An
@@ -4541,6 +4574,7 @@ fn build_continuation_class(
         type_param_bounds: vec![],
         type_params: Vec::new(),
         supertypes: vec![],
+        properties: Vec::new(),
         fields,
         ctor_param_count: 0,
         ctor_args,
@@ -5159,7 +5193,12 @@ fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
         IrExpr::RefGet { holder, .. } => box_returns(ir, holder),
         IrExpr::RefSet { holder, value, .. } => box_returns(ir, holder) && box_returns(ir, value),
         IrExpr::Variable { init, .. } => init.is_none_or(|i| box_returns(ir, i)),
-        IrExpr::GetField { receiver, .. } => box_returns(ir, receiver),
+        IrExpr::GetField { receiver, .. } | IrExpr::PropertyRead { receiver, .. } => {
+            box_returns(ir, receiver)
+        }
+        IrExpr::PropertyWrite {
+            receiver, value, ..
+        } => box_returns(ir, receiver) && box_returns(ir, value),
         IrExpr::Call { args, .. } => args.into_iter().all(|a| box_returns(ir, a)),
         // A function-value invoke (`f(x)` on a `Function{n}` value) — traverse like a call; the
         // machine has already threaded its continuation if it suspends.
