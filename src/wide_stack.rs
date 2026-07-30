@@ -20,6 +20,10 @@ const WIDE_STACK_BYTES: usize = 128 * 1024 * 1024;
 /// to the spawned thread, the parent blocks inside `scope` until it finishes, and the result moves
 /// back through `join` (which synchronizes-with the child). No allocation is ever touched by two
 /// threads at once, so the non-atomic refcounts and unguarded caches stay single-threaded.
+///
+/// Implicit precondition: nothing reachable from `f` may stash non-`Sync` state in thread-locals
+/// or rely on running on a particular thread — the compiler has no `thread_local!` state today,
+/// and any future addition must account for passes running on this throwaway thread.
 pub(crate) fn on_wide_stack<T>(f: impl FnOnce() -> T) -> T {
     struct AssertSend<T>(T);
     unsafe impl<T> Send for AssertSend<T> {}

@@ -3461,6 +3461,19 @@ pub fn collect_signatures_with_cp(
     libraries: Box<dyn SemanticPlatform>,
     diags: &mut DiagSink,
 ) -> SymbolTable {
+    // Signature collection structurally infers expression-body literal types (`infer_lit_ty_p`, a
+    // per-operand recursion over the body), so a deep expression recurses here BEFORE any wrapped
+    // check runs — it needs the same wide stack (see [`crate::wide_stack`]).
+    crate::wide_stack::on_wide_stack(move || {
+        collect_signatures_with_cp_impl(files, libraries, diags)
+    })
+}
+
+fn collect_signatures_with_cp_impl(
+    files: &[File],
+    libraries: Box<dyn SemanticPlatform>,
+    diags: &mut DiagSink,
+) -> SymbolTable {
     let platform_default_imports = libraries.platform_default_import_packages();
     // Pass 1: every class simple-name -> internal name (no bodies, just the type universe). Nothing is
     // pre-seeded: every referenced type resolves through the file's imports and default packages below
@@ -9522,6 +9535,14 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
 /// erased `java/util/List` instead of the inferred `List<Role>`) would resolve against the collection
 /// default until B is processed. Iterating a global fixpoint over all files closes that cross-file gap.
 pub fn preinfer_module_returns(files: &[File], syms: &mut SymbolTable, diags: &mut DiagSink) {
+    // Pre-inference (and the capture discovery it starts with) checks expression bodies with the
+    // same recursion as the main pass, so it needs the same wide stack — it runs BEFORE any file's
+    // `check_file_on_checker_stack`, and without this an inferred-return deep expression would
+    // overflow the calling thread long before the depth guard fires (see [`crate::wide_stack`]).
+    crate::wide_stack::on_wide_stack(move || preinfer_module_returns_impl(files, syms, diags))
+}
+
+fn preinfer_module_returns_impl(files: &[File], syms: &mut SymbolTable, diags: &mut DiagSink) {
     discover_anonymous_object_captures(files, syms);
     let saved = diags.current_file();
     for _pass in 0..8 {

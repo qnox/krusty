@@ -55,6 +55,23 @@ fn deep_left_leaning_boolean_chain_compiles_on_default_stack() {
 }
 
 #[test]
+fn deep_inferred_return_chain_preinfers_on_default_stack() {
+    // No declared return type → the MODULE-LEVEL pre-inference pass checks the expression body
+    // before any per-file check runs, so it recurses just as deep and must survive on a default
+    // stack too (it used to run the checker recursion unwrapped on the calling thread).
+    let chain = vec!["true"; 400].join(" && ");
+    let src = format!("fun deep() = {chain}\n");
+    let mut d = DiagSink::new();
+    let toks = lex(&src, &mut d);
+    let files = vec![parse(&src, &toks, &mut d)];
+    let mut syms = collect_signatures(&files, &mut d);
+    krusty::frontend::preinfer_module_returns(&files, &mut syms, &mut d);
+    check_file(&files[0], &mut syms, &mut d);
+    let es: Vec<String> = d.diags.iter().map(|x| x.msg.clone()).collect();
+    assert!(es.is_empty(), "expected no diagnostics, got: {es:?}");
+}
+
+#[test]
 fn beyond_depth_guard_chain_degrades_without_crash() {
     // 700 operands → past the 500 depth guard: the expression may type as `Error` (diagnostics are
     // allowed), but the compiler must return, not crash.
