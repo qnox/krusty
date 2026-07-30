@@ -26100,6 +26100,20 @@ impl<'a> Checker<'a> {
                     }
                     return Ty::String; // intrinsic on any type
                 }
+                // A primitive's own operator method (`Int.rem`) is NOT `infix`, so the infix notation
+                // (`a rem b`) cannot select it — only a user `infix` extension can answer such a call.
+                // When one is in scope, every builtin/member path below is skipped and the call goes to
+                // extension resolution; the dot form (`a.rem(b)`) is unaffected and keeps the builtin.
+                let infix_shadows_builtin = self.file.infix_calls.contains(&call.0)
+                    && rt.is_numeric_or_char()
+                    && is_builtin_operator_method(&name)
+                    && self
+                        .resolver()
+                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
+                        .map(crate::symbol_resolver::Symbol::overloads)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .any(|o| o.is_extension() && o.receiver_rank == 0);
                 if self.file.infix_calls.contains(&call.0)
                     && rt.is_numeric_or_char()
                     && is_builtin_operator_method(&name)
@@ -26116,12 +26130,15 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
-                match self.record_classpath_member_call_with_slots(call, rt, &name, args, false) {
-                    ClasspathMemberSlotCall::Resolved(ret) => return ret,
-                    ClasspathMemberSlotCall::Ambiguous | ClasspathMemberSlotCall::Rejected => {
-                        return Ty::Error;
+                if !infix_shadows_builtin {
+                    match self.record_classpath_member_call_with_slots(call, rt, &name, args, false)
+                    {
+                        ClasspathMemberSlotCall::Resolved(ret) => return ret,
+                        ClasspathMemberSlotCall::Ambiguous | ClasspathMemberSlotCall::Rejected => {
+                            return Ty::Error;
+                        }
+                        ClasspathMemberSlotCall::NoMatch => {}
                     }
-                    ClasspathMemberSlotCall::NoMatch => {}
                 }
                 // A rejected LABEL must not be re-bound positionally. `known(z = 1)` against
                 // `known(x)` would otherwise resolve as `known(1)` here and the unknown name would
@@ -26159,7 +26176,7 @@ impl<'a> Checker<'a> {
                 ) {
                     return Ty::Int;
                 }
-                if module_members.is_empty() && !unknown_named_arg {
+                if module_members.is_empty() && !unknown_named_arg && !infix_shadows_builtin {
                     if let Some(m) = self.resolve_instance_member_with_literal_and_lambda_args(
                         rt,
                         &name,
@@ -26213,7 +26230,11 @@ impl<'a> Checker<'a> {
                     && is_builtin_operator_method(&name)
                     && arg_tys.iter().all(|a| a.is_numeric_or_char())
                 {
-                    if rt.is_numeric() {
+                    // A user `infix` extension shadows the builtin for the infix form (see
+                    // `infix_shadows_builtin` above): skip every arm here and let extension resolution
+                    // downstream take the call.
+                    let infix_user_ext = infix_shadows_builtin;
+                    if !infix_user_ext && rt.is_numeric() {
                         // Binary arithmetic methods: `a.plus(b)` ≡ `a + b` (same numeric promotion).
                         let bin = BinOp::from_arith_operator_name(&name);
                         if let (Some(op), [at]) = (bin, arg_tys.as_slice()) {
@@ -26238,7 +26259,7 @@ impl<'a> Checker<'a> {
                     // `Char` arithmetic methods: `c.plus(n): Char`, `c.minus(n): Char`, `c.minus(c2): Int`.
                     // `Char` isn't `is_numeric` (no promotion), but these map to the operator form, which
                     // `check_binary` types with the correct `Char`/`Int` operand rules.
-                    if rt == Ty::Char {
+                    if !infix_user_ext && rt == Ty::Char {
                         // `Char` has only `plus`/`minus` operator overloads (no `times`/`div`/`rem`).
                         let bin = BinOp::from_arith_operator_name(&name)
                             .filter(|o| matches!(o, BinOp::Add | BinOp::Sub));
@@ -26246,8 +26267,10 @@ impl<'a> Checker<'a> {
                             return self.check_binary(op, rt, *at, span);
                         }
                     }
-                    self.diags.error(span, format!("krusty: builtin operator method '{name}' on a primitive is not supported"));
-                    return Ty::Error;
+                    if !infix_user_ext {
+                        self.diags.error(span, format!("krusty: builtin operator method '{name}' on a primitive is not supported"));
+                        return Ty::Error;
+                    }
                 }
                 // Extension / static method from any classpath library (e.g. Kotlin stdlib).
                 // Receiver type is passed as the first argument (invokestatic at the JVM level).
