@@ -74,15 +74,19 @@ fn this_delegation_supports_primary_defaults_and_varargs() {
 
 #[test]
 fn constructor_delegation_combines_listed_and_spread_varargs() {
+    // `Text`'s secondary constructor carries a `marker` parameter it never uses: without it, its JVM
+    // signature would be `<init>([Ljava/lang/String;)V` — the same one the `vararg` primary erases to —
+    // and kotlinc rejects the class outright with "platform declaration clash". `Numbers` needs no such
+    // marker because its two `IntArray` parameters already give it a distinct descriptor.
     const SRC: &str = "class Numbers(vararg val values: Int) {\n\
         \x20 constructor(left: IntArray, right: IntArray): this(0, *left, 3, *right, 6)\n\
         }\n\
         class Text(vararg val values: String) {\n\
-        \x20 constructor(middle: Array<String>): this(\"a\", *middle, \"d\")\n\
+        \x20 constructor(middle: Array<String>, marker: Boolean): this(\"a\", *middle, \"d\")\n\
         }\n\
         fun box(): String {\n\
         \x20 val numbers = Numbers(intArrayOf(1, 2), intArrayOf(4, 5))\n\
-        \x20 val text = Text(arrayOf(\"b\", \"c\"))\n\
+        \x20 val text = Text(arrayOf(\"b\", \"c\"), true)\n\
         \x20 return numbers.values.joinToString(\"\") + \"/\" + text.values.joinToString(\"\")\n\
         }\n";
     assert_eq!(run(SRC).expect("mixed constructor varargs"), "0123456/abcd");
