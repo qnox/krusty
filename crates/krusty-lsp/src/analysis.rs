@@ -185,16 +185,16 @@ impl WorkspaceSymbolBudget {
         new_package: bool,
     ) -> bool {
         let bytes = WORKSPACE_SYMBOL_ENTRY_MAX_WIRE_BYTES
-            .saturating_add(
-                new_name
-                    .then(|| workspace_symbol_string_wire_cost(name))
-                    .unwrap_or(0),
-            )
-            .saturating_add(
-                new_package
-                    .then(|| workspace_symbol_string_wire_cost(package))
-                    .unwrap_or(0),
-            );
+            .saturating_add(if new_name {
+                workspace_symbol_string_wire_cost(name)
+            } else {
+                0
+            })
+            .saturating_add(if new_package {
+                workspace_symbol_string_wire_cost(package)
+            } else {
+                0
+            });
         self.reserve(bytes)
     }
 
@@ -1232,32 +1232,84 @@ impl WorkspaceSymbolIndex {
         if query.len() > MAX_WORKSPACE_SYMBOL_QUERY_BYTES {
             return Vec::new();
         }
-        let lowercase_query = query.to_lowercase();
-        let mut result = Vec::new();
-        let mut wire_bytes = 2usize;
-        if lowercase_query.is_empty() {
-            for index in 0..self.entries.len() as u32 {
-                if !self.push_encoded(index, source_set, &mut result, &mut wire_bytes) {
-                    return result;
-                }
+        // A query typed without switching keyboard layout is searched in both forms, so `зфкыу`
+        // finds what `parse` would.
+        let mut parsed = vec![WorkspaceQuery::parse(query)];
+        if let Some(latin) = qwerty_from_cyrillic(query) {
+            let translated = WorkspaceQuery::parse(&latin);
+            if translated != parsed[0] {
+                parsed.push(translated);
             }
-            return result;
         }
 
-        for &index in self.prefix_matches(&lowercase_query) {
-            if !self.push_encoded(index, source_set, &mut result, &mut wire_bytes) {
-                return result;
+        let mut result = Vec::new();
+        let mut wire_bytes = 2usize;
+        // Two query forms can reach the same entry, so ranks are deduplicated across them.
+        let mut seen = std::collections::HashSet::new();
+        for query in &parsed {
+            if !self.encode_ranked(query, source_set, &mut result, &mut wire_bytes, &mut seen) {
+                break;
             }
         }
-        for &index in self.initials_matches(&lowercase_query) {
+        result
+    }
+
+    /// Rank and encode matches for one parsed query. Returns false once the wire budget is spent.
+    fn encode_ranked(
+        &self,
+        query: &WorkspaceQuery,
+        source_set: &[(String, String)],
+        result: &mut Vec<Value>,
+        wire_bytes: &mut usize,
+        seen: &mut std::collections::HashSet<u32>,
+    ) -> bool {
+        let lowercase_query = &query.pattern;
+        if query.is_empty() {
+            for index in 0..self.entries.len() as u32 {
+                if !self.admit(index, query, source_set, result, wire_bytes, seen) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        if query.globbed {
+            // A literal prefix still narrows through the sorted array; `*foo*` has none and falls
+            // back to a scan, which is the cost of a leading wildcard.
+            let prefix = query.literal_prefix().to_string();
+            let scanned = if prefix.is_empty() {
+                (0..self.entries.len() as u32).collect::<Vec<u32>>()
+            } else {
+                self.prefix_matches(&prefix).to_vec()
+            };
+            for index in scanned {
+                let Some(name) = self.source_name(index) else {
+                    continue;
+                };
+                if !matches_glob(&name.to_lowercase(), &query.pattern) {
+                    continue;
+                }
+                if !self.admit(index, query, source_set, result, wire_bytes, seen) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        for &index in self.prefix_matches(lowercase_query) {
+            if !self.admit(index, query, source_set, result, wire_bytes, seen) {
+                return false;
+            }
+        }
+        for &index in self.initials_matches(lowercase_query) {
             if self
                 .source_name(index)
-                .is_some_and(|name| starts_with_lowercase(name, &lowercase_query))
+                .is_some_and(|name| starts_with_lowercase(name, lowercase_query))
             {
                 continue;
             }
-            if !self.push_encoded(index, source_set, &mut result, &mut wire_bytes) {
-                return result;
+            if !self.admit(index, query, source_set, result, wire_bytes, seen) {
+                return false;
             }
         }
         for &index in &self.by_initials {
@@ -1265,14 +1317,14 @@ impl WorkspaceSymbolIndex {
                 continue;
             };
             let initials = camel_hump_initials(name);
-            if starts_with_lowercase(name, &lowercase_query)
-                || initials.starts_with(&lowercase_query)
-                || !is_ordered_subsequence_lowercase(&initials, &lowercase_query)
+            if starts_with_lowercase(name, lowercase_query)
+                || initials.starts_with(lowercase_query)
+                || !is_ordered_subsequence_lowercase(&initials, lowercase_query)
             {
                 continue;
             }
-            if !self.push_encoded(index, source_set, &mut result, &mut wire_bytes) {
-                return result;
+            if !self.admit(index, query, source_set, result, wire_bytes, seen) {
+                return false;
             }
         }
         for index in 0..self.entries.len() as u32 {
@@ -1280,17 +1332,51 @@ impl WorkspaceSymbolIndex {
                 continue;
             };
             let initials = camel_hump_initials(name);
-            if starts_with_lowercase(name, &lowercase_query)
-                || is_ordered_subsequence_lowercase(&initials, &lowercase_query)
-                || !is_ordered_subsequence_lowercase(name, &lowercase_query)
+            if starts_with_lowercase(name, lowercase_query)
+                || is_ordered_subsequence_lowercase(&initials, lowercase_query)
+                || !is_ordered_subsequence_lowercase(name, lowercase_query)
             {
                 continue;
             }
-            if !self.push_encoded(index, source_set, &mut result, &mut wire_bytes) {
-                return result;
+            if !self.admit(index, query, source_set, result, wire_bytes, seen) {
+                return false;
             }
         }
-        result
+        true
+    }
+
+    /// Encode one entry if its package satisfies the query and no earlier rung claimed it.
+    fn admit(
+        &self,
+        index: u32,
+        query: &WorkspaceQuery,
+        source_set: &[(String, String)],
+        result: &mut Vec<Value>,
+        wire_bytes: &mut usize,
+        seen: &mut std::collections::HashSet<u32>,
+    ) -> bool {
+        if !self.package_matches(index, query.package.as_deref()) {
+            return true;
+        }
+        if !seen.insert(index) {
+            return true;
+        }
+        self.push_encoded(index, source_set, result, wire_bytes)
+    }
+
+    /// Whether an entry's package satisfies a qualified query. An unqualified query admits every
+    /// entry; a qualified one matches any package whose dotted path contains the requested prefix,
+    /// so `collections.listOf` finds `kotlin.collections`.
+    fn package_matches(&self, entry_index: u32, package: Option<&str>) -> bool {
+        let Some(package) = package else {
+            return true;
+        };
+        let Some(entry) = self.entries.get(entry_index as usize) else {
+            return false;
+        };
+        self.packages
+            .get(entry[9] as usize)
+            .is_some_and(|declared| contains_folded(declared, package))
     }
 
     /// Whether every indexable declaration fit in the retained snapshot budget.
@@ -1418,6 +1504,130 @@ fn workspace_symbol_parent_is_valid(
         && parent[11] <= child[11]
         && child[12] <= parent[12]
         && (parent[11], parent[12]) != (child[11], child[12])
+}
+
+/// A parsed `workspace/symbol` query.
+///
+/// The protocol defines no matching semantics beyond "a query string to filter symbols by", so the
+/// grammar here is ours. Zed re-filters results with a subsequence matcher against the name the
+/// server returns, which silently discards anything whose query contains characters no symbol name
+/// holds - wildcards, or a wrong-layout query. A trailing `::` is the escape: Zed keeps only the text
+/// after the last `::` for its own filter, so an empty remainder disables client filtering and leaves
+/// the server authoritative.
+#[derive(Debug, PartialEq, Eq)]
+struct WorkspaceQuery {
+    /// Folded name pattern; may contain `*` and `?` when `globbed` is set.
+    pattern: String,
+    /// Folded package prefix, when the query was written qualified (`kotlin.collections.listOf`).
+    package: Option<String>,
+    globbed: bool,
+}
+
+impl WorkspaceQuery {
+    fn parse(raw: &str) -> WorkspaceQuery {
+        // Everything before the last `::` is the server-side query; the marker itself is not matched.
+        let body = raw.rsplit_once("::").map_or(
+            raw,
+            |(head, tail)| {
+                if tail.is_empty() {
+                    head
+                } else {
+                    raw
+                }
+            },
+        );
+        let folded = body.to_lowercase();
+        // A dotted or slashed query names a package; the last segment is the symbol.
+        let (package, pattern) = match folded.rsplit_once(['.', '/']) {
+            Some((head, tail)) if !head.is_empty() && !tail.is_empty() => {
+                (Some(head.replace('/', ".")), tail.to_string())
+            }
+            _ => (None, folded),
+        };
+        WorkspaceQuery {
+            globbed: pattern.contains('*') || pattern.contains('?'),
+            pattern,
+            package,
+        }
+    }
+
+    /// The literal text before the first wildcard, usable as a sorted-array prefix.
+    fn literal_prefix(&self) -> &str {
+        let end = self.pattern.find(['*', '?']).unwrap_or(self.pattern.len());
+        &self.pattern[..end]
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pattern.is_empty() && self.package.is_none()
+    }
+}
+
+/// Glob match over folded text: `*` spans any run, `?` one character.
+fn matches_glob(text: &str, pattern: &str) -> bool {
+    // Iterative backtracking rather than recursion: names are short but the input is untrusted.
+    let text = text.as_bytes();
+    let pattern = pattern.as_bytes();
+    let (mut t, mut p) = (0usize, 0usize);
+    let (mut star, mut resume) = (usize::MAX, 0usize);
+    while t < text.len() {
+        if p < pattern.len() && (pattern[p] == b'?' || pattern[p] == text[t]) {
+            t += 1;
+            p += 1;
+        } else if p < pattern.len() && pattern[p] == b'*' {
+            star = p;
+            resume = t;
+            p += 1;
+        } else if star != usize::MAX {
+            p = star + 1;
+            resume += 1;
+            t = resume;
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == b'*' {
+        p += 1;
+    }
+    p == pattern.len()
+}
+
+/// Positional ЙЦУКЕН -> QWERTY mapping, for a query typed without switching layout.
+///
+/// Returns `None` when the query holds no Cyrillic, so callers can skip the second search.
+fn qwerty_from_cyrillic(query: &str) -> Option<String> {
+    const CYRILLIC: &str = "йцукенгшщзхъфывапролджэячсмитьбю.ё";
+    const LATIN: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,./`";
+    let mut mapped = String::with_capacity(query.len());
+    let mut translated = false;
+    for character in query.chars() {
+        let folded = character.to_lowercase().next().unwrap_or(character);
+        match CYRILLIC.chars().position(|candidate| candidate == folded) {
+            Some(index) => {
+                mapped.push(LATIN.chars().nth(index).unwrap_or(folded));
+                translated = true;
+            }
+            None => mapped.push(character),
+        }
+    }
+    translated.then_some(mapped)
+}
+
+/// Case-insensitive substring test that allocates nothing. `needle` must already be folded.
+fn contains_folded(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|window| {
+        window
+            .iter()
+            .zip(needle)
+            .all(|(left, right)| left.to_ascii_lowercase() == *right)
+    })
 }
 
 fn camel_hump_initials(name: &str) -> String {
@@ -2882,6 +3092,154 @@ mod tests {
             serialized_json_wire_bytes(&value).unwrap(),
             serde_json::to_string(&value).unwrap().len()
         );
+    }
+
+    fn indexed(sources: &[&str], uris: &[&str]) -> (WorkspaceSymbolIndex, Vec<(String, String)>) {
+        let analysis = analyze_standalone_source_set(sources);
+        // from_source_set already establishes the search order.
+        let index = WorkspaceSymbolIndex::from_source_set(sources, &analysis.files);
+        let source_set = uris
+            .iter()
+            .zip(sources)
+            .map(|(uri, source)| ((*uri).to_string(), (*source).to_string()))
+            .collect();
+        (index, source_set)
+    }
+
+    fn encoded_names(
+        index: &WorkspaceSymbolIndex,
+        query: &str,
+        set: &[(String, String)],
+    ) -> Vec<String> {
+        index
+            .encode(query, set)
+            .into_iter()
+            .map(|symbol| symbol["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn workspace_symbols_match_wildcard_queries() {
+        let (index, set) = indexed(
+            &["class KotlinParser\nclass Lexer\nfun parseAll(): Int = 1\n"],
+            &["file:///W.kt"],
+        );
+
+        // Leading wildcard: no literal prefix to binary-search, so this exercises the scan path.
+        let mut interior = encoded_names(&index, "*parse*", &set);
+        interior.sort();
+        assert_eq!(interior, vec!["KotlinParser", "parseAll"]);
+
+        // A literal prefix narrows through the sorted array before the glob verifies.
+        assert_eq!(encoded_names(&index, "Kotlin*", &set), vec!["KotlinParser"]);
+
+        // `?` spans exactly one character.
+        assert_eq!(encoded_names(&index, "Lexe?", &set), vec!["Lexer"]);
+        assert!(encoded_names(&index, "Lexe??", &set).is_empty());
+    }
+
+    #[test]
+    fn workspace_symbols_match_package_qualified_queries() {
+        let (index, set) = indexed(
+            &[
+                "package kotlin.collections\nfun listOf(): Int = 1\n",
+                "package demo.app\nfun listOf(): Int = 2\n",
+            ],
+            &["file:///A.kt", "file:///B.kt"],
+        );
+
+        // Unqualified finds both declarations.
+        assert_eq!(encoded_names(&index, "listOf", &set).len(), 2);
+
+        // Qualifying by package selects one, and a `/` separator behaves like `.`.
+        let qualified = index.encode("kotlin.collections.listOf", &set);
+        assert_eq!(qualified.len(), 1);
+        assert_eq!(qualified[0]["containerName"], "kotlin.collections");
+        assert_eq!(index.encode("demo/app/listOf", &set).len(), 1);
+
+        // A package that matches nothing yields nothing, rather than falling back to the bare name.
+        assert!(index.encode("nosuch.pkg.listOf", &set).is_empty());
+    }
+
+    #[test]
+    fn workspace_symbols_match_a_wrong_layout_query() {
+        let (index, set) = indexed(&["fun parse(): Int = 1\n"], &["file:///L.kt"]);
+
+        // `зфкыу` is `parse` typed on a Cyrillic layout; the Latin form still matches too.
+        assert_eq!(encoded_names(&index, "зфкыу", &set), vec!["parse"]);
+        assert_eq!(encoded_names(&index, "parse", &set), vec!["parse"]);
+    }
+
+    #[test]
+    fn a_trailing_double_colon_is_stripped_before_matching() {
+        let (index, set) = indexed(&["class KotlinParser\n"], &["file:///E.kt"]);
+
+        // Zed keeps only the text after the last `::` for its own filter, so a trailing marker
+        // disables client filtering; the server must not try to match the marker itself.
+        assert_eq!(
+            encoded_names(&index, "*parser*::", &set),
+            vec!["KotlinParser"]
+        );
+    }
+
+    #[test]
+    fn workspace_query_parses_packages_wildcards_and_the_escape() {
+        // Plain name.
+        let plain = WorkspaceQuery::parse("Widget");
+        assert_eq!(plain.pattern, "widget");
+        assert_eq!(plain.package, None);
+        assert!(!plain.globbed);
+
+        // Qualified: the last segment is the symbol, the rest is the package. `/` normalises to `.`.
+        let dotted = WorkspaceQuery::parse("kotlin.collections.listOf");
+        assert_eq!(dotted.pattern, "listof");
+        assert_eq!(dotted.package.as_deref(), Some("kotlin.collections"));
+        let slashed = WorkspaceQuery::parse("kotlin/collections/listOf");
+        assert_eq!(slashed.package.as_deref(), Some("kotlin.collections"));
+
+        // A trailing `::` is the client-filter escape and is not part of the pattern.
+        let escaped = WorkspaceQuery::parse("*Parse*::");
+        assert_eq!(escaped.pattern, "*parse*");
+        assert!(escaped.globbed);
+
+        // A non-empty tail after `::` is a path-style query, not the escape, so it stays intact.
+        assert_eq!(WorkspaceQuery::parse("foo::bar").pattern, "foo::bar");
+    }
+
+    #[test]
+    fn workspace_query_reports_the_literal_prefix_before_a_wildcard() {
+        assert_eq!(WorkspaceQuery::parse("Foo*Bar").literal_prefix(), "foo");
+        assert_eq!(WorkspaceQuery::parse("Fo?o").literal_prefix(), "fo");
+        // A leading wildcard leaves nothing to binary-search on.
+        assert_eq!(WorkspaceQuery::parse("*Parse*").literal_prefix(), "");
+        assert_eq!(WorkspaceQuery::parse("plain").literal_prefix(), "plain");
+    }
+
+    #[test]
+    fn glob_matching_handles_stars_and_single_characters() {
+        assert!(matches_glob("kotlinparser", "*parse*"));
+        assert!(matches_glob("parser", "parse?"));
+        assert!(!matches_glob("parse", "parse?"));
+        assert!(matches_glob("foobar", "foo*"));
+        assert!(matches_glob("foobar", "*bar"));
+        assert!(matches_glob("foobar", "f?o*r"));
+        assert!(!matches_glob("foobar", "*baz"));
+        assert!(matches_glob("anything", "*"));
+        assert!(matches_glob("exact", "exact"));
+        assert!(!matches_glob("exact", "exac"));
+        // Backtracking: the first `*` must give ground so the trailing literal can land.
+        assert!(matches_glob("aaa", "a*a"));
+        assert!(matches_glob("abcabc", "*abc"));
+    }
+
+    #[test]
+    fn wrong_keyboard_layout_maps_to_the_intended_latin_query() {
+        // `зфкыу` is `parse` typed on a Cyrillic layout.
+        assert_eq!(qwerty_from_cyrillic("зфкыу").as_deref(), Some("parse"));
+        // Nothing to do for a query that is already Latin.
+        assert_eq!(qwerty_from_cyrillic("parse"), None);
+        // Mixed input still translates the Cyrillic run.
+        assert_eq!(qwerty_from_cyrillic("зфкыу2").as_deref(), Some("parse2"));
     }
 
     #[test]
