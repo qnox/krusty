@@ -128,8 +128,10 @@ is not stable.
 
 Known limitations:
 
-- Only the most recently analyzed group's primary documents are dumpable. With files from two
-  modules open, the action can legitimately offer nothing for the module you're looking at.
+- Only a module's own primary documents are dumpable. A file the latest analysis pass saw purely as
+  support for a different module is not: dumping it under that module's classpath and language
+  arguments would describe a compilation the editor never performed. Files from several open modules
+  are each dumpable under their own module.
 - A dump requested while an edit is still being analyzed can replay pre-edit state. The `source
   hash` in the document's header identifies the text it was rendered from, so a stale dump is
   recognizable even when the edit preserved the file's length.

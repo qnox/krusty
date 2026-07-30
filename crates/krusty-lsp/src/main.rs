@@ -187,11 +187,9 @@ struct AnalysisPayload<'a> {
     classpath: Option<&'a [PathBuf]>,
 }
 
-/// The most recent analysis payload, kept only under `--dev` so a dump request can replay exactly
-/// the source set and configuration the session analyzed. Superseded payloads are dropped, never
-/// accumulated.
+/// One analysis group's payload, exactly as that group was analyzed.
 #[derive(Default)]
-struct RetainedAnalysis {
+struct RetainedGroup {
     sources: Vec<String>,
     source_kinds: Vec<SourceKind>,
     uris: Vec<String>,
@@ -202,35 +200,8 @@ struct RetainedAnalysis {
     classpath: Option<Vec<PathBuf>>,
 }
 
-impl RetainedAnalysis {
-    /// Replace the retained payload, or retain nothing at all when dev mode is off.
-    ///
-    /// Callers additionally skip building the payload outside dev mode — copying every source text
-    /// on each keystroke is the cost this gate exists to avoid — but the check lives here so
-    /// retention cannot be reached another way.
-    fn record(&mut self, dev: bool, payload: &AnalysisPayload<'_>) {
-        if !dev {
-            return;
-        }
-        self.sources = payload.sources.to_vec();
-        self.source_kinds = payload.source_kinds.to_vec();
-        self.uris = payload.uris.to_vec();
-        self.result_count = payload.result_count;
-        self.inferred_count = payload.inferred_count;
-        self.java_sources = payload.java_sources.to_vec();
-        self.language_arguments = payload.language_arguments.to_vec();
-        self.classpath = payload.classpath.map(<[PathBuf]>::to_vec);
-    }
-
-    /// The retained slot holding `uri`, if the last analyzed payload covered it.
-    fn index_of(&self, uri: &str) -> Option<usize> {
-        if uri.is_empty() {
-            return None;
-        }
-        self.uris.iter().position(|candidate| candidate == uri)
-    }
-
-    /// Replay the retained payload as a dump of slot `target`.
+impl RetainedGroup {
+    /// Replay this group as a dump of slot `target`.
     ///
     /// `language_arguments` is always `Some`: the analysis call derives its features from the
     /// module's arguments even when that list is empty, so falling back to the worker's session
@@ -253,6 +224,64 @@ impl RetainedAnalysis {
             language_arguments: Some(&self.language_arguments),
             classpath: self.classpath.as_deref(),
         }
+    }
+}
+
+/// Every group the latest analysis pass covered, kept only under `--dev` so a dump request can
+/// replay exactly the source set and configuration the session analyzed.
+///
+/// One entry per group, not one entry in total: a pass walks every group, and a single retained
+/// payload would leave every module but the last one permanently undumpable. Superseded passes are
+/// dropped wholesale, never accumulated, so the retained bytes stay close to what the session
+/// already holds in its open documents.
+#[derive(Default)]
+struct RetainedAnalysis {
+    groups: Vec<RetainedGroup>,
+}
+
+impl RetainedAnalysis {
+    /// Drop the previous pass's payloads. Cheap and unconditional: outside dev mode nothing was
+    /// ever recorded, so this clears an empty vector and allocates nothing.
+    fn begin_pass(&mut self) {
+        self.groups.clear();
+    }
+
+    /// Retain one group's payload, or retain nothing at all when dev mode is off.
+    ///
+    /// Callers additionally skip building the payload outside dev mode — copying every source text
+    /// on each keystroke is the cost this gate exists to avoid — but the check lives here so
+    /// retention cannot be reached another way.
+    fn record(&mut self, dev: bool, payload: &AnalysisPayload<'_>) {
+        if !dev {
+            return;
+        }
+        self.groups.push(RetainedGroup {
+            sources: payload.sources.to_vec(),
+            source_kinds: payload.source_kinds.to_vec(),
+            uris: payload.uris.to_vec(),
+            result_count: payload.result_count,
+            inferred_count: payload.inferred_count,
+            java_sources: payload.java_sources.to_vec(),
+            language_arguments: payload.language_arguments.to_vec(),
+            classpath: payload.classpath.map(<[PathBuf]>::to_vec),
+        });
+    }
+
+    /// The retained group and slot holding `uri`, if the latest pass covered it.
+    ///
+    /// A URI is dumpable in at most one group: `project_group_uris` blanks every slot the group
+    /// does not own, so support copies of another module's file never claim it.
+    fn locate(&self, uri: &str) -> Option<(&RetainedGroup, usize)> {
+        if uri.is_empty() {
+            return None;
+        }
+        self.groups.iter().find_map(|group| {
+            group
+                .uris
+                .iter()
+                .position(|candidate| candidate == uri)
+                .map(|slot| (group, slot))
+        })
     }
 }
 
@@ -522,7 +551,7 @@ impl krusty_lsp::Analysis for WorkerHost {
         if !self.options.dev() {
             return None;
         }
-        let target = self.retained.index_of(uri)?;
+        let (group, slot) = self.retained.locate(uri)?;
         let label = workspace_relative_label(self.root.as_deref(), uri);
         let cache_root = self
             .options
@@ -533,7 +562,7 @@ impl krusty_lsp::Analysis for WorkerHost {
             });
         let response = self
             .worker
-            .dump(&self.retained.dump_target(target, &label, &cache_root))
+            .dump(&group.dump_target(slot, &label, &cache_root))
             .ok()
             .flatten()?;
         Some(DumpResult {
@@ -555,6 +584,9 @@ impl krusty_lsp::Analysis for WorkerHost {
             .collect::<Vec<_>>();
         let mut workspace_symbols = krusty_lsp::WorkspaceSymbolIndex::default();
         self.analysis_pending = false;
+        // Retention spans the pass, not one group inside it: every group this loop reaches is
+        // recorded, so a file is dumpable whichever module it belongs to.
+        self.retained.begin_pass();
 
         let mut retained_support_bytes = 0usize;
         let mut support_documents = Vec::new();
@@ -690,6 +722,39 @@ impl krusty_lsp::Analysis for WorkerHost {
             };
             let inputs = project_group_inputs(documents, &group);
             let fingerprint = project_group_fingerprint(documents, &group);
+            // Resolved before the cache lookup because retention has to happen on both arms: a pass
+            // that serves this group from cache still analyzed it, and a dump of one of its files
+            // must not fail just because no re-analysis was needed. Outside dev mode this stays
+            // `None` and costs nothing.
+            let mut group_config = self.options.dev().then(|| {
+                project_group_compiler_config(
+                    self.sync.as_ref().and_then(ProjectSync::model),
+                    group.module_index,
+                    &self.platform_classpath,
+                    &self.options,
+                )
+            });
+            if let Some((classpath, language_arguments)) = group_config.as_ref() {
+                let retained_uris = project_group_uris(documents, &group);
+                let retained_sources = inputs
+                    .iter()
+                    .map(|input| input.text.to_string())
+                    .collect::<Vec<_>>();
+                let retained_kinds = inputs.iter().map(|input| input.kind).collect::<Vec<_>>();
+                self.retained.record(
+                    true,
+                    &AnalysisPayload {
+                        sources: &retained_sources,
+                        source_kinds: &retained_kinds,
+                        uris: &retained_uris,
+                        result_count: documents.len(),
+                        inferred_count: documents.len() + group.inferred_support_count,
+                        java_sources: &group.java_sources,
+                        language_arguments,
+                        classpath: classpath.as_deref(),
+                    },
+                );
+            }
             let mut selected = if let Some(index) = self.analysis_cache.iter().position(|cached| {
                 cached.module_index == group.module_index
                     && cached.fingerprint == fingerprint
@@ -700,33 +765,14 @@ impl krusty_lsp::Analysis for WorkerHost {
                 self.analysis_cache.push(cached);
                 selected
             } else {
-                let (classpath, language_arguments) = project_group_compiler_config(
-                    self.sync.as_ref().and_then(ProjectSync::model),
-                    group.module_index,
-                    &self.platform_classpath,
-                    &self.options,
-                );
-                if self.options.dev() {
-                    let retained_uris = project_group_uris(documents, &group);
-                    let retained_sources = inputs
-                        .iter()
-                        .map(|input| input.text.to_string())
-                        .collect::<Vec<_>>();
-                    let retained_kinds = inputs.iter().map(|input| input.kind).collect::<Vec<_>>();
-                    self.retained.record(
-                        true,
-                        &AnalysisPayload {
-                            sources: &retained_sources,
-                            source_kinds: &retained_kinds,
-                            uris: &retained_uris,
-                            result_count: documents.len(),
-                            inferred_count: documents.len() + group.inferred_support_count,
-                            java_sources: &group.java_sources,
-                            language_arguments: &language_arguments,
-                            classpath: classpath.as_deref(),
-                        },
-                    );
-                }
+                let (classpath, language_arguments) = group_config.take().unwrap_or_else(|| {
+                    project_group_compiler_config(
+                        self.sync.as_ref().and_then(ProjectSync::model),
+                        group.module_index,
+                        &self.platform_classpath,
+                        &self.options,
+                    )
+                });
                 let result = self.worker.analyze_inputs_prefix_with_config(
                     &inputs,
                     documents.len(),
@@ -1743,29 +1789,25 @@ mod tests {
             },
         );
 
-        assert_eq!(
-            retained.index_of(&dependency_uri),
-            None,
+        assert!(
+            retained.locate(&dependency_uri).is_none(),
             "a file that is only support for another module must not be dumped under this \
              module's configuration"
         );
-        assert_eq!(retained.index_of(&consumer_uri), Some(2));
+        assert_eq!(
+            retained.locate(&consumer_uri).map(|(_, slot)| slot),
+            Some(2)
+        );
     }
 
-    #[test]
-    fn dev_mode_retains_only_the_latest_analysis_payload() {
-        let mut retained = RetainedAnalysis::default();
-        let first_sources = ["a".to_string()];
-        let first_uris = ["file:///a.kt".to_string()];
-        let second_sources = ["b".to_string(), "c".to_string()];
-        let second_uris = ["file:///b.kt".to_string(), "file:///c.kt".to_string()];
-
+    /// Record one group's payload with a single dumpable slot, as one pass over one module would.
+    fn record_module(retained: &mut RetainedAnalysis, dev: bool, uri: &str, source: &str) {
         retained.record(
-            true,
+            dev,
             &AnalysisPayload {
-                sources: &first_sources,
+                sources: &[source.to_string()],
                 source_kinds: &[SourceKind::Kotlin],
-                uris: &first_uris,
+                uris: &[uri.to_string()],
                 result_count: 1,
                 inferred_count: 1,
                 java_sources: &[],
@@ -1773,28 +1815,81 @@ mod tests {
                 classpath: None,
             },
         );
-        retained.record(
-            true,
-            &AnalysisPayload {
-                sources: &second_sources,
-                source_kinds: &[SourceKind::Kotlin, SourceKind::Kotlin],
-                uris: &second_uris,
-                result_count: 2,
-                inferred_count: 2,
-                java_sources: &[],
-                language_arguments: &[],
-                classpath: None,
-            },
-        );
+    }
 
-        assert_eq!(retained.index_of("file:///b.kt"), Some(0));
-        assert_eq!(retained.index_of("file:///c.kt"), Some(1));
+    #[test]
+    fn every_group_in_a_pass_stays_dumpable() {
+        let mut retained = RetainedAnalysis::default();
+
+        // One pass over a workspace with a file open from each of two modules. The traversal order
+        // is deterministic, so a single retained payload would leave the same module undumpable
+        // forever rather than intermittently.
+        retained.begin_pass();
+        record_module(&mut retained, true, "file:///dependency/First.kt", "a");
+        record_module(&mut retained, true, "file:///consumer/Second.kt", "b");
+
         assert_eq!(
-            retained.index_of("file:///a.kt"),
-            None,
-            "the superseded payload must be dropped, not accumulated"
+            retained
+                .locate("file:///dependency/First.kt")
+                .map(|(group, slot)| (group.sources.clone(), slot)),
+            Some((vec!["a".to_string()], 0)),
+            "the group analyzed first must stay dumpable once a later group is analyzed"
         );
-        assert_eq!(retained.sources, second_sources);
+        assert_eq!(
+            retained
+                .locate("file:///consumer/Second.kt")
+                .map(|(_, slot)| slot),
+            Some(0)
+        );
+    }
+
+    /// A pass that serves a group from the analysis cache still leaves that group's files dumpable.
+    ///
+    /// Structural rather than behavioural: reaching the cache-hit arm needs a live worker process
+    /// and a resolved project model, so what is pinned here is the property that made the arm
+    /// matter — retention happens for the group regardless of which arm produces its analyses.
+    #[test]
+    fn retention_covers_a_pass_that_is_served_from_the_analysis_cache() {
+        let source = include_str!("main.rs");
+        let pass = source
+            .split_once("fn analyze_open_documents(")
+            .expect("the analysis pass")
+            .1;
+        let begin = pass
+            .find("self.retained.begin_pass()")
+            .expect("the pass drops the previous pass's payloads");
+        let record = pass
+            .find("self.retained.record(")
+            .expect("the pass retains each group it reaches");
+        let lookup = pass
+            .find("self.analysis_cache.iter().position(")
+            .expect("the pass consults the analysis cache");
+
+        assert!(begin < record, "the pass must be cleared before it records");
+        assert!(
+            record < lookup,
+            "retaining inside the cache-miss arm leaves a cached group undumpable, so a pass \
+             triggered by a project change would drop every module but the last"
+        );
+    }
+
+    #[test]
+    fn a_new_pass_supersedes_the_previous_one_wholesale() {
+        let mut retained = RetainedAnalysis::default();
+        retained.begin_pass();
+        record_module(&mut retained, true, "file:///a.kt", "a");
+
+        retained.begin_pass();
+        record_module(&mut retained, true, "file:///b.kt", "b");
+        record_module(&mut retained, true, "file:///c.kt", "c");
+
+        assert!(retained.locate("file:///b.kt").is_some());
+        assert!(retained.locate("file:///c.kt").is_some());
+        assert!(
+            retained.locate("file:///a.kt").is_none(),
+            "the superseded pass must be dropped, not accumulated"
+        );
+        assert_eq!(retained.groups.len(), 2);
     }
 
     #[test]
@@ -1804,6 +1899,7 @@ mod tests {
         let uris = ["file:///a.kt".to_string()];
         let classpath = vec![PathBuf::from("/modules/lib.jar")];
 
+        retained.begin_pass();
         retained.record(
             false,
             &AnalysisPayload {
@@ -1818,12 +1914,11 @@ mod tests {
             },
         );
 
-        assert_eq!(retained.index_of("file:///a.kt"), None);
-        assert!(retained.sources.is_empty());
-        assert!(retained.source_kinds.is_empty());
-        assert!(retained.java_sources.is_empty());
-        assert!(retained.language_arguments.is_empty());
-        assert_eq!(retained.classpath, None);
+        assert!(retained.locate("file:///a.kt").is_none());
+        assert!(
+            retained.groups.is_empty(),
+            "a non-dev session must retain nothing at all"
+        );
     }
 
     #[test]
@@ -1853,11 +1948,11 @@ mod tests {
             },
         );
 
-        let index = retained
-            .index_of("file:///w/Main.kt")
+        let (group, slot) = retained
+            .locate("file:///w/Main.kt")
             .expect("the analyzed target must be retained");
         let cache_root = Path::new("/cache");
-        let target = retained.dump_target(index, "Main.kt", cache_root);
+        let target = group.dump_target(slot, "Main.kt", cache_root);
 
         assert_eq!(target.target, 0);
         assert_eq!(target.sources, sources);
