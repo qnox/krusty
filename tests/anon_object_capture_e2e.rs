@@ -1,7 +1,3 @@
-//! `object : I { … }` expressions that capture enclosing parameters/locals — exercises the parser's
-//! anonymous-object capture analysis (anon_bound_names / anon_body_uses / anon_body_writes /
-//! rewrite_anon_captures), a path the box corpus does not reach.
-
 use super::common;
 
 fn run_ok(stem: &str, body: &str) {
@@ -41,6 +37,61 @@ fn captures_local_val() {
 }
 
 #[test]
+fn captures_constructor_initialized_local() {
+    run_ok(
+        "AnonCtorLocal",
+        "interface W { fun put(s: String) }\n\
+         fun box(): String {\n\
+         val sb = StringBuilder()\n\
+         val w = object : W { override fun put(s: String) { sb.append(s) } }\n\
+         w.put(\"O\")\n\
+         w.put(\"K\")\n\
+         return sb.toString() }\n",
+    );
+}
+
+#[test]
+fn captures_capitalized_function_result() {
+    let library = "package lib\n\
+        class Token(val value: String)\n\
+        fun Token(value: Int): String = if (value == 1) \"OK\" else \"FAIL\"\n";
+    let source = "import lib.Token\n\
+        interface Text { fun read(): String }\n\
+        fun box(): String {\n\
+        val value = Token(1)\n\
+        val text = object : Text { override fun read(): String = value }\n\
+        return text.read() }\n";
+    common::expect_box_ok_against("anon_capitalized_function_capture", library, source);
+}
+
+#[test]
+fn captures_generic_constructor_result() {
+    run_ok(
+        "AnonGenericCtor",
+        "interface Text { fun read(): String }\n\
+         fun box(): String {\n\
+         val values = ArrayList<String>()\n\
+         values.add(\"OK\")\n\
+         val text = object : Text { override fun read(): String = values[0] }\n\
+         return text.read() }\n",
+    );
+}
+
+#[test]
+fn captures_qualified_constructor_result() {
+    run_ok(
+        "AnonQualifiedCtor",
+        "interface Sink { fun add(value: String) }\n\
+         fun box(): String {\n\
+         val builder = java.lang.StringBuilder()\n\
+         val sink = object : Sink { override fun add(value: String) { builder.append(value) } }\n\
+         sink.add(\"O\")\n\
+         sink.add(\"K\")\n\
+         return builder.toString() }\n",
+    );
+}
+
+#[test]
 fn bound_name_shadows_capture() {
     run_ok(
         "AnonShadow",
@@ -55,7 +106,7 @@ fn capture_used_in_property_initializer() {
     run_ok(
         "AnonProp",
         "interface T { fun g(): Int }\n\
-         fun mk(seed: Int): T = object : T { val stored = seed * 2; override fun g(): Int = stored }\n\
+         fun mk(seed: Int): T = object : T { val stored: Int = seed * 2; override fun g(): Int = stored }\n\
          fun box(): String { return if (mk(21).g() == 42) \"OK\" else \"F\" }\n",
     );
 }

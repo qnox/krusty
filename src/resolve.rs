@@ -1350,6 +1350,12 @@ type MappedNamedArgs = (Vec<ExprId>, Vec<Ty>, Vec<Option<ExprId>>);
 
 type MemberExtensionProperty = (Ty, bool, Visibility, TypeName, ImplicitReceiver);
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnonymousObjectCapture {
+    pub name: String,
+    pub ty: Ty,
+}
+
 pub struct SymbolTable {
     pub funs: HashMap<String, Vec<Signature>>,
     conflicting_top_level_keys: std::collections::HashSet<TopLevelFunctionConflictKey>,
@@ -1358,6 +1364,9 @@ pub struct SymbolTable {
         HashMap<TopLevelFunctionConflictKey, TopLevelFunctionConflictCandidates>,
     /// Declared classes by simple name (e.g. `Point`).
     pub classes: HashMap<String, ClassSig>,
+    anonymous_object_types: HashMap<(u32, DeclId), TypeName>,
+    anonymous_object_captures: HashMap<(u32, DeclId), Vec<AnonymousObjectCapture>>,
+    anonymous_object_capture_discovered: std::collections::HashSet<(u32, DeclId)>,
     /// Top-level properties (name → type, is_var, is_const), backed by static fields on the file facade.
     /// `is_const` distinguishes a `const val` (public field, no accessor, cross-file `getstatic`) from a
     /// plain `val`/`var` (private field, read/written through `getX`/`setX`).
@@ -1417,6 +1426,9 @@ impl Default for SymbolTable {
             conflicting_top_level_key_by_source: HashMap::new(),
             conflicting_top_level_candidates: HashMap::new(),
             classes: HashMap::new(),
+            anonymous_object_types: HashMap::new(),
+            anonymous_object_captures: HashMap::new(),
+            anonymous_object_capture_discovered: std::collections::HashSet::new(),
             props: HashMap::new(),
             context_props: HashMap::new(),
             context_prop_names: std::collections::HashSet::new(),
@@ -1484,6 +1496,19 @@ impl SymbolTable {
             .into_iter()
             .map(|((file, declaration), property)| ((file + offset, declaration), property))
             .collect();
+        self.anonymous_object_types = std::mem::take(&mut self.anonymous_object_types)
+            .into_iter()
+            .map(|((file, declaration), internal)| ((file + offset, declaration), internal))
+            .collect();
+        self.anonymous_object_captures = std::mem::take(&mut self.anonymous_object_captures)
+            .into_iter()
+            .map(|((file, declaration), captures)| ((file + offset, declaration), captures))
+            .collect();
+        self.anonymous_object_capture_discovered =
+            std::mem::take(&mut self.anonymous_object_capture_discovered)
+                .into_iter()
+                .map(|(file, declaration)| (file + offset, declaration))
+                .collect();
         self.source_generic_value_operand_slots =
             std::mem::take(&mut self.source_generic_value_operand_slots)
                 .into_iter()
@@ -4064,10 +4089,19 @@ pub fn collect_signatures_with_cp(
                     }
                 }
                 Decl::Class(c) => {
+                    let anonymous_object = file
+                        .anonymous_object_classes
+                        .values()
+                        .any(|declaration| *declaration == d);
                     let internal = class_names
                         .get(&c.name)
                         .map(TypeName::render)
                         .unwrap_or_else(|| class_internal(file, &c.name));
+                    if anonymous_object {
+                        table
+                            .anonymous_object_types
+                            .insert((i as u32, d), type_name(&internal));
+                    }
                     // An `inner class` captures the enclosing instance, so the outer class's type
                     // parameters are in scope for its own member/ctor/field types (`inner class N :
                     // Iterator<T>` where `T` is the outer's parameter). Walk the `inner_of` chain and
@@ -7962,6 +7996,9 @@ fn ty_of_ref_with(
 pub struct TypeInfo {
     pub expr_types: Vec<Ty>,
     resolved_type_refs: HashMap<(u32, u32), TypeName>,
+    pub anonymous_object_captures_by_class: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
+    pub anonymous_object_captures_by_construction: HashMap<ExprId, Vec<AnonymousObjectCapture>>,
+    pub anonymous_object_types: HashMap<DeclId, TypeName>,
     /// Selected expression lowerings that cannot be recovered from the expression shape alone.
     pub expr_lowers: HashMap<ExprId, ExprLowering>,
     /// Selected statement lowerings that differ from the parser's generic statement shape.
@@ -9069,9 +9106,257 @@ fn make_checker<'a>(
         expr_depth: 0,
         allow_lambda_mutation: false,
         symbolic_signature_inference: false,
+        discover_anonymous_captures: false,
+        discovered_anonymous_captures: HashMap::new(),
         loop_labels: Vec::new(),
         loop_depth: 0,
         return_allowed: true,
+    }
+}
+
+fn anonymous_body_bound_names(
+    file: &File,
+    declaration: DeclId,
+) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    let Decl::Class(class) = file.decl(declaration) else {
+        return names;
+    };
+    names.extend(class.props.iter().map(|property| property.name.clone()));
+    names.extend(
+        class
+            .body_props
+            .iter()
+            .map(|property| property.name.clone()),
+    );
+    for method in &class.methods {
+        names.insert(method.name.clone());
+        names.extend(method.params.iter().map(|parameter| parameter.name.clone()));
+    }
+    names
+}
+
+fn expression_writes_name(file: &File, expression: ExprId, name: &str) -> bool {
+    let mut child_expressions = Vec::new();
+    let mut child_statements = Vec::new();
+    file.any_child_expr(
+        expression,
+        &mut |child| {
+            child_expressions.push(child);
+            false
+        },
+        &mut |statement| {
+            child_statements.push(statement);
+            false
+        },
+    );
+    if child_statements.iter().any(|statement| {
+        matches!(
+            file.stmt(*statement),
+            Stmt::Assign { name: target, .. } | Stmt::IncDec { name: target, .. }
+                if target == name
+        )
+    }) {
+        return true;
+    }
+    child_expressions
+        .into_iter()
+        .any(|child| expression_writes_name(file, child, name))
+        || child_statements.into_iter().any(|statement| {
+            let mut expressions = Vec::new();
+            file.any_child_stmt(statement, &mut |child| {
+                expressions.push(child);
+                false
+            });
+            expressions
+                .into_iter()
+                .any(|child| expression_writes_name(file, child, name))
+        })
+}
+
+fn anonymous_body_writes_name(file: &File, declaration: DeclId, name: &str) -> bool {
+    let Decl::Class(class) = file.decl(declaration) else {
+        return false;
+    };
+    class
+        .methods
+        .iter()
+        .filter_map(|method| fun_body_expr(&method.body))
+        .chain(class.body_props.iter().filter_map(|property| property.init))
+        .chain(class.base_args.iter().copied())
+        .any(|expression| expression_writes_name(file, expression, name))
+}
+
+fn expression_has_member_call_named(file: &File, expression: ExprId, name: &str) -> bool {
+    if matches!(file.expr(expression), Expr::Lambda { .. }) {
+        return false;
+    }
+    let matches = match file.expr(expression) {
+        Expr::SafeCall { name: member, .. } => member == name,
+        Expr::Call { callee, .. } => {
+            matches!(file.expr(*callee), Expr::Member { name: member, .. } if member == name)
+        }
+        _ => false,
+    };
+    if matches {
+        return true;
+    }
+    let mut expressions = Vec::new();
+    let mut statements = Vec::new();
+    file.any_child_expr(
+        expression,
+        &mut |child| {
+            expressions.push(child);
+            false
+        },
+        &mut |statement| {
+            statements.push(statement);
+            false
+        },
+    );
+    expressions
+        .into_iter()
+        .any(|child| expression_has_member_call_named(file, child, name))
+        || statements.into_iter().any(|statement| {
+            let mut children = Vec::new();
+            file.any_child_stmt(statement, &mut |child| {
+                children.push(child);
+                false
+            });
+            children
+                .into_iter()
+                .any(|child| expression_has_member_call_named(file, child, name))
+        })
+}
+
+fn anonymous_body_uses_name(file: &File, declaration: DeclId, name: &str, ty: Ty) -> bool {
+    let Decl::Class(class) = file.decl(declaration) else {
+        return false;
+    };
+    let expressions = class
+        .methods
+        .iter()
+        .filter_map(|method| fun_body_expr(&method.body))
+        .chain(class.body_props.iter().filter_map(|property| property.init))
+        .chain(class.base_args.iter().copied())
+        .collect::<Vec<_>>();
+    expressions
+        .iter()
+        .any(|expression| file.expr_uses_name(*expression, name))
+        || matches!(ty, Ty::Fun(signature) if signature.has_receiver)
+            && expressions
+                .into_iter()
+                .any(|expression| expression_has_member_call_named(file, expression, name))
+}
+
+#[derive(Clone)]
+struct AnonymousCaptureCandidate {
+    name: String,
+    ty: Ty,
+}
+
+fn record_anonymous_construction_captures(
+    file: &File,
+    construction: ExprId,
+    candidates: &[AnonymousCaptureCandidate],
+    captures: &mut HashMap<DeclId, Vec<AnonymousObjectCapture>>,
+) {
+    let Some(&declaration) = file.anonymous_object_classes.get(&construction) else {
+        return;
+    };
+    let bound = anonymous_body_bound_names(file, declaration);
+    let selected = candidates
+        .iter()
+        .enumerate()
+        .filter(|(index, candidate)| {
+            !candidates[index + 1..]
+                .iter()
+                .any(|later| later.name == candidate.name)
+        })
+        .filter(|(_, candidate)| candidate.ty != Ty::Error)
+        .filter(|(_, candidate)| !bound.contains(&candidate.name))
+        .filter(|(_, candidate)| !anonymous_body_writes_name(file, declaration, &candidate.name))
+        .filter(|(_, candidate)| {
+            anonymous_body_uses_name(file, declaration, &candidate.name, candidate.ty)
+        })
+        .map(|(_, candidate)| AnonymousObjectCapture {
+            name: candidate.name.clone(),
+            ty: candidate.ty,
+        })
+        .collect();
+    captures.insert(declaration, selected);
+}
+
+fn install_anonymous_object_captures(
+    syms: &mut SymbolTable,
+    file_index: u32,
+    discovered: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
+) {
+    for (declaration, captures) in discovered {
+        let key = (file_index, declaration);
+        syms.anonymous_object_capture_discovered.insert(key);
+        let Some(internal) = syms.anonymous_object_types.get(&key).copied() else {
+            continue;
+        };
+        let Some(class) = syms.class_by_type_name_mut(internal) else {
+            continue;
+        };
+        for capture in &captures {
+            if class
+                .ctor_param_names
+                .iter()
+                .any(|(name, _)| name == &capture.name)
+            {
+                continue;
+            }
+            class.props.push((capture.name.clone(), capture.ty, false));
+            class.declared_props.insert(
+                capture.name.clone(),
+                DeclaredPropertySig {
+                    ty: capture.ty,
+                    storage_ty: None,
+                    visibility: Visibility::Private,
+                    getter_name: property_getter_name(&capture.name),
+                    setter_name: None,
+                    context_params: Vec::new(),
+                },
+            );
+            class.ctor_params.push(capture.ty);
+            class.ctor_param_shapes.push((capture.ty, false));
+            class.ctor_param_names.push((capture.name.clone(), false));
+            class.ctor_defaults.push(None);
+        }
+        syms.anonymous_object_captures.insert(key, captures);
+    }
+}
+
+fn discover_anonymous_object_captures_at(file: &File, file_index: u32, syms: &mut SymbolTable) {
+    let declarations = file
+        .anonymous_object_classes
+        .values()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    if declarations.is_empty()
+        || declarations.iter().all(|declaration| {
+            syms.anonymous_object_capture_discovered
+                .contains(&(file_index, *declaration))
+        })
+    {
+        return;
+    }
+
+    let mut scratch = DiagSink::new();
+    let info = check_file_at_impl_mode(file, file_index, None, syms, &mut scratch, true);
+    let mut discovered = info.anonymous_object_captures_by_class;
+    for declaration in declarations {
+        discovered.entry(declaration).or_default();
+    }
+    install_anonymous_object_captures(syms, file_index, discovered);
+}
+
+pub fn discover_anonymous_object_captures(files: &[File], syms: &mut SymbolTable) {
+    for (file_index, file) in files.iter().enumerate() {
+        discover_anonymous_object_captures_at(file, file_index as u32, syms);
     }
 }
 
@@ -9118,6 +9403,7 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
             );
             pre.this_ty = Some(dispatch_ty);
             pre.this_labels.push((cl.name.clone(), dispatch_ty, true));
+            let properties = pre.scoped_properties(internal_name);
             for (property_index, property) in cl.body_props.iter().enumerate() {
                 let (Some(receiver), None, Some(FunBody::Expr(getter))) =
                     (&property.receiver, &property.ty, &property.getter)
@@ -9169,7 +9455,7 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
                         &class_internal_resolver(pre.syms),
                     );
                     pre.reified_tparams = m.reified_type_params.iter().cloned().collect();
-                    pre.check_method(m, &[]);
+                    pre.check_method(m, &properties);
                     pre.tparams.clear();
                     pre.reified_tparams.clear();
                 }
@@ -9236,6 +9522,7 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
 /// erased `java/util/List` instead of the inferred `List<Role>`) would resolve against the collection
 /// default until B is processed. Iterating a global fixpoint over all files closes that cross-file gap.
 pub fn preinfer_module_returns(files: &[File], syms: &mut SymbolTable, diags: &mut DiagSink) {
+    discover_anonymous_object_captures(files, syms);
     let saved = diags.current_file();
     for _pass in 0..8 {
         let mut changed = false;
@@ -9250,13 +9537,17 @@ pub fn preinfer_module_returns(files: &[File], syms: &mut SymbolTable, diags: &m
     diags.set_file(saved);
 }
 
-fn check_file_at_impl(
+fn check_file_at_impl_mode(
     file: &File,
     file_index: u32,
     source_files: Option<&[File]>,
     syms: &mut SymbolTable,
     diags: &mut DiagSink,
+    capture_discovery: bool,
 ) -> TypeInfo {
+    if !capture_discovery {
+        discover_anonymous_object_captures_at(file, file_index, syms);
+    }
     // Pre-infer EXPRESSION-body return types (top-level functions AND class methods) and patch the
     // signature table BEFORE the main check — so a call to `fun m() = f()` resolves to its real return,
     // not the collection default `Unit`. Without this, a method whose return couldn't be inferred at
@@ -9265,13 +9556,16 @@ fn check_file_at_impl(
     // (`object { fun foo4() = foo3() }.apply { foo4() }`). A body that calls another expr-body method
     // declared LATER (forward reference) needs a second pass, so iterate to a FIXPOINT (bounded — the
     // dependency chain is shallow; an unresolvable case simply stops improving).
-    for _pass in 0..8 {
-        if !preinfer_returns_pass(file, file_index, syms) {
-            break;
+    if !capture_discovery {
+        for _pass in 0..8 {
+            if !preinfer_returns_pass(file, file_index, syms) {
+                break;
+            }
         }
     }
 
     let mut c = make_checker(file, file_index, source_files, &*syms, diags);
+    c.discover_anonymous_captures = capture_discovery;
 
     // Each top-level declaration is checked in its OWN scope. Reset to the base depth (file-level
     // scope, e.g. top-level properties) before each one so a prior decl's leftover scope can't leak —
@@ -10201,53 +10495,56 @@ fn check_file_at_impl(
         delegate_getvalue_targets,
         context_args,
         super_ctor_params,
+        discovered_anonymous_captures,
         ..
     } = c;
-    for (internal, params) in super_ctor_params {
-        if let Some(cs) = syms.class_by_internal_mut(&internal) {
-            cs.super_ctor_params = params;
+    if !capture_discovery {
+        for (internal, params) in super_ctor_params {
+            if let Some(cs) = syms.class_by_internal_mut(&internal) {
+                cs.super_ctor_params = params;
+            }
         }
-    }
-    for ((file, decl), ret) in inferred_fun_rets {
-        if let Some(sig) = syms.funs.values_mut().find_map(|sigs| {
-            sigs.iter_mut()
-                .find(|s| s.source_file == Some(file) && s.source_decl == Some(DeclId(decl)))
-        }) {
-            sig.ret = ret;
+        for ((file, decl), ret) in inferred_fun_rets {
+            if let Some(sig) = syms.funs.values_mut().find_map(|sigs| {
+                sigs.iter_mut()
+                    .find(|s| s.source_file == Some(file) && s.source_decl == Some(DeclId(decl)))
+            }) {
+                sig.ret = ret;
+            }
         }
-    }
-    for ((file, decl, name), ret) in inferred_ext_fun_rets {
-        if let Some(sig) = syms.ext_funs.get_mut(&name).and_then(|families| {
-            families.values_mut().find_map(|overloads| {
-                overloads.iter_mut().find(|signature| {
-                    signature.source_file == Some(file)
-                        && signature.source_decl == Some(DeclId(decl))
+        for ((file, decl, name), ret) in inferred_ext_fun_rets {
+            if let Some(sig) = syms.ext_funs.get_mut(&name).and_then(|families| {
+                families.values_mut().find_map(|overloads| {
+                    overloads.iter_mut().find(|signature| {
+                        signature.source_file == Some(file)
+                            && signature.source_decl == Some(DeclId(decl))
+                    })
                 })
-            })
-        }) {
-            sig.ret = ret;
+            }) {
+                sig.ret = ret;
+            }
         }
-    }
-    for ((internal, name, params), ret) in inferred_method_rets {
-        if let Some(sig) = syms
-            .class_by_type_name_mut(internal)
-            .and_then(|c| c.methods.get_mut(&name))
-            .and_then(|ov| ov.iter_mut().find(|s| s.params == params))
-        {
-            sig.ret = ret;
+        for ((internal, name, params), ret) in inferred_method_rets {
+            if let Some(sig) = syms
+                .class_by_type_name_mut(internal)
+                .and_then(|c| c.methods.get_mut(&name))
+                .and_then(|ov| ov.iter_mut().find(|s| s.params == params))
+            {
+                sig.ret = ret;
+            }
         }
-    }
-    for ((internal, name, receiver, params), ret) in inferred_member_ext_fun_rets {
-        if let Some(signature) = syms
-            .class_by_type_name_mut(internal)
-            .and_then(|class| class.member_ext_funs.get_mut(&name))
-            .and_then(|overloads| {
-                overloads.iter_mut().find(|signature| {
-                    signature.receiver_ty == receiver && signature.signature.params == params
+        for ((internal, name, receiver, params), ret) in inferred_member_ext_fun_rets {
+            if let Some(signature) = syms
+                .class_by_type_name_mut(internal)
+                .and_then(|class| class.member_ext_funs.get_mut(&name))
+                .and_then(|overloads| {
+                    overloads.iter_mut().find(|signature| {
+                        signature.receiver_ty == receiver && signature.signature.params == params
+                    })
                 })
-            })
-        {
-            signature.signature.ret = ret;
+            {
+                signature.signature.ret = ret;
+            }
         }
     }
     let used_extension_receivers = extension_receiver_expr_uses
@@ -10256,9 +10553,47 @@ fn check_file_at_impl(
         .flatten()
         .map(|span| (span.lo, span.hi))
         .collect();
+    let anonymous_object_captures_by_class = if capture_discovery {
+        discovered_anonymous_captures
+    } else {
+        file.anonymous_object_classes
+            .values()
+            .copied()
+            .filter_map(|declaration| {
+                syms.anonymous_object_captures
+                    .get(&(file_index, declaration))
+                    .cloned()
+                    .map(|captures| (declaration, captures))
+            })
+            .collect::<HashMap<_, _>>()
+    };
+    let anonymous_object_captures_by_construction = file
+        .anonymous_object_classes
+        .iter()
+        .filter_map(|(construction, declaration)| {
+            anonymous_object_captures_by_class
+                .get(declaration)
+                .cloned()
+                .map(|captures| (*construction, captures))
+        })
+        .collect();
+    let anonymous_object_types = file
+        .anonymous_object_classes
+        .values()
+        .copied()
+        .filter_map(|declaration| {
+            syms.anonymous_object_types
+                .get(&(file_index, declaration))
+                .copied()
+                .map(|ty| (declaration, ty))
+        })
+        .collect();
     TypeInfo {
         expr_types,
         resolved_type_refs,
+        anonymous_object_captures_by_class,
+        anonymous_object_captures_by_construction,
+        anonymous_object_types,
         expr_lowers,
         stmt_lowers,
         discarded_exprs,
@@ -10289,6 +10624,16 @@ fn check_file_at_impl(
         delegate_getvalue_targets,
         context_args,
     }
+}
+
+fn check_file_at_impl(
+    file: &File,
+    file_index: u32,
+    source_files: Option<&[File]>,
+    syms: &mut SymbolTable,
+    diags: &mut DiagSink,
+) -> TypeInfo {
+    check_file_at_impl_mode(file, file_index, source_files, syms, diags, false)
 }
 
 pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> TypeInfo {
@@ -10560,6 +10905,8 @@ struct Checker<'a> {
     /// Enables symbolic generic substitution while inferring declaration signatures. Ordinary checking
     /// stays erased until the backend can emit every corresponding bridge and value-class shape.
     symbolic_signature_inference: bool,
+    discover_anonymous_captures: bool,
+    discovered_anonymous_captures: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
     /// In-scope loop labels (`l@ for …`), innermost last. A `break@l`/`continue@l` must name one of
     /// these — an unknown label is rejected (the file skips) rather than silently retargeting a loop.
     loop_labels: Vec<String>,
@@ -23340,6 +23687,58 @@ impl<'a> Checker<'a> {
         span: Span,
         expected: Option<Ty>,
     ) -> Ty {
+        if let Some(declaration) = self.file.anonymous_object_classes.get(&call).copied() {
+            if self.discover_anonymous_captures {
+                let mut candidates = self
+                    .scopes
+                    .iter()
+                    .flat_map(|scope| scope.iter())
+                    .filter(|(name, local)| {
+                        !local.is_var || !self.fn_reassigned.contains(name.as_str())
+                    })
+                    .map(|(name, local)| AnonymousCaptureCandidate {
+                        name: name.clone(),
+                        ty: local.narrowed.unwrap_or(local.ty),
+                    })
+                    .collect::<Vec<_>>();
+                candidates.sort_by(|left, right| left.name.cmp(&right.name));
+                record_anonymous_construction_captures(
+                    self.file,
+                    call,
+                    &candidates,
+                    &mut self.discovered_anonymous_captures,
+                );
+                return self
+                    .syms
+                    .anonymous_object_types
+                    .get(&(self.file_index, declaration))
+                    .copied()
+                    .map(Ty::obj_name)
+                    .unwrap_or(Ty::Error);
+            }
+            let captures = self
+                .syms
+                .anonymous_object_captures
+                .get(&(self.file_index, declaration))
+                .cloned()
+                .unwrap_or_default();
+            if !captures.is_empty() {
+                for capture in captures {
+                    let actual = self
+                        .lookup(&capture.name)
+                        .map(|local| local.narrowed.unwrap_or(local.ty))
+                        .unwrap_or(Ty::Error);
+                    self.expect_assignable(capture.ty, actual, span, "anonymous object capture");
+                }
+                return self
+                    .syms
+                    .anonymous_object_types
+                    .get(&(self.file_index, declaration))
+                    .copied()
+                    .map(Ty::obj_name)
+                    .unwrap_or(Ty::Error);
+            }
+        }
         // The called function's name (`foo` / `recv.method`) — a `Recv.() -> R` lambda argument to it
         // binds `this@<name>`, so this is the label pushed when checking any receiver-lambda argument.
         // Uniform across every function: scope functions (`run`/`apply`/`with`) are not special here.
