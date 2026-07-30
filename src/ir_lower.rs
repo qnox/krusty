@@ -22258,6 +22258,22 @@ impl<'a> Lower<'a> {
                                     recv,
                                     ty_to_ir(Ty::obj_name(bi)),
                                 );
+                                // Where the checker resolved a MODULE member, hand the cast receiver to the
+                                // shared module-member lowering instead of re-deriving the call here: it is
+                                // the only path that reads `resolved_call_arg_slots` and can emit
+                                // `<name>$default(…, mask, marker)`. The positional fallback below cannot do
+                                // either, so `when (this) { is Create -> copy(path = p) }` — a named
+                                // argument that also OMITS a defaulted parameter — bailed the whole file
+                                // even though the identical `this.copy(path = p)` lowered fine.
+                                if let Some(target @ ResolvedCall::ModuleMember { .. }) =
+                                    self.info.resolved_calls.get(&e).cloned()
+                                {
+                                    // A selected semantic target is authoritative. If its shared
+                                    // argument lowering declines an unsupported shape, skip the file;
+                                    // falling through to the positional legacy path would silently
+                                    // reinterpret named arguments in source order.
+                                    return self.lower_module_member_call(cast, &target, &args, e);
+                                }
                                 let (class, index, mfid, _) =
                                     self.resolve_method_name(bi, &fname)?;
                                 let params = self.ir.functions[mfid as usize].params.clone();

@@ -23816,6 +23816,32 @@ impl<'a> Checker<'a> {
         })
     }
 
+    /// Whether the federated symbol source exposes a current-module instance member named `name` on
+    /// `receiver` with parameter names. Querying through the same resolver used for ordinary calls keeps
+    /// same-file and sibling-file members on one path; the origin check deliberately excludes library
+    /// and extension candidates because narrowed-`this` resolution currently records only
+    /// [`ResolvedCall::ModuleMember`], which is the shape the lowerer can realize here.
+    fn module_member_supports_named(&self, receiver: Ty, name: &str) -> bool {
+        self.resolver()
+            .resolve_symbol(
+                crate::symbol_resolver::SymRecv::Value(receiver),
+                name,
+                &[],
+                &[],
+            )
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default()
+            .iter()
+            .any(|member| {
+                member.kind == crate::libraries::FnKind::Member
+                    && matches!(
+                        member.callable.origin,
+                        crate::libraries::Origin::Module { .. }
+                    )
+                    && member.call_sig.has_param_names()
+            })
+    }
+
     fn member_extension_supports_named(&self, extension_receiver: Ty, name: &str) -> bool {
         self.member_extension_function_shapes(extension_receiver, name)
             .iter()
@@ -25440,6 +25466,23 @@ impl<'a> Checker<'a> {
                         || self.implicit_receiver_types().into_iter().any(|rt| {
                             self.member_extension_supports_named(rt, n)
                         })
+                        // A member reached through a SMART-CAST `this`: in
+                        // `fun Op.f(p: String) = when (this) { is Create -> copy(path = p) }` the call
+                        // resolves against `Create`, but `implicit_receiver_types` reports the DECLARED
+                        // receiver `Op`, which has no `copy` to take the labels from — so the call was
+                        // rejected here before the narrowed-this resolution below ever ran, while the
+                        // explicitly qualified `o.copy(path = …)` after an `is` check worked. Ask the same
+                        // `effective_this_narrow` seam that resolution itself uses, rather than widening
+                        // what counts as an implicit receiver for every other lookup.
+                        || self
+                            .effective_this_narrow()
+                            .filter(|narrowed| self.this_ty != Some(*narrowed))
+                            // Deliberately MODULE MEMBERS only, matching what the narrowed-this
+                            // resolution records and what lowering can emit. Admitting member
+                            // EXTENSIONS here would accept named arguments the narrowed-this lowering
+                            // still handles positionally — the accept-then-lower-wrong shape this very
+                            // change exists to remove. Widen both ends together or neither.
+                            .is_some_and(|narrowed| self.module_member_supports_named(narrowed, n))
                         // A CLASSPATH CONSTRUCTOR whose `@Metadata` records parameter names
                         // (`Point(y = 2, x = 1)`, or `Cfg(a = 1, c = "x")` omitting a defaulted `b`,
                         // against a data/plain class from a dependency). `constructor_named_params` returns
