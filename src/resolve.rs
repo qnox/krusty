@@ -5742,6 +5742,12 @@ fn map_call_sig_args_with_trailing(
     )
 }
 
+/// The one mapping failure worth reporting, when every candidate failed for the SAME reason.
+///
+/// Equality is over the whole failure, deliberately. Agreeing only on the first error is not enough:
+/// overloads that reject a call for genuinely different reasons must fall through to the
+/// "none of the following candidates is applicable:" list rather than have one of their reasons
+/// presented as though it were the whole story (`classpath_named_calls_reject_conflicting_overload_mappings`).
 fn take_unanimous_mapping_error<T>(
     failures: &mut Vec<(CallArgMappingFailure, T)>,
 ) -> Option<(CallArgMappingFailure, T)> {
@@ -8251,6 +8257,12 @@ struct CtorDelegationCandidate {
     defaults: Vec<bool>,
     vararg: Option<usize>,
     supports_default_abi: bool,
+    /// Whether each parameter's DECLARED type mentions one of the class's type parameters. Such a
+    /// parameter has no concrete expectation until the call binds the type argument, so an argument must
+    /// not be judged against its erased upper bound (`<T>` erases to a non-null `Any`, which rejected
+    /// `C(null)`). Empty means "nothing generic", which is the right answer wherever the declaration is
+    /// out of reach.
+    generic_params: Vec<bool>,
 }
 
 fn constructor_delegation_cycles(edges: &[Option<usize>]) -> Vec<Vec<usize>> {
@@ -14493,6 +14505,7 @@ impl<'a> Checker<'a> {
                     .collect(),
                 vararg: class.props.iter().position(|parameter| parameter.is_vararg),
                 supports_default_abi: !class.is_value,
+                generic_params: Vec::new(),
             });
         }
         for (index, constructor) in class.secondary_ctors.iter().enumerate() {
@@ -14521,9 +14534,31 @@ impl<'a> Checker<'a> {
                     .iter()
                     .position(|parameter| parameter.is_vararg),
                 supports_default_abi: !class.is_value,
+                generic_params: Vec::new(),
             });
         }
         candidates
+    }
+
+    /// Whether a DECLARED type mentions one of `tparams` — the class's own type parameters — directly, as
+    /// a type argument, or inside a function type. The erased `Ty` cannot answer this: `<T>` erases to a
+    /// non-null `kotlin/Any`, indistinguishable from a parameter genuinely declared `Any`.
+    fn type_ref_mentions_type_param(reference: &TypeRef, tparams: &[String]) -> bool {
+        if tparams.contains(&reference.name) {
+            return true;
+        }
+        reference
+            .arg
+            .as_deref()
+            .is_some_and(|argument| Self::type_ref_mentions_type_param(argument, tparams))
+            || reference
+                .targs
+                .iter()
+                .any(|argument| Self::type_ref_mentions_type_param(argument, tparams))
+            || reference
+                .fun_params
+                .iter()
+                .any(|argument| Self::type_ref_mentions_type_param(argument, tparams))
     }
 
     fn source_constructor_candidates(
@@ -14552,6 +14587,13 @@ impl<'a> Checker<'a> {
                     .iter()
                     .position(|parameter| parameter.is_vararg),
                 supports_default_abi: true,
+                generic_params: declaration
+                    .props
+                    .iter()
+                    .map(|parameter| {
+                        Self::type_ref_mentions_type_param(&parameter.ty, &declaration.type_params)
+                    })
+                    .collect(),
             });
         }
         for (index, params) in class.secondary_ctors.iter().enumerate() {
@@ -14578,9 +14620,50 @@ impl<'a> Checker<'a> {
                     .iter()
                     .position(|parameter| parameter.is_vararg),
                 supports_default_abi: !declaration.is_value,
+                generic_params: Vec::new(),
             });
         }
         candidates
+    }
+
+    /// Report WHY no source constructor accepted the call, when every candidate agrees on the reason.
+    ///
+    /// `select_source_constructor` answers only yes/no, so the reason was dropped and the caller fell back
+    /// to the generic "none of the following candidates is applicable:" list — `Point()` on
+    /// `class Point(val x: Int)` said that instead of "no value passed for parameter 'x'.", which is what
+    /// every other callable origin reports for the same mistake. Re-run the argument mapping over the
+    /// candidates to recover it. Returns whether a canonical error was reported.
+    fn report_source_constructor_mapping_error(
+        &mut self,
+        call: ExprId,
+        args: &[ExprId],
+        arguments: &CtorDelegationCall,
+        candidates: &[CtorDelegationCandidate],
+    ) -> bool {
+        let names: Option<&[Option<String>]> = arguments
+            .names
+            .iter()
+            .any(Option::is_some)
+            .then_some(&arguments.names);
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let mut failures = Vec::new();
+        for candidate in candidates {
+            let params = crate::libraries::ParamList {
+                names: candidate.param_names.clone(),
+                defaults: candidate.defaults.clone(),
+                vararg: candidate.vararg,
+            };
+            if let Err(failure) = map_param_list_args(args, names, &params, trailing_lambda) {
+                failures.push((failure, ()));
+            }
+        }
+        match take_unanimous_mapping_error(&mut failures) {
+            Some((failure, ())) => {
+                self.report_call_arg_mapping_error(call, args, failure);
+                true
+            }
+            None => false,
+        }
     }
 
     fn select_source_constructor(
@@ -14643,6 +14726,7 @@ impl<'a> Checker<'a> {
                 defaults: Vec::new(),
                 vararg: None,
                 supports_default_abi: false,
+                generic_params: Vec::new(),
             }];
         };
         if let Some(base) = self.syms.class_by_type_name(owner) {
@@ -14666,6 +14750,7 @@ impl<'a> Checker<'a> {
                         .collect(),
                     vararg: base.ctor_vararg,
                     supports_default_abi: true,
+                    generic_params: Vec::new(),
                 });
             }
             for (index, params) in base.secondary_ctors.iter().enumerate() {
@@ -14704,6 +14789,7 @@ impl<'a> Checker<'a> {
                             .position(|parameter| parameter.is_vararg)
                     }),
                     supports_default_abi: false,
+                    generic_params: Vec::new(),
                 });
             }
             return candidates;
@@ -14757,9 +14843,30 @@ impl<'a> Checker<'a> {
                 defaults,
                 vararg,
                 supports_default_abi,
+                generic_params: Vec::new(),
             });
         }
         candidates
+    }
+
+    /// Whether `ty` mentions a generic type parameter anywhere — directly, inside a nullable wrapper, or
+    /// as a type argument. Such a type is a placeholder the call site instantiates, not a fixed
+    /// expectation an argument can be measured against before inference runs.
+    fn ty_mentions_type_param(ty: Ty) -> bool {
+        match ty {
+            Ty::TyParam(..) => true,
+            Ty::Nullable(inner) => Self::ty_mentions_type_param(*inner),
+            Ty::Obj(_, args) => args.iter().copied().any(Self::ty_mentions_type_param),
+            Ty::Fun(signature) => {
+                signature
+                    .params
+                    .iter()
+                    .copied()
+                    .any(Self::ty_mentions_type_param)
+                    || Self::ty_mentions_type_param(signature.ret)
+            }
+            _ => false,
+        }
     }
 
     fn match_ctor_delegation_candidate(
@@ -14805,7 +14912,16 @@ impl<'a> Checker<'a> {
                 parameter
             };
             let actual = self.expr_types[argument.0 as usize];
-            if actual != Ty::Error && !self.receiver_is_assignable(actual, expected) {
+            // A parameter whose type MENTIONS a type parameter is not yet a concrete expectation — the
+            // call is what binds it. Judging the argument against the declared upper bound rejects calls
+            // Kotlin accepts: `class C<T>(val x: T)` erases `T` to a non-null `Any`, so `C(null)` and
+            // `C(x = null)` were both "none of the following candidates is applicable", and
+            // `PairBox<T>(a: T, b: T)` could not merge two occurrences. Let the argument through here and
+            // leave the judgement to inference and the `expect_assignable` pass on the SELECTED
+            // constructor, which knows the bound type arguments.
+            let generic = Self::ty_mentions_type_param(expected)
+                || candidate.generic_params.get(slot).copied().unwrap_or(false);
+            if actual != Ty::Error && !generic && !self.receiver_is_assignable(actual, expected) {
                 return None;
             }
             argument_types.push(expected);
@@ -23802,9 +23918,6 @@ impl<'a> Checker<'a> {
         implicit_receiver: bool,
     ) -> ClasspathMemberSlotCall {
         let arg_names = self.file.call_arg_names.get(&call.0).cloned();
-        let named_call = arg_names
-            .as_ref()
-            .is_some_and(|names| names.iter().any(Option::is_some));
         let needs_slot_map = arg_names.is_some();
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         let mut mapping_errors = Vec::new();
@@ -23863,51 +23976,7 @@ impl<'a> Checker<'a> {
             return ClasspathMemberSlotCall::NoMatch;
         }
         if candidates.is_empty() {
-            if named_call {
-                // Every candidate rejected the labels. An UNKNOWN name is worth remembering: no member
-                // owns it, but an EXTENSION still might, so returning `NoMatch` here is right — dropping
-                // the error is not. Without it the positional fallback downstream binds `known(z = 1)` as
-                // `known(1)` and an unknown parameter name compiles silently.
-                if let Some((name, argument)) = mapping_errors
-                    .iter()
-                    .find_map(|(failure, _)| {
-                        failure.errors.iter().find_map(|error| match error {
-                            crate::libraries::CallArgMappingError::NoParameterNamed {
-                                name,
-                                argument,
-                            } => Some((name.clone(), *argument)),
-                            _ => None,
-                        })
-                    })
-                    .filter(|_| {
-                        mapping_errors.iter().all(|(failure, _)| {
-                            failure.errors.iter().any(|error| {
-                                matches!(
-                                    error,
-                                    crate::libraries::CallArgMappingError::NoParameterNamed { .. }
-                                )
-                            })
-                        })
-                    })
-                {
-                    let span = self
-                        .file
-                        .call_arg_name_spans
-                        .get(&call.0)
-                        .and_then(|spans| spans.get(argument).copied().flatten())
-                        .unwrap_or_else(|| self.span(args[argument.min(args.len() - 1)]));
-                    self.pending_unknown_named_arg.insert(
-                        call,
-                        (
-                            crate::libraries::CallArgMappingError::NoParameterNamed {
-                                name,
-                                argument,
-                            }
-                            .to_string(),
-                            span,
-                        ),
-                    );
-                }
+            if self.extension_could_serve(rt, name) {
                 return ClasspathMemberSlotCall::NoMatch;
             }
             let unanimous = mapping_errors
@@ -23952,7 +24021,14 @@ impl<'a> Checker<'a> {
             }
         }
         if !candidates.is_empty() && candidates.iter().all(|(score, _, _, _)| score.is_none()) {
-            if named_call {
+            // A LAMBDA-LITERAL argument's applicability depends on the callee it is checked against, so a
+            // member family rejecting it is not the final word: an imported extension taking a lambda
+            // (`"".literalChoice(a = { … })`) must still get its turn, and reporting here would bury it
+            // under a diagnostic for a callable the programmer did not mean. Defer only for that reason —
+            // deferring every named call is what silently dropped mapping errors, arity errors, type
+            // mismatches and ambiguity for the classpath-member origin while every other origin reported
+            // them.
+            if self.extension_could_serve(rt, name) {
                 return ClasspathMemberSlotCall::NoMatch;
             }
             if candidates.len() == 1 && mapping_errors.is_empty() {
@@ -23970,7 +24046,7 @@ impl<'a> Checker<'a> {
             } else {
                 self.diags.error(
                     self.call_callee_name_span(call),
-                    "none of the following candidates is applicable:".to_string(),
+                    INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
                 );
             }
             return ClasspathMemberSlotCall::Rejected;
@@ -24044,6 +24120,28 @@ impl<'a> Checker<'a> {
         ClasspathMemberSlotCall::Resolved(ret)
     }
 
+    /// Whether an EXTENSION could serve this call, in which case a classpath member family rejecting it is
+    /// not the final word and must stay silent so the extension gets its turn (`"".pick(value = 1)` where
+    /// only `String.pick(value)` declares that name; `"".literalChoice(a = { … })` where only the extension
+    /// takes a lambda). Used as the deferral condition instead of "the call has named arguments": deferring
+    /// every named call is what silently dropped mapping errors, arity errors, type mismatches and
+    /// ambiguity for the classpath-member origin while every other origin reported them.
+    fn extension_could_serve(&self, receiver: Ty, name: &str) -> bool {
+        self.member_extension_supports_named(receiver, name)
+            || self
+                .resolver()
+                .resolve_symbol(
+                    crate::symbol_resolver::SymRecv::Value(receiver),
+                    name,
+                    &[],
+                    &[],
+                )
+                .map(crate::symbol_resolver::Symbol::overloads)
+                .unwrap_or_default()
+                .iter()
+                .any(crate::libraries::FunctionInfo::is_extension)
+    }
+
     fn call_slot_score(&self, params: &[Ty], slots: &[Option<ExprId>]) -> Option<usize> {
         if params.len() != slots.len() {
             return None;
@@ -24052,12 +24150,27 @@ impl<'a> Checker<'a> {
         for (i, slot) in slots.iter().enumerate() {
             let Some(arg) = slot else { continue };
             let aty = self.expr_types[arg.0 as usize];
-            if aty != Ty::Error && !self.receiver_is_assignable(aty, params[i]) {
+            if aty != Ty::Error
+                && !self.receiver_is_assignable(aty, params[i])
+                && !self.integer_literal_adapts_to_integral(params[i], aty, *arg)
+            {
                 return None;
             }
             score += if params[i] == aty { 4 } else { 1 };
         }
         Some(score)
+    }
+
+    /// An integer LITERAL adapts to any integral parameter type, not just `Long`. Kotlin types the literal
+    /// from its context, so `f(a = 1)` is applicable to `f(a: Byte)`, `f(a: Short)` and `f(a: Long)` alike.
+    /// Scoring only `Int`→`Long` made an overload pair like `tie(Long)`/`tie(Byte)` look like a single
+    /// applicable candidate, so a genuinely AMBIGUOUS call silently picked one instead of being reported —
+    /// the "do not fall back to first match" property. Every adapted parameter scores the same as any other
+    /// inexact match, so the tie stays a tie.
+    fn integer_literal_adapts_to_integral(&self, expected: Ty, actual: Ty, expr: ExprId) -> bool {
+        actual == Ty::Int
+            && matches!(expected, Ty::Byte | Ty::Short | Ty::Long)
+            && self.is_integer_literal_arg(expr)
     }
 
     fn same_named_callable_exists(&self, name: &str) -> bool {
@@ -24447,7 +24560,7 @@ impl<'a> Checker<'a> {
         if has_sibling_overloads && applicable_members.is_empty() {
             self.diags.error(
                 self.call_callee_name_span(call),
-                "none of the following candidates is applicable:".to_string(),
+                INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
             );
             return Some(Ty::Error);
         }
@@ -26360,10 +26473,8 @@ impl<'a> Checker<'a> {
                             return ret;
                         }
                         _ => {
-                            self.diags.error(
-                                span,
-                                "none of the following candidates is applicable:".to_string(),
-                            );
+                            self.diags
+                                .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
                             return Ty::Error;
                         }
                     }
@@ -26475,7 +26586,7 @@ impl<'a> Checker<'a> {
                 self.diags.error(
                     self.call_callee_name_span(call),
                     if has_inapplicable_candidate {
-                        "none of the following candidates is applicable:".to_string()
+                        INAPPLICABLE_OVERLOAD_PREFIX.to_string()
                     } else {
                         format!("unresolved reference '{name}'.")
                     },
@@ -26624,10 +26735,8 @@ impl<'a> Checker<'a> {
                         match (applicable.next(), applicable.next()) {
                             (Some(selected), None) => Some(selected),
                             _ => {
-                                self.diags.error(
-                                    span,
-                                    "none of the following candidates is applicable:".to_string(),
-                                );
+                                self.diags
+                                    .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
                                 return Ty::Error;
                             }
                         }
@@ -27735,13 +27844,45 @@ impl<'a> Checker<'a> {
                         let Some(selected) =
                             self.select_source_constructor(&arguments, &candidates)
                         else {
-                            self.diags.error(
-                                span,
-                                "none of the following candidates is applicable:".to_string(),
-                            );
+                            if !self.report_source_constructor_mapping_error(
+                                call,
+                                args,
+                                &arguments,
+                                &candidates,
+                            ) {
+                                self.diags
+                                    .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
+                            }
                             return self.ctor_result_name(call, cls.internal_name());
                         };
-                        for (&argument, &expected) in args.iter().zip(&selected.argument_types) {
+                        // A parameter declared as one of the class's TYPE PARAMETERS has no concrete
+                        // expectation here: `argument_types` carries its erased upper bound, and `<T>`
+                        // erases to a NON-NULL `kotlin/Any`, so checking against it rejected `C(null)` on
+                        // `class C<T>(val x: T)` — which Kotlin accepts by inferring `T` as nullable. The
+                        // type argument is bound by inference; judge only the parameters whose declared
+                        // type is concrete.
+                        let generic_slots = declaration
+                            .props
+                            .iter()
+                            .map(|parameter| {
+                                Self::type_ref_mentions_type_param(
+                                    &parameter.ty,
+                                    &declaration.type_params,
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        for (index, (&argument, &expected)) in
+                            args.iter().zip(&selected.argument_types).enumerate()
+                        {
+                            let generic = selected
+                                .argument_slots
+                                .get(index)
+                                .and_then(|&slot| generic_slots.get(slot))
+                                .copied()
+                                .unwrap_or(false);
+                            if generic {
+                                continue;
+                            }
                             self.expect_assignable(
                                 expected,
                                 self.expr_types[argument.0 as usize],
@@ -28748,10 +28889,7 @@ impl<'a> Checker<'a> {
                             .is_empty()
                     });
                 let (message, identity) = if has_inapplicable_candidate {
-                    (
-                        "none of the following candidates is applicable:".to_string(),
-                        None,
-                    )
+                    (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None)
                 } else if self.value_root_shadows_classifier(&fname) {
                     (format!("unresolved function '{fname}'"), None)
                 } else if let Some((internal, access)) = self.inaccessible_classifier(&fname) {
