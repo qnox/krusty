@@ -1141,6 +1141,7 @@ pub struct File {
     /// `ExprId`. Lets a constructor call carry its instantiation (`ArrayList<Int>()` → `ArrayList<Int>`)
     /// so member/element types resolve. Absent ⇒ no explicit type arguments.
     pub call_type_args: std::collections::HashMap<u32, Vec<TypeRef>>,
+    pub anonymous_object_classes: std::collections::HashMap<ExprId, DeclId>,
     /// Explicit parameter type annotations on a lambda literal (`{ x: Int, y -> … }`), keyed by the
     /// lambda's `ExprId`, parallel to its `params`. `None` for an unannotated parameter. Lets the
     /// checker type a *bare-value* lambda (`val f = { x: Int -> x*2 }`) from its own declared types
@@ -1272,6 +1273,7 @@ impl File {
         self.trailing_call_close_paren_ends = Default::default();
         self.infix_calls = Default::default();
         self.call_type_args = Default::default();
+        self.anonymous_object_classes = Default::default();
         self.lambda_param_types = Default::default();
         self.anon_fun_lambdas = Default::default();
         self.destructure_source_props = Default::default();

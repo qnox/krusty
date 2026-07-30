@@ -10,12 +10,13 @@ use std::collections::HashMap;
 
 use crate::ast::{self, BinOp, Decl, Expr, ExprId as AstExprId, FunBody, Stmt, TemplatePart};
 use crate::frontend::{
-    classifier_over_default, function_import_scope, qualified_path, typeref_leaf, ClassNames,
-    CompoundAssignmentTarget, CtorDefaultValue, DelegateGetValueTarget, DestructureComponentTarget,
-    ExprLowering, FrontendSymbols, FrontendTypeInfo, FunctionImportScope, InlineCall, InvokeKind,
-    IteratorDispatchTarget, LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ReceiverLambda,
-    ResolvedCall, ResolvedConstructor, ResolvedLocalFunctionCall, ResolvedMember,
-    ResolvedModuleTopLevelCall, SigFlags, Signature, StmtLowering,
+    classifier_over_default, function_import_scope, qualified_path, typeref_leaf,
+    AnonymousObjectCapture, ClassNames, CompoundAssignmentTarget, CtorDefaultValue,
+    DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, FrontendSymbols,
+    FrontendTypeInfo, FunctionImportScope, InlineCall, InvokeKind, IteratorDispatchTarget,
+    LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ReceiverLambda, ResolvedCall,
+    ResolvedConstructor, ResolvedLocalFunctionCall, ResolvedMember, ResolvedModuleTopLevelCall,
+    SigFlags, Signature, StmtLowering,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
@@ -553,6 +554,11 @@ pub fn lower_file_at_reporting(
     for &d in &file.decls {
         if let Decl::Class(c) = file.decl(d) {
             let internal = class_internal(file, &c.name);
+            let anonymous_captures = info
+                .anonymous_object_captures_by_class
+                .get(&d)
+                .cloned()
+                .unwrap_or_default();
             // A generic class gets a JVM class `Signature` (kotlinc does), matching its bytecode.
             if let Some(s) = class_generic_sig(file, c, &*lo.syms.libraries, &lo.syms.class_names) {
                 lo.ir.insert_class_signature(&internal, s);
@@ -594,11 +600,15 @@ pub fn lower_file_at_reporting(
                     .prop_visibilities
                     .insert((internal.clone(), p.name.clone()), p.visibility);
             }
-            let mut ctor_fields: Vec<(String, Ty)> = c
-                .props
+            let mut ctor_fields: Vec<(String, Ty)> = anonymous_captures
                 .iter()
-                .filter(|p| p.is_property)
-                .map(|p| (p.name.clone(), resolved_prop_ty(&p.name)))
+                .map(|capture| (capture.name.clone(), capture.ty))
+                .chain(
+                    c.props
+                        .iter()
+                        .filter(|p| p.is_property)
+                        .map(|p| (p.name.clone(), resolved_prop_ty(&p.name))),
+                )
                 .collect();
             if let Some(outer) = &inner_outer {
                 ctor_fields.insert(0, ("this$0".to_string(), Ty::obj(outer)));
@@ -741,15 +751,14 @@ pub fn lower_file_at_reporting(
             // Parallel to `fields`: each field's source type-parameter name (`val x: T` → `Some("T")`),
             // else `None`. Same ordering as `fields` (ctor props, `this$0` at 0 for an inner class, then
             // backing-field body props). Neutral metadata for the value-class pass's bound resolution.
-            let mut field_type_params: Vec<Option<String>> = c
-                .props
+            let mut field_type_params: Vec<Option<String>> = anonymous_captures
                 .iter()
-                .filter(|p| p.is_property)
-                .map(|p| {
+                .map(|_| None)
+                .chain(c.props.iter().filter(|p| p.is_property).map(|p| {
                     c.type_params
                         .contains(&p.ty.name)
                         .then(|| p.ty.name.clone())
-                })
+                }))
                 .collect();
             if inner_outer.is_some() {
                 field_type_params.insert(0, None);
@@ -839,6 +848,7 @@ pub fn lower_file_at_reporting(
             let field_finals: Vec<bool> = inner_outer
                 .iter()
                 .map(|_| true)
+                .chain(anonymous_captures.iter().map(|_| true))
                 .chain(c.props.iter().filter(|p| p.is_property).map(|p| !p.is_var))
                 .chain(
                     c.body_props
@@ -948,9 +958,27 @@ pub fn lower_file_at_reporting(
                         type_param: None,
                         check: None,
                     })
+                    .chain(anonymous_captures.iter().map(|capture| {
+                        IrCtorArg {
+                            name: Some(capture.name.clone()),
+                            ty: ty_to_ir(capture.ty),
+                            is_field: true,
+                            has_default: false,
+                            type_param: None,
+                            check: capture
+                                .ty
+                                .is_reference()
+                                .then(|| capture.name.clone())
+                                .filter(|_| !capture.ty.is_nullable()),
+                        }
+                    }))
                     .chain(c.props.iter().enumerate().map(|(i, p)| {
                         let t = ty_to_ir(stored_value_ty(
-                            class_sig.ctor_params.get(i).copied().unwrap_or(Ty::Error),
+                            class_sig
+                                .ctor_params
+                                .get(anonymous_captures.len() + i)
+                                .copied()
+                                .unwrap_or(Ty::Error),
                         ));
                         let t = if p.ty.nullable() { mark_nullable(t) } else { t };
                         // A non-null reference param gets an `Intrinsics.checkNotNullParameter` guard at
@@ -1424,7 +1452,7 @@ pub fn lower_file_at_reporting(
                     .collect();
                 // An inner class's `this$0` occupies field index 0, so the declared properties' fields
                 // are shifted by one — map each property's `field_props` index to its real field index.
-                let field_offset = if inner_outer.is_some() { 1 } else { 0 };
+                let field_offset = anonymous_captures.len() + usize::from(inner_outer.is_some());
                 // For a generic class, a field typed by a bare type parameter (`val a: A`) → its
                 // synthesized accessors carry a JVM `Signature` (`getA()` → `()TA;`, `setA(TA;)V`).
                 let field_tp: std::collections::HashMap<String, String> =
@@ -2330,6 +2358,11 @@ pub fn lower_file_at_reporting(
             }
             Decl::Class(c) => {
                 lo.set_bail("deep:class");
+                let anonymous_captures = info
+                    .anonymous_object_captures_by_class
+                    .get(&d)
+                    .cloned()
+                    .unwrap_or_default();
                 let internal = class_internal(file, &c.name);
                 // A method that overrides a base method with a *different erased signature* (a
                 // generic/covariant override) needs a synthetic JVM bridge that krusty doesn't emit
@@ -3477,6 +3510,7 @@ pub fn lower_file_at_reporting(
                     || has_delegated
                     || has_iface_synth_delegate
                     || c.inner_of.is_some()
+                    || !anonymous_captures.is_empty()
                     || c.props.iter().any(|p| p.is_property))
                     && c.has_primary_ctor
                 {
@@ -3502,6 +3536,10 @@ pub fn lower_file_at_reporting(
                             Ty::obj(&class_internal(file, outer)),
                         ));
                     }
+                    for capture in &anonymous_captures {
+                        let value = lo.fresh_value();
+                        lo.scope.push((capture.name.clone(), value, capture.ty));
+                    }
                     // ALL ctor params (property and plain) in scope as values, declaration order.
                     for p in c.props.iter() {
                         let v = lo.fresh_value();
@@ -3526,6 +3564,10 @@ pub fn lower_file_at_reporting(
                             // (`ir_emit`), not here — a `super(…)` argument may read the outer instance
                             // (`inner class Inner : Base(run { outerProp })`), and kotlinc stores it first.
                             // Reserve its field index but don't emit the (post-super) store.
+                            field_i += 1;
+                        }
+                        for capture in &anonymous_captures {
+                            targets.push((capture.name.clone(), field_i));
                             field_i += 1;
                         }
                         for p in c.props.iter().filter(|p| p.is_property) {
@@ -9621,6 +9663,26 @@ impl<'a> Lower<'a> {
             .iter()
             .rev()
             .find_map(|(n, v, t)| (n == name).then_some((*v, *t)))
+    }
+
+    fn lower_anonymous_capture(&mut self, capture: &AnonymousObjectCapture) -> Option<u32> {
+        if let Some((value, actual)) = self.lookup(&capture.name) {
+            let value = self.emit_get_value(value);
+            return self.coerce_argument_value(value, actual, capture.ty);
+        }
+        let owner = self.cur_class?;
+        let class = self.class_info_name(owner)?.id;
+        let field = self
+            .classes
+            .get(&owner)?
+            .fields
+            .iter()
+            .position(|(name, _)| name == &capture.name)?;
+        let actual = self.classes.get(&owner)?.fields[field].1;
+        let (this, _) = self.lookup("$dispatch").or_else(|| self.lookup("this"))?;
+        let receiver = self.emit_get_value(this);
+        let value = self.emit_get_field(receiver, class, field as u32);
+        self.coerce_argument_value(value, actual, capture.ty)
     }
 
     fn lower_member_extension_receiver_read(
@@ -21262,6 +21324,34 @@ impl<'a> Lower<'a> {
             // never reaches the normal vararg-packing paths below.
             Expr::Call { callee, args } if args.iter().any(|&a| self.afile.is_spread_arg(a)) => {
                 self.lower_single_spread_call(e, callee, &args)?
+            }
+            Expr::Call { args, .. }
+                if self
+                    .info
+                    .anonymous_object_captures_by_construction
+                    .get(&e)
+                    .is_some_and(|captures| !captures.is_empty()) =>
+            {
+                if !args.is_empty() {
+                    return None;
+                }
+                let declaration = self.afile.anonymous_object_classes.get(&e)?;
+                let internal = self.info.anonymous_object_types.get(declaration)?;
+                let class = self.class_info_name(*internal)?.id;
+                let captures = self
+                    .info
+                    .anonymous_object_captures_by_construction
+                    .get(&e)
+                    .cloned()
+                    .unwrap_or_default();
+                if self.ir.classes[class as usize].ctor_param_count as usize != captures.len() {
+                    return None;
+                }
+                let mut arguments = Vec::with_capacity(captures.len());
+                for capture in &captures {
+                    arguments.push(self.lower_anonymous_capture(capture)?);
+                }
+                self.emit_new(class, arguments, None)
             }
             Expr::Call { callee, args } => match self.afile.expr(callee).clone() {
                 // Local top-level function, or constructor `C(args)`.
