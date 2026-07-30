@@ -1545,6 +1545,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and constructors resolve without imports, while inaccessible classifiers produce the diagnostic
   for the source spelling. Exposed-visibility diagnostics for public declarations remain unsupported.
 
+- **The dev-mode dump renders AST and IR arenas flat and id-ordered, never as trees.** The AST and
+  IR are index-based by design (nodes reference each other by `u32` arena ids), so a flat listing is
+  the faithful view: every node appears exactly once, including nodes unreachable from any
+  declaration, and each node's `Debug` output carries its child ids for navigation. A tree renderer
+  would need a match arm per variant across the full node sets and would rot as variants are added.
+  Tests: `src/dump.rs` cover the document shape.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

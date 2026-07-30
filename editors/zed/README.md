@@ -109,3 +109,25 @@ lifetime.
 
 Diagnostics, hover, completion (with resolve), semantic highlighting, full-document sync. Requests
 Zed sends for other features (go-to-definition, rename, formatting) are not implemented.
+
+## Developer dump
+
+With dev mode on, `cmd-.` on a Kotlin file offers **krusty (dev): dump AST + checker + IR**, which
+opens a Markdown buffer holding the file's parsed arenas, its diagnostics and inferred expression
+types, and its lowered IR — or the reason lowering bailed. The dump path is stable per source file,
+so a buffer left open in a split refreshes in place each time the action runs.
+
+Dev mode is off by default. Turn it on in Zed settings:
+
+```json
+{ "lsp": { "krusty-lsp": { "binary": { "arguments": ["--dev"] } } } }
+```
+
+The dump is a debugging view of internal compiler structures. Its format tracks those structures and
+is not stable.
+
+Known limitations:
+
+- Only the most recently analyzed group's primary documents are dumpable. With files from two
+  modules open, the action can legitimately offer nothing for the module you're looking at.
+- A dump requested while an edit is still being analyzed can replay pre-edit state.
