@@ -12179,11 +12179,29 @@ impl<'a> Checker<'a> {
         None
     }
 
+    /// Map each source argument onto the parameter slot its LABEL names (`fold(onFailure = …,
+    /// onSuccess = …)`); unlabelled arguments stay positional. `None` when a label names no parameter
+    /// of this overload — that overload cannot take the call at all.
+    fn named_argument_map(
+        overload: &crate::libraries::FunctionInfo,
+        arg_names: &[Option<String>],
+        argument_count: usize,
+    ) -> Option<Vec<usize>> {
+        let param_names = &overload.call_sig.param_names;
+        (0..argument_count)
+            .map(|i| match arg_names.get(i).and_then(|n| n.as_ref()) {
+                Some(label) => param_names.iter().position(|p| p == label),
+                None => Some(i),
+            })
+            .collect()
+    }
+
     fn extension_lambda_shape(
         &self,
         receiver: Ty,
         name: &str,
         arg_tys: &[Option<Ty>],
+        arg_names: Option<&[Option<String>]>,
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
         let src = self.fed_source();
         let fs = crate::libraries::FunctionSet {
@@ -12211,11 +12229,24 @@ impl<'a> Checker<'a> {
                     Some(self.file_index),
                 )
             {
-                let Some(argument_map) = crate::symbol_resolver::trailing_default_arg_indices(
-                    o.semantic_params().len(),
-                    arg_tys,
-                ) else {
-                    continue;
+                // A labelled argument binds by NAME, not by position: without this the lambda at
+                // source position 0 would be typed from parameter 0 and `fold(onFailure = …,
+                // onSuccess = …)` would compile each lambda against the other's parameter type.
+                let named = arg_names
+                    .filter(|names| names.iter().any(Option::is_some))
+                    .and_then(|names| Self::named_argument_map(o, names, arg_tys.len()));
+                let argument_map = match (arg_names, named) {
+                    (Some(names), None) if names.iter().any(Option::is_some) => continue,
+                    (_, Some(map)) => map,
+                    _ => {
+                        let Some(map) = crate::symbol_resolver::trailing_default_arg_indices(
+                            o.semantic_params().len(),
+                            arg_tys,
+                        ) else {
+                            continue;
+                        };
+                        map
+                    }
                 };
                 let partial = self.lambda_overload_partially_applicable(
                     o,
@@ -17455,8 +17486,9 @@ impl<'a> Checker<'a> {
                 context_counts: None,
                 materialized: None,
             });
-        let shape = member_extension_shape
-            .or_else(|| self.extension_lambda_shape(receiver, name, &partial));
+        let shape = member_extension_shape.or_else(|| {
+            self.extension_lambda_shape(receiver, name, &partial, arg_names.as_deref())
+        });
         let pts = shape.as_ref().and_then(|shape| shape.param_types.as_ref());
         let receivers = shape.as_ref().and_then(|shape| shape.receivers.as_ref());
         args.iter()
@@ -25891,9 +25923,9 @@ impl<'a> Checker<'a> {
                         })
                     });
                 let ext_lambda_shape = if member_ext_lambda_plan.is_none() {
-                    ext_lambda_partial
-                        .as_ref()
-                        .and_then(|partial| self.extension_lambda_shape(rt, &name, partial))
+                    ext_lambda_partial.as_ref().and_then(|partial| {
+                        self.extension_lambda_shape(rt, &name, partial, arg_names.as_deref())
+                    })
                 } else {
                     None
                 };
@@ -27457,6 +27489,7 @@ impl<'a> Checker<'a> {
                                 receiver,
                                 &fname,
                                 this_member_partial.as_deref().unwrap_or_default(),
+                                arg_names.as_deref(),
                             )?;
                             shape.param_types.as_ref()?;
                             Some(shape)
