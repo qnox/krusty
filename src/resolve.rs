@@ -24300,6 +24300,7 @@ impl<'a> Checker<'a> {
             if aty != Ty::Error
                 && !self.receiver_is_assignable(aty, params[i])
                 && !self.integer_literal_adapts_to_integral(params[i], aty, *arg)
+                && !self.erased_function_param_fits(params[i], aty)
             {
                 return None;
             }
@@ -24486,21 +24487,29 @@ impl<'a> Checker<'a> {
         {
             return Some(1);
         }
+        self.erased_function_param_fits(expected, actual)
+            .then_some(1)
+    }
+
+    /// Whether `actual` fits a FUNCTION-typed parameter whose signature reached the checker ERASED.
+    /// A classpath `(StringBuilder) -> Unit` parameter is a bare `Function1` — `(Any) -> Any` — and a
+    /// source `() -> T` erases the same way, so neither can judge the lambda's own parameter and return
+    /// types. Matched on arity and suspend-ness, judging only components that are not the erased top.
+    fn erased_function_param_fits(&self, expected: Ty, actual: Ty) -> bool {
         let (Ty::Fun(expected), Ty::Fun(actual)) = (expected, actual) else {
-            return None;
+            return false;
         };
         let component = |expected: Ty, actual: Ty| {
             expected.is_erased_top() || self.member_argument_score(expected, actual).is_some()
         };
-        (expected.params.len() == actual.params.len()
+        expected.params.len() == actual.params.len()
             && expected.suspend == actual.suspend
             && expected
                 .params
                 .iter()
                 .zip(&actual.params)
                 .all(|(expected, actual)| component(*expected, *actual))
-            && component(expected.ret, actual.ret))
-        .then_some(1)
+            && component(expected.ret, actual.ret)
     }
 
     fn module_member_candidate_score(
