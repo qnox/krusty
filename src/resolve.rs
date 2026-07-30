@@ -21709,7 +21709,11 @@ impl<'a> Checker<'a> {
                         break;
                     }
                     crate::symbol_resolver::CandidateSelection::None => {
-                        for entry in &candidates {
+                        // Only when this rank holds a SINGLE candidate. With more than one, choosing by
+                        // slot score would answer a question the specificity selection just declined to
+                        // answer, and score cannot tell `pick(value: Any)` from `pick(value: CharSequence)`
+                        // — it would silently take whichever came first.
+                        if let [entry] = candidates.as_slice() {
                             let score = self.call_slot_score(&entry.1, &entry.2).unwrap_or(0);
                             if best_mapped.as_ref().is_none_or(|(best, _)| score > *best) {
                                 best_mapped = Some((score, entry.clone()));
