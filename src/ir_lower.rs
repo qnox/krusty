@@ -4340,6 +4340,11 @@ pub fn lower_file_at_reporting(
         })
         .collect();
     for (stmt_id, f) in &local_funs {
+        // A `tailrec` LOCAL function isn't loop-transformed (only top-level functions are) —
+        // skip the file rather than emit stack-overflowing recursion, mirroring the member case.
+        if f.is_tailrec() && !matches!(f.body, ast::FunBody::None) {
+            return None;
+        }
         let Some(&fid) = lo.local_fun_ids.get(stmt_id) else {
             continue;
         };
@@ -7410,7 +7415,14 @@ impl<'a> Lower<'a> {
                         .filter_map(|(index, slot)| slot.is_none().then_some(index)),
                 );
             } else {
-                self.append_default_call_args(&mut a, &c.params, args, has_trailing_lambda)?;
+                self.append_default_call_args(
+                    &mut a,
+                    &c.params,
+                    args,
+                    has_trailing_lambda,
+                    c.vararg_elem,
+                    c.vararg_index,
+                )?;
             }
         } else {
             if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
@@ -13527,13 +13539,58 @@ impl<'a> Lower<'a> {
         self.emit_new_array(array_type, size)
     }
 
+    /// Lower one element of a selected vararg using both representations recorded by resolution.
+    /// `logical_element` controls source adaptation (`T` specialized to `Int`, literal widening,
+    /// value-class semantics); the array's physical element controls storage (`Object[]` for an
+    /// erased generic). The final coercion therefore boxes a primitive for `Object[]` without
+    /// changing primitive arrays such as `CharArray`, and no caller needs a source/type-name case.
+    fn lower_vararg_element(
+        &mut self,
+        argument: AstExprId,
+        logical_element: Ty,
+        physical_array: Ty,
+    ) -> Option<u32> {
+        let physical_element = physical_array.array_elem()?;
+        let value = self.lower_arg(argument, &ty_to_ir(logical_element))?;
+        self.coerce_argument_value(value, logical_element, ty_to_ir(physical_element))
+    }
+
     fn append_default_call_args(
         &mut self,
         out: &mut Vec<u32>,
         params: &[Ty],
         args: &[AstExprId],
         trailing_lambda: bool,
+        vararg_elem: Option<Ty>,
+        vararg_index: Option<usize>,
     ) -> Option<()> {
+        // Element-form vararg into a `$default` (`split('.')` → `split$default(recv, char[],
+        // boolean, int, mask, marker)`): PACK the trailing provided arguments into the vararg
+        // slot's array, then placeholder+mask the name-only-defaulted tail.
+        if let Some((elem, slot)) = vararg_elem.zip(vararg_index) {
+            let array_type = *params.get(slot)?;
+            // The resolver records the semantic slot; the physical parameter need only be an
+            // array. In particular, `vararg T` specialized to `String` still emits `Object[]`.
+            // Reject a malformed record rather than shifting arguments into a non-array slot.
+            array_type.array_elem()?;
+            if args.len() < slot {
+                return None;
+            }
+            for (index, &arg) in args[..slot].iter().enumerate() {
+                out.push(self.lower_arg(arg, &ty_to_ir(params[index]))?);
+            }
+            let mut elements = Vec::new();
+            for &arg in &args[slot..] {
+                elements.push(self.lower_vararg_element(arg, elem, array_type)?);
+            }
+            out.push(self.emit_vararg(ty_to_ir(array_type), elements));
+            for &param in &params[slot + 1..] {
+                out.push(self.zero_placeholder(param));
+            }
+            let mask: i32 = (slot + 1..params.len()).map(|j| 1i32 << j).sum();
+            self.append_default_mask_marker(out, mask);
+            return Some(());
+        }
         let mask: i32 = if trailing_lambda && args.len() < params.len() {
             let prefix_len = args.len().checked_sub(1)?;
             let last = params.len() - 1;
@@ -22095,6 +22152,8 @@ impl<'a> Lower<'a> {
                                 &c.params,
                                 &args,
                                 trailing_lambda,
+                                c.vararg_elem,
+                                c.vararg_index,
                             )?;
                         } else {
                             // `ctx_n` leading context arguments are already in `a`; the explicit source
@@ -23435,6 +23494,8 @@ impl<'a> Lower<'a> {
                                 explicit_params,
                                 &args,
                                 trailing_lambda,
+                                c.vararg_elem,
+                                c.vararg_index,
                             )?;
                         } else if let Some((fixed, arr_ty, elem)) = c
                             .vararg_elem
@@ -23454,7 +23515,7 @@ impl<'a> Lower<'a> {
                             }
                             let mut elems = Vec::with_capacity(args.len() - fixed);
                             for &arg in &args[fixed..] {
-                                elems.push(self.lower_arg(arg, &ty_to_ir(elem))?);
+                                elems.push(self.lower_vararg_element(arg, elem, arr_ty)?);
                             }
                             a.push(self.emit_vararg(ty_to_ir(arr_ty), elems));
                         } else {
