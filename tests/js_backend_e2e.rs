@@ -115,6 +115,24 @@ fn class_field_and_method() {
 }
 
 #[test]
+fn class_property_custom_accessors() {
+    // A semantic PropertyRead/PropertyWrite is not necessarily a direct JavaScript field operation:
+    // source-written accessor bodies remain real methods in the shared IR. The JS realization must call
+    // those methods, just as the JVM realization calls the emitted accessor, or it silently bypasses the
+    // user's getter/setter logic.
+    check(
+        "class Counter {\n\
+           var raw: Int = 2\n\
+           var scaled: Int = 0\n\
+             get() = raw * 3\n\
+             set(value) { raw = value + 1 }\n\
+         }\n\
+         fun box(): Int { val c = Counter(); c.scaled = 4; return c.scaled }",
+        "15",
+    );
+}
+
+#[test]
 fn instanceof_and_cast() {
     check(
         "open class Animal\nclass Dog : Animal()\n\

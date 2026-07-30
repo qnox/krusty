@@ -3539,6 +3539,183 @@ impl super::inline::MethodBodies for Classpath {
             .or_else(|| crate::jvm::jvm_class_map::jvm_mapped_builtin_is_interface(owner))
             .unwrap_or(false)
     }
+    fn method_is_static(&self, owner: &str, name: &str, descriptor: &str) -> bool {
+        self.find(owner).is_some_and(|ci| {
+            ci.methods
+                .iter()
+                .any(|m| m.name == name && m.descriptor == descriptor && m.is_static())
+        })
+    }
+    fn property_read_access(
+        &self,
+        owner: &str,
+        property: &str,
+    ) -> Option<super::inline::PropertyAccess> {
+        inherited_property_access(self, owner, property, class_property_read_access)
+    }
+    fn property_write_access(
+        &self,
+        owner: &str,
+        property: &str,
+    ) -> Option<super::inline::PropertyAccess> {
+        inherited_property_access(self, owner, property, class_property_write_access)
+    }
+}
+
+/// Resolve one target realization over the owner's supertype closure. Reads and writes must walk the
+/// exact same breadth-first order so the nearest declaration wins consistently; keeping that traversal
+/// here prevents the two operations from drifting as new classpath shapes are added.
+fn inherited_property_access(
+    classpath: &Classpath,
+    owner: &str,
+    property: &str,
+    declared_access: fn(&ClassInfo, &str) -> Option<super::inline::PropertyAccess>,
+) -> Option<super::inline::PropertyAccess> {
+    let mut queue = std::collections::VecDeque::new();
+    let mut seen = std::collections::HashSet::new();
+    queue.push_back(super::jvm_class_map::to_jvm_type_name(type_name(owner)));
+    while let Some(current) = queue.pop_front() {
+        if !seen.insert(current) {
+            continue;
+        }
+        let Some(class) = classpath.find_name(current) else {
+            continue;
+        };
+        if let Some(access) = declared_access(&class, property) {
+            return Some(access);
+        }
+        queue.extend(class.super_class);
+        queue.extend(class.interfaces.iter_ids());
+    }
+    None
+}
+
+/// The write analogue of [`class_property_read_access`]: the setter `@Metadata` names for `property`, else
+/// the bean setter of a Java class, else a public non-final field. `None` for a read-only property.
+fn class_property_write_access(
+    ci: &ClassInfo,
+    property: &str,
+) -> Option<super::inline::PropertyAccess> {
+    use super::inline::PropertyAccess;
+    let owner = ci.this_class().to_string();
+    let setter = |method: &super::classreader::MethodSig| PropertyAccess::Accessor {
+        owner: owner.clone(),
+        name: method.name.clone(),
+        descriptor: method.descriptor.clone(),
+        is_static: method.is_static(),
+        is_interface: ci.is_interface(),
+    };
+    let one_arg = |name: &str| {
+        ci.methods
+            .iter()
+            .find(|m| {
+                m.name == name
+                    && super::names::parse_method_descriptor(&m.descriptor)
+                        .is_some_and(|(parameters, ret)| parameters.len() == 1 && ret == "V")
+            })
+            .cloned()
+    };
+    if let Some(declared) = super::metadata::class_properties(ci)
+        .iter()
+        .find(|p| p.name == property && !p.is_extension)
+    {
+        if let Some(method) = declared.setter.as_ref().and_then(|setter| {
+            ci.methods
+                .iter()
+                .find(|m| m.name == setter.name && m.descriptor == setter.desc)
+        }) {
+            return Some(setter(method));
+        }
+    } else if let Some(method) = one_arg(&crate::names::property_setter_name(property)) {
+        return Some(setter(&method));
+    }
+    let field = ci.fields.iter().find(|f| {
+        f.name == property
+            && f.access & super::classreader::ACC_PUBLIC != 0
+            && f.access & 0x0010 == 0 // not ACC_FINAL
+    })?;
+    Some(PropertyAccess::Field {
+        owner,
+        name: field.name.clone(),
+        descriptor: field.descriptor.clone(),
+        is_static: field.access & super::classreader::ACC_STATIC != 0,
+    })
+}
+
+/// The realization of property `property` DECLARED by `ci` itself (no supertype walk). `@Metadata`'s
+/// `JvmPropertySignature` names the accessor and/or backing field authoritatively — never a `getX` guess —
+/// and the class file's access flags say whether it takes a receiver. An accessor is preferred over a
+/// field: a private backing field is unreadable from outside, and a computed property has no field at all.
+fn class_property_read_access(
+    ci: &ClassInfo,
+    property: &str,
+) -> Option<super::inline::PropertyAccess> {
+    use super::inline::PropertyAccess;
+    let owner = ci.this_class().to_string();
+    let accessor = |method: &super::classreader::MethodSig| PropertyAccess::Accessor {
+        owner: owner.clone(),
+        name: method.name.clone(),
+        descriptor: method.descriptor.clone(),
+        is_static: method.is_static(),
+        is_interface: ci.is_interface(),
+    };
+    let zero_arg = |name: &str| {
+        ci.methods
+            .iter()
+            .find(|m| m.name == name && m.descriptor.starts_with("()") && m.descriptor != "()V")
+            .cloned()
+    };
+    // A Kotlin class: `@Metadata` names the accessor exactly (`@JvmName`, value-class mangling, and the
+    // `@JvmStatic` case where it is a static of this class).
+    if let Some(declared) = super::metadata::class_properties(ci)
+        .iter()
+        .find(|p| p.name == property && !p.is_extension)
+    {
+        if let Some(method) = declared.getter.as_ref().and_then(|getter| {
+            ci.methods
+                .iter()
+                .find(|m| m.name == getter.name && m.descriptor == getter.desc)
+        }) {
+            return Some(accessor(method));
+        }
+    } else {
+        // A Java class has no property declarations: Kotlin sees a SYNTHETIC property for a `getX()` /
+        // `isX()` bean accessor. The Kotlin-name → JVM-name mapping for a mapped builtin (`size` →
+        // `size()`, `keys` → `keySet()`) is applied first, since those are not bean-shaped.
+        let mapped = super::names::mapped_builtin_virtual_name(&owner, property);
+        for candidate in [
+            mapped.to_string(),
+            crate::names::property_getter_name(property),
+            format!("is{}", capitalize(property)),
+            // A zero-arg method read under its own name. Kotlin has no synthetic property for this, but
+            // krusty's checker admits it, so the realization has to exist or the read would emit nothing.
+            property.to_string(),
+        ] {
+            if let Some(method) = zero_arg(&candidate) {
+                return Some(accessor(&method));
+            }
+        }
+    }
+    // No accessor method: the property is realized as a plain field (`@JvmField`, a `const val`, or a
+    // public Java field surfaced as a Kotlin property).
+    let field = ci
+        .fields
+        .iter()
+        .find(|f| f.name == property && f.access & super::classreader::ACC_PUBLIC != 0)?;
+    Some(PropertyAccess::Field {
+        owner,
+        name: field.name.clone(),
+        descriptor: field.descriptor.clone(),
+        is_static: field.access & super::classreader::ACC_STATIC != 0,
+    })
+}
+
+fn capitalize(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 /// A lean per-class record for building the extension index — only what's needed to follow facade

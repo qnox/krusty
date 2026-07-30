@@ -64,6 +64,30 @@ fun box(): String {\n\
     );
 }
 
+/// Property accessors live in the semantic property table rather than the ordinary method table.
+/// Delegation must therefore synthesize their forwarders explicitly; otherwise the class verifies but
+/// throws `AbstractMethodError` when the interface getter is invoked. This is the minimized
+/// multiplatform corpus regression: the delegated class is declared against the expect interface and
+/// must still implement the actual interface's accessor ABI.
+#[test]
+fn delegation_forwards_interface_property_accessors() {
+    const COMMON: &str = "// LANGUAGE: +MultiPlatformProjects\n\
+expect interface Base { val s: String }\n\
+class Delegated<T>(val base: Base) : Base by base\n";
+    const PLATFORM: &str = "// LANGUAGE: +MultiPlatformProjects\n\
+actual interface Base { actual val s: String }\n\
+class Impl : Base { override val s: String = \"K\" }\n\
+fun box(): String {\n\
+    val delegated = Delegated<Int>(Impl())\n\
+    return delegated.s\n\
+}\n";
+    assert_eq!(
+        common::compile_and_run_files_with_stdlib(&[("Common", COMMON), ("Platform", PLATFORM),])
+            .expect("delegation forwards interface property accessors"),
+        "K"
+    );
+}
+
 /// Delegation to a generic interface instantiated with a REFERENCE type argument (`A<String> by a`):
 /// the interface method `foo(): T` erases to `Object`, so a raw forward through the synthesized field
 /// is correct (the unbox/checkcast happens at the call site). The non-`val` param uses a `$$delegate_N`.
