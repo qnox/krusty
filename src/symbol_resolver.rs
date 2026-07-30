@@ -4088,7 +4088,13 @@ fn select_overload(
             continue;
         }
         let lp = logical_value_params(lib, o, binding_receiver, type_args);
-        let lp = specialized_sam_params(&lp, o.generic_sig.as_ref(), args, lambda_literals, type_args);
+        let lp = specialized_sam_params(
+            &lp,
+            o.generic_sig.as_ref(),
+            args,
+            lambda_literals,
+            type_args,
+        );
         let lp = apply_platform_call_parameter_nullability(
             lp,
             &o.call_sig.platform_nullable_params,
