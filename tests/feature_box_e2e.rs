@@ -3387,13 +3387,22 @@ fun box(): String {
     (
         "ValueClassSecondaryCtor",
         r#"
+var secondaryTrace = ""
+fun secondaryArg(value: Int): Int {
+    secondaryTrace += "arg;"
+    return value
+}
 @JvmInline
 value class Sc(val v: Int) {
-    constructor(s: String) : this(s.length)
+    init { secondaryTrace += "init$v;" }
+    constructor(s: String) : this(secondaryArg(s.length)) {
+        secondaryTrace += "body$v;"
+    }
 }
 fun box(): String {
-    if (Sc(3).v != 3) return "f1"
-    if (Sc("abcde").v != 5) return "f2:${Sc("abcde").v}"
+    val value = Sc("abcde")
+    if (value.v != 5) return "f1:${value.v}"
+    if (secondaryTrace != "arg;init5;body5;") return "f2:$secondaryTrace"
     return "OK"
 }
 "#,

@@ -33,9 +33,44 @@ for a in "$@"; do
   esac
 done
 
-# Filtered/profile-specific runs are single-purpose; defer to cargo's normal runner.
+# Filtered/profile-specific runs are single-purpose; defer to cargo's normal runner. They may not need
+# a JVM at all, so the toolchain preflight below deliberately sits after this and guards only the full
+# suite; a filtered run that does need one still gets the same diagnosis from `common::jdk_modules`.
 if [ "$#" -ne 0 ] || [ "$profile_overridden" -ne 0 ]; then
   exec cargo test $profile_arg "$@"
+fi
+
+# Hundreds of e2e tests resolve `java.*` against the JDK's `lib/modules` jimage. Without it they all
+# fail identically, minutes into the run, with a bare `.expect` panic and no hint of the cause — which
+# reads exactly like a mass regression. Stop before building instead. `just test` and the lefthook
+# pre-push gate both land here, so a shell without JAVA_HOME is caught before it can waste a full run.
+if [ -n "${KRUSTY_SURVEY_JDK_MODULES:-}" ]; then
+  if [ ! -f "${KRUSTY_SURVEY_JDK_MODULES}" ]; then
+    echo "run-tests.sh: KRUSTY_SURVEY_JDK_MODULES is set but is not a file:" >&2
+    echo "  ${KRUSTY_SURVEY_JDK_MODULES}" >&2
+    echo "It must point at a JDK's lib/modules jimage. Unset it to fall back to JAVA_HOME." >&2
+    exit 2
+  fi
+else
+  # Matches the precedence in `krusty::toolchain::jdk_modules`.
+  jdk_home="${JAVA_HOME:-${KRUSTY_REF_JAVA_HOME:-}}"
+  if [ -z "${jdk_home}" ]; then
+    echo "run-tests.sh: JAVA_HOME is not set, so the JVM-backed tests cannot run." >&2
+    echo "There is no fallback to /usr/libexec/java_home — the variable must be set explicitly." >&2
+    if [ "$(uname -s)" = "Darwin" ] && [ -x /usr/libexec/java_home ]; then
+      echo "Try: JAVA_HOME=\"\$(/usr/libexec/java_home -v 21)\" $0" >&2
+    else
+      echo "Set it to a JDK 21+ home and re-run." >&2
+    fi
+    exit 2
+  fi
+  if [ ! -f "${jdk_home}/lib/modules" ]; then
+    echo "run-tests.sh: no lib/modules jimage under JAVA_HOME:" >&2
+    echo "  ${jdk_home}" >&2
+    echo "That path is not a JDK home. A package-manager prefix is the usual mistake — the real home" >&2
+    echo "is often a subdirectory (e.g. .../openjdk@21/libexec/openjdk.jdk/Contents/Home)." >&2
+    exit 2
+  fi
 fi
 
 logdir="$(mktemp -d)"

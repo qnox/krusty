@@ -37,6 +37,10 @@ pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_HEADER_BYTES: usize = 8 * 1024;
 const INPUT_QUEUE_CAPACITY: usize = 4;
 const MAX_INPUT_DISPATCHES_BEFORE_MAINTENANCE: usize = 32;
+/// How long shutdown waits for the analysis thread to notice the disconnect before
+/// abandoning it. Without a bound, one wedged analysis keeps the process — and its
+/// worker child — alive indefinitely after the client is gone.
+const ENGINE_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const MAX_OPEN_DOCUMENTS: usize = 256;
 const MAX_OPEN_SOURCE_BYTES: usize = MAX_RETAINED_ANALYSIS_BYTES;
 const MAX_CONTENT_CHANGES: usize = 256;
@@ -3877,13 +3881,46 @@ where
             let _ = write_framed(writer, &encoded);
         }
     }
-    let mut engine = service.backend.into_engine();
-    engine.disconnect();
-    while !engine.is_finished() {
-        let _ = incoming.recv_timeout(Duration::from_millis(50));
-    }
-    engine.join();
+    let _ = shutdown_engine(
+        service.backend.into_engine(),
+        &incoming,
+        ENGINE_SHUTDOWN_GRACE,
+    );
     outcome
+}
+
+/// Disconnect the analysis command queue and wait at most `grace` for its thread to unwind.
+///
+/// Returning whether the thread joined makes the exceptional detach path directly testable without
+/// baking the production two-second budget into a unit test. While waiting, drain engine events: the
+/// engine uses a bounded event channel and could otherwise be finished with analysis but blocked trying
+/// to publish its last result. Once the deadline expires, dropping the join handle deliberately detaches
+/// the thread so the server's main thread can return and process teardown can reclaim it.
+fn shutdown_engine(
+    mut engine: AnalysisEngine,
+    incoming: &Receiver<Incoming>,
+    grace: Duration,
+) -> bool {
+    engine.disconnect();
+    let deadline = Instant::now()
+        .checked_add(grace)
+        .unwrap_or_else(Instant::now);
+    while !engine.is_finished() {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        // Do not overshoot a short test budget by the production polling interval.
+        let _ = incoming.recv_timeout(remaining.min(Duration::from_millis(50)));
+    }
+    if engine.is_finished() {
+        engine.join();
+        true
+    } else {
+        // The analysis thread is wedged. Leave it detached and let process teardown
+        // reap it; blocking here would strand the server after the client is gone.
+        engine.abandon();
+        false
+    }
 }
 
 fn maintenance_preempts_input(input_dispatches: usize, due: Option<Duration>) -> bool {
@@ -4431,6 +4468,67 @@ mod tests {
         assert!(
             dropped.load(Ordering::SeqCst),
             "shutdown must drain the backlog and join the engine thread instead of deadlocking"
+        );
+    }
+
+    #[test]
+    fn shutdown_abandons_analysis_that_exceeds_its_grace_period() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc::{channel, sync_channel};
+        use std::sync::Arc;
+
+        struct BlockingAnalysis {
+            entered: std::sync::mpsc::Sender<()>,
+            release: std::sync::mpsc::Receiver<()>,
+            completed: Arc<AtomicBool>,
+        }
+        impl Analysis for BlockingAnalysis {
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                let _ = self.entered.send(());
+                let _ = self.release.recv();
+                self.completed.store(true, Ordering::SeqCst);
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+        }
+
+        let (entered_tx, entered_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let completed = Arc::new(AtomicBool::new(false));
+        let analysis = BlockingAnalysis {
+            entered: entered_tx,
+            release: release_rx,
+            completed: completed.clone(),
+        };
+        let (events, incoming) = sync_channel(INPUT_QUEUE_CAPACITY);
+        let engine = AnalysisEngine::spawn(analysis, events);
+        engine.submit(EngineCommand::Analyze(AnalysisJob {
+            documents: vec![("file:///blocked.kt".into(), "fun blocked() {}".into(), 1)],
+            open_uris: vec!["file:///blocked.kt".into()],
+        }));
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("analysis entered its blocking section");
+
+        let started = Instant::now();
+        assert!(
+            !shutdown_engine(engine, &incoming, Duration::from_millis(20)),
+            "a still-running analysis must take the detach path"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "shutdown exceeded its bounded grace period"
+        );
+
+        // Detachment must not corrupt the engine's own unwind path. Release the synthetic block and
+        // wait for it to finish before the test drops its channels, keeping this regression leak-free.
+        release_tx.send(()).expect("release detached analysis");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !completed.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(
+            completed.load(Ordering::SeqCst),
+            "detached analysis did not unwind after its blocker was released"
         );
     }
 

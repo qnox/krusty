@@ -146,6 +146,13 @@ impl AnalysisEngine {
         }
     }
 
+    /// Detach a thread that has not answered `disconnect`, so shutdown can proceed
+    /// without waiting on it. Process teardown reaps the thread.
+    pub(crate) fn abandon(mut self) {
+        self.disconnect();
+        drop(self.handle.take());
+    }
+
     pub(crate) fn is_finished(&self) -> bool {
         self.handle.as_ref().is_none_or(JoinHandle::is_finished)
     }
