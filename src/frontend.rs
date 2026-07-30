@@ -21,8 +21,8 @@ pub(crate) use crate::resolve::{
     ClassNames, CtorDefaultValue, DelegateGetValueTarget, DestructureComponentTarget, ExprLowering,
     FunctionImportScope, InlineCall, InvokeKind, IteratorDispatchTarget, LambdaCapture, LambdaInfo,
     ReceiverFnValueOrigin, ReceiverLambda, ResolvedCall, ResolvedConstructor,
-    ResolvedLocalFunctionCall, ResolvedMember, ResolvedModuleTopLevelCall, SigFlags, Signature,
-    StmtLowering,
+    ResolvedCtorDelegation, ResolvedCtorDelegationTarget, ResolvedLocalFunctionCall,
+    ResolvedMember, ResolvedModuleTopLevelCall, SigFlags, Signature, StmtLowering,
 };
 use crate::source::{SourceInput, SourceKind};
 

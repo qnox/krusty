@@ -2600,8 +2600,8 @@ fn extension_receiver_physical_key_inner(t: Ty, boxed_array_element: bool) -> Er
 /// A loose, `self`-free argument-fit test for overload disambiguation: is a value of type `a` plausibly
 /// passable where `p` is expected? Exact match, `Error`/`Nothing`/`null`→reference, numeric→numeric, and
 /// any value→reference (boxing/upcast) fit; a reference is NOT passable to a primitive. Intentionally
-/// permissive between two references (subtype isn't checked here) — it only needs to rank overloads, and
-/// the same function runs in the checker and the lowerer so they always agree on the choice.
+/// permissive between two references (subtype isn't checked here); callers that have a type oracle use
+/// full assignability instead.
 pub fn arg_assignable_simple(p: Ty, a: Ty) -> bool {
     if p == a || a == Ty::Error || p == Ty::Error || a == Ty::Nothing {
         return true;
@@ -2946,7 +2946,7 @@ fn collect_class_type_names(
                 )
                 .chain(match &constructor.delegation {
                     crate::ast::CtorDelegation::This(arguments)
-                    | crate::ast::CtorDelegation::Super(arguments) => arguments.clone(),
+                    | crate::ast::CtorDelegation::Super(arguments) => arguments.args.clone(),
                     crate::ast::CtorDelegation::None => Vec::new(),
                 })
                 .chain(constructor.body)
@@ -8060,6 +8060,9 @@ pub struct TypeInfo {
     pub property_setters: HashMap<StmtId, crate::libraries::LibraryCallable>,
     /// Classpath/library constructors selected while checking, keyed by the construction call.
     pub resolved_constructors: HashMap<ExprId, ResolvedConstructor>,
+    /// Secondary-constructor delegations selected while checking, keyed by the containing class
+    /// declaration and the constructor's index in that class.
+    pub resolved_ctor_delegations: HashMap<(DeclId, usize), ResolvedCtorDelegation>,
     /// `super.f(...)` targets selected while checking, keyed by the call expression.
     pub resolved_super_calls: HashMap<ExprId, ResolvedSuperCall>,
     /// Classpath member `$default` synthetic targets selected while checking for calls with omitted
@@ -8140,6 +8143,7 @@ pub enum ResolvedCall {
         ret: Ty,
         owner: Option<TypeName>,
         source: Option<(u32, u32)>,
+        vararg: bool,
     },
     /// A same-module receiver-less top-level call selected by the checker. The lowerer maps this
     /// semantic target to the current file's lifted IR function or sibling facade; it must not
@@ -8181,6 +8185,15 @@ impl ResolvedCall {
 
 #[derive(Clone, Debug)]
 pub enum ResolvedConstructor {
+    Source {
+        primary: bool,
+        params: Vec<Ty>,
+        argument_slots: Vec<usize>,
+        argument_types: Vec<Ty>,
+        omitted: Vec<usize>,
+        vararg: Option<usize>,
+        default_masks: Vec<i32>,
+    },
     Plain {
         member: crate::libraries::LibraryMember,
         args: Vec<ExprId>,
@@ -8199,6 +8212,79 @@ pub enum ResolvedConstructor {
         slots: Vec<Option<ExprId>>,
         mask: i32,
     },
+}
+
+#[derive(Clone, Debug)]
+pub enum ResolvedCtorDelegationTarget {
+    ThisPrimary { params: Vec<Ty> },
+    ThisSecondary { index: usize, params: Vec<Ty> },
+    Super { owner: TypeName, params: Vec<Ty> },
+}
+
+impl ResolvedCtorDelegationTarget {
+    pub(crate) fn params(&self) -> &[Ty] {
+        match self {
+            Self::ThisPrimary { params }
+            | Self::ThisSecondary { params, .. }
+            | Self::Super { params, .. } => params,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolvedCtorDelegation {
+    pub target: ResolvedCtorDelegationTarget,
+    /// Parameter slot for each source argument, in source order.
+    pub argument_slots: Vec<usize>,
+    /// Expected type for each source argument after vararg expansion/spread handling.
+    pub argument_types: Vec<Ty>,
+    pub omitted: Vec<usize>,
+    pub vararg: Option<usize>,
+    /// Empty for a direct constructor invocation.
+    pub default_masks: Vec<i32>,
+}
+
+#[derive(Clone)]
+struct CtorDelegationCandidate {
+    target: ResolvedCtorDelegationTarget,
+    param_names: Vec<String>,
+    defaults: Vec<bool>,
+    vararg: Option<usize>,
+    supports_default_abi: bool,
+}
+
+fn constructor_delegation_cycles(edges: &[Option<usize>]) -> Vec<Vec<usize>> {
+    let mut state = vec![0u8; edges.len()];
+    let mut cycles = Vec::new();
+    for start in 0..edges.len() {
+        if state[start] != 0 {
+            continue;
+        }
+        let mut path = Vec::new();
+        let mut current = Some(start);
+        while let Some(node) = current.filter(|&node| node < edges.len()) {
+            if state[node] != 0 {
+                if state[node] == 1 {
+                    if let Some(offset) = path.iter().position(|&candidate| candidate == node) {
+                        cycles.push(path[offset..].to_vec());
+                    }
+                }
+                break;
+            }
+            state[node] = 1;
+            path.push(node);
+            current = edges[node];
+        }
+        for node in path {
+            state[node] = 2;
+        }
+    }
+    cycles
+}
+
+struct MatchedCtorDelegation {
+    resolved: ResolvedCtorDelegation,
+    unsupported_defaults: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -8608,6 +8694,13 @@ impl TypeInfo {
     /// The resolved classpath/library constructor target for construction call `e`.
     pub fn resolved_constructor(&self, e: ExprId) -> Option<&ResolvedConstructor> {
         self.resolved_constructors.get(&e)
+    }
+    pub fn resolved_ctor_delegation(
+        &self,
+        class: DeclId,
+        secondary: usize,
+    ) -> Option<&ResolvedCtorDelegation> {
+        self.resolved_ctor_delegations.get(&(class, secondary))
     }
     /// The resolved target for a `super.f(...)` call.
     pub fn resolved_super_call(&self, e: ExprId) -> Option<&ResolvedSuperCall> {
@@ -9091,6 +9184,7 @@ fn make_checker<'a>(
         bound_member_refs: HashMap::new(),
         property_setters: HashMap::new(),
         resolved_constructors: HashMap::new(),
+        resolved_ctor_delegations: HashMap::new(),
         resolved_super_calls: HashMap::new(),
         resolved_default_member_calls: HashMap::new(),
         resolved_library_companion_consts: HashMap::new(),
@@ -9901,8 +9995,7 @@ fn check_file_at_impl_mode(
                         c.check_method(bm, &entry_props);
                     }
                 }
-                // Secondary constructors: their parameters + the class properties are in scope; the
-                // `this(args)` delegation is checked against the primary constructor, then the body.
+                // Secondary constructors: check and record one delegation target before the body.
                 let primary_params = c
                     .syms
                     .classes
@@ -9923,7 +10016,7 @@ fn check_file_at_impl_mode(
                     })
                     .map(|bp| bp.name.as_str())
                     .collect();
-                for sc in &cl.secondary_ctors {
+                for (sc_index, sc) in cl.secondary_ctors.iter().enumerate() {
                     c.push_scope();
                     for property in &props {
                         c.declare_dispatch_property(
@@ -9934,48 +10027,62 @@ fn check_file_at_impl_mode(
                         );
                     }
                     for p in &sc.params {
-                        let ty = c.resolve_ty(&p.ty);
+                        let ty = c.secondary_ctor_param_ty(p);
                         c.declare(&p.name, ty, false);
                     }
-                    match &sc.delegation {
-                        CtorDelegation::This(args) => {
-                            let ats: Vec<Ty> = args.iter().map(|a| c.expr(*a)).collect();
-                            // `this(…)` targets the primary constructor OR a SIBLING secondary (never
-                            // itself). Collect the candidate signatures and check assignability against
-                            // the unique same-arity one — the lowering resolves the exact target (and
-                            // bails on ambiguity), so a multi-candidate arity match isn't rejected here.
-                            let mut candidates: Vec<Vec<Ty>> = Vec::new();
-                            if cl.has_primary_ctor {
-                                candidates.push(primary_params.clone());
-                            }
-                            for s in &cl.secondary_ctors {
-                                if !std::ptr::eq(s, sc) {
-                                    candidates.push(
-                                        s.params.iter().map(|p| c.resolve_ty(&p.ty)).collect(),
-                                    );
-                                }
-                            }
-                            let same: Vec<&Vec<Ty>> =
-                                candidates.iter().filter(|p| p.len() == ats.len()).collect();
-                            if same.is_empty() {
-                                c.diags.error(
-                                    sc.span,
-                                    format!(
-                                        "krusty: this(…) has no target constructor taking {} args",
-                                        ats.len()
-                                    ),
-                                );
-                            } else if same.len() == 1 {
-                                for (i, (p, a)) in same[0].iter().zip(&ats).enumerate() {
-                                    c.expect_assignable(*p, *a, c.span(args[i]), "this() argument");
-                                }
-                            }
+                    for p in &sc.params {
+                        if let Some(default) = p.default {
+                            let ty = c.secondary_ctor_param_ty(p);
+                            c.check_default_arg(&p.ty, default, ty);
                         }
-                        // `super(…)`/implicit: evaluate the arguments (records their types for lowering).
-                        CtorDelegation::Super(args) => {
-                            for a in args {
-                                c.expr(*a);
+                    }
+                    match &sc.delegation {
+                        CtorDelegation::This(delegation) => {
+                            for &argument in &delegation.args {
+                                c.expr(argument);
                             }
+                            let candidates =
+                                c.this_ctor_delegation_candidates(cl, sc_index, &primary_params);
+                            c.select_ctor_delegation(
+                                d,
+                                sc_index,
+                                sc.span,
+                                "this",
+                                delegation,
+                                candidates,
+                                cl.is_value,
+                            );
+                        }
+                        CtorDelegation::Super(delegation) => {
+                            for &argument in &delegation.args {
+                                c.expr(argument);
+                            }
+                            let candidates = c.super_ctor_delegation_candidates(cl);
+                            c.select_ctor_delegation(
+                                d,
+                                sc_index,
+                                sc.span,
+                                "super",
+                                delegation,
+                                candidates,
+                                cl.is_value,
+                            );
+                        }
+                        CtorDelegation::None if !cl.has_primary_ctor => {
+                            let arguments = CtorDelegationCall {
+                                args: Vec::new(),
+                                names: Vec::new(),
+                            };
+                            let candidates = c.super_ctor_delegation_candidates(cl);
+                            c.select_ctor_delegation(
+                                d,
+                                sc_index,
+                                sc.span,
+                                "super",
+                                &arguments,
+                                candidates,
+                                cl.is_value,
+                            );
                         }
                         CtorDelegation::None => {}
                     }
@@ -9986,6 +10093,7 @@ fn check_file_at_impl_mode(
                     }
                     c.pop_scope();
                 }
+                c.validate_ctor_delegation_graph(d, cl);
                 // Primary-constructor parameter defaults (`class A(val ctx: CoroutineContext =
                 // EmptyCoroutineContext)`) are evaluated in the CALLER's context — they may not read other
                 // ctor params (enforced in collect) and have no `this` — so check each in a fresh scope.
@@ -10486,6 +10594,7 @@ fn check_file_at_impl_mode(
         bound_member_refs,
         property_setters,
         resolved_constructors,
+        resolved_ctor_delegations,
         resolved_super_calls,
         resolved_default_member_calls,
         resolved_library_companion_consts,
@@ -10615,6 +10724,7 @@ fn check_file_at_impl_mode(
         bound_member_refs,
         property_setters,
         resolved_constructors,
+        resolved_ctor_delegations,
         resolved_super_calls,
         resolved_default_member_calls,
         resolved_library_companion_consts,
@@ -10756,6 +10866,7 @@ struct MemberExtensionCall<'a> {
     partial_arg_tys: &'a [Option<Ty>],
     arg_names: Option<&'a [Option<String>]>,
     explicit_type_args: &'a [Ty],
+    trailing_lambda: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -10875,6 +10986,7 @@ struct Checker<'a> {
     bound_member_refs: HashMap<ExprId, crate::libraries::LibraryMember>,
     property_setters: HashMap<StmtId, crate::libraries::LibraryCallable>,
     resolved_constructors: HashMap<ExprId, ResolvedConstructor>,
+    resolved_ctor_delegations: HashMap<(DeclId, usize), ResolvedCtorDelegation>,
     resolved_super_calls: HashMap<ExprId, ResolvedSuperCall>,
     resolved_default_member_calls: HashMap<ExprId, ResolvedDefaultMemberCall>,
     resolved_library_companion_consts: HashMap<ExprId, crate::libraries::LibraryConst>,
@@ -11222,6 +11334,64 @@ impl<'a> Checker<'a> {
             .syms
             .source_extension_function(file, DeclId(declaration))?;
         Some((selected, signature.clone()))
+    }
+
+    fn check_source_extension_call_args(
+        &mut self,
+        call: ExprId,
+        name: &str,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+        selected: &crate::libraries::FunctionInfo,
+        params: &[Ty],
+    ) -> bool {
+        let arg_names = self.file.call_arg_names.get(&call.0).cloned();
+        if arg_names.is_none() && selected.call_sig.vararg {
+            self.expect_call_args(params, true, args, arg_tys);
+            return true;
+        }
+        if arg_names.is_some()
+            || (arg_tys.len() != params.len()
+                && selected.call_sig.can_map_omitted_args(params.len()))
+        {
+            let slots = match map_call_sig_args_with_trailing(
+                args,
+                arg_names.as_deref(),
+                &selected.call_sig,
+                self.file.call_has_trailing_lambda.contains(&call.0),
+            ) {
+                Ok(slots) => slots,
+                Err(error) => {
+                    self.report_call_arg_mapping_error(call, args, error);
+                    return false;
+                }
+            };
+            for (index, argument) in slots.iter().enumerate() {
+                if let Some(argument) = argument {
+                    self.expect_assignable(
+                        params[index],
+                        self.expr_types[argument.0 as usize],
+                        self.span(*argument),
+                        "argument",
+                    );
+                }
+            }
+            self.resolved_call_arg_slots.insert(call, slots);
+            true
+        } else if params.len() != arg_tys.len() {
+            self.diags.error(
+                self.span(call),
+                format!(
+                    "extension '{name}' expects {} args, got {}",
+                    params.len(),
+                    arg_tys.len()
+                ),
+            );
+            false
+        } else {
+            self.expect_call_args(params, false, args, arg_tys);
+            true
+        }
     }
 
     fn unique_visible_source_extension(&self, receiver: Ty, name: &str) -> Option<&Signature> {
@@ -11989,6 +12159,7 @@ impl<'a> Checker<'a> {
                     receiver,
                     &fs,
                     allow_must_inline,
+                    Some(self.file_index),
                 )
             {
                 let Some(argument_map) = crate::symbol_resolver::trailing_default_arg_indices(
@@ -12638,6 +12809,7 @@ impl<'a> Checker<'a> {
                     ret: sig.ret,
                     owner,
                     source: selected.source_key,
+                    vararg: selected.call_sig.vararg,
                 },
             ));
         }
@@ -14215,6 +14387,519 @@ impl<'a> Checker<'a> {
             return None; // ambiguous — don't guess an overload
         }
         Some(first.params.clone())
+    }
+
+    fn source_class_decl_by_internal(&self, internal: TypeName) -> Option<ClassDecl> {
+        let find = |file: &File| {
+            file.decls
+                .iter()
+                .find_map(|&declaration| match file.decl(declaration) {
+                    Decl::Class(class)
+                        if class_internal(file, &class.name) == internal.render() =>
+                    {
+                        Some(class.clone())
+                    }
+                    _ => None,
+                })
+        };
+        if let Some(class) = self
+            .source_files
+            .and_then(|files| files.iter().find_map(&find))
+        {
+            return Some(class);
+        }
+        find(self.file)
+    }
+
+    fn secondary_ctor_param_ty(&mut self, parameter: &Param) -> Ty {
+        self.resolve_ty(&parameter.ty)
+    }
+
+    fn this_ctor_delegation_candidates(
+        &mut self,
+        class: &ClassDecl,
+        secondary: usize,
+        primary_params: &[Ty],
+    ) -> Vec<CtorDelegationCandidate> {
+        let mut candidates = Vec::new();
+        if class.has_primary_ctor {
+            candidates.push(CtorDelegationCandidate {
+                target: ResolvedCtorDelegationTarget::ThisPrimary {
+                    params: primary_params.to_vec(),
+                },
+                param_names: class
+                    .props
+                    .iter()
+                    .map(|parameter| parameter.name.clone())
+                    .collect(),
+                defaults: class
+                    .props
+                    .iter()
+                    .map(|parameter| parameter.default.is_some())
+                    .collect(),
+                vararg: class.props.iter().position(|parameter| parameter.is_vararg),
+                supports_default_abi: !class.is_value,
+            });
+        }
+        for (index, constructor) in class.secondary_ctors.iter().enumerate() {
+            if index == secondary {
+                continue;
+            }
+            let params = constructor
+                .params
+                .iter()
+                .map(|parameter| self.secondary_ctor_param_ty(parameter))
+                .collect();
+            candidates.push(CtorDelegationCandidate {
+                target: ResolvedCtorDelegationTarget::ThisSecondary { index, params },
+                param_names: constructor
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.name.clone())
+                    .collect(),
+                defaults: constructor
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.default.is_some())
+                    .collect(),
+                vararg: constructor
+                    .params
+                    .iter()
+                    .position(|parameter| parameter.is_vararg),
+                supports_default_abi: !class.is_value,
+            });
+        }
+        candidates
+    }
+
+    fn source_constructor_candidates(
+        &self,
+        declaration: &ClassDecl,
+        class: &ClassSig,
+    ) -> Vec<CtorDelegationCandidate> {
+        let mut candidates = Vec::new();
+        if declaration.has_primary_ctor {
+            candidates.push(CtorDelegationCandidate {
+                target: ResolvedCtorDelegationTarget::ThisPrimary {
+                    params: class.ctor_params.clone(),
+                },
+                param_names: declaration
+                    .props
+                    .iter()
+                    .map(|parameter| parameter.name.clone())
+                    .collect(),
+                defaults: declaration
+                    .props
+                    .iter()
+                    .map(|parameter| parameter.default.is_some())
+                    .collect(),
+                vararg: declaration
+                    .props
+                    .iter()
+                    .position(|parameter| parameter.is_vararg),
+                supports_default_abi: true,
+            });
+        }
+        for (index, params) in class.secondary_ctors.iter().enumerate() {
+            let Some(constructor) = declaration.secondary_ctors.get(index) else {
+                continue;
+            };
+            candidates.push(CtorDelegationCandidate {
+                target: ResolvedCtorDelegationTarget::ThisSecondary {
+                    index,
+                    params: params.clone(),
+                },
+                param_names: constructor
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.name.clone())
+                    .collect(),
+                defaults: constructor
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.default.is_some())
+                    .collect(),
+                vararg: constructor
+                    .params
+                    .iter()
+                    .position(|parameter| parameter.is_vararg),
+                supports_default_abi: !declaration.is_value,
+            });
+        }
+        candidates
+    }
+
+    fn select_source_constructor(
+        &self,
+        arguments: &CtorDelegationCall,
+        candidates: &[CtorDelegationCandidate],
+    ) -> Option<ResolvedCtorDelegation> {
+        let mut matches = candidates
+            .iter()
+            .filter_map(|candidate| self.match_ctor_delegation_candidate(arguments, candidate))
+            .filter(|candidate| !candidate.unsupported_defaults)
+            .collect::<Vec<_>>();
+        let min_omitted = matches
+            .iter()
+            .map(|candidate| candidate.resolved.omitted.len())
+            .min()?;
+        matches.retain(|candidate| candidate.resolved.omitted.len() == min_omitted);
+        if matches
+            .iter()
+            .any(|candidate| candidate.resolved.vararg.is_none())
+        {
+            matches.retain(|candidate| candidate.resolved.vararg.is_none());
+        }
+        let dominated = |candidate: usize, other: usize| {
+            let left = &matches[candidate].resolved.argument_types;
+            let right = &matches[other].resolved.argument_types;
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(&sub, &sup)| self.receiver_is_assignable(sub, sup))
+                && left
+                    .iter()
+                    .zip(right)
+                    .any(|(&sub, &sup)| !self.receiver_is_assignable(sup, sub))
+        };
+        let winners = (0..matches.len())
+            .filter(|&candidate| {
+                !(0..matches.len()).any(|other| other != candidate && dominated(other, candidate))
+            })
+            .collect::<Vec<_>>();
+        (winners.len() == 1).then(|| matches.swap_remove(winners[0]).resolved)
+    }
+
+    fn super_ctor_delegation_candidates(
+        &mut self,
+        class: &ClassDecl,
+    ) -> Vec<CtorDelegationCandidate> {
+        let current = class_internal(self.file, &class.name);
+        let Some(current_sig) = self.syms.class_by_internal(&current) else {
+            return Vec::new();
+        };
+        let Some(owner) = current_sig.super_internal_name() else {
+            return vec![CtorDelegationCandidate {
+                target: ResolvedCtorDelegationTarget::Super {
+                    owner: type_name("kotlin/Any"),
+                    params: Vec::new(),
+                },
+                param_names: Vec::new(),
+                defaults: Vec::new(),
+                vararg: None,
+                supports_default_abi: false,
+            }];
+        };
+        if let Some(base) = self.syms.class_by_type_name(owner) {
+            let declaration = self.source_class_decl_by_internal(owner);
+            let mut candidates = Vec::new();
+            if base.has_primary_ctor {
+                candidates.push(CtorDelegationCandidate {
+                    target: ResolvedCtorDelegationTarget::Super {
+                        owner,
+                        params: base.ctor_params.clone(),
+                    },
+                    param_names: base
+                        .ctor_param_names
+                        .iter()
+                        .map(|(name, _)| name.clone())
+                        .collect(),
+                    defaults: base
+                        .ctor_param_names
+                        .iter()
+                        .map(|(_, has_default)| *has_default)
+                        .collect(),
+                    vararg: base.ctor_vararg,
+                    supports_default_abi: true,
+                });
+            }
+            for (index, params) in base.secondary_ctors.iter().enumerate() {
+                let metadata = declaration
+                    .as_ref()
+                    .and_then(|base| base.secondary_ctors.get(index));
+                candidates.push(CtorDelegationCandidate {
+                    target: ResolvedCtorDelegationTarget::Super {
+                        owner,
+                        params: params.clone(),
+                    },
+                    param_names: metadata
+                        .map(|constructor| {
+                            constructor
+                                .params
+                                .iter()
+                                .map(|parameter| parameter.name.clone())
+                                .collect()
+                        })
+                        .unwrap_or_else(|| {
+                            (0..params.len()).map(|index| format!("p{index}")).collect()
+                        }),
+                    defaults: metadata
+                        .map(|constructor| {
+                            constructor
+                                .params
+                                .iter()
+                                .map(|parameter| parameter.default.is_some())
+                                .collect()
+                        })
+                        .unwrap_or_else(|| vec![false; params.len()]),
+                    vararg: metadata.and_then(|constructor| {
+                        constructor
+                            .params
+                            .iter()
+                            .position(|parameter| parameter.is_vararg)
+                    }),
+                    supports_default_abi: false,
+                });
+            }
+            return candidates;
+        }
+
+        let Some(base) = self.resolved_type_name(owner) else {
+            return Vec::new();
+        };
+        let mut candidates = Vec::new();
+        let mut metadata_index = 0;
+        for constructor in &base.constructors {
+            let synthetic_default = constructor.params.last().is_some_and(|parameter| {
+                parameter.obj_internal().is_some_and(|name| {
+                    name.matches("kotlin/jvm/internal/DefaultConstructorMarker")
+                })
+            });
+            if synthetic_default {
+                continue;
+            }
+            let metadata = base
+                .ctor_named_params
+                .get(metadata_index)
+                .filter(|params| params.names.len() == constructor.params.len());
+            metadata_index += 1;
+            if !self.member_accessible(constructor.visibility, owner) {
+                continue;
+            }
+            let param_names = metadata
+                .map(|params| params.names.clone())
+                .unwrap_or_else(|| {
+                    (0..constructor.params.len())
+                        .map(|index| format!("p{index}"))
+                        .collect()
+                });
+            let defaults = metadata
+                .map(|params| params.defaults.clone())
+                .unwrap_or_else(|| vec![false; constructor.params.len()]);
+            let vararg = metadata.and_then(|params| params.vararg);
+            let supports_default_abi = defaults.iter().any(|default| *default)
+                && crate::symbol_resolver::synthetic_default_ctor_from_type(
+                    &base,
+                    constructor.params.len(),
+                )
+                .is_some();
+            candidates.push(CtorDelegationCandidate {
+                target: ResolvedCtorDelegationTarget::Super {
+                    owner,
+                    params: constructor.params.clone(),
+                },
+                param_names,
+                defaults,
+                vararg,
+                supports_default_abi,
+            });
+        }
+        candidates
+    }
+
+    fn match_ctor_delegation_candidate(
+        &self,
+        arguments: &CtorDelegationCall,
+        candidate: &CtorDelegationCandidate,
+    ) -> Option<MatchedCtorDelegation> {
+        let params = candidate.target.params();
+        let slots = map_call_args(
+            &arguments.args,
+            Some(&arguments.names),
+            &candidate.param_names,
+            params.len(),
+            required_arity(params.len(), &candidate.defaults),
+            &candidate.defaults,
+            candidate.vararg,
+            false,
+        )
+        .ok()?;
+        let argument_slots = arguments
+            .args
+            .iter()
+            .map(|argument| {
+                slots
+                    .iter()
+                    .position(|slot| slot.as_ref() == Some(argument))
+                    .or(candidate.vararg)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let mut argument_types = Vec::with_capacity(arguments.args.len());
+        for (&argument, &slot) in arguments.args.iter().zip(&argument_slots) {
+            let parameter = *params.get(slot)?;
+            let expected = if candidate.vararg == Some(slot) {
+                if self.file.is_spread_arg(argument) {
+                    parameter
+                } else {
+                    parameter.array_elem()?
+                }
+            } else {
+                if self.file.is_spread_arg(argument) {
+                    return None;
+                }
+                parameter
+            };
+            let actual = self.expr_types[argument.0 as usize];
+            if actual != Ty::Error && !self.receiver_is_assignable(actual, expected) {
+                return None;
+            }
+            argument_types.push(expected);
+        }
+        let omitted = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                (slot.is_none() && candidate.vararg != Some(index)).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let unsupported_defaults = !omitted.is_empty() && !candidate.supports_default_abi;
+        let mut default_masks = Vec::new();
+        if !omitted.is_empty() && candidate.supports_default_abi {
+            default_masks.resize(params.len().div_ceil(32).max(1), 0);
+            for &index in &omitted {
+                default_masks[index / 32] |= (1u32 << (index % 32)) as i32;
+            }
+        }
+        Some(MatchedCtorDelegation {
+            resolved: ResolvedCtorDelegation {
+                target: candidate.target.clone(),
+                argument_slots,
+                argument_types,
+                omitted,
+                vararg: candidate.vararg,
+                default_masks,
+            },
+            unsupported_defaults,
+        })
+    }
+
+    fn select_ctor_delegation(
+        &mut self,
+        class: DeclId,
+        secondary: usize,
+        span: Span,
+        label: &str,
+        arguments: &CtorDelegationCall,
+        candidates: Vec<CtorDelegationCandidate>,
+        value_class: bool,
+    ) {
+        let mut matches = candidates
+            .iter()
+            .filter_map(|candidate| self.match_ctor_delegation_candidate(arguments, candidate))
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            self.diags.error(
+                span,
+                format!("krusty: {label}(...) has no matching target constructor"),
+            );
+            return;
+        }
+        let min_omitted = matches
+            .iter()
+            .map(|candidate| candidate.resolved.omitted.len())
+            .min()
+            .unwrap_or(0);
+        matches.retain(|candidate| candidate.resolved.omitted.len() == min_omitted);
+        if matches
+            .iter()
+            .any(|candidate| candidate.resolved.vararg.is_none())
+        {
+            matches.retain(|candidate| candidate.resolved.vararg.is_none());
+        }
+        let dominated = |candidate: usize, other: usize| {
+            let left = &matches[candidate].resolved.argument_types;
+            let right = &matches[other].resolved.argument_types;
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(&sub, &sup)| self.receiver_is_assignable(sub, sup))
+                && left
+                    .iter()
+                    .zip(right)
+                    .any(|(&sub, &sup)| !self.receiver_is_assignable(sup, sub))
+        };
+        let winners = (0..matches.len())
+            .filter(|&candidate| {
+                !(0..matches.len()).any(|other| other != candidate && dominated(other, candidate))
+            })
+            .collect::<Vec<_>>();
+        if winners.len() != 1 {
+            self.diags.error(
+                span,
+                format!("overload resolution ambiguity for {label}(...)"),
+            );
+            return;
+        }
+        let selected = matches.swap_remove(winners[0]);
+        if value_class
+            && !matches!(
+                &selected.resolved.target,
+                ResolvedCtorDelegationTarget::ThisPrimary { .. }
+            )
+        {
+            self.diags.error(
+                span,
+                "a value-class secondary constructor must delegate to its primary constructor"
+                    .to_string(),
+            );
+            return;
+        }
+        if selected.unsupported_defaults {
+            self.diags.error(
+                span,
+                "constructor delegation cannot omit defaults for this target".to_string(),
+            );
+            return;
+        }
+        for (&argument, &expected) in arguments.args.iter().zip(&selected.resolved.argument_types) {
+            self.expect_assignable(
+                expected,
+                self.expr_types[argument.0 as usize],
+                self.span(argument),
+                "constructor delegation argument",
+            );
+        }
+        self.resolved_ctor_delegations
+            .insert((class, secondary), selected.resolved);
+    }
+
+    fn validate_ctor_delegation_graph(&mut self, class: DeclId, declaration: &ClassDecl) {
+        let edges = declaration
+            .secondary_ctors
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                self.resolved_ctor_delegations
+                    .get(&(class, index))
+                    .and_then(|resolved| match &resolved.target {
+                        ResolvedCtorDelegationTarget::ThisSecondary { index, .. } => Some(*index),
+                        _ => None,
+                    })
+            })
+            .collect::<Vec<_>>();
+        for cycle in constructor_delegation_cycles(&edges) {
+            if let Some(&index) = cycle.first() {
+                self.diags.error(
+                    declaration.secondary_ctors[index].span,
+                    "constructor delegation cycle".to_string(),
+                );
+            }
+            for index in cycle {
+                self.resolved_ctor_delegations.remove(&(class, index));
+            }
+        }
     }
 
     /// the classpath — the SAME kotlinc-conforming resolver the signature pass uses
@@ -16594,6 +17279,7 @@ impl<'a> Checker<'a> {
                 &partial,
                 arg_names.as_deref(),
                 explicit_type_args,
+                self.file.call_has_trailing_lambda.contains(&call.0),
             )
         });
         let member_extension_plan = member_extension_plan.flatten();
@@ -17473,6 +18159,7 @@ impl<'a> Checker<'a> {
                             ret: sig.ret,
                             owner,
                             source: selected.source_key,
+                            vararg: selected.call_sig.vararg,
                         },
                     );
                     return self.set(e, sig.ret);
@@ -18000,7 +18687,19 @@ impl<'a> Checker<'a> {
                 // A safe-call scope function (`s?.let { it… }`, `s?.run { … }`): the receiver is non-null
                 // inside; type it like the non-safe form, then wrap the result nullable below.
                 let result = if let Some(t) = self.safe_scope_call_result(rt, &name, &args) {
-                    t
+                    let type_args = self.resolved_explicit_type_args(e);
+                    match args.as_deref().and_then(|args| {
+                        self.record_extension_call_with_slots(
+                            e,
+                            &name,
+                            rt.non_null(),
+                            args,
+                            &type_args,
+                        )
+                    }) {
+                        Some(Ty::Error) => Ty::Error,
+                        _ => t,
+                    }
                 } else {
                     match &args {
                         // After `?.` the receiver is non-null, so resolve the member against the NON-NULL
@@ -18034,29 +18733,38 @@ impl<'a> Checker<'a> {
                             } else if let ("hashCode", []) = (name.as_str(), arg_tys.as_slice()) {
                                 Ty::Int // Int (not a reference), so safe-call rejection fires below
                             } else if recv == Ty::String {
-                                if let Some(m) = self.resolve_instance_member(recv, &name, &arg_tys)
-                                {
-                                    let ret = m.ret;
-                                    self.resolved_calls.insert(e, ResolvedCall::Member(m));
-                                    ret
-                                } else if let Some(ret) = self.check_member_extension_function_call(
-                                    e, recv, &name, a, &arg_tys,
+                                let member = match self.record_classpath_member_call_with_slots(
+                                    e, recv, &name, a, false,
                                 ) {
-                                    ret
-                                } else {
-                                    self.record_library_extension_call(
-                                        Some(e),
-                                        &name,
-                                        recv,
-                                        &arg_tys,
-                                        &type_args,
-                                    )
+                                    ClasspathMemberSlotCall::Resolved(ret) => Some(ret),
+                                    ClasspathMemberSlotCall::Ambiguous
+                                    | ClasspathMemberSlotCall::Rejected => Some(Ty::Error),
+                                    ClasspathMemberSlotCall::NoMatch => None,
+                                };
+                                member
+                                    .or_else(|| {
+                                        self.resolve_instance_member(recv, &name, &arg_tys).map(
+                                            |m| {
+                                                let ret = m.ret;
+                                                self.resolved_calls
+                                                    .insert(e, ResolvedCall::Member(m));
+                                                ret
+                                            },
+                                        )
+                                    })
+                                    .or_else(|| {
+                                        self.check_member_extension_function_call(
+                                            e, recv, &name, a, &arg_tys,
+                                        )
+                                    })
+                                    .or_else(|| {
+                                        self.record_extension_call_from_args(
+                                            e, &name, recv, a, &arg_tys, &type_args,
+                                        )
+                                    })
                                     .unwrap_or(Ty::Error)
-                                }
                             } else if let Ty::Obj(internal, _) = recv {
-                                // A MODULE (user) class member only; a classpath / inherited-classpath
-                                // member falls through to the classpath selectors below (which pick by
-                                // argument fit and record the call for emit).
+                                // Source members take precedence over extensions and classpath members.
                                 let arg_names = self.file.call_arg_names.get(&e.0).cloned();
                                 let full_arg_tys =
                                     arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
@@ -18082,13 +18790,26 @@ impl<'a> Checker<'a> {
                                         &arg_tys,
                                         arg_names.as_deref(),
                                         &type_args,
+                                        self.file.call_has_trailing_lambda.contains(&e.0),
                                     )
                                     .is_ok_and(|candidate| candidate.is_some());
                                 (applicable_module_member || !applicable_member_extension)
                                     .then(|| {
-                                        self.check_module_member_call(e, recv, &name, a, &arg_tys)
+                                        self.check_applicable_module_member_call(
+                                            e, recv, &name, a, &arg_tys,
+                                        )
                                     })
                                     .flatten()
+                                    .or_else(|| {
+                                        match self.record_classpath_member_call_with_slots(
+                                            e, recv, &name, a, false,
+                                        ) {
+                                            ClasspathMemberSlotCall::Resolved(ret) => Some(ret),
+                                            ClasspathMemberSlotCall::Ambiguous
+                                            | ClasspathMemberSlotCall::Rejected => Some(Ty::Error),
+                                            ClasspathMemberSlotCall::NoMatch => None,
+                                        }
+                                    })
                                     .or_else(|| {
                                         self.resolve_instance_name(internal, &name, &arg_tys).map(
                                             |m| {
@@ -18114,17 +18835,9 @@ impl<'a> Checker<'a> {
                                             e, recv, &name, a, &arg_tys,
                                         )
                                     })
-                                    // A stdlib/classpath EXTENSION reached by `?.` (`c?.takeIf { … }`):
-                                    // resolve AND RECORD the callable keyed by the safe-call `ExprId`, so the
-                                    // lowerer's `lower_ext_call_on(e)` reads it instead of re-resolving. One
-                                    // resolution admits `@InlineOnly` (`takeIf`) — no separate inline path.
                                     .or_else(|| {
-                                        self.record_library_extension_call(
-                                            Some(e),
-                                            &name,
-                                            recv,
-                                            &arg_tys,
-                                            &type_args,
+                                        self.record_extension_call_from_args(
+                                            e, &name, recv, a, &arg_tys, &type_args,
                                         )
                                     })
                                     .unwrap_or(Ty::Error)
@@ -18133,12 +18846,8 @@ impl<'a> Checker<'a> {
                                     e, recv, &name, a, &arg_tys,
                                 )
                                 .or_else(|| {
-                                    self.record_library_extension_call(
-                                        Some(e),
-                                        &name,
-                                        recv,
-                                        &arg_tys,
-                                        &type_args,
+                                    self.record_extension_call_from_args(
+                                        e, &name, recv, a, &arg_tys, &type_args,
                                     )
                                 })
                                 .unwrap_or(Ty::Error)
@@ -18146,10 +18855,8 @@ impl<'a> Checker<'a> {
                         }
                     }
                 };
-                // A same-module EXTENSION via safe call (`s?.id()` where `fun String.id()` is declared in
-                // this module): the member/classpath/library lookups above don't see module extensions, so
-                // resolve it here on the non-null receiver. The lowerer emits the static extension call.
-                let result = if result == Ty::Error {
+                let result = if result == Ty::Error && !self.file.call_arg_names.contains_key(&e.0)
+                {
                     let arg_exprs = args.as_deref().unwrap_or_default();
                     let arg_tys = self.arg_tys(arg_exprs);
                     let lambda_literals = self.lambda_literal_args(arg_exprs);
@@ -18159,29 +18866,39 @@ impl<'a> Checker<'a> {
                         &arg_tys,
                         &lambda_literals,
                     ) {
-                        self.expect_call_args(&sig.params, false, arg_exprs, &arg_tys);
-                        self.mark_source_call(e, selected.source_key);
-                        let owner =
-                            sig.source_file
-                                .zip(sig.source_decl)
-                                .and_then(|(file, declaration)| {
+                        if !self.check_source_extension_call_args(
+                            e,
+                            &name,
+                            arg_exprs,
+                            &arg_tys,
+                            &selected,
+                            &sig.params,
+                        ) {
+                            Ty::Error
+                        } else {
+                            self.mark_source_call(e, selected.source_key);
+                            let owner = sig.source_file.zip(sig.source_decl).and_then(
+                                |(file, declaration)| {
                                     self.syms
                                         .fn_facades_by_decl
                                         .get(&(file, declaration.0))
                                         .copied()
-                                });
-                        self.resolved_calls.insert(
-                            e,
-                            ResolvedCall::ModuleExtension {
-                                receiver: rt.non_null(),
-                                name: name.clone(),
-                                params: sig.params.clone(),
-                                ret: sig.ret,
-                                owner,
-                                source: selected.source_key,
-                            },
-                        );
-                        sig.ret
+                                },
+                            );
+                            self.resolved_calls.insert(
+                                e,
+                                ResolvedCall::ModuleExtension {
+                                    receiver: rt.non_null(),
+                                    name: name.clone(),
+                                    params: sig.params.clone(),
+                                    ret: sig.ret,
+                                    owner,
+                                    source: selected.source_key,
+                                    vararg: selected.call_sig.vararg,
+                                },
+                            );
+                            sig.ret
+                        }
                     } else {
                         Ty::Error
                     }
@@ -18215,6 +18932,18 @@ impl<'a> Checker<'a> {
                 } else {
                     result
                 };
+                // Named arguments must have a checker-owned parameter-slot mapping before lowering.
+                if result != Ty::Error
+                    && !self.resolved_call_arg_slots.contains_key(&e)
+                    && self
+                        .file
+                        .call_arg_names
+                        .get(&e.0)
+                        .is_some_and(|names| names.iter().any(Option::is_some))
+                {
+                    self.diags.error(self.span(e), "krusty: named arguments are only supported for top-level functions and methods with named parameters".to_string());
+                    return Ty::Error;
+                }
                 // The safe-call result is nullable: `T` becomes `T?`; scalar member values are boxed
                 // (or `null`) in lowering. A non-boxable primitive (unsigned/value) stays unsupported.
                 if !result.is_reference() && result != Ty::Error {
@@ -18676,6 +19405,7 @@ impl<'a> Checker<'a> {
                                 ret: signature.ret,
                                 owner,
                                 source: selected.source_key,
+                                vararg: selected.call_sig.vararg,
                             },
                         );
                         return self.set(e, Ty::Boolean);
@@ -20115,8 +20845,7 @@ impl<'a> Checker<'a> {
         // (keyed by the call `ExprId`) — not just its return type — so the lowerer emits it through the
         // ordinary extension path instead of bailing (`lower_ext_call_on` reads `resolved_extension`).
         // Mirrors the qualified `recv.name(args)` extension typing + recording.
-        if let Some(ret) = self.record_library_extension_call_with_slots(call, name, rt, args, &[])
-        {
+        if let Some(ret) = self.record_extension_call_with_slots(call, name, rt, args, &[]) {
             return Some(ret);
         }
         if let Some(ret) = self.record_library_extension_call(Some(call), name, rt, arg_tys, &[]) {
@@ -20636,7 +21365,30 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn record_library_extension_call_with_slots(
+    fn record_extension_call_from_args(
+        &mut self,
+        call: ExprId,
+        name: &str,
+        receiver: Ty,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+        type_args: &[Ty],
+    ) -> Option<Ty> {
+        if self.file.call_arg_names.contains_key(&call.0) {
+            return self
+                .record_extension_call_with_slots(call, name, receiver, args, type_args)
+                .or_else(|| {
+                    self.diags.error(
+                        self.call_callee_name_span(call),
+                        "none of the following candidates is applicable:".to_string(),
+                    );
+                    Some(Ty::Error)
+                });
+        }
+        self.record_library_extension_call(Some(call), name, receiver, arg_tys, type_args)
+    }
+
+    fn record_extension_call_with_slots(
         &mut self,
         call: ExprId,
         name: &str,
@@ -20651,42 +21403,148 @@ impl<'a> Checker<'a> {
             .cloned()
             .filter(|ns| ns.iter().any(Option::is_some))?;
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
-        let mut mapping_errors = Vec::new();
-        let mut candidates: Vec<_> = self
-            .resolver()
-            .resolve_symbol(
-                crate::symbol_resolver::SymRecv::Value(receiver),
-                name,
-                &[],
-                &[],
-            )
-            .map(crate::symbol_resolver::Symbol::overloads)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(crate::libraries::FunctionInfo::is_extension)
-            .filter(|o| o.call_sig.has_param_names())
-            .filter_map(|o| {
-                let params = o.extension_value_params().to_vec();
-                let slots = match map_call_sig_args_with_trailing(
-                    args,
-                    Some(&names),
-                    &o.call_sig,
-                    trailing_lambda,
-                ) {
-                    Ok(slots) => slots,
-                    Err(error) => {
-                        mapping_errors.push((error, o));
-                        return None;
+        let (selected, mut mapped, mut mapping_errors, ambiguous) = {
+            let overloads = self
+                .resolver()
+                .resolve_symbol(
+                    crate::symbol_resolver::SymRecv::Value(receiver),
+                    name,
+                    &[],
+                    &[],
+                )
+                .map(crate::symbol_resolver::Symbol::overloads)
+                .unwrap_or_default();
+            let fs = crate::libraries::FunctionSet { overloads };
+            let source = self.fed_source();
+            let ranked = crate::symbol_resolver::ranked_extension_overloads_by_recv(
+                &source,
+                receiver,
+                &fs,
+                true,
+                Some(self.file_index),
+            );
+            let mut mapping_errors = Vec::new();
+            let mut mapped = Vec::new();
+            let mut selected = None;
+            let mut ambiguous = false;
+            let mut start = 0;
+            while start < ranked.len() {
+                let rank = ranked[start].0;
+                let end = ranked[start..]
+                    .iter()
+                    .position(|(candidate_rank, _, _)| *candidate_rank != rank)
+                    .map_or(ranked.len(), |offset| start + offset);
+                let mut candidates = Vec::new();
+                for (_, _, candidate) in &ranked[start..end] {
+                    if !candidate.call_sig.has_param_names() {
+                        continue;
                     }
-                };
-                let mut score = self.call_slot_score(&params, &slots);
-                if matches!(o.callable.origin, Origin::Module { .. }) {
-                    score = score.map(|score| score + 1_000_000);
+                    let params = candidate.extension_value_params().to_vec();
+                    let slots = match map_call_sig_args_with_trailing(
+                        args,
+                        Some(&names),
+                        &candidate.call_sig,
+                        trailing_lambda,
+                    ) {
+                        Ok(slots) => slots,
+                        Err(error) => {
+                            mapping_errors.push((error, (**candidate).clone()));
+                            continue;
+                        }
+                    };
+                    let slot_tys = slots
+                        .iter()
+                        .map(|slot| slot.map(|arg| self.expr_types[arg.0 as usize]))
+                        .collect::<Vec<_>>();
+                    let resolver = self.resolver();
+                    if !resolver
+                        .extension_slots_admit_bounds(receiver, type_args, candidate, &slot_tys)
+                    {
+                        continue;
+                    }
+                    let callable = resolver.build_extension_callable_for_slots(
+                        name, receiver, type_args, candidate, &slot_tys,
+                    );
+                    let resolved_params = callable
+                        .as_ref()
+                        .and_then(|callable| callable.params.get(1..))
+                        .filter(|resolved| resolved.len() == params.len())
+                        .unwrap_or(&params);
+                    let resolved_params = resolved_params.to_vec();
+                    let selection_params = args
+                        .iter()
+                        .map(|argument| {
+                            let slot = slots
+                                .iter()
+                                .position(|candidate| candidate.as_ref() == Some(argument))
+                                .or(candidate.call_sig.vararg_index)?;
+                            let parameter = *resolved_params.get(slot)?;
+                            let actual = self.expr_types[argument.0 as usize];
+                            if candidate.call_sig.vararg_index == Some(slot)
+                                && !self.file.is_spread_arg(*argument)
+                                && actual != parameter
+                            {
+                                parameter.array_elem()
+                            } else {
+                                Some(parameter)
+                            }
+                        })
+                        .collect::<Option<Vec<_>>>();
+                    mapped.push((
+                        (**candidate).clone(),
+                        resolved_params.clone(),
+                        slots.clone(),
+                    ));
+                    if let Some(selection_params) = selection_params {
+                        candidates.push((
+                            (**candidate).clone(),
+                            resolved_params,
+                            slots,
+                            callable,
+                            selection_params,
+                        ));
+                    }
                 }
-                Some((score, o, params, slots))
-            })
-            .collect();
-        if candidates.is_empty() {
+                let arg_tys = args
+                    .iter()
+                    .map(|argument| self.expr_types[argument.0 as usize])
+                    .collect::<Vec<_>>();
+                let ranked_candidates = candidates
+                    .iter()
+                    .map(|(candidate, _, _, _, params)| (candidate, params.clone()))
+                    .collect::<Vec<_>>();
+                match crate::symbol_resolver::best_by_args(
+                    &*self.syms.libraries,
+                    &ranked_candidates,
+                    &arg_tys,
+                    &self.integer_literal_args(args),
+                    &self.lambda_literal_args(args),
+                ) {
+                    crate::symbol_resolver::CandidateSelection::Selected(best) => {
+                        let index = candidates
+                            .iter()
+                            .position(|(candidate, ..)| std::ptr::eq(candidate, best))?;
+                        selected = Some(candidates.swap_remove(index));
+                        break;
+                    }
+                    crate::symbol_resolver::CandidateSelection::Ambiguous => {
+                        ambiguous = true;
+                        break;
+                    }
+                    crate::symbol_resolver::CandidateSelection::None => {}
+                }
+                start = end;
+            }
+            (selected, mapped, mapping_errors, ambiguous)
+        };
+        if ambiguous {
+            self.diags.error(
+                self.call_callee_name_span(call),
+                "overload resolution ambiguity".to_string(),
+            );
+            return Some(Ty::Error);
+        }
+        if selected.is_none() {
             if let Some((error, candidate)) = take_unanimous_mapping_error(&mut mapping_errors) {
                 self.report_callable_arg_mapping_error(
                     call,
@@ -20706,18 +21564,8 @@ impl<'a> Checker<'a> {
                 );
                 return Some(Ty::Error);
             }
-            if !mapping_errors.is_empty() {
-                self.diags.error(
-                    self.call_callee_name_span(call),
-                    "none of the following candidates is applicable:".to_string(),
-                );
-                return Some(Ty::Error);
-            }
-            return None;
-        }
-        if candidates.iter().all(|(score, _, _, _)| score.is_none()) {
-            if candidates.len() == 1 && mapping_errors.is_empty() {
-                let (_, _, params, slots) = candidates.pop().unwrap();
+            if mapped.len() == 1 && mapping_errors.is_empty() {
+                let (_, params, slots) = mapped.pop().unwrap();
                 for (parameter, argument) in params.iter().zip(&slots) {
                     if let Some(argument) = argument {
                         self.expect_assignable(
@@ -20730,42 +21578,62 @@ impl<'a> Checker<'a> {
                 }
             } else {
                 self.diags.error(
-                    self.span(call),
+                    self.call_callee_name_span(call),
                     "none of the following candidates is applicable:".to_string(),
                 );
             }
             return Some(Ty::Error);
         }
-        candidates.retain(|(score, _, _, _)| score.is_some());
-        candidates.sort_by_key(|(score, _, _, _)| std::cmp::Reverse(*score));
-        if candidates
-            .get(1)
-            .zip(candidates.first())
-            .is_some_and(|((next_score, _, _, _), (best_score, _, _, _))| next_score == best_score)
-        {
-            return None;
+        let (fi, _params, slots, callable, selection_params) = selected?;
+        for (&argument, &parameter) in args.iter().zip(&selection_params) {
+            self.expect_assignable(
+                parameter,
+                self.expr_types[argument.0 as usize],
+                self.span(argument),
+                "argument",
+            );
         }
-        let (_, fi, params, slots) = candidates.into_iter().next()?;
         if matches!(fi.callable.origin, Origin::Module { .. }) {
-            return None;
+            let (file, declaration) = fi.source_key?;
+            let (_, signature) = self
+                .syms
+                .source_extension_function(file, DeclId(declaration))?;
+            let signature = signature.clone();
+            let ret = callable
+                .as_ref()
+                .map_or(signature.ret, |callable| callable.ret);
+            let owner = signature.source_file.zip(signature.source_decl).and_then(
+                |(source_file, source_decl)| {
+                    self.syms
+                        .fn_facades_by_decl
+                        .get(&(source_file, source_decl.0))
+                        .copied()
+                },
+            );
+            self.mark_source_call(call, fi.source_key);
+            self.resolved_calls.insert(
+                call,
+                ResolvedCall::ModuleExtension {
+                    receiver,
+                    name: name.to_string(),
+                    params: signature.params,
+                    ret,
+                    owner,
+                    source: fi.source_key,
+                    vararg: fi.call_sig.vararg,
+                },
+            );
+            self.resolved_call_arg_slots.insert(call, slots);
+            return Some(ret);
         }
         let slot_tys: Vec<Option<Ty>> = slots
             .iter()
             .map(|slot| slot.map(|arg| self.expr_types[arg.0 as usize]))
             .collect();
-        let c = self
-            .resolver()
-            .build_extension_callable_for_slots(name, receiver, type_args, &fi, &slot_tys)?;
-        for (i, slot) in slots.iter().enumerate() {
-            if let Some(arg) = slot {
-                self.expect_assignable(
-                    params[i],
-                    self.expr_types[arg.0 as usize],
-                    self.span(*arg),
-                    "argument",
-                );
-            }
-        }
+        let c = callable.or_else(|| {
+            self.resolver()
+                .build_extension_callable_for_slots(name, receiver, type_args, &fi, &slot_tys)
+        })?;
         let ret = c.ret;
         self.resolved_calls
             .insert(call, ResolvedCall::Extension(c.clone()));
@@ -20922,7 +21790,8 @@ impl<'a> Checker<'a> {
         name: &str,
         span: Span,
     ) -> Result<Option<DestructureComponentTarget>, ()> {
-        let candidate = match self.member_extension_function(recv, name, &[], &[], None, &[]) {
+        let candidate = match self.member_extension_function(recv, name, &[], &[], None, &[], false)
+        {
             Ok(Some(candidate)) => candidate,
             Ok(None) => return Ok(None),
             Err(()) => {
@@ -22195,6 +23064,7 @@ impl<'a> Checker<'a> {
             partial_arg_tys,
             arg_names,
             explicit_type_args,
+            trailing_lambda,
         } = call;
         let function = &shape.function;
         if !explicit_type_args.is_empty() && explicit_type_args.len() != function.type_params.len()
@@ -22209,7 +23079,7 @@ impl<'a> Checker<'a> {
                 .map(|(source, _)| (source.min(last), source))
                 .collect::<Vec<_>>()
         } else {
-            map_call_sig_args(args, arg_names, &call_sig)
+            map_call_sig_args_with_trailing(args, arg_names, &call_sig, trailing_lambda)
                 .ok()?
                 .iter()
                 .enumerate()
@@ -22305,7 +23175,7 @@ impl<'a> Checker<'a> {
             args,
             &applicability_arg_tys,
             arg_names,
-            false,
+            trailing_lambda,
         )?;
         let ret = function.ret.as_ref().map_or_else(
             || crate::symbol_resolver::ty_subst(function.signature.ret, &bindings),
@@ -22341,6 +23211,7 @@ impl<'a> Checker<'a> {
         partial_arg_tys: &[Option<Ty>],
         arg_names: Option<&[Option<String>]>,
         explicit_type_args: &[Ty],
+        trailing_lambda: bool,
     ) -> Option<MemberExtensionLambdaPlan> {
         let mut plans = Vec::new();
         for shape in self.member_extension_function_shapes(extension_receiver, name) {
@@ -22353,6 +23224,7 @@ impl<'a> Checker<'a> {
                     partial_arg_tys,
                     arg_names,
                     explicit_type_args,
+                    trailing_lambda,
                 },
             ) else {
                 continue;
@@ -22403,6 +23275,7 @@ impl<'a> Checker<'a> {
         arg_tys: &[Ty],
         arg_names: Option<&[Option<String>]>,
         explicit_type_args: &[Ty],
+        trailing_lambda: bool,
     ) -> Result<Option<MemberExtensionFunctionCandidate>, ()> {
         let mut candidates = Vec::new();
         let full_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
@@ -22416,6 +23289,7 @@ impl<'a> Checker<'a> {
                     partial_arg_tys: &full_arg_tys,
                     arg_names,
                     explicit_type_args,
+                    trailing_lambda,
                 },
             ) else {
                 continue;
@@ -22478,6 +23352,7 @@ impl<'a> Checker<'a> {
             arg_tys,
             arg_names.as_deref(),
             &explicit_type_args,
+            self.file.call_has_trailing_lambda.contains(&call.0),
         ) {
             Ok(Some(candidate)) => {
                 for &(parameter, source) in &candidate.argument_parameters {
@@ -22901,6 +23776,9 @@ impl<'a> Checker<'a> {
         implicit_receiver: bool,
     ) -> ClasspathMemberSlotCall {
         let arg_names = self.file.call_arg_names.get(&call.0).cloned();
+        let named_call = arg_names
+            .as_ref()
+            .is_some_and(|names| names.iter().any(Option::is_some));
         let needs_slot_map = arg_names.is_some();
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         let mut mapping_errors = Vec::new();
@@ -22920,6 +23798,10 @@ impl<'a> Checker<'a> {
             .filter(|o| o.call_sig.has_param_names())
             .filter_map(|o| {
                 let params = o.callable.params.clone();
+                if arg_names.is_none() && o.call_sig.vararg && args.len() != params.len() {
+                    direct_candidate = true;
+                    return None;
+                }
                 let needs_slot_map = needs_slot_map
                     || args.len() != params.len()
                     || (trailing_lambda && o.call_sig.vararg_index == params.len().checked_sub(1));
@@ -22954,31 +23836,10 @@ impl<'a> Checker<'a> {
         if direct_candidate {
             return ClasspathMemberSlotCall::NoMatch;
         }
-        if candidates.iter().all(|(score, _, _, _)| score.is_none()) {
-            let arg_tys: Vec<Ty> = args
-                .iter()
-                .map(|argument| self.expr_types[argument.0 as usize])
-                .collect();
-            let integer_literals = self.integer_literal_args(args);
-            let lambda_literals = self.lambda_literal_args(args);
-            let type_args = self.resolved_explicit_type_args(call);
-            let extension_applies = self
-                .resolver()
-                .resolve_symbol_with_literal_and_lambda_args(
-                    receiver,
-                    name,
-                    &arg_tys,
-                    &integer_literals,
-                    &lambda_literals,
-                    &type_args,
-                )
-                .and_then(crate::symbol_resolver::Symbol::extension_call)
-                .is_some();
-            if extension_applies {
+        if candidates.is_empty() {
+            if named_call {
                 return ClasspathMemberSlotCall::NoMatch;
             }
-        }
-        if candidates.is_empty() {
             let unanimous = mapping_errors
                 .first()
                 .is_some_and(|(first, _)| mapping_errors.iter().all(|(error, _)| error == first));
@@ -23019,6 +23880,9 @@ impl<'a> Checker<'a> {
             }
         }
         if !candidates.is_empty() && candidates.iter().all(|(score, _, _, _)| score.is_none()) {
+            if named_call {
+                return ClasspathMemberSlotCall::NoMatch;
+            }
             if candidates.len() == 1 && mapping_errors.is_empty() {
                 let (_, _, params, slots) = candidates.pop().unwrap();
                 for (parameter, argument) in params.iter().zip(&slots) {
@@ -23116,7 +23980,7 @@ impl<'a> Checker<'a> {
         for (i, slot) in slots.iter().enumerate() {
             let Some(arg) = slot else { continue };
             let aty = self.expr_types[arg.0 as usize];
-            if !arg_assignable_simple(params[i], aty) {
+            if aty != Ty::Error && !self.receiver_is_assignable(aty, params[i]) {
                 return None;
             }
             score += if params[i] == aty { 4 } else { 1 };
@@ -24756,6 +25620,7 @@ impl<'a> Checker<'a> {
                             partial,
                             arg_names.as_deref(),
                             &member_extension_type_args,
+                            self.file.call_has_trailing_lambda.contains(&call.0),
                         )
                     });
                 let ext_lambda_shape = if member_ext_lambda_plan.is_none() {
@@ -24968,6 +25833,22 @@ impl<'a> Checker<'a> {
                     }
                     return Ty::String; // intrinsic on any type
                 }
+                if self.file.infix_calls.contains(&call.0)
+                    && rt.is_numeric_or_char()
+                    && is_builtin_operator_method(&name)
+                {
+                    let call_targs = self.resolved_explicit_type_args(call);
+                    if let Some(ret) = self.record_library_extension_call_with_literal_args(
+                        Some(call),
+                        &name,
+                        rt,
+                        &arg_tys,
+                        &integer_literals,
+                        &call_targs,
+                    ) {
+                        return ret;
+                    }
+                }
                 match self.record_classpath_member_call_with_slots(call, rt, &name, args, false) {
                     ClasspathMemberSlotCall::Resolved(ret) => return ret,
                     ClasspathMemberSlotCall::Ambiguous | ClasspathMemberSlotCall::Rejected => {
@@ -25061,18 +25942,7 @@ impl<'a> Checker<'a> {
                     && is_builtin_operator_method(&name)
                     && arg_tys.iter().all(|a| a.is_numeric_or_char())
                 {
-                    // A user `infix`/`operator` extension with this name shadows the builtin for the
-                    // *infix* form (`a rem b`) while the dot form (`a.rem(b)`) keeps the builtin.
-                    let user_ext = self
-                        .resolver()
-                        .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
-                        .map(crate::symbol_resolver::Symbol::overloads)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .find(|o| o.is_extension() && o.receiver_rank == 0)
-                        .is_some();
-                    let infix_user_ext = self.file.infix_calls.contains(&call.0) && user_ext;
-                    if !infix_user_ext && rt.is_numeric() {
+                    if rt.is_numeric() {
                         // Binary arithmetic methods: `a.plus(b)` ≡ `a + b` (same numeric promotion).
                         let bin = BinOp::from_arith_operator_name(&name);
                         if let (Some(op), [at]) = (bin, arg_tys.as_slice()) {
@@ -25097,7 +25967,7 @@ impl<'a> Checker<'a> {
                     // `Char` arithmetic methods: `c.plus(n): Char`, `c.minus(n): Char`, `c.minus(c2): Int`.
                     // `Char` isn't `is_numeric` (no promotion), but these map to the operator form, which
                     // `check_binary` types with the correct `Char`/`Int` operand rules.
-                    if !infix_user_ext && rt == Ty::Char {
+                    if rt == Ty::Char {
                         // `Char` has only `plus`/`minus` operator overloads (no `times`/`div`/`rem`).
                         let bin = BinOp::from_arith_operator_name(&name)
                             .filter(|o| matches!(o, BinOp::Add | BinOp::Sub));
@@ -25105,10 +25975,8 @@ impl<'a> Checker<'a> {
                             return self.check_binary(op, rt, *at, span);
                         }
                     }
-                    if !infix_user_ext {
-                        self.diags.error(span, format!("krusty: builtin operator method '{name}' on a primitive is not supported"));
-                        return Ty::Error;
-                    }
+                    self.diags.error(span, format!("krusty: builtin operator method '{name}' on a primitive is not supported"));
+                    return Ty::Error;
                 }
                 // Extension / static method from any classpath library (e.g. Kotlin stdlib).
                 // Receiver type is passed as the first argument (invokestatic at the JVM level).
@@ -25144,14 +26012,17 @@ impl<'a> Checker<'a> {
                 {
                     return ret;
                 }
-                if let Some(ret) = self.record_library_extension_call_with_slots(
-                    call,
-                    &name,
-                    rt,
-                    args,
-                    &call_targs,
-                ) {
+                if let Some(ret) =
+                    self.record_extension_call_with_slots(call, &name, rt, args, &call_targs)
+                {
                     return ret;
+                }
+                if arg_names.is_some() {
+                    self.diags.error(
+                        self.call_callee_name_span(call),
+                        "none of the following candidates is applicable:".to_string(),
+                    );
+                    return Ty::Error;
                 }
                 if let Some(ret) = self.record_library_extension_call_with_literal_args(
                     Some(call),
@@ -25210,6 +26081,12 @@ impl<'a> Checker<'a> {
                     &arg_tys,
                     &extension_lambda_literals,
                 ) {
+                    let logical = fi.extension_value_params().to_vec();
+                    if !self.check_source_extension_call_args(
+                        call, &name, args, &arg_tys, &fi, &logical,
+                    ) {
+                        return Ty::Error;
+                    }
                     self.mark_source_call(call, fi.source_key);
                     let owner =
                         sig.source_file
@@ -25229,45 +26106,9 @@ impl<'a> Checker<'a> {
                             ret: sig.ret,
                             owner,
                             source: fi.source_key,
+                            vararg: fi.call_sig.vararg,
                         },
                     );
-                    let logical = fi.extension_value_params().to_vec();
-                    let cs = &fi.call_sig;
-                    if (arg_names.is_some() || arg_tys.len() != logical.len())
-                        && cs.can_map_omitted_args(logical.len())
-                    {
-                        match map_call_sig_args_with_trailing(
-                            args,
-                            arg_names.as_deref(),
-                            cs,
-                            self.file.call_has_trailing_lambda.contains(&call.0),
-                        ) {
-                            Ok(slots) => {
-                                for (i, slot) in slots.iter().enumerate() {
-                                    if let Some(a) = slot {
-                                        self.expect_assignable(
-                                            logical[i],
-                                            self.expr_types[a.0 as usize],
-                                            self.span(*a),
-                                            "argument",
-                                        );
-                                    }
-                                }
-                            }
-                            Err(error) => self.report_call_arg_mapping_error(call, args, error),
-                        }
-                    } else if logical.len() != arg_tys.len() {
-                        self.diags.error(
-                            span,
-                            format!(
-                                "extension '{name}' expects {} args, got {}",
-                                logical.len(),
-                                arg_tys.len()
-                            ),
-                        );
-                    } else {
-                        self.expect_call_args(&logical, false, args, &arg_tys);
-                    }
                     if erased_type_key(rt) != erased_type_key(Ty::obj("kotlin/Any")) {
                         if let Some(decl) = self.source_function_decl(&fi).filter(|function| {
                             function.is_inline()
@@ -26293,6 +27134,7 @@ impl<'a> Checker<'a> {
                                 this_member_partial.as_deref().unwrap_or_default(),
                                 arg_names.as_deref(),
                                 &explicit_type_args,
+                                self.file.call_has_trailing_lambda.contains(&call.0),
                             )
                         })
                 } else {
@@ -26793,147 +27635,72 @@ impl<'a> Checker<'a> {
                                 return ret;
                             }
                         }
-                        let ctor_params: Vec<Ty> = cls.ctor_params.clone();
-                        // A value class is resolved like ANY class here — no value-class special case.
-                        // Its construction (incl. `Vid()` omitting a defaulted sole param) lowers through
-                        // the uniform `New`, which the value-class JVM pass realizes as `constructor-impl` /
-                        // `constructor-impl$default`. The resolver carries no value-class knowledge.
-                        // Named-argument constructor call (`C(b = 9)`): map names → positions using the
-                        // primary ctor's parameter names + per-parameter defaults, the same path a
-                        // top-level function uses. An omitted parameter falls back to its default (the
-                        // lowering fills a simple-literal default, or skips the file — never miscompiles).
-                        if arg_names.is_some()
-                            || self.file.call_has_trailing_lambda.contains(&call.0)
-                        {
-                            if let Some(param_list) = self.primary_ctor_param_list(&fname) {
-                                match map_param_list_args(
-                                    args,
-                                    arg_names.as_deref(),
-                                    &param_list,
-                                    self.file.call_has_trailing_lambda.contains(&call.0),
-                                ) {
-                                    Ok(slots) => {
-                                        let inferred = self.expect_source_constructor_args(
-                                            call,
-                                            &cls,
-                                            &ctor_params,
-                                            args,
-                                            &arg_tys,
-                                            Some(&slots),
-                                        );
-                                        return self.ctor_result_name_with_inferred(
-                                            call,
-                                            cls.internal_name(),
-                                            inferred,
-                                        );
-                                    }
-                                    Err(error) => {
-                                        self.report_call_arg_mapping_error(call, args, error)
-                                    }
-                                }
-                                return self.ctor_result_name(call, cls.internal_name());
-                            }
-                        }
-                        let got = arg_tys.len();
-                        // Omitting a trailing parameter is allowed when it simply HAS a default. The
-                        // predicate is "does the class get an `<init>$default`", not "can the call site
-                        // inline the default value": a class with any defaulted primary-ctor parameter
-                        // gets kotlinc's synthetic `<init>(params…, int mask, DefaultConstructorMarker)`
-                        // (a value class, the same thing under `constructor-impl$default`), and the call
-                        // lowers to it with the omitted slots masked off. Whether the default is a literal
-                        // the caller could have emitted itself is irrelevant to whether the call resolves —
-                        // requiring that rejected every non-constant default (`= emptyList()`, `= one()`),
-                        // which is most of them.
-                        // An omission has to be REALIZABLE, by one of two mechanisms: inline-fill from a
-                        // default value krusty captured, or the `<init>$default(…, mask, marker)`
-                        // synthetic, which evaluates the default INSIDE the constructor so the call site
-                        // never needs its value. The `$default` synthetic is what makes a non-constant
-                        // default (`= emptyList()`) omittable at all — requiring an inline-fillable value
-                        // rejected most real defaults.
-                        //
-                        // Two shapes do NOT get the synthetic and must stay rejected, or the call
-                        // miscompiles into a NoSuchMethodError/VerifyError at runtime:
-                        //   - an annotation class, which is emitted as an INTERFACE (no ctor stub);
-                        //   - an omitted parameter whose TYPE is a value class, where the stub's
-                        //     descriptor and its stackmap disagree about the erased underlying type.
-                        // A value class being CONSTRUCTED is fine — that is `constructor-impl$default`.
-                        let realizable_via_stub = !cls.is_annotation() && !cls.is_interface();
-                        let ok_arity = got <= ctor_params.len()
-                            && (got..ctor_params.len()).all(|i| {
-                                let inline_fillable = cls
-                                    .ctor_defaults
-                                    .get(i)
-                                    .and_then(|o| o.as_ref())
-                                    .is_some_and(|dv| dv.fills_param_ty(ctor_params[i]));
-                                let via_stub = realizable_via_stub
-                                    && !self.ty_is_value_class(ctor_params[i])
-                                    && cls
-                                        .ctor_param_names
-                                        .get(i)
-                                        .is_some_and(|(_, has_default)| *has_default);
-                                inline_fillable || via_stub
-                            });
-                        let primary_applicable = ok_arity
-                            && ctor_params.iter().zip(&arg_tys).all(|(parameter, actual)| {
-                                arg_assignable_simple(*parameter, *actual)
-                            });
-                        let secondary_match = cls.secondary_ctors.iter().find(|parameters| {
-                            parameters.len() == got && self.ctor_args_match(parameters, &arg_tys)
-                        });
-                        if !primary_applicable
-                            && secondary_match.is_none()
-                            && !cls.secondary_ctors.is_empty()
-                        {
+                        let Some(declaration) =
+                            self.source_class_decl_by_internal(cls.internal_name())
+                        else {
+                            return self.ctor_result_name(call, cls.internal_name());
+                        };
+                        let names = arg_names.clone().unwrap_or_else(|| vec![None; args.len()]);
+                        let arguments = CtorDelegationCall {
+                            args: args.to_vec(),
+                            names,
+                        };
+                        let candidates = self.source_constructor_candidates(&declaration, &cls);
+                        let Some(selected) =
+                            self.select_source_constructor(&arguments, &candidates)
+                        else {
                             self.diags.error(
                                 span,
                                 "none of the following candidates is applicable:".to_string(),
                             );
                             return self.ctor_result_name(call, cls.internal_name());
-                        }
-                        // The arguments don't match the primary — try a secondary constructor. Prefer one
-                        // whose parameter TYPES accept the arguments (`A(123)` is the `Int` secondary, not
-                        // the same-arity `String` one); fall back to the first same-arity ctor.
-                        if !ok_arity {
-                            let chosen = secondary_match
-                                .or_else(|| cls.secondary_ctors.iter().find(|sp| sp.len() == got));
-                            if let Some(sparams) = chosen {
-                                self.expect_call_args(sparams, false, args, &arg_tys);
-                                return self.ctor_result_name(call, cls.internal_name());
-                            }
-                            self.report_constructor_arity(
-                                call,
-                                &fname,
-                                &ctor_params,
-                                &cls.ctor_param_names,
-                                args,
+                        };
+                        for (&argument, &expected) in args.iter().zip(&selected.argument_types) {
+                            self.expect_assignable(
+                                expected,
+                                self.expr_types[argument.0 as usize],
+                                self.span(argument),
+                                "constructor argument",
                             );
-                        } else {
-                            // Primary arity matches but the argument TYPES may not (a same-arity
-                            // secondary, e.g. `Sc(Int)` primary vs `Sc(String)` secondary) — prefer a
-                            // secondary whose parameter types accept the arguments.
-                            if got == ctor_params.len()
-                                && !self.ctor_args_match(&ctor_params, &arg_tys)
-                            {
-                                if let Some(sparams) = secondary_match {
-                                    self.expect_call_args(sparams, false, args, &arg_tys);
-                                    return self.ctor_result_name(call, cls.internal_name());
-                                }
+                        }
+                        let primary = matches!(
+                            &selected.target,
+                            ResolvedCtorDelegationTarget::ThisPrimary { .. }
+                        );
+                        let params = selected.target.params().to_vec();
+                        let inferred = if primary && selected.vararg.is_none() {
+                            let mut slots = vec![None; params.len()];
+                            for (&argument, &slot) in args.iter().zip(&selected.argument_slots) {
+                                slots[slot] = Some(argument);
                             }
-                            let inferred = self.expect_source_constructor_args(
+                            self.expect_source_constructor_args(
                                 call,
                                 &cls,
-                                &ctor_params,
+                                &params,
                                 args,
                                 &arg_tys,
-                                None,
-                            );
-                            return self.ctor_result_name_with_inferred(
-                                call,
-                                cls.internal_name(),
-                                inferred,
-                            );
-                        }
-                        return self.ctor_result_name(call, cls.internal_name());
+                                Some(&slots),
+                            )
+                        } else {
+                            Vec::new()
+                        };
+                        self.resolved_constructors.insert(
+                            call,
+                            ResolvedConstructor::Source {
+                                primary,
+                                params,
+                                argument_slots: selected.argument_slots,
+                                argument_types: selected.argument_types,
+                                omitted: selected.omitted,
+                                vararg: selected.vararg,
+                                default_masks: selected.default_masks,
+                            },
+                        );
+                        return self.ctor_result_name_with_inferred(
+                            call,
+                            cls.internal_name(),
+                            inferred,
+                        );
                     }
                     if let Some(internal) = scoped_nested_internal
                         .filter(|internal| self.syms.class_by_type_name(*internal).is_none())

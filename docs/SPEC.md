@@ -2367,3 +2367,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `crates/krusty-lsp/tests/deps_render.rs`, `crates/krusty-lsp/src/server.rs`
   (`definition_into_a_library_returns_a_materialized_file_location`),
   `crates/krusty-lsp/src/deps_cache.rs`.
+
+- **Newlines after infix operators continue the expression.** The right operand may begin after one
+  or more newlines, while a newline before the operator still terminates the expression. A `when`
+  subject declaration may likewise place its initializer after a newline. Test:
+  `tests/infix_newline_operand_e2e.rs`.
+
+- **Safe calls use the ordinary value-argument grammar and slot mapping.** Named and spread
+  arguments, including defaults supported by the ordinary target, use the same member and extension
+  call machinery as non-safe calls. Supplied arguments evaluate left-to-right inside the non-null
+  branch, then load in parameter order. Tests: `tests/safe_call_argument_list_e2e.rs`.

@@ -976,8 +976,14 @@ pub struct SecondaryCtor {
 #[derive(Clone, Debug)]
 pub enum CtorDelegation {
     None,
-    This(Vec<ExprId>),
-    Super(Vec<ExprId>),
+    This(CtorDelegationCall),
+    Super(CtorDelegationCall),
+}
+
+#[derive(Clone, Debug)]
+pub struct CtorDelegationCall {
+    pub args: Vec<ExprId>,
+    pub names: Vec<Option<String>>,
 }
 
 /// A primary-constructor init step (source-ordered): a body-property initializer or an `init` block.

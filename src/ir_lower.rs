@@ -15,8 +15,8 @@ use crate::frontend::{
     DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, FrontendSymbols,
     FrontendTypeInfo, FunctionImportScope, InlineCall, InvokeKind, IteratorDispatchTarget,
     LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ReceiverLambda, ResolvedCall,
-    ResolvedConstructor, ResolvedLocalFunctionCall, ResolvedMember, ResolvedModuleTopLevelCall,
-    SigFlags, Signature, StmtLowering,
+    ResolvedConstructor, ResolvedCtorDelegationTarget, ResolvedLocalFunctionCall, ResolvedMember,
+    ResolvedModuleTopLevelCall, SigFlags, Signature, StmtLowering,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
@@ -3742,25 +3742,6 @@ pub fn lower_file_at_reporting(
                 if !c.secondary_ctors.is_empty() {
                     use crate::ir::CtorDelegateTarget;
                     let class_id = lo.class_info(&internal)?.id;
-                    let primary_param_tys: Vec<Ty> = {
-                        let n = lo.ir.classes[class_id as usize].ctor_param_count as usize;
-                        lo.ir.classes[class_id as usize].fields[..n]
-                            .iter()
-                            .map(|f| f.ty.clone())
-                            .collect()
-                    };
-                    // The IR param types of every secondary ctor (for resolving a sibling `this(…)`).
-                    let sec_param_tys: Vec<Vec<Ty>> = c
-                        .secondary_ctors
-                        .iter()
-                        .map(|sc| {
-                            sc.params
-                                .iter()
-                                .map(|p| ty_to_ir(ty_of(file, &p.ty, &*syms.libraries)))
-                                .collect()
-                        })
-                        .collect();
-                    let super_param_tys = lo.super_ctor_param_tys(&internal);
                     let mut secs = Vec::new();
                     for (sc_idx, sc) in c.secondary_ctors.iter().enumerate() {
                         lo.scope.clear();
@@ -3772,178 +3753,105 @@ pub fn lower_file_at_reporting(
                         lo.scope
                             .push(("this".to_string(), this_v, Ty::obj(&internal)));
                         let mut param_irs = Vec::new();
-                        // A secondary ctor with a defaulted parameter needs kotlinc's synthetic
-                        // `<init>(…, int mask, DefaultConstructorMarker)` overload, which krusty doesn't
-                        // emit — a call omitting the default would hit a missing `<init>`. Bail.
-                        if sc.params.iter().any(|p| p.default.is_some()) {
-                            return None;
-                        }
                         for p in &sc.params {
                             let pty = ty_of(file, &p.ty, &*syms.libraries);
                             let v = lo.fresh_value();
                             lo.scope.push((p.name.clone(), v, pty));
                             param_irs.push(ty_to_ir(pty));
                         }
-                        // Resolve the delegation target + the parameter types its args must coerce to.
-                        let (delegate, delegate_args, target_tys, run_init): (
-                            CtorDelegateTarget,
-                            Vec<AstExprId>,
-                            Vec<Ty>,
-                            bool,
-                        ) = match &sc.delegation {
-                            // A value class's secondary ctors are re-shaped by the `value_classes` IR
-                            // pass, which reads this `target_params`. Keep the EXACT prior resolution
-                            // for value classes (primary target when there's a primary ctor, else the
-                            // unique same-arity sibling) so the pass is unaffected — value-class logic
-                            // stays in `value_classes.rs` (rule 4). The primary-vs-sibling unification
-                            // below is for plain classes only.
-                            ast::CtorDelegation::This(args) if c.is_value => {
-                                let target = if c.has_primary_ctor {
-                                    primary_param_tys.clone()
-                                } else {
-                                    let arg_irs = tys_to_ir(&lo.arg_tys(args));
-                                    // Exclude self — a `this(…)` never delegates to its own ctor.
-                                    let typed = sec_param_tys.iter().enumerate().find(|(j, p)| {
-                                        *j != sc_idx
-                                            && p.len() == arg_irs.len()
-                                            && arg_irs
-                                                .iter()
-                                                .zip(p.iter())
-                                                .all(|(a, pp)| ir_arg_assignable(a, pp))
-                                    });
-                                    match typed {
-                                        Some((_, p)) => p.clone(),
-                                        None => {
-                                            let same: Vec<&Vec<Ty>> = sec_param_tys
-                                                .iter()
-                                                .enumerate()
-                                                .filter(|(j, p)| {
-                                                    *j != sc_idx && p.len() == args.len()
-                                                })
-                                                .map(|(_, p)| p)
-                                                .collect();
-                                            if same.len() != 1 {
-                                                return None;
-                                            }
-                                            same[0].clone()
-                                        }
-                                    }
-                                };
-                                (
-                                    CtorDelegateTarget::This {
-                                        target_params: target.clone(),
-                                        to_primary: c.has_primary_ctor,
-                                    },
-                                    args.clone(),
-                                    target,
-                                    false,
-                                )
+                        let mut defaults = Vec::with_capacity(sc.params.len());
+                        for (parameter, parameter_ty) in sc.params.iter().zip(&param_irs) {
+                            defaults.push(match parameter.default {
+                                Some(default) => Some(lo.lower_arg(default, parameter_ty)?),
+                                None => None,
+                            });
+                        }
+                        let resolved = lo.info.resolved_ctor_delegation(d, sc_idx)?.clone();
+                        let source_args = match &sc.delegation {
+                            ast::CtorDelegation::This(call) | ast::CtorDelegation::Super(call) => {
+                                call.args.as_slice()
                             }
-                            ast::CtorDelegation::This(args) => {
-                                // `this(…)` may target the primary constructor OR a SIBLING secondary
-                                // (never itself). Build the candidate signatures — the primary (when
-                                // present) plus every OTHER secondary — and pick the one accepting the
-                                // arguments (by type, else the unique same-arity candidate).
-                                let arg_irs = tys_to_ir(&lo.arg_tys(args));
-                                // Candidate `(signature, is_primary)` pairs: the primary (index 0 when
-                                // present) plus every OTHER secondary.
-                                let mut candidates: Vec<(Vec<Ty>, bool)> = Vec::new();
-                                if c.has_primary_ctor {
-                                    candidates.push((primary_param_tys.clone(), true));
-                                }
-                                for (j, sig) in sec_param_tys.iter().enumerate() {
-                                    if j != sc_idx {
-                                        candidates.push((sig.clone(), false));
-                                    }
-                                }
-                                let typed = candidates.iter().find(|(p, _)| {
-                                    p.len() == arg_irs.len()
-                                        && arg_irs
-                                            .iter()
-                                            .zip(p.iter())
-                                            .all(|(a, pp)| ir_arg_assignable(a, pp))
-                                });
-                                let (target, to_primary) = match typed {
-                                    Some((p, prim)) => (p.clone(), *prim),
-                                    None => {
-                                        let same: Vec<&(Vec<Ty>, bool)> = candidates
-                                            .iter()
-                                            .filter(|(p, _)| p.len() == args.len())
-                                            .collect();
-                                        if same.len() != 1 {
-                                            return None;
-                                        }
-                                        (same[0].0.clone(), same[0].1)
-                                    }
-                                };
-                                (
-                                    CtorDelegateTarget::This {
-                                        target_params: target.clone(),
-                                        to_primary,
-                                    },
-                                    args.clone(),
-                                    target,
-                                    false,
-                                )
-                            }
-                            ast::CtorDelegation::Super(args) => {
-                                if c.has_primary_ctor {
-                                    return None; // a secondary in a primary class must delegate via this(…)
-                                }
-                                // Resolve the base `<init>` this `super(...)` targets by argument arity:
-                                // the base primary, or a base SECONDARY constructor (a base with no
-                                // primary). `super_param_tys` (the base primary) still covers the common
-                                // single-candidate case; multiple candidates disambiguate by arity.
-                                let cands = lo.super_ctor_candidate_tys(&internal);
-                                let target = match cands.len() {
-                                    // Object base / untracked base — no candidate signatures.
-                                    0 => super_param_tys.clone(),
-                                    // Exactly one base `<init>` (a primary, or a base with a single
-                                    // secondary and no primary) — that is the target.
-                                    1 => cands[0].clone(),
-                                    // Several base `<init>`s — disambiguate by argument arity.
-                                    _ => {
-                                        let same: Vec<&Vec<Ty>> = cands
-                                            .iter()
-                                            .filter(|p| p.len() == args.len())
-                                            .collect();
-                                        if same.len() != 1 {
-                                            return None; // no unique base ctor of this arity
-                                        }
-                                        same[0].clone()
-                                    }
-                                };
-                                (CtorDelegateTarget::Super, args.clone(), target, true)
-                            }
-                            ast::CtorDelegation::None => {
-                                if c.has_primary_ctor {
-                                    return None;
-                                }
-                                // Implicit `super()` — must be a no-arg base (Object, or a base ctor we
-                                // can't pass args to here). Bail if the base needs constructor arguments.
-                                if !super_param_tys.is_empty() {
-                                    return None;
-                                }
-                                (CtorDelegateTarget::Super, vec![], vec![], true)
-                            }
+                            ast::CtorDelegation::None => &[],
                         };
-                        // A branchy delegation argument (`this("O" + if (c) …)`) records stackmap
-                        // frames the secondary-ctor `<init>` prologue can't place consistently (the
-                        // arg is evaluated before `this` is on the stack) — bail rather than emit a
-                        // frame-inconsistent method (the file skips, never miscompiles).
-                        if delegate_args
-                            .iter()
-                            .any(|&a| body_contains_branch(lo.afile, a))
+                        if source_args.len() != resolved.argument_slots.len()
+                            || source_args.len() != resolved.argument_types.len()
                         {
                             return None;
                         }
-                        if delegate_args.len() != target_tys.len() {
-                            return None;
+                        let target_tys = tys_to_ir(resolved.target.params());
+                        let mut slot_temps: Vec<Vec<(u32, Ty, bool)>> =
+                            vec![Vec::new(); target_tys.len()];
+                        let mut delegate_prelude = Vec::new();
+                        for ((&argument, &slot), &expected) in source_args
+                            .iter()
+                            .zip(&resolved.argument_slots)
+                            .zip(&resolved.argument_types)
+                        {
+                            let expected = ty_to_ir(expected);
+                            let value = lo.lower_arg(argument, &expected)?;
+                            let temp = lo.fresh_value();
+                            delegate_prelude.push(lo.emit_variable(temp, expected, Some(value)));
+                            slot_temps.get_mut(slot)?.push((
+                                temp,
+                                expected,
+                                lo.afile.is_spread_arg(argument),
+                            ));
                         }
-                        let mut dargs = Vec::new();
-                        for (a, ft) in delegate_args.iter().zip(&target_tys) {
-                            dargs.push(lo.lower_arg(*a, ft)?);
+                        let mut delegate_args = Vec::with_capacity(target_tys.len());
+                        for (slot, &parameter) in target_tys.iter().enumerate() {
+                            let supplied = &slot_temps[slot];
+                            if resolved.vararg == Some(slot) {
+                                if supplied.len() == 1
+                                    && supplied[0].1 == parameter
+                                    && supplied[0].2
+                                {
+                                    delegate_args.push(lo.emit_get_value(supplied[0].0));
+                                } else {
+                                    let elements = supplied
+                                        .iter()
+                                        .map(|(temp, _, _)| lo.emit_get_value(*temp))
+                                        .collect();
+                                    let spreads =
+                                        supplied.iter().map(|(_, _, spread)| *spread).collect();
+                                    delegate_args.push(
+                                        lo.emit_vararg_with_spreads(parameter, elements, spreads),
+                                    );
+                                }
+                            } else if let [(temp, _, _)] = supplied.as_slice() {
+                                delegate_args.push(lo.emit_get_value(*temp));
+                            } else if supplied.is_empty() && resolved.omitted.contains(&slot) {
+                                delegate_args.push(lo.zero_placeholder(parameter));
+                            } else {
+                                return None;
+                            }
                         }
+                        let default_masks = resolved.default_masks.clone();
+                        let (delegate, run_init) = match resolved.target {
+                            ResolvedCtorDelegationTarget::ThisPrimary { .. } => (
+                                CtorDelegateTarget::This {
+                                    target_params: target_tys,
+                                    to_primary: true,
+                                    default_masks,
+                                },
+                                false,
+                            ),
+                            ResolvedCtorDelegationTarget::ThisSecondary { .. } => (
+                                CtorDelegateTarget::This {
+                                    target_params: target_tys,
+                                    to_primary: false,
+                                    default_masks,
+                                },
+                                false,
+                            ),
+                            ResolvedCtorDelegationTarget::Super { owner, .. } => (
+                                CtorDelegateTarget::Super {
+                                    owner,
+                                    target_params: target_tys,
+                                    default_masks,
+                                },
+                                true,
+                            ),
+                        };
                         // A `super(…)`-reaching ctor runs the init steps (field initializers + `init {}`)
                         // before its own body; a `this(…)` ctor runs only its body.
                         let mut out = Vec::new();
@@ -3960,7 +3868,9 @@ pub fn lower_file_at_reporting(
                         };
                         secs.push(crate::ir::IrSecondaryCtor {
                             params: param_irs,
-                            delegate_args: dargs,
+                            defaults,
+                            delegate_prelude,
+                            delegate_args,
                             body,
                             delegate,
                             synthetic: false,
@@ -5699,6 +5609,72 @@ impl<'a> Lower<'a> {
         self.ir.new_external(internal.as_ref(), ctor_desc, args)
     }
 
+    fn lower_resolved_source_constructor(
+        &mut self,
+        args: &[AstExprId],
+        params: &[Ty],
+        argument_slots: &[usize],
+        argument_types: &[Ty],
+        omitted: &[usize],
+        vararg: Option<usize>,
+        default_masks: &[i32],
+        value_class: bool,
+    ) -> Option<(Vec<u32>, Vec<u32>, Vec<Ty>)> {
+        if args.len() != argument_slots.len() || args.len() != argument_types.len() {
+            return None;
+        }
+        if value_class && !omitted.is_empty() {
+            return (args.is_empty() && params.len() == 1)
+                .then(|| (Vec::new(), Vec::new(), tys_to_ir(params)));
+        }
+        let ir_params = tys_to_ir(params);
+        let mut slot_temps: Vec<Vec<(u32, Ty, bool)>> = vec![Vec::new(); params.len()];
+        let mut prelude = Vec::new();
+        for ((&argument, &slot), &expected) in args.iter().zip(argument_slots).zip(argument_types) {
+            let expected = ty_to_ir(expected);
+            let value = self.lower_arg(argument, &expected)?;
+            let temp = self.fresh_value();
+            prelude.push(self.emit_variable(temp, expected, Some(value)));
+            slot_temps
+                .get_mut(slot)?
+                .push((temp, expected, self.afile.is_spread_arg(argument)));
+        }
+        let mut lowered = Vec::with_capacity(params.len());
+        for (slot, &parameter) in ir_params.iter().enumerate() {
+            let supplied = &slot_temps[slot];
+            if vararg == Some(slot) {
+                if supplied.len() == 1 && supplied[0].1 == parameter && supplied[0].2 {
+                    lowered.push(self.emit_get_value(supplied[0].0));
+                } else {
+                    let elements = supplied
+                        .iter()
+                        .map(|(temp, _, _)| self.emit_get_value(*temp))
+                        .collect();
+                    let spreads = supplied.iter().map(|(_, _, spread)| *spread).collect();
+                    lowered.push(self.emit_vararg_with_spreads(parameter, elements, spreads));
+                }
+            } else if let [(temp, _, _)] = supplied.as_slice() {
+                lowered.push(self.emit_get_value(*temp));
+            } else if supplied.is_empty() && omitted.contains(&slot) {
+                lowered.push(self.zero_placeholder(parameter));
+            } else {
+                return None;
+            }
+        }
+        let mut invoke_params = ir_params;
+        for &mask in default_masks {
+            lowered.push(self.emit_const(IrConst::Int(mask)));
+            invoke_params.push(ty_to_ir(Ty::Int));
+        }
+        if !default_masks.is_empty() {
+            lowered.push(self.emit_const(IrConst::Null));
+            invoke_params.push(ty_to_ir(Ty::obj(
+                "kotlin/jvm/internal/DefaultConstructorMarker",
+            )));
+        }
+        Some((lowered, prelude, invoke_params))
+    }
+
     fn emit_const(&mut self, value: IrConst) -> u32 {
         self.ir.add_expr(IrExpr::Const(value))
     }
@@ -5726,7 +5702,21 @@ impl<'a> Lower<'a> {
     fn emit_vararg(&mut self, array_type: Ty, elements: Vec<u32>) -> u32 {
         self.ir.add_expr(IrExpr::Vararg {
             array_type,
+            spreads: vec![false; elements.len()],
             elements,
+        })
+    }
+
+    fn emit_vararg_with_spreads(
+        &mut self,
+        array_type: Ty,
+        elements: Vec<u32>,
+        spreads: Vec<bool>,
+    ) -> u32 {
+        self.ir.add_expr(IrExpr::Vararg {
+            array_type,
+            elements,
+            spreads,
         })
     }
 
@@ -6450,6 +6440,7 @@ impl<'a> Lower<'a> {
         call_expr: AstExprId,
     ) -> Option<u32> {
         let ResolvedCall::ModuleMember {
+            receiver: receiver_ty,
             owner,
             name,
             params,
@@ -6466,8 +6457,9 @@ impl<'a> Lower<'a> {
         if let Some((class, index, _fid, linked_ret)) =
             self.link_local_method(&owner.render(), name, params)
         {
-            let (provided, prelude) =
+            let (provided, mut prelude) =
                 self.lower_selected_module_member_args(call_expr, args, params, *vararg)?;
+            let recv = self.spill_receiver_before_args(recv, *receiver_ty, &mut prelude);
             let call = self.emit_method_call(class, index, recv, provided);
             let call = self.record_suspend_call(call, *suspend, *ret);
             let call = self.coerce_to_static(call, *ret, linked_ret);
@@ -6476,20 +6468,26 @@ impl<'a> Lower<'a> {
         if !interface {
             if let Some(slots) = self.info.resolved_call_arg_slots.get(&call_expr).cloned() {
                 if slots.iter().any(Option::is_none) {
-                    let (slot_args, prelude) =
+                    let (slot_args, mut prelude) =
                         self.lower_call_slot_args_source_order(args, &slots, params, true)?;
+                    let recv = self.spill_receiver_before_args(recv, *receiver_ty, &mut prelude);
                     let mut lowered = vec![recv];
                     lowered.extend(slot_args);
-                    let mask: i32 = slots
+                    let omitted = slots
                         .iter()
                         .enumerate()
                         .filter(|(_, slot)| slot.is_none())
-                        .map(|(index, _)| 1i32 << index)
-                        .sum();
-                    self.append_default_mask_marker(&mut lowered, mask);
+                        .map(|(index, _)| index)
+                        .collect::<Vec<_>>();
+                    self.append_default_masks_marker(
+                        &mut lowered,
+                        params.len(),
+                        omitted.iter().copied(),
+                    );
                     let mut default_params = vec![Ty::obj_name(*owner)];
                     default_params.extend(params.iter().map(|&ty| self.vc_erase_ty(ty)));
-                    default_params.push(Ty::Int);
+                    default_params
+                        .extend(std::iter::repeat(Ty::Int).take(default_mask_count(params.len())));
                     default_params.push(Ty::obj("java/lang/Object"));
                     let descriptor = self
                         .runtime
@@ -6507,8 +6505,9 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        let (provided, prelude) =
+        let (provided, mut prelude) =
             self.lower_selected_module_member_args(call_expr, args, params, *vararg)?;
+        let recv = self.spill_receiver_before_args(recv, *receiver_ty, &mut prelude);
         let lowered = provided.into_iter().collect::<Option<Vec<_>>>()?;
         let call = self.emit_call(
             Callee::Virtual {
@@ -6583,11 +6582,19 @@ impl<'a> Lower<'a> {
         args: &[AstExprId],
         call_expr: AstExprId,
     ) -> Option<u32> {
-        let ResolvedCall::ModuleMemberExtension { params, vararg, .. } = target else {
+        let ResolvedCall::ModuleMemberExtension {
+            extension_receiver,
+            params,
+            vararg,
+            ..
+        } = target
+        else {
             return None;
         };
-        let (mut provided, prelude) =
+        let (mut provided, mut prelude) =
             self.lower_selected_module_member_args(call_expr, args, params, *vararg)?;
+        let extension_value =
+            self.spill_receiver_before_args(extension_value, *extension_receiver, &mut prelude);
         let call =
             self.emit_module_member_extension_call(extension_value, target, &mut provided)?;
         Some(self.wrap_arg_prelude(call, prelude))
@@ -6924,26 +6931,51 @@ impl<'a> Lower<'a> {
             .unwrap_or_default()
     }
 
-    /// Candidate base-`<init>` signatures a `super(...)` may target: the base's primary constructor
-    /// (when it has one) plus every base SECONDARY constructor (a base with no primary constructor
-    /// exposes only these). The caller matches the `super(...)` argument arity against these to pick
-    /// the base `<init>` to call.
-    fn super_ctor_candidate_tys(&self, internal: &str) -> Vec<Vec<Ty>> {
+    fn super_ctor_candidates(&self, internal: &str) -> Vec<(Vec<Ty>, Vec<String>)> {
         let Some(sid) = self.super_class(internal).map(|sup| sup.id) else {
             return Vec::new();
         };
         let sup = &self.ir.classes[sid as usize];
+        let Some(class) = self.afile.decls.iter().find_map(|declaration| {
+            let Decl::Class(class) = self.afile.decl(*declaration) else {
+                return None;
+            };
+            (class_internal(self.afile, &class.name) == sup.fq_name.render()).then_some(class)
+        }) else {
+            return Vec::new();
+        };
         let mut out = Vec::new();
         if sup.has_primary_ctor {
-            out.push(if sup.ctor_args.is_empty() {
+            let params = if sup.ctor_args.is_empty() {
                 let n = sup.ctor_param_count as usize;
                 sup.fields[..n].iter().map(|f| f.ty.clone()).collect()
             } else {
                 sup.ctor_args.iter().map(|a| a.ty).collect()
-            });
+            };
+            out.push((
+                params,
+                class
+                    .props
+                    .iter()
+                    .map(|parameter| parameter.name.clone())
+                    .collect(),
+            ));
         }
-        for sc in &sup.secondary_ctors {
-            out.push(sc.params.clone());
+        for constructor in &class.secondary_ctors {
+            out.push((
+                constructor
+                    .params
+                    .iter()
+                    .map(|parameter| {
+                        ty_to_ir(ty_of(self.afile, &parameter.ty, &*self.syms.libraries))
+                    })
+                    .collect(),
+                constructor
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.name.clone())
+                    .collect(),
+            ));
         }
         out
     }
@@ -7497,6 +7529,50 @@ impl<'a> Lower<'a> {
             }
         }
         match self.info.resolved_constructor(call).cloned()? {
+            ResolvedConstructor::Source {
+                primary,
+                params,
+                argument_slots,
+                argument_types,
+                omitted,
+                vararg,
+                default_masks,
+            } => {
+                let class = self.syms.class_by_internal(internal);
+                let value_class = class.is_some_and(|class| class.value_field.is_some());
+                let value_param_primary = primary
+                    && default_masks.is_empty()
+                    && !value_class
+                    && class.is_some_and(|class| {
+                        class.ctor_params.iter().any(|parameter| {
+                            parameter.non_null().obj_internal().is_some_and(|owner| {
+                                self.syms
+                                    .class_by_type_name(owner)
+                                    .is_some_and(|class| class.value_field.is_some())
+                            })
+                        })
+                    });
+                let (mut lowered, prelude, mut invoke_params) = self
+                    .lower_resolved_source_constructor(
+                        args,
+                        &params,
+                        &argument_slots,
+                        &argument_types,
+                        &omitted,
+                        vararg,
+                        &default_masks,
+                        value_class,
+                    )?;
+                if value_param_primary {
+                    lowered.push(self.emit_const(IrConst::Null));
+                    invoke_params.push(ty_to_ir(Ty::obj(
+                        "kotlin/jvm/internal/DefaultConstructorMarker",
+                    )));
+                }
+                let descriptor = self.runtime.method_descriptor(&invoke_params, Ty::Unit)?;
+                let new = self.emit_new_external(internal, descriptor, lowered);
+                Some(self.wrap_arg_prelude(new, prelude))
+            }
             ResolvedConstructor::Plain { member, args } => {
                 let lowered = if member.call_sig.vararg {
                     self.lower_library_member_vararg_args(Some(call), &args, &member)?
@@ -10181,6 +10257,21 @@ impl<'a> Lower<'a> {
         self.emit_block(prelude, Some(call))
     }
 
+    fn spill_receiver_before_args(
+        &mut self,
+        receiver: u32,
+        receiver_ty: Ty,
+        prelude: &mut Vec<u32>,
+    ) -> u32 {
+        if prelude.is_empty() {
+            return receiver;
+        }
+        let value = self.fresh_value();
+        let declaration = self.emit_variable(value, ty_to_ir(receiver_ty), Some(receiver));
+        prelude.insert(0, declaration);
+        self.emit_get_value(value)
+    }
+
     /// Lower a top-level function call that OMITS one or more defaulted arguments, via kotlinc's
     /// `foo$default(realparams…, int mask, Object marker)` synthetic (`Callee::LocalDefault`, emitted by
     /// `emit_facade_default_stub`). Each PROVIDED argument is evaluated in SOURCE order into a temp (so a
@@ -10509,104 +10600,55 @@ impl<'a> Lower<'a> {
         Some(self.emit_block(prelude, Some(mcall)))
     }
 
-    /// Lower a named same-module extension call while preserving source evaluation order.
-    fn lower_named_ext_call(
-        &mut self,
-        call: AstExprId,
-        receiver: AstExprId,
-        fid: u32,
-        args: &[AstExprId],
-    ) -> Option<u32> {
-        let params = self.ir.functions[fid as usize].params.clone();
-        let n = params.len();
-        if args.len() + 1 != n {
-            return None;
-        }
-        let names = self.ir.param_names(fid)?.to_vec();
-        if names.len() != n {
-            return None;
-        }
-        // Map each source argument onto a LOGICAL slot in `1..n` (slot 0 is the receiver).
-        let arg_names = self.afile.call_arg_names.get(&call.0)?;
-        let mut slot_filled = vec![false; n];
-        slot_filled[0] = true;
-        let mut arg_slot: Vec<usize> = Vec::with_capacity(args.len());
-        let mut pos = 1usize;
-        for (i, _) in args.iter().enumerate() {
-            match arg_names.get(i).and_then(|o| o.as_ref()) {
-                None => {
-                    if pos >= n || slot_filled[pos] {
-                        return None;
-                    }
-                    slot_filled[pos] = true;
-                    arg_slot.push(pos);
-                    pos += 1;
-                }
-                Some(nm) => {
-                    let idx = names.iter().position(|p| p == nm).filter(|&x| x >= 1)?;
-                    if slot_filled[idx] {
-                        return None;
-                    }
-                    slot_filled[idx] = true;
-                    arg_slot.push(idx);
-                }
-            }
-        }
-        let recv_v = self.lower_ext_receiver(receiver, &params[0], &params[0])?;
-        let recv_tmp = self.fresh_value();
-        let recv_decl = self.emit_variable(recv_tmp, params[0], Some(recv_v));
-        let mut prelude = vec![recv_decl];
-        let mut slot_temp: Vec<Option<u32>> = vec![None; n];
-        for (i, &arg) in args.iter().enumerate() {
-            let k = arg_slot[i];
-            let v = self.lower_arg(arg, &params[k])?;
-            let tmp = self.fresh_value();
-            let decl = self.emit_variable(tmp, params[k], Some(v));
-            prelude.push(decl);
-            slot_temp[k] = Some(tmp);
-        }
-        // Build args `[receiver, slot1, …]` in slot order.
-        let mut a = vec![self.emit_get_value(recv_tmp)];
-        for slot in slot_temp.iter().skip(1) {
-            let tmp = (*slot)?;
-            a.push(self.emit_get_value(tmp));
-        }
-        let ecall = self.emit_local_call(fid, a);
-        Some(self.emit_block(prelude, Some(ecall)))
-    }
-
-    /// Lower source-order arguments into temporaries, then load them in checker-resolved parameter-slot
-    /// order. This preserves Kotlin's left-to-right evaluation while keeping name resolution in the
-    /// checker.
-    fn lower_args_from_resolved_slots(
+    /// Lower arguments in source-evaluation order and return them in parameter order.
+    fn lower_call_args_in_slot_order(
         &mut self,
         call: AstExprId,
         args: &[AstExprId],
         params: &[Ty],
     ) -> Option<(Vec<u32>, Vec<u32>)> {
+        if let Some(slots) = self.info.resolved_call_arg_slots.get(&call).cloned() {
+            self.lower_call_slot_args_source_order(args, &slots, params, false)
+        } else {
+            Some((self.lower_args(args, params)?, Vec::new()))
+        }
+    }
+
+    fn lower_source_extension_args(
+        &mut self,
+        function: u32,
+        call: AstExprId,
+        args: &[AstExprId],
+        params: &[Ty],
+    ) -> Option<(Vec<u32>, Vec<u32>)> {
         let slots = self.info.resolved_call_arg_slots.get(&call)?.clone();
-        if slots.len() != args.len() || slots.iter().any(Option::is_none) {
+        if slots.len() != params.len() {
             return None;
         }
-        if params.len() != slots.len() {
-            return None;
-        }
-        let mut slot_temp: Vec<Option<u32>> = vec![None; params.len()];
+        let defaults = self.ir.fn_params.get(&function)?.defaults.as_ref()?.clone();
+        let mut slot_temp = vec![None; params.len()];
         let mut prelude = Vec::new();
-        for &arg in args {
-            let slot_idx = slots.iter().position(|slot| *slot == Some(arg))?;
-            if slot_temp[slot_idx].is_some() {
-                return None;
-            }
-            let ir_ty = ty_to_ir(params[slot_idx]);
-            let value = self.lower_arg(arg, &ir_ty)?;
-            let tmp = self.fresh_value();
-            prelude.push(self.emit_variable(tmp, ir_ty, Some(value)));
-            slot_temp[slot_idx] = Some(tmp);
+        for &argument in args {
+            let index = slots.iter().position(|slot| *slot == Some(argument))?;
+            let value = self.lower_arg(argument, &params[index])?;
+            let temp = self.fresh_value();
+            prelude.push(self.emit_variable(temp, params[index], Some(value)));
+            slot_temp[index] = Some(temp);
         }
         let mut lowered = Vec::with_capacity(params.len());
-        for tmp in slot_temp {
-            lowered.push(self.emit_get_value(tmp?));
+        for (index, temp) in slot_temp.into_iter().enumerate() {
+            if let Some(temp) = temp {
+                lowered.push(self.emit_get_value(temp));
+                continue;
+            }
+            let default = defaults
+                .get(index + 1)
+                .and_then(|default| *default)
+                .map(|default| self.ir.exprs[default as usize].clone())?;
+            let IrExpr::Const(constant) = default else {
+                return None;
+            };
+            lowered.push(self.emit_const(constant));
         }
         Some((lowered, prelude))
     }
@@ -10646,68 +10688,6 @@ impl<'a> Lower<'a> {
                 signature.params.clone(),
             ))
             .copied()
-    }
-
-    /// The emitted id of a top-level extension `name` applicable to `recv_ty`, plus the receiver type
-    /// the extension was found on. Exact receiver matches win before walking supertypes.
-    fn ext_fun_id_for_recv(&self, recv_ty: Ty, name: &str, n_args: usize) -> Option<(u32, Ty)> {
-        let pick = |recv: Ty| self.unique_ext_fun_id_by_arity(recv, name, n_args);
-        if let Some(fid) = pick(recv_ty) {
-            return Some((fid, recv_ty));
-        }
-        if let Some(i) = recv_ty.non_null().obj_internal() {
-            if self.resolve_method_name(i, name).is_some() {
-                return None;
-            }
-        }
-        let mut seen = std::collections::HashSet::new();
-        let mut queue: std::collections::VecDeque<TypeName> = std::collections::VecDeque::new();
-        if let Some(c) = recv_ty
-            .non_null()
-            .obj_internal()
-            .and_then(|i| self.syms.class_by_type_name(i))
-        {
-            for i in c.interface_names() {
-                queue.push_back(i);
-            }
-            if let Some(s) = c.super_internal_name() {
-                queue.push_back(s);
-            }
-        }
-        while let Some(internal) = queue.pop_front() {
-            if !seen.insert(internal) {
-                continue;
-            }
-            let Some(c) = self.syms.class_by_type_name(internal) else {
-                continue;
-            };
-            if c.tparam_names.is_empty() {
-                if let Some(fid) = pick(Ty::obj_name(internal)) {
-                    return Some((fid, Ty::obj_name(internal)));
-                }
-            }
-            for i in c.interface_names() {
-                queue.push_back(i);
-            }
-            if let Some(s) = c.super_internal_name() {
-                queue.push_back(s);
-            }
-        }
-        None
-    }
-
-    fn lower_ext_receiver(
-        &mut self,
-        receiver: AstExprId,
-        decl_recv: &Ty,
-        param0: &Ty,
-    ) -> Option<u32> {
-        let recv_ty = self.recv_ty(receiver);
-        let recv = self.lower_arg(receiver, param0)?;
-        if recv_ty.is_reference() && recv_ty.erased_recv() != decl_recv.erased_recv() {
-            return Some(self.emit_type_op(IrTypeOp::Cast, recv, *param0));
-        }
-        Some(recv)
     }
 
     /// An arithmetic operator member of a primitive numeric type called by its METHOD name
@@ -12584,6 +12564,7 @@ impl<'a> Lower<'a> {
                 ret: selected_ret,
                 owner,
                 source,
+                vararg,
             } => {
                 if target != name || receiver.erased_recv() != recv_ty.erased_recv() {
                     return None;
@@ -12605,24 +12586,46 @@ impl<'a> Lower<'a> {
                 if let Some(fid) = exact_local.or_else(|| legacy_local.flatten()) {
                     let params = self.ir.functions[fid as usize].params.clone();
                     let ret = self.ir.functions[fid as usize].ret;
-                    if ret != selected_ret
-                        || params.len() != args.len() + 1
-                        || params.get(1..) != Some(selected_params.as_slice())
-                    {
+                    if ret != selected_ret || params.get(1..) != Some(selected_params.as_slice()) {
                         return None;
                     }
                     let receiver_value = self.coerce_argument_value(recv_v, recv_ty, params[0])?;
+                    let (arguments, mut prelude) = match source_expr {
+                        Some(call)
+                            if self
+                                .info
+                                .resolved_call_arg_slots
+                                .get(&call)
+                                .is_some_and(|slots| slots.iter().any(Option::is_none)) =>
+                        {
+                            self.lower_source_extension_args(fid, call, args, &params[1..])?
+                        }
+                        Some(call)
+                            if vararg && !self.info.resolved_call_arg_slots.contains_key(&call) =>
+                        {
+                            let value_params = &params[1..];
+                            let n_fixed = value_params.len().checked_sub(1)?;
+                            (
+                                self.lower_call_args_vararg(args, value_params, true, n_fixed)?,
+                                Vec::new(),
+                            )
+                        }
+                        Some(call) => {
+                            self.lower_call_args_in_slot_order(call, args, &params[1..])?
+                        }
+                        None if args.len() == params.len() - 1 => {
+                            (self.lower_args(args, &params[1..])?, Vec::new())
+                        }
+                        None => return None,
+                    };
+                    let receiver_value =
+                        self.spill_receiver_before_args(receiver_value, recv_ty, &mut prelude);
                     let mut lowered = vec![receiver_value];
-                    for (argument, parameter) in args.iter().zip(&params[1..]) {
-                        lowered.push(self.lower_arg(*argument, parameter)?);
-                    }
+                    lowered.extend(arguments);
                     let call = self.emit_local_call(fid, lowered);
-                    return Some((call, ret));
+                    return Some((self.wrap_arg_prelude(call, prelude), ret));
                 }
                 let owner = owner?;
-                if selected_params.len() != args.len() {
-                    return None;
-                }
                 let physical_receiver = source
                     .and_then(|(file, declaration)| {
                         self.syms
@@ -12637,10 +12640,27 @@ impl<'a> Lower<'a> {
                     .unwrap_or(receiver);
                 let receiver_value =
                     self.coerce_argument_value(recv_v, recv_ty, physical_receiver)?;
+                let params = tys_to_ir(&selected_params);
+                let (arguments, mut prelude) = match source_expr {
+                    Some(call)
+                        if vararg && !self.info.resolved_call_arg_slots.contains_key(&call) =>
+                    {
+                        let n_fixed = params.len().checked_sub(1)?;
+                        (
+                            self.lower_call_args_vararg(args, &params, true, n_fixed)?,
+                            Vec::new(),
+                        )
+                    }
+                    Some(call) => self.lower_call_args_in_slot_order(call, args, &params)?,
+                    None if args.len() == params.len() => {
+                        (self.lower_args(args, &params)?, Vec::new())
+                    }
+                    None => return None,
+                };
+                let receiver_value =
+                    self.spill_receiver_before_args(receiver_value, recv_ty, &mut prelude);
                 let mut lowered = vec![receiver_value];
-                for (argument, parameter) in args.iter().zip(&selected_params) {
-                    lowered.push(self.lower_arg(*argument, &ty_to_ir(*parameter))?);
-                }
+                lowered.extend(arguments);
                 let mut physical_params = Vec::with_capacity(selected_params.len() + 1);
                 physical_params.push(physical_receiver);
                 physical_params.extend(selected_params.iter().copied());
@@ -12649,10 +12669,10 @@ impl<'a> Lower<'a> {
                     .method_descriptor(&physical_params, selected_ret)?;
                 let call =
                     self.emit_static_call(owner, target, descriptor, InlineKind::None, lowered);
-                Some((call, selected_ret))
+                Some((self.wrap_arg_prelude(call, prelude), selected_ret))
             }
             ResolvedCall::Extension(callable) => {
-                if callable.name != name || callable.params.len() != args.len() + 1 {
+                if callable.name != name {
                     return None;
                 }
                 let selected_ret = callable.ret;
@@ -12663,12 +12683,19 @@ impl<'a> Lower<'a> {
                     } else {
                         recv_v
                     };
+                let params = tys_to_ir(&callable.params[1..]);
+                let (arguments, mut prelude) = match source_expr {
+                    Some(call) => self.lower_call_args_in_slot_order(call, args, &params)?,
+                    None if args.len() == params.len() => {
+                        (self.lower_args(args, &params)?, Vec::new())
+                    }
+                    None => return None,
+                };
+                let receiver = self.spill_receiver_before_args(receiver, recv_ty, &mut prelude);
                 let mut lowered = vec![receiver];
-                for (argument, parameter) in args.iter().zip(&callable.params[1..]) {
-                    lowered.push(self.lower_arg(*argument, &ty_to_ir(*parameter))?);
-                }
+                lowered.extend(arguments);
                 let call = self.emit_library_static_call(callable, lowered, false);
-                Some((call, selected_ret))
+                Some((self.wrap_arg_prelude(call, prelude), selected_ret))
             }
             _ => None,
         }
@@ -14095,6 +14122,23 @@ impl<'a> Lower<'a> {
         params: &[Ty],
         fill_omitted: bool,
     ) -> Option<(Vec<u32>, Vec<u32>)> {
+        self.lower_call_slot_args_source_order_with_element(
+            source_args,
+            slots,
+            params,
+            fill_omitted,
+            None,
+        )
+    }
+
+    fn lower_call_slot_args_source_order_with_element(
+        &mut self,
+        source_args: &[AstExprId],
+        slots: &[Option<AstExprId>],
+        params: &[Ty],
+        fill_omitted: bool,
+        elem_prim: Option<Ty>,
+    ) -> Option<(Vec<u32>, Vec<u32>)> {
         if slots.len() != params.len() {
             return None;
         }
@@ -14105,8 +14149,19 @@ impl<'a> Lower<'a> {
             if slot_temp[slot_idx].is_some() {
                 return None;
             }
-            let ir_ty = ty_to_ir(params[slot_idx]);
-            let value = self.lower_arg(arg, &ir_ty)?;
+            let parameter = params[slot_idx];
+            let ir_ty = ty_to_ir(parameter);
+            let value = if parameter.is_erased_top()
+                && elem_prim.is_some_and(|element| {
+                    let argument = self.info.ty(arg);
+                    self.has_scalar_value_repr(argument) && argument != element
+                }) {
+                let element = elem_prim?;
+                let value = self.lower_arg(arg, &ty_to_ir(element))?;
+                self.emit_type_op(IrTypeOp::ImplicitCoercion, value, ir_ty)
+            } else {
+                self.lower_arg(arg, &ir_ty)?
+            };
             let tmp = self.fresh_value();
             prelude.push(self.emit_variable(tmp, ir_ty, Some(value)));
             slot_temp[slot_idx] = Some(tmp);
@@ -14222,17 +14277,18 @@ impl<'a> Lower<'a> {
         // `$default` synthetic in PARAMETER order — kotlinc's evaluation-order semantics for a named
         // call whose labels don't follow declaration order (`copy(createdAt = now(), status = P)`),
         // where a side-effecting argument must not be reordered past a later one.
-        let (slot_args, prelude) =
+        let (slot_args, mut prelude) =
             self.lower_call_slot_args_source_order(args, &slots, real, true)?;
+        let recv = self.spill_receiver_before_args(recv, rt, &mut prelude);
         let mut a = vec![recv];
         a.extend(slot_args);
-        let mask: i32 = slots
+        let omitted = slots
             .iter()
             .enumerate()
             .filter(|(_, s)| s.is_none())
-            .map(|(i, _)| 1i32 << i)
-            .sum();
-        self.append_default_mask_marker(&mut a, mask);
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        self.append_default_masks_marker(&mut a, slots.len(), omitted);
         let call = self.emit_static_call(
             owner,
             format!("{}$default", member.name),
@@ -14398,8 +14454,11 @@ impl<'a> Lower<'a> {
         let source_receiver = c.source_receiver;
         let mut a = vec![recv];
         let explicit_params = c.params.get(1..)?;
+        let mut arg_prelude = Vec::new();
         if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
-            let slot_args = self.lower_call_slot_args(args, &slots, explicit_params)?;
+            let (slot_args, prelude) =
+                self.lower_call_slot_args_source_order(args, &slots, explicit_params, true)?;
+            arg_prelude = prelude;
             if c.default_call {
                 let mask: i32 = slots
                     .iter()
@@ -14426,6 +14485,8 @@ impl<'a> Lower<'a> {
                 }
             }
         }
+        let recv = self.spill_receiver_before_args(a[0], rt, &mut arg_prelude);
+        a[0] = recv;
         // For a `<reified T>` extension the backend must SPLICE (its compiled body carries a
         // `reifiedOperationMarker`/`T::class` the JVM can't call directly): bind the callee's reified
         // type-parameter NAMES to the call's explicit type arguments, or — when omitted — to the RECEIVER's
@@ -14439,7 +14500,8 @@ impl<'a> Lower<'a> {
             self.ir.reified_call_subst.insert(call, reified_subst);
         }
         self.record_ext_source_receiver(call, source_receiver);
-        Some(self.coerce_erased_call_result(e, call, &physical_ret, true))
+        let call = self.coerce_erased_call_result(e, call, &physical_ret, true);
+        Some(self.wrap_arg_prelude(call, arg_prelude))
     }
 
     /// Lower call arguments, packing a trailing `vararg` parameter (`fun f(vararg s: T)` called
@@ -17593,23 +17655,28 @@ impl<'a> Lower<'a> {
         if sig_params.len() != pnames.len() {
             return None;
         }
-        // Fixed (non-vararg) parameter count. A vararg call supplies `>= n_fixed` arguments (the rest pack
-        // into the trailing array); a non-vararg call must match exactly (after default-filling).
         let n_fixed = if vararg {
             sig_params.len() - 1
         } else {
             sig_params.len()
         };
-        // Effective per-parameter arguments. For a non-vararg call, place named arguments at their declared
-        // position and fill each omitted parameter with its default expression (an inline fn substitutes the
-        // default directly — no `$default` method). A vararg call keeps the raw list (packed below).
+        let source_args = args.to_vec();
         let eff_storage: Vec<AstExprId>;
+        let mut named_vararg_omitted = false;
         let has_named = self
             .afile
             .call_arg_names
             .get(&call_id)
             .is_some_and(|n| n.iter().any(|x| x.is_some()));
-        let args: &[AstExprId] = if vararg {
+        let args: &[AstExprId] = if vararg && has_named {
+            let slots = self.info.resolved_call_arg_slots.get(&AstExprId(call_id))?;
+            if slots.len() != sig_params.len() || slots[..n_fixed].iter().any(Option::is_none) {
+                return None;
+            }
+            named_vararg_omitted = slots[n_fixed].is_none();
+            eff_storage = slots.iter().flatten().copied().collect();
+            &eff_storage
+        } else if vararg {
             if args.len() < n_fixed {
                 return None;
             }
@@ -17757,6 +17824,7 @@ impl<'a> Lower<'a> {
         let caller_fn_name = self.cur_fn_name.clone();
         let lam_depth = self.inline_lambdas.len();
         let mut stmts = Vec::new();
+        let mut prelowered_args = HashMap::new();
         if let Some(rt) = &recv_ty {
             let rt = *rt;
             if let Some(slot) = member
@@ -17797,11 +17865,76 @@ impl<'a> Lower<'a> {
                 self.scope.push(("this".to_string(), slot, rt));
             }
         }
+        if has_named {
+            for argument in &source_args {
+                let Some(parameter_index) = args.iter().position(|candidate| candidate == argument)
+                else {
+                    self.scope.truncate(depth);
+                    self.inline_lambdas.truncate(lam_depth);
+                    self.inline_active.truncate(active_depth);
+                    self.reified_subst.truncate(reif_depth);
+                    return None;
+                };
+                let parameter_ty = sig_params[parameter_index];
+                let splice = matches!(parameter_ty, Ty::Fun(_))
+                    && matches!(self.afile.expr(*argument), Expr::Lambda { .. })
+                    && !name_used_as_value(self.afile, body, &pnames[parameter_index]);
+                if splice {
+                    continue;
+                }
+                let target_ty = if matches!(parameter_ty, Ty::Fun(_)) {
+                    parameter_ty
+                } else {
+                    member_param_shapes
+                        .as_ref()
+                        .and_then(|shapes| shapes.get(parameter_index))
+                        .map(|shape| crate::symbol_resolver::ty_subst(*shape, &tbinds))
+                        .or_else(|| {
+                            tbinds
+                                .get(f.params[parameter_index].ty.name.as_str())
+                                .copied()
+                        })
+                        .unwrap_or(parameter_ty)
+                };
+                let Some(value) = self.lower_arg(*argument, &ty_to_ir(target_ty)) else {
+                    self.scope.truncate(depth);
+                    self.inline_lambdas.truncate(lam_depth);
+                    self.inline_active.truncate(active_depth);
+                    self.reified_subst.truncate(reif_depth);
+                    return None;
+                };
+                let slot = self.fresh_value();
+                stmts.push(self.emit_variable(slot, ty_to_ir(target_ty), Some(value)));
+                prelowered_args.insert(*argument, slot);
+            }
+        }
         for (i, pty) in sig_params.iter().enumerate() {
-            // The trailing `vararg` parameter: pack the remaining arguments into a fresh array bound to it
-            // (a `kotlin/Array`/`IntArray`/… local), exactly as the non-inline call site does. The inlined
-            // body then iterates it normally.
             if vararg && i == n_fixed {
+                if has_named {
+                    if named_vararg_omitted {
+                        let value = self.emit_vararg(ty_to_ir(*pty), Vec::new());
+                        let slot = self.fresh_value();
+                        stmts.push(self.emit_variable(slot, ty_to_ir(*pty), Some(value)));
+                        self.scope.push((pnames[i].clone(), slot, *pty));
+                        continue;
+                    }
+                    let Some(value) = prelowered_args
+                        .get(&args[i])
+                        .copied()
+                        .map(|slot| self.emit_get_value(slot))
+                        .or_else(|| self.lower_arg(args[i], &ty_to_ir(*pty)))
+                    else {
+                        self.scope.truncate(depth);
+                        self.inline_lambdas.truncate(lam_depth);
+                        self.inline_active.truncate(active_depth);
+                        self.reified_subst.truncate(reif_depth);
+                        return None;
+                    };
+                    let slot = self.fresh_value();
+                    stmts.push(self.emit_variable(slot, ty_to_ir(*pty), Some(value)));
+                    self.scope.push((pnames[i].clone(), slot, *pty));
+                    continue;
+                }
                 let elem_ty = match pty.array_elem() {
                     Some(t) => t,
                     None => {
@@ -17923,7 +18056,12 @@ impl<'a> Lower<'a> {
                     // invokes it via `.invoke`. Semantically identical (kotlinc inlines the reference too;
                     // the value form is box-OK and verifies) — no FunctionN-drop bookkeeping needed.
                     let slot = self.fresh_value();
-                    let val = match self.lower_arg(args[i], &ty_to_ir(*pty)) {
+                    let val = match prelowered_args
+                        .get(&args[i])
+                        .copied()
+                        .map(|slot| self.emit_get_value(slot))
+                        .or_else(|| self.lower_arg(args[i], &ty_to_ir(*pty)))
+                    {
                         Some(v) => v,
                         None => {
                             self.scope.truncate(depth);
@@ -17948,7 +18086,12 @@ impl<'a> Lower<'a> {
                     .or_else(|| tbinds.get(f.params[i].ty.name.as_str()).copied())
                     .unwrap_or(*pty);
                 let slot = self.fresh_value();
-                let val = match self.lower_arg(args[i], &ty_to_ir(spty)) {
+                let val = match prelowered_args
+                    .get(&args[i])
+                    .copied()
+                    .map(|slot| self.emit_get_value(slot))
+                    .or_else(|| self.lower_arg(args[i], &ty_to_ir(spty)))
+                {
                     Some(v) => v,
                     None => {
                         self.scope.truncate(depth);
@@ -18736,6 +18879,10 @@ impl<'a> Lower<'a> {
                                     None,
                                     Some(&target),
                                 )?
+                            } else if let Some(target @ ResolvedCall::ModuleMember { .. }) =
+                                self.info.resolved_calls.get(&e).cloned()
+                            {
+                                self.lower_module_member_call(recv2, &target, &args, e)?
                             } else if let Some(
                                 target @ ResolvedCall::ModuleMemberExtension { .. },
                             ) = self.info.resolved_calls.get(&e).cloned()
@@ -18760,13 +18907,19 @@ impl<'a> Lower<'a> {
                                 if args.len() != params.len() {
                                     return None;
                                 }
-                                let a = self.lower_args(&args, &params)?;
+                                let (a, arg_prelude) =
+                                    self.lower_call_args_in_slot_order(e, &args, &params)?;
                                 let call = self.emit_method_call(
                                     class,
                                     index,
                                     recv2,
                                     a.into_iter().map(Some).collect(),
                                 );
+                                let call = if arg_prelude.is_empty() {
+                                    call
+                                } else {
+                                    self.wrap_arg_prelude(call, arg_prelude)
+                                };
                                 self.coerce_to_static(call, result_ty, physical_ret)
                             } else if let Some(fid) =
                                 self.unique_ext_fun_id_by_arity(nn, &name, args.len())
@@ -18780,41 +18933,53 @@ impl<'a> Lower<'a> {
                                 if params.len() != args.len() + 1 {
                                     return None;
                                 }
+                                let (lowered, arg_prelude) =
+                                    self.lower_call_args_in_slot_order(e, &args, &params[1..])?;
                                 let mut a = vec![recv2];
-                                for (arg, pt) in args.iter().zip(&params[1..]) {
-                                    a.push(self.lower_arg(*arg, pt)?);
-                                }
-                                self.emit_local_call(fid, a)
+                                a.extend(lowered);
+                                let call = self.emit_local_call(fid, a);
+                                self.wrap_arg_prelude(call, arg_prelude)
                             } else {
                                 // A classpath instance method (`s?.substring(1)`).
                                 if let Some(resolved) = self.info.resolved_member(e).cloned() {
-                                    let m = resolved.member;
-                                    if m.name != name {
+                                    if resolved.member.name != name {
                                         return None;
                                     }
-                                    let a = if m.call_sig.vararg {
-                                        self.lower_library_member_vararg_args(Some(e), &args, &m)?
+                                    if let Some(call) = self.lower_library_default_member_call(
+                                        recv2, nn, e, &resolved, &args,
+                                    ) {
+                                        call
                                     } else {
-                                        if m.params.len() != args.len() {
-                                            return None;
-                                        }
-                                        let mut lowered = Vec::new();
-                                        for (arg, pt) in args.iter().zip(&m.params) {
-                                            lowered.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
-                                        }
-                                        lowered
-                                    };
-                                    let ret = resolved.ret;
-                                    let physical_ret = m.physical_ret;
-                                    let call = self.emit_library_member_call(
-                                        recv2,
-                                        internal_id,
-                                        m,
-                                        ret,
-                                        resolved.suspend,
-                                        a,
-                                    );
-                                    self.coerce_to_static(call, ret, physical_ret)
+                                        let m = resolved.member;
+                                        let (a, arg_prelude) = if m.call_sig.vararg {
+                                            (
+                                                self.lower_library_member_vararg_args(
+                                                    Some(e),
+                                                    &args,
+                                                    &m,
+                                                )?,
+                                                Vec::new(),
+                                            )
+                                        } else {
+                                            if m.params.len() != args.len() {
+                                                return None;
+                                            }
+                                            let params = m.params.clone();
+                                            self.lower_call_args_in_slot_order(e, &args, &params)?
+                                        };
+                                        let ret = resolved.ret;
+                                        let physical_ret = m.physical_ret;
+                                        let call = self.emit_library_member_call(
+                                            recv2,
+                                            internal_id,
+                                            m,
+                                            ret,
+                                            resolved.suspend,
+                                            a,
+                                        );
+                                        let call = self.wrap_arg_prelude(call, arg_prelude);
+                                        self.coerce_to_static(call, ret, physical_ret)
+                                    }
                                 } else {
                                     // A stdlib EXTENSION via safe call (`s?.uppercase()`) — inline it on
                                     // the non-null receiver, the same path as the qualified call.
@@ -21907,8 +22072,10 @@ impl<'a> Lower<'a> {
                                 return None;
                             }
                             if ctx_n == 0 && self.info.resolved_call_arg_slots.contains_key(&e) {
-                                let (slot_args, prelude) =
-                                    self.lower_args_from_resolved_slots(e, &args, &c.params)?;
+                                let slots = self.info.resolved_call_arg_slots.get(&e).cloned()?;
+                                let (slot_args, prelude) = self.lower_call_slot_args_source_order(
+                                    &args, &slots, &c.params, false,
+                                )?;
                                 a.extend(slot_args);
                                 arg_prelude = prelude;
                             } else {
@@ -22112,6 +22279,34 @@ impl<'a> Lower<'a> {
                             .call_arg_names
                             .get(&e.0)
                             .map_or(true, |ns| ns.iter().all(|n| n.is_none()));
+                        if let Some(ResolvedConstructor::Source {
+                            primary,
+                            params,
+                            argument_slots,
+                            argument_types,
+                            omitted,
+                            vararg,
+                            default_masks,
+                        }) = self.info.resolved_constructor(e).cloned()
+                        {
+                            let value_class = self.ir.classes[class as usize].is_value;
+                            let (lowered, prelude, invoke_params) = self
+                                .lower_resolved_source_constructor(
+                                    &args,
+                                    &params,
+                                    &argument_slots,
+                                    &argument_types,
+                                    &omitted,
+                                    vararg,
+                                    &default_masks,
+                                    value_class,
+                                )?;
+                            let exact_params =
+                                (!primary || !default_masks.is_empty() || value_class)
+                                    .then_some(invoke_params);
+                            let new = self.emit_new(class, lowered, exact_params);
+                            return Some(self.wrap_arg_prelude(new, prelude));
+                        }
                         let arg_prims: Vec<Option<Ty>> = (0..args.len())
                             .map(|i| {
                                 prop_tys
@@ -22408,11 +22603,14 @@ impl<'a> Lower<'a> {
                     if let ([arg], true) = (
                         &args[..],
                         self.has_scalar_value_repr(self.info.ty(receiver))
-                            && !(self.afile.infix_calls.contains(&e.0)
-                                && self.ext_fun_ids.contains_key(&(
-                                    self.info.ty(receiver).erased_recv(),
-                                    name.clone(),
-                                ))),
+                            && !matches!(
+                                self.info.resolved_calls.get(&e),
+                                Some(
+                                    ResolvedCall::Extension(_)
+                                        | ResolvedCall::ModuleExtension { .. }
+                                        | ResolvedCall::ModuleMemberExtension { .. }
+                                )
+                            ),
                     ) {
                         if let Some(r) =
                             self.lower_prim_op_method(receiver, &name, *arg, self.info.ty(e))
@@ -22791,129 +22989,21 @@ impl<'a> Lower<'a> {
                             }
                         }
                     }
-                    // A top-level extension function `recv.name(args)` → a static call whose first
-                    // argument is the receiver (matching how the extension was registered/emitted).
+                    if let Some(target @ ResolvedCall::ModuleExtension { .. }) =
+                        self.info.resolved_calls.get(&e).cloned()
                     {
-                        if !self.afile.call_arg_names.contains_key(&e.0) {
-                            if let Some(target @ ResolvedCall::ModuleExtension { .. }) =
-                                self.info.resolved_calls.get(&e).cloned().filter(|target| {
-                                    matches!(
-                                        target,
-                                        ResolvedCall::ModuleExtension { params, .. }
-                                            if params.len() == args.len()
-                                    )
-                                })
-                            {
-                                let receiver_ty = self.recv_ty(receiver);
-                                let receiver = self.expr(receiver)?;
-                                return self
-                                    .lower_selected_op_call(
-                                        receiver,
-                                        receiver_ty,
-                                        &name,
-                                        &args,
-                                        target,
-                                        Some(e),
-                                    )
-                                    .map(|(value, _)| value);
-                            }
-                        }
-                        let selected_source = self.info.resolved_source_call(e);
-                        let exact_local = selected_source.and_then(|(file, declaration)| {
-                            (file == self.file_index).then_some(())?;
-                            let declaration = ast::DeclId(declaration);
-                            let fid = self.fun_ids_by_decl.get(&declaration).copied()?;
-                            let (decl_recv, _) =
-                                self.syms.source_extension_function(file, declaration)?;
-                            Some((fid, decl_recv))
-                        });
-                        let target = if exact_local.is_some() {
-                            exact_local
-                        } else if selected_source.is_none() {
-                            self.ext_fun_id_for_recv(self.recv_ty(receiver), &name, args.len())
-                        } else {
-                            None
-                        };
-                        if let Some((fid, decl_recv)) = target {
-                            let params = self.ir.functions[fid as usize].params.clone();
-                            if params.len() == args.len() + 1 {
-                                // A NAMED extension call may reorder the arguments: map labels onto
-                                // positions and evaluate receiver + args in source order (never the
-                                // positional pairing below, which would bind labels in the wrong order).
-                                if self.afile.call_arg_names.contains_key(&e.0) {
-                                    return self.lower_named_ext_call(e, receiver, fid, &args);
-                                }
-                                let recv =
-                                    self.lower_ext_receiver(receiver, &decl_recv, &params[0])?;
-                                let mut a = vec![recv];
-                                for (arg, pt) in args.iter().zip(&params[1..]) {
-                                    a.push(self.lower_arg(*arg, pt)?);
-                                }
-                                return Some(self.emit_local_call(fid, a));
-                            }
-                            // Omitted extension arguments are filled from constant defaults.
-                            if let Some(param_info) = self.ir.fn_params.get(&fid).cloned() {
-                                let defaults = param_info.defaults;
-                                let names = param_info.names;
-                                let n = params.len();
-                                let arg_names = self.afile.call_arg_names.get(&e.0).cloned();
-                                let recv =
-                                    self.lower_ext_receiver(receiver, &decl_recv, &params[0])?;
-                                let mut slot: Vec<Option<u32>> = vec![None; n];
-                                slot[0] = Some(recv);
-                                let mut pos = 1usize;
-                                let mut ok = names.len() == n;
-                                for (ai, arg) in args.iter().enumerate() {
-                                    let nm = arg_names
-                                        .as_ref()
-                                        .and_then(|v| v.get(ai).cloned().flatten());
-                                    let p = match nm {
-                                        Some(s) => names.iter().position(|f| *f == s),
-                                        None => {
-                                            let p = pos;
-                                            pos += 1;
-                                            Some(p)
-                                        }
-                                    };
-                                    match p {
-                                        Some(p) if p < n && slot[p].is_none() => {
-                                            slot[p] = Some(self.lower_arg(*arg, &params[p])?);
-                                        }
-                                        _ => {
-                                            ok = false;
-                                            break;
-                                        }
-                                    }
-                                }
-                                if ok {
-                                    let mut a = Vec::with_capacity(n);
-                                    for (k, s) in slot.iter().enumerate() {
-                                        let v = match s {
-                                            Some(v) => *v,
-                                            // A constant default — clone it as a fresh node (avoid aliasing).
-                                            None => match defaults
-                                                .as_ref()
-                                                .and_then(|defaults| {
-                                                    defaults.get(k).and_then(|d| *d)
-                                                })
-                                                .map(|d| self.ir.exprs[d as usize].clone())
-                                            {
-                                                Some(IrExpr::Const(c)) => self.emit_const(c),
-                                                _ => {
-                                                    ok = false;
-                                                    break;
-                                                }
-                                            },
-                                        };
-                                        a.push(v);
-                                        let _ = k;
-                                    }
-                                    if ok && a.len() == n {
-                                        return Some(self.emit_local_call(fid, a));
-                                    }
-                                }
-                            }
-                        }
+                        let receiver_ty = self.recv_ty(receiver);
+                        let receiver = self.expr(receiver)?;
+                        return self
+                            .lower_selected_op_call(
+                                receiver,
+                                receiver_ty,
+                                &name,
+                                &args,
+                                target,
+                                Some(e),
+                            )
+                            .map(|(value, _)| value);
                     }
                     // Unsigned conversions. `UInt`/`Int` and `ULong`/`Long` share a JVM representation,
                     // so a conversion that doesn't change the representation is a no-op reinterpret;
@@ -23093,6 +23183,29 @@ impl<'a> Lower<'a> {
                                 .into()
                         });
                         if member.call_sig.vararg {
+                            if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned()
+                            {
+                                if slots.iter().any(Option::is_none) {
+                                    return None;
+                                }
+                                let (a, mut prelude) = self.lower_call_slot_args_source_order(
+                                    &args,
+                                    &slots,
+                                    &member.params,
+                                    false,
+                                )?;
+                                let recv = self.spill_receiver_before_args(recv, rt, &mut prelude);
+                                let call = self.emit_library_member_call(
+                                    recv,
+                                    owner,
+                                    member,
+                                    ret,
+                                    resolved.suspend,
+                                    a,
+                                );
+                                let call = self.coerce_to_static(call, ret, physical_ret);
+                                return Some(self.wrap_arg_prelude(call, prelude));
+                            }
                             let a =
                                 self.lower_library_member_vararg_args(Some(e), &args, &member)?;
                             let call = self.emit_library_member_call(
@@ -23133,14 +23246,14 @@ impl<'a> Lower<'a> {
                         };
                         // Coerce each argument to the resolved parameter type so a primitive flowing into
                         // an erased `Any` parameter (`List<Int>.add(E)` → `add(Object)`) autoboxes.
-                        let a = if let Some(slots) =
+                        let (a, mut prelude) = if let Some(slots) =
                             self.info.resolved_call_arg_slots.get(&e).cloned()
                         {
                             if slots.iter().any(Option::is_none) {
                                 return None;
                             }
-                            self.lower_call_slot_args_with_element(
-                                &args, &slots, &mparams, elem_prim,
+                            self.lower_call_slot_args_source_order_with_element(
+                                &args, &slots, &mparams, false, elem_prim,
                             )?
                         } else {
                             let mut lowered = Vec::new();
@@ -23167,8 +23280,9 @@ impl<'a> Lower<'a> {
                                     None => lowered.push(self.expr(arg)?),
                                 }
                             }
-                            lowered
+                            (lowered, Vec::new())
                         };
+                        let recv = self.spill_receiver_before_args(recv, rt, &mut prelude);
                         let call = self.emit_library_member_call(
                             recv,
                             owner,
@@ -23179,7 +23293,8 @@ impl<'a> Lower<'a> {
                         );
                         // A generic member whose erased return is `Object` but whose substituted type is
                         // more specific (`List<Int>.get` → `Int`) gets the unbox/checkcast kotlinc emits.
-                        self.coerce_to_static(call, ret, physical_ret)
+                        let call = self.coerce_to_static(call, ret, physical_ret);
+                        self.wrap_arg_prelude(call, prelude)
                     } else if let Some((internal, m)) = {
                         // A `@JvmStatic` member of a classpath `object` (`IdGen.of(x)`) → a static
                         // method on the object class (`invokestatic`), found in the type's static list.
@@ -23226,6 +23341,10 @@ impl<'a> Lower<'a> {
                                 }
                             }
                         }
+                        if self.info.resolved_call_arg_slots.contains_key(&e) {
+                            let receiver = self.expr(receiver)?;
+                            return self.lower_ext_call_on(receiver, rt, &name, &args, e);
+                        }
                         // A library extension `recv.name(args)` → `invokestatic facade.name(recv, args)`.
                         // The CHECKER resolved it (sole resolver) and recorded the callable; the lowerer
                         // only reads it. Owner + descriptor come from that record — no name hardcoded.
@@ -23241,25 +23360,7 @@ impl<'a> Lower<'a> {
                             && args
                                 .last()
                                 .is_some_and(|&x| matches!(self.info.ty(x), Ty::Fun(_)));
-                        if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
-                            let slot_args =
-                                self.lower_call_slot_args(&args, &slots, explicit_params)?;
-                            if c.default_call {
-                                let mask: i32 = slots
-                                    .iter()
-                                    .enumerate()
-                                    .filter(|(_, slot)| slot.is_none())
-                                    .map(|(i, _)| 1i32 << i)
-                                    .sum();
-                                a.extend(slot_args);
-                                self.append_default_mask_marker(&mut a, mask);
-                            } else {
-                                if slots.iter().any(Option::is_none) {
-                                    return None;
-                                }
-                                a.extend(slot_args);
-                            }
-                        } else if c.default_call {
+                        if c.default_call {
                             self.append_default_call_args(
                                 &mut a,
                                 explicit_params,
