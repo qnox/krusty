@@ -22334,6 +22334,28 @@ impl<'a> Lower<'a> {
                         }) = self.info.resolved_constructor(e).cloned()
                         {
                             let value_class = self.ir.classes[class as usize].is_value;
+                            // The default-argument constructor ABI is only usable when the target
+                            // actually emits its stub. A VALUE class needs `constructor-impl$default`,
+                            // which exists only if its default expression lowered; and an ordinary
+                            // class's `<init>(…, mask, marker)` is emitted from the LOGICAL parameter
+                            // types, which a value-class parameter erases away underneath. Neither is
+                            // modelled — skip the file rather than call a constructor nothing emits.
+                            if !omitted.is_empty() || !default_masks.is_empty() {
+                                let internal = self.ir.classes[class as usize].fq_name();
+                                let stub_missing = if value_class {
+                                    self.ir.value_ctor_default(&internal).is_none()
+                                } else {
+                                    params.iter().any(|parameter| {
+                                        parameter
+                                            .non_null()
+                                            .obj_internal()
+                                            .is_some_and(|name| self.ir.is_value_class_name(name))
+                                    })
+                                };
+                                if stub_missing {
+                                    return None;
+                                }
+                            }
                             let (lowered, prelude, invoke_params) = self
                                 .lower_resolved_source_constructor(
                                     &args,
