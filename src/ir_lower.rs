@@ -9441,14 +9441,7 @@ impl<'a> Lower<'a> {
                     .fields
                     .iter()
                     .position(|(n, _)| n == delegate || n == &synth_name)? as u32;
-            self.forward_iface_methods(
-                file,
-                iface_name,
-                delegate_idx,
-                class_id,
-                internal,
-                is_synth,
-            )?;
+            self.forward_iface_methods(file, iface_name, delegate_idx, class_id, internal)?;
         }
         // Expression delegates (`: I by Impl()`) always use a synthesized `$$delegate_e<j>` field.
         for (j, (iface_name, _e)) in c.delegation_exprs.iter().enumerate() {
@@ -9458,16 +9451,16 @@ impl<'a> Lower<'a> {
                 .fields
                 .iter()
                 .position(|(n, _)| n == &synth_name)? as u32;
-            self.forward_iface_methods(file, iface_name, delegate_idx, class_id, internal, true)?;
+            self.forward_iface_methods(file, iface_name, delegate_idx, class_id, internal)?;
         }
         Some(())
     }
 
     /// Synthesize, on `internal`, a forwarding method for each of interface `iface_name`'s methods that
-    /// calls it on the delegate field at `delegate_idx` (`fun m(args) = this.<field>.m(args)`). When
-    /// the delegate is synthesized (a non-`val` param or an expression — not a `val`-param field), bail
-    /// (skip the file) on a PROPERTY interface (`getX`/`setX` would go un-forwarded → `AbstractMethodError`)
-    /// or a GENERIC one (`A<Long, Int>` needs substituted-type bridges a raw forward mis-coerces).
+    /// calls it on the delegate field at `delegate_idx` (`fun m(args) = this.<field>.m(args)`).
+    /// Properties are declarations rather than functions in the semantic symbol table, so their getter
+    /// and setter forwarders are collected explicitly alongside ordinary methods. A GENERIC interface
+    /// whose primitive instantiation needs substituted bridges is rejected by the caller.
     fn forward_iface_methods(
         &mut self,
         file: &ast::File,
@@ -9475,30 +9468,22 @@ impl<'a> Lower<'a> {
         delegate_idx: u32,
         class_id: ClassId,
         internal: &str,
-        is_synth: bool,
     ) -> Option<()> {
-        // A synthesized-field delegation to a PROPERTY interface (`getX`/`setX`) would go un-forwarded
-        // (an `AbstractMethodError`) — skip. A generic interface instantiated with REFERENCE type
-        // arguments (`A<String> by a`) forwards correctly at the erased (`Object`) level; only a PRIMITIVE
-        // instantiation needs bridges, and that is rejected at the delegation site.
         let iface_internal = self
             .syms
             .class_names
             .get(iface_name)
             .map(TypeName::render)
             .unwrap_or_else(|| class_internal(file, iface_name));
-        let iface_sig = self
-            .syms
-            .class_by_internal(&iface_internal)
-            .or_else(|| self.syms.classes.get(iface_name));
-        if is_synth && iface_sig.is_some_and(|s| !s.props.is_empty()) {
-            return None;
-        }
         // Collect the delegated interface's methods AND those inherited from its super-interfaces
         // (`interface Second : First` → forward `First`'s methods too): a `: Second by s` class must
-        // implement every method Second exposes, not just the ones Second declares directly. Walk the
-        // module-`ClassSig` super-interface graph breadth-first, deduping by name + parameter types.
+        // implement every callable Second exposes, not just the ones Second declares directly. Walk the
+        // module-`ClassSig` super-interface graph breadth-first, deduping methods by signature and
+        // properties by source name. The property entry retains its declaring owner because an inherited
+        // accessor must dispatch against the interface that actually declares that JVM method.
         let mut methods: Vec<(String, Vec<Ty>, Ty)> = Vec::new();
+        let mut properties: Vec<(TypeName, String, crate::resolve::DeclaredPropertySig)> =
+            Vec::new();
         let mut seen_ifaces: std::collections::HashSet<TypeName> = std::collections::HashSet::new();
         let mut queue = vec![existing_type_name(&iface_internal)
             .or_else(|| self.syms.classes.get(iface_name).map(|c| c.internal_name()))?];
@@ -9515,6 +9500,14 @@ impl<'a> Lower<'a> {
                     if !methods.iter().any(|(on, op, _)| on == n && *op == s.params) {
                         methods.push((n.clone(), s.params.clone(), s.ret));
                     }
+                }
+            }
+            for (name, property) in &cs.declared_props {
+                if !properties
+                    .iter()
+                    .any(|(_, inherited_name, _)| inherited_name == name)
+                {
+                    properties.push((cur, name.clone(), property.clone()));
                 }
             }
             // Super-interfaces (and any base) are stored by internal name; the module table is keyed by
@@ -9547,6 +9540,50 @@ impl<'a> Lower<'a> {
                 self.emit_block(vec![ret_stmt], None)
             };
             self.add_synth_method(internal, class_id, &mname, params_ir, ret, body, false);
+        }
+        for (owner, _name, property) in properties {
+            let field = self.this_field(class_id, delegate_idx);
+            let getter = self.emit_virtual_call(
+                owner,
+                property.getter_name.clone(),
+                self.runtime.method_descriptor(&[], property.ty)?,
+                true,
+                field,
+                vec![],
+            );
+            let returned = self.emit_return(Some(getter));
+            let body = self.emit_block(vec![returned], None);
+            self.add_synth_method(
+                internal,
+                class_id,
+                &property.getter_name,
+                vec![],
+                property.ty,
+                body,
+                false,
+            );
+            if let Some(setter_name) = property.setter_name {
+                let field = self.this_field(class_id, delegate_idx);
+                let value = self.emit_get_value(1);
+                let setter = self.emit_virtual_call(
+                    owner,
+                    setter_name.clone(),
+                    self.runtime.method_descriptor(&[property.ty], Ty::Unit)?,
+                    true,
+                    field,
+                    vec![value],
+                );
+                let body = self.emit_block(vec![setter], None);
+                self.add_synth_method(
+                    internal,
+                    class_id,
+                    &setter_name,
+                    vec![ty_to_ir(property.ty)],
+                    Ty::Unit,
+                    body,
+                    false,
+                );
+            }
         }
         Some(())
     }
