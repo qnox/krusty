@@ -14696,6 +14696,7 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         arguments: &CtorDelegationCall,
         candidates: &[CtorDelegationCandidate],
+        class_name: &str,
     ) -> bool {
         let names: Option<&[Option<String>]> = arguments
             .names
@@ -14704,18 +14705,57 @@ impl<'a> Checker<'a> {
             .then_some(&arguments.names);
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         let mut failures = Vec::new();
-        for candidate in candidates {
+        for (index, candidate) in candidates.iter().enumerate() {
             let params = crate::libraries::ParamList {
                 names: candidate.param_names.clone(),
                 defaults: candidate.defaults.clone(),
                 vararg: candidate.vararg,
             };
             if let Err(failure) = map_param_list_args(args, names, &params, trailing_lambda) {
-                failures.push((failure, ()));
+                failures.push((failure, index));
             }
         }
         match take_unanimous_mapping_error(&mut failures) {
-            Some((failure, ())) => {
+            Some((failure, index)) => {
+                // kotlinc names the CALLEE for an over-long argument list — "too many arguments for
+                // 'constructor(x: Int): C'." — where the generic mapping error only says how many were
+                // expected. Every other callable origin already reports the named form.
+                if let ([CallArgMappingError::TooManyArguments { .. }], Some(candidate)) =
+                    (failure.errors.as_slice(), candidates.get(index))
+                {
+                    let rendered = candidate
+                        .param_names
+                        .iter()
+                        .zip(candidate.target.params())
+                        .enumerate()
+                        .map(|(index, (name, ty))| {
+                            let default = if candidate.defaults.get(index).copied().unwrap_or(false)
+                            {
+                                " = ..."
+                            } else {
+                                ""
+                            };
+                            let vararg = if candidate.vararg == Some(index) {
+                                "vararg "
+                            } else {
+                                ""
+                            };
+                            format!("{vararg}{name}: {}{default}", ty.source_name())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if candidate.param_names.len() == candidate.target.params().len() {
+                        let span =
+                            self.arity_diagnostic_span(call, args, candidate.param_names.len());
+                        self.diags.error(
+                            span,
+                            format!(
+                                "too many arguments for 'constructor({rendered}): {class_name}'."
+                            ),
+                        );
+                        return true;
+                    }
+                }
                 self.report_call_arg_mapping_error(call, args, failure);
                 true
             }
@@ -28061,6 +28101,7 @@ impl<'a> Checker<'a> {
                                 args,
                                 &arguments,
                                 &candidates,
+                                &declaration.name,
                             ) && !self.call_already_has_argument_diagnostic(call, args)
                             {
                                 self.diags
