@@ -1272,6 +1272,12 @@ pub struct IrFile {
     /// with suspension points, builds the state machine + continuation class. ir_lower itself lowers a
     /// `suspend fun` as a plain function (mirroring how value classes stay plain until their pass).
     pub suspend_funs: Vec<u32>,
+    /// Methods the source declares WITHOUT `override` — a fresh declaration rather than an override of a
+    /// supertype member. A language fact nothing else in the IR records: `IrFunction` carries a signature,
+    /// not the modifier, and a SYNTHESIZED method (absent here) is deliberately indistinguishable from an
+    /// override, since both can legitimately be reached through a supertype's descriptor. The JVM bridge
+    /// pass needs it to refuse to point a supertype's descriptor at a same-named fresh declaration.
+    pub fresh_method_decls: Vec<u32>,
     /// Each rewritten `suspend fun`'s DECLARED signature `(params, ret)`, captured by the coroutine
     /// pass just before it appends the `Continuation` and erases the return. `@Metadata` and the JVM
     /// generic `Signature` both describe the function in Kotlin terms — `suspend fun f(a: String)`,

@@ -15,7 +15,7 @@ use crate::frontend::FrontendSymbols;
 use crate::ir::{Bridge, IrFile};
 use crate::jvm::backend::SkipReason;
 use crate::jvm::names::type_descriptor;
-use crate::names::{property_getter_name, property_setter_name};
+use crate::names::{accessor_property_name, property_getter_name, property_setter_name};
 use crate::types::{stored_value_ty, Ty, TypeName};
 
 /// Every bridge family this class needs, appended to `IrClass::bridges`.
@@ -32,6 +32,7 @@ pub fn derive_bridges(ir: &mut IrFile, syms: &FrontendSymbols) -> Result<(), Ski
         superclass_method_bridges(ir, cid)?;
         property_bridges(ir, cid, syms);
         mapped_interface_bridges(ir, cid, syms);
+        interface_bridges(ir, cid, syms)?;
     }
     Ok(())
 }
@@ -308,4 +309,473 @@ fn mapped_interface_bridges(ir: &mut IrFile, cid: usize, syms: &FrontendSymbols)
             });
         }
     }
+}
+
+/// Bridge-signature erasure: a type parameter becomes its bound's storage type, a nullable keeps its
+/// wrapper. This is the shape a descriptor is written from, so it defines when two signatures COLLIDE.
+fn bridge_erasure(ty: Ty) -> Ty {
+    match ty {
+        Ty::TyParam(_, bound) => stored_value_ty(bridge_erasure(*bound)),
+        Ty::Nullable(inner) => Ty::nullable(bridge_erasure(*inner)),
+        Ty::Obj(internal, _) if internal.render().is_empty() => Ty::obj("kotlin/Any"),
+        other => other,
+    }
+}
+
+fn unique_match<T>(items: &[T], mut predicate: impl FnMut(&T) -> bool) -> Option<&T> {
+    let mut matches = items.iter().filter(|item| predicate(item));
+    match (matches.next(), matches.next()) {
+        (Some(item), None) => Some(item),
+        _ => None,
+    }
+}
+
+fn class_of(ir: &IrFile, name: TypeName) -> Option<&crate::ir::IrClass> {
+    ir.classes.iter().find(|c| c.fq_name == name)
+}
+
+/// Methods of a class in this file, by name.
+fn methods_named<'a>(ir: &'a IrFile, owner: TypeName, name: &'a str) -> Vec<u32> {
+    class_of(ir, owner)
+        .map(|c| {
+            c.methods
+                .iter()
+                .copied()
+                .filter(|fid| ir.functions[*fid as usize].name == name)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The nearest declaration of a property at or above `internal`, within this file.
+fn declared_property(ir: &IrFile, internal: TypeName, name: &str) -> Option<(TypeName, Ty)> {
+    let mut cur = internal;
+    loop {
+        let c = class_of(ir, cur)?;
+        if let Some(p) = c.properties.iter().find(|p| p.name == name) {
+            return Some((cur, p.ty));
+        }
+        cur = c.superclass;
+    }
+}
+
+/// Every method of an interface in this file, including its super-interfaces'.
+fn iface_methods(ir: &IrFile, itf: TypeName) -> Vec<(TypeName, String, u32)> {
+    let mut out = Vec::new();
+    let mut stack = vec![itf];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(i) = stack.pop() {
+        if !seen.insert(i) {
+            continue;
+        }
+        if let Some(c) = class_of(ir, i) {
+            for fid in c.methods.iter().copied() {
+                out.push((i, ir.functions[fid as usize].name.clone(), fid));
+            }
+            stack.extend(c.interfaces.iter_ids());
+        }
+    }
+    out
+}
+
+/// Two erased types that write the SAME descriptor (a platform type and its Kotlin twin do).
+fn types_match(left: Ty, right: Ty) -> bool {
+    if left == right {
+        return true;
+    }
+    if left.is_reference() != right.is_reference() {
+        return false;
+    }
+    let (Some(left_name), Some(right_name)) = (
+        left.non_null().kotlin_class_internal(),
+        right.non_null().kotlin_class_internal(),
+    ) else {
+        return false;
+    };
+    crate::symbol_resolver::platform_type_names_match(left_name, right_name)
+}
+
+fn param_narrows(syms: &FrontendSymbols, erased: Ty, concrete: Ty) -> bool {
+    types_match(erased, concrete)
+        || erased.is_erased_top()
+        || syms.is_source_subtype(concrete, erased)
+}
+
+fn return_admits(syms: &FrontendSymbols, erased: Ty, concrete: Ty, allow_fake: bool) -> bool {
+    param_narrows(syms, erased, concrete)
+        || (allow_fake
+            && erased.is_reference()
+            && concrete.is_reference()
+            && concrete.is_erased_top())
+}
+
+/// A value class's parameter erases to its underlying type — the shape the concrete method really takes
+/// once the value-class pass has run.
+fn post_value_erasure(syms: &FrontendSymbols, ty: Ty) -> Ty {
+    if ty.is_nullable() {
+        return bridge_erasure(ty);
+    }
+    syms.libraries
+        .value_underlying(ty)
+        .map(bridge_erasure)
+        .unwrap_or_else(|| bridge_erasure(ty))
+}
+
+/// The method a supertype's erased descriptor must land on: searched up the superclass chain first, then
+/// across default methods of the interfaces. `None` when nothing implements the obligation here.
+fn resolve_bridge_target(
+    ir: &IrFile,
+    syms: &FrontendSymbols,
+    internal: TypeName,
+    name: &str,
+    erased_params: &[Ty],
+    erased_ret: Ty,
+    allow_fake_override: bool,
+) -> Option<u32> {
+    let mut current = Some(internal);
+    let mut seen = std::collections::HashSet::new();
+    while let Some(owner) = current {
+        if !seen.insert(owner) {
+            return None;
+        }
+        let Some(class) = class_of(ir, owner) else {
+            break;
+        };
+        let overloads = methods_named(ir, owner, name);
+        if overloads.is_empty() {
+            current = Some(class.superclass);
+            continue;
+        }
+        let mut candidates = overloads
+            .into_iter()
+            .filter_map(|fid| {
+                let function = &ir.functions[fid as usize];
+                (function.params.len() == erased_params.len()).then(|| {
+                    let params = function
+                        .params
+                        .iter()
+                        .copied()
+                        .map(bridge_erasure)
+                        .collect::<Vec<_>>();
+                    (fid, params, bridge_erasure(function.ret))
+                })
+            })
+            .collect::<Vec<_>>();
+        if let Some((fid, _, _)) = unique_match(&candidates, |(_, params, ret)| {
+            params == erased_params && *ret == erased_ret
+        }) {
+            return Some(*fid);
+        }
+        candidates.retain(|(fid, params, ret)| {
+            let generic_override = params
+                .iter()
+                .zip(erased_params)
+                .all(|(&concrete, &erased)| param_narrows(syms, erased, concrete));
+            let fake_override = allow_fake_override
+                && params
+                    .iter()
+                    .zip(erased_params)
+                    .all(|(&concrete, &erased)| {
+                        types_match(concrete, erased) || concrete.is_erased_top()
+                    });
+            let changes_signature = params != erased_params || *ret != erased_ret;
+            let return_admitted = return_admits(syms, erased_ret, *ret, allow_fake_override);
+            (generic_override || fake_override)
+                && return_admitted
+                && changes_signature
+                // A FRESH declaration in the class itself is not an override, so a supertype's descriptor
+                // must not be pointed at it.
+                && (owner != internal || !ir.fresh_method_decls.contains(fid))
+        });
+        if let Some((fid, _, _)) =
+            unique_match(&candidates, |(_, params, _)| params == erased_params)
+        {
+            return Some(*fid);
+        }
+        if candidates.len() == 1 {
+            return Some(candidates[0].0);
+        }
+        if !candidates.is_empty() {
+            return None;
+        }
+        current = Some(class.superclass);
+    }
+    resolve_default_bridge_target(ir, syms, internal, name, erased_params, erased_ret)
+}
+
+/// The obligation may be satisfied by an inherited interface DEFAULT method rather than by anything the
+/// class hierarchy declares.
+fn resolve_default_bridge_target(
+    ir: &IrFile,
+    syms: &FrontendSymbols,
+    internal: TypeName,
+    name: &str,
+    erased_params: &[Ty],
+    erased_ret: Ty,
+) -> Option<u32> {
+    let mut queue = std::collections::VecDeque::new();
+    let mut current = Some(internal);
+    while let Some(owner) = current {
+        let Some(class) = class_of(ir, owner) else {
+            break;
+        };
+        queue.extend(class.interfaces.iter_ids());
+        current = Some(class.superclass);
+    }
+    let mut seen = std::collections::HashSet::new();
+    while let Some(owner) = queue.pop_front() {
+        if !seen.insert(owner) {
+            continue;
+        }
+        let Some(class) = class_of(ir, owner) else {
+            continue;
+        };
+        let overloads = methods_named(ir, owner, name);
+        if !overloads.is_empty() {
+            let candidates = overloads
+                .into_iter()
+                .filter_map(|fid| {
+                    let function = &ir.functions[fid as usize];
+                    // A DEFAULT method (one with a body) can be the target; an abstract one cannot.
+                    if function.body.is_none() || function.params.len() != erased_params.len() {
+                        return None;
+                    }
+                    let params = function
+                        .params
+                        .iter()
+                        .copied()
+                        .map(bridge_erasure)
+                        .collect::<Vec<_>>();
+                    let ret = bridge_erasure(function.ret);
+                    let compatible = params
+                        .iter()
+                        .zip(erased_params)
+                        .all(|(&concrete, &erased)| param_narrows(syms, erased, concrete))
+                        && return_admits(syms, erased_ret, ret, false);
+                    compatible.then_some((fid, params, ret))
+                })
+                .collect::<Vec<_>>();
+            if let Some((fid, _, _)) = unique_match(&candidates, |(_, params, ret)| {
+                params == erased_params && *ret == erased_ret
+            }) {
+                return Some(*fid);
+            }
+            if candidates.len() == 1 {
+                return Some(candidates[0].0);
+            }
+            if !candidates.is_empty() {
+                return None;
+            }
+        }
+        queue.extend(class.interfaces.iter_ids());
+    }
+    None
+}
+
+/// For each method an implemented interface obliges the class to provide, when the class's actual
+/// implementation (declared, inherited, or a property accessor the backend synthesizes) has a different
+/// erased signature than the interface's, add a bridge carrying the interface's descriptor.
+fn interface_bridges(
+    ir: &mut IrFile,
+    cid: usize,
+    syms: &FrontendSymbols,
+) -> Result<(), SkipReason> {
+    let internal_name = ir.classes[cid].fq_name;
+    let mut ifaces = ir.classes[cid].interfaces.clone();
+    for sup in syms.supertype_internal_names_from(internal_name) {
+        let is_iface = syms
+            .class_by_type_name(sup)
+            .is_some_and(|c| c.is_interface())
+            || syms
+                .libraries
+                .resolve_type_name(sup)
+                .is_some_and(|t| t.is_interface());
+        if is_iface && !ifaces.contains_name(sup) {
+            ifaces.push_name(sup);
+        }
+    }
+    let mut seen: std::collections::HashSet<(String, Vec<Ty>, Ty)> = ir.classes[cid]
+        .bridges
+        .iter()
+        .map(|bridge| {
+            (
+                bridge.name.clone(),
+                bridge
+                    .erased_params
+                    .iter()
+                    .copied()
+                    .map(bridge_erasure)
+                    .collect(),
+                bridge_erasure(bridge.erased_ret),
+            )
+        })
+        .collect();
+    for itf in ifaces.iter_ids() {
+        let classpath_interface = syms.libraries.resolve_type_name(itf).is_some();
+        let applied_interface_args = syms
+            .applied_hierarchy(Ty::obj_name(internal_name))
+            .into_iter()
+            .find_map(|(owner, applied, _)| (owner == itf).then(|| applied.type_args().to_vec()))
+            .unwrap_or_default();
+        // `default`: whether the interface method has a body, known only for an interface declared in this
+        // file. `logical_params`: the generic signature's declared parameters, for a classpath interface.
+        type Obligation = (String, Vec<Ty>, Ty, Option<bool>, Option<Vec<Ty>>);
+        let obligations: Vec<Obligation> = if class_of(ir, itf).is_some() {
+            iface_methods(ir, itf)
+                .into_iter()
+                .map(|(_, name, fid)| {
+                    let function = &ir.functions[fid as usize];
+                    (
+                        name,
+                        function
+                            .params
+                            .iter()
+                            .copied()
+                            .map(bridge_erasure)
+                            .collect(),
+                        bridge_erasure(function.ret),
+                        Some(function.body.is_some()),
+                        None,
+                    )
+                })
+                .collect()
+        } else if let Some(interface) = syms.libraries.resolve_type_name(itf) {
+            interface
+                .members
+                .iter()
+                .map(|member| {
+                    (
+                        member.name.clone(),
+                        member.params.iter().copied().map(bridge_erasure).collect(),
+                        bridge_erasure(member.ret),
+                        None,
+                        member
+                            .generic_sig
+                            .as_ref()
+                            .map(|signature| signature.params.clone()),
+                    )
+                })
+                .collect()
+        } else if let Some(interface) = syms.class_by_type_name(itf) {
+            interface
+                .methods
+                .iter()
+                .flat_map(|(name, signatures)| {
+                    signatures.iter().map(move |signature| {
+                        (
+                            name.clone(),
+                            signature
+                                .params
+                                .iter()
+                                .copied()
+                                .map(bridge_erasure)
+                                .collect(),
+                            bridge_erasure(signature.ret),
+                            None,
+                            None,
+                        )
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for (name, erased_params, erased_ret, default, logical_params) in obligations {
+            let impl_fid = resolve_bridge_target(
+                ir,
+                syms,
+                internal_name,
+                &name,
+                &erased_params,
+                erased_ret,
+                default == Some(false),
+            );
+            // A property accessor is not an IR method — this backend synthesizes it — so the DECLARATION
+            // is the implementation the obligation is satisfied by.
+            let impl_sig = match impl_fid {
+                Some(fid) => {
+                    let f = &ir.functions[fid as usize];
+                    Some((f.params.clone(), f.ret, f.dispatch_receiver))
+                }
+                None => accessor_property_name(&name).and_then(|prop| {
+                    let (declaring, ty) = declared_property(ir, internal_name, &prop)?;
+                    Some(if name.starts_with("set") {
+                        (vec![ty], Ty::Unit, Some(declaring))
+                    } else {
+                        (Vec::new(), ty, Some(declaring))
+                    })
+                }),
+            };
+            let Some((concrete_params, concrete_ret, impl_owner)) = impl_sig else {
+                continue;
+            };
+            let concrete_erased_params = concrete_params
+                .iter()
+                .copied()
+                .map(bridge_erasure)
+                .collect::<Vec<_>>();
+            if erased_params == concrete_erased_params && erased_ret == bridge_erasure(concrete_ret)
+            {
+                continue;
+            }
+            // An INHERITED implementation whose signature already matches needs no bridge here: the
+            // supertype that declares it carries its own.
+            let inherited_signature_matches = impl_owner != Some(internal_name)
+                && erased_params.len() == concrete_params.len()
+                && erased_params
+                    .iter()
+                    .zip(&concrete_params)
+                    .all(|(&erased, &concrete)| types_match(erased, bridge_erasure(concrete)))
+                && types_match(erased_ret, bridge_erasure(concrete_ret));
+            if inherited_signature_matches {
+                continue;
+            }
+            let post_value_params = concrete_params
+                .iter()
+                .copied()
+                .map(|ty| post_value_erasure(syms, ty))
+                .collect::<Vec<_>>();
+            let logical_match = logical_params.as_ref().is_some_and(|logical| {
+                logical.len() == concrete_params.len()
+                    && logical
+                        .iter()
+                        .zip(&concrete_params)
+                        .all(|(&declared, &concrete)| types_match(declared, concrete))
+            });
+            let specializes_value_parameter = concrete_params.iter().copied().any(|concrete| {
+                syms.libraries.value_underlying(concrete).is_some()
+                    && applied_interface_args
+                        .iter()
+                        .copied()
+                        .any(|argument| types_match(concrete, argument))
+            });
+            if (logical_match || (classpath_interface && !specializes_value_parameter))
+                && erased_params.len() == post_value_params.len()
+                && erased_params
+                    .iter()
+                    .zip(&post_value_params)
+                    .all(|(&erased, &concrete)| types_match(erased, concrete))
+                && erased_ret == bridge_erasure(concrete_ret)
+            {
+                continue;
+            }
+            if impl_fid.is_some_and(|fid| ir.suspend_funs.contains(&fid)) {
+                return Err(SkipReason::Bridges);
+            }
+            if seen.insert((name.clone(), erased_params.clone(), erased_ret)) {
+                ir.classes[cid].bridges.push(Bridge {
+                    name,
+                    erased_params,
+                    erased_ret,
+                    concrete_params,
+                    concrete_ret,
+                    type_safe_barrier: false,
+                    target_name: None,
+                    box_ret: None,
+                    unbox_params: Vec::new(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
