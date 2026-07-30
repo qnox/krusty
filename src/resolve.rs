@@ -18906,6 +18906,16 @@ impl<'a> Checker<'a> {
                             let recv = rt.non_null();
                             let type_args = self.resolved_explicit_type_args(e);
                             let arg_tys = self.ext_arg_tys(e, recv, &name, a, &type_args);
+                            // A LABELLED call cannot be answered by a resolution that binds arguments
+                            // positionally: `s?.replace(newValue = …, oldValue = …)` names the stdlib
+                            // EXTENSION's parameters, and letting the label-blind member lookup claim it
+                            // silently reverses the two arguments (the qualified arm gates the same
+                            // fallbacks the same way).
+                            let labelled = self
+                                .file
+                                .call_arg_names
+                                .get(&e.0)
+                                .is_some_and(|names| names.iter().any(Option::is_some));
                             if !type_args.is_empty() {
                                 self.resolved_call_type_args
                                     .insert(e, type_args.iter().copied().map(Some).collect());
@@ -18925,6 +18935,9 @@ impl<'a> Checker<'a> {
                                 };
                                 member
                                     .or_else(|| {
+                                        if labelled {
+                                            return None;
+                                        }
                                         self.resolve_instance_member(recv, &name, &arg_tys).map(
                                             |m| {
                                                 let ret = m.ret;
@@ -18937,6 +18950,15 @@ impl<'a> Checker<'a> {
                                     .or_else(|| {
                                         self.check_member_extension_function_call(
                                             e, recv, &name, a, &arg_tys,
+                                        )
+                                    })
+                                    // Mirrors the qualified arm: a NAMED call to a library extension
+                                    // (`s?.replace(newValue = …, oldValue = …)`) needs the checker-owned
+                                    // slot mapping, and only this records it. Returns `None` for an
+                                    // unlabelled call, so the ordering below is unchanged.
+                                    .or_else(|| {
+                                        self.record_extension_call_with_slots(
+                                            e, &name, recv, a, &type_args,
                                         )
                                     })
                                     .or_else(|| {
@@ -18996,6 +19018,9 @@ impl<'a> Checker<'a> {
                                         }
                                     })
                                     .or_else(|| {
+                                        if labelled {
+                                            return None;
+                                        }
                                         self.resolve_instance_name(internal, &name, &arg_tys).map(
                                             |m| {
                                                 let ret = m.ret;
@@ -19021,6 +19046,11 @@ impl<'a> Checker<'a> {
                                         )
                                     })
                                     .or_else(|| {
+                                        self.record_extension_call_with_slots(
+                                            e, &name, recv, a, &type_args,
+                                        )
+                                    })
+                                    .or_else(|| {
                                         self.record_extension_call_from_args(
                                             e, &name, recv, a, &arg_tys, &type_args,
                                         )
@@ -19030,6 +19060,11 @@ impl<'a> Checker<'a> {
                                 self.check_member_extension_function_call(
                                     e, recv, &name, a, &arg_tys,
                                 )
+                                .or_else(|| {
+                                    self.record_extension_call_with_slots(
+                                        e, &name, recv, a, &type_args,
+                                    )
+                                })
                                 .or_else(|| {
                                     self.record_extension_call_from_args(
                                         e, &name, recv, a, &arg_tys, &type_args,
