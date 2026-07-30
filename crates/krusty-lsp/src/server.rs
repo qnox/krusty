@@ -1,7 +1,7 @@
 mod engine;
 mod implementation;
 mod status;
-pub use engine::{AnalysisBatch, AnalysisJob};
+pub use engine::{AnalysisBatch, AnalysisJob, DumpResult};
 pub use implementation::*;
 
 #[cfg(test)]

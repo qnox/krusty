@@ -6,7 +6,7 @@ pub mod dump_cache;
 mod options;
 pub mod project;
 mod server;
-mod uri;
+pub mod uri;
 mod worker;
 
 pub use analysis::*;

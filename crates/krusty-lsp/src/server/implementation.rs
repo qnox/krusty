@@ -24,8 +24,8 @@ use super::super::{
 };
 use crate::compiler_analysis::LibraryRef;
 use crate::server::engine::{
-    AnalysisBatch, AnalysisEngine, AnalysisJob, EngineBackend, EngineEvent, MaterializeJob,
-    MaterializeResult,
+    AnalysisBatch, AnalysisEngine, AnalysisJob, DumpResult, EngineBackend, EngineEvent,
+    MaterializeJob, MaterializeResult,
 };
 use crate::server::status::StatusReporter;
 use crate::uri::{file_uri_to_path, path_to_file_uri};
@@ -235,6 +235,13 @@ pub trait Analysis {
         None
     }
 
+    /// Render the dev-mode AST/checker/IR dump for `uri` and report where it was written. `None`
+    /// when dev mode is off, the document was not part of the retained analysis payload, or
+    /// rendering failed.
+    fn dump(&mut self, _uri: &str) -> Option<DumpResult> {
+        None
+    }
+
     fn analysis_ready(&self) -> bool {
         true
     }
@@ -314,6 +321,11 @@ pub trait AnalysisBackend {
             definition: None,
         })
     }
+    /// Render the dev-mode dump for `uri`, returning where it was written. `None` when dev mode is
+    /// off, the document was never analyzed, or rendering failed.
+    fn dump(&mut self, _uri: &str) -> Option<DumpResult> {
+        None
+    }
     fn set_workspace_root(&mut self, root: Option<PathBuf>) -> Option<ProjectFeedback>;
     fn watched_globs(&mut self) -> Vec<String>;
     fn note_project_change(&mut self);
@@ -374,6 +386,10 @@ impl<A: Analysis> AnalysisBackend for InlineBackend<A> {
             token: job.token,
             definition,
         })
+    }
+
+    fn dump(&mut self, uri: &str) -> Option<DumpResult> {
+        self.0.dump(uri)
     }
 
     fn set_workspace_root(&mut self, root: Option<PathBuf>) -> Option<ProjectFeedback> {

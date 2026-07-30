@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use url::Url;
 
-pub(crate) fn file_uri_to_path(value: &str) -> Option<PathBuf> {
+pub fn file_uri_to_path(value: &str) -> Option<PathBuf> {
     if value == "file://" {
         return None;
     }

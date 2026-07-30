@@ -44,6 +44,16 @@ pub struct MaterializeResult {
     pub definition: Option<MaterializedDefinition>,
 }
 
+/// Where a dev-mode dump was written.
+///
+/// Only the path travels: the rendered document carries every AST node, typed expression, and IR
+/// instruction of a file, so the code action navigates to it rather than inlining it into a
+/// response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DumpResult {
+    pub path: std::path::PathBuf,
+}
+
 #[derive(Debug)]
 pub(crate) enum EngineCommand {
     SetWorkspaceRoot(Option<std::path::PathBuf>),

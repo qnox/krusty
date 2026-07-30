@@ -5,10 +5,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use krusty::jvm::classpath::platform_jdk_modules;
+use krusty::source::SourceKind;
 use krusty_lsp::{
-    detect, resolve_jdk, AnalysisWorker, DocumentAnalysis, JdkRequest, LibraryRef, LspOptions,
-    MaterializedDefinition, ProcessRunner, ProjectFeedback, ProjectMessageKind, ProjectModel,
-    ProjectSources, ProjectSync, ProviderKind, RefreshOutcome, SystemEnvironment,
+    detect, resolve_jdk, AnalysisWorker, DocumentAnalysis, DumpResult, DumpTarget, JdkRequest,
+    LibraryRef, LspOptions, MaterializedDefinition, ProcessRunner, ProjectFeedback,
+    ProjectMessageKind, ProjectModel, ProjectSources, ProjectSync, ProviderKind, RefreshOutcome,
+    SystemEnvironment,
 };
 
 const WORKER_RECONFIGURE_RETRY_INITIAL_MS: u64 = 1_000;
@@ -165,6 +167,109 @@ fn main() {
     }
 }
 
+/// One analysis call's inputs, exactly as the worker received them.
+///
+/// Every field changes what the dump sees. The kinds keep Java and script documents out of the
+/// Kotlin parser, the Java sources keep the group's stub overlay, and the language arguments and
+/// classpath keep the module's own compiler configuration — a dump analyzed against the launch
+/// classpath would report unresolved types for a file the editor shows as clean.
+struct AnalysisPayload<'a> {
+    sources: &'a [String],
+    source_kinds: &'a [SourceKind],
+    /// Parallel to `sources`. Empty for a slot whose text was blanked out because the document
+    /// belongs to another analysis group, so such a slot never matches a dump request.
+    uris: &'a [String],
+    result_count: usize,
+    inferred_count: usize,
+    java_sources: &'a [String],
+    language_arguments: &'a [String],
+    classpath: Option<&'a [PathBuf]>,
+}
+
+/// The most recent analysis payload, kept only under `--dev` so a dump request can replay exactly
+/// the source set and configuration the session analyzed. Superseded payloads are dropped, never
+/// accumulated.
+#[derive(Default)]
+struct RetainedAnalysis {
+    sources: Vec<String>,
+    source_kinds: Vec<SourceKind>,
+    uris: Vec<String>,
+    result_count: usize,
+    inferred_count: usize,
+    java_sources: Vec<String>,
+    language_arguments: Vec<String>,
+    classpath: Option<Vec<PathBuf>>,
+}
+
+impl RetainedAnalysis {
+    /// Replace the retained payload, or retain nothing at all when dev mode is off.
+    ///
+    /// Callers additionally skip building the payload outside dev mode — copying every source text
+    /// on each keystroke is the cost this gate exists to avoid — but the check lives here so
+    /// retention cannot be reached another way.
+    fn record(&mut self, dev: bool, payload: &AnalysisPayload<'_>) {
+        if !dev {
+            return;
+        }
+        self.sources = payload.sources.to_vec();
+        self.source_kinds = payload.source_kinds.to_vec();
+        self.uris = payload.uris.to_vec();
+        self.result_count = payload.result_count;
+        self.inferred_count = payload.inferred_count;
+        self.java_sources = payload.java_sources.to_vec();
+        self.language_arguments = payload.language_arguments.to_vec();
+        self.classpath = payload.classpath.map(<[PathBuf]>::to_vec);
+    }
+
+    /// The retained slot holding `uri`, if the last analyzed payload covered it.
+    fn index_of(&self, uri: &str) -> Option<usize> {
+        if uri.is_empty() {
+            return None;
+        }
+        self.uris.iter().position(|candidate| candidate == uri)
+    }
+
+    /// Replay the retained payload as a dump of slot `target`.
+    ///
+    /// `language_arguments` is always `Some`: the analysis call derives its features from the
+    /// module's arguments even when that list is empty, so falling back to the worker's session
+    /// features here would dump under a different feature set than the editor analyzed under.
+    fn dump_target<'a>(
+        &'a self,
+        target: usize,
+        label: &'a str,
+        cache_root: &'a Path,
+    ) -> DumpTarget<'a> {
+        DumpTarget {
+            sources: &self.sources,
+            source_kinds: &self.source_kinds,
+            target,
+            label,
+            cache_root,
+            result_count: self.result_count,
+            inferred_count: self.inferred_count,
+            java_sources: &self.java_sources,
+            language_arguments: Some(&self.language_arguments),
+            classpath: self.classpath.as_deref(),
+        }
+    }
+}
+
+/// Workspace-relative path for a document URI, falling back to the file name, then the URI itself.
+///
+/// This is both the dump's heading and its `dump_cache` key, so it stays stable across runs.
+fn workspace_relative_label(root: Option<&Path>, uri: &str) -> String {
+    let Some(path) = krusty_lsp::uri::file_uri_to_path(uri) else {
+        return uri.to_string();
+    };
+    if let Some(relative) = root.and_then(|root| path.strip_prefix(root).ok()) {
+        return relative.to_string_lossy().into_owned();
+    }
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| uri.to_string())
+}
+
 struct WorkerHost {
     worker: AnalysisWorker,
     options: LspOptions,
@@ -179,6 +284,7 @@ struct WorkerHost {
     platform_classpath: Vec<PathBuf>,
     worker_reconfigure_retry_at_ms: Option<u64>,
     worker_reconfigure_retry_backoff_ms: u64,
+    retained: RetainedAnalysis,
 }
 
 impl WorkerHost {
@@ -205,6 +311,7 @@ impl WorkerHost {
             platform_classpath,
             worker_reconfigure_retry_at_ms: None,
             worker_reconfigure_retry_backoff_ms: 0,
+            retained: RetainedAnalysis::default(),
         }
     }
 
@@ -410,6 +517,29 @@ impl krusty_lsp::Analysis for WorkerHost {
         })
     }
 
+    fn dump(&mut self, uri: &str) -> Option<DumpResult> {
+        if !self.options.dev() {
+            return None;
+        }
+        let target = self.retained.index_of(uri)?;
+        let label = workspace_relative_label(self.root.as_deref(), uri);
+        let cache_root = self
+            .options
+            .deps_cache_dir()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| {
+                krusty_lsp::deps_cache::default_cache_root(&|key| std::env::var(key).ok())
+            });
+        let response = self
+            .worker
+            .dump(&self.retained.dump_target(target, &label, &cache_root))
+            .ok()
+            .flatten()?;
+        Some(DumpResult {
+            path: response.path,
+        })
+    }
+
     fn analyze_open_documents(
         &mut self,
         documents: &[(&str, &str)],
@@ -575,6 +705,41 @@ impl krusty_lsp::Analysis for WorkerHost {
                     &self.platform_classpath,
                     &self.options,
                 );
+                if self.options.dev() {
+                    // The retained URIs are parallel to `inputs`: a document outside this group had
+                    // its text blanked by `project_group_inputs`, so it gets an empty URI and can
+                    // never be selected as a dump target through this payload.
+                    let retained_uris = documents
+                        .iter()
+                        .enumerate()
+                        .map(|(index, (uri, _))| {
+                            if group.document_indices.contains(&index) {
+                                (*uri).to_string()
+                            } else {
+                                String::new()
+                            }
+                        })
+                        .chain(group.support_documents.iter().map(|(uri, _)| uri.clone()))
+                        .collect::<Vec<_>>();
+                    let retained_sources = inputs
+                        .iter()
+                        .map(|input| input.text.to_string())
+                        .collect::<Vec<_>>();
+                    let retained_kinds = inputs.iter().map(|input| input.kind).collect::<Vec<_>>();
+                    self.retained.record(
+                        true,
+                        &AnalysisPayload {
+                            sources: &retained_sources,
+                            source_kinds: &retained_kinds,
+                            uris: &retained_uris,
+                            result_count: documents.len(),
+                            inferred_count: documents.len() + group.inferred_support_count,
+                            java_sources: &group.java_sources,
+                            language_arguments: &language_arguments,
+                            classpath: classpath.as_deref(),
+                        },
+                    );
+                }
                 let result = self.worker.analyze_inputs_prefix_with_config(
                     &inputs,
                     documents.len(),
@@ -1446,5 +1611,161 @@ mod tests {
         assert!(!is_java_source_path(Path::new(
             "src/main/kotlin/p/Widget.kt"
         )));
+    }
+
+    #[test]
+    fn dev_mode_retains_only_the_latest_analysis_payload() {
+        let mut retained = RetainedAnalysis::default();
+        let first_sources = ["a".to_string()];
+        let first_uris = ["file:///a.kt".to_string()];
+        let second_sources = ["b".to_string(), "c".to_string()];
+        let second_uris = ["file:///b.kt".to_string(), "file:///c.kt".to_string()];
+
+        retained.record(
+            true,
+            &AnalysisPayload {
+                sources: &first_sources,
+                source_kinds: &[SourceKind::Kotlin],
+                uris: &first_uris,
+                result_count: 1,
+                inferred_count: 1,
+                java_sources: &[],
+                language_arguments: &[],
+                classpath: None,
+            },
+        );
+        retained.record(
+            true,
+            &AnalysisPayload {
+                sources: &second_sources,
+                source_kinds: &[SourceKind::Kotlin, SourceKind::Kotlin],
+                uris: &second_uris,
+                result_count: 2,
+                inferred_count: 2,
+                java_sources: &[],
+                language_arguments: &[],
+                classpath: None,
+            },
+        );
+
+        assert_eq!(retained.index_of("file:///b.kt"), Some(0));
+        assert_eq!(retained.index_of("file:///c.kt"), Some(1));
+        assert_eq!(
+            retained.index_of("file:///a.kt"),
+            None,
+            "the superseded payload must be dropped, not accumulated"
+        );
+        assert_eq!(retained.sources, second_sources);
+    }
+
+    #[test]
+    fn nothing_is_retained_outside_dev_mode() {
+        let mut retained = RetainedAnalysis::default();
+        let sources = ["a".to_string()];
+        let uris = ["file:///a.kt".to_string()];
+        let classpath = vec![PathBuf::from("/modules/lib.jar")];
+
+        retained.record(
+            false,
+            &AnalysisPayload {
+                sources: &sources,
+                source_kinds: &[SourceKind::Kotlin],
+                uris: &uris,
+                result_count: 1,
+                inferred_count: 1,
+                java_sources: &["class Stub {}".to_string()],
+                language_arguments: &["-Xcontext-parameters".to_string()],
+                classpath: Some(&classpath),
+            },
+        );
+
+        assert_eq!(retained.index_of("file:///a.kt"), None);
+        assert!(retained.sources.is_empty());
+        assert!(retained.source_kinds.is_empty());
+        assert!(retained.java_sources.is_empty());
+        assert!(retained.language_arguments.is_empty());
+        assert_eq!(retained.classpath, None);
+    }
+
+    #[test]
+    fn the_retained_payload_carries_the_module_configuration_to_the_dump() {
+        let mut retained = RetainedAnalysis::default();
+        let sources = ["fun box() = 1".to_string(), "class Helper {}".to_string()];
+        let uris = [
+            "file:///w/Main.kt".to_string(),
+            "file:///w/Helper.java".to_string(),
+        ];
+        let source_kinds = [SourceKind::Kotlin, SourceKind::Java];
+        let java_sources = ["package p; class Stub {}".to_string()];
+        let language_arguments = ["-Xname-based-destructuring".to_string()];
+        let classpath = vec![PathBuf::from("/modules/lib.jar")];
+
+        retained.record(
+            true,
+            &AnalysisPayload {
+                sources: &sources,
+                source_kinds: &source_kinds,
+                uris: &uris,
+                result_count: 2,
+                inferred_count: 3,
+                java_sources: &java_sources,
+                language_arguments: &language_arguments,
+                classpath: Some(&classpath),
+            },
+        );
+
+        let index = retained
+            .index_of("file:///w/Main.kt")
+            .expect("the analyzed target must be retained");
+        let cache_root = Path::new("/cache");
+        let target = retained.dump_target(index, "Main.kt", cache_root);
+
+        assert_eq!(target.target, 0);
+        assert_eq!(target.sources, sources);
+        assert_eq!(
+            target.source_kinds, source_kinds,
+            "a Java document fed to the Kotlin parser fills the dump with spurious diagnostics"
+        );
+        assert_eq!(target.result_count, 2);
+        assert_eq!(target.inferred_count, 3);
+        assert_eq!(
+            target.java_sources, java_sources,
+            "without the Java stub overlay, references into Java sources stop resolving"
+        );
+        assert_eq!(
+            target.language_arguments,
+            Some(&language_arguments[..]),
+            "the module's language arguments must not fall back to session features"
+        );
+        assert_eq!(
+            target.classpath,
+            Some(&classpath[..]),
+            "without the module classpath the dump falls back to the launch -cp"
+        );
+        assert_eq!(target.label, "Main.kt");
+        assert_eq!(target.cache_root, cache_root);
+    }
+
+    #[test]
+    fn dump_labels_are_workspace_relative() {
+        let root = Path::new("/workspace");
+        let uri = url::Url::from_file_path("/workspace/src/Main.kt")
+            .unwrap()
+            .to_string();
+
+        assert_eq!(
+            workspace_relative_label(Some(root), &uri),
+            Path::new("src/Main.kt").to_string_lossy()
+        );
+
+        let outside = url::Url::from_file_path("/elsewhere/Other.kt")
+            .unwrap()
+            .to_string();
+        assert_eq!(workspace_relative_label(Some(root), &outside), "Other.kt");
+        assert_eq!(workspace_relative_label(None, &outside), "Other.kt");
+        assert_eq!(
+            workspace_relative_label(Some(root), "untitled:Untitled-1"),
+            "untitled:Untitled-1"
+        );
     }
 }
