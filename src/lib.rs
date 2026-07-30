@@ -12,6 +12,7 @@ pub use dhat;
 
 pub mod assignable;
 pub mod ast;
+pub mod ast_print;
 pub mod backend;
 pub mod compiler;
 pub mod conformance;
