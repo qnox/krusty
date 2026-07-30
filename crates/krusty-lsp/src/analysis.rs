@@ -1757,6 +1757,16 @@ pub struct MaterializedDefinition {
     pub hi: u32,
 }
 
+/// One workspace file's indexing result. Only diagnostics and the text hash are retained; the
+/// rich per-document indices are derived while indexing and dropped, because a swept file is
+/// re-analysed interactively the moment it is opened.
+#[derive(Clone, Debug)]
+pub struct IndexedFile {
+    pub uri: String,
+    pub diagnostics: Vec<Diagnostic>,
+    pub text_hash: u64,
+}
+
 #[derive(Clone)]
 pub struct DocumentAnalysis {
     pub diagnostics: Vec<Diagnostic>,

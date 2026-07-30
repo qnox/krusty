@@ -6,13 +6,35 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use super::super::{DocumentAnalysis, MaterializedDefinition};
+use super::super::{DocumentAnalysis, IndexedFile, MaterializedDefinition};
 use super::implementation::{
     Analysis, AnalysisBackend, DocumentAdmission, Incoming, ProjectFeedback,
 };
 use crate::compiler_analysis::LibraryRef;
 
 const MAX_PENDING_WATCHED_FILES: usize = 1024;
+
+/// Index levels, ordered strictly behind interactive work and behind each other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexPriority {
+    /// Files in modules that hold an open document, or that depend on one.
+    Neighborhood,
+    /// Everything else in the workspace.
+    Sweep,
+}
+
+#[derive(Debug)]
+pub struct IndexJob {
+    pub priority: IndexPriority,
+    pub uris: Vec<String>,
+}
+
+pub struct IndexBatch {
+    pub priority: IndexPriority,
+    pub files: Vec<IndexedFile>,
+    /// Chunks of the same priority still queued behind this one.
+    pub remaining: usize,
+}
 
 #[derive(Debug)]
 pub struct AnalysisJob {
@@ -49,6 +71,7 @@ pub(crate) enum EngineCommand {
     SetWorkspaceRoot(Option<std::path::PathBuf>),
     Analyze(AnalysisJob),
     Materialize(MaterializeJob),
+    Index(IndexJob),
     ProjectChange {
         refresh: bool,
         reanalyze: bool,
@@ -62,6 +85,7 @@ pub(crate) enum EngineEvent {
     Project(ProjectFeedback),
     ReanalyzeRequested,
     AnalysisComplete(AnalysisBatch),
+    IndexProgress(IndexBatch),
     Materialized(MaterializeResult),
     Status(ServerStatus),
 }
@@ -199,6 +223,9 @@ impl CommandState {
             EngineCommand::Materialize(job) => {
                 self.pending.push_back(EngineCommand::Materialize(job));
             }
+            EngineCommand::Index(job) => {
+                self.pending.push_back(EngineCommand::Index(job));
+            }
             EngineCommand::SetWorkspaceRoot(root) => {
                 let analysis = self
                     .pending
@@ -316,6 +343,10 @@ impl CommandState {
 }
 
 impl CommandReceiver {
+    fn queued_index_chunks(&self, _priority: IndexPriority) -> usize {
+        0
+    }
+
     fn recv(&self, timeout: Option<Duration>) -> CommandReceive {
         let mut state = self
             .queue
@@ -527,6 +558,21 @@ fn run<A: Analysis>(
                             definition,
                         },
                     )))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Some(EngineCommand::Index(job)) => {
+                let uris: Vec<&str> = job.uris.iter().map(String::as_str).collect();
+                let files = analyze.index_workspace_files(&uris);
+                let remaining = commands.queued_index_chunks(job.priority);
+                if events
+                    .send(Incoming::Engine(EngineEvent::IndexProgress(IndexBatch {
+                        priority: job.priority,
+                        files,
+                        remaining,
+                    })))
                     .is_err()
                 {
                     break;
@@ -1096,6 +1142,52 @@ mod tests {
             ]
         );
 
+        engine.join();
+    }
+    #[test]
+    fn an_index_command_produces_a_progress_event() {
+        use std::sync::mpsc::sync_channel;
+
+        struct Mock;
+        impl Analysis for Mock {
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+
+            fn index_workspace_files(&mut self, uris: &[&str]) -> Vec<IndexedFile> {
+                uris.iter()
+                    .map(|uri| IndexedFile {
+                        uri: (*uri).to_string(),
+                        diagnostics: Vec::new(),
+                        text_hash: 7,
+                    })
+                    .collect()
+            }
+        }
+
+        let (tx, rx) = sync_channel(8);
+        let engine = AnalysisEngine::spawn(Mock, tx);
+        engine.submit(EngineCommand::Index(IndexJob {
+            priority: IndexPriority::Sweep,
+            uris: vec!["file:///w/A.kt".into(), "file:///w/B.kt".into()],
+        }));
+
+        let batch = (0..8).find_map(|_| match rx.recv().unwrap() {
+            Incoming::Engine(EngineEvent::IndexProgress(batch)) => Some(batch),
+            _ => None,
+        });
+        let batch = batch.expect("index progress event");
+        assert_eq!(batch.priority, IndexPriority::Sweep);
+        assert_eq!(
+            batch
+                .files
+                .iter()
+                .map(|f| f.uri.as_str())
+                .collect::<Vec<_>>(),
+            vec!["file:///w/A.kt", "file:///w/B.kt"]
+        );
+        assert_eq!(batch.files[0].text_hash, 7);
+        assert_eq!(batch.remaining, 0);
         engine.join();
     }
 }

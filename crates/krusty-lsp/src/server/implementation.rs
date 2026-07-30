@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 
 use super::super::{
     CompletionIndex, DefinitionIndex, DocumentAnalysis, DocumentSymbolIndex, FoldingRangeIndex,
-    HoverIndex, LibraryDefinitionIndex, MaterializedDefinition, SemanticTokenIndex,
+    HoverIndex, IndexedFile, LibraryDefinitionIndex, MaterializedDefinition, SemanticTokenIndex,
     SemanticTokenRange, SignatureHelpIndex, WorkspaceSymbolIndex, MAX_RETAINED_ANALYSIS_BYTES,
     SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
 };
@@ -210,6 +210,12 @@ impl DocumentAdmission {
 /// Analysis and project-model operations behind an LSP session.
 pub trait Analysis {
     fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis>;
+
+    /// Index workspace files that are not open. Defaults to doing nothing so every existing
+    /// implementation, including the test mocks, keeps compiling unchanged.
+    fn index_workspace_files(&mut self, _uris: &[&str]) -> Vec<IndexedFile> {
+        Vec::new()
+    }
 
     fn document_admission(&self) -> DocumentAdmission {
         DocumentAdmission::default()
@@ -3548,6 +3554,7 @@ where
                 service.mark_analysis_dirty();
             }
         }
+        EngineEvent::IndexProgress(_) => {}
         EngineEvent::WatchedGlobs(globs) => {
             if globs.is_empty() {
                 return Ok(());
