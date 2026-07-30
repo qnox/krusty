@@ -95,6 +95,26 @@ fn classpath_super_delegation_supports_multiple_default_masks() {
 }
 
 #[test]
+fn module_super_delegation_recognizes_a_base_from_another_file() {
+    // A class without a primary constructor writes its base without parentheses; that syntax is
+    // identical to an interface entry until semantic symbols are available. The source-set symbol
+    // graph must classify an other-file module class exactly as it classifies a classpath class.
+    const BASE: &str = "open class Base(val value: Int)\n";
+    const DERIVED: &str = "class Derived : Base {\n\
+        \x20 constructor() : super(7)\n\
+        }\n\
+        fun box(): String { Derived(); return \"OK\" }\n";
+    common::expect_front_end_ok_files_with_stdlib(
+        &[BASE, DERIVED],
+        "module_parenless_base_secondary_super_frontend",
+    );
+    common::expect_box_ok_files_with_stdlib(
+        &[("Base.kt", BASE), ("Derived.kt", DERIVED)],
+        "module_parenless_base_secondary_super",
+    );
+}
+
+#[test]
 fn super_delegation_keeps_the_exact_same_arity_overload() {
     const SRC: &str = "open class B {\n\
         \x20 val text: String\n\

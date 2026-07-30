@@ -3476,6 +3476,10 @@ pub fn collect_signatures_with_cp(
     // simple name in different packages (e.g. a test's root-package `EmptyContinuation` and the
     // injected `helpers.EmptyContinuation`) are distinct declarations, not a conflict.
     let mut user_defined: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Bootstrap class/interface identity for the same all-files pass. `ModuleSymbols` cannot exist
+    // until this table is complete, but a parenless supertype still needs semantic classification:
+    // another-file source base and a classpath base must produce the same `super_internal` shape.
+    let mut user_base_classes: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (i, file) in files.iter().enumerate() {
         diags.set_file(i as u32);
         for &d in &file.decls {
@@ -3483,6 +3487,9 @@ pub fn collect_signatures_with_cp(
                 let internal = class_internal(file, &c.name);
                 if !user_defined.insert(internal.clone()) {
                     diags.error(c.span, format!("conflicting declarations: {}", c.name));
+                }
+                if !c.is_interface() && !c.is_object() {
+                    user_base_classes.insert(internal.clone());
                 }
                 class_names.insert(c.name.clone(), internal);
             }
@@ -4962,15 +4969,16 @@ pub fn collect_signatures_with_cp(
                             }
                         }
                     };
-                    // A parenless supertype that names a CLASSPATH class is the base class, not an
-                    // interface (`class D : Base { constructor(): super(…) }`). The parser's own fixup
-                    // can only recognize a base declared in the same FILE — there, `Base` and an
-                    // interface are syntactically identical. The classpath is in hand here, so ask it.
+                    // The parser can promote only a SAME-FILE base; at this all-files signature pass,
+                    // classify an other-file module declaration from the bootstrap index and otherwise
+                    // ask the library source. Both origins feed the same `super_internal` field, so later
+                    // checking/lowering never needs separate file/module/classpath branches.
                     let parenless_base = crate::ast::parenless_base_supertype(c, |name| {
                         declared_supertype_name(c, name, &class_names).is_some_and(|internal| {
-                            libraries
-                                .resolve_type_name(internal)
-                                .is_some_and(|ty| !ty.is_interface() && !ty.is_object())
+                            user_base_classes.contains(&internal.render())
+                                || libraries
+                                    .resolve_type_name(internal)
+                                    .is_some_and(|ty| !ty.is_interface() && !ty.is_object())
                         })
                     })
                     .map(str::to_string);
@@ -8262,6 +8270,23 @@ pub struct ResolvedCtorDelegation {
     pub vararg: Option<usize>,
     /// Empty for a direct constructor invocation.
     pub default_masks: Vec<i32>,
+    /// Source-level constraint retained for every target parameter. This is used only while checking
+    /// the selected constructor; lowering consumes the already validated argument types and slots.
+    parameter_constraints: Vec<ConstructorParameterConstraint>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ConstructorParameterConstraint {
+    /// The declared parameter has a concrete type and is checked normally.
+    #[default]
+    Concrete,
+    /// The parameter is the class type variable itself (`value: T`). Its erased upper bound cannot
+    /// reject the argument before inference binds `T`.
+    Inferred,
+    /// A function type contains a class type variable (`transform: (Int) -> T`). Only the variable
+    /// components are inferable: the enclosing function shape, concrete components, suspend-ness,
+    /// and nullability remain real constraints during overload selection.
+    GenericFunction,
 }
 
 #[derive(Clone)]
@@ -8271,12 +8296,9 @@ struct CtorDelegationCandidate {
     defaults: Vec<bool>,
     vararg: Option<usize>,
     supports_default_abi: bool,
-    /// Whether each parameter's DECLARED type mentions one of the class's type parameters. Such a
-    /// parameter has no concrete expectation until the call binds the type argument, so an argument must
-    /// not be judged against its erased upper bound (`<T>` erases to a non-null `Any`, which rejected
-    /// `C(null)`). Empty means "nothing generic", which is the right answer wherever the declaration is
-    /// out of reach.
-    generic_params: Vec<bool>,
+    /// Source declaration constraints, parallel to the target parameters. Empty means the declaration
+    /// is unavailable; matching then falls back to the semantic `Ty` without inventing source metadata.
+    parameter_constraints: Vec<ConstructorParameterConstraint>,
 }
 
 fn constructor_delegation_cycles(edges: &[Option<usize>]) -> Vec<Vec<usize>> {
@@ -14628,7 +14650,13 @@ impl<'a> Checker<'a> {
                     .collect(),
                 vararg: class.props.iter().position(|parameter| parameter.is_vararg),
                 supports_default_abi: !class.is_value,
-                generic_params: Vec::new(),
+                parameter_constraints: class
+                    .props
+                    .iter()
+                    .map(|parameter| {
+                        Self::constructor_parameter_constraint(&parameter.ty, &class.type_params)
+                    })
+                    .collect(),
             });
         }
         for (index, constructor) in class.secondary_ctors.iter().enumerate() {
@@ -14657,26 +14685,35 @@ impl<'a> Checker<'a> {
                     .iter()
                     .position(|parameter| parameter.is_vararg),
                 supports_default_abi: !class.is_value,
-                generic_params: Vec::new(),
+                parameter_constraints: constructor
+                    .params
+                    .iter()
+                    .map(|parameter| {
+                        Self::constructor_parameter_constraint(&parameter.ty, &class.type_params)
+                    })
+                    .collect(),
             });
         }
         candidates
     }
 
-    /// Whether a DECLARED type mentions one of `tparams` — the class's own type parameters — directly, as
-    /// a type argument, or inside a function type. The erased `Ty` cannot answer this: `<T>` erases to a
-    /// non-null `kotlin/Any`, indistinguishable from a parameter genuinely declared `Any`.
-    /// Whether an argument for a parameter declared as `reference` must escape judgement against the
-    /// parameter's ERASED type. That is so when the parameter IS one of the class's type parameters
-    /// (`x: T` — the call is what binds it, and `<T>` erases to a non-null `Any`), and when it is a
-    /// FUNCTION type mentioning one (the erasure says nothing about the lambda's own parameter and
-    /// return types). A CONSTRUCTED type still constrains its argument by its head: `value: List<T>`
-    /// accepts a list and never a `String`, and judging that is what tells the primary
-    /// `ICs(value: List<T>)` from the secondary `ICs(value: T)`. Only its type ARGUMENTS are free.
-    fn type_ref_escapes_judgement(reference: &TypeRef, tparams: &[String]) -> bool {
-        tparams.contains(&reference.name)
-            || (!reference.fun_params.is_empty()
-                && Self::type_ref_mentions_type_param(reference, tparams))
+    /// Preserve the concrete part of a declared generic constructor parameter instead of reducing
+    /// "mentions a type variable" to a boolean. `<T>` itself is inference-only, a function containing
+    /// `T` still constrains its outer shape, and a constructed type such as `List<T>` still constrains
+    /// its argument by the `List` head.
+    fn constructor_parameter_constraint(
+        reference: &TypeRef,
+        tparams: &[String],
+    ) -> ConstructorParameterConstraint {
+        if tparams.contains(&reference.name) {
+            ConstructorParameterConstraint::Inferred
+        } else if reference.name == "<fun>"
+            && Self::type_ref_mentions_type_param(reference, tparams)
+        {
+            ConstructorParameterConstraint::GenericFunction
+        } else {
+            ConstructorParameterConstraint::Concrete
+        }
     }
 
     fn type_ref_mentions_type_param(reference: &TypeRef, tparams: &[String]) -> bool {
@@ -14723,11 +14760,14 @@ impl<'a> Checker<'a> {
                     .iter()
                     .position(|parameter| parameter.is_vararg),
                 supports_default_abi: true,
-                generic_params: declaration
+                parameter_constraints: declaration
                     .props
                     .iter()
                     .map(|parameter| {
-                        Self::type_ref_escapes_judgement(&parameter.ty, &declaration.type_params)
+                        Self::constructor_parameter_constraint(
+                            &parameter.ty,
+                            &declaration.type_params,
+                        )
                     })
                     .collect(),
             });
@@ -14756,7 +14796,16 @@ impl<'a> Checker<'a> {
                     .iter()
                     .position(|parameter| parameter.is_vararg),
                 supports_default_abi: !declaration.is_value,
-                generic_params: Vec::new(),
+                parameter_constraints: constructor
+                    .params
+                    .iter()
+                    .map(|parameter| {
+                        Self::constructor_parameter_constraint(
+                            &parameter.ty,
+                            &declaration.type_params,
+                        )
+                    })
+                    .collect(),
             });
         }
         candidates
@@ -14902,7 +14951,7 @@ impl<'a> Checker<'a> {
                 defaults: Vec::new(),
                 vararg: None,
                 supports_default_abi: false,
-                generic_params: Vec::new(),
+                parameter_constraints: Vec::new(),
             }];
         };
         if let Some(base) = self.syms.class_by_type_name(owner) {
@@ -14926,7 +14975,20 @@ impl<'a> Checker<'a> {
                         .collect(),
                     vararg: base.ctor_vararg,
                     supports_default_abi: true,
-                    generic_params: Vec::new(),
+                    parameter_constraints: declaration
+                        .as_ref()
+                        .map(|base| {
+                            base.props
+                                .iter()
+                                .map(|parameter| {
+                                    Self::constructor_parameter_constraint(
+                                        &parameter.ty,
+                                        &base.type_params,
+                                    )
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 });
             }
             for (index, params) in base.secondary_ctors.iter().enumerate() {
@@ -14965,7 +15027,23 @@ impl<'a> Checker<'a> {
                             .position(|parameter| parameter.is_vararg)
                     }),
                     supports_default_abi: false,
-                    generic_params: Vec::new(),
+                    parameter_constraints: metadata
+                        .map(|constructor| {
+                            constructor
+                                .params
+                                .iter()
+                                .map(|parameter| {
+                                    Self::constructor_parameter_constraint(
+                                        &parameter.ty,
+                                        declaration
+                                            .as_ref()
+                                            .map(|base| base.type_params.as_slice())
+                                            .unwrap_or_default(),
+                                    )
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 });
             }
             return candidates;
@@ -15019,7 +15097,7 @@ impl<'a> Checker<'a> {
                 defaults,
                 vararg,
                 supports_default_abi,
-                generic_params: Vec::new(),
+                parameter_constraints: Vec::new(),
             });
         }
         candidates
@@ -15043,6 +15121,16 @@ impl<'a> Checker<'a> {
             }
             _ => false,
         }
+    }
+
+    fn generic_function_constructor_arg_fits(&self, expected: Ty, actual: Ty) -> bool {
+        if actual == Ty::Null {
+            return expected.is_nullable();
+        }
+        if actual.is_nullable() && !expected.is_nullable() {
+            return false;
+        }
+        self.erased_function_param_fits(expected.non_null(), actual.non_null())
     }
 
     fn match_ctor_delegation_candidate(
@@ -15088,16 +15176,38 @@ impl<'a> Checker<'a> {
                 parameter
             };
             let actual = self.expr_types[argument.0 as usize];
-            // A parameter whose type MENTIONS a type parameter is not yet a concrete expectation — the
-            // call is what binds it. Judging the argument against the declared upper bound rejects calls
-            // Kotlin accepts: `class C<T>(val x: T)` erases `T` to a non-null `Any`, so `C(null)` and
-            // `C(x = null)` were both "none of the following candidates is applicable", and
-            // `PairBox<T>(a: T, b: T)` could not merge two occurrences. Let the argument through here and
-            // leave the judgement to inference and the `expect_assignable` pass on the SELECTED
-            // constructor, which knows the bound type arguments.
-            let generic = Self::ty_mentions_type_param(expected)
-                || candidate.generic_params.get(slot).copied().unwrap_or(false);
-            if actual != Ty::Error && !generic && !self.receiver_is_assignable(actual, expected) {
+            // Preserve the non-generic shell of a parameter while leaving only its type-variable
+            // components to inference. A direct `T` cannot be judged against its erased non-null `Any`,
+            // but `(Int) -> T` still requires a function of the right shape; otherwise that primary
+            // constructor can enter competition for a String argument and make a valid String secondary
+            // ambiguous.
+            let constraint = candidate
+                .parameter_constraints
+                .get(slot)
+                .copied()
+                .unwrap_or_else(|| {
+                    if !Self::ty_mentions_type_param(expected) {
+                        ConstructorParameterConstraint::Concrete
+                    } else if matches!(expected.non_null(), Ty::Fun(_)) {
+                        ConstructorParameterConstraint::GenericFunction
+                    } else {
+                        ConstructorParameterConstraint::Inferred
+                    }
+                });
+            let fits = match constraint {
+                ConstructorParameterConstraint::Concrete => {
+                    self.receiver_is_assignable(actual, expected)
+                }
+                ConstructorParameterConstraint::Inferred => true,
+                ConstructorParameterConstraint::GenericFunction => {
+                    // A lambda's arity is contextual (an omitted parameter list can mean zero
+                    // parameters or implicit `it`), so its provisional type cannot reject a function
+                    // candidate. Non-lambda values already have a stable function shape and must match.
+                    matches!(self.file.expr(argument), Expr::Lambda { .. })
+                        || self.generic_function_constructor_arg_fits(expected, actual)
+                }
+            };
+            if actual != Ty::Error && !fits {
                 return None;
             }
             argument_types.push(expected);
@@ -15125,6 +15235,7 @@ impl<'a> Checker<'a> {
                 omitted,
                 vararg: candidate.vararg,
                 default_masks,
+                parameter_constraints: candidate.parameter_constraints.clone(),
             },
             unsupported_defaults,
         })
@@ -15212,7 +15323,22 @@ impl<'a> Checker<'a> {
             );
             return;
         }
-        for (&argument, &expected) in arguments.args.iter().zip(&selected.resolved.argument_types) {
+        for (index, (&argument, &expected)) in arguments
+            .args
+            .iter()
+            .zip(&selected.resolved.argument_types)
+            .enumerate()
+        {
+            let constraint = selected
+                .resolved
+                .argument_slots
+                .get(index)
+                .and_then(|&slot| selected.resolved.parameter_constraints.get(slot))
+                .copied()
+                .unwrap_or_default();
+            if constraint != ConstructorParameterConstraint::Concrete {
+                continue;
+            }
             self.expect_assignable(
                 expected,
                 self.expr_types[argument.0 as usize],
@@ -21920,8 +22046,14 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|(candidate, _, _, _, params)| (candidate, params.clone()))
                     .collect::<Vec<_>>();
+                // Specificity must see the same composite source graph as every other overload path.
+                // A named classpath extension can take a module-declared subclass; consulting only the
+                // JVM platform here would make the labelled form reject a call that the positional form
+                // accepts, and would reintroduce an origin-specific module/classpath branch.
+                let source = self.fed_source();
                 match crate::symbol_resolver::best_by_args(
                     &*self.syms.libraries,
+                    &source,
                     &ranked_candidates,
                     &arg_tys,
                     &self.integer_literal_args(args),
@@ -28300,32 +28432,21 @@ impl<'a> Checker<'a> {
                             }
                             return self.ctor_result_name(call, cls.internal_name());
                         };
-                        // A parameter declared as one of the class's TYPE PARAMETERS has no concrete
-                        // expectation here: `argument_types` carries its erased upper bound, and `<T>`
-                        // erases to a NON-NULL `kotlin/Any`, so checking against it rejected `C(null)` on
-                        // `class C<T>(val x: T)` — which Kotlin accepts by inferring `T` as nullable. The
-                        // type argument is bound by inference; judge only the parameters whose declared
-                        // type is concrete.
-                        let generic_slots = declaration
-                            .props
-                            .iter()
-                            .map(|parameter| {
-                                Self::type_ref_escapes_judgement(
-                                    &parameter.ty,
-                                    &declaration.type_params,
-                                )
-                            })
-                            .collect::<Vec<_>>();
+                        // Candidate matching already checked the concrete shell of a generic function
+                        // parameter. Do not then re-check its erased type here: `(Int) -> T` may have
+                        // become `(Int) -> Any`, and that erasure would reject a nullable return that is
+                        // precisely the evidence used to infer `T`. Fully concrete parameters still use
+                        // the ordinary assignability diagnostic below.
                         for (index, (&argument, &expected)) in
                             args.iter().zip(&selected.argument_types).enumerate()
                         {
-                            let generic = selected
+                            let constraint = selected
                                 .argument_slots
                                 .get(index)
-                                .and_then(|&slot| generic_slots.get(slot))
+                                .and_then(|&slot| selected.parameter_constraints.get(slot))
                                 .copied()
-                                .unwrap_or(false);
-                            if generic {
+                                .unwrap_or_default();
+                            if constraint != ConstructorParameterConstraint::Concrete {
                                 continue;
                             }
                             self.expect_assignable(

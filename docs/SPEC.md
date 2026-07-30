@@ -467,15 +467,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   secondary `<init>`. A constructor delegating to `super(…)` (or implicitly, to a no-arg base/`Object`)
   runs the field initializers + `init {}` blocks (source order) before its own body; one delegating to a
   sibling `this(…)` runs only its body (the init steps run in the reached `super`-constructor). The
-  parenless base class (`class A : B { constructor(): super() }` — B is a concrete file class) is
-  recovered post-parse. **Field-initializer default-value elision:** kotlinc omits a field initializer
+  parenless base class (`class A : B { constructor(): super() }`) is recovered semantically after
+  parsing: the all-files bootstrap classifies module declarations and the composite symbol source
+  classifies both module and library types, so same-file, other-file, and classpath bases produce the
+  same superclass shape. **Field-initializer default-value elision:** kotlinc omits a field initializer
   that stores the field's JVM default (`0`/`false`/`null`/`'\0'`, incl. `0.toByte()`), so a value a base
   constructor's virtual call already wrote survives; krusty does the same (test
   `secondary_ctor_noprimary_e2e`, corpus `fieldInitializerOptimization`). The delegation `<init>`
   *target signature* is read live from the (post-`value_classes`-pass) class at emit time, so the lowerer
-  needs no value-class knowledge and a value-class `super(…)` argument erases correctly. Skipped (bail,
-  never miscompile): a secondary with a defaulted parameter (needs the synthetic `DefaultConstructorMarker`
-  overload) and an ambiguous `this(…)` target.
+  needs no value-class knowledge and a value-class `super(…)` argument erases correctly. A secondary
+  constructor with lowerable defaults emits and calls the synthetic `DefaultConstructorMarker` overload;
+  when that ABI cannot be emitted, the file is skipped rather than calling a nonexistent target.
+  Ambiguous `this(…)`/`super(…)` targets and delegation cycles are diagnosed. Tests:
+  `tests/secondary_ctor_this_sibling_e2e.rs` and `tests/super_to_base_secondary_ctor_e2e.rs`.
 - Constructor references `::A`: lowered like a lambda `{ args -> A(args) }` — a synthesized static
   impl `(ctor params) -> new A(params)` wrapped in the same `invokedynamic`/`LambdaMetafactory`
   closure. Only the simple primary-constructor positional case (the reference's arity matches the
@@ -2513,3 +2517,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   arguments, including defaults supported by the ordinary target, use the same member and extension
   call machinery as non-safe calls. Supplied arguments evaluate left-to-right inside the non-null
   branch, then load in parameter order. Tests: `tests/safe_call_argument_list_e2e.rs`.
+
+- **Named extension applicability uses the composite source graph.** Overload selection does not
+  distinguish a positional call from a labelled one, nor a module type from a classpath type: a
+  module-declared subclass is assignable to a classpath extension parameter through the same
+  federated hierarchy used by ordinary resolution. Test:
+  `named_args_classpath_e2e::named_classpath_extension_accepts_a_module_subclass_argument`.
+
+- **Generic constructor inference preserves concrete parameter shells.** A parameter declared
+  directly as `T` is inference-only before `T` is bound, but a parameter such as `(Int) -> T` still
+  requires a function of the correct arity, suspend shape, and nullability. Constructed types such
+  as `List<T>` likewise retain their concrete head. This keeps an incompatible generic primary out
+  of overload competition with a valid concrete secondary constructor. Tests:
+  `definitely_non_null_type_e2e::generic_function_constructor_still_requires_a_function_argument`
+  and
+  `definitely_non_null_type_e2e::concrete_secondary_beats_an_incompatible_generic_function_primary`.

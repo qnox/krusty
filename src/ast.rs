@@ -993,9 +993,9 @@ pub struct CtorDelegationCall {
 /// A class with NO primary constructor names its base class WITHOUT parentheses — `class D : Base {
 /// constructor(): super(…) }` — because the base arguments come from each secondary `super(…)`. The
 /// parser parks every parenless supertype in `supertypes` and promotes only the ones naming a class
-/// declared in the SAME FILE (`fixup_parenless_base_classes`); it cannot see the classpath, where a
-/// base class and an interface look identical. Callers that do have a classpath pass `is_base_class`
-/// and get back the supertype that is really the base.
+/// declared in the SAME FILE (`fixup_parenless_base_classes`); it cannot see another source file or
+/// a classpath, where a base class and an interface look identical. Semantic callers pass one
+/// origin-neutral `is_base_class` query and get back the supertype that is really the base.
 pub fn parenless_base_supertype(
     class: &ClassDecl,
     mut is_base_class: impl FnMut(&str) -> bool,

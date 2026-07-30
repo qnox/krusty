@@ -800,13 +800,12 @@ pub fn lower_file_at_reporting(
             };
             let module = crate::module_symbols::ModuleSymbols::new(lo.syms);
             let symbols = SymbolResolver::new_scoped_with_module(&*lo.syms.libraries, &module, &[]);
-            // A parenless supertype naming a CLASSPATH class is the base class, not an interface — the
-            // parser can only promote a base declared in the same file. Same probe the checker uses, so
-            // the two agree on which supertype is the base.
+            // The parser can classify only same-file declarations. At lowering time the composite
+            // resolver is authoritative for both module and library types; using it here keeps the
+            // checker-recorded superclass and the emitted superclass identical across source origins.
             let parenless_base = crate::ast::parenless_base_supertype(c, |name| {
                 lo.syms.class_names.get(name).is_some_and(|internal| {
-                    lo.syms
-                        .libraries
+                    symbols
                         .resolve_type_name(internal)
                         .is_some_and(|ty| !ty.is_interface() && !ty.is_object())
                 })
