@@ -13505,17 +13505,24 @@ impl<'a> Checker<'a> {
         let mut mapped = Vec::new();
         let mut failures = Vec::new();
         for candidate in overloads {
+            // CONTEXT parameters are not value arguments: they are supplied by the enclosing scope, so
+            // the labels and arity a call is mapped against must exclude them. Mapping against the full
+            // signature counted `context(c: C)` as a parameter, so `combine(b = "K", a = "O")` on
+            // `context(c: C) fun combine(a: String, b: String)` reported "none of the following
+            // candidates is applicable:". Every other named-argument site already strips them with
+            // `call_sig_without_context`; this one did not.
+            let context_count = candidate.context_count.min(candidate.callable.params.len());
+            let value_signature = call_sig_without_context(&candidate.call_sig, context_count);
+            let value_params = &candidate.callable.params[context_count..];
             match map_call_sig_args_with_trailing(
                 args,
                 Some(names),
-                &candidate.call_sig,
+                &value_signature,
                 trailing_lambda,
             ) {
-                Ok(slots) => mapped.push((
-                    self.call_slot_score(&candidate.callable.params, &slots),
-                    slots,
-                    candidate,
-                )),
+                Ok(slots) => {
+                    mapped.push((self.call_slot_score(value_params, &slots), slots, candidate))
+                }
                 Err(error) => failures.push((error, candidate)),
             }
         }
@@ -13532,7 +13539,9 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-            } else if !self.report_pending_unknown_named_arg(call) {
+            } else if !self.report_pending_unknown_named_arg(call)
+                && !self.call_already_has_argument_diagnostic(call, args)
+            {
                 self.diags.error(
                     self.call_callee_name_span(call),
                     INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
@@ -13581,7 +13590,9 @@ impl<'a> Checker<'a> {
             return Err(());
         }
         if !failures.is_empty() {
-            if !self.report_pending_unknown_named_arg(call) {
+            if !self.report_pending_unknown_named_arg(call)
+                && !self.call_already_has_argument_diagnostic(call, args)
+            {
                 self.diags.error(
                     self.call_callee_name_span(call),
                     INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
@@ -13597,6 +13608,21 @@ impl<'a> Checker<'a> {
     /// more useful than the generic overload list, and it is the diagnostic every OTHER call origin
     /// (top-level, extension, constructor) already produces for the same mistake — so whichever path
     /// ends up failing the call should say the same thing.
+    /// Whether an argument-level diagnostic has already been reported inside `call`'s argument list. The
+    /// generic "none of the following candidates is applicable:" list is a LAST resort: adding it to a call
+    /// that already carries specific per-argument errors tells the programmer less, not more, and reads as a
+    /// second, contradictory verdict on the same call.
+    fn call_already_has_argument_diagnostic(&self, call: ExprId, args: &[ExprId]) -> bool {
+        let list = self.call_argument_list_span(call, args);
+        let whole = self.span(call);
+        let lo = list.lo.min(whole.lo);
+        let hi = list.hi.max(whole.hi);
+        self.diags
+            .diags
+            .iter()
+            .any(|diagnostic| diagnostic.span.lo >= lo && diagnostic.span.hi <= hi)
+    }
+
     fn report_pending_unknown_named_arg(&mut self, call: ExprId) -> bool {
         match self.pending_unknown_named_arg.remove(&call) {
             Some((message, span)) => {
@@ -21505,7 +21531,9 @@ impl<'a> Checker<'a> {
             return self
                 .record_extension_call_with_slots(call, name, receiver, args, type_args)
                 .or_else(|| {
-                    if !self.report_pending_unknown_named_arg(call) {
+                    if !self.report_pending_unknown_named_arg(call)
+                        && !self.call_already_has_argument_diagnostic(call, args)
+                    {
                         self.diags.error(
                             self.call_callee_name_span(call),
                             INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
@@ -21555,6 +21583,13 @@ impl<'a> Checker<'a> {
             let mut mapping_errors = Vec::new();
             let mut mapped = Vec::new();
             let mut selected = None;
+            // The highest-scoring candidate that MAPPED, kept in case the argument-based selection below
+            // declines to pick any. It answers "which overload fits the labels best", which is what this
+            // resolution did before the ranked/bounds-aware selection was added, and a call that maps
+            // cleanly must not be reported as inapplicable just because the newer selection abstained —
+            // that regressed every NAMED call to a context function (`combine(a = "O", b = "K")` on
+            // `context(c: C) fun combine(…)`) while the positional form kept working.
+            let mut best_mapped: Option<(usize, _)> = None;
             let mut ambiguous = false;
             let mut start = 0;
             while start < ranked.len() {
@@ -21569,10 +21604,23 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     let params = candidate.extension_value_params().to_vec();
+                    // Align the signature's LABELS with its value parameters. `extension_value_params`
+                    // drops the leading receiver/context slots, but `call_sig` still names them, so the
+                    // labels were off by one: `combine(a = "O", b = "K")` on
+                    // `context(c: C) fun combine(a: String, b: String)` mapped `a`/`b` past the `c` slot,
+                    // left a required parameter unfilled, and reported "none of the following candidates
+                    // is applicable:" — for every named form, while the positional call worked. Deriving
+                    // the count from the two lists keeps them in step however the receiver is modelled.
+                    let leading = candidate
+                        .call_sig
+                        .param_names
+                        .len()
+                        .saturating_sub(params.len());
+                    let value_signature = call_sig_without_context(&candidate.call_sig, leading);
                     let slots = match map_call_sig_args_with_trailing(
                         args,
                         Some(&names),
-                        &candidate.call_sig,
+                        &value_signature,
                         trailing_lambda,
                     ) {
                         Ok(slots) => slots,
@@ -21660,10 +21708,18 @@ impl<'a> Checker<'a> {
                         ambiguous = true;
                         break;
                     }
-                    crate::symbol_resolver::CandidateSelection::None => {}
+                    crate::symbol_resolver::CandidateSelection::None => {
+                        for entry in &candidates {
+                            let score = self.call_slot_score(&entry.1, &entry.2).unwrap_or(0);
+                            if best_mapped.as_ref().is_none_or(|(best, _)| score > *best) {
+                                best_mapped = Some((score, entry.clone()));
+                            }
+                        }
+                    }
                 }
                 start = end;
             }
+            let selected = selected.or_else(|| best_mapped.map(|(_, entry)| entry));
             (selected, mapped, mapping_errors, ambiguous)
         };
         if ambiguous {
@@ -21674,6 +21730,14 @@ impl<'a> Checker<'a> {
             return Some(Ty::Error);
         }
         if selected.is_none() {
+            // Nothing MAPPED and nothing to report: this resolution simply does not apply, so defer to the
+            // paths that follow instead of failing the call. Returning an error here made any callable this
+            // path skips — a context function, whose signature carries no value-parameter names for it to
+            // map — inapplicable outright, so every NAMED call to one was rejected while the positional
+            // form resolved through a later path.
+            if mapped.is_empty() && mapping_errors.is_empty() {
+                return None;
+            }
             if let Some((error, candidate)) = take_unanimous_mapping_error(&mut mapping_errors) {
                 self.report_callable_arg_mapping_error(
                     call,
@@ -21705,7 +21769,9 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-            } else if !self.report_pending_unknown_named_arg(call) {
+            } else if !self.report_pending_unknown_named_arg(call)
+                && !self.call_already_has_argument_diagnostic(call, args)
+            {
                 self.diags.error(
                     self.call_callee_name_span(call),
                     INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
@@ -24011,7 +24077,9 @@ impl<'a> Checker<'a> {
                 return ClasspathMemberSlotCall::Rejected;
             }
             if !mapping_errors.is_empty() {
-                if !self.report_pending_unknown_named_arg(call) {
+                if !self.report_pending_unknown_named_arg(call)
+                    && !self.call_already_has_argument_diagnostic(call, args)
+                {
                     self.diags.error(
                         self.call_callee_name_span(call),
                         INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
@@ -24044,10 +24112,12 @@ impl<'a> Checker<'a> {
                     }
                 }
             } else {
-                self.diags.error(
-                    self.call_callee_name_span(call),
-                    INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
-                );
+                if !self.call_already_has_argument_diagnostic(call, args) {
+                    self.diags.error(
+                        self.call_callee_name_span(call),
+                        INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
+                    );
+                }
             }
             return ClasspathMemberSlotCall::Rejected;
         }
@@ -24139,7 +24209,13 @@ impl<'a> Checker<'a> {
                 .map(crate::symbol_resolver::Symbol::overloads)
                 .unwrap_or_default()
                 .iter()
-                .any(crate::libraries::FunctionInfo::is_extension)
+                .filter(|candidate| candidate.is_extension())
+                // Only an extension that CARRIES parameter names can take these labels — that is exactly
+                // the filter the extension resolution itself applies before considering a candidate. If it
+                // would skip every extension, deferring to it hands the call to a path that also declines,
+                // and the two deferrals compose into silence: the member's own mapping errors and type
+                // mismatches are never reported.
+                .any(|candidate| candidate.call_sig.has_param_names())
     }
 
     fn call_slot_score(&self, params: &[Ty], slots: &[Option<ExprId>]) -> Option<usize> {
@@ -24558,10 +24634,12 @@ impl<'a> Checker<'a> {
             return None;
         }
         if has_sibling_overloads && applicable_members.is_empty() {
-            self.diags.error(
-                self.call_callee_name_span(call),
-                INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
-            );
+            if !self.call_already_has_argument_diagnostic(call, args) {
+                self.diags.error(
+                    self.call_callee_name_span(call),
+                    INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
+                );
+            }
             return Some(Ty::Error);
         }
         let members = if applicable_members.is_empty() {
@@ -26214,10 +26292,12 @@ impl<'a> Checker<'a> {
                     if self.report_pending_unknown_named_arg(call) {
                         return Ty::Error;
                     }
-                    self.diags.error(
-                        self.call_callee_name_span(call),
-                        INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
-                    );
+                    if !self.call_already_has_argument_diagnostic(call, args) {
+                        self.diags.error(
+                            self.call_callee_name_span(call),
+                            INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
+                        );
+                    }
                     return Ty::Error;
                 }
                 if let Some(ret) = self.record_library_extension_call_with_literal_args(
@@ -26473,8 +26553,10 @@ impl<'a> Checker<'a> {
                             return ret;
                         }
                         _ => {
-                            self.diags
-                                .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
+                            if !self.call_already_has_argument_diagnostic(call, args) {
+                                self.diags
+                                    .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
+                            }
                             return Ty::Error;
                         }
                     }
@@ -26735,8 +26817,10 @@ impl<'a> Checker<'a> {
                         match (applicable.next(), applicable.next()) {
                             (Some(selected), None) => Some(selected),
                             _ => {
-                                self.diags
-                                    .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
+                                if !self.call_already_has_argument_diagnostic(call, args) {
+                                    self.diags
+                                        .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
+                                }
                                 return Ty::Error;
                             }
                         }
@@ -27849,7 +27933,8 @@ impl<'a> Checker<'a> {
                                 args,
                                 &arguments,
                                 &candidates,
-                            ) {
+                            ) && !self.call_already_has_argument_diagnostic(call, args)
+                            {
                                 self.diags
                                     .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
                             }
