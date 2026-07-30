@@ -22327,6 +22327,16 @@ impl<'a> Checker<'a> {
         })
     }
 
+    /// Whether a MODULE class's instance member named `name` on `receiver` carries parameter names, and so
+    /// can take named arguments. The companion of [`Self::member_extension_supports_named`] for ordinary
+    /// members; a data class's synthesized `copy` is the pervasive case.
+    fn module_member_supports_named(&self, receiver: Ty, name: &str) -> bool {
+        crate::module_symbols::ModuleSymbols::new(self.syms)
+            .instance_members(receiver, name)
+            .iter()
+            .any(|member| member.call_sig.has_param_names())
+    }
+
     fn member_extension_supports_named(&self, extension_receiver: Ty, name: &str) -> bool {
         self.member_extension_function_shapes(extension_receiver, name)
             .iter()
@@ -23793,6 +23803,23 @@ impl<'a> Checker<'a> {
                         || self.implicit_receiver_types().into_iter().any(|rt| {
                             self.member_extension_supports_named(rt, n)
                         })
+                        // A member reached through a SMART-CAST `this`: in
+                        // `fun Op.f(p: String) = when (this) { is Create -> copy(path = p) }` the call
+                        // resolves against `Create`, but `implicit_receiver_types` reports the DECLARED
+                        // receiver `Op`, which has no `copy` to take the labels from — so the call was
+                        // rejected here before the narrowed-this resolution below ever ran, while the
+                        // explicitly qualified `o.copy(path = …)` after an `is` check worked. Ask the same
+                        // `effective_this_narrow` seam that resolution itself uses, rather than widening
+                        // what counts as an implicit receiver for every other lookup.
+                        || self
+                            .effective_this_narrow()
+                            .filter(|narrowed| self.this_ty != Some(*narrowed))
+                            // Deliberately MODULE MEMBERS only, matching what the narrowed-this
+                            // resolution records and what lowering can emit. Admitting member
+                            // EXTENSIONS here would accept named arguments the narrowed-this lowering
+                            // still handles positionally — the accept-then-lower-wrong shape this very
+                            // change exists to remove. Widen both ends together or neither.
+                            .is_some_and(|narrowed| self.module_member_supports_named(narrowed, n))
                         // A CLASSPATH CONSTRUCTOR whose `@Metadata` records parameter names
                         // (`Point(y = 2, x = 1)`, or `Cfg(a = 1, c = "x")` omitting a defaulted `b`,
                         // against a data/plain class from a dependency). `constructor_named_params` returns
