@@ -117,6 +117,15 @@ fn referenced_class_names(ir: &IrFile) -> Vec<TypeName> {
             IrExpr::TypeOp { type_operand, .. } => collect_obj_names(*type_operand, &mut out),
             IrExpr::Variable { ty, .. } => collect_obj_names(*ty, &mut out),
             IrExpr::InvokeFunction { ret, .. } => collect_obj_names(*ret, &mut out),
+            IrExpr::PropertyRead { owner, ty, .. } | IrExpr::PropertyWrite { owner, ty, .. } => {
+                // Semantic property nodes replaced realization-shaped calls, so both the declaring
+                // owner (needed to recognize a value class's sole-property identity read) and logical
+                // value type (needed to mangle/erase another class's accessor) are type references in
+                // their own right. Omitting either makes value-class handling depend on some unrelated
+                // signature also mentioning the class.
+                out.push(*owner);
+                collect_obj_names(*ty, &mut out);
+            }
             IrExpr::New {
                 internal,
                 ctor_params,
@@ -340,6 +349,62 @@ pub fn lower_value_classes(
     if under.is_empty() {
         return true;
     }
+
+    // A semantic property operation deliberately keeps the Kotlin property name. For an owner compiled
+    // from another source file there is no classfile for the emitter to inspect, so record the JVM
+    // accessor spelling here while the original property type is still present. The emitter consults
+    // this table only as its declaration-less fallback; same-file declarations and classpath metadata
+    // remain authoritative. Keeping this target fact in a JVM-pass side table prevents common lowering
+    // from branching on whether the owner came from this file, another module file, or the classpath.
+    ir.property_accessor_jvm_realizations = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(id, expression)| {
+            let operation = match expression {
+                IrExpr::PropertyRead { operation, .. }
+                | IrExpr::PropertyWrite { operation, .. } => operation.unwrap_or(id as u32),
+                _ => return None,
+            };
+            let accessor = match expression {
+                IrExpr::PropertyRead { name, ty, .. }
+                    if ty
+                        .non_null()
+                        .obj_internal()
+                        .is_some_and(|owner| under.contains_key(&owner)) =>
+                {
+                    vc_mangle(&property_getter_name(name), &[], ty, &under, false, false)
+                }
+                IrExpr::PropertyWrite { name, ty, .. }
+                    if ty
+                        .non_null()
+                        .obj_internal()
+                        .is_some_and(|owner| under.contains_key(&owner)) =>
+                {
+                    vc_mangle(
+                        &crate::names::property_setter_name(name),
+                        std::slice::from_ref(ty),
+                        &Ty::Unit,
+                        &under,
+                        false,
+                        false,
+                    )
+                }
+                _ => return None,
+            };
+            // Record the erased property value beside the name: reads deliberately retain their logical
+            // value-class type in the IR, so the declaration-less emitter cannot derive the descriptor
+            // from the node after this pass.
+            let physical = match expression {
+                IrExpr::PropertyRead { ty, .. } | IrExpr::PropertyWrite { ty, .. } => {
+                    erase(ty, &under)
+                }
+                _ => unreachable!("the accessor match above accepted only property operations"),
+            };
+            Some((operation, (accessor, physical)))
+        })
+        .collect();
+
     let value_class_ids: Vec<u32> = (0..ir.classes.len() as u32)
         .filter(|&i| ir.classes[i as usize].is_value)
         .collect();
@@ -376,7 +441,9 @@ pub fn lower_value_classes(
             continue;
         }
         let has_init = ir.classes[cid as usize].init_body.is_some();
-        synth_value_members(ir, cid, &under, has_init);
+        if !synth_value_members(ir, cid, &under, has_init) {
+            return false;
+        }
     }
 
     // Pre-erasure signatures, so box/unbox at call boundaries can see `Object`/generic param/field
@@ -429,12 +496,20 @@ pub fn lower_value_classes(
                     // Guard against a coincidentally-named method (a BOXING override, a user method): the
                     // body must actually READ that field. A plain field getter's reachable body contains a
                     // `GetField` of `(ci, fi)`; a boxing override does not (it box-impls a value instead).
+                    let field_name = ir.classes[ci].fields[fi as usize].name.clone();
+                    let owner = ir.classes[ci].fq_name;
                     let reads_field = ir.functions[fid as usize].body.is_some_and(|b| {
                         let mut reach = HashSet::new();
                         collect_reachable(&ir.exprs, b, &mut reach);
-                        reach.iter().any(|&e| {
-                            matches!(&ir.exprs[e as usize],
-                                IrExpr::GetField { class, index, .. } if *class as usize == ci && *index == fi)
+                        reach.iter().any(|&e| match &ir.exprs[e as usize] {
+                            IrExpr::GetField { class, index, .. } => {
+                                *class as usize == ci && *index == fi
+                            }
+                            // The same read expressed as a property of this class.
+                            IrExpr::PropertyRead { owner: o, name, .. } => {
+                                *o == owner && *name == field_name
+                            }
+                            _ => false,
                         })
                     });
                     if reads_field {
@@ -586,7 +661,7 @@ pub fn lower_value_classes(
                 collect_reachable_scoped(&ir.exprs, &ir.inline_only_fns, root, &mut reach);
                 for id in reach {
                     if let IrExpr::Variable { index, ty, .. } = &ir.exprs[id as usize] {
-                        m.insert(*index, ty.clone());
+                        m.insert(*index, *ty);
                     }
                 }
             }
@@ -1448,6 +1523,13 @@ pub fn lower_value_classes(
                 }
                 *p = erase(p, &under);
             }
+            let target_params = match &mut sc.delegate {
+                crate::ir::CtorDelegateTarget::This { target_params, .. }
+                | crate::ir::CtorDelegateTarget::Super { target_params, .. } => target_params,
+            };
+            for parameter in target_params {
+                *parameter = erase(parameter, &under);
+            }
         }
     }
     for internal in value_param_ctors {
@@ -1494,6 +1576,11 @@ pub fn lower_value_classes(
         let keep_box = vc_body_exprs.contains(&(i as u32));
         match e {
             IrExpr::Variable { ty, .. } => *ty = erase(ty, &under),
+            // A property WRITE's carried type is the value it stores, which erases like any other. A
+            // property READ's is the property's DECLARED type, which the pass's own analyses read
+            // pre-erasure (exactly as they read a field's declared type) — erasing it would hide the
+            // value class from them.
+            IrExpr::PropertyWrite { ty, .. } => *ty = erase(ty, &under),
             IrExpr::TypeOp { type_operand, .. } => {
                 // `is X` / `as X` on a value class keeps the BOXED type — the box is the only object that is
                 // `instanceof X`, and a `checkcast X` of an `Any` yields a box the property access then
@@ -1608,11 +1695,18 @@ pub fn lower_value_classes(
         }
         for (sidx, sc) in c.secondary_ctors.iter().enumerate() {
             let params = &orig_secondary[cidx][sidx];
+            let slots = secondary_ctor_slot_map(&ir.exprs, sc, params);
             if let Some(b) = sc.body {
-                s4_bodies.push((b, body_slot_map(&ir.exprs, b, params), None));
+                s4_bodies.push((b, slots.clone(), None));
+            }
+            for &statement in &sc.delegate_prelude {
+                s4_bodies.push((statement, slots.clone(), None));
             }
             for &a in &sc.delegate_args {
-                s4_bodies.push((a, body_slot_map(&ir.exprs, a, params), None));
+                s4_bodies.push((a, slots.clone(), None));
+            }
+            for &default in sc.defaults.iter().flatten() {
+                s4_bodies.push((default, slots.clone(), None));
             }
         }
         for entry in &c.enum_entries {
@@ -1754,6 +1848,19 @@ pub fn lower_value_classes(
             IrExpr::GetField {
                 receiver, class, ..
             } if is_vc[*class as usize] => Some(Rw::Prop(*receiver, fq[*class as usize])),
+            // The same read as a PROPERTY: a value class's sole property IS its erased underlying, so
+            // reading it never goes through an accessor whatever the owner's declaration says.
+            IrExpr::PropertyRead {
+                receiver,
+                owner,
+                name,
+                ..
+            } if vc_getters
+                .get(owner)
+                .is_some_and(|getter| *getter == property_getter_name(name)) =>
+            {
+                Some(Rw::Prop(*receiver, *owner))
+            }
             // A sole-property access resolved to `invokevirtual X.getV()` (e.g. inside another value
             // class's `init` block) — rewrite like the indexed getter.
             IrExpr::Call {
@@ -1954,11 +2061,18 @@ pub fn lower_value_classes(
         // params — box/unbox their value-class accesses/constructions.
         for (sidx, sc) in c.secondary_ctors.iter().enumerate() {
             let params = &orig_secondary[cidx][sidx];
+            let slots = secondary_ctor_slot_map(&ir.exprs, sc, params);
             if let Some(b) = sc.body {
-                bodies.push((b, body_slot_map(&ir.exprs, b, params)));
+                bodies.push((b, slots.clone()));
+            }
+            for &statement in &sc.delegate_prelude {
+                bodies.push((statement, slots.clone()));
             }
             for &a in &sc.delegate_args {
-                bodies.push((a, body_slot_map(&ir.exprs, a, params)));
+                bodies.push((a, slots.clone()));
+            }
+            for &default in sc.defaults.iter().flatten() {
+                bodies.push((default, slots.clone()));
             }
         }
         // Base-class constructor args run in the subclass `<init>` over its primary ctor params.
@@ -2110,6 +2224,19 @@ pub fn lower_value_classes(
                     let u = under.get(&x).map(|t| erase(t, &under));
                     if u.map(|u| u.non_null()) == Some(type_operand.non_null()) {
                         ops.push((*arg, BoxOp::Unbox(x)));
+                    }
+                }
+            }
+            // Reading a value class's OWN property that is not its sole stored one (a computed member)
+            // dispatches on the boxed object exactly like a member call — box the receiver. The sole
+            // property is not here: that read was rewritten to identity in step 4.
+            if let IrExpr::PropertyRead {
+                receiver, owner, ..
+            } = &ir.exprs[id as usize]
+            {
+                if under.contains_key(owner) {
+                    if let Repr::Unboxed(x) = repr_ctx.repr(*receiver) {
+                        ops.push((*receiver, BoxOp::Box(x)));
                     }
                 }
             }
@@ -2799,6 +2926,122 @@ pub fn lower_value_classes(
         box_vc_tail(ir, body, &under, &orig_rets, false);
     }
 
+    // A property whose declared type is a VALUE CLASS has a `@JvmName`-mangled accessor. The backend
+    // synthesizes the accessors for a plain property and cannot know the value classes, so stamp the
+    // mangled spelling onto the declaration here, where the map exists.
+    for ci in 0..ir.classes.len() {
+        let props: Vec<(usize, String, Ty)> = ir.classes[ci]
+            .properties
+            .iter()
+            .enumerate()
+            // Only a property the backend SYNTHESIZES an accessor for needs a stamped name. An abstract
+            // or interface property keeps a real IR method, which this pass mangles like any other.
+            .filter(|(_, p)| p.getter.is_none() && p.backing_field.is_some())
+            .map(|(i, p)| (i, p.name.clone(), p.ty))
+            .collect();
+        for (index, name, ty) in props {
+            let is_vc_ty = |t: &Ty| {
+                t.non_null()
+                    .obj_internal()
+                    .is_some_and(|fq_name| under.contains_key(&fq_name))
+            };
+            // An OVERRIDE must carry the name its supertype's accessor has: `override val p: Nothing?`
+            // over an `Inlined?` property is spelled with the supertype's mangled name, or the interface
+            // call finds no implementation. So the mangling type is the supertype's when it has one.
+            // The supertype's accessor has ALREADY been mangled by this pass (it is a real IR method), so
+            // take its exact name rather than recomputing the hash — the override and its bridge must
+            // match byte for byte or the interface call finds no implementation.
+            let plain = property_getter_name(&name);
+            let supers: Vec<TypeName> = ir.classes[ci]
+                .supertypes
+                .iter()
+                .filter_map(|st| st.non_null().obj_internal())
+                .chain(ir.classes[ci].interfaces.iter_ids())
+                .collect();
+            let super_accessor = supers
+                .iter()
+                .filter_map(|st| ir.classes.iter().find(|sc| sc.fq_name == *st))
+                .filter(|sc| sc.properties.iter().any(|sp| sp.name == name))
+                .flat_map(|sc| sc.methods.iter())
+                .map(|&fid| ir.functions[fid as usize].name.clone())
+                .find(|n| n.strip_prefix(&plain).is_some_and(|r| r.starts_with('-')));
+            crate::trace_compiler!(
+                "value_classes",
+                "prop stamp {}.{} super_accessor={super_accessor:?} vc_ty={}",
+                ir.classes[ci].fq_name.render(),
+                name,
+                is_vc_ty(&ty)
+            );
+            if super_accessor.is_none() && !is_vc_ty(&ty) {
+                continue;
+            }
+            // The property's OWN accessor is mangled only when its own type is a value class. When it
+            // merely overrides a value-class property (`override val p: Nothing?`), the own accessor keeps
+            // the plain spelling and it is the BRIDGE that carries the supertype's mangled name.
+            let own_mangled =
+                is_vc_ty(&ty).then(|| vc_mangle(&plain, &[], &ty, &under, false, false));
+            let getter = own_mangled.clone().unwrap_or_else(|| plain.clone());
+            let setter = vc_mangle(
+                &crate::names::property_setter_name(&name),
+                std::slice::from_ref(&ty),
+                &Ty::Unit,
+                &under,
+                false,
+                false,
+            );
+            // Any call already built against the PLAIN spelling (a plugin emits `getX()` before this pass
+            // runs) must move to the mangled one too — this is the single place that decides the name.
+            let owner = ir.classes[ci].fq_name;
+            let plain_getter = property_getter_name(&name);
+            let plain_setter = crate::names::property_setter_name(&name);
+            for e in ir.exprs.iter_mut() {
+                if let IrExpr::Call {
+                    callee:
+                        Callee::Virtual {
+                            owner: call_owner,
+                            name: call_name,
+                            ..
+                        },
+                    ..
+                } = e
+                {
+                    if *call_owner != owner {
+                        continue;
+                    }
+                    if *call_name == plain_getter {
+                        *call_name = getter.clone();
+                    } else if *call_name == plain_setter {
+                        *call_name = setter.clone();
+                    }
+                }
+            }
+            // A bridge delegating to the accessor must target the mangled spelling too — an unmangled
+            // `getProp()Bse` bridge over a value-class property calls `getProp-<hash>()I`.
+            for bridge in ir.classes[ci].bridges.iter_mut() {
+                let target = bridge
+                    .target_name
+                    .as_deref()
+                    .unwrap_or(&bridge.name)
+                    .to_string();
+                if target == plain_getter {
+                    if let Some(super_name) = super_accessor.clone() {
+                        // The property OVERRIDES a value-class one: the bridge IS the supertype's mangled
+                        // accessor, delegating to this class's own (plain) one.
+                        bridge.name = super_name;
+                        bridge.target_name = Some(getter.clone());
+                    } else {
+                        bridge.target_name = Some(getter.clone());
+                    }
+                } else if target == plain_setter {
+                    bridge.target_name = Some(setter.clone());
+                }
+            }
+            let p = &mut ir.classes[ci].properties[index];
+            p.getter_jvm_name = own_mangled;
+            p.setter_jvm_name = is_vc_ty(&ty).then_some(setter);
+        }
+    }
+
     true
 }
 
@@ -3024,6 +3267,8 @@ fn operand_nonnull(
             .get(*class as usize)
             .and_then(|fs| fs.get(*index as usize))
             .is_some_and(non_null_ty),
+        // The same read as a property: its declared type is what says whether the value can be null.
+        IrExpr::PropertyRead { ty, .. } => non_null_ty(ty),
         IrExpr::NotNullAssert { .. } => true,
         IrExpr::Call {
             callee: Callee::Static { name, .. },
@@ -3092,6 +3337,9 @@ fn repr(
             .get(*class as usize)
             .and_then(|fs| fs.get(*index as usize))
             .map_or(Repr::NotVc, |t| repr_of_ty(t, under)),
+        // A property read carries its own declared type. Whatever accessor or field the target picks for
+        // it yields the value class's ERASED underlying — the same representation a field read of one has.
+        IrExpr::PropertyRead { ty, .. } => repr_of_ty(ty, under),
         // A value-class-FIELD getter (`Test.getS()` for `val s: S<T>`) reprs as the field's representation
         // — the UNBOXED underlying. Keyed on the getter's IDENTITY (owning class + method slot, via
         // `field_getters`), so it is distinguished from a boxing OVERRIDE getter, which is not in the map and
@@ -3426,6 +3674,9 @@ fn is_boxed_vc(
             .get(*class as usize)
             .and_then(|fs| fs.get(*index as usize))
             .is_some_and(|t| matches!(repr_of_ty(t, under), Repr::Boxed(c) if c == x)),
+        IrExpr::PropertyRead { ty, .. } => {
+            matches!(repr_of_ty(ty, under), Repr::Boxed(c) if c == x)
+        }
         IrExpr::Call {
             callee: Callee::Static { owner, name, .. },
             ..
@@ -4017,7 +4268,7 @@ fn descriptor_param_refs(descriptor: &str) -> Vec<bool> {
 /// this pass, NOT `ir_lower`): `unbox-impl`/`box-impl`/`constructor-impl`/`equals-impl0` plus structural
 /// `equals`/`hashCode`/`toString` (skipped where the user defined one). The plain single-field class
 /// (field, `<init>`, getter) is already emitted by `ir_lower`.
-fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: bool) {
+fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: bool) -> bool {
     let internal = ir.classes[class_id as usize].fq_name();
     let fname = ir.classes[class_id as usize].fields[0].name.clone();
     let internal_name = type_name(&internal);
@@ -4124,9 +4375,15 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
             if let Some(init_root) = ir.classes[class_id as usize].init_body {
                 let mut reach = HashSet::new();
                 collect_reachable(&ir.exprs, init_root, &mut reach);
+                let class_fq = ir.classes[class_id as usize].fq_name;
                 for id in reach {
-                    if matches!(&ir.exprs[id as usize], IrExpr::GetField { class, .. } if *class == class_id)
-                    {
+                    // The sole field read — as an indexed field read, or as the property it is.
+                    let sole_field_read = match &ir.exprs[id as usize] {
+                        IrExpr::GetField { class, .. } => *class == class_id,
+                        IrExpr::PropertyRead { owner, .. } => *owner == class_fq,
+                        _ => false,
+                    };
+                    if sole_field_read {
                         ir.exprs[id as usize] = IrExpr::GetValue(1); // sole field == the ctor param (slot 1)
                     }
                 }
@@ -4317,33 +4574,44 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
         }
     }
 
-    // A secondary constructor becomes a static `constructor-impl` OVERLOAD (the unboxed model has no
-    // real `<init>` to delegate to): run the secondary body, then delegate to the primary
-    // `constructor-impl`. `ir_lower` lowered the body in an INSTANCE frame (`this` at slot 0, params at
-    // `1..`); a static method has no `this`, so shift every slot down by one. The class's
-    // `secondary_ctors` are then cleared so no instance `<init>` is also emitted.
+    // A secondary constructor becomes a static `constructor-impl` overload.
     let secs = std::mem::take(&mut ir.classes[class_id as usize].secondary_ctors);
     if !secs.is_empty() {
         let udesc = type_descriptor(ir_ty_to_jvm(&u_ir));
         for sc in secs {
-            // Drop the `this` slot: shift all value-slot references in the body + delegation args.
-            if let Some(b) = sc.body {
-                shift_slots(ir, b);
+            let crate::ir::CtorDelegateTarget::This {
+                target_params,
+                to_primary: true,
+                default_masks,
+            } = &sc.delegate
+            else {
+                return false;
+            };
+            if target_params.as_slice() != [u_ir]
+                || !default_masks.is_empty()
+                || sc.delegate_args.len() != 1
+            {
+                return false;
+            }
+
+            let mut roots = sc.delegate_prelude.clone();
+            roots.extend(sc.delegate_args.iter().copied());
+            roots.extend(sc.body);
+            let delegated_value = max_value_slot(ir, &roots).max(
+                u32::try_from(sc.params.len()).expect("value-class constructor parameter count"),
+            );
+
+            for &statement in &sc.delegate_prelude {
+                shift_slots(ir, statement);
             }
             for &a in &sc.delegate_args {
                 shift_slots(ir, a);
             }
-            let mut stmts = Vec::new();
-            if let Some(b) = sc.body {
-                if let IrExpr::Block { stmts: bs, value } = &ir.exprs[b as usize] {
-                    stmts.extend(bs.iter().copied());
-                    if let Some(v) = value {
-                        stmts.push(*v);
-                    }
-                } else {
-                    stmts.push(b);
-                }
+            if let Some(body) = sc.body {
+                reframe_value_class_secondary(ir, body, delegated_value);
             }
+
+            let mut stmts = sc.delegate_prelude.clone();
             let call = ir.add_expr(IrExpr::Call {
                 callee: Callee::Static {
                     owner: internal_name,
@@ -4354,9 +4622,62 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
                 dispatch_receiver: None,
                 args: sc.delegate_args.clone(),
             });
-            stmts.push(ir.add_expr(IrExpr::Return(Some(call))));
+            stmts.push(ir.add_expr(IrExpr::Variable {
+                index: delegated_value,
+                ty: u_ir,
+                init: Some(call),
+                named: false,
+            }));
+            if let Some(body) = sc.body {
+                if let IrExpr::Block { stmts: bs, value } = &ir.exprs[body as usize] {
+                    stmts.extend(bs.iter().copied());
+                    if let Some(value) = value {
+                        stmts.push(*value);
+                    }
+                } else {
+                    stmts.push(body);
+                }
+            }
+            let result = ir.add_expr(IrExpr::GetValue(delegated_value));
+            stmts.push(ir.add_expr(IrExpr::Return(Some(result))));
             let body = ir.add_expr(IrExpr::Block { stmts, value: None });
             add_static(ir, "constructor-impl", sc.params.clone(), u_ir, body);
+        }
+    }
+    true
+}
+
+fn max_value_slot(ir: &IrFile, roots: &[ExprId]) -> u32 {
+    let mut reachable = HashSet::new();
+    for &root in roots {
+        collect_reachable(&ir.exprs, root, &mut reachable);
+    }
+    reachable
+        .into_iter()
+        .filter_map(|id| match &ir.exprs[id as usize] {
+            IrExpr::GetValue(index)
+            | IrExpr::SetValue { var: index, .. }
+            | IrExpr::Variable { index, .. } => Some(*index),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn reframe_value_class_secondary(ir: &mut IrFile, root: ExprId, this_value: u32) {
+    let mut reachable = HashSet::new();
+    collect_reachable(&ir.exprs, root, &mut reachable);
+    for id in reachable {
+        let index = match &mut ir.exprs[id as usize] {
+            IrExpr::GetValue(index)
+            | IrExpr::SetValue { var: index, .. }
+            | IrExpr::Variable { index, .. } => index,
+            _ => continue,
+        };
+        if *index == 0 {
+            *index = this_value;
+        } else {
+            *index -= 1;
         }
     }
 }
@@ -4598,7 +4919,36 @@ fn body_slot_map(exprs: &[IrExpr], root: ExprId, params: &[Ty]) -> HashMap<u32, 
     collect_reachable(exprs, root, &mut reach);
     for id in reach {
         if let IrExpr::Variable { index, ty, .. } = &exprs[id as usize] {
-            slots.insert(*index, ty.clone());
+            slots.insert(*index, *ty);
+        }
+    }
+    slots
+}
+
+fn secondary_ctor_slot_map(
+    exprs: &[IrExpr],
+    constructor: &crate::ir::IrSecondaryCtor,
+    params: &[Ty],
+) -> HashMap<u32, Ty> {
+    let mut slots: HashMap<u32, Ty> = params
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| (1 + index as u32, *ty))
+        .collect();
+    let mut reach = HashSet::new();
+    for root in constructor
+        .delegate_prelude
+        .iter()
+        .chain(&constructor.delegate_args)
+        .chain(constructor.defaults.iter().flatten())
+        .copied()
+        .chain(constructor.body)
+    {
+        collect_reachable(exprs, root, &mut reach);
+    }
+    for id in reach {
+        if let IrExpr::Variable { index, ty, .. } = &exprs[id as usize] {
+            slots.insert(*index, *ty);
         }
     }
     slots

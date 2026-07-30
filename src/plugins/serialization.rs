@@ -1155,10 +1155,12 @@ impl SerializationPlugin {
             .collect();
         let kclass_arr = ir.add_expr(IrExpr::Vararg {
             array_type: Ty::obj_args("kotlin/Array", &[class_ty("kotlin/reflect/KClass")]),
+            spreads: vec![false; sub_kclasses.len()],
             elements: sub_kclasses,
         });
         let ser_arr = ir.add_expr(IrExpr::Vararg {
             array_type: Ty::obj_args("kotlin/Array", &[kserializer_of(class_ty("kotlin/Any"))]),
+            spreads: vec![false; sub_serializers.len()],
             elements: sub_serializers,
         });
         let inst = ir.new_external(
@@ -1274,6 +1276,7 @@ impl IrPlugin for SerializationPlugin {
             // `typeParametersSerializers(): KSerializer<?>[]` is filled in `transform_bodies`.
             let tps_arr = ir.add_expr(IrExpr::Vararg {
                 array_type: Ty::obj_args("kotlin/Array", &[kserializer_of(class_ty("kotlin/Any"))]),
+                spreads: vec![],
                 elements: vec![],
             });
             let tps_ret = ir.add_expr(IrExpr::Return(Some(tps_arr)));
@@ -1679,13 +1682,20 @@ impl IrPlugin for SerializationPlugin {
                     stmts: deser_stmts,
                     value: None,
                 });
+                let super_owner = ir.classes[class_id as usize].superclass;
                 ir.classes[class_id as usize]
                     .secondary_ctors
                     .push(crate::ir::IrSecondaryCtor {
                         params: deser_params,
+                        defaults: vec![],
+                        delegate_prelude: vec![],
                         delegate_args: vec![],
                         body: Some(deser_body),
-                        delegate: crate::ir::CtorDelegateTarget::Super,
+                        delegate: crate::ir::CtorDelegateTarget::Super {
+                            owner: super_owner,
+                            target_params: vec![],
+                            default_masks: vec![],
+                        },
                         synthetic: true,
                     });
             }
@@ -1731,6 +1741,7 @@ impl IrPlugin for SerializationPlugin {
                     .collect();
                 let arr = ir.add_expr(IrExpr::Vararg {
                     array_type: lazy_arr_ty,
+                    spreads: vec![false; elems.len()],
                     elements: elems,
                 });
                 ir.statics.push(crate::ir::IrStatic {
@@ -2631,6 +2642,7 @@ impl IrPlugin for SerializationPlugin {
                             .collect();
                         let arr = ir.add_expr(IrExpr::Vararg {
                             array_type: Ty::obj_args("kotlin/Array", &[class_ty(KSERIALIZER_FQ)]),
+                            spreads: vec![false; elements.len()],
                             elements,
                         });
                         let ret = ir.add_expr(IrExpr::Return(Some(arr)));
@@ -2653,6 +2665,7 @@ impl IrPlugin for SerializationPlugin {
                             .collect();
                         let arr = ir.add_expr(IrExpr::Vararg {
                             array_type: Ty::obj_args("kotlin/Array", &[class_ty(KSERIALIZER_FQ)]),
+                            spreads: vec![false; elements.len()],
                             elements,
                         });
                         let ret = ir.add_expr(IrExpr::Return(Some(arr)));
