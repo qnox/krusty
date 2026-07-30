@@ -17,6 +17,7 @@ pub mod backend;
 pub mod compiler;
 pub mod conformance;
 pub mod diag;
+pub mod dump;
 pub mod features;
 pub mod frontend;
 pub mod ir;
