@@ -1114,19 +1114,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
 - **A property read is a property read; how it is READ is the target's business.** `Dispatchers.IO` was
   reported as `unresolved reference 'IO'`, and the cause was a category error rather than a missing case:
-  a Kotlin property has no accessor — `getIO()` exists only in the class file — yet the accessor was
-  carried all the way into resolution and lowering, and a read that could not be expressed as a zero-arg
-  MEMBER METHOD therefore failed to resolve at all. `@JvmStatic` (which `Dispatchers` puts on every
+  the use denotes a Kotlin property, not a JVM accessor call — `getIO()` is only one possible class-file
+  realization — yet that method spelling was carried all the way into resolution and lowering, and a read
+  that could not be expressed as a zero-arg MEMBER METHOD therefore failed to resolve at all. `@JvmStatic`
+  (which `Dispatchers` puts on every
   member) is an annotation for the JVM emitter: it moves the accessor off the singleton to a static of
   the object class, so the accessor is not an instance member and the lookup found nothing.
   The model now stops at the declaration. Resolution answers only what it owns — the receiver declares a
   property of this name (`SymbolResolver::member_property_type`), recorded as
   `ExprLowering::MemberPropertyRead` so lowering never re-decides what the member is — and lowering emits
-  one node, `IrExpr::PropertyRead { receiver, owner, name, ty }`, the same whatever the owner (this file,
-  a sibling file, the classpath) and whatever the receiver. `ty` is the front end's answer for the read's
-  Kotlin type, after substituting the receiver's type arguments; nothing else about the read reaches the
-  IR. Members still beat extensions, which matters here: `kotlinx.coroutines` also ships a binary-compat
-  `DispatchersKt.getIO(Dispatchers)` EXTENSION property of the same name.
+  one node, `IrExpr::PropertyRead { receiver, owner, name, ty, interface }`, the same whatever the owner
+  (this file, a sibling file, the classpath) and whatever the receiver. `ty` is the front end's answer for
+  the read's Kotlin type, after substituting the receiver's type arguments; `interface` is declaration
+  shape required for virtual dispatch when a streaming backend has not emitted the sibling source class
+  yet. Neither field selects a target realization. Members still beat extensions, which matters here:
+  `kotlinx.coroutines` also ships a binary-compat `DispatchersKt.getIO(Dispatchers)` EXTENSION property of
+  the same name.
   The JVM backend decides the rest, and is the only layer that knows what `@JvmStatic` means.
   `Classpath::property_read_access` reads the owner's declaration for the realization — `@Metadata`'s
   `JvmPropertySignature` for a Kotlin class (so a `@JvmName` or value-class-mangled accessor is honoured,
@@ -1153,10 +1156,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   private field — an `IllegalAccessError`. A `Unit` property is stored as `Lkotlin/Unit;` but read
   through a `()V` accessor, so what the read leaves on the stack comes from the chosen realization
   (`descriptor_ret_words`), not from the declared type.
+  A sibling source class likewise does not get a special common-IR branch. Its classfile is unavailable
+  while another file streams through the backend, so the JVM value-class pass records an accessor's
+  mangled JVM spelling in a JVM-only side table before erasure; the emitter consults that spelling only
+  as its declaration-less fallback. The semantic node continues to name the Kotlin property.
+  Default accessor synthesis also preserves declaration visibility: a `private set` remains private in
+  both frontend access checking and the synthesized JVM method flags.
   The node carries the property's DECLARED type: substituting it to the type the site sees stays in the
   IR as before, because a pass that rewrites the read away still needs that bridging. And nothing ever
   narrows to a value class — it has no runtime type of its own, its values ARE the erased underlying — in
   the receiver narrowing or in the backend's physical-to-logical bridge.
+  On JavaScript, a plain/default property realizes as a native field operation. A source-written getter
+  or setter is retained as an IR function, however, so the JS emitter invokes that function; bypassing it
+  with an unconditional field read/write would erase computed and custom-accessor behavior.
   The cost of a realization-shaped IR is paid by every pass that pattern-matches one, and each had to be
   taught the node: `suspend` walks it structurally, `ir_emit` tracks stack frames per node kind, and
   `value_classes` recognizes it in five places (the sole-property read that is the erased underlying, the

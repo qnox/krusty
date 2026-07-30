@@ -1328,6 +1328,7 @@ pub fn lower_file_at_reporting(
                         is_var: p.is_var,
                         is_open: p.is_open,
                         is_private: false,
+                        setter_is_private: false,
                         getter: Some(fid),
                         setter: None,
                         getter_jvm_name: None,
@@ -1374,6 +1375,10 @@ pub fn lower_file_at_reporting(
                         is_var: p.is_var,
                         is_open: p.is_open,
                         is_private: false,
+                        setter_is_private: p
+                            .setter
+                            .as_ref()
+                            .is_some_and(|setter| setter.is_private),
                         getter: Some(fid),
                         setter: None,
                         getter_jvm_name: None,
@@ -1452,6 +1457,10 @@ pub fn lower_file_at_reporting(
                             is_var: p.is_var,
                             is_open: p.is_open,
                             is_private: false,
+                            setter_is_private: p
+                                .setter
+                                .as_ref()
+                                .is_some_and(|setter| setter.is_private),
                             getter: None,
                             setter: None,
                             getter_jvm_name: None,
@@ -1576,6 +1585,13 @@ pub fn lower_file_at_reporting(
                             is_var: *is_var,
                             is_open: prop_open,
                             is_private: *is_private,
+                            setter_is_private: c.body_props.iter().any(|property| {
+                                property.name == *pname
+                                    && property
+                                        .setter
+                                        .as_ref()
+                                        .is_some_and(|setter| setter.is_private)
+                            }),
                             getter: None,
                             setter: None,
                             getter_jvm_name: None,
@@ -11076,6 +11092,19 @@ impl<'a> Lower<'a> {
         None
     }
 
+    /// Target-neutral declaration shape for a semantic property owner. Same-file classes are already in
+    /// the IR; sibling-file classes come from the module signature table. Keeping this one query prevents
+    /// each read/write lowering path from inventing its own file/module classification.
+    fn property_owner_is_interface(&self, owner: TypeName) -> bool {
+        self.class_info_name(owner)
+            .and_then(|class| self.ir.classes.get(class.id as usize))
+            .is_some_and(|class| class.is_interface)
+            || self
+                .syms
+                .class_by_type_name(owner)
+                .is_some_and(|class| class.is_interface())
+    }
+
     fn resolve_field_name(&self, internal: TypeName, name: &str) -> Option<(ClassId, u32, Ty)> {
         let mut cur = Some(internal);
         while let Some(ci_name) = cur {
@@ -14122,6 +14151,8 @@ impl<'a> Lower<'a> {
             owner,
             name: name.to_string(),
             ty,
+            interface: self.property_owner_is_interface(owner),
+            operation: None,
         });
         Some(self.coerce_generic_read(read, e, ty))
     }
@@ -14147,6 +14178,8 @@ impl<'a> Lower<'a> {
             owner,
             name: name.to_string(),
             ty,
+            interface: self.property_owner_is_interface(owner),
+            operation: None,
         }))
     }
 
@@ -14194,6 +14227,8 @@ impl<'a> Lower<'a> {
             owner: owner_internal,
             name: name.to_string(),
             ty: pty,
+            interface: self.property_owner_is_interface(owner_internal),
+            operation: None,
         });
         Some(self.coerce_generic_read(read, e, pty))
     }
@@ -14343,46 +14378,6 @@ impl<'a> Lower<'a> {
         // site) is a valid reference at runtime — the getter dispatches the same, and krusty does not
         // enforce null-safety. Without this a `foo().bar` on a `Foo?`-typed result resolves no member.
         let rt = rt.non_null();
-        // A property on a class defined in ANOTHER file → its public `getX()` accessor (the backing
-        // field is private). Resolved from the sibling class's `ClassSig`.
-        if let Ty::Obj(i, _) = rt {
-            if self.class_of(rt).is_none() {
-                if let Some((owner, ret_ty, is_iface)) = self
-                    .syms
-                    .class_by_type_name(i)
-                    .filter(|cs| cs.value_field.is_none())
-                    .and_then(|cs| {
-                        cs.props
-                            .iter()
-                            .find_map(|(n, t, _)| (n == name).then_some((i, *t, cs.is_interface())))
-                    })
-                {
-                    return Some(self.emit_call(
-                        Callee::Virtual {
-                            owner,
-                            name: property_getter_name(name),
-                            descriptor: String::new(),
-                            params: Some((vec![], ty_to_ir(ret_ty))),
-                            interface: is_iface,
-                        },
-                        Some(recv),
-                        vec![],
-                    ));
-                }
-            }
-        }
-        // Reading a value class's sole underlying field on a cross-file receiver is the identity
-        // in the erased representation (the receiver IS the unboxed underlying).
-        if let Ty::Obj(i, _) = rt {
-            if self
-                .syms
-                .class_by_type_name(i)
-                .and_then(|cs| cs.value_field.as_ref())
-                .is_some_and(|(fname, _)| fname == name)
-            {
-                return Some(recv);
-            }
-        }
         // A Kotlin property is a zero-arg member. Resolve the semantic property name through the
         // library source first; mapped builtins supply their physical owner/name/descriptor there.
         let internal = match rt {
@@ -14395,17 +14390,16 @@ impl<'a> Lower<'a> {
         // decision, made from the owner's declaration. Without the record the read resolved to something
         // else, and the caller's other paths handle it.
         let ty = self.info.ty(e);
-        if ty != Ty::Error
-            && matches!(
-                self.info.expr_lowers.get(&e),
-                Some(ExprLowering::MemberPropertyRead)
-            )
+        if let Some(ExprLowering::MemberPropertyRead { owner, interface }) =
+            self.info.expr_lowers.get(&e)
         {
             return Some(self.ir.add_expr(IrExpr::PropertyRead {
                 receiver: recv,
-                owner: internal,
+                owner: *owner,
                 name: name.to_string(),
                 ty,
+                interface: *interface,
+                operation: None,
             }));
         }
         let resolved = self.info.resolved_member(e).cloned().map(|r| {
@@ -16683,6 +16677,8 @@ impl<'a> Lower<'a> {
                             name: name.clone(),
                             value: val,
                             ty: pty,
+                            interface: self.property_owner_is_interface(owner),
+                            operation: None,
                         }))
                     }
                 }
@@ -16775,6 +16771,8 @@ impl<'a> Lower<'a> {
                         name: name.clone(),
                         value: nv,
                         ty: fty,
+                        interface: self.property_owner_is_interface(owner_tn),
+                        operation: None,
                     }));
                 }
                 let (v, ty) = self.lookup(&name)?;
@@ -17623,45 +17621,15 @@ impl<'a> Lower<'a> {
             ));
         }
         let rt = self.info.ty(receiver);
-        // A property write on a `var` of a class defined in ANOTHER file → its `setX(v)` accessor
-        // (the backing field is private). A cross-file `val` write bails.
-        if self.class_of(rt).is_none() {
-            if let Ty::Obj(i, _) = &rt {
-                if let Some((owner, pty, is_var, interface)) = self
-                    .syms
-                    .class_by_type_name(*i)
-                    .filter(|cs| cs.value_field.is_none())
-                    .and_then(|cs| {
-                        cs.props.iter().find_map(|(n, t, v)| {
-                            (n.as_str() == name).then_some((*i, *t, *v, cs.is_interface()))
-                        })
-                    })
-                {
-                    if !is_var {
-                        return None;
-                    }
-                    let r = self.expr(receiver)?;
-                    let v = self.lower_arg(value, &ty_to_ir(pty))?;
-                    return Some(self.emit_call(
-                        Callee::Virtual {
-                            owner,
-                            name: property_setter_name(name),
-                            descriptor: String::new(),
-                            params: Some((vec![ty_to_ir(pty)], Ty::Unit)),
-                            interface,
-                        },
-                        Some(r),
-                        vec![v],
-                    ));
-                }
-            }
-        }
         // The checker resolved `recv.name = value` to a member property and said so. Lowering names that
         // property; the store form — a field store, an instance setter, a receiverless one — is the
         // backend's decision, made from the owner's declaration. Mirrors the read in
         // `lower_member_read_on`.
-        if let (Ty::Obj(owner, _), Some(StmtLowering::MemberPropertyWrite { ty })) =
-            (rt, self.info.stmt_lowers.get(&stmt).cloned())
+        if let Some(StmtLowering::MemberPropertyWrite {
+            owner,
+            ty,
+            interface,
+        }) = self.info.stmt_lowers.get(&stmt).cloned()
         {
             let r = self.expr(receiver)?;
             let v = self.lower_arg(value, &ty_to_ir(ty))?;
@@ -17671,34 +17639,9 @@ impl<'a> Lower<'a> {
                 name: name.to_string(),
                 value: v,
                 ty,
+                interface,
+                operation: None,
             }));
-        }
-        // A `var` member of a CLASSPATH type → its setter resolved by real `@Metadata` name
-        // (mirrors the getter read in `lower_member_read_on`). The setter `LibraryCallable`
-        // carries the owner/descriptor for the `invokevirtual`; its parameter type coerces the
-        // value (`Int` literal into a `Long` setter).
-        if self.class_of(rt).is_none() {
-            if let Ty::Obj(_, _) = &rt {
-                if let Some(setter) = self.info.property_setter(stmt).cloned() {
-                    let pty = setter
-                        .params
-                        .first()
-                        .map(|t| ty_to_ir(*t))
-                        .unwrap_or_else(|| ty_to_ir(self.info.ty(value)));
-                    let setter_owner = setter.owner_type();
-                    let is_iface = self.library_type_is_interface(setter_owner);
-                    let r = self.expr(receiver)?;
-                    let v = self.lower_arg(value, &pty)?;
-                    return Some(self.emit_virtual_call(
-                        setter_owner,
-                        setter.name,
-                        setter.descriptor,
-                        is_iface,
-                        r,
-                        vec![v],
-                    ));
-                }
-            }
         }
         // A property of a class THIS compilation declares. Same rule as everywhere else: name the
         // property, and let the backend decide whether the store is a direct field write (legal only
@@ -17740,6 +17683,8 @@ impl<'a> Lower<'a> {
             name: name.to_string(),
             value: v,
             ty: prop_ty,
+            interface: self.property_owner_is_interface(owner),
+            operation: None,
         }))
     }
 

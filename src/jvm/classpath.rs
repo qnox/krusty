@@ -3551,49 +3551,43 @@ impl super::inline::MethodBodies for Classpath {
         owner: &str,
         property: &str,
     ) -> Option<super::inline::PropertyAccess> {
-        // Breadth-first over the supertype closure: the nearest declaration of the property wins, the
-        // same order member resolution used to pick it.
-        let mut queue = std::collections::VecDeque::new();
-        let mut seen = std::collections::HashSet::new();
-        queue.push_back(super::jvm_class_map::to_jvm_type_name(type_name(owner)));
-        while let Some(current) = queue.pop_front() {
-            if !seen.insert(current) {
-                continue;
-            }
-            let Some(ci) = self.find_name(current) else {
-                continue;
-            };
-            if let Some(access) = class_property_read_access(&ci, property) {
-                return Some(access);
-            }
-            queue.extend(ci.super_class);
-            queue.extend(ci.interfaces.iter_ids());
-        }
-        None
+        inherited_property_access(self, owner, property, class_property_read_access)
     }
     fn property_write_access(
         &self,
         owner: &str,
         property: &str,
     ) -> Option<super::inline::PropertyAccess> {
-        let mut queue = std::collections::VecDeque::new();
-        let mut seen = std::collections::HashSet::new();
-        queue.push_back(super::jvm_class_map::to_jvm_type_name(type_name(owner)));
-        while let Some(current) = queue.pop_front() {
-            if !seen.insert(current) {
-                continue;
-            }
-            let Some(ci) = self.find_name(current) else {
-                continue;
-            };
-            if let Some(access) = class_property_write_access(&ci, property) {
-                return Some(access);
-            }
-            queue.extend(ci.super_class);
-            queue.extend(ci.interfaces.iter_ids());
-        }
-        None
+        inherited_property_access(self, owner, property, class_property_write_access)
     }
+}
+
+/// Resolve one target realization over the owner's supertype closure. Reads and writes must walk the
+/// exact same breadth-first order so the nearest declaration wins consistently; keeping that traversal
+/// here prevents the two operations from drifting as new classpath shapes are added.
+fn inherited_property_access(
+    classpath: &Classpath,
+    owner: &str,
+    property: &str,
+    declared_access: fn(&ClassInfo, &str) -> Option<super::inline::PropertyAccess>,
+) -> Option<super::inline::PropertyAccess> {
+    let mut queue = std::collections::VecDeque::new();
+    let mut seen = std::collections::HashSet::new();
+    queue.push_back(super::jvm_class_map::to_jvm_type_name(type_name(owner)));
+    while let Some(current) = queue.pop_front() {
+        if !seen.insert(current) {
+            continue;
+        }
+        let Some(class) = classpath.find_name(current) else {
+            continue;
+        };
+        if let Some(access) = declared_access(&class, property) {
+            return Some(access);
+        }
+        queue.extend(class.super_class);
+        queue.extend(class.interfaces.iter_ids());
+    }
+    None
 }
 
 /// The write analogue of [`class_property_read_access`]: the setter `@Metadata` names for `property`, else
@@ -3615,7 +3609,9 @@ fn class_property_write_access(
         ci.methods
             .iter()
             .find(|m| {
-                m.name == name && m.descriptor.ends_with(")V") && !m.descriptor.starts_with("()")
+                m.name == name
+                    && super::names::parse_method_descriptor(&m.descriptor)
+                        .is_some_and(|(parameters, ret)| parameters.len() == 1 && ret == "V")
             })
             .cloned()
     };

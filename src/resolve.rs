@@ -614,6 +614,10 @@ pub struct DeclaredPropertySig {
     pub visibility: Visibility,
     pub getter_name: String,
     pub setter_name: Option<String>,
+    /// Visibility of the setter declaration. `None` means `val`; a `var` normally inherits the
+    /// property's visibility, while an explicit `private set` narrows only this value. Keeping it beside
+    /// `setter_name` prevents backend accessor synthesis from accidentally widening the source ABI.
+    pub setter_visibility: Option<Visibility>,
     pub context_params: Vec<Ty>,
 }
 
@@ -4305,6 +4309,9 @@ pub fn collect_signatures_with_cp(
                                     setter_name: property
                                         .is_var
                                         .then(|| property_setter_name(&property.name)),
+                                    setter_visibility: property
+                                        .is_var
+                                        .then_some(property.visibility),
                                     context_params: Vec::new(),
                                 },
                             )
@@ -4547,6 +4554,13 @@ pub fn collect_signatures_with_cp(
                                 visibility: bp.visibility,
                                 getter_name: property_getter_name(&bp.name),
                                 setter_name: bp.is_var.then(|| property_setter_name(&bp.name)),
+                                setter_visibility: bp.is_var.then(|| {
+                                    if bp.setter.as_ref().is_some_and(|setter| setter.is_private) {
+                                        Visibility::Private
+                                    } else {
+                                        bp.visibility
+                                    }
+                                }),
                                 context_params,
                             },
                         );
@@ -8928,7 +8942,15 @@ pub enum ExprLowering {
     /// which is what resolves the name; lowering reads this instead of re-deciding what the member is, and
     /// emits [`crate::ir::IrExpr::PropertyRead`]. Absent when the read resolved to something else (an
     /// intrinsic, a zero-arg method read, an implicit receiver), so lowering keeps its other paths.
-    MemberPropertyRead,
+    MemberPropertyRead {
+        /// Class that declares the selected property. Keeping the semantic owner selected by the
+        /// frontend avoids making lowering rediscover it differently for same-file, sibling-file, and
+        /// library receivers.
+        owner: TypeName,
+        /// Whether that declaring owner is an interface. This is target-neutral type shape; a backend
+        /// that has no compiled declaration to inspect still needs it to realize virtual dispatch.
+        interface: bool,
+    },
     /// A property-read `recv.name` resolved to a classpath extension property getter.
     ExtensionPropertyGet {
         getter: Box<crate::libraries::LibraryCallable>,
@@ -9022,7 +9044,11 @@ pub enum StmtLowering {
     /// analogue of [`ExprLowering::MemberPropertyRead`]. `ty` is the property's type, which the assigned
     /// value is bridged to. Lowering emits [`crate::ir::IrExpr::PropertyWrite`] and decides nothing about
     /// the store form.
-    MemberPropertyWrite { ty: Ty },
+    MemberPropertyWrite {
+        owner: TypeName,
+        ty: Ty,
+        interface: bool,
+    },
     /// A `kotlin.contracts.contract { … }` statement: erased metadata, never executed and emits no
     /// bytecode (kotlinc drops it at codegen). The lowerer skips it entirely.
     Erased,
@@ -9471,6 +9497,7 @@ fn install_anonymous_object_captures(
                     visibility: Visibility::Private,
                     getter_name: property_getter_name(&capture.name),
                     setter_name: None,
+                    setter_visibility: None,
                     context_params: Vec::new(),
                 },
             );
@@ -11297,6 +11324,14 @@ impl<'a> Checker<'a> {
                 None
             }
         })
+    }
+
+    /// Declaration shape shared by semantic member-property reads and writes. The federated source
+    /// covers this file, sibling source files, and the classpath, so call sites do not need origin-specific
+    /// interface probes merely to preserve the dispatch shape selected during resolution.
+    fn resolved_owner_is_interface(&self, owner: TypeName) -> bool {
+        self.resolved_type_name(owner)
+            .is_some_and(|class| class.is_interface())
     }
 
     fn with_ret<R>(&mut self, ret_ty: Ty, f: impl FnOnce(&mut Self) -> R) -> R {
@@ -16666,14 +16701,14 @@ impl<'a> Checker<'a> {
 
     fn lookup_prop_name(&self, internal: TypeName, name: &str) -> Option<(Ty, bool)> {
         self.lookup_prop_with_owner_name(internal, name)
-            .map(|(_, ty, is_var)| (ty, is_var))
+            .map(|(_, ty, is_var, _)| (ty, is_var))
     }
 
     fn lookup_prop_with_owner_name(
         &self,
         internal: TypeName,
         name: &str,
-    ) -> Option<(TypeName, Ty, bool)> {
+    ) -> Option<(TypeName, Ty, bool, Option<Visibility>)> {
         let mut pending = vec![internal];
         let mut seen = std::collections::HashSet::new();
         while let Some(current) = pending.pop() {
@@ -16684,7 +16719,11 @@ impl<'a> Checker<'a> {
                 continue;
             };
             if let Some(property) = class.prop(name) {
-                return Some((current, property.0, property.1));
+                let setter_visibility = class
+                    .declared_props
+                    .get(name)
+                    .and_then(|property| property.setter_visibility);
+                return Some((current, property.0, property.1, setter_visibility));
             }
             pending.extend(class.super_internal);
             pending.extend(class.interfaces.iter_ids());
@@ -16699,7 +16738,7 @@ impl<'a> Checker<'a> {
     fn implicit_property_write(&self, name: &str) -> Option<ImplicitPropertyWriteResolution> {
         for implicit_receiver in self.implicit_receivers() {
             let receiver = implicit_receiver.ty;
-            if let Some((owner, ty, is_var)) = receiver
+            if let Some((owner, ty, is_var, _)) = receiver
                 .obj_internal()
                 .and_then(|internal| self.lookup_prop_with_owner_name(internal, name))
             {
@@ -24003,7 +24042,16 @@ impl<'a> Checker<'a> {
     ) -> Option<Ty> {
         if let Ty::Obj(internal, _) = rt {
             let internal_name = internal;
-            if let Some((owner, ty, _)) = self.lookup_prop_with_owner_name(internal_name, name) {
+            if let Some((owner, ty, _, _)) = self.lookup_prop_with_owner_name(internal_name, name) {
+                if let Some(expression) = mexpr {
+                    self.expr_lowers.insert(
+                        expression,
+                        ExprLowering::MemberPropertyRead {
+                            owner,
+                            interface: self.resolved_owner_is_interface(owner),
+                        },
+                    );
+                }
                 if let Some((vis, owner)) = self.effective_property_visibility(internal_name, name)
                 {
                     if vis != Visibility::Public {
@@ -24045,6 +24093,15 @@ impl<'a> Checker<'a> {
             if let Some(m) = self.resolve_external_inherited_property(internal_name, name) {
                 let ret = m.ret;
                 if let Some(me) = mexpr {
+                    let owner = m.member.owner_type_or(internal_name);
+                    self.expr_lowers.insert(
+                        me,
+                        ExprLowering::MemberPropertyRead {
+                            owner,
+                            interface: m.member.is_interface()
+                                || self.resolved_owner_is_interface(owner),
+                        },
+                    );
                     self.resolved_calls.insert(me, ResolvedCall::Member(m));
                 }
                 return Some(ret);
@@ -24059,8 +24116,18 @@ impl<'a> Checker<'a> {
                 let ret = m.ret;
                 if let Some(me) = mexpr {
                     if is_property {
-                        self.expr_lowers
-                            .insert(me, ExprLowering::MemberPropertyRead);
+                        let fallback = rt
+                            .obj_internal()
+                            .unwrap_or_else(|| type_name("kotlin/String"));
+                        let owner = m.member.owner_type_or(fallback);
+                        self.expr_lowers.insert(
+                            me,
+                            ExprLowering::MemberPropertyRead {
+                                owner,
+                                interface: m.member.is_interface()
+                                    || self.resolved_owner_is_interface(owner),
+                            },
+                        );
                     }
                     self.resolved_calls.insert(me, ResolvedCall::Member(m));
                 }
@@ -24071,10 +24138,10 @@ impl<'a> Checker<'a> {
             // it need not go through any method — the backend realizes the read from the owner's own
             // declaration. Resolution owes the site only the property's type. It stays a MEMBER, so it is
             // decided here, ahead of any extension property of the same name.
-            if let Some(ty) = self.resolver().member_property_type(rt, name) {
+            if let Some((owner, ty, interface)) = self.resolver().member_property_type(rt, name) {
                 if let Some(me) = mexpr {
                     self.expr_lowers
-                        .insert(me, ExprLowering::MemberPropertyRead);
+                        .insert(me, ExprLowering::MemberPropertyRead { owner, interface });
                 }
                 return Some(ty);
             }
@@ -24136,7 +24203,8 @@ impl<'a> Checker<'a> {
 
     fn probe_property_read(&self, rt: Ty, name: &str) -> Option<PropertyReadProbe> {
         if let Ty::Obj(internal_name, _) = rt {
-            if let Some((owner, mut ty, _)) = self.lookup_prop_with_owner_name(internal_name, name)
+            if let Some((owner, mut ty, _, _)) =
+                self.lookup_prop_with_owner_name(internal_name, name)
             {
                 if let Some(cs) = self.syms.class_by_type_name(owner) {
                     if let Some(&(i, definitely_non_null)) = cs.generic_props.get(name) {
@@ -30094,7 +30162,7 @@ impl<'a> Checker<'a> {
                     None
                 } else {
                     rt.obj_internal()
-                        .and_then(|internal| self.syms.prop_of_name(internal, &name))
+                        .and_then(|internal| self.lookup_prop_with_owner_name(internal, &name))
                 };
                 let property_setter = if !rt.is_nullable() && source_property.is_none() {
                     self.resolve_property_setter(rt, &name)
@@ -30123,7 +30191,7 @@ impl<'a> Checker<'a> {
                     Ok(None)
                 };
                 let assignment_expected = source_property
-                    .map(|(ty, _)| ty)
+                    .map(|(_, ty, _, _)| ty)
                     .or_else(|| {
                         property_setter
                             .as_ref()
@@ -30148,10 +30216,14 @@ impl<'a> Checker<'a> {
                 };
                 let span = self.file.stmt_spans[s.0 as usize];
                 let target_span = self.assignment_target_span(s);
-                if let Some((lty, is_var)) = source_property {
+                if let Some((owner, lty, is_var, setter_visibility)) = source_property {
                     if !is_var {
                         self.diags
                             .error(target_span, "'val' cannot be reassigned.".to_string());
+                    } else if let Some(visibility) = setter_visibility {
+                        if visibility != Visibility::Public {
+                            self.reject_if_inaccessible(visibility, &name, owner, target_span);
+                        }
                     }
                     self.expect_assignable(
                         lty,
@@ -30159,6 +30231,16 @@ impl<'a> Checker<'a> {
                         self.value_diagnostic_span(value, vt),
                         "assignment",
                     );
+                    if is_var {
+                        self.stmt_lowers.insert(
+                            s,
+                            StmtLowering::MemberPropertyWrite {
+                                owner,
+                                ty: lty,
+                                interface: self.resolved_owner_is_interface(owner),
+                            },
+                        );
+                    }
                     return;
                 }
                 if let Some(setter) = property_setter {
@@ -30169,17 +30251,17 @@ impl<'a> Checker<'a> {
                         self.value_diagnostic_span(value, vt),
                         "assignment",
                     );
-                    // Whether the receiver DECLARES this property is a resolution question, answered here
-                    // and recorded — the write analogue of `MemberPropertyRead`. Lowering then names the
-                    // property and leaves the store form to the backend.
-                    if self.syms.libraries.member_is_property(rt, &name) {
-                        self.stmt_lowers.insert(
-                            s,
-                            StmtLowering::MemberPropertyWrite {
-                                ty: setter.params.first().copied().unwrap_or(pty),
-                            },
-                        );
-                    }
+                    // `property_setter` can only come from a property declaration. Preserve the selected
+                    // owner for every symbol source so lowering does not branch on module vs classpath.
+                    let owner = setter.owner_type();
+                    self.stmt_lowers.insert(
+                        s,
+                        StmtLowering::MemberPropertyWrite {
+                            owner,
+                            ty: setter.params.first().copied().unwrap_or(pty),
+                            interface: self.resolved_owner_is_interface(owner),
+                        },
+                    );
                     self.property_setters.insert(s, setter);
                     return;
                 }

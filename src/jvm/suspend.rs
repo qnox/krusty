@@ -1109,6 +1109,8 @@ fn hoist_expr(
             owner,
             name,
             ty,
+            interface,
+            operation,
         } => {
             let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, prelude);
             ir.exprs[e as usize] = IrExpr::PropertyRead {
@@ -1116,6 +1118,8 @@ fn hoist_expr(
                 owner,
                 name,
                 ty,
+                interface,
+                operation,
             };
             e
         }
@@ -1125,6 +1129,8 @@ fn hoist_expr(
             name,
             value,
             ty,
+            interface,
+            operation,
         } => {
             let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, prelude);
             let nv = hoist_expr(ir, value, suspend_set, orig_rets, prelude);
@@ -1134,6 +1140,8 @@ fn hoist_expr(
                 name,
                 value: nv,
                 ty,
+                interface,
+                operation,
             };
             e
         }

@@ -249,6 +249,13 @@ pub enum IrExpr {
         owner: TypeName,
         name: String,
         ty: Ty,
+        /// Semantic owner shape selected by resolution. A JVM backend normally reads this from the
+        /// compiled declaration, but a sibling source file has no classfile in the shared classpath yet.
+        interface: bool,
+        /// Stable identity assigned by [`IrFile::add_expr`]. Backend passes can move/clone an operation
+        /// into a new expression slot; this identity follows the node so side-table realization facts do
+        /// not accidentally remain attached to the obsolete arena index.
+        operation: Option<u32>,
     },
     /// Write a PROPERTY of `owner` (statement) — the write analogue of [`IrExpr::PropertyRead`], and the
     /// same rule: it names the property, and how the target writes it (a field store, an instance setter,
@@ -260,6 +267,8 @@ pub enum IrExpr {
         name: String,
         value: ExprId,
         ty: Ty,
+        interface: bool,
+        operation: Option<u32>,
     },
     /// Read an instance field (`IrGetField`): `receiver.<fields[index]>` of class `class`.
     GetField {
@@ -692,6 +701,9 @@ pub struct IrProperty {
     /// backing field — so a use from outside the declaring class has nothing to call, and whichever
     /// path is lowering it does not own the access.
     pub is_private: bool,
+    /// `true` for a `var` whose setter alone is declared `private`. This is declaration visibility, not
+    /// a JVM flag: every backend must preserve it when realizing a default setter.
+    pub setter_is_private: bool,
     /// The lowered body of a source-written getter/setter (a computed, `field`-using, or delegated
     /// property). `None` for a plain backing-field property, whose accessor has no source body at all.
     pub getter: Option<FunId>,
@@ -1361,6 +1373,12 @@ pub struct IrFile {
     /// identically in the JVM descriptor. Only concrete declared receivers are recorded (a `Var` receiver
     /// is `None` at the source and never inserted).
     pub ext_call_source_receiver: std::collections::HashMap<u32, Ty>,
+    /// Stable property-operation identity → JVM accessor spelling and physical property-value type,
+    /// selected by the value-class pass for an owner in another source file. The common node keeps the
+    /// Kotlin name and logical type; this backend side table carries the declaration-less target
+    /// realization only after the JVM pass has enough erasure information. It is deliberately not keyed
+    /// by expression arena index because boxing and identity rewrites can move a node.
+    pub property_accessor_jvm_realizations: std::collections::HashMap<u32, (String, Ty)>,
     /// Lifted-lambda function id → the parameter INDEX at which the lambda's OWN parameters begin (its
     /// captured variables occupy the lower indices). A lambda's own parameters arrive through the
     /// `FunctionN` generic (`Object`) invoke slot, so a reference-underlying value-class parameter is
@@ -1634,8 +1652,16 @@ impl IrFile {
     pub fn expr(&self, id: ExprId) -> &IrExpr {
         &self.exprs[id as usize]
     }
-    pub fn add_expr(&mut self, e: IrExpr) -> ExprId {
+    pub fn add_expr(&mut self, mut e: IrExpr) -> ExprId {
         let id = self.exprs.len() as u32;
+        match &mut e {
+            IrExpr::PropertyRead { operation, .. } | IrExpr::PropertyWrite { operation, .. } => {
+                // Preserve an identity already assigned to a moved/cloned property operation. Fresh
+                // lowering constructors pass `None` and receive their original arena index here.
+                operation.get_or_insert(id);
+            }
+            _ => {}
+        }
         self.exprs.push(e);
         id
     }

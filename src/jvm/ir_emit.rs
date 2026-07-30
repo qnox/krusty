@@ -2521,7 +2521,15 @@ fn emit_declared_property_accessors(
                 st.ret_void();
                 st.ensure_locals(1 + words);
                 st.link();
-                let access = if overridable { 0x0001 } else { 0x0011 };
+                // `private set` narrows only the setter. Accessor synthesis owns the method flags now,
+                // so it must preserve that declaration fact instead of widening the setter to public.
+                let access = if property.setter_is_private {
+                    0x0012 // PRIVATE | FINAL
+                } else if overridable {
+                    0x0001
+                } else {
+                    0x0011 // PUBLIC | FINAL
+                };
                 let sig = ir
                     .field_signatures(fq_name)
                     .and_then(|fs| fs.iter().find(|(fname, _)| *fname == field.name))
@@ -6558,6 +6566,18 @@ fn emit_ctor_marker_accessor(owner: &str, real_params: &[Ty], cw: &mut ClassWrit
     cw.add_method(0x1001 /* PUBLIC | SYNTHETIC */, "<init>", &desc, &code);
 }
 
+/// The target-neutral identity and selected declaration shape shared by JVM property reads and writes.
+/// Keeping these fields together prevents the two realizers from accepting subtly different owner,
+/// interface, or physical-type inputs as the semantic operation grows more metadata.
+struct PropertyOperation<'a> {
+    expression: crate::ir::ExprId,
+    receiver: crate::ir::ExprId,
+    owner: &'a str,
+    name: &'a str,
+    ty: &'a Ty,
+    interface: bool,
+}
+
 struct Emitter<'a> {
     ir: &'a IrFile,
     cw: &'a mut ClassWriter,
@@ -7722,29 +7742,46 @@ impl<'a> Emitter<'a> {
     /// `JvmPropertySignature`, so a `@JvmName` or value-class-mangled spelling is honoured, never guessed)
     /// and says whether it takes a receiver. A class this compilation is still emitting has no class file
     /// to ask, so it falls back to the JVM convention kotlinc itself follows: `get<Name>()`.
-    fn emit_property_read(
-        &mut self,
-        receiver: crate::ir::ExprId,
-        owner: &str,
-        name: &str,
-        ty: &Ty,
-        code: &mut CodeBuilder,
-    ) {
+    fn emit_property_read(&mut self, operation: PropertyOperation<'_>, code: &mut CodeBuilder) {
         use crate::jvm::inline::PropertyAccess;
-        if let Some(access) = self.declared_property_read_access(owner, name) {
-            return self.emit_realized_property_read(receiver, access, ty, code);
+        if let Some(access) = self.declared_property_read_access(operation.owner, operation.name) {
+            return self.emit_realized_property_read(
+                operation.receiver,
+                access,
+                operation.ty,
+                code,
+            );
         }
+        let stamped = self
+            .ir
+            .property_accessor_jvm_realizations
+            .get(&operation.expression);
         let access = self
             .bodies
-            .property_read_access(owner, name)
+            .property_read_access(operation.owner, operation.name)
             .unwrap_or_else(|| PropertyAccess::Accessor {
-                owner: owner.to_string(),
-                name: crate::names::property_getter_name(name),
-                descriptor: method_descriptor(&[], ir_ty_to_jvm(ty)),
+                owner: operation.owner.to_string(),
+                // A sibling source class has no classfile in `bodies`, so this is the only realization
+                // that cannot read the exact JVM accessor spelling from a declaration. The JVM
+                // value-class pass records a mangled spelling for that case; ordinary properties keep
+                // the Kotlin getter convention. The semantic IR node itself remains target-neutral.
+                name: stamped
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_else(|| crate::names::property_getter_name(operation.name)),
+                // The logical property type is intentionally retained on a read for later value-class
+                // analysis. A sibling accessor's descriptor needs the erased PHYSICAL type recorded by
+                // that pass, or a mangled `getId-…(): String` is emitted as `(): Id` and fails verification.
+                descriptor: method_descriptor(
+                    &[],
+                    ir_ty_to_jvm(stamped.map_or(operation.ty, |(_, physical)| physical)),
+                ),
                 is_static: false,
-                is_interface: self.bodies.owner_is_interface(owner),
+                // Resolution carries source-module shape because a sibling class is not in `bodies`.
+                // For classpath owners the body reader remains authoritative.
+                is_interface: operation.interface
+                    || self.bodies.owner_is_interface(operation.owner),
             });
-        self.emit_realized_property_read(receiver, access, ty, code)
+        self.emit_realized_property_read(operation.receiver, access, operation.ty, code)
     }
 
     /// Realize `IrExpr::PropertyWrite` — the write analogue of [`Self::emit_property_read`], and the same
@@ -7752,23 +7789,35 @@ impl<'a> Emitter<'a> {
     /// JVM naming convention (`set<Name>`).
     fn emit_property_write(
         &mut self,
-        receiver: crate::ir::ExprId,
-        owner: &str,
-        name: &str,
+        operation: PropertyOperation<'_>,
         value: crate::ir::ExprId,
-        ty: &Ty,
         code: &mut CodeBuilder,
     ) {
         use crate::jvm::inline::PropertyAccess;
+        let stamped = self
+            .ir
+            .property_accessor_jvm_realizations
+            .get(&operation.expression);
         let access = self
-            .declared_property_write_access(owner, name)
-            .or_else(|| self.bodies.property_write_access(owner, name))
+            .declared_property_write_access(operation.owner, operation.name)
+            .or_else(|| {
+                self.bodies
+                    .property_write_access(operation.owner, operation.name)
+            })
             .unwrap_or_else(|| PropertyAccess::Accessor {
-                owner: owner.to_string(),
-                name: crate::names::property_setter_name(name),
-                descriptor: method_descriptor(&[ir_ty_to_jvm(ty)], Ty::Unit),
+                owner: operation.owner.to_string(),
+                name: stamped
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_else(|| crate::names::property_setter_name(operation.name)),
+                descriptor: method_descriptor(
+                    &[ir_ty_to_jvm(
+                        stamped.map_or(operation.ty, |(_, physical)| physical),
+                    )],
+                    Ty::Unit,
+                ),
                 is_static: false,
-                is_interface: self.bodies.owner_is_interface(owner),
+                is_interface: operation.interface
+                    || self.bodies.owner_is_interface(operation.owner),
             });
         let (access_owner, takes_receiver) = match &access {
             PropertyAccess::Field {
@@ -7780,24 +7829,21 @@ impl<'a> Emitter<'a> {
             // The receiver is the bridge's first ARGUMENT, so it is pushed like an ordinary receiver.
             PropertyAccess::AccessBridge { owner, .. } => (owner.clone(), true),
         };
-        if takes_receiver {
-            self.emit_value(receiver, code);
-            self.narrow_on_stack(self.value_ty(receiver), &Ty::obj(&access_owner), code);
+        // A branchy assigned value emits merge frames. It cannot do so with an instance receiver already
+        // on the operand stack because those frames describe an empty baseline. Spill BOTH operands in
+        // source evaluation order (receiver, then value), then reload them; spilling only the value would
+        // reverse observable side effects.
+        let spilled = if takes_receiver && self.records_frame(value) {
+            Some(self.spill_to_temps(&[operation.receiver, value], code))
         } else {
-            let initializes_owner = match self.ir.expr(receiver) {
-                IrExpr::ExternalStaticField { owner, .. }
-                | IrExpr::ExternalStaticInstance { owner, .. } => owner.matches(&access_owner),
-                IrExpr::StaticInstance { owner, .. } => self
-                    .ir
-                    .classes
-                    .get(*owner as usize)
-                    .is_some_and(|c| c.fq_name_matches(&access_owner)),
-                _ => false,
-            };
-            if !crate::ir::expr_runs_no_code(self.ir, receiver) && !initializes_owner {
-                self.emit_value(receiver, code);
-                code.pop();
-            }
+            None
+        };
+        if let Some(temps) = &spilled {
+            let (slot, receiver_ty, _) = temps[0];
+            load(receiver_ty, slot, code);
+            self.narrow_on_stack(receiver_ty, &Ty::obj(&access_owner), code);
+        } else {
+            self.emit_property_receiver(operation.receiver, &access_owner, takes_receiver, code);
         }
         // The assigned value is bridged to what the realization stores, the mirror of the read's bridge.
         let target = match &access {
@@ -7805,15 +7851,23 @@ impl<'a> Emitter<'a> {
             PropertyAccess::Accessor { descriptor, .. } => {
                 crate::jvm::names::parse_method_descriptor(descriptor)
                     .and_then(|(params, _)| params.first().map(|p| ty_from_field_descriptor(p)))
-                    .unwrap_or_else(|| ir_ty_to_jvm(ty))
+                    .unwrap_or_else(|| ir_ty_to_jvm(operation.ty))
             }
             PropertyAccess::AccessBridge { descriptor, .. } => {
                 crate::jvm::names::parse_method_descriptor(descriptor)
                     .and_then(|(params, _)| params.last().map(|p| ty_from_field_descriptor(p)))
-                    .unwrap_or_else(|| ir_ty_to_jvm(ty))
+                    .unwrap_or_else(|| ir_ty_to_jvm(operation.ty))
             }
         };
-        self.emit_value(value, code);
+        if let Some(temps) = &spilled {
+            let (slot, value_ty, _) = temps[1];
+            load(value_ty, slot, code);
+            for &(_, _, key) in temps {
+                self.slots.remove(&key);
+            }
+        } else {
+            self.emit_value(value, code);
+        }
         let source = self.value_ty(value);
         if source.is_jvm_scalar() && !target.is_jvm_scalar() && target.is_reference() {
             box_prim_free(self.cw, code, source);
@@ -7882,6 +7936,40 @@ impl<'a> Emitter<'a> {
                 let m = self.cw.methodref(&owner, &name, &descriptor);
                 code.invokestatic(m, words, 0);
             }
+        }
+    }
+
+    /// Emit the source receiver according to an already-selected property realization. Instance
+    /// accessors/fields consume it; a static realization still evaluates and drops an effectful receiver.
+    /// Reads and writes share this exact rule so `side().p` and `side().p = v` cannot diverge.
+    fn emit_property_receiver(
+        &mut self,
+        receiver: crate::ir::ExprId,
+        access_owner: &str,
+        takes_receiver: bool,
+        code: &mut CodeBuilder,
+    ) {
+        if takes_receiver {
+            self.emit_value(receiver, code);
+            self.narrow_on_stack(self.value_ty(receiver), &Ty::obj(access_owner), code);
+            return;
+        }
+        // A receiverless realization does not make the receiver expression disappear. Elide only an
+        // expression that runs no code, or a singleton/static read of the very owner whose static access
+        // initializes it anyway; every other receiver is evaluated and popped.
+        let initializes_owner = match self.ir.expr(receiver) {
+            IrExpr::ExternalStaticField { owner, .. }
+            | IrExpr::ExternalStaticInstance { owner, .. } => owner.matches(access_owner),
+            IrExpr::StaticInstance { owner, .. } => self
+                .ir
+                .classes
+                .get(*owner as usize)
+                .is_some_and(|class| class.fq_name_matches(access_owner)),
+            _ => false,
+        };
+        if !crate::ir::expr_runs_no_code(self.ir, receiver) && !initializes_owner {
+            self.emit_value(receiver, code);
+            code.pop();
         }
     }
 
@@ -8088,28 +8176,7 @@ impl<'a> Emitter<'a> {
             // The receiver is the bridge's first ARGUMENT, so it is pushed like an ordinary receiver.
             PropertyAccess::AccessBridge { owner, .. } => (owner.clone(), true),
         };
-        if takes_receiver {
-            self.emit_value(receiver, code);
-            self.narrow_on_stack(self.value_ty(receiver), &Ty::obj(&access_owner), code);
-        } else {
-            // The receiver carries no value here, but it is still an expression the program evaluates:
-            // drop it, don't skip it. Elide only what runs no code, or a read of a static of the very
-            // class this access initializes anyway (the `Obj.INSTANCE` singleton) — kotlinc's own rule.
-            let initializes_owner = match self.ir.expr(receiver) {
-                IrExpr::ExternalStaticField { owner, .. }
-                | IrExpr::ExternalStaticInstance { owner, .. } => owner.matches(&access_owner),
-                IrExpr::StaticInstance { owner, .. } => self
-                    .ir
-                    .classes
-                    .get(*owner as usize)
-                    .is_some_and(|c| c.fq_name_matches(&access_owner)),
-                _ => false,
-            };
-            if !crate::ir::expr_runs_no_code(self.ir, receiver) && !initializes_owner {
-                self.emit_value(receiver, code);
-                code.pop();
-            }
-        }
+        self.emit_property_receiver(receiver, &access_owner, takes_receiver, code);
         let physical = match access {
             PropertyAccess::Field {
                 owner,
@@ -8342,9 +8409,28 @@ impl<'a> Emitter<'a> {
                 owner,
                 name,
                 ty,
+                interface,
+                operation,
             } => {
-                let (receiver, owner, name, ty) = (*receiver, owner.render(), name.clone(), *ty);
-                self.emit_property_read(receiver, &owner, &name, &ty, code);
+                let (receiver, owner, name, ty, interface, operation) = (
+                    *receiver,
+                    owner.render(),
+                    name.clone(),
+                    *ty,
+                    *interface,
+                    operation.unwrap_or(e),
+                );
+                self.emit_property_read(
+                    PropertyOperation {
+                        expression: operation,
+                        receiver,
+                        owner: &owner,
+                        name: &name,
+                        ty: &ty,
+                        interface,
+                    },
+                    code,
+                );
             }
             IrExpr::PropertyWrite {
                 receiver,
@@ -8352,10 +8438,30 @@ impl<'a> Emitter<'a> {
                 name,
                 value,
                 ty,
+                interface,
+                operation,
             } => {
-                let (receiver, owner, name, value, ty) =
-                    (*receiver, owner.render(), name.clone(), *value, *ty);
-                self.emit_property_write(receiver, &owner, &name, value, &ty, code);
+                let (receiver, owner, name, value, ty, interface, operation) = (
+                    *receiver,
+                    owner.render(),
+                    name.clone(),
+                    *value,
+                    *ty,
+                    *interface,
+                    operation.unwrap_or(e),
+                );
+                self.emit_property_write(
+                    PropertyOperation {
+                        expression: operation,
+                        receiver,
+                        owner: &owner,
+                        name: &name,
+                        ty: &ty,
+                        interface,
+                    },
+                    value,
+                    code,
+                );
             }
             IrExpr::GetField {
                 receiver,

@@ -8,10 +8,11 @@ use super::classfile::ClassWriter;
 use super::classreader::{MethodCode, C};
 use std::collections::HashMap;
 
-/// How a compiled class realizes a PROPERTY read. Kotlin has no accessors — `Dispatchers.IO` is a
-/// property — so the emitter asks the class file what reading it actually compiles to. `is_static` means
-/// the realization takes no receiver (a `@JvmStatic` accessor, or a `static` field): the receiver is an
-/// expression the program still evaluates, but it is not passed.
+/// How a compiled class realizes a PROPERTY read. Kotlin source can declare getter/setter behavior, but
+/// a use such as `Dispatchers.IO` denotes the property rather than a JVM method call, so the emitter asks
+/// the class file what that read actually compiles to. `is_static` means the realization takes no receiver
+/// (a `@JvmStatic` accessor, or a `static` field): the receiver is an expression the program still
+/// evaluates, but it is not passed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PropertyAccess {
     /// `getfield` / `getstatic <owner>.<name>:<descriptor>`.

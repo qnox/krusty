@@ -117,6 +117,15 @@ fn referenced_class_names(ir: &IrFile) -> Vec<TypeName> {
             IrExpr::TypeOp { type_operand, .. } => collect_obj_names(*type_operand, &mut out),
             IrExpr::Variable { ty, .. } => collect_obj_names(*ty, &mut out),
             IrExpr::InvokeFunction { ret, .. } => collect_obj_names(*ret, &mut out),
+            IrExpr::PropertyRead { owner, ty, .. } | IrExpr::PropertyWrite { owner, ty, .. } => {
+                // Semantic property nodes replaced realization-shaped calls, so both the declaring
+                // owner (needed to recognize a value class's sole-property identity read) and logical
+                // value type (needed to mangle/erase another class's accessor) are type references in
+                // their own right. Omitting either makes value-class handling depend on some unrelated
+                // signature also mentioning the class.
+                out.push(*owner);
+                collect_obj_names(*ty, &mut out);
+            }
             IrExpr::New {
                 internal,
                 ctor_params,
@@ -340,6 +349,62 @@ pub fn lower_value_classes(
     if under.is_empty() {
         return true;
     }
+
+    // A semantic property operation deliberately keeps the Kotlin property name. For an owner compiled
+    // from another source file there is no classfile for the emitter to inspect, so record the JVM
+    // accessor spelling here while the original property type is still present. The emitter consults
+    // this table only as its declaration-less fallback; same-file declarations and classpath metadata
+    // remain authoritative. Keeping this target fact in a JVM-pass side table prevents common lowering
+    // from branching on whether the owner came from this file, another module file, or the classpath.
+    ir.property_accessor_jvm_realizations = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(id, expression)| {
+            let operation = match expression {
+                IrExpr::PropertyRead { operation, .. }
+                | IrExpr::PropertyWrite { operation, .. } => operation.unwrap_or(id as u32),
+                _ => return None,
+            };
+            let accessor = match expression {
+                IrExpr::PropertyRead { name, ty, .. }
+                    if ty
+                        .non_null()
+                        .obj_internal()
+                        .is_some_and(|owner| under.contains_key(&owner)) =>
+                {
+                    vc_mangle(&property_getter_name(name), &[], ty, &under, false, false)
+                }
+                IrExpr::PropertyWrite { name, ty, .. }
+                    if ty
+                        .non_null()
+                        .obj_internal()
+                        .is_some_and(|owner| under.contains_key(&owner)) =>
+                {
+                    vc_mangle(
+                        &crate::names::property_setter_name(name),
+                        std::slice::from_ref(ty),
+                        &Ty::Unit,
+                        &under,
+                        false,
+                        false,
+                    )
+                }
+                _ => return None,
+            };
+            // Record the erased property value beside the name: reads deliberately retain their logical
+            // value-class type in the IR, so the declaration-less emitter cannot derive the descriptor
+            // from the node after this pass.
+            let physical = match expression {
+                IrExpr::PropertyRead { ty, .. } | IrExpr::PropertyWrite { ty, .. } => {
+                    erase(ty, &under)
+                }
+                _ => unreachable!("the accessor match above accepted only property operations"),
+            };
+            Some((operation, (accessor, physical)))
+        })
+        .collect();
+
     let value_class_ids: Vec<u32> = (0..ir.classes.len() as u32)
         .filter(|&i| ir.classes[i as usize].is_value)
         .collect();

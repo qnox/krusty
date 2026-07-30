@@ -1723,8 +1723,10 @@ impl<'a> SymbolResolver<'a> {
     /// The declared type of the member property `name` on `recv` — the property itself, with no accessor
     /// in the answer. A property is a declaration, not a method: whether the target realizes reading it
     /// through a method at all is not a resolution question, so a read must not be made to depend on
-    /// finding one. Nearest declaration wins, as for any member.
-    pub fn member_property_type(&self, recv: Ty, name: &str) -> Option<Ty> {
+    /// finding one. Returns the selected declaration owner and its interface shape beside the logical
+    /// property type so lowering does not rediscover either from a source-specific table. Nearest
+    /// declaration wins, as for any member.
+    pub fn member_property_type(&self, recv: Ty, name: &str) -> Option<(TypeName, Ty, bool)> {
         let receiver_accessible = !recv.is_nullable()
             && recv
                 .kotlin_class_internal()
@@ -1738,7 +1740,7 @@ impl<'a> SymbolResolver<'a> {
             lexical_classes: &self.lexical_classes,
             receiver: Some(recv),
         };
-        self.lib
+        self.src
             .property_members(recv, name)
             .overloads
             .into_iter()
@@ -1748,7 +1750,13 @@ impl<'a> SymbolResolver<'a> {
                     && member_visible(Some(&access), property.visibility, property.owner)
             })
             .min_by_key(|property| property.receiver_rank)
-            .map(|property| property.ty)
+            .map(|property| {
+                let interface = self
+                    .src
+                    .resolve_type_name(property.owner)
+                    .is_some_and(|owner| owner.is_interface());
+                (property.owner, property.ty, interface)
+            })
     }
 
     /// Resolve a name on a receiver to the thing it DENOTES — a member, a property, a companion/instance
