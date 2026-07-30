@@ -1,6 +1,7 @@
 //! Compact semantic data retained by interactive language-server queries.
 
 use std::collections::{HashMap, HashSet};
+use std::io::{self, Write};
 
 #[cfg(test)]
 use crate::compiler_analysis::analyze_standalone_source_set;
@@ -19,6 +20,35 @@ use krusty::diag::{Diagnostic, Span};
 use krusty::source::{SourceInput, SourceKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+#[derive(Default)]
+struct JsonWireCounter {
+    bytes: usize,
+}
+
+impl Write for JsonWireCounter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.bytes = self.bytes.checked_add(buffer.len()).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "serialized JSON length overflow",
+            )
+        })?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+pub(crate) fn serialized_json_wire_bytes<T: ?Sized + Serialize>(
+    value: &T,
+) -> Result<usize, serde_json::Error> {
+    let mut counter = JsonWireCounter::default();
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.bytes)
+}
 
 /// `(source lo, source hi, interned hover value id)`.
 type HoverEntry = [u32; 3];
@@ -43,17 +73,24 @@ const MAX_SOURCE_SET_HOVER_ENTRIES: usize = 256 * 1024;
 const MAX_SOURCE_SET_HOVER_WIRE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SOURCE_SET_DOCUMENT_SYMBOL_ENTRIES: usize = 32 * 1024;
 const MAX_SOURCE_SET_DOCUMENT_SYMBOL_WIRE_BYTES: usize = 8 * 1024 * 1024;
-pub const MAX_SOURCE_SET_WORKSPACE_SYMBOL_ENTRIES: usize = 32 * 1024;
 pub const MAX_WORKSPACE_SYMBOL_WIRE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_SOURCE_SET_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_WORKSPACE_SYMBOL_QUERY_BYTES: usize = 1024;
-const MAX_WORKSPACE_SYMBOL_PACKAGE_BYTES: usize = 1024 * 1024;
 const MAX_WORKSPACE_SYMBOL_CONTAINER_DEPTH: usize = 128;
+const JSON_U32_MAX_BYTES: usize = 10;
+// Entry array and separator, plus one value in each search permutation.
+const WORKSPACE_SYMBOL_ENTRY_MAX_WIRE_BYTES: usize =
+    2 + 13 * JSON_U32_MAX_BYTES + 12 + 1 + 2 * (JSON_U32_MAX_BYTES + 1);
+// Object keys, collection delimiters, and completeness.
+const WORKSPACE_SYMBOL_INDEX_FIXED_WIRE_BYTES: usize = 256;
 const MAX_SOURCE_SET_FOLDING_RANGE_ENTRIES: usize = 32 * 1024;
 const MAX_SOURCE_SET_FOLDING_RANGE_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const FOLDING_RANGE_WIRE_FIXED_BYTES: usize = 192;
 const MAX_SOURCE_SET_SIGNATURE_HELP_CALLS: usize = 32 * 1024;
 const MAX_SOURCE_SET_SIGNATURE_HELP_WIRE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_RETAINED_ANALYSIS_BYTES: usize = 64 * 1024 * 1024;
+// Response field names, delimiters, and array framing.
+const ANALYSIS_RESPONSE_FIXED_WIRE_BYTES: usize = 512;
 
 #[derive(Default)]
 pub(crate) struct HoverBudget {
@@ -96,6 +133,78 @@ pub(crate) struct NavigationBudget {
 pub(crate) struct DocumentSymbolBudget {
     entries: usize,
     wire_bytes: usize,
+}
+
+struct WorkspaceSymbolBudget {
+    wire_bytes: usize,
+    max_wire_bytes: usize,
+}
+
+impl WorkspaceSymbolBudget {
+    fn new() -> Self {
+        Self::with_limit(MAX_SOURCE_SET_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES)
+    }
+
+    fn with_limit(max_wire_bytes: usize) -> Self {
+        Self {
+            wire_bytes: WORKSPACE_SYMBOL_INDEX_FIXED_WIRE_BYTES,
+            max_wire_bytes,
+        }
+    }
+
+    fn from_index(index: &WorkspaceSymbolIndex) -> Self {
+        let mut budget = Self::new();
+        let string_bytes = index
+            .packages
+            .iter()
+            .chain(&index.names)
+            .fold(0usize, |bytes, value| {
+                bytes.saturating_add(workspace_symbol_string_wire_cost(value))
+            });
+        budget.wire_bytes = budget
+            .wire_bytes
+            .saturating_add(
+                index
+                    .entries
+                    .len()
+                    .saturating_mul(WORKSPACE_SYMBOL_ENTRY_MAX_WIRE_BYTES),
+            )
+            .saturating_add(string_bytes);
+        budget
+    }
+
+    fn remaining_entry_capacity(&self) -> usize {
+        self.max_wire_bytes.saturating_sub(self.wire_bytes) / WORKSPACE_SYMBOL_ENTRY_MAX_WIRE_BYTES
+    }
+
+    fn reserve_merged_entry(
+        &mut self,
+        name: &str,
+        new_name: bool,
+        package: &str,
+        new_package: bool,
+    ) -> bool {
+        let bytes = WORKSPACE_SYMBOL_ENTRY_MAX_WIRE_BYTES
+            .saturating_add(
+                new_name
+                    .then(|| workspace_symbol_string_wire_cost(name))
+                    .unwrap_or(0),
+            )
+            .saturating_add(
+                new_package
+                    .then(|| workspace_symbol_string_wire_cost(package))
+                    .unwrap_or(0),
+            );
+        self.reserve(bytes)
+    }
+
+    fn reserve(&mut self, bytes: usize) -> bool {
+        if bytes > self.max_wire_bytes.saturating_sub(self.wire_bytes) {
+            return false;
+        }
+        self.wire_bytes += bytes;
+        true
+    }
 }
 
 #[derive(Default)]
@@ -345,12 +454,70 @@ pub struct DocumentSymbolIndex {
     names: Vec<String>,
 }
 
-type WorkspaceSymbolEntry = [u32; 10];
+/// `(file, selection lo/hi, start line/character, end line/character, kind, parent + 1,
+/// package id, name id, declaration lo/hi)`.
+type WorkspaceSymbolEntry = [u32; 13];
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+/// Bounded, searchable declarations retained from one assembled source set.
+#[derive(Clone, Serialize)]
 pub struct WorkspaceSymbolIndex {
     entries: Vec<WorkspaceSymbolEntry>,
     packages: Vec<String>,
+    by_name: Vec<u32>,
+    by_initials: Vec<u32>,
+    names: Vec<String>,
+    complete: bool,
+}
+
+impl Default for WorkspaceSymbolIndex {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            packages: Vec::new(),
+            by_name: Vec::new(),
+            by_initials: Vec::new(),
+            names: Vec::new(),
+            complete: true,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct WorkspaceSymbolIndexWire {
+    entries: Vec<WorkspaceSymbolEntry>,
+    packages: Vec<String>,
+    #[serde(default)]
+    by_name: Vec<u32>,
+    #[serde(default)]
+    by_initials: Vec<u32>,
+    #[serde(default)]
+    names: Vec<String>,
+    #[serde(default = "workspace_symbol_index_complete")]
+    complete: bool,
+}
+
+impl<'de> Deserialize<'de> for WorkspaceSymbolIndex {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = WorkspaceSymbolIndexWire::deserialize(deserializer)?;
+        let mut index = Self {
+            entries: wire.entries,
+            packages: wire.packages,
+            by_name: wire.by_name,
+            by_initials: wire.by_initials,
+            names: wire.names,
+            complete: wire.complete,
+        };
+        index.drop_invalid_entries();
+        index.rebuild_search_order();
+        Ok(index)
+    }
+}
+
+fn workspace_symbol_index_complete() -> bool {
+    true
 }
 
 /// `(argument-list lo, hi, signature start/count, selected signature, argument start/count,
@@ -714,24 +881,17 @@ impl DocumentSymbolIndex {
 impl WorkspaceSymbolIndex {
     pub(crate) fn from_source_set(sources: &[&str], files: &[FileAnalysis]) -> Self {
         let mut result = Self::default();
+        let mut budget = WorkspaceSymbolBudget::new();
         let mut package_ids = HashMap::<String, u32>::new();
-        let mut package_bytes = 0usize;
+        let mut name_ids = HashMap::<String, u32>::new();
 
         'files: for (file_index, (source, analysis)) in sources.iter().zip(files).enumerate() {
             let package = analysis.file.package.as_deref().unwrap_or("");
-            let Some(package_id) = intern_workspace_package(
-                package,
-                &mut result.packages,
-                &mut package_ids,
-                &mut package_bytes,
-            ) else {
-                break;
-            };
-            let occurrences = document_symbol_occurrences(
-                source,
-                analysis,
-                MAX_SOURCE_SET_WORKSPACE_SYMBOL_ENTRIES.saturating_sub(result.entries.len()),
-            );
+            let entry_capacity = budget.remaining_entry_capacity();
+            let mut occurrences =
+                document_symbol_occurrences(source, analysis, entry_capacity.saturating_add(1));
+            let truncated = occurrences.len() > entry_capacity;
+            occurrences.truncate(entry_capacity);
             let mut retained = Vec::with_capacity(occurrences.len());
             let mut retained_indices = vec![None; occurrences.len()];
             for (occurrence_index, occurrence) in occurrences.iter().enumerate() {
@@ -772,9 +932,22 @@ impl WorkspaceSymbolIndex {
             let entry_offset = result.entries.len();
 
             for (occurrence, parent) in retained {
-                if result.entries.len() >= MAX_SOURCE_SET_WORKSPACE_SYMBOL_ENTRIES {
+                let Some(declared) = source
+                    .get(occurrence.selection.lo as usize..occurrence.selection.hi as usize)
+                    .map(|name| name.trim_matches('`'))
+                    .filter(|name| !name.is_empty())
+                else {
+                    continue;
+                };
+                let new_package = !package_ids.contains_key(package);
+                let new_name = !name_ids.contains_key(declared);
+                if !budget.reserve_merged_entry(declared, new_name, package, new_package) {
+                    result.complete = false;
                     break 'files;
                 }
+                let package_id =
+                    intern_workspace_string(package, &mut result.packages, &mut package_ids);
+                let name_id = intern_workspace_string(declared, &mut result.names, &mut name_ids);
                 let start = position(occurrence.selection.lo);
                 let end = position(occurrence.selection.hi);
                 let parent = parent
@@ -793,24 +966,218 @@ impl WorkspaceSymbolIndex {
                     u32::from(occurrence.kind),
                     parent,
                     package_id,
+                    name_id,
+                    occurrence.range.lo,
+                    occurrence.range.hi,
                 ]);
             }
+            if truncated {
+                result.complete = false;
+                break;
+            }
         }
+        result.rebuild_search_order();
         result
     }
 
-    pub fn remap_files(&mut self, remaps: &[(u32, u32)]) {
-        for entry in &mut self.entries {
+    pub fn remap_files(&mut self, remaps: &[(u32, u32)], retained_file_count: usize) {
+        let mut retained = Vec::with_capacity(self.entries.len());
+        let mut retained_indices = Vec::with_capacity(self.entries.len());
+        for mut entry in self.entries.drain(..) {
             if let Ok(index) = remaps.binary_search_by_key(&entry[0], |(candidate, _)| *candidate) {
                 entry[0] = remaps[index].1;
             }
+            if entry[0] as usize >= retained_file_count {
+                self.complete = false;
+                retained_indices.push(None);
+                continue;
+            }
+            entry[8] = entry[8]
+                .checked_sub(1)
+                .and_then(|parent| retained_indices.get(parent as usize).copied().flatten())
+                .and_then(|parent: u32| parent.checked_add(1))
+                .unwrap_or(0);
+            let index = retained.len() as u32;
+            retained.push(entry);
+            retained_indices.push(Some(index));
         }
+        self.entries = retained;
+        self.rebuild_search_order();
+    }
+
+    fn drop_invalid_entries(&mut self) {
+        let entries = std::mem::take(&mut self.entries);
+        let mut retained = Vec::with_capacity(entries.len());
+        let mut retained_indices = Vec::with_capacity(entries.len());
+        for mut entry in entries {
+            if !workspace_symbol_entry_is_valid(&entry)
+                || self.packages.get(entry[9] as usize).is_none()
+                || self.names.get(entry[10] as usize).is_none()
+            {
+                self.complete = false;
+                retained_indices.push(None);
+                continue;
+            }
+            let parent = remap_workspace_parent(entry[8], &retained_indices).and_then(|parent| {
+                let Some(parent_index) = parent.checked_sub(1) else {
+                    return Some(0);
+                };
+                retained
+                    .get(parent_index as usize)
+                    .filter(|parent| workspace_symbol_parent_is_valid(parent, &entry))
+                    .map(|_| parent)
+            });
+            if entry[8] != 0 && parent.is_none() {
+                self.complete = false;
+            }
+            entry[8] = parent.unwrap_or(0);
+            let index = retained.len() as u32;
+            retained.push(entry);
+            retained_indices.push(Some(index));
+        }
+        self.entries = retained;
+    }
+
+    fn rebuild_search_order(&mut self) {
+        let lowercase_names = self
+            .names
+            .iter()
+            .map(|name| name.to_lowercase())
+            .collect::<Vec<_>>();
+        let initials = self
+            .names
+            .iter()
+            .map(|name| camel_hump_initials(name))
+            .collect::<Vec<_>>();
+        let name_id = |entry_index: u32| {
+            self.entries
+                .get(entry_index as usize)
+                .map(|entry| entry[10] as usize)
+        };
+        let mut by_name = (0..self.entries.len() as u32).collect::<Vec<u32>>();
+        by_name.sort_unstable_by(|left, right| {
+            name_id(*left)
+                .and_then(|name| lowercase_names.get(name))
+                .map(String::as_str)
+                .unwrap_or_default()
+                .cmp(
+                    name_id(*right)
+                        .and_then(|name| lowercase_names.get(name))
+                        .map(String::as_str)
+                        .unwrap_or_default(),
+                )
+                .then_with(|| left.cmp(right))
+        });
+        let mut by_initials = (0..self.entries.len() as u32).collect::<Vec<u32>>();
+        by_initials.sort_unstable_by(|left, right| {
+            name_id(*left)
+                .and_then(|name| initials.get(name))
+                .map(String::as_str)
+                .unwrap_or_default()
+                .cmp(
+                    name_id(*right)
+                        .and_then(|name| initials.get(name))
+                        .map(String::as_str)
+                        .unwrap_or_default(),
+                )
+                .then_with(|| left.cmp(right))
+        });
+        self.by_name = by_name;
+        self.by_initials = by_initials;
+    }
+
+    fn lowercase_name(&self, entry_index: u32) -> Option<String> {
+        Some(self.source_name(entry_index)?.to_lowercase())
+    }
+
+    fn source_name(&self, entry_index: u32) -> Option<&str> {
+        let entry = self.entries.get(entry_index as usize)?;
+        self.names.get(entry[10] as usize).map(String::as_str)
+    }
+
+    fn entry_initials(&self, entry_index: u32) -> String {
+        self.source_name(entry_index)
+            .map(camel_hump_initials)
+            .unwrap_or_default()
+    }
+
+    fn prefix_matches(&self, lowercase_query: &str) -> &[u32] {
+        let start = self.by_name.partition_point(|&index| {
+            self.lowercase_name(index).unwrap_or_default().as_str() < lowercase_query
+        });
+        let count = self.by_name[start..].partition_point(|&index| {
+            self.lowercase_name(index)
+                .unwrap_or_default()
+                .starts_with(lowercase_query)
+        });
+        &self.by_name[start..start + count]
+    }
+
+    fn initials_matches(&self, lowercase_query: &str) -> &[u32] {
+        let start = self
+            .by_initials
+            .partition_point(|&index| self.entry_initials(index).as_str() < lowercase_query);
+        let count = self.by_initials[start..]
+            .partition_point(|&index| self.entry_initials(index).starts_with(lowercase_query));
+        &self.by_initials[start..start + count]
+    }
+
+    fn retain_wire_budget(&mut self, max_wire_bytes: usize) {
+        if self.wire_bytes() <= max_wire_bytes {
+            return;
+        }
+        let old = std::mem::take(self);
+        let mut retained = Self {
+            complete: false,
+            ..Self::default()
+        };
+        let mut budget = WorkspaceSymbolBudget::with_limit(max_wire_bytes);
+        let mut package_ids = HashMap::<String, u32>::new();
+        let mut name_ids = HashMap::<String, u32>::new();
+        let mut retained_indices = Vec::with_capacity(old.entries.len());
+        for mut entry in old.entries {
+            let Some(package) = old.packages.get(entry[9] as usize) else {
+                retained_indices.push(None);
+                continue;
+            };
+            let Some(name) = old.names.get(entry[10] as usize) else {
+                retained_indices.push(None);
+                continue;
+            };
+            let Some(parent) = remap_workspace_parent(entry[8], &retained_indices) else {
+                retained_indices.push(None);
+                continue;
+            };
+            let new_package = !package_ids.contains_key(package);
+            let new_name = !name_ids.contains_key(name);
+            if !budget.reserve_merged_entry(name, new_name, package, new_package) {
+                break;
+            }
+            entry[8] = parent;
+            entry[9] = intern_workspace_string(package, &mut retained.packages, &mut package_ids);
+            entry[10] = intern_workspace_string(name, &mut retained.names, &mut name_ids);
+            let index = retained.entries.len() as u32;
+            retained.entries.push(entry);
+            retained_indices.push(Some(index));
+        }
+        retained.rebuild_search_order();
+        *self = retained;
+    }
+
+    fn wire_bytes(&self) -> usize {
+        serialized_json_wire_bytes(self).map_or(usize::MAX, |bytes| bytes.saturating_add(1))
     }
 
     pub fn merge_from(&mut self, other: Self) {
-        let mut package_bytes = self.packages.iter().map(String::len).sum::<usize>();
+        let mut budget = WorkspaceSymbolBudget::from_index(self);
         let mut package_ids = self
             .packages
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (value.clone(), index as u32))
+            .collect::<HashMap<_, _>>();
+        let mut name_ids = self
+            .names
             .iter()
             .enumerate()
             .map(|(index, value)| (value.clone(), index as u32))
@@ -821,86 +1188,162 @@ impl WorkspaceSymbolIndex {
             .enumerate()
             .map(|(index, entry)| (workspace_symbol_identity(entry), index as u32))
             .collect::<HashMap<_, _>>();
+        self.complete &= other.complete;
         let mut remapped_entries = Vec::with_capacity(other.entries.len());
         for mut entry in other.entries {
             if let Some(&index) = identities.get(&workspace_symbol_identity(&entry)) {
                 remapped_entries.push(Some(index));
                 continue;
             }
-            if self.entries.len() >= MAX_SOURCE_SET_WORKSPACE_SYMBOL_ENTRIES {
-                break;
-            }
             let Some(package) = other.packages.get(entry[9] as usize) else {
+                self.complete = false;
                 remapped_entries.push(None);
                 continue;
             };
-            let Some(package_id) = intern_workspace_package(
-                package,
-                &mut self.packages,
-                &mut package_ids,
-                &mut package_bytes,
-            ) else {
-                break;
+            let Some(name) = other.names.get(entry[10] as usize) else {
+                self.complete = false;
+                remapped_entries.push(None);
+                continue;
             };
+            let new_package = !package_ids.contains_key(package);
+            let new_name = !name_ids.contains_key(name);
+            if !budget.reserve_merged_entry(name, new_name, package, new_package) {
+                self.complete = false;
+                break;
+            }
+            let package_id = intern_workspace_string(package, &mut self.packages, &mut package_ids);
+            let name_id = intern_workspace_string(name, &mut self.names, &mut name_ids);
             entry[8] = entry[8]
                 .checked_sub(1)
                 .and_then(|parent| remapped_entries.get(parent as usize).copied().flatten())
                 .and_then(|parent| parent.checked_add(1))
                 .unwrap_or(0);
             entry[9] = package_id;
+            entry[10] = name_id;
             let index = self.entries.len() as u32;
             identities.insert(workspace_symbol_identity(&entry), index);
             self.entries.push(entry);
             remapped_entries.push(Some(index));
         }
+        self.rebuild_search_order();
     }
 
     pub fn encode(&self, query: &str, source_set: &[(String, String)]) -> Vec<Value> {
         if query.len() > MAX_WORKSPACE_SYMBOL_QUERY_BYTES {
             return Vec::new();
         }
-        let folded_query = query.to_lowercase();
+        let lowercase_query = query.to_lowercase();
         let mut result = Vec::new();
         let mut wire_bytes = 2usize;
-        for (entry_index, entry) in self.entries.iter().enumerate() {
-            let Some((uri, source)) = source_set.get(entry[0] as usize) else {
-                continue;
-            };
-            let Some(name) = workspace_source_name(source, entry) else {
-                continue;
-            };
-            if !name.to_lowercase().contains(&folded_query) {
+        if lowercase_query.is_empty() {
+            for index in 0..self.entries.len() as u32 {
+                if !self.push_encoded(index, source_set, &mut result, &mut wire_bytes) {
+                    return result;
+                }
+            }
+            return result;
+        }
+
+        for &index in self.prefix_matches(&lowercase_query) {
+            if !self.push_encoded(index, source_set, &mut result, &mut wire_bytes) {
+                return result;
+            }
+        }
+        for &index in self.initials_matches(&lowercase_query) {
+            if self
+                .source_name(index)
+                .is_some_and(|name| starts_with_lowercase(name, &lowercase_query))
+            {
                 continue;
             }
-            let container = self.container_name(entry_index, source_set);
-            let symbol = json!({
-                "name": name,
-                "kind": entry[7],
-                "containerName": container,
-                "location": {
-                    "uri": uri,
-                    "range": {
-                        "start": {"line": entry[3], "character": entry[4]},
-                        "end": {"line": entry[5], "character": entry[6]},
-                    },
-                },
-            });
-            let symbol_bytes = serde_json::to_vec(&symbol).map_or(usize::MAX, |wire| wire.len());
-            let next_bytes = wire_bytes.saturating_add(symbol_bytes).saturating_add(1);
-            if next_bytes > MAX_WORKSPACE_SYMBOL_WIRE_BYTES {
-                break;
+            if !self.push_encoded(index, source_set, &mut result, &mut wire_bytes) {
+                return result;
             }
-            wire_bytes = next_bytes;
-            result.push(symbol);
+        }
+        for &index in &self.by_initials {
+            let Some(name) = self.source_name(index) else {
+                continue;
+            };
+            let initials = camel_hump_initials(name);
+            if starts_with_lowercase(name, &lowercase_query)
+                || initials.starts_with(&lowercase_query)
+                || !is_ordered_subsequence_lowercase(&initials, &lowercase_query)
+            {
+                continue;
+            }
+            if !self.push_encoded(index, source_set, &mut result, &mut wire_bytes) {
+                return result;
+            }
+        }
+        for index in 0..self.entries.len() as u32 {
+            let Some(name) = self.source_name(index) else {
+                continue;
+            };
+            let initials = camel_hump_initials(name);
+            if starts_with_lowercase(name, &lowercase_query)
+                || is_ordered_subsequence_lowercase(&initials, &lowercase_query)
+                || !is_ordered_subsequence_lowercase(name, &lowercase_query)
+            {
+                continue;
+            }
+            if !self.push_encoded(index, source_set, &mut result, &mut wire_bytes) {
+                return result;
+            }
         }
         result
     }
 
-    pub fn entry_count(&self) -> usize {
-        self.entries.len()
+    /// Whether every indexable declaration fit in the retained snapshot budget.
+    pub fn is_complete(&self) -> bool {
+        self.complete
     }
 
-    fn container_name(&self, entry_index: usize, source_set: &[(String, String)]) -> String {
+    fn clear_incomplete(&mut self) {
+        *self = Self {
+            complete: false,
+            ..Self::default()
+        };
+    }
+
+    fn push_encoded(
+        &self,
+        entry_index: u32,
+        source_set: &[(String, String)],
+        result: &mut Vec<Value>,
+        wire_bytes: &mut usize,
+    ) -> bool {
+        let Some(entry) = self.entries.get(entry_index as usize).copied() else {
+            return true;
+        };
+        let Some((uri, _)) = source_set.get(entry[0] as usize) else {
+            return true;
+        };
+        let Some(name) = self.source_name(entry_index) else {
+            return true;
+        };
+        let symbol = json!({
+            "name": name,
+            "kind": entry[7],
+            "containerName": self.container_name(entry_index as usize),
+            "location": {
+                "uri": uri,
+                "range": {
+                    "start": {"line": entry[3], "character": entry[4]},
+                    "end": {"line": entry[5], "character": entry[6]},
+                },
+            },
+        });
+        let symbol_bytes = serialized_json_wire_bytes(&symbol).unwrap_or(usize::MAX);
+        let next_bytes = wire_bytes.saturating_add(symbol_bytes).saturating_add(1);
+        if next_bytes > MAX_WORKSPACE_SYMBOL_WIRE_BYTES {
+            return false;
+        }
+        *wire_bytes = next_bytes;
+        result.push(symbol);
+        true
+    }
+
+    fn container_name(&self, entry_index: usize) -> String {
         let entry = self.entries[entry_index];
         let mut names = Vec::new();
         let mut parent = entry[8];
@@ -911,10 +1354,11 @@ impl WorkspaceSymbolIndex {
             let Some(parent_entry) = self.entries.get(parent_index) else {
                 break;
             };
-            let Some((_, source)) = source_set.get(parent_entry[0] as usize) else {
-                break;
-            };
-            let Some(name) = workspace_source_name(source, parent_entry) else {
+            let Some(name) = self
+                .names
+                .get(parent_entry[10] as usize)
+                .map(String::as_str)
+            else {
                 break;
             };
             names.push(name);
@@ -946,31 +1390,123 @@ fn workspace_symbol_identity(entry: &WorkspaceSymbolEntry) -> (DefinitionTarget,
     )
 }
 
-fn workspace_source_name<'a>(source: &'a str, entry: &WorkspaceSymbolEntry) -> Option<&'a str> {
-    source
-        .get(entry[1] as usize..entry[2] as usize)
-        .map(|name| name.trim_matches('`'))
-        .filter(|name| !name.is_empty())
+fn remap_workspace_parent(parent: u32, retained_indices: &[Option<u32>]) -> Option<u32> {
+    match parent.checked_sub(1) {
+        Some(parent) => retained_indices
+            .get(parent as usize)
+            .copied()
+            .flatten()?
+            .checked_add(1),
+        None => Some(0),
+    }
 }
 
-fn intern_workspace_package(
+fn workspace_symbol_entry_is_valid(entry: &WorkspaceSymbolEntry) -> bool {
+    entry[1] <= entry[2]
+        && entry[11] <= entry[1]
+        && entry[2] <= entry[12]
+        && entry[11] <= entry[12]
+        && (entry[3], entry[4]) <= (entry[5], entry[6])
+}
+
+fn workspace_symbol_parent_is_valid(
+    parent: &WorkspaceSymbolEntry,
+    child: &WorkspaceSymbolEntry,
+) -> bool {
+    parent[0] == child[0]
+        && parent[9] == child[9]
+        && parent[11] <= child[11]
+        && child[12] <= parent[12]
+        && (parent[11], parent[12]) != (child[11], child[12])
+}
+
+fn camel_hump_initials(name: &str) -> String {
+    let mut initials = String::new();
+    let mut chars = name.chars().peekable();
+    let mut previous = None;
+    while let Some(ch) = chars.next() {
+        let next = chars.peek().copied();
+        let boundary = previous.is_none()
+            || previous == Some('_')
+            || (ch.is_uppercase()
+                && (previous.is_some_and(|previous| !previous.is_uppercase())
+                    || next.is_some_and(char::is_lowercase)));
+        if boundary && ch.is_alphanumeric() {
+            initials.extend(ch.to_lowercase());
+        }
+        previous = Some(ch);
+    }
+    initials
+}
+
+fn is_ordered_subsequence_lowercase(haystack: &str, lowercase_needle: &str) -> bool {
+    if lowercase_needle.is_empty() {
+        return true;
+    }
+    if haystack.is_ascii() && lowercase_needle.is_ascii() {
+        let mut needle = lowercase_needle.bytes();
+        let Some(mut expected) = needle.next() else {
+            return true;
+        };
+        for byte in haystack.bytes() {
+            if byte.to_ascii_lowercase() != expected {
+                continue;
+            }
+            let Some(next) = needle.next() else {
+                return true;
+            };
+            expected = next;
+        }
+        return false;
+    }
+    let mut needle = lowercase_needle.chars();
+    let Some(mut expected) = needle.next() else {
+        return true;
+    };
+    for ch in haystack.chars().flat_map(char::to_lowercase) {
+        if ch != expected {
+            continue;
+        }
+        let Some(next) = needle.next() else {
+            return true;
+        };
+        expected = next;
+    }
+    false
+}
+
+fn starts_with_lowercase(haystack: &str, lowercase_needle: &str) -> bool {
+    if !haystack.is_ascii() || !lowercase_needle.is_ascii() {
+        return haystack.to_lowercase().starts_with(lowercase_needle);
+    }
+    haystack
+        .as_bytes()
+        .get(..lowercase_needle.len())
+        .is_some_and(|prefix| {
+            prefix
+                .iter()
+                .zip(lowercase_needle.as_bytes())
+                .all(|(left, right)| left.to_ascii_lowercase() == *right)
+        })
+}
+
+fn intern_workspace_string(
     value: &str,
-    packages: &mut Vec<String>,
+    values: &mut Vec<String>,
     ids: &mut HashMap<String, u32>,
-    retained_bytes: &mut usize,
-) -> Option<u32> {
+) -> u32 {
     if let Some(&id) = ids.get(value) {
-        return Some(id);
+        return id;
     }
-    if value.len() > MAX_WORKSPACE_SYMBOL_PACKAGE_BYTES.saturating_sub(*retained_bytes) {
-        return None;
-    }
-    let id = packages.len() as u32;
+    let id = values.len() as u32;
     let value = value.to_string();
     ids.insert(value.clone(), id);
-    *retained_bytes += value.len();
-    packages.push(value);
-    Some(id)
+    values.push(value);
+    id
+}
+
+fn workspace_symbol_string_wire_cost(value: &str) -> usize {
+    value.len().saturating_mul(6).saturating_add(3)
 }
 
 fn selected_positions(
@@ -1959,11 +2495,12 @@ impl DocumentAnalysis {
         Self::with_diagnostics(Vec::new())
     }
 
-    pub fn remap_navigation_files(&mut self, remaps: &[(u32, u32)]) {
+    pub fn remap_navigation_files(&mut self, remaps: &[(u32, u32)], retained_file_count: usize) {
         self.definitions.remap_files(remaps);
         self.type_definitions.remap_files(remaps);
         self.implementations.remap_files(remaps);
-        self.workspace_symbols.remap_files(remaps);
+        self.workspace_symbols
+            .remap_files(remaps, retained_file_count);
         for relation in &mut self.implementation_relations {
             for file in [0, 3] {
                 if let Ok(index) =
@@ -1978,8 +2515,10 @@ impl DocumentAnalysis {
     }
 
     pub fn retained_wire_bytes(&self) -> usize {
-        self.diagnostic_wire_bytes()
-            .saturating_add(self.semantic_wire_bytes())
+        ANALYSIS_RESPONSE_FIXED_WIRE_BYTES
+            .saturating_add(self.diagnostic_wire_bytes())
+            .saturating_add(self.non_workspace_semantic_wire_bytes())
+            .saturating_add(self.workspace_symbol_wire_bytes())
     }
 
     fn diagnostic_wire_bytes(&self) -> usize {
@@ -1990,8 +2529,8 @@ impl DocumentAnalysis {
         })
     }
 
-    fn semantic_wire_bytes(&self) -> usize {
-        serde_json::to_vec(&(
+    fn non_workspace_semantic_wire_bytes(&self) -> usize {
+        serialized_json_wire_bytes(&(
             &self.hover,
             &self.completion,
             &self.signature_help,
@@ -2001,14 +2540,17 @@ impl DocumentAnalysis {
             &self.implementations,
             &self.library_definitions,
             &self.document_symbols,
-            &self.workspace_symbols,
             &self.folding_ranges,
             &self.implementation_relations,
         ))
-        .map_or(usize::MAX, |wire| wire.len())
+        .unwrap_or(usize::MAX)
     }
 
-    fn clear_semantic_indexes(&mut self) {
+    fn workspace_symbol_wire_bytes(&self) -> usize {
+        self.workspace_symbols.wire_bytes()
+    }
+
+    fn clear_non_workspace_semantic_indexes(&mut self) {
         self.hover = HoverIndex::default();
         self.completion = CompletionIndex::default();
         self.signature_help = SignatureHelpIndex::default();
@@ -2018,7 +2560,6 @@ impl DocumentAnalysis {
         self.implementations = DefinitionIndex::default();
         self.library_definitions = LibraryDefinitionIndex::default();
         self.document_symbols = DocumentSymbolIndex::default();
-        self.workspace_symbols = WorkspaceSymbolIndex::default();
         self.folding_ranges = FoldingRangeIndex::default();
         self.implementation_relations.clear();
     }
@@ -2120,8 +2661,17 @@ fn merge_cross_document_implementations_with_limits(
 }
 
 pub fn retain_analysis_wire_budget(analyses: &mut [DocumentAnalysis], max_bytes: usize) {
-    let mut remaining = max_bytes;
-    for analysis in analyses {
+    let mut empty = DocumentAnalysis::empty();
+    empty.workspace_symbols.clear_incomplete();
+    let non_workspace_floor = empty.non_workspace_semantic_wire_bytes();
+    let workspace_floor = empty.workspace_symbol_wire_bytes();
+    let retained_floor = ANALYSIS_RESPONSE_FIXED_WIRE_BYTES
+        .saturating_add(non_workspace_floor)
+        .saturating_add(workspace_floor)
+        .saturating_mul(analyses.len());
+    let mut remaining = max_bytes.saturating_sub(retained_floor);
+
+    for analysis in analyses.iter_mut() {
         let mut diagnostic_bytes = analysis.diagnostic_wire_bytes();
         while diagnostic_bytes > remaining && !analysis.diagnostics.is_empty() {
             let diagnostic = analysis.diagnostics.pop().unwrap();
@@ -2129,13 +2679,25 @@ pub fn retain_analysis_wire_budget(analyses: &mut [DocumentAnalysis], max_bytes:
                 .saturating_sub(96usize.saturating_add(diagnostic.msg.len().saturating_mul(6)));
         }
         remaining = remaining.saturating_sub(diagnostic_bytes);
-        let semantic_bytes = analysis.semantic_wire_bytes();
-        if semantic_bytes <= remaining {
-            remaining -= semantic_bytes;
+    }
+
+    for analysis in analyses.iter_mut() {
+        let semantic_bytes = analysis.non_workspace_semantic_wire_bytes();
+        let additional_bytes = semantic_bytes.saturating_sub(non_workspace_floor);
+        if additional_bytes <= remaining {
+            remaining -= additional_bytes;
         } else {
-            analysis.clear_semantic_indexes();
-            remaining = remaining.saturating_sub(analysis.semantic_wire_bytes());
+            analysis.clear_non_workspace_semantic_indexes();
         }
+    }
+
+    for analysis in analyses {
+        let allowed_bytes = workspace_floor.saturating_add(remaining);
+        analysis.workspace_symbols.retain_wire_budget(allowed_bytes);
+        let additional_bytes = analysis
+            .workspace_symbol_wire_bytes()
+            .saturating_sub(workspace_floor);
+        remaining = remaining.saturating_sub(additional_bytes);
     }
 }
 
@@ -2310,6 +2872,173 @@ mod tests {
     use crate::compiler_analysis::CompletionKind;
 
     #[test]
+    fn json_wire_counter_matches_json_serialization() {
+        let value = json!({
+            "text": "line\n\u{1f642}",
+            "values": [0, u32::MAX],
+        });
+
+        assert_eq!(
+            serialized_json_wire_bytes(&value).unwrap(),
+            serde_json::to_string(&value).unwrap().len()
+        );
+    }
+
+    #[test]
+    fn workspace_symbol_names_survive_without_the_source_text() {
+        let source = "class DetachedMarker\n";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        let source_set = vec![("file:///Detached.kt".to_string(), String::new())];
+        let names = index
+            .encode("DetachedMarker", &source_set)
+            .into_iter()
+            .map(|symbol| symbol["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["DetachedMarker"]);
+    }
+
+    #[test]
+    fn workspace_symbols_match_camel_hump_initials() {
+        let source = "class StructuredSourceFile\nfun drawrect(): Int = 1\n";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        let source_set = vec![("file:///Humps.kt".to_string(), source.to_string())];
+        let names = index
+            .encode("ssf", &source_set)
+            .into_iter()
+            .map(|symbol| symbol["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["StructuredSourceFile"]);
+    }
+
+    #[test]
+    fn workspace_symbols_match_acronym_camel_boundaries() {
+        let source = "class APIResponseCache\n";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        let source_set = vec![("file:///Acronym.kt".to_string(), source.to_string())];
+
+        assert_eq!(
+            index.encode("arc", &source_set)[0]["name"],
+            "APIResponseCache"
+        );
+        assert_eq!(index.encode("a", &source_set).len(), 1);
+    }
+
+    #[test]
+    fn workspace_symbols_match_unicode_and_ordered_subsequences() {
+        let source =
+            "class StructuredSourceFile\nclass ÄtherMarker\nfun preResolvedValue(): Int = 1\n";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        let source_set = [("file:///Search.kt".into(), source.into())];
+
+        assert_eq!(
+            index.encode("sf", &source_set)[0]["name"],
+            "StructuredSourceFile"
+        );
+        assert_eq!(index.encode("äm", &source_set)[0]["name"], "ÄtherMarker");
+        assert_eq!(
+            index.encode("rsv", &source_set)[0]["name"],
+            "preResolvedValue"
+        );
+    }
+
+    #[test]
+    fn workspace_symbol_prefix_matches_lead_substring_matches() {
+        let source = "fun preresolveAll(): Int = 1\nfun resolve(): Int = 2\n";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        let source_set = vec![("file:///Rank.kt".to_string(), source.to_string())];
+
+        let names = index
+            .encode("resolve", &source_set)
+            .into_iter()
+            .map(|symbol| symbol["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["resolve", "preresolveAll"]);
+    }
+
+    #[test]
+    fn workspace_symbols_preserve_unicode_lowercase_matching_for_interior_matches() {
+        let source = "class PrefixÄtherMarker\n";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        let source_set = vec![("file:///Unicode.kt".to_string(), source.to_string())];
+
+        assert_eq!(
+            index.encode("äther", &source_set)[0]["name"],
+            "PrefixÄtherMarker"
+        );
+    }
+
+    #[test]
+    fn workspace_symbols_keep_unicode_lowercase_equivalence_boundaries() {
+        let source = "class StraßeMarker\nclass ΣigmaMarker\n";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        let source_set = [("file:///Unicode.kt".into(), source.into())];
+
+        assert_eq!(
+            index.encode("straße", &source_set)[0]["name"],
+            "StraßeMarker"
+        );
+        assert!(index.encode("strasse", &source_set).is_empty());
+        assert_eq!(index.encode("σm", &source_set)[0]["name"], "ΣigmaMarker");
+        assert!(index.encode("ςm", &source_set).is_empty());
+    }
+
+    #[test]
+    fn workspace_symbol_merge_is_not_capped_at_a_fixed_entry_count() {
+        const ENTRIES: usize = 40 * 1024;
+        let entry = |line: usize| {
+            let lo = (line * 7) as u32;
+            [
+                0u32,
+                lo,
+                lo + 6,
+                line as u32,
+                0,
+                line as u32,
+                6,
+                5,
+                0,
+                0,
+                0,
+                lo,
+                lo + 6,
+            ]
+        };
+        let mut index = WorkspaceSymbolIndex {
+            entries: (0..ENTRIES / 2).map(entry).collect(),
+            packages: vec!["package".into()],
+            by_name: Vec::new(),
+            by_initials: Vec::new(),
+            names: vec!["Needle".into()],
+            complete: true,
+        };
+        let mut other = WorkspaceSymbolIndex {
+            entries: (ENTRIES / 2..ENTRIES).map(entry).collect(),
+            packages: vec!["package".into()],
+            by_name: Vec::new(),
+            by_initials: Vec::new(),
+            names: vec!["Needle".into()],
+            complete: true,
+        };
+        index.rebuild_search_order();
+        other.rebuild_search_order();
+        index.merge_from(other);
+
+        assert_eq!(
+            index.entries.len(),
+            ENTRIES,
+            "merging must not drop entries past a fixed ceiling"
+        );
+        assert!(index.is_complete());
+    }
+
+    #[test]
     fn workspace_symbols_use_source_names_and_declaration_containers() {
         let source = "package workspaceparity\n\
                       class KrustyWorkspaceParityBox {\n\
@@ -2345,7 +3074,7 @@ mod tests {
             index.encode("krustyworkspaceparitybox", &source_set).len(),
             1
         );
-        assert!(index.encode("KWPB", &source_set).is_empty());
+        assert_eq!(index.encode("KWPB", &source_set).len(), 1);
         assert_eq!(
             index.encode("nestedNeedle", &source_set),
             vec![json!({
@@ -2394,8 +3123,8 @@ mod tests {
         let second_analysis = analyze_standalone_source_set(&[source]);
         let mut first = WorkspaceSymbolIndex::from_source_set(&[source], &first_analysis.files);
         let mut second = WorkspaceSymbolIndex::from_source_set(&[source], &second_analysis.files);
-        first.remap_files(&[(0, 3)]);
-        second.remap_files(&[(0, 3)]);
+        first.remap_files(&[(0, 3)], 4);
+        second.remap_files(&[(0, 3)], 4);
         first.merge_from(second);
         let mut source_set = vec![
             ("file:///unused.kt".to_string(), String::new()),
@@ -2411,27 +3140,215 @@ mod tests {
     }
 
     #[test]
+    fn workspace_symbol_merge_rebuilds_search_order() {
+        let first_source = "fun pretargetResult(): Int = 1\n";
+        let second_source = "fun targetResult(): Int = 2\nclass APIResponseCache\n";
+        let first_analysis = analyze_standalone_source_set(&[first_source]);
+        let second_analysis = analyze_standalone_source_set(&[second_source]);
+        let mut first =
+            WorkspaceSymbolIndex::from_source_set(&[first_source], &first_analysis.files);
+        let mut second =
+            WorkspaceSymbolIndex::from_source_set(&[second_source], &second_analysis.files);
+        second.remap_files(&[(0, 1)], 2);
+
+        assert_eq!(
+            first.encode(
+                "target",
+                &[("file:///First.kt".into(), first_source.into())]
+            )[0]["name"],
+            "pretargetResult"
+        );
+        first.merge_from(second);
+        let source_set = vec![
+            ("file:///First.kt".into(), first_source.into()),
+            ("file:///Second.kt".into(), second_source.into()),
+        ];
+        let names = first
+            .encode("target", &source_set)
+            .into_iter()
+            .map(|symbol| symbol["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["targetResult", "pretargetResult"]);
+        assert_eq!(
+            first.encode("arc", &source_set)[0]["name"],
+            "APIResponseCache"
+        );
+    }
+
+    #[test]
+    fn workspace_symbol_search_order_reuses_interned_long_name_keys() {
+        const ENTRIES: usize = 256;
+        let name = format!("A{}Result", "x".repeat(64 * 1024));
+        let mut index = WorkspaceSymbolIndex {
+            entries: (0..ENTRIES)
+                .map(|line| [0, 0, 1, line as u32, 0, line as u32, 1, 12, 0, 0, 0, 0, 1])
+                .collect(),
+            packages: vec![String::new()],
+            by_name: Vec::new(),
+            by_initials: Vec::new(),
+            names: vec![name],
+            complete: true,
+        };
+
+        index.rebuild_search_order();
+
+        assert_eq!(index.names.len(), 1);
+        assert_eq!(index.prefix_matches("a").len(), ENTRIES);
+        assert_eq!(index.initials_matches("ar").len(), ENTRIES);
+    }
+
+    #[test]
+    fn workspace_symbol_deserialization_rebuilds_ranked_orders() {
+        let source =
+            "fun pretargetValue(): Int = 1\nfun targetValue(): Int = 2\nclass APIResultStore\n";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        let mut wire = serde_json::to_value(index).unwrap();
+        wire["by_name"] = json!([0]);
+        wire["by_initials"] = json!([0]);
+
+        let rebuilt = serde_json::from_value::<WorkspaceSymbolIndex>(wire).unwrap();
+        let source_set = [("file:///Ranked.kt".into(), source.into())];
+        let names = rebuilt
+            .encode("target", &source_set)
+            .into_iter()
+            .map(|symbol| symbol["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["targetValue", "pretargetValue"]);
+        assert_eq!(
+            rebuilt.encode("ars", &source_set)[0]["name"],
+            "APIResultStore"
+        );
+        assert!(rebuilt.is_complete());
+    }
+
+    #[test]
+    fn workspace_symbol_deserialization_drops_invalid_entries_and_detaches_invalid_parents() {
+        let wire = json!({
+            "entries": [
+                [0, 0, 4, 0, 0, 0, 4, 5, 0, 0, 0, 0, 30],
+                [0, 5, 10, 1, 0, 1, 5, 6, 1, 0, 1, 5, 10],
+                [1, 0, 9, 0, 0, 0, 9, 5, 1, 0, 2, 0, 9],
+                [0, 31, 38, 2, 0, 2, 7, 5, 1, 0, 3, 31, 38],
+                [0, 11, 16, 3, 0, 3, 5, 6, 1, 0, 99, 11, 16],
+                [0, 17, 23, 4, 0, 4, 6, 6, 5, 0, 4, 17, 23],
+                [0, 40, 49, 5, 0, 5, 9, 5, 0, 0, 5, 42, 49]
+            ],
+            "packages": [""],
+            "by_name": [],
+            "by_initials": [],
+            "names": ["Root", "Child", "CrossFile", "Outside", "Orphan", "Malformed"],
+            "complete": true
+        });
+
+        let index = serde_json::from_value::<WorkspaceSymbolIndex>(wire).unwrap();
+        let source_set = [
+            ("file:///Symbols.kt".into(), String::new()),
+            ("file:///Other.kt".into(), String::new()),
+        ];
+
+        assert_eq!(index.entries.len(), 5);
+        assert!(!index.is_complete());
+        assert_eq!(index.encode("Root", &source_set)[0]["name"], "Root");
+        assert_eq!(
+            index.encode("Child", &source_set)[0]["containerName"],
+            "Root"
+        );
+        for name in ["CrossFile", "Outside", "Orphan"] {
+            assert_eq!(index.encode(name, &source_set)[0]["containerName"], "");
+        }
+        assert!(index.encode("Malformed", &source_set).is_empty());
+    }
+
+    #[test]
+    fn workspace_symbol_remap_drops_unavailable_files_and_marks_incomplete() {
+        let mut index = WorkspaceSymbolIndex {
+            entries: vec![
+                [0, 0, 4, 0, 0, 0, 4, 5, 0, 0, 0, 0, 4],
+                [1, 0, 7, 0, 0, 0, 7, 5, 0, 0, 1, 0, 7],
+            ],
+            packages: vec![String::new()],
+            by_name: Vec::new(),
+            by_initials: Vec::new(),
+            names: vec!["Kept".into(), "Removed".into()],
+            complete: true,
+        };
+        index.rebuild_search_order();
+
+        index.remap_files(&[(1, u32::MAX)], 1);
+
+        assert!(!index.is_complete());
+        assert_eq!(index.entries.len(), 1);
+        assert_eq!(
+            index.encode("kept", &[("file:///Kept.kt".into(), String::new())])[0]["name"],
+            "Kept"
+        );
+        assert!(index
+            .encode("removed", &[("file:///Kept.kt".into(), String::new())])
+            .is_empty());
+    }
+
+    #[test]
     fn workspace_symbol_snapshot_and_expanded_response_are_bounded() {
-        let source = "Needle\n".repeat(MAX_SOURCE_SET_WORKSPACE_SYMBOL_ENTRIES);
-        let entries = (0..MAX_SOURCE_SET_WORKSPACE_SYMBOL_ENTRIES)
-            .map(|line| {
-                let lo = (line * 7) as u32;
-                [0, lo, lo + 6, line as u32, 0, line as u32, 6, 5, 0, 0]
-            })
-            .collect();
-        let index = WorkspaceSymbolIndex {
+        let mut budget = WorkspaceSymbolBudget::new();
+        let capacity = budget.remaining_entry_capacity();
+        let mut entries = Vec::with_capacity(capacity);
+        for line in 0..capacity {
+            if !budget.reserve_merged_entry("Needle", line == 0, "package", line == 0) {
+                break;
+            }
+            let lo = (line * 7) as u32;
+            entries.push([
+                0,
+                lo,
+                lo + 6,
+                line as u32,
+                0,
+                line as u32,
+                6,
+                5,
+                0,
+                0,
+                0,
+                lo,
+                lo + 6,
+            ]);
+        }
+        assert!(!budget.reserve_merged_entry("Needle", false, "package", false));
+        let entry_count = entries.len();
+        let source = "Needle\n".repeat(entry_count);
+        let mut index = WorkspaceSymbolIndex {
             entries,
             packages: vec!["package".into()],
+            by_name: Vec::new(),
+            by_initials: Vec::new(),
+            names: vec!["Needle".into()],
+            complete: false,
         };
+        index.rebuild_search_order();
+        let snapshot_bytes = serialized_json_wire_bytes(&index).unwrap();
         assert!(
-            serde_json::to_vec(&index).unwrap().len() <= MAX_WORKSPACE_SYMBOL_WIRE_BYTES,
+            snapshot_bytes <= budget.wire_bytes
+                && snapshot_bytes <= MAX_SOURCE_SET_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES,
             "retained workspace-symbol index exceeded its wire budget"
         );
+        assert!(!index.is_complete());
+        let mut analysis = DocumentAnalysis::empty();
+        analysis.workspace_symbols = index.clone();
+        retain_analysis_wire_budget(
+            std::slice::from_mut(&mut analysis),
+            MAX_RETAINED_ANALYSIS_BYTES,
+        );
+        assert!(!analysis.workspace_symbols.entries.is_empty());
+        assert!(!analysis.workspace_symbols.is_complete());
         let long_uri = format!("file:///{}.kt", "u".repeat(2048));
-        let encoded = index.encode("needle", &[(long_uri, source)]);
-        assert!(encoded.len() < MAX_SOURCE_SET_WORKSPACE_SYMBOL_ENTRIES);
+        let source_set = [(long_uri, source)];
+        let encoded = index.encode("needle", &source_set);
+        assert!(encoded.len() < entry_count);
         assert!(
-            serde_json::to_vec(&encoded).unwrap().len() <= MAX_WORKSPACE_SYMBOL_WIRE_BYTES,
+            serialized_json_wire_bytes(&encoded).unwrap() <= MAX_WORKSPACE_SYMBOL_WIRE_BYTES,
             "expanded workspace-symbol result exceeded its wire budget"
         );
     }
@@ -2845,9 +3762,7 @@ mod tests {
         assert!(bounded.entries.len() < 3000);
         assert!(budget.wire_bytes <= MAX_SOURCE_SET_FOLDING_RANGE_WIRE_BYTES);
         assert!(
-            serde_json::to_vec(&Value::Array(bounded.encode(&source)))
-                .unwrap()
-                .len()
+            serialized_json_wire_bytes(&Value::Array(bounded.encode(&source))).unwrap()
                 <= MAX_SOURCE_SET_FOLDING_RANGE_WIRE_BYTES
         );
 
@@ -3434,7 +4349,7 @@ mod tests {
         analysis.type_definitions = DefinitionIndex::build(vec![occurrence(7)], usize::MAX);
         analysis.implementations = DefinitionIndex::build(vec![occurrence(7)], usize::MAX);
 
-        analysis.remap_navigation_files(&[(7, 2)]);
+        analysis.remap_navigation_files(&[(7, 2)], 3);
 
         let expected = vec![DefinitionTarget {
             file: 2,
@@ -3589,6 +4504,110 @@ mod tests {
         assert!(analyses
             .iter()
             .all(|analysis| analysis.definitions.entry_count() == 0));
+    }
+
+    #[test]
+    fn workspace_symbol_budget_does_not_clear_other_semantic_indexes() {
+        let mut analysis = DocumentAnalysis::empty();
+        analysis.definitions = DefinitionIndex::build(
+            vec![DefinitionOccurrence {
+                span: Span::new(0, 1),
+                target: DefinitionTarget {
+                    file: 0,
+                    span: Span::new(2, 3),
+                },
+            }],
+            usize::MAX,
+        );
+        analysis.workspace_symbols = WorkspaceSymbolIndex {
+            entries: vec![[0, 0, 6, 0, 0, 0, 6, 12, 0, 0, 0, 0, 6]],
+            packages: vec![String::new()],
+            by_name: vec![0],
+            by_initials: vec![0],
+            names: vec!["Result".repeat(1024)],
+            complete: false,
+        };
+        let non_workspace_bytes = analysis.non_workspace_semantic_wire_bytes();
+        let mut empty = DocumentAnalysis::empty();
+        empty.workspace_symbols.clear_incomplete();
+        let empty_workspace_bytes = empty.workspace_symbol_wire_bytes();
+        let budget = ANALYSIS_RESPONSE_FIXED_WIRE_BYTES
+            .saturating_add(non_workspace_bytes)
+            .saturating_add(empty_workspace_bytes);
+
+        retain_analysis_wire_budget(std::slice::from_mut(&mut analysis), budget);
+
+        assert_eq!(analysis.definitions.entry_count(), 1);
+        assert!(analysis.workspace_symbols.entries.is_empty());
+        assert!(!analysis.workspace_symbols.is_complete());
+        assert!(analysis.retained_wire_bytes() <= budget);
+    }
+
+    #[test]
+    fn aggregate_budget_partially_retains_workspace_symbols() {
+        let entry_count = 128usize;
+        let mut index = WorkspaceSymbolIndex {
+            entries: (0..entry_count)
+                .map(|line| {
+                    let lo = (line * 7) as u32;
+                    [
+                        0,
+                        lo,
+                        lo + 6,
+                        line as u32,
+                        0,
+                        line as u32,
+                        6,
+                        5,
+                        0,
+                        0,
+                        0,
+                        lo,
+                        lo + 6,
+                    ]
+                })
+                .collect(),
+            packages: vec![String::new()],
+            by_name: Vec::new(),
+            by_initials: Vec::new(),
+            names: vec!["Needle".into()],
+            complete: true,
+        };
+        index.rebuild_search_order();
+        let mut analysis = DocumentAnalysis::empty();
+        analysis.definitions = DefinitionIndex::build(
+            vec![DefinitionOccurrence {
+                span: Span::new(0, 1),
+                target: DefinitionTarget {
+                    file: 0,
+                    span: Span::new(2, 3),
+                },
+            }],
+            usize::MAX,
+        );
+        analysis.workspace_symbols = index;
+        let mut empty = DocumentAnalysis::empty();
+        empty.workspace_symbols.clear_incomplete();
+        let budget = ANALYSIS_RESPONSE_FIXED_WIRE_BYTES
+            + analysis.non_workspace_semantic_wire_bytes()
+            + empty.workspace_symbol_wire_bytes()
+            + 2048;
+
+        retain_analysis_wire_budget(std::slice::from_mut(&mut analysis), budget);
+
+        assert_eq!(analysis.definitions.entry_count(), 1);
+        assert!(!analysis.workspace_symbols.entries.is_empty());
+        assert!(analysis.workspace_symbols.entries.len() < entry_count);
+        assert!(!analysis.workspace_symbols.is_complete());
+        assert!(analysis.retained_wire_bytes() <= budget);
+        let restored: WorkspaceSymbolIndex =
+            serde_json::from_slice(&serde_json::to_vec(&analysis.workspace_symbols).unwrap())
+                .unwrap();
+        assert_eq!(
+            restored.entries.len(),
+            analysis.workspace_symbols.entries.len()
+        );
+        assert!(!restored.is_complete());
     }
 
     #[test]

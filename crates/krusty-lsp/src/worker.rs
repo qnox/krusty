@@ -291,6 +291,10 @@ fn encode_response(analyses: &[AnalysisResponse]) -> io::Result<Vec<u8>> {
     Ok(response.bytes)
 }
 
+fn response_wire_bytes(analyses: &[AnalysisResponse]) -> io::Result<usize> {
+    crate::analysis::serialized_json_wire_bytes(analyses).map_err(json_io)
+}
+
 fn encode_materialize_request(reference: &LibraryRef, use_sources: bool) -> io::Result<Vec<u8>> {
     let mut request = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
     serde_json::to_writer(
@@ -676,16 +680,23 @@ fn retain_implementation_relations_for_response(
             .saturating_add(analysis.implementations.entry_count())
     });
     relations.truncate(max_navigation_entries.saturating_sub(retained_navigation_entries));
+    let baseline_bytes = response_wire_bytes(analyses)?;
+    if baseline_bytes > max_wire_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "retained analysis exceeds worker response limit",
+        ));
+    }
     if analyses.is_empty() || relations.is_empty() {
         return Ok(());
     }
 
-    let baseline_bytes = encode_response(analyses)?.len();
     let mut remaining_wire_bytes = max_wire_bytes.saturating_sub(baseline_bytes);
     let mut retained = 0usize;
     for relation in &relations {
-        let encoded = serde_json::to_vec(relation).map_err(json_io)?;
-        let wire_bytes = encoded.len().saturating_add(usize::from(retained > 0));
+        let encoded_bytes =
+            crate::analysis::serialized_json_wire_bytes(relation).map_err(json_io)?;
+        let wire_bytes = encoded_bytes.saturating_add(usize::from(retained > 0));
         if wire_bytes > remaining_wire_bytes {
             break;
         }
@@ -879,6 +890,7 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
         if let Some(first) = analyses.first_mut() {
             first.workspace_symbols = workspace_symbols;
         }
+        crate::retain_analysis_wire_budget(&mut analyses, MAX_WORKER_MESSAGE_BYTES);
         let mut analyses = analyses
             .into_iter()
             .map(AnalysisResponse::from)

@@ -592,8 +592,10 @@ impl krusty_lsp::Analysis for WorkerHost {
                 if group_analyses.len() != documents.len() {
                     return (Vec::new(), support_documents);
                 }
+                let retained_file_count = documents.len().saturating_add(support_documents.len());
                 for analysis in &mut group_analyses {
-                    analysis.remap_navigation_files(&group.navigation_file_remaps);
+                    analysis
+                        .remap_navigation_files(&group.navigation_file_remaps, retained_file_count);
                 }
                 let mut workspace_symbols = krusty_lsp::WorkspaceSymbolIndex::default();
                 for analysis in &mut group_analyses {
