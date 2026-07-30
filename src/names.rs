@@ -44,6 +44,20 @@ pub fn property_setter_name(prop: &str) -> String {
     }
 }
 
+/// The property an accessor name denotes (`getFoo`/`setFoo` → `foo`), or `None` when the name is not
+/// accessor-shaped — the inverse of [`crate::names::property_getter_name`].
+pub fn accessor_property_name(name: &str) -> Option<String> {
+    let rest = name
+        .strip_prefix("get")
+        .or_else(|| name.strip_prefix("set"))?;
+    let mut chars = rest.chars();
+    let first = chars.next()?;
+    if !first.is_uppercase() {
+        return None;
+    }
+    Some(first.to_lowercase().collect::<String>() + chars.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

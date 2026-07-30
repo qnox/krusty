@@ -484,7 +484,7 @@ pub fn compile_to_dir(
 pub enum BackendOutcome {
     Emitted,
     LowerBail(String),
-    BackendPassBail,
+    BackendPassBail(krusty::jvm::backend::SkipReason),
     EmitBail,
 }
 
@@ -554,8 +554,10 @@ pub fn backend_outcome_in_process(
     else {
         return Some(BackendOutcome::LowerBail(bail.borrow().clone()));
     };
-    if krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms).is_err() {
-        return Some(BackendOutcome::BackendPassBail);
+    if let Err(reason) =
+        krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms)
+    {
+        return Some(BackendOutcome::BackendPassBail(reason));
     }
     Some(
         if krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None).is_none() {
@@ -878,6 +880,20 @@ pub fn inline_source_backend_outcome(src: &str) -> Option<BackendOutcome> {
     let jdk = jdk_modules()?;
     let cp = krusty::toolchain::classpath_jars_for(src);
     backend_outcome_in_process(src, "P", &cp, Some(&jdk))
+}
+
+/// The file must be declined by a BACKEND PASS, naming which one — the counterpart of
+/// [`assert_inline_source_lower_bail`] for a gate that lives after lowering.
+#[allow(dead_code)]
+pub fn assert_inline_source_backend_bail(src: &str, reason: krusty::jvm::backend::SkipReason) {
+    if !stdlib_toolchain_ready() {
+        return;
+    }
+    assert_eq!(
+        inline_source_backend_outcome(src),
+        Some(BackendOutcome::BackendPassBail(reason)),
+        "source must stop at its precise unsupported backend-pass boundary:\n{src}"
+    );
 }
 
 #[allow(dead_code)]
