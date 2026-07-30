@@ -6,7 +6,10 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use super::super::{DocumentAnalysis, IndexedFile, MaterializedDefinition};
+use super::super::{
+    workspace_index_uri_bytes, DocumentAnalysis, IndexedFile, MaterializedDefinition,
+    MAX_WORKSPACE_INDEX_FILES,
+};
 use super::implementation::{
     Analysis, AnalysisBackend, DocumentAdmission, Incoming, ProjectFeedback,
 };
@@ -17,11 +20,28 @@ const MAX_PENDING_WATCHED_FILES: usize = 1024;
 /// inside a single worker source-set round trip.
 const MAX_INDEX_CHUNK_FILES: usize = 32;
 /// Ceiling on files awaiting indexing, so a pathological workspace cannot grow the queue without
-/// bound. Reaching it drops the excess; the sweep re-offers those files on its next pass.
-const MAX_QUEUED_INDEX_FILES: usize = 200_000;
+/// bound. Reaching it drops the excess and marks this generation incomplete for the client log.
+const MAX_QUEUED_INDEX_FILES: usize = MAX_WORKSPACE_INDEX_FILES;
 /// Companion byte ceiling. A count alone is not a memory bound: deeply nested workspaces produce
-/// long URIs, and each is retained twice, in a chunk and in the priority map.
-const MAX_QUEUED_INDEX_BYTES: usize = 16 * 1024 * 1024;
+/// long URIs, and promotion can retain three copies across both priority chunks and the map.
+const MAX_QUEUED_INDEX_BYTES: usize = 32 * 1024 * 1024;
+
+fn queued_uri_bytes(uri: &str) -> usize {
+    // A queued URI owns the map key and one chunk string. Promotion can temporarily leave the old
+    // sweep string beside a new neighbourhood string, so reserve for all three representations up
+    // front; releasing that reservation with the promoted claim still leaves at most its one-third
+    // stale copy while newly admitted work consumes the rest of the ceiling.
+    workspace_index_uri_bytes(uri).saturating_mul(3)
+}
+
+#[derive(Clone, Copy)]
+struct QueuedIndexEntry {
+    priority: IndexPriority,
+    /// Promotion queues a neighbourhood copy ahead of the original sweep copy. The latter remains
+    /// in its chunk until that chunk reaches the front, so its reserved bytes cannot be released
+    /// when the promoted copy is claimed.
+    stale_sweep_copy: bool,
+}
 
 /// Index levels, ordered strictly behind interactive work and behind each other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +120,10 @@ pub(crate) enum EngineEvent {
     Project(ProjectFeedback),
     ReanalyzeRequested,
     AnalysisComplete(AnalysisBatch),
+    /// The project model or its compiler configuration changed. Clear retained workspace results
+    /// immediately; waiting for the first batch of the replacement sweep would expose old-model
+    /// diagnostics in the interval.
+    IndexReset(u64),
     IndexProgress(IndexBatch),
     Materialized(MaterializeResult),
     Status(ServerStatus),
@@ -185,8 +209,9 @@ struct CommandState {
     sweep: VecDeque<IndexJob>,
     /// The level each queued URI currently belongs to. Promotion rewrites the level here and
     /// queues the URI again; the superseded entry is filtered out when its chunk is handed out.
-    queued: HashMap<String, IndexPriority>,
+    queued: HashMap<String, QueuedIndexEntry>,
     queued_bytes: usize,
+    index_admission_truncated: bool,
     generation: u64,
     disconnected: bool,
 }
@@ -256,22 +281,43 @@ impl CommandState {
                 let priority = job.priority;
                 let mut chunk = Vec::with_capacity(MAX_INDEX_CHUNK_FILES.min(job.uris.len()));
                 for uri in job.uris {
-                    if self.queued.len() >= MAX_QUEUED_INDEX_FILES
-                        || self.queued_bytes >= MAX_QUEUED_INDEX_BYTES
-                    {
-                        break;
-                    }
-                    match self.queued.get(&uri) {
+                    match self.queued.get_mut(&uri) {
                         // Already waiting at this level or a higher one; nothing to do.
-                        Some(IndexPriority::Neighborhood) => continue,
-                        Some(IndexPriority::Sweep) if priority == IndexPriority::Sweep => continue,
-                        // Promotion: re-queue at the higher level and let the sweep entry lapse.
-                        Some(IndexPriority::Sweep) => {
-                            self.queued.insert(uri.clone(), priority);
+                        Some(entry) if entry.priority == IndexPriority::Neighborhood => continue,
+                        Some(entry)
+                            if entry.priority == IndexPriority::Sweep
+                                && priority == IndexPriority::Sweep =>
+                        {
+                            continue;
+                        }
+                        // Promotion does not retain another map key, so it must remain possible even
+                        // when the queue is at either admission ceiling. Initial admission reserved
+                        // all three copies, including the sweep string that promotion leaves stale.
+                        Some(entry) => {
+                            entry.priority = priority;
+                            entry.stale_sweep_copy = true;
                         }
                         None => {
-                            self.queued_bytes = self.queued_bytes.saturating_add(uri.len());
-                            self.queued.insert(uri.clone(), priority);
+                            if self.queued.len() >= MAX_QUEUED_INDEX_FILES {
+                                self.index_admission_truncated = true;
+                                break;
+                            }
+                            let retained_bytes = queued_uri_bytes(&uri);
+                            if retained_bytes
+                                > MAX_QUEUED_INDEX_BYTES.saturating_sub(self.queued_bytes)
+                            {
+                                // A later, shorter URI may still fit the remaining byte budget.
+                                self.index_admission_truncated = true;
+                                continue;
+                            }
+                            self.queued_bytes = self.queued_bytes.saturating_add(retained_bytes);
+                            self.queued.insert(
+                                uri.clone(),
+                                QueuedIndexEntry {
+                                    priority,
+                                    stale_sweep_copy: false,
+                                },
+                            );
                         }
                     }
                     chunk.push(uri);
@@ -285,7 +331,7 @@ impl CommandState {
                 }
             }
             EngineCommand::SetWorkspaceRoot(root) => {
-                self.discard_index_work();
+                self.replace_index_generation();
                 let analysis = self
                     .pending
                     .iter()
@@ -362,16 +408,35 @@ impl CommandState {
     /// Drop the URIs this chunk no longer owns, then release the rest so a file that changes while
     /// its chunk waits can be offered again.
     fn claim(&mut self, mut job: IndexJob) -> Option<IndexJob> {
-        job.uris
-            .retain(|uri| self.queued.get(uri) == Some(&job.priority));
-        if job.uris.is_empty() {
-            return None;
-        }
-        for uri in &job.uris {
-            if self.queued.remove(uri).is_some() {
-                self.queued_bytes = self.queued_bytes.saturating_sub(uri.len());
+        let mut claimed = Vec::with_capacity(job.uris.len());
+        for uri in job.uris.drain(..) {
+            let owner = self.queued.get(&uri).copied();
+            if owner.is_some_and(|entry| entry.priority == job.priority) {
+                let entry = self
+                    .queued
+                    .remove(&uri)
+                    .expect("the matching queue owner was just observed");
+                let one_copy = workspace_index_uri_bytes(&uri);
+                let released = if entry.stale_sweep_copy {
+                    // Keep the old sweep string charged until its stale chunk is discarded below.
+                    one_copy.saturating_mul(2)
+                } else {
+                    one_copy.saturating_mul(3)
+                };
+                self.queued_bytes = self.queued_bytes.saturating_sub(released);
+                claimed.push(uri);
+            } else if job.priority == IndexPriority::Sweep {
+                // Same-priority duplicates are rejected at admission, so a sweep item without a
+                // sweep owner is precisely the stale copy left by promotion.
+                self.queued_bytes = self
+                    .queued_bytes
+                    .saturating_sub(workspace_index_uri_bytes(&uri));
             }
         }
+        if claimed.is_empty() {
+            return None;
+        }
+        job.uris = claimed;
         Some(job)
     }
 
@@ -380,12 +445,14 @@ impl CommandState {
     }
 
     /// Work queued against the previous model must never run against its replacement.
-    fn discard_index_work(&mut self) {
+    fn replace_index_generation(&mut self) -> u64 {
         self.generation = self.generation.saturating_add(1);
         self.neighborhood.clear();
         self.sweep.clear();
         self.queued.clear();
         self.queued_bytes = 0;
+        self.index_admission_truncated = false;
+        self.generation
     }
 
     fn push_index_chunk(&mut self, priority: IndexPriority, uris: Vec<String>) {
@@ -494,6 +561,36 @@ impl CommandReceiver {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .indexing_outstanding()
+    }
+
+    fn index_generation(&self) -> u64 {
+        self.queue
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .generation
+    }
+
+    fn index_admission_truncated(&self) -> bool {
+        self.queue
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .index_admission_truncated
+    }
+
+    /// Replace the model generation from inside the engine after a deferred project refresh.
+    /// Root replacement does this when it is enqueued; refresh replacement is discovered only
+    /// after the provider has run, so it must share the same queue-owned transition here.
+    fn replace_index_generation(&self) -> u64 {
+        let mut state = self
+            .queue
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let generation = state.replace_index_generation();
+        self.queue.ready.notify_one();
+        generation
     }
 
     fn recv(&self, timeout: Option<Duration>) -> CommandReceive {
@@ -635,6 +732,7 @@ fn run<A: Analysis>(
     update_admission(&admission, analyze.document_admission());
     let mut last_ready = analyze.analysis_ready();
     let mut indexing = false;
+    let mut submitted_sweep_generation = None;
     let _ = events.send(Incoming::Engine(EngineEvent::ReadyState(last_ready)));
     // Reconfiguration and analysis must remain ordered on this thread.
     loop {
@@ -668,6 +766,16 @@ fn run<A: Analysis>(
         match command {
             None => {
                 let feedback = analyze_refresh(&mut analyze);
+                if feedback.reanalyze {
+                    let generation = commands.replace_index_generation();
+                    submitted_sweep_generation = None;
+                    if events
+                        .send(Incoming::Engine(EngineEvent::IndexReset(generation)))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
                 update_admission(&admission, analyze.document_admission());
                 if emit_project(&events, &mut analyze, feedback, &mut last_ready).is_err() {
                     break;
@@ -675,6 +783,14 @@ fn run<A: Analysis>(
             }
             Some(EngineCommand::SetWorkspaceRoot(root)) => {
                 let feedback = analyze.set_workspace_root(root);
+                let generation = commands.index_generation();
+                submitted_sweep_generation = None;
+                if events
+                    .send(Incoming::Engine(EngineEvent::IndexReset(generation)))
+                    .is_err()
+                {
+                    break;
+                }
                 update_admission(&admission, analyze.document_admission());
                 let globs = analyze.watched_globs();
                 if events
@@ -727,7 +843,26 @@ fn run<A: Analysis>(
                             uris: neighborhood,
                         }));
                     }
-                    submit_workspace_sweep(&mut analyze, &commands);
+                    let generation = commands.index_generation();
+                    if submitted_sweep_generation != Some(generation) {
+                        submit_workspace_sweep(&mut analyze, &commands);
+                        if (analyze.workspace_index_incomplete()
+                            || commands.index_admission_truncated())
+                            && events
+                                .send(Incoming::Engine(EngineEvent::Project(ProjectFeedback {
+                                    logs: vec![
+                                        "krusty: workspace diagnostic inventory reached its \
+                                         traversal or queue limit; background results are incomplete"
+                                            .to_string(),
+                                    ],
+                                    ..ProjectFeedback::default()
+                                })))
+                                .is_err()
+                        {
+                            break;
+                        }
+                        submitted_sweep_generation = Some(generation);
+                    }
                 }
             }
             Some(EngineCommand::Materialize(job)) => {
@@ -776,8 +911,22 @@ fn run<A: Analysis>(
                 if refresh {
                     analyze.note_project_change();
                 }
+                let mut changed_sources = Vec::new();
                 for uri in &uris {
-                    reanalyze |= analyze.note_watched_file_change(uri);
+                    if analyze.note_watched_file_change(uri) {
+                        reanalyze = true;
+                        changed_sources.push(uri.clone());
+                    }
+                }
+                if !changed_sources.is_empty() {
+                    // Direct changes do not need a reverse-dependency graph: the originating file
+                    // can always be refreshed (or tombstoned) immediately. Dependents remain a
+                    // separate incremental-indexing slice.
+                    commands.enqueue(EngineCommand::Index(IndexJob {
+                        generation: 0,
+                        priority: IndexPriority::Neighborhood,
+                        uris: changed_sources,
+                    }));
                 }
                 if reanalyze
                     && events
@@ -791,8 +940,9 @@ fn run<A: Analysis>(
     }
 }
 
-/// Raise a sweep over everything the project model knows about. Enqueueing is idempotent: files
-/// already waiting are skipped, so repeating this after a refresh costs a map lookup per file.
+/// Raise one sweep over everything the current project-model generation knows about. Direct watched
+/// changes are queued separately; repeating this inventory after every interactive analysis would
+/// put an unqueued full tree walk back on the latency-sensitive engine thread.
 fn submit_workspace_sweep<A: Analysis>(analyze: &mut A, commands: &CommandReceiver) {
     let uris = analyze.workspace_index_candidates();
     if uris.is_empty() {
@@ -1429,6 +1579,51 @@ mod tests {
         assert_eq!(batch.attempted.len(), 2);
         engine.join();
     }
+
+    #[test]
+    fn a_watched_source_change_is_reindexed_after_the_initial_sweep() {
+        use std::sync::mpsc::sync_channel;
+
+        struct Mock;
+        impl Analysis for Mock {
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                IndexOutcome {
+                    files: Vec::new(),
+                    conclusive: true,
+                }
+            }
+
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+
+            fn note_watched_file_change(&mut self, uri: &str) -> bool {
+                uri.ends_with(".kt")
+            }
+        }
+
+        let (events, incoming) = sync_channel(16);
+        let engine = AnalysisEngine::spawn(Mock, events);
+        engine.submit(EngineCommand::ProjectChange {
+            refresh: false,
+            reanalyze: false,
+            uris: vec!["file:///w/Changed.kt".to_string()],
+        });
+
+        loop {
+            match incoming.recv_timeout(Duration::from_secs(1)) {
+                Ok(Incoming::Engine(EngineEvent::IndexProgress(batch))) => {
+                    assert_eq!(batch.attempted, ["file:///w/Changed.kt"]);
+                    assert!(batch.conclusive);
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) => panic!("changed source was not indexed: {error}"),
+            }
+        }
+        engine.join();
+    }
+
     #[test]
     fn interactive_commands_are_served_before_queued_index_chunks() {
         let mut state = CommandState::default();
@@ -1712,6 +1907,67 @@ mod tests {
     }
 
     #[test]
+    fn a_sweep_file_can_be_promoted_at_the_admission_ceiling() {
+        let uri = "file:///w/Promoted.kt".to_string();
+        let mut state = CommandState::default();
+        state.queued.insert(
+            uri.clone(),
+            QueuedIndexEntry {
+                priority: IndexPriority::Sweep,
+                stale_sweep_copy: false,
+            },
+        );
+        state.queued_bytes = MAX_QUEUED_INDEX_BYTES;
+        state.sweep.push_back(IndexJob {
+            generation: 0,
+            priority: IndexPriority::Sweep,
+            uris: vec![uri.clone()],
+        });
+
+        state.enqueue(EngineCommand::Index(IndexJob {
+            generation: 0,
+            priority: IndexPriority::Neighborhood,
+            uris: vec![uri.clone()],
+        }));
+
+        let Some(EngineCommand::Index(job)) = state.take() else {
+            panic!("promotion must not be rejected as new admission");
+        };
+        assert_eq!(job.priority, IndexPriority::Neighborhood);
+        assert_eq!(job.uris, [uri]);
+    }
+
+    #[test]
+    fn a_promoted_sweep_copy_stays_charged_until_it_is_discarded() {
+        let uri = "file:///w/Promoted.kt".to_string();
+        let mut state = CommandState::default();
+        state.enqueue(EngineCommand::Index(IndexJob {
+            generation: 0,
+            priority: IndexPriority::Sweep,
+            uris: vec![uri.clone()],
+        }));
+        state.enqueue(EngineCommand::Index(IndexJob {
+            generation: 0,
+            priority: IndexPriority::Neighborhood,
+            uris: vec![uri],
+        }));
+
+        let Some(EngineCommand::Index(job)) = state.take() else {
+            panic!("promoted work must run at neighbourhood priority");
+        };
+        assert_eq!(job.priority, IndexPriority::Neighborhood);
+        assert!(
+            state.queued_bytes > 0,
+            "the superseded sweep string remains retained in its old chunk"
+        );
+        assert!(state.take().is_none(), "the stale sweep copy must not run");
+        assert_eq!(
+            state.queued_bytes, 0,
+            "discarding the stale chunk must release its final URI reservation"
+        );
+    }
+
+    #[test]
     fn replacing_the_workspace_root_discards_queued_index_work() {
         let mut state = CommandState::default();
         state.enqueue(EngineCommand::Index(IndexJob {
@@ -1758,7 +2014,7 @@ mod tests {
     #[test]
     fn the_index_queue_stops_growing_at_its_byte_bound() {
         let mut state = CommandState::default();
-        let long = "x".repeat(1024);
+        let long = "x".repeat(4096);
         let uris: Vec<String> = (0..4096)
             .map(|index| format!("file:///w/{long}{index}.kt"))
             .collect();
@@ -1773,6 +2029,10 @@ mod tests {
             "the queue bounds retained URI bytes, not just the file count"
         );
         assert!(state.queued_bytes > 0, "some work is still admitted");
+        assert!(
+            state.index_admission_truncated,
+            "dropped inventory must be surfaced as incomplete rather than silently omitted"
+        );
     }
 
     #[test]
@@ -1797,5 +2057,102 @@ mod tests {
             !state.indexing_outstanding(),
             "progress closes once the last chunk is handed out"
         );
+    }
+
+    #[test]
+    fn a_model_refresh_replaces_the_queue_generation_and_discards_old_work() {
+        let (_sender, receiver) = command_queue();
+        receiver.enqueue(EngineCommand::Index(IndexJob {
+            generation: 0,
+            priority: IndexPriority::Sweep,
+            uris: vec!["file:///old/A.kt".into()],
+        }));
+
+        assert_eq!(receiver.replace_index_generation(), 1);
+        assert!(
+            matches!(receiver.recv(Some(Duration::ZERO)), CommandReceive::Timeout),
+            "a refreshed model must not execute work discovered under its predecessor"
+        );
+    }
+
+    #[test]
+    fn a_workspace_sweep_is_enumerated_once_per_model_generation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc::sync_channel;
+        use std::sync::Arc;
+
+        struct Mock {
+            inventories: Arc<AtomicUsize>,
+        }
+        impl Analysis for Mock {
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                IndexOutcome {
+                    files: Vec::new(),
+                    conclusive: true,
+                }
+            }
+
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+
+            fn workspace_index_candidates(&mut self) -> Vec<String> {
+                self.inventories.fetch_add(1, Ordering::SeqCst);
+                Vec::new()
+            }
+        }
+
+        let inventories = Arc::new(AtomicUsize::new(0));
+        let (events, incoming) = sync_channel(16);
+        let engine = AnalysisEngine::spawn(
+            Mock {
+                inventories: inventories.clone(),
+            },
+            events,
+        );
+        for version in [1, 2] {
+            engine.submit(EngineCommand::Analyze(AnalysisJob {
+                documents: vec![("file:///w/Open.kt".into(), "fun open() {}".into(), version)],
+                open_uris: vec!["file:///w/Open.kt".into()],
+            }));
+            loop {
+                match incoming.recv_timeout(Duration::from_secs(1)) {
+                    Ok(Incoming::Engine(EngineEvent::AnalysisComplete(_))) => break,
+                    Ok(_) => {}
+                    Err(error) => panic!("analysis event timed out: {error}"),
+                }
+            }
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while inventories.load(Ordering::SeqCst) < 1 && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+        }
+        // A following command can run only after the second analysis has completed its post-work
+        // sweep decision, making the counter assertion deterministic without a timing sleep.
+        engine.submit(EngineCommand::Materialize(MaterializeJob {
+            token: 9,
+            reference: LibraryRef {
+                fqn: String::new(),
+                member_name: String::new(),
+                member_desc: String::new(),
+            },
+        }));
+        loop {
+            match incoming.recv_timeout(Duration::from_secs(1)) {
+                Ok(Incoming::Engine(EngineEvent::Materialized(MaterializeResult {
+                    token: 9,
+                    ..
+                }))) => break,
+                Ok(_) => {}
+                Err(error) => panic!("materialization event timed out: {error}"),
+            }
+        }
+
+        assert_eq!(
+            inventories.load(Ordering::SeqCst),
+            1,
+            "interactive analyses must not re-walk the complete workspace once its sweep is queued"
+        );
+        engine.join();
     }
 }

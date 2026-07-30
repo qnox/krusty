@@ -55,6 +55,7 @@ const MAX_SOURCE_SET_DIAGNOSTIC_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const DIAGNOSTIC_WIRE_FIXED_BYTES: usize = 256;
 const MAX_PENDING_ANALYSIS_REQUEST_BYTES: usize = 256 * 1024;
 const BOUNDED_EXACT_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_WORKSPACE_DIAGNOSTIC_REPORTS: usize = 32 * 1024;
 const MAX_RENAME_IDENTIFIER_BYTES: usize = 1024;
 const MAX_RENAME_SPELLINGS: usize = 8;
 pub(super) const MAX_RENAME_WIRE_BYTES: usize = 8 * 1024 * 1024;
@@ -233,6 +234,12 @@ pub trait Analysis {
         Vec::new()
     }
 
+    /// Whether the current model's inventory was truncated. Kept separate from the URI vector so
+    /// queueing stays allocation-focused while the engine can report incomplete workspace coverage.
+    fn workspace_index_incomplete(&self) -> bool {
+        false
+    }
+
     fn document_admission(&self) -> DocumentAdmission {
         DocumentAdmission::default()
     }
@@ -320,7 +327,12 @@ impl Analysis for DocumentAnalyzer {
             })
             .collect();
         if readable.is_empty() {
-            return IndexOutcome::default();
+            // This standalone host has no infrastructure that can be pending: an empty read set is
+            // a conclusive set of tombstones, not a failed analysis attempt.
+            return IndexOutcome {
+                files: Vec::new(),
+                conclusive: true,
+            };
         }
         let documents: Vec<(&str, &str)> = readable
             .iter()
@@ -1207,18 +1219,35 @@ where
     }
 
     pub(crate) fn apply_index_batch(&mut self, batch: IndexBatch) -> Vec<Value> {
-        let accepted = self.workspace_diagnostics.merge(
+        let outcome = self.workspace_diagnostics.merge(
             batch.generation,
             &batch.attempted,
             batch.conclusive,
             batch.files,
             resolve_diagnostic_positions,
         );
-        if !accepted {
+        if !outcome.accepted {
             return Vec::new();
+        }
+        let mut messages = Vec::new();
+        if outcome.newly_truncated {
+            messages.push(log_message(
+                "krusty: workspace diagnostic retention reached its memory limit; results are incomplete"
+                    .to_string(),
+            ));
         }
         // Files the sweep touched may now have different diagnostics, and a pull-based client has
         // no other way to hear about a file it is not actively pulling.
+        if outcome.changed {
+            messages.extend(self.diagnostic_refresh());
+        }
+        messages
+    }
+
+    pub(crate) fn reset_workspace_index(&mut self, generation: u64) -> Vec<Value> {
+        self.workspace_diagnostics.reset_to(generation);
+        // Clearing old-model results is itself a diagnostic change. Pull clients must be told even
+        // when the replacement model produces no files or its first analysis is still pending.
         self.diagnostic_refresh().into_iter().collect()
     }
 
@@ -1434,7 +1463,7 @@ where
             "textDocument/formatting" => self.formatting(id, params),
             "textDocument/foldingRange" => self.folding_ranges(id, params),
             "textDocument/diagnostic" => self.pull_diagnostics(id, params),
-            "workspace/diagnostic" => self.workspace_diagnostic(id),
+            "workspace/diagnostic" => self.workspace_diagnostic(id, params),
             "textDocument/completion" => self.completion(id, params),
             "textDocument/signatureHelp" => self.signature_help(id, params),
             "completionItem/resolve" => self.resolve_completion(id, params),
@@ -2549,28 +2578,100 @@ where
     /// Report every file the sweep has indexed. Without this the retained diagnostics are
     /// unreachable: a client only pulls `textDocument/diagnostic` for documents it has open, and
     /// those are always answered from the open buffer.
-    fn workspace_diagnostic(&mut self, id: Option<Value>) -> Dispatch {
+    fn workspace_diagnostic(&mut self, id: Option<Value>, params: Value) -> Dispatch {
         let Some(id) = id else {
             return Dispatch::none();
         };
+        let Ok(params) = serde_json::from_value::<WorkspaceDiagnosticParams>(params) else {
+            return invalid_params(Some(id));
+        };
+        if params.previous_result_ids.len() > MAX_WORKSPACE_DIAGNOSTIC_REPORTS {
+            return Dispatch::messages(vec![diagnostic_server_cancelled(
+                id,
+                "workspace diagnostic prior-result set exceeds the response limit",
+                false,
+            )]);
+        }
+        let previous: HashMap<String, String> = params
+            .previous_result_ids
+            .into_iter()
+            .map(|previous| (previous.uri, previous.value))
+            .collect();
+        // Include prior client state even when the file disappeared: omitting that URI would leave
+        // its old diagnostics installed forever. Open buffers also belong here and are authoritative
+        // over the sweep, just as they are for textDocument/diagnostic.
+        let mut uris = self.workspace_diagnostics.indexed_uris();
+        uris.extend(self.documents.keys().cloned());
+        uris.extend(previous.keys().cloned());
+        uris.sort_unstable();
+        uris.dedup();
+        if uris.len() > MAX_WORKSPACE_DIAGNOSTIC_REPORTS {
+            return Dispatch::messages(vec![diagnostic_server_cancelled(
+                id,
+                "workspace diagnostic report exceeds the bounded non-streaming response limit",
+                false,
+            )]);
+        }
+
         let mut items = Vec::new();
-        for uri in self.workspace_diagnostics.indexed_uris() {
-            if self.documents.contains_key(&uri) {
-                // The open buffer is authoritative and is reported through the document pull.
-                continue;
-            }
-            let Some(found) = self.workspace_diagnostics.diagnostics(&uri) else {
-                continue;
+        let mut item_wire_bytes = 2usize;
+        for uri in uris {
+            let workspace_index;
+            let empty_index;
+            let index = if let Some(open) = self.documents.get(&uri) {
+                &open.diagnostics
+            } else if let Some(found) = self.workspace_diagnostics.diagnostics(&uri) {
+                workspace_index = DiagnosticIndex::from_workspace(&found);
+                &workspace_index
+            } else {
+                empty_index = DiagnosticIndex::default();
+                &empty_index
             };
-            let index = DiagnosticIndex::from_workspace(&found);
-            items.push(json!({
+            let result_id = index.result_id();
+            let item = if previous.get(&uri).map(String::as_str) == Some(result_id.as_str()) {
+                json!({
+                    "kind": "unchanged",
+                    "uri": uri,
+                    "version": Value::Null,
+                    "resultId": result_id,
+                })
+            } else {
+                json!({
                 "kind": "full",
                 "uri": uri,
-                "resultId": index.result_id(),
+                    "version": Value::Null,
+                    "resultId": result_id,
                 "items": index.encode(),
-            }));
+                })
+            };
+            let Ok(encoded) = serde_json::to_vec(&item) else {
+                return Dispatch::messages(vec![rpc_error(
+                    id,
+                    -32603,
+                    "workspace diagnostic serialization failed",
+                )]);
+            };
+            item_wire_bytes = item_wire_bytes
+                .saturating_add(encoded.len())
+                .saturating_add(1);
+            if item_wire_bytes > BOUNDED_EXACT_RESPONSE_BYTES {
+                return Dispatch::messages(vec![diagnostic_server_cancelled(
+                    id,
+                    "workspace diagnostic report exceeds the bounded non-streaming response limit",
+                    false,
+                )]);
+            }
+            items.push(item);
         }
-        Dispatch::messages(vec![rpc_result(id, json!({"items": items}))])
+        let response = rpc_result(id.clone(), json!({"items": items}));
+        if !serialized_value_fits(&response, MAX_MESSAGE_BYTES) {
+            return Dispatch::messages(vec![diagnostic_server_cancelled(
+                id,
+                "workspace diagnostic response exceeds the protocol message limit",
+                false,
+            )]);
+        }
+        Dispatch::messages(vec![response])
     }
 
     fn semantic_tokens(&self, id: Option<Value>, params: Value, range: bool) -> Dispatch {
@@ -2692,6 +2793,19 @@ struct DocumentDiagnosticParams {
     text_document: TextDocumentIdentifier,
     #[serde(default)]
     previous_result_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceDiagnosticParams {
+    #[serde(default)]
+    previous_result_ids: Vec<WorkspacePreviousResultId>,
+}
+
+#[derive(Deserialize)]
+struct WorkspacePreviousResultId {
+    uri: String,
+    value: String,
 }
 
 #[derive(Deserialize)]
@@ -3705,6 +3819,12 @@ where
                 write_framed(writer, &encoded)?;
             }
         }
+        EngineEvent::IndexReset(generation) => {
+            for message in service.reset_workspace_index(generation) {
+                let encoded = serde_json::to_vec(&message).map_err(json_io)?;
+                write_framed(writer, &encoded)?;
+            }
+        }
         EngineEvent::WatchedGlobs(globs) => {
             if globs.is_empty() {
                 return Ok(());
@@ -4483,6 +4603,12 @@ mod tests {
             completed: Arc<AtomicBool>,
         }
         impl Analysis for BlockingAnalysis {
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                // This fixture isolates shutdown while an interactive analysis is blocked; it has
+                // no project model and therefore no legitimate workspace-index producer.
+                IndexOutcome::default()
+            }
+
             fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
                 let _ = self.entered.send(());
                 let _ = self.release.recv();
@@ -6269,6 +6395,153 @@ mod tests {
                 .diagnostics("file:///new/A.kt")
                 .is_some(),
             "a late batch from a replaced model must not delete data the current model produced"
+        );
+    }
+
+    #[test]
+    fn a_model_reset_clears_retained_diagnostics_before_the_replacement_sweep() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        let uri = "file:///old/Model.kt";
+        service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec![uri.to_string()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: uri.to_string(),
+                diagnostics: Vec::new(),
+                text_hash: 1,
+                text: String::new(),
+            }],
+        });
+
+        let _refresh = service.reset_workspace_index(1);
+
+        assert!(
+            service.workspace_diagnostics.diagnostics(uri).is_none(),
+            "old-model results must disappear when the model changes, not when its first new batch arrives"
+        );
+        service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec![uri.to_string()],
+            conclusive: true,
+            files: Vec::new(),
+        });
+        assert!(
+            service.workspace_diagnostics.diagnostics(uri).is_none(),
+            "a late old-generation batch must not repopulate the cleared store"
+        );
+    }
+
+    #[test]
+    fn workspace_report_honors_prior_ids_and_clears_disappeared_files() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        let indexed_uri = "file:///w/Indexed.kt";
+        service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec![indexed_uri.to_string()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: indexed_uri.to_string(),
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(0, 1),
+                    editor_span: None,
+                    identity: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: "indexed".to_string(),
+                    file: 0,
+                }],
+                text_hash: 1,
+                text: "x".to_string(),
+            }],
+        });
+        let first = service.workspace_diagnostic(Some(json!(1)), json!({}));
+        let prior = first.messages[0]["result"]["items"][0]["resultId"]
+            .as_str()
+            .expect("workspace result id")
+            .to_string();
+
+        let second = service.workspace_diagnostic(
+            Some(json!(2)),
+            json!({
+                "previousResultIds": [
+                    {"uri": indexed_uri, "value": prior},
+                    {"uri": "file:///w/Deleted.kt", "value": "stale"},
+                ]
+            }),
+        );
+        let items = second.messages[0]["result"]["items"]
+            .as_array()
+            .expect("workspace diagnostic items");
+        let indexed = items
+            .iter()
+            .find(|item| item["uri"] == indexed_uri)
+            .expect("indexed report");
+        assert_eq!(indexed["kind"], "unchanged");
+        assert_eq!(indexed["version"], Value::Null);
+        let deleted = items
+            .iter()
+            .find(|item| item["uri"] == "file:///w/Deleted.kt")
+            .expect("deleted-file tombstone");
+        assert_eq!(deleted["kind"], "full");
+        assert_eq!(deleted["items"], json!([]));
+        assert_eq!(deleted["version"], Value::Null);
+        assert!(
+            serialized_value_fits(&second.messages[0], MAX_MESSAGE_BYTES),
+            "workspace diagnostic response must respect the framed protocol limit"
+        );
+    }
+
+    #[test]
+    fn workspace_report_uses_the_open_buffer_over_retained_disk_results() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        let uri = "file:///w/Open.kt";
+        service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec![uri.to_string()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: uri.to_string(),
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(0, 1),
+                    editor_span: None,
+                    identity: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: "stale disk diagnostic".to_string(),
+                    file: 0,
+                }],
+                text_hash: 1,
+                text: "x".to_string(),
+            }],
+        });
+        service.open_document_for_test(uri, "val current = 1", 1);
+
+        let report = service.workspace_diagnostic(Some(json!(1)), json!({}));
+        let item = &report.messages[0]["result"]["items"][0];
+        assert_eq!(item["uri"], uri);
+        assert_eq!(
+            item["items"],
+            json!([]),
+            "the current open buffer must win over an older sweep snapshot"
         );
     }
 }

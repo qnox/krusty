@@ -2317,6 +2317,17 @@ pub struct IndexedFile {
     pub text: String,
 }
 
+/// Global ceiling on one model generation's cached source inventory.
+pub const MAX_WORKSPACE_INDEX_FILES: usize = 200_000;
+/// URI payload and record bytes retained by the producer's cached source inventory.
+pub const MAX_WORKSPACE_INDEX_URI_BYTES: usize = 16 * 1024 * 1024;
+
+/// One owned URI's payload plus its `String` record. Queue layers multiply this by the number of
+/// representations they retain, keeping producer and consumer accounting on the same unit.
+pub fn workspace_index_uri_bytes(uri: &str) -> usize {
+    uri.len().saturating_add(std::mem::size_of::<String>())
+}
+
 #[derive(Clone)]
 pub struct DocumentAnalysis {
     pub diagnostics: Vec<Diagnostic>,
