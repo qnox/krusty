@@ -42,6 +42,7 @@ pub mod token;
 pub mod toolchain;
 pub mod trace;
 pub mod types;
+mod wide_stack;
 
 #[cfg(test)]
 mod architecture;

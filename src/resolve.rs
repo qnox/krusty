@@ -10646,7 +10646,7 @@ pub fn check_file_at(
     syms: &mut SymbolTable,
     diags: &mut DiagSink,
 ) -> TypeInfo {
-    check_file_at_impl(file, file_index, None, syms, diags)
+    check_file_on_checker_stack(file, file_index, None, syms, diags)
 }
 
 pub fn check_file_in_source_set(
@@ -10656,7 +10656,22 @@ pub fn check_file_in_source_set(
     diags: &mut DiagSink,
 ) -> TypeInfo {
     let file = &files[file_index as usize];
-    check_file_at_impl(file, file_index, Some(files), syms, diags)
+    check_file_on_checker_stack(file, file_index, Some(files), syms, diags)
+}
+
+/// Run the check on a dedicated thread sized for the `expr_depth` bound (500), so the depth guard
+/// — not the calling thread's stack — is what limits expression nesting in every build profile
+/// (see [`crate::wide_stack`]).
+fn check_file_on_checker_stack(
+    file: &File,
+    file_index: u32,
+    source_files: Option<&[File]>,
+    syms: &mut SymbolTable,
+    diags: &mut DiagSink,
+) -> TypeInfo {
+    crate::wide_stack::on_wide_stack(move || {
+        check_file_at_impl(file, file_index, source_files, syms, diags)
+    })
 }
 
 #[derive(Clone)]
