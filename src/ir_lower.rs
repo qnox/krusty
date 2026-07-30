@@ -5631,33 +5631,40 @@ impl<'a> Lower<'a> {
                 .then(|| (Vec::new(), Vec::new(), tys_to_ir(params)));
         }
         let ir_params = tys_to_ir(params);
-        let mut slot_temps: Vec<Vec<(u32, Ty, bool)>> = vec![Vec::new(); params.len()];
+        // Arguments are EVALUATED in source order but LOADED in slot order. Spilling each to a temp is
+        // what keeps those two orders apart, and it is only needed when they differ — a named call that
+        // reorders. With non-decreasing slots the load order already IS the source order, so the temps
+        // would buy nothing and cost a local: a default expression that spilled one is refused by
+        // `toplevel_default_stub_safe` (a value index past the parameters), which would skip the whole
+        // file for `fun f(x: F = F(7))`.
+        let reordered = argument_slots.windows(2).any(|w| w[0] > w[1]);
+        let mut slot_values: Vec<Vec<(u32, Ty, bool)>> = vec![Vec::new(); params.len()];
         let mut prelude = Vec::new();
         for ((&argument, &slot), &expected) in args.iter().zip(argument_slots).zip(argument_types) {
             let expected = ty_to_ir(expected);
-            let value = self.lower_arg(argument, &expected)?;
-            let temp = self.fresh_value();
-            prelude.push(self.emit_variable(temp, expected, Some(value)));
-            slot_temps
+            let mut value = self.lower_arg(argument, &expected)?;
+            if reordered {
+                let temp = self.fresh_value();
+                prelude.push(self.emit_variable(temp, expected, Some(value)));
+                value = self.emit_get_value(temp);
+            }
+            slot_values
                 .get_mut(slot)?
-                .push((temp, expected, self.afile.is_spread_arg(argument)));
+                .push((value, expected, self.afile.is_spread_arg(argument)));
         }
         let mut lowered = Vec::with_capacity(params.len());
         for (slot, &parameter) in ir_params.iter().enumerate() {
-            let supplied = &slot_temps[slot];
+            let supplied = &slot_values[slot];
             if vararg == Some(slot) {
                 if supplied.len() == 1 && supplied[0].1 == parameter && supplied[0].2 {
-                    lowered.push(self.emit_get_value(supplied[0].0));
+                    lowered.push(supplied[0].0);
                 } else {
-                    let elements = supplied
-                        .iter()
-                        .map(|(temp, _, _)| self.emit_get_value(*temp))
-                        .collect();
+                    let elements = supplied.iter().map(|(value, _, _)| *value).collect();
                     let spreads = supplied.iter().map(|(_, _, spread)| *spread).collect();
                     lowered.push(self.emit_vararg_with_spreads(parameter, elements, spreads));
                 }
-            } else if let [(temp, _, _)] = supplied.as_slice() {
-                lowered.push(self.emit_get_value(*temp));
+            } else if let [(value, _, _)] = supplied.as_slice() {
+                lowered.push(*value);
             } else if supplied.is_empty() && omitted.contains(&slot) {
                 lowered.push(self.zero_placeholder(parameter));
             } else {
