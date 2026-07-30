@@ -116,6 +116,13 @@ mod tests {
             {
                 allowed.push("features");
             }
+            // The worker renders the dev-mode dump, whose IR section only exists once the checked
+            // file has been lowered. Both stay confined to the worker: the supervisor process
+            // still sees nothing but the path the dump was written to.
+            if path.ends_with("worker.rs") {
+                allowed.push("dump");
+                allowed.push("ir_lower");
+            }
             assert_allowed_external_crate_modules_in_file(&path, &allowed);
         }
     }
