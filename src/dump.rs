@@ -5,8 +5,9 @@
 
 use crate::ast::File;
 use crate::diag::Diagnostic;
-use crate::frontend::FrontendTypeInfo;
+use crate::frontend::{FrontendSymbols, FrontendTypeInfo};
 use crate::ir::IrFile;
+use crate::runtime::TargetRuntime;
 use std::fmt::Write as _;
 
 /// Everything one dump needs. `ir` carries the lowered file, or the bail reason explaining why
@@ -19,6 +20,58 @@ pub struct DumpInput<'a> {
     pub info: Option<&'a FrontendTypeInfo>,
     pub diagnostics: &'a [Diagnostic],
     pub ir: Result<&'a IrFile, &'a str>,
+}
+
+/// One checked file, plus everything lowering it needs.
+///
+/// This is the input a caller holding a finished analysis already has: the callers must not have to
+/// know how the IR section is produced, only which file they want dumped.
+pub struct FileDumpInput<'a> {
+    /// Workspace-relative path shown in the heading.
+    pub label: &'a str,
+    pub source: &'a str,
+    pub file: &'a File,
+    /// Index of `file` within the analyzed source set; lowering stamps it into IR spans.
+    pub file_index: usize,
+    pub info: Option<&'a FrontendTypeInfo>,
+    pub symbols: &'a FrontendSymbols,
+    pub runtime: &'a dyn TargetRuntime,
+    pub diagnostics: &'a [Diagnostic],
+}
+
+/// Lower the checked file and render its dump document.
+///
+/// Lowering lives here rather than in the caller because the IR section owns its own failure modes:
+/// an unchecked file, a reported bail, and a silent `None` all have to become one displayable
+/// reason, and that mapping is a property of the document, not of whoever asked for it.
+pub fn render_file_dump(input: &FileDumpInput<'_>) -> String {
+    let bail = std::cell::RefCell::new(String::new());
+    let lowered = input.info.and_then(|info| {
+        crate::ir_lower::lower_file_at_reporting(
+            input.file,
+            input.file_index as u32,
+            info,
+            input.symbols,
+            input.runtime,
+            &bail,
+        )
+    });
+    let bail_reason = bail.borrow();
+    let ir = match lowered.as_ref() {
+        Some(ir) => Ok(ir),
+        None if input.info.is_none() => Err("file was not checked"),
+        None if bail_reason.is_empty() => Err("lowering produced no IR and no reason"),
+        None => Err(bail_reason.as_str()),
+    };
+
+    render_dump(&DumpInput {
+        label: input.label,
+        source: input.source,
+        file: input.file,
+        info: input.info,
+        diagnostics: input.diagnostics,
+        ir,
+    })
 }
 
 /// Render the dump document.
@@ -158,6 +211,51 @@ mod tests {
             text.contains("not lowered: lower_expr: unsupported Expr::Wild"),
             "{text}"
         );
+        assert!(!text.contains("functions ("), "{text}");
+    }
+
+    #[test]
+    fn a_file_dump_lowers_the_checked_file_itself() {
+        let source = "fun box(): String = \"OK\"\n";
+        let mut diags = DiagSink::new();
+        let files = [parse_source_with_detected_features(source, &mut diags)];
+        let mut symbols = collect_signatures(&files, &mut diags);
+        let info = check_file(&files[0], &mut symbols, &mut diags);
+
+        let text = render_file_dump(&FileDumpInput {
+            label: "src/Main.kt",
+            source,
+            file: &files[0],
+            file_index: 0,
+            info: Some(&info),
+            symbols: &symbols,
+            runtime: &EmptySymbolSource,
+            diagnostics: &[],
+        });
+
+        assert!(text.contains("\n## IR\n"), "{text}");
+        assert!(text.contains("functions (1)"), "{text}");
+    }
+
+    #[test]
+    fn a_file_dump_names_the_reason_an_unchecked_file_has_no_ir() {
+        let source = "fun box(): String = \"OK\"\n";
+        let mut diags = DiagSink::new();
+        let files = [parse_source_with_detected_features(source, &mut diags)];
+        let symbols = collect_signatures(&files, &mut diags);
+
+        let text = render_file_dump(&FileDumpInput {
+            label: "src/Main.kt",
+            source,
+            file: &files[0],
+            file_index: 0,
+            info: None,
+            symbols: &symbols,
+            runtime: &EmptySymbolSource,
+            diagnostics: &[],
+        });
+
+        assert!(text.contains("not lowered: file was not checked"), "{text}");
         assert!(!text.contains("functions ("), "{text}");
     }
 

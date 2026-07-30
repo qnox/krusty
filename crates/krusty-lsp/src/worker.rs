@@ -1147,7 +1147,11 @@ fn render_dump_request(
     response
 }
 
-/// Lower the analyzed target file, render the document, and store it under `cache_root`.
+/// Render the analyzed target file's document and store it under `cache_root`.
+///
+/// Everything the document needs — including driving the lowering that fills its IR section — is
+/// the dump renderer's own business; the worker only picks the file out of its analysis and decides
+/// where the result is written.
 fn render_analyzed_dump(
     analysis: &compiler_analysis::SourceSetAnalysis,
     source: &str,
@@ -1157,32 +1161,15 @@ fn render_analyzed_dump(
     runtime: &JvmLibraries,
 ) -> Option<DumpResponse> {
     let file_analysis = analysis.files.get(target)?;
-    let bail = std::cell::RefCell::new(String::new());
-    let lowered = file_analysis.types.as_ref().and_then(|info| {
-        krusty::ir_lower::lower_file_at_reporting(
-            &file_analysis.file,
-            target as u32,
-            info,
-            &analysis.symbols,
-            runtime,
-            &bail,
-        )
-    });
-    let bail_reason = bail.borrow();
-    let ir = match lowered.as_ref() {
-        Some(ir) => Ok(ir),
-        None if file_analysis.types.is_none() => Err("file was not checked"),
-        None if bail_reason.is_empty() => Err("lowering produced no IR and no reason"),
-        None => Err(bail_reason.as_str()),
-    };
-
-    let text = krusty::dump::render_dump(&krusty::dump::DumpInput {
+    let text = krusty::dump::render_file_dump(&krusty::dump::FileDumpInput {
         label,
         source,
         file: &file_analysis.file,
+        file_index: target,
         info: file_analysis.types.as_ref(),
+        symbols: &analysis.symbols,
+        runtime,
         diagnostics: &file_analysis.diagnostics,
-        ir,
     });
 
     let path = crate::dump_cache::store(cache_root, label, &text).ok()?;
