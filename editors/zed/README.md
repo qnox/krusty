@@ -115,7 +115,9 @@ Zed sends for other features (go-to-definition, rename, formatting) are not impl
 With dev mode on, `cmd-.` on a Kotlin file offers **krusty (dev): dump AST + checker + IR**, which
 opens a Markdown buffer holding the file's parsed arenas, its diagnostics and inferred expression
 types, and its lowered IR — or the reason lowering bailed. The dump path is stable per source file,
-so a buffer left open in a split refreshes in place each time the action runs.
+so a buffer left open in a split refreshes in place each time the action runs. A document is
+re-rendered only once the file has been analyzed again, so repeated requests — including the code
+action refreshes a client issues on every cursor settle — reuse the file already written.
 
 Dev mode is off by default. Turn it on in Zed settings:
 

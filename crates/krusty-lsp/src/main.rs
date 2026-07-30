@@ -198,6 +198,25 @@ struct RetainedGroup {
     java_sources: Vec<String>,
     language_arguments: Vec<String>,
     classpath: Option<Vec<PathBuf>>,
+    /// Digest of everything above. The payload is the dump's only input, so two payloads with the
+    /// same digest render the same document and a repeat request can reuse the rendered file.
+    fingerprint: u64,
+}
+
+/// Digest every input a dump is rendered from.
+fn retained_group_fingerprint(payload: &AnalysisPayload<'_>) -> u64 {
+    let mut fingerprint = DefaultHasher::new();
+    payload.sources.hash(&mut fingerprint);
+    for kind in payload.source_kinds {
+        kind.wire_code().hash(&mut fingerprint);
+    }
+    payload.uris.hash(&mut fingerprint);
+    payload.result_count.hash(&mut fingerprint);
+    payload.inferred_count.hash(&mut fingerprint);
+    payload.java_sources.hash(&mut fingerprint);
+    payload.language_arguments.hash(&mut fingerprint);
+    payload.classpath.hash(&mut fingerprint);
+    fingerprint.finish()
 }
 
 impl RetainedGroup {
@@ -264,6 +283,7 @@ impl RetainedAnalysis {
             java_sources: payload.java_sources.to_vec(),
             language_arguments: payload.language_arguments.to_vec(),
             classpath: payload.classpath.map(<[PathBuf]>::to_vec),
+            fingerprint: retained_group_fingerprint(payload),
         });
     }
 
@@ -282,6 +302,56 @@ impl RetainedAnalysis {
                 .position(|candidate| candidate == uri)
                 .map(|slot| (group, slot))
         })
+    }
+}
+
+/// Bounded so a session cycling through files cannot grow the reuse list without limit. Small on
+/// purpose: an entry only serves repeat requests on a document whose analysis has not moved.
+const MAX_RENDERED_DUMPS: usize = 16;
+
+struct RenderedDump {
+    uri: String,
+    fingerprint: u64,
+    path: PathBuf,
+}
+
+/// Documents already rendered this session, keyed by the file and the payload it was rendered from.
+///
+/// A code action is not one deliberate user gesture: clients refresh code actions whenever the
+/// cursor settles — Zed's inline indicator, VS Code's lightbulb — and every refresh would otherwise
+/// re-parse, re-check and re-lower the whole module group and rewrite a large Markdown file,
+/// serially on the thread that also serves diagnostics, completion and hover. A repeat request on
+/// an unchanged document costs one hash comparison instead.
+///
+/// Keyed by the payload rather than by the document version deliberately. The payload is what the
+/// document is rendered from, and it can lag the buffer; a version key would pin a dump rendered
+/// from pre-edit state and keep serving it after the analysis had caught up.
+#[derive(Default)]
+struct RenderedDumps {
+    entries: Vec<RenderedDump>,
+}
+
+impl RenderedDumps {
+    /// The file already rendered for `uri` from this exact payload, if there is one.
+    fn lookup(&self, uri: &str, fingerprint: u64) -> Option<&Path> {
+        self.entries
+            .iter()
+            .find(|entry| entry.fingerprint == fingerprint && entry.uri == uri)
+            .map(|entry| entry.path.as_path())
+    }
+
+    /// Note what a render produced. One entry per URI: an entry whose payload has been superseded
+    /// can never be reused, so it is replaced rather than kept.
+    fn record(&mut self, uri: &str, fingerprint: u64, path: &Path) {
+        self.entries.retain(|entry| entry.uri != uri);
+        if self.entries.len() >= MAX_RENDERED_DUMPS {
+            self.entries.remove(0);
+        }
+        self.entries.push(RenderedDump {
+            uri: uri.to_string(),
+            fingerprint,
+            path: path.to_path_buf(),
+        });
     }
 }
 
@@ -315,6 +385,7 @@ struct WorkerHost {
     worker_reconfigure_retry_at_ms: Option<u64>,
     worker_reconfigure_retry_backoff_ms: u64,
     retained: RetainedAnalysis,
+    rendered_dumps: RenderedDumps,
 }
 
 impl WorkerHost {
@@ -342,6 +413,7 @@ impl WorkerHost {
             worker_reconfigure_retry_at_ms: None,
             worker_reconfigure_retry_backoff_ms: 0,
             retained: RetainedAnalysis::default(),
+            rendered_dumps: RenderedDumps::default(),
         }
     }
 
@@ -552,6 +624,19 @@ impl krusty_lsp::Analysis for WorkerHost {
             return None;
         }
         let (group, slot) = self.retained.locate(uri)?;
+        let fingerprint = group.fingerprint;
+        // Re-rendering costs a full re-parse, re-check and re-lowering of the module group plus a
+        // large file write, all on the thread that also serves diagnostics and completion. Nothing
+        // about the document has changed since the last render, so nothing about it needs redoing.
+        if let Some(path) = self
+            .rendered_dumps
+            .lookup(uri, fingerprint)
+            .filter(|path| path.exists())
+        {
+            return Some(DumpResult {
+                path: path.to_path_buf(),
+            });
+        }
         let label = workspace_relative_label(self.root.as_deref(), uri);
         let cache_root = self
             .options
@@ -565,6 +650,7 @@ impl krusty_lsp::Analysis for WorkerHost {
             .dump(&group.dump_target(slot, &label, &cache_root))
             .ok()
             .flatten()?;
+        self.rendered_dumps.record(uri, fingerprint, &response.path);
         Some(DumpResult {
             path: response.path,
         })
@@ -1890,6 +1976,102 @@ mod tests {
             "the superseded pass must be dropped, not accumulated"
         );
         assert_eq!(retained.groups.len(), 2);
+    }
+
+    #[test]
+    fn a_repeat_dump_on_an_unchanged_document_is_not_re_rendered() {
+        let mut retained = RetainedAnalysis::default();
+        retained.begin_pass();
+        record_module(&mut retained, true, "file:///a.kt", "fun foo() {}");
+        let (group, _) = retained.locate("file:///a.kt").expect("retained");
+
+        let mut rendered = RenderedDumps::default();
+        assert_eq!(
+            rendered.lookup("file:///a.kt", group.fingerprint),
+            None,
+            "the first request has nothing to reuse"
+        );
+        rendered.record(
+            "file:///a.kt",
+            group.fingerprint,
+            Path::new("/cache/dumps/a.kt.md"),
+        );
+
+        // A burst of code action requests — 20 rapid presses, or one per cursor settle — hits the
+        // same payload, so only the first re-analyzes the module group and rewrites the document.
+        for _ in 0..20 {
+            assert_eq!(
+                rendered.lookup("file:///a.kt", group.fingerprint),
+                Some(Path::new("/cache/dumps/a.kt.md"))
+            );
+        }
+    }
+
+    #[test]
+    fn a_re_analyzed_document_is_rendered_again() {
+        let mut retained = RetainedAnalysis::default();
+        retained.begin_pass();
+        record_module(&mut retained, true, "file:///a.kt", "fun foo() {}");
+        let before = retained
+            .locate("file:///a.kt")
+            .expect("retained")
+            .0
+            .fingerprint;
+
+        // Length-preserving: the payload's byte count is unchanged, so only a content-sensitive key
+        // can tell the two apart.
+        retained.begin_pass();
+        record_module(&mut retained, true, "file:///a.kt", "fun bar() {}");
+        let after = retained
+            .locate("file:///a.kt")
+            .expect("retained")
+            .0
+            .fingerprint;
+
+        assert_ne!(before, after);
+
+        let mut rendered = RenderedDumps::default();
+        rendered.record("file:///a.kt", before, Path::new("/cache/dumps/a.kt.md"));
+        assert_eq!(
+            rendered.lookup("file:///a.kt", after),
+            None,
+            "a document analyzed since the last render must be rendered again"
+        );
+    }
+
+    #[test]
+    fn rendered_dumps_stay_bounded() {
+        let mut rendered = RenderedDumps::default();
+        for index in 0..(MAX_RENDERED_DUMPS * 3) {
+            rendered.record(
+                &format!("file:///{index}.kt"),
+                index as u64,
+                Path::new("/cache/dumps/x.md"),
+            );
+        }
+
+        assert_eq!(rendered.entries.len(), MAX_RENDERED_DUMPS);
+        assert!(
+            rendered
+                .lookup(
+                    &format!("file:///{}.kt", MAX_RENDERED_DUMPS * 3 - 1),
+                    (MAX_RENDERED_DUMPS * 3 - 1) as u64
+                )
+                .is_some(),
+            "the most recent render must survive the bound"
+        );
+
+        // Re-rendering one document does not accumulate: its superseded entry can never be reused.
+        rendered.record("file:///0.kt", 1, Path::new("/cache/dumps/x.md"));
+        rendered.record("file:///0.kt", 2, Path::new("/cache/dumps/x.md"));
+        assert_eq!(
+            rendered
+                .entries
+                .iter()
+                .filter(|entry| entry.uri == "file:///0.kt")
+                .count(),
+            1
+        );
     }
 
     #[test]
