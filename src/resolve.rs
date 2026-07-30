@@ -23816,14 +23816,30 @@ impl<'a> Checker<'a> {
         })
     }
 
-    /// Whether a MODULE class's instance member named `name` on `receiver` carries parameter names, and so
-    /// can take named arguments. The companion of [`Self::member_extension_supports_named`] for ordinary
-    /// members; a data class's synthesized `copy` is the pervasive case.
+    /// Whether the federated symbol source exposes a current-module instance member named `name` on
+    /// `receiver` with parameter names. Querying through the same resolver used for ordinary calls keeps
+    /// same-file and sibling-file members on one path; the origin check deliberately excludes library
+    /// and extension candidates because narrowed-`this` resolution currently records only
+    /// [`ResolvedCall::ModuleMember`], which is the shape the lowerer can realize here.
     fn module_member_supports_named(&self, receiver: Ty, name: &str) -> bool {
-        crate::module_symbols::ModuleSymbols::new(self.syms)
-            .instance_members(receiver, name)
+        self.resolver()
+            .resolve_symbol(
+                crate::symbol_resolver::SymRecv::Value(receiver),
+                name,
+                &[],
+                &[],
+            )
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default()
             .iter()
-            .any(|member| member.call_sig.has_param_names())
+            .any(|member| {
+                member.kind == crate::libraries::FnKind::Member
+                    && matches!(
+                        member.callable.origin,
+                        crate::libraries::Origin::Module { .. }
+                    )
+                    && member.call_sig.has_param_names()
+            })
     }
 
     fn member_extension_supports_named(&self, extension_receiver: Ty, name: &str) -> bool {

@@ -22265,14 +22265,14 @@ impl<'a> Lower<'a> {
                                 // either, so `when (this) { is Create -> copy(path = p) }` — a named
                                 // argument that also OMITS a defaulted parameter — bailed the whole file
                                 // even though the identical `this.copy(path = p)` lowered fine.
-                                if let Some(target) = self.info.resolved_calls.get(&e).cloned() {
-                                    if matches!(target, ResolvedCall::ModuleMember { .. }) {
-                                        if let Some(lowered) =
-                                            self.lower_module_member_call(cast, &target, &args, e)
-                                        {
-                                            return Some(lowered);
-                                        }
-                                    }
+                                if let Some(target @ ResolvedCall::ModuleMember { .. }) =
+                                    self.info.resolved_calls.get(&e).cloned()
+                                {
+                                    // A selected semantic target is authoritative. If its shared
+                                    // argument lowering declines an unsupported shape, skip the file;
+                                    // falling through to the positional legacy path would silently
+                                    // reinterpret named arguments in source order.
+                                    return self.lower_module_member_call(cast, &target, &args, e);
                                 }
                                 let (class, index, mfid, _) =
                                     self.resolve_method_name(bi, &fname)?;
