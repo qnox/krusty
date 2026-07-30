@@ -7,7 +7,8 @@ use krusty::diag::{DiagSink, Span};
 use krusty::frontend::lex_name_tokens;
 
 use super::source_scan::{
-    matching_delimiter, skip_block_comment, skip_quoted, skip_trivia, utf8_char_len,
+    bounded_utf8_advance, matching_delimiter, normalized_scan_end, skip_block_comment, skip_quoted,
+    skip_trivia, utf8_char_len,
 };
 use super::{navigation::definition_name_span, FileAnalysis};
 
@@ -765,8 +766,11 @@ fn primary_constructor_spans(
         return None;
     }
     let bytes = source.as_bytes();
-    let end = (declaration_range(source, class.span).hi as usize).min(bytes.len());
+    let end = normalized_scan_end(bytes, declaration_range(source, class.span).hi as usize);
     let mut index = class_name.hi as usize;
+    if index >= end {
+        return None;
+    }
     let line_end = bytes[index..end]
         .iter()
         .position(|byte| matches!(byte, b'\n' | b'\r'))
@@ -795,7 +799,14 @@ fn primary_constructor_spans(
     index = prefix_start;
     let mut explicit = false;
     let open = loop {
+        if index >= end {
+            return None;
+        }
+        let previous = index;
         index = skip_trivia(bytes, index, end);
+        if index >= end {
+            return None;
+        }
         match *bytes.get(index)? {
             b'@' => index = skip_source_annotation(bytes, index, end),
             b'<' => {
@@ -808,7 +819,10 @@ fn primary_constructor_spans(
                 explicit = true;
                 index += b"constructor".len();
             }
-            _ => index += utf8_char_len(bytes[index]),
+            _ => index = bounded_utf8_advance(bytes, index, end),
+        }
+        if index <= previous {
+            return None;
         }
     };
     let close = matching_delimiter(bytes, open, end, b'(', b')')?;
@@ -828,6 +842,9 @@ fn skip_source_annotation(bytes: &[u8], at: usize, end: usize) -> usize {
     }
     loop {
         index = skip_trivia(bytes, index, end);
+        if index >= end {
+            return end;
+        }
         if bytes.get(index) == Some(&b':') || bytes.get(index) == Some(&b'.') {
             index = skip_trivia(bytes, index + 1, end);
             if let Some(span) = source_identifier_span(bytes, index, end) {
@@ -838,6 +855,9 @@ fn skip_source_annotation(bytes: &[u8], at: usize, end: usize) -> usize {
         break;
     }
     index = skip_trivia(bytes, index, end);
+    if index >= end {
+        return end;
+    }
     if bytes.get(index) == Some(&b'(') {
         matching_delimiter(bytes, index, end, b'(', b')')
             .map_or(end, |close| close.saturating_add(1))
@@ -1261,6 +1281,49 @@ mod tests {
             .iter()
             .find(|occurrence| occurrence.name == "old")
             .is_some_and(|occurrence| occurrence.deprecated));
+    }
+
+    #[test]
+    fn class_header_scan_stays_within_the_declaration() {
+        for malformed in [
+            "class Sample \"text\"\n",
+            "class Sample \"\"\"text\"\"\"\n",
+            "class Sample `name`\n",
+            "class Sample 'x'\n",
+            "class Sampl\u{00e9} \"x\"\n",
+            "class Sample constructor \"x\"\n",
+            "class Sample @Ann \"x\"\n",
+        ] {
+            let source = format!("{malformed}class Later(val value: Int)\n");
+            let later = source.find("class Later").expect("later declaration");
+            let mut analysis = analyze_standalone_source_set(&[&source]);
+            let file = analysis.files.pop().expect("analyzed file");
+            let occurrences = document_symbol_occurrences(&source, &file, 64);
+            assert!(occurrences.iter().any(
+                |occurrence| occurrence.kind == SYMBOL_KIND_CLASS && occurrence.name == "Later"
+            ));
+            assert!(occurrences
+                .iter()
+                .filter(|occurrence| occurrence.kind == SYMBOL_KIND_CONSTRUCTOR)
+                .all(|occurrence| occurrence.name == "Later"
+                    && occurrence.range.lo as usize >= later));
+            assert!(occurrences.iter().all(|occurrence| {
+                let lo = occurrence.range.lo as usize;
+                let hi = occurrence.range.hi as usize;
+                lo <= hi
+                    && hi <= source.len()
+                    && source.is_char_boundary(lo)
+                    && source.is_char_boundary(hi)
+            }));
+        }
+
+        let source = "class Sample /* unterminated\n";
+        let mut analysis = analyze_standalone_source_set(&[source]);
+        let file = analysis.files.pop().expect("analyzed file");
+        let occurrences = document_symbol_occurrences(source, &file, 64);
+        assert!(occurrences
+            .iter()
+            .all(|occurrence| occurrence.kind != SYMBOL_KIND_CONSTRUCTOR));
     }
 
     #[test]
