@@ -476,6 +476,8 @@ mod indy_infra_e2e;
 mod inferred_computed_prop_e2e;
 #[path = "inferred_property_type_args_e2e.rs"]
 mod inferred_property_type_args_e2e;
+#[path = "infix_newline_operand_e2e.rs"]
+mod infix_newline_operand_e2e;
 #[path = "inheritance_e2e.rs"]
 mod inheritance_e2e;
 #[path = "inline_deep_coverage_e2e.rs"]
@@ -788,6 +790,8 @@ mod resolver_regression_e2e;
 mod result_e2e;
 #[path = "run_noreceiver_e2e.rs"]
 mod run_noreceiver_e2e;
+#[path = "safe_call_argument_list_e2e.rs"]
+mod safe_call_argument_list_e2e;
 #[path = "safe_call_e2e.rs"]
 mod safe_call_e2e;
 #[path = "safe_call_generic_field_e2e.rs"]
@@ -998,6 +1002,8 @@ mod var_extension_property_e2e;
 mod var_smartcast_after_assign_e2e;
 #[path = "vararg_e2e.rs"]
 mod vararg_e2e;
+#[path = "vararg_element_default_e2e.rs"]
+mod vararg_element_default_e2e;
 #[path = "vararg_extension_overload_e2e.rs"]
 mod vararg_extension_overload_e2e;
 #[path = "vc_mangled_default_e2e.rs"]

@@ -376,7 +376,9 @@ pub fn lower_value_classes(
             continue;
         }
         let has_init = ir.classes[cid as usize].init_body.is_some();
-        synth_value_members(ir, cid, &under, has_init);
+        if !synth_value_members(ir, cid, &under, has_init) {
+            return false;
+        }
     }
 
     // Pre-erasure signatures, so box/unbox at call boundaries can see `Object`/generic param/field
@@ -594,7 +596,7 @@ pub fn lower_value_classes(
                 collect_reachable_scoped(&ir.exprs, &ir.inline_only_fns, root, &mut reach);
                 for id in reach {
                     if let IrExpr::Variable { index, ty, .. } = &ir.exprs[id as usize] {
-                        m.insert(*index, ty.clone());
+                        m.insert(*index, *ty);
                     }
                 }
             }
@@ -1456,6 +1458,13 @@ pub fn lower_value_classes(
                 }
                 *p = erase(p, &under);
             }
+            let target_params = match &mut sc.delegate {
+                crate::ir::CtorDelegateTarget::This { target_params, .. }
+                | crate::ir::CtorDelegateTarget::Super { target_params, .. } => target_params,
+            };
+            for parameter in target_params {
+                *parameter = erase(parameter, &under);
+            }
         }
     }
     for internal in value_param_ctors {
@@ -1621,11 +1630,18 @@ pub fn lower_value_classes(
         }
         for (sidx, sc) in c.secondary_ctors.iter().enumerate() {
             let params = &orig_secondary[cidx][sidx];
+            let slots = secondary_ctor_slot_map(&ir.exprs, sc, params);
             if let Some(b) = sc.body {
-                s4_bodies.push((b, body_slot_map(&ir.exprs, b, params), None));
+                s4_bodies.push((b, slots.clone(), None));
+            }
+            for &statement in &sc.delegate_prelude {
+                s4_bodies.push((statement, slots.clone(), None));
             }
             for &a in &sc.delegate_args {
-                s4_bodies.push((a, body_slot_map(&ir.exprs, a, params), None));
+                s4_bodies.push((a, slots.clone(), None));
+            }
+            for &default in sc.defaults.iter().flatten() {
+                s4_bodies.push((default, slots.clone(), None));
             }
         }
         for entry in &c.enum_entries {
@@ -1980,11 +1996,18 @@ pub fn lower_value_classes(
         // params — box/unbox their value-class accesses/constructions.
         for (sidx, sc) in c.secondary_ctors.iter().enumerate() {
             let params = &orig_secondary[cidx][sidx];
+            let slots = secondary_ctor_slot_map(&ir.exprs, sc, params);
             if let Some(b) = sc.body {
-                bodies.push((b, body_slot_map(&ir.exprs, b, params)));
+                bodies.push((b, slots.clone()));
+            }
+            for &statement in &sc.delegate_prelude {
+                bodies.push((statement, slots.clone()));
             }
             for &a in &sc.delegate_args {
-                bodies.push((a, body_slot_map(&ir.exprs, a, params)));
+                bodies.push((a, slots.clone()));
+            }
+            for &default in sc.defaults.iter().flatten() {
+                bodies.push((default, slots.clone()));
             }
         }
         // Base-class constructor args run in the subclass `<init>` over its primary ctor params.
@@ -4180,7 +4203,7 @@ fn descriptor_param_refs(descriptor: &str) -> Vec<bool> {
 /// this pass, NOT `ir_lower`): `unbox-impl`/`box-impl`/`constructor-impl`/`equals-impl0` plus structural
 /// `equals`/`hashCode`/`toString` (skipped where the user defined one). The plain single-field class
 /// (field, `<init>`, getter) is already emitted by `ir_lower`.
-fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: bool) {
+fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: bool) -> bool {
     let internal = ir.classes[class_id as usize].fq_name();
     let fname = ir.classes[class_id as usize].fields[0].name.clone();
     let internal_name = type_name(&internal);
@@ -4486,33 +4509,44 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
         }
     }
 
-    // A secondary constructor becomes a static `constructor-impl` OVERLOAD (the unboxed model has no
-    // real `<init>` to delegate to): run the secondary body, then delegate to the primary
-    // `constructor-impl`. `ir_lower` lowered the body in an INSTANCE frame (`this` at slot 0, params at
-    // `1..`); a static method has no `this`, so shift every slot down by one. The class's
-    // `secondary_ctors` are then cleared so no instance `<init>` is also emitted.
+    // A secondary constructor becomes a static `constructor-impl` overload.
     let secs = std::mem::take(&mut ir.classes[class_id as usize].secondary_ctors);
     if !secs.is_empty() {
         let udesc = type_descriptor(ir_ty_to_jvm(&u_ir));
         for sc in secs {
-            // Drop the `this` slot: shift all value-slot references in the body + delegation args.
-            if let Some(b) = sc.body {
-                shift_slots(ir, b);
+            let crate::ir::CtorDelegateTarget::This {
+                target_params,
+                to_primary: true,
+                default_masks,
+            } = &sc.delegate
+            else {
+                return false;
+            };
+            if target_params.as_slice() != [u_ir]
+                || !default_masks.is_empty()
+                || sc.delegate_args.len() != 1
+            {
+                return false;
+            }
+
+            let mut roots = sc.delegate_prelude.clone();
+            roots.extend(sc.delegate_args.iter().copied());
+            roots.extend(sc.body);
+            let delegated_value = max_value_slot(ir, &roots).max(
+                u32::try_from(sc.params.len()).expect("value-class constructor parameter count"),
+            );
+
+            for &statement in &sc.delegate_prelude {
+                shift_slots(ir, statement);
             }
             for &a in &sc.delegate_args {
                 shift_slots(ir, a);
             }
-            let mut stmts = Vec::new();
-            if let Some(b) = sc.body {
-                if let IrExpr::Block { stmts: bs, value } = &ir.exprs[b as usize] {
-                    stmts.extend(bs.iter().copied());
-                    if let Some(v) = value {
-                        stmts.push(*v);
-                    }
-                } else {
-                    stmts.push(b);
-                }
+            if let Some(body) = sc.body {
+                reframe_value_class_secondary(ir, body, delegated_value);
             }
+
+            let mut stmts = sc.delegate_prelude.clone();
             let call = ir.add_expr(IrExpr::Call {
                 callee: Callee::Static {
                     owner: internal_name,
@@ -4523,9 +4557,62 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
                 dispatch_receiver: None,
                 args: sc.delegate_args.clone(),
             });
-            stmts.push(ir.add_expr(IrExpr::Return(Some(call))));
+            stmts.push(ir.add_expr(IrExpr::Variable {
+                index: delegated_value,
+                ty: u_ir,
+                init: Some(call),
+                named: false,
+            }));
+            if let Some(body) = sc.body {
+                if let IrExpr::Block { stmts: bs, value } = &ir.exprs[body as usize] {
+                    stmts.extend(bs.iter().copied());
+                    if let Some(value) = value {
+                        stmts.push(*value);
+                    }
+                } else {
+                    stmts.push(body);
+                }
+            }
+            let result = ir.add_expr(IrExpr::GetValue(delegated_value));
+            stmts.push(ir.add_expr(IrExpr::Return(Some(result))));
             let body = ir.add_expr(IrExpr::Block { stmts, value: None });
             add_static(ir, "constructor-impl", sc.params.clone(), u_ir, body);
+        }
+    }
+    true
+}
+
+fn max_value_slot(ir: &IrFile, roots: &[ExprId]) -> u32 {
+    let mut reachable = HashSet::new();
+    for &root in roots {
+        collect_reachable(&ir.exprs, root, &mut reachable);
+    }
+    reachable
+        .into_iter()
+        .filter_map(|id| match &ir.exprs[id as usize] {
+            IrExpr::GetValue(index)
+            | IrExpr::SetValue { var: index, .. }
+            | IrExpr::Variable { index, .. } => Some(*index),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn reframe_value_class_secondary(ir: &mut IrFile, root: ExprId, this_value: u32) {
+    let mut reachable = HashSet::new();
+    collect_reachable(&ir.exprs, root, &mut reachable);
+    for id in reachable {
+        let index = match &mut ir.exprs[id as usize] {
+            IrExpr::GetValue(index)
+            | IrExpr::SetValue { var: index, .. }
+            | IrExpr::Variable { index, .. } => index,
+            _ => continue,
+        };
+        if *index == 0 {
+            *index = this_value;
+        } else {
+            *index -= 1;
         }
     }
 }
@@ -4767,7 +4854,36 @@ fn body_slot_map(exprs: &[IrExpr], root: ExprId, params: &[Ty]) -> HashMap<u32, 
     collect_reachable(exprs, root, &mut reach);
     for id in reach {
         if let IrExpr::Variable { index, ty, .. } = &exprs[id as usize] {
-            slots.insert(*index, ty.clone());
+            slots.insert(*index, *ty);
+        }
+    }
+    slots
+}
+
+fn secondary_ctor_slot_map(
+    exprs: &[IrExpr],
+    constructor: &crate::ir::IrSecondaryCtor,
+    params: &[Ty],
+) -> HashMap<u32, Ty> {
+    let mut slots: HashMap<u32, Ty> = params
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| (1 + index as u32, *ty))
+        .collect();
+    let mut reach = HashSet::new();
+    for root in constructor
+        .delegate_prelude
+        .iter()
+        .chain(&constructor.delegate_args)
+        .chain(constructor.defaults.iter().flatten())
+        .copied()
+        .chain(constructor.body)
+    {
+        collect_reachable(exprs, root, &mut reach);
+    }
+    for id in reach {
+        if let IrExpr::Variable { index, ty, .. } = &exprs[id as usize] {
+            slots.insert(*index, *ty);
         }
     }
     slots

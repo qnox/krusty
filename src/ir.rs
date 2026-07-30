@@ -424,6 +424,8 @@ pub enum IrExpr {
         /// `kotlin/Array<Int>` = `Integer[]`) from it via `ir_ty_to_jvm`. The element alone is ambiguous
         /// (`Obj("kotlin/Int")` is both a primitive `IntArray` element and a boxed `Array<Int>` element).
         array_type: Ty,
+        /// Parallel to `elements`; a set entry contributes an array rather than one scalar element.
+        spreads: Vec<bool>,
         elements: Vec<ExprId>,
     },
     /// Allocate an uninitialized array of `size` elements (`anewarray` for a reference element,
@@ -1054,12 +1056,14 @@ impl IrClass {
     }
 }
 
-/// A secondary constructor: `<init>(params)` evaluates `delegate_args`, calls the delegate target
-/// (`invokespecial`), then runs `body`. `this` is value 0 and the parameters are values
-/// `1..=params.len()` in `delegate_args`/`body`.
+/// A secondary constructor: `<init>(params)` runs `delegate_prelude`, loads `delegate_args`, calls the
+/// delegate target, then runs `body`. `this` is value 0 and parameters are values `1..=params.len()`.
 #[derive(Clone, Debug)]
 pub struct IrSecondaryCtor {
     pub params: Vec<Ty>,
+    pub defaults: Vec<Option<ExprId>>,
+    /// Source-ordered temp declarations for delegation arguments.
+    pub delegate_prelude: Vec<ExprId>,
     pub delegate_args: Vec<ExprId>,
     pub body: Option<ExprId>,
     /// Which `<init>` this constructor delegates to, and whether it runs the class init body.
@@ -1072,17 +1076,18 @@ pub struct IrSecondaryCtor {
 #[derive(Clone, Debug)]
 pub enum CtorDelegateTarget {
     /// `this(args)` → `invokespecial` an own `<init>(target_params)` (the primary, or a sibling
-    /// secondary). The class init body runs in the reached constructor, not here. `to_primary` marks
-    /// a delegation to the PRIMARY `<init>`, whose live (post-value-class-pass) signature the emitter
-    /// reads directly — `target_params` is the lower-time signature, correct only for a sibling target.
+    /// secondary). The class init body runs in the reached constructor, not here.
     This {
         target_params: Vec<Ty>,
         to_primary: bool,
+        default_masks: Vec<i32>,
     },
-    /// `super(args)` (or implicit) in a class with NO primary constructor → `invokespecial` the
-    /// superclass `<init>` (its signature is read live from the base class at emit time), then run the
-    /// class init body (field initializers + `init {}`) before this constructor's own `body`.
-    Super,
+    /// `super(args)` (or implicit) → the exact checker-selected superclass constructor.
+    Super {
+        owner: TypeName,
+        target_params: Vec<Ty>,
+        default_masks: Vec<i32>,
+    },
 }
 
 /// A synthetic bridge method (`name(erased_params)erased_ret` → `name(concrete_params)concrete_ret`).

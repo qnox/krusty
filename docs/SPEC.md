@@ -467,15 +467,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   secondary `<init>`. A constructor delegating to `super(…)` (or implicitly, to a no-arg base/`Object`)
   runs the field initializers + `init {}` blocks (source order) before its own body; one delegating to a
   sibling `this(…)` runs only its body (the init steps run in the reached `super`-constructor). The
-  parenless base class (`class A : B { constructor(): super() }` — B is a concrete file class) is
-  recovered post-parse. **Field-initializer default-value elision:** kotlinc omits a field initializer
+  parenless base class (`class A : B { constructor(): super() }`) is recovered semantically after
+  parsing: the all-files bootstrap classifies module declarations and the composite symbol source
+  classifies both module and library types, so same-file, other-file, and classpath bases produce the
+  same superclass shape. **Field-initializer default-value elision:** kotlinc omits a field initializer
   that stores the field's JVM default (`0`/`false`/`null`/`'\0'`, incl. `0.toByte()`), so a value a base
   constructor's virtual call already wrote survives; krusty does the same (test
   `secondary_ctor_noprimary_e2e`, corpus `fieldInitializerOptimization`). The delegation `<init>`
   *target signature* is read live from the (post-`value_classes`-pass) class at emit time, so the lowerer
-  needs no value-class knowledge and a value-class `super(…)` argument erases correctly. Skipped (bail,
-  never miscompile): a secondary with a defaulted parameter (needs the synthetic `DefaultConstructorMarker`
-  overload) and an ambiguous `this(…)` target.
+  needs no value-class knowledge and a value-class `super(…)` argument erases correctly. A secondary
+  constructor with lowerable defaults emits and calls the synthetic `DefaultConstructorMarker` overload;
+  when that ABI cannot be emitted, the file is skipped rather than calling a nonexistent target.
+  Ambiguous `this(…)`/`super(…)` targets and delegation cycles are diagnosed. Tests:
+  `tests/secondary_ctor_this_sibling_e2e.rs` and `tests/super_to_base_secondary_ctor_e2e.rs`.
 - Constructor references `::A`: lowered like a lambda `{ args -> A(args) }` — a synthesized static
   impl `(ctor params) -> new A(params)` wrapped in the same `invokedynamic`/`LambdaMetafactory`
   closure. Only the simple primary-constructor positional case (the reference's arity matches the
@@ -687,6 +691,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nullable reference already reads as its non-null type. `var`s are not narrowed (a closure could reset
   them to null), and unsigned stays unnarrowed (its value-box unbox isn't modeled).
   `tests/elvis_return_smartcast_e2e.rs`.
+- **`u?.member ?: return` smart-casts the safe-call ROOT receiver** for the code that follows: the
+  elvis only completes when every `?.` in the left side held, which proves the chain's root non-null.
+  The root must be a stable `val`/parameter name; the same `var`/unsigned exclusions as the bare-name
+  form apply. (Intermediate results are not path-narrowed — only the root name is.)
+  `crates/krusty-lsp/src/compiler_analysis.rs::source_set_narrows_safe_call_root_after_elvis_return`.
+- **An `if`/`else if` chain of diverging guards narrows level by level** for the rest of the block:
+  `if (x is A) return …; else if (x !is B) return …` proves `x !is A && x is B` afterwards, because
+  falling through a level whose then-branch diverges means that level's condition was false. The walk
+  stops at the first non-diverging then-branch (control can fall through it with its condition true).
+  This is the statement form kotlinc handles via exhaustive flow typing; krusty walks the else-if
+  spine only. `crates/krusty-lsp/src/compiler_analysis.rs::source_set_narrows_after_else_if_return_chain`.
 - **`x is Int? && x != null` narrows to the non-null primitive** (either leaf order): the `is Int?` leaf
   narrows to the nullable-primitive wrapper and a `x != null` leaf anywhere in the same `&&` chain strips
   the `?`. The refinement is pushed last, so the innermost-last declare keeps it over the `Int?` binding.
@@ -1606,6 +1621,131 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Lenient mode skips malformed declarations and erases unresolved member types; strict compiler
   callers still reject them.
 
+
+
+- **JPS `packagePrefix` roots match imports through package-qualified logical paths.** A source
+  root declaring `packagePrefix="org.example"` stores `org.example.p.X` at `<root>/p/X.java`; the
+  LSP's import-driven Java loader matches import paths against `org/example/p/X.java` (prefix
+  directories + root-relative path), so prefixed dependencies keep their budget priority
+  (`crates/krusty-lsp/src/project/sources.rs::imported_java_sources_match_through_package_prefixed_roots`).
+
+- **Java `...` parameters are varargs in stubs.** The signature stubs emit `ACC_VARARGS` for a
+  trailing `Type... name` parameter (methods and constructors), so element-style calls
+  (`h.reg("x", fix)`, zero-element `h.reg("y")`) and Kotlin spreads (`reg(s, *fixes)`) resolve
+  against source-stubbed Java members exactly as against compiled ones
+  (`src/jvm/java_stub.rs::java_varargs_parameters_emit_acc_varargs`,
+  `crates/krusty-lsp/src/compiler_analysis.rs::source_set_spreads_kotlin_vararg_into_java_vararg_member`).
+
+- **A generic static's return binds from the call arguments.** `<T extends Node> T
+  copyOf(T, Document)` called with a `Node` returns `Node`, not the
+  erased `Object` — the companion-member path binds the generic signature against the arguments
+  exactly as instance members do (`tests/generic_static_field_e2e.rs`).
+
+- **Member types resolve from their enclosing class chain in stubs.** A Java source referencing a
+  sibling member type without qualification (`Proc` inside `class Builder { interface Proc {…} }`)
+  resolves through the enclosing declarations (`Builder$Proc`) before the package, per JLS scoping —
+  previously the reference silently erased to `Object` in lenient stubbing, so the nested SAM
+  parameter never matched
+  (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_converts_sam_lambdas_on_implicit_receivers_and_nested_interfaces`).
+
+- **SAM conversion works on implicit receivers.** A trailing lambda passed to a Java member of an
+  implicit receiver (`Button().apply { addActionListener { … } }`) types against the functional
+  method's parameters — including a lambda with no declared parameters (`it` bound) — and member
+  selection receives the lambda-literal flags, exactly as on an explicit receiver (same test).
+
+- **Explicit type arguments bind generic static SAM calls.** `Maps.create<String, Int> { s -> … }`
+  seeds `K`/`V` from the call's type-argument list before any
+  argument unification: the SAM lambda's parameter types substitute through (`s: String`) and the
+  return types as `Map<String, Int>`, matching kotlinc
+  (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_binds_explicit_type_args_on_generic_static_sam_call`).
+
+- **Interface fields are implicitly public static final (JLS §9.3).** Signature stubs stamp the
+  implicit flags, so generic constant-holder fields (`Modifiers.STATIC`, `Names.STRING`) resolve
+  as static field reads
+  (`src/jvm/java_stub.rs::interface_fields_are_implicitly_public_static_final`).
+
+- **All-caps Java getters map to decapitalize-smart properties.** `getID()` reads as `id`,
+  `getURLPath()` as `urlPath` — the physical-getter fallback tries the re-uppercased leading-run
+  spelling after the conventional `getX`
+  (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_maps_all_caps_java_getters_to_properties`).
+
+- **Modifier-prefixed local functions parse in any body.** `tailrec fun`/`suspend fun` local
+  declarations are statements everywhere, not only in scripts; the soft-keyword prefix no longer
+  parses as an expression name (`src/frontend.rs::modifier_prefixed_local_functions_parse_in_bodies`).
+
+- **Element-form vararg calls select and lower against classpath extensions.** `"a.b".trim('.')`
+  expands `trim(vararg chars: Char)` element-wise (an exact element type beats an assignable one, so
+  the `Char` overload wins over `String`); `fq.split('.')` additionally requires every parameter
+  after the vararg to be defaulted and pairs the base's `$default` synthetic by parameter identity,
+  with the lowering PACKING the elements into the array before the mask machinery. The selected
+  callable carries its declared vararg index separately from its logical element type: for
+  `fun <T> List<T>.render(vararg values: T, separator: String = …)`, a `String` specialization
+  still occupies a physical `Object[]` slot, and positional arguments at that non-final vararg
+  remain elements while `separator` defaults. Lowering therefore never rediscovers the slot by
+  comparing logical and physical types; each element lowers to its specialized logical type and
+  is then coerced to the physical array element, so primitive specializations are boxed for
+  `Object[]` while primitive arrays remain unboxed
+  (`tests/vararg_element_default_e2e.rs` — runtime-verified; both failures were VerifyErrors).
+
+- **A plain constructor initializer types a capturable local.** `val sb = StringBuilder()` is
+  capturable by an anonymous object exactly like an annotated local — the capture list infers the
+  type from the capitalized bare-name constructor call, and the checker verifies the name like an
+  explicit annotation; a function-call initializer (`val xs = listOf(…)`) stays uncaptured
+  (skip-not-wrong) (`tests/anon_object_capture_e2e.rs::captures_constructor_initialized_local` —
+  runtime-verified mutation visibility).
+
+- **A Java accessor pair without `@Metadata` is a writable synthetic property.** `x.text = v` on a
+  Java receiver resolves the write to the single-argument `void` setter named by Kotlin's accessor
+  rules (`text` → `setText`, `isOpen` → `setOpen`) — but only when the getter also resolves
+  (kotlinc synthesizes the property from the getter; a setter alone creates none), and never when
+  the receiver has a real `@Metadata` property (a Kotlin `val` stays read-only even if a `setX`
+  exists). Among setter overloads, the one whose parameter matches the getter's type wins; an
+  ambiguous remainder resolves to none
+  (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_resolves_java_setter_backed_property_write`).
+
+- **Member types of a Java interface or annotation are implicitly public (JLS §9.5).** The Java
+  signature stubs emit `interface Registry { final class Handler {…} }` with `ACC_PUBLIC` on
+  `Registry$Handler`, so `Registry.Handler.publish(…)` resolves like kotlinc
+  (`src/jvm/java_stub.rs::interface_nested_types_are_implicitly_public`).
+
+- **A Kotlin override of a Java-supertype getter refines the synthetic property's type.**
+  `interface RefinedCatalog : JavaCatalog { override fun getEntries(): Array<RefinedEntry> }`
+  keeps the Java synthetic property `entries` (the property exists because a JAVA base declares
+  the accessor; a pure-Kotlin `getX()` still creates none), but reads as the most-derived SOURCE override's
+  return — `catalog.entries` is `Array<RefinedEntry>`, not `BaseEntry[]`. Applied on both the checked
+  tier (`resolve_external_inherited_property`) and the declaration-only tier
+  (`SourceFallbackPlatform::property_members`)
+  (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_refines_java_getter_property_via_kotlin_override`).
+
+- **A qualified static call resolves nested types through in-scope outers.** `Outer.Nested.m(args)`
+  where `Outer` is imported/in scope resolves the receiver chain to `pkg/Outer$Nested` (an in-scope
+  type shadows a package path, as in kotlinc), then dispatches `m` as a static/companion member
+  (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_resolves_interface_nested_class_static_call`).
+
+- **A static field's generic type comes from its `Signature`, not its erased descriptor.** A read of
+  `Keys.CURRENT : Key<Document>` retains its arguments so a generic callee binds from it
+  (`<T> T getData(Key<T>)` returns `Document`); a signature carrying free type variables falls
+  back to the erased descriptor
+  (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_binds_generic_return_from_generic_static_field`).
+
+- **A module-declared argument class reaches a library parameter through its source supertypes.**
+  Library-member overload selection admits an argument whose supertype walk runs through MODULE
+  declarations (`class V : Thread()` — or an anonymous object over a declaration-only Kotlin base —
+  passed to `take(Thread)`): the platform oracle alone only walks classpath supertypes and cannot
+  see source classes. Applied in the ordered applicability pass and the assignability pass via the
+  module-first source federation
+  (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_passes_module_subclass_to_java_member_parameter`).
+  CONSTRUCTOR resolution admits the same walk in its assignability pass (`class V : Visitor()` into
+  `Holder(Visitor)`): `resolve_constructor_name` threads the resolver's source federation next to
+  the platform oracle
+  (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_passes_module_subclass_to_java_constructor_parameter`).
+
+- **Extensions from declaration-only source tiers resolve like in-prefix ones.** A call to an
+  imported extension whose declaring file sits beyond the inferred prefix (LSP dependency modules)
+  selects through the fallback platform seam and synthesizes the checked signature from the
+  resolved overload — defaulted parameters included; only the emit-facade owner is unknown, which
+  checking never needs (`src/frontend.rs::declaration_only_extension_calls_resolve_and_type`).
+
 - **krusty-lsp reports project and analysis work through server-initiated work-done progress.**
   When the client advertises `capabilities.window.workDoneProgress`, the async engine opens one
   token for project loading or analysis, updates that token when the current work changes, and ends
@@ -2440,3 +2580,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `crates/krusty-lsp/tests/deps_render.rs`, `crates/krusty-lsp/src/server.rs`
   (`definition_into_a_library_returns_a_materialized_file_location`),
   `crates/krusty-lsp/src/deps_cache.rs`.
+
+- **Newlines after infix operators continue the expression.** The right operand may begin after one
+  or more newlines, while a newline before the operator still terminates the expression. A `when`
+  subject declaration may likewise place its initializer after a newline. Test:
+  `tests/infix_newline_operand_e2e.rs`.
+
+- **Safe calls use the ordinary value-argument grammar and slot mapping.** Named and spread
+  arguments, including defaults supported by the ordinary target, use the same member and extension
+  call machinery as non-safe calls. Supplied arguments evaluate left-to-right inside the non-null
+  branch, then load in parameter order. Tests: `tests/safe_call_argument_list_e2e.rs`.
+
+- **Named extension applicability uses the composite source graph.** Overload selection does not
+  distinguish a positional call from a labelled one, nor a module type from a classpath type: a
+  module-declared subclass is assignable to a classpath extension parameter through the same
+  federated hierarchy used by ordinary resolution. Test:
+  `named_args_classpath_e2e::named_classpath_extension_accepts_a_module_subclass_argument`.
+
+- **Generic constructor inference preserves concrete parameter shells.** A parameter declared
+  directly as `T` is inference-only before `T` is bound, but a parameter such as `(Int) -> T` still
+  requires a function of the correct arity, suspend shape, and nullability. Constructed types such
+  as `List<T>` likewise retain their concrete head. This keeps an incompatible generic primary out
+  of overload competition with a valid concrete secondary constructor. Tests:
+  `definitely_non_null_type_e2e::generic_function_constructor_still_requires_a_function_argument`
+  and
+  `definitely_non_null_type_e2e::concrete_secondary_beats_an_incompatible_generic_function_primary`.
