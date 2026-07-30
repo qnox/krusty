@@ -54,11 +54,27 @@ pub struct DumpResult {
     pub path: std::path::PathBuf,
 }
 
+/// A dump request on its way to the analysis thread. `token` correlates it with the LSP request id
+/// the session parked while waiting.
+#[derive(Debug)]
+pub struct DumpJob {
+    pub token: u64,
+    pub uri: String,
+}
+
+pub struct DumpOutcome {
+    pub token: u64,
+    /// `None` when the document is not dumpable — dev mode is off, the document was not part of the
+    /// retained analysis payload, or rendering failed.
+    pub dump: Option<DumpResult>,
+}
+
 #[derive(Debug)]
 pub(crate) enum EngineCommand {
     SetWorkspaceRoot(Option<std::path::PathBuf>),
     Analyze(AnalysisJob),
     Materialize(MaterializeJob),
+    Dump(DumpJob),
     ProjectChange {
         refresh: bool,
         reanalyze: bool,
@@ -73,6 +89,7 @@ pub(crate) enum EngineEvent {
     ReanalyzeRequested,
     AnalysisComplete(AnalysisBatch),
     Materialized(MaterializeResult),
+    Dumped(DumpOutcome),
     Status(ServerStatus),
 }
 
@@ -208,6 +225,11 @@ impl CommandState {
             }
             EngineCommand::Materialize(job) => {
                 self.pending.push_back(EngineCommand::Materialize(job));
+            }
+            // Queued behind any pending analysis on purpose: the dump replays the payload the
+            // worker last analyzed, so running it after a queued re-analysis keeps it current.
+            EngineCommand::Dump(job) => {
+                self.pending.push_back(EngineCommand::Dump(job));
             }
             EngineCommand::SetWorkspaceRoot(root) => {
                 let analysis = self
@@ -400,6 +422,11 @@ impl AnalysisBackend for EngineBackend {
         None
     }
 
+    fn dump(&mut self, job: DumpJob) -> Option<DumpOutcome> {
+        self.engine.submit(EngineCommand::Dump(job));
+        None
+    }
+
     fn set_workspace_root(&mut self, root: Option<std::path::PathBuf>) -> Option<ProjectFeedback> {
         self.engine.submit(EngineCommand::SetWorkspaceRoot(root));
         None
@@ -537,6 +564,18 @@ fn run<A: Analysis>(
                             definition,
                         },
                     )))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Some(EngineCommand::Dump(job)) => {
+                let dump = analyze.dump(&job.uri);
+                if events
+                    .send(Incoming::Engine(EngineEvent::Dumped(DumpOutcome {
+                        token: job.token,
+                        dump,
+                    })))
                     .is_err()
                 {
                     break;

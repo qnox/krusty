@@ -156,8 +156,9 @@ fn main() {
         let _ = krusty_lsp::deps_cache::gc(&cache_root, max_age_days, max_bytes, now_secs);
     });
 
+    let dev = options.dev();
     let host = WorkerHost::new(worker, options);
-    match krusty_lsp::run_stdio_connection_async(host) {
+    match krusty_lsp::run_stdio_connection_async(host, dev) {
         Ok(0) => {}
         Ok(code) => std::process::exit(code),
         Err(error) => {
