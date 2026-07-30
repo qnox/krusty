@@ -14266,15 +14266,15 @@ impl<'a> Checker<'a> {
 
     /// Find a nested type visible from the lexical class receiver stack.
     fn enclosing_nested_type_name(&self, name: &str) -> Option<TypeName> {
-        for receiver in self
-            .this_labels
-            .iter()
-            .rev()
-            .filter_map(|(_, receiver, is_class)| is_class.then_some(*receiver))
-        {
-            let Ty::Obj(outer, _) = receiver.non_null() else {
-                continue;
-            };
+        // Walk the LEXICAL enclosing classes, not just `this_labels`. Inside a plain `companion object`
+        // there is no class `this` — a companion only becomes a first-class type when it declares a
+        // supertype — so a `this_labels`-only walk saw no enclosing class at all and a sibling nested type
+        // referenced by simple name came back unresolved: `companion object { fun f() = Inner(…) }` failed
+        // with "unresolved function 'Inner'" while the same call from an ordinary member, and the qualified
+        // `Outer.Inner(…)` from the companion, both resolved. `lexical_source_class_names` already covers
+        // the companion (via `companion_of`) for inherited-classifier lookup; nested-type scoping is the
+        // same question and now asks the same way.
+        for outer in self.lexical_source_class_names() {
             let outer = outer.render();
             let mut prefix: &str = &outer;
             loop {
@@ -23809,6 +23809,16 @@ impl<'a> Checker<'a> {
                             .and_then(|i| self.resolved_type_name(i))
                             .and_then(|t| t.constructor_named_params(args.len()))
                             .is_some()
+                        // A SIBLING nested class of an enclosing one, referenced by simple name
+                        // (`Inner(version = "1")` inside `Outer` or its companion). Kotlin nested-type
+                        // scoping puts it in scope, and the positional form already resolved through
+                        // `enclosing_nested_type_name`; only this predicate had no clause for it, so the
+                        // named form was rejected while `Outer.Inner(version = "1")` was accepted. Asking
+                        // the same lookup keeps the two spellings in agreement.
+                        || self
+                            .enclosing_nested_type_name(n)
+                            .and_then(|internal| self.syms.class_by_type_name(internal))
+                            .is_some_and(|sig| !sig.ctor_param_names.is_empty())
                 }
                 Expr::Member { receiver, name }
                     if self.same_file_nested_class_qname(*receiver, name).is_some() =>

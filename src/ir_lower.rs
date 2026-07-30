@@ -22078,8 +22078,20 @@ impl<'a> Lower<'a> {
                         // `Long`. Only the simple all-property positional case.
                         // A NULLABLE type-param field (`val z: T?`) stays boxed (`Int?`) — only coerce a
                         // non-nullable one (`val value: T`); use an empty (non-matching) name for nullable.
+                        // Resolve the class DECL from the class we are constructing, not from the
+                        // written name. A NESTED class's decl is keyed by its hoisted name (`Outer.Inner`),
+                        // so a simple-name lookup found nothing for `Inner(version = "1")` written inside
+                        // `Outer` or its companion — leaving the ctor-parameter metadata below empty, which
+                        // is what named arguments and defaults are filled from, so the construction bailed
+                        // the whole file. Keying on the class covers the nested and top-level spellings the
+                        // same way.
+                        let ctor_decl_name = {
+                            let fq = self.ir.classes[class as usize].fq_name();
+                            self.class_decl_by_type_name(type_name(&fq))
+                                .map_or_else(|| fname.clone(), |cd| cd.name.clone())
+                        };
                         let (tparams, prop_tys): (Vec<String>, Vec<String>) = self
-                            .class_decl(&fname)
+                            .class_decl(&ctor_decl_name)
                             .map(|cd| {
                                 (
                                     cd.type_params.clone(),
@@ -22144,7 +22156,7 @@ impl<'a> Lower<'a> {
                             return Some(self.emit_new(class, a, None));
                         }
                         let meta: Vec<(String, Option<AstExprId>)> = self
-                            .class_decl(&fname)
+                            .class_decl(&ctor_decl_name)
                             .map(|cd| {
                                 cd.props
                                     .iter()
