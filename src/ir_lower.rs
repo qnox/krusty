@@ -7527,6 +7527,24 @@ impl<'a> Lower<'a> {
                         "kotlin/jvm/internal/DefaultConstructorMarker",
                     )));
                 }
+                // A VALUE class is not constructed with `new` at all: its `<init>` is private and the
+                // JVM value-class pass rewrites the construction to `constructor-impl`. That rewrite only
+                // fires on a `New` WITHOUT a constructor descriptor, so emitting an external `new` here
+                // left a raw `invokespecial` on the private `<init>` — an `IllegalAccessError` at runtime
+                // for a value class declared in another file. `ResolvedConstructor::Plain` already routes
+                // value classes to `new_cross_file`; this branch, which handles a SOURCE class in another
+                // file of the same module, must do the same. The sole parameter is the class's DECLARED
+                // underlying, not the call's arity, so an omitted default still picks
+                // `constructor-impl$default`.
+                if value_class {
+                    let params = class
+                        .and_then(|class| {
+                            class.value_field.as_ref().map(|(_, u)| vec![ty_to_ir(*u)])
+                        })
+                        .unwrap_or_else(|| tys_to_ir(&invoke_params));
+                    let new = self.ir.new_cross_file(internal, params, lowered);
+                    return Some(self.wrap_arg_prelude(new, prelude));
+                }
                 let descriptor = self.runtime.method_descriptor(&invoke_params, Ty::Unit)?;
                 let new = self.emit_new_external(internal, descriptor, lowered);
                 Some(self.wrap_arg_prelude(new, prelude))
