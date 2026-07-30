@@ -7,6 +7,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Write `text` as the dump for `key` and return its stable path.
 pub fn store(root: &Path, key: &str, text: &str) -> io::Result<PathBuf> {
@@ -14,11 +15,28 @@ pub fn store(root: &Path, key: &str, text: &str) -> io::Result<PathBuf> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    // Write-then-rename so a reloading editor never sees a half-written dump.
-    let tmp = path.with_extension("md.tmp");
+    // Write-then-rename so a reloading editor never sees a half-written dump. The temp file gets a
+    // per-invocation unique name so concurrent stores of the same key never share (and thus never
+    // interleave through) the same temp file; it lives beside the final path so the rename stays
+    // on one filesystem and therefore stays atomic.
+    let tmp = tmp_path(&path);
     fs::write(&tmp, text)?;
-    fs::rename(&tmp, &path)?;
+    if let Err(err) = fs::rename(&tmp, &path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
     Ok(path)
+}
+
+/// A unique temp path in the same directory as `path`, for one `store` invocation.
+fn tmp_path(path: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("dump");
+    path.with_file_name(format!("{file_name}.{}-{count}.tmp", std::process::id()))
 }
 
 /// `<root>/dumps/<escaped key>.krusty.md`.
@@ -112,6 +130,63 @@ mod tests {
         let second = store(&root, "b/Main.kt", "x").unwrap();
 
         assert_ne!(first, second);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn temp_paths_are_unique_per_invocation() {
+        let root = scratch("tmp-unique");
+        let path = dump_path(&root, "src/Main.kt");
+
+        let first = tmp_path(&path);
+        let second = tmp_path(&path);
+
+        assert_ne!(
+            first, second,
+            "concurrent stores must not share a temp file"
+        );
+        assert_eq!(
+            first.parent(),
+            path.parent(),
+            "temp file must stay beside the final path so rename is atomic"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn concurrent_stores_of_the_same_key_never_interleave_or_leave_temp_files() {
+        let root = scratch("concurrent");
+        let text_a = "a".repeat(200_000);
+        let text_b = "b".repeat(200_000);
+
+        let root_a = root.clone();
+        let text_a_thread = text_a.clone();
+        let handle_a = std::thread::spawn(move || store(&root_a, "src/Main.kt", &text_a_thread));
+
+        let root_b = root.clone();
+        let text_b_thread = text_b.clone();
+        let handle_b = std::thread::spawn(move || store(&root_b, "src/Main.kt", &text_b_thread));
+
+        let path_a = handle_a.join().unwrap().unwrap();
+        let path_b = handle_b.join().unwrap().unwrap();
+        assert_eq!(path_a, path_b, "the key's path must stay stable");
+
+        let final_text = fs::read_to_string(&path_a).unwrap();
+        assert!(
+            final_text == text_a || final_text == text_b,
+            "final dump must hold one writer's complete text, never interleaved bytes"
+        );
+
+        let dumps_dir = path_a.parent().unwrap();
+        for entry in fs::read_dir(dumps_dir).unwrap() {
+            let name = entry.unwrap().file_name();
+            let name = name.to_string_lossy();
+            assert!(
+                !name.ends_with(".tmp"),
+                "stray temp file left behind: {name}"
+            );
+        }
+
         let _ = fs::remove_dir_all(&root);
     }
 }
