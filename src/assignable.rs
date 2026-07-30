@@ -133,6 +133,21 @@ fn assignable_inner(
         return true;
     }
 
+    // A compile-time constant integer literal can widen to a larger numeric type.
+    if let Ty::Const(inner) = sub {
+        let inner = inner.normalize();
+        if matches!(sup, Ty::Long) && inner == Ty::Int {
+            return true;
+        }
+        if matches!(sup, Ty::Float | Ty::Double) && matches!(inner, Ty::Int | Ty::Long) {
+            return true;
+        }
+        if matches!(sup, Ty::Double) && inner == Ty::Float {
+            return true;
+        }
+        return assignable_inner(cx, oracle, inner, sup, value_class);
+    }
+
     // Nullability. `null` fits any nullable target; `T` fits `T?`; `T?` does not fit non-null `T`.
     if sub == Ty::Null {
         return matches!(sup, Ty::Nullable(_)) || sup == Ty::Null;

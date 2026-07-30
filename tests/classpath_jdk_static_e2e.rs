@@ -456,3 +456,29 @@ fn generic_java_static_accepts_zero_arg_sam_lambda() {
         "OK"
     );
 }
+
+#[test]
+fn jdk_static_call_return_type_inferred_for_private_property() {
+    const SOURCE: &str = "import java.time.Instant\n\
+        class Holder {\n\
+            private val value = Instant.ofEpochSecond(1_700_000_000)\n\
+            private val computed = Instant.ofEpochSecond(1_700_000_000 + 1)\n\
+            fun epochSecond(): Long = value.epochSecond\n\
+            fun computedEpochSecond(): Long = computed.epochSecond\n\
+        }\n\
+        fun box(): String {\n\
+            if (Holder().epochSecond() != 1_700_000_000L) return \"wrong epoch\"\n\
+            if (Holder().computedEpochSecond() != 1_700_000_001L) return \"wrong computed\"\n\
+            return \"OK\"\n\
+        }\n";
+
+    let output = common::compile_and_run_with_stdlib(SOURCE, "Main").unwrap_or_else(|| {
+        let stdlib = common::stdlib_jar().unwrap();
+        let jdk = common::jdk_modules().unwrap();
+        panic!(
+            "{:?}",
+            common::front_end_diagnostics(SOURCE, &[stdlib], Some(&jdk))
+        )
+    });
+    assert_eq!(output.trim(), "OK");
+}

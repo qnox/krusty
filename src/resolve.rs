@@ -17,9 +17,9 @@ use crate::libraries::{
     EmptySymbolSource, GenericSig, InlineKind, Origin, ParamList, SemanticPlatform,
 };
 use crate::names::{property_getter_name, property_setter_name};
-use crate::symbol_resolver::InheritedNestedClassifier;
+use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier};
 use crate::symbol_source::SymbolSource;
-use crate::types::{existing_type_name, type_name, Ty, TypeName, Visibility};
+use crate::types::{existing_type_name, intern_ty, type_name, Ty, TypeName, Visibility};
 
 mod source_fallback;
 pub(crate) use source_fallback::SourceFallbackPlatform;
@@ -973,6 +973,9 @@ pub type MethodMap = HashMap<String, Vec<Signature>>;
 fn positional_score(params: &[Ty], arg_tys: &[Ty]) -> Option<usize> {
     let mut sc = 0;
     for (&p, &a) in params.iter().zip(arg_tys.iter()) {
+        // Score against the RUNTIME type: a `Const(Int)` literal is an exact `Int` match, not a
+        // loose fit — the `Const` provenance must not tie-break toward a reference overload.
+        let a = a.normalize();
         if !arg_assignable_simple(p, a) {
             return None;
         }
@@ -3746,7 +3749,8 @@ pub fn collect_signatures_with_cp(
                                     &this_scope,
                                     &*libraries,
                                     &table,
-                                );
+                                )
+                                .normalize();
                                 if t != Ty::Error {
                                     t
                                 } else if let Expr::Name(n) = file.expr(*e) {
@@ -4420,27 +4424,32 @@ pub fn collect_signatures_with_cp(
                                     })
                                     .unwrap_or(Ty::Error),
                             }
-                        };
-                        let storage_ty = bp.explicit_backing_field.as_ref().map(|field| {
-                            field
-                                .ty
-                                .as_ref()
-                                .map(|ty| ty_of_ref(ty, &class_names, &btp, diags))
-                                .or_else(|| {
-                                    bp.init.map(|init| {
-                                        infer_lit_ty_scoped(
-                                            file,
-                                            init,
-                                            &class_names,
-                                            &fun_rets,
-                                            &property_scope,
-                                            &*libraries,
-                                            &table,
-                                        )
+                        }
+                        .normalize();
+                        let storage_ty = bp
+                            .explicit_backing_field
+                            .as_ref()
+                            .map(|field| {
+                                field
+                                    .ty
+                                    .as_ref()
+                                    .map(|ty| ty_of_ref(ty, &class_names, &btp, diags))
+                                    .or_else(|| {
+                                        bp.init.map(|init| {
+                                            infer_lit_ty_scoped(
+                                                file,
+                                                init,
+                                                &class_names,
+                                                &fun_rets,
+                                                &property_scope,
+                                                &*libraries,
+                                                &table,
+                                            )
+                                        })
                                     })
-                                })
-                                .unwrap_or(Ty::Error)
-                        });
+                                    .unwrap_or(Ty::Error)
+                            })
+                            .map(|ty| ty.normalize());
                         if storage_ty == Some(Ty::Error) {
                             diags.error(
                                 bp.span,
@@ -4622,7 +4631,8 @@ pub fn collect_signatures_with_cp(
                                             &table,
                                         )
                                     })
-                                    .unwrap_or(Ty::Error),
+                                    .unwrap_or(Ty::Error)
+                                    .normalize(),
                             };
                             if ty != Ty::Error {
                                 props.push((bp.name.clone(), ty, bp.is_var));
@@ -4733,7 +4743,8 @@ pub fn collect_signatures_with_cp(
                                         &scope,
                                         &*libraries,
                                         &table,
-                                    );
+                                    )
+                                    .normalize();
                                     if t != Ty::Error {
                                         return t;
                                     }
@@ -5022,7 +5033,8 @@ pub fn collect_signatures_with_cp(
                                             &class_names,
                                             &fun_rets,
                                             &*libraries,
-                                        );
+                                        )
+                                        .normalize();
                                         if t != Ty::Error {
                                             t
                                         } else {
@@ -5090,7 +5102,7 @@ pub fn collect_signatures_with_cp(
                         .map(|p| {
                             let ty = match &p.ty {
                                 Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
-                                None => p.init.map(|i| infer_lit_ty(file, i, &class_names, &fun_rets, &*libraries)).unwrap_or(Ty::Error),
+                                None => p.init.map(|i| infer_lit_ty(file, i, &class_names, &fun_rets, &*libraries)).unwrap_or(Ty::Error).normalize(),
                             };
                             if ty == Ty::Error && p.init.is_some() && p.ty.is_none() {
                                 diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
@@ -5401,7 +5413,8 @@ pub fn collect_signatures_with_cp(
                                     )),
                                     _ => None,
                                 })
-                                .unwrap_or(Ty::Error);
+                                .unwrap_or(Ty::Error)
+                                .normalize();
                         if recv_ty != Ty::Error && ty != Ty::Error {
                             let receiver = recv_ty.erased_recv();
                             let declared_receiver = if accepts_nullable_receiver {
@@ -5517,7 +5530,8 @@ pub fn collect_signatures_with_cp(
                                 })
                                 .unwrap_or(Ty::Error),
                         }
-                    };
+                    }
+                    .normalize();
                     if ty == Ty::Error && (p.init.is_some() || is_computed) && p.ty.is_none() {
                         diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
                     }
@@ -6720,6 +6734,46 @@ fn infer_lit_ty_p(
         }
         ret
     }
+    /// Whether an expression is an integer-literal CONSTANT: a literal, or a constant fold
+    /// (unary `-`/`+`, arithmetic) over integer literals. Such an argument widens to a larger
+    /// numeric parameter (`Long`, `Double`) exactly as a bare literal does — kotlinc evaluates the
+    /// constant against the expected type. The provenance is SYNTACTIC: no `Const` wrapper is ever
+    /// stored in a type.
+    fn is_integer_literal_arg(file: &File, expr: ExprId) -> bool {
+        match file.expr(expr) {
+            Expr::IntLit(_) => true,
+            Expr::Unary {
+                op: UnOp::Neg | UnOp::Plus,
+                operand,
+            } => is_integer_literal_arg(file, *operand),
+            Expr::Binary { op, lhs, rhs, .. } => {
+                matches!(
+                    op,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+                ) && is_integer_literal_arg(file, *lhs)
+                    && is_integer_literal_arg(file, *rhs)
+            }
+            _ => false,
+        }
+    }
+    fn is_lambda_literal_arg(file: &File, expr: ExprId) -> bool {
+        matches!(file.expr(expr), Expr::Lambda { .. })
+    }
+    fn call_arg_kinds(file: &File, args: &[ExprId], arg_tys: &[Ty]) -> Vec<CallArgKind> {
+        args.iter()
+            .zip(arg_tys)
+            .map(|(&arg, &ty)| {
+                if is_lambda_literal_arg(file, arg) {
+                    CallArgKind::LambdaLiteral(ty)
+                } else if is_integer_literal_arg(file, arg) {
+                    CallArgKind::Typed(Ty::Const(intern_ty(Ty::Int)))
+                } else {
+                    CallArgKind::Typed(ty)
+                }
+            })
+            .collect()
+    }
+
     fn type_receiver(
         file: &File,
         receiver: ExprId,
@@ -6902,11 +6956,13 @@ fn infer_lit_ty_p(
                         return t;
                     }
                     if !arg_tys.contains(&Ty::Error) {
+                        let arg_kinds: Vec<CallArgKind> =
+                            arg_tys.iter().map(|&ty| CallArgKind::Typed(ty)).collect();
                         if let Some(c) = resolver
-                            .resolve_symbol(
+                            .resolve_symbol_with_literal_and_lambda_args(
                                 crate::symbol_resolver::SymRecv::TopLevel,
                                 n,
-                                &arg_tys,
+                                &arg_kinds,
                                 &[],
                             )
                             .and_then(crate::symbol_resolver::Symbol::top_level_call)
@@ -6973,13 +7029,14 @@ fn infer_lit_ty_p(
                         .iter()
                         .map(|a| infer_lit_ty_p(file, *a, class_names, fun_rets, props, src, env))
                         .collect();
+                    let arg_kinds = call_arg_kinds(file, args, &arg_tys);
                     if !arg_tys.contains(&Ty::Error) {
                         if let Some(ret) = type_receiver(file, *receiver, class_names, props, src)
                             .and_then(|internal| {
-                                match resolver.resolve_symbol(
+                                match resolver.resolve_symbol_with_literal_and_lambda_args(
                                     crate::symbol_resolver::SymRecv::TypeName(internal),
                                     name,
-                                    &arg_tys,
+                                    &arg_kinds,
                                     &[],
                                 ) {
                                     Some(crate::symbol_resolver::Symbol::Companion(member))
@@ -7014,10 +7071,10 @@ fn infer_lit_ty_p(
                         if !arg_tys.contains(&Ty::Error) {
                             for r in [recv_ty, Ty::obj("kotlin/Any")] {
                                 if let Some(m) = resolver
-                                    .resolve_symbol(
+                                    .resolve_symbol_with_literal_and_lambda_args(
                                         crate::symbol_resolver::SymRecv::Value(r),
                                         name,
-                                        &arg_tys,
+                                        &arg_kinds,
                                         &[],
                                     )
                                     .and_then(crate::symbol_resolver::Symbol::call)
@@ -8907,8 +8964,12 @@ pub enum LambdaCapture {
 }
 
 impl TypeInfo {
+    /// The checked type of an expression, with the `Ty::Const` literal-provenance wrapper stripped.
+    /// `Const` exists only for overload resolution inside the checker (integer-literal widening);
+    /// consumers of checked types — the lowerer, the JVM backend, tooling — always see the runtime
+    /// type (`Const(Int)` reads as `Int`).
     pub fn ty(&self, e: ExprId) -> Ty {
-        self.expr_types[e.0 as usize]
+        self.expr_types[e.0 as usize].normalize()
     }
     pub fn local_fun(&self, stmt_id: StmtId) -> Option<&LocalFunInfo> {
         match self.stmt_lowers.get(&stmt_id)? {
@@ -11198,25 +11259,11 @@ impl<'a> Checker<'a> {
         &self,
         receiver: Ty,
         name: &str,
-        args: &[Ty],
+        args: &[CallArgKind],
     ) -> Option<(crate::libraries::FunctionInfo, Signature)> {
-        self.selected_source_extension_with_lambda_args(receiver, name, args, &[])
-    }
-
-    fn selected_source_extension_with_lambda_args(
-        &self,
-        receiver: Ty,
-        name: &str,
-        args: &[Ty],
-        lambda_literals: &[bool],
-    ) -> Option<(crate::libraries::FunctionInfo, Signature)> {
-        let selected = self.resolver().resolve_extension_info(
-            receiver,
-            name,
-            args,
-            lambda_literals,
-            Some(self.file_index),
-        )?;
+        let selected =
+            self.resolver()
+                .resolve_extension_info(receiver, name, args, Some(self.file_index))?;
         let (file, declaration) = selected.source_key?;
         let (_, signature) = self
             .syms
@@ -12029,7 +12076,8 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &[Ty],
     ) -> Option<crate::symbol_resolver::ResolvedMember> {
-        self.resolve_instance_member_with_literal_args(recv, name, args, &[])
+        let arg_kinds: Vec<CallArgKind> = args.iter().map(|&ty| CallArgKind::Typed(ty)).collect();
+        self.resolve_instance_member_with_literal_args(recv, name, &arg_kinds)
     }
     fn resolve_implicit_instance_member(
         &self,
@@ -12046,35 +12094,19 @@ impl<'a> Checker<'a> {
         &self,
         recv: Ty,
         name: &str,
-        args: &[Ty],
-        integer_literals: &[bool],
+        args: &[CallArgKind],
     ) -> Option<crate::symbol_resolver::ResolvedMember> {
-        self.resolve_instance_member_with_literal_and_lambda_args(
-            recv,
-            name,
-            args,
-            integer_literals,
-            &[],
-        )
+        self.resolve_instance_member_with_literal_and_lambda_args(recv, name, args)
     }
     fn resolve_instance_member_with_literal_and_lambda_args(
         &self,
         recv: Ty,
         name: &str,
-        args: &[Ty],
-        integer_literals: &[bool],
-        lambda_literals: &[bool],
+        args: &[CallArgKind],
     ) -> Option<crate::symbol_resolver::ResolvedMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol_with_literal_and_lambda_args(
-                SymRecv::Value(recv),
-                name,
-                args,
-                integer_literals,
-                lambda_literals,
-                &[],
-            )
+            .resolve_symbol_with_literal_and_lambda_args(SymRecv::Value(recv), name, args, &[])
             .and_then(Symbol::call)
     }
     fn resolve_property_member(
@@ -12332,7 +12364,7 @@ impl<'a> Checker<'a> {
         &self,
         internal: TypeName,
         name: &str,
-        args: &[Ty],
+        args: &[CallArgKind],
     ) -> Option<crate::libraries::LibraryMember> {
         self.resolver().resolve_super_instance(internal, name, args)
     }
@@ -12351,20 +12383,11 @@ impl<'a> Checker<'a> {
         &self,
         internal: &str,
         name: &str,
-        args: &[Ty],
-        integer_literals: &[bool],
-        lambda_literals: &[bool],
+        args: &[CallArgKind],
     ) -> Option<crate::libraries::LibraryMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol_with_literal_and_lambda_args(
-                SymRecv::Type(internal),
-                name,
-                args,
-                integer_literals,
-                lambda_literals,
-                &[],
-            )
+            .resolve_symbol_with_literal_and_lambda_args(SymRecv::Type(internal), name, args, &[])
             .and_then(Symbol::companion)
     }
     fn resolve_companion_name(
@@ -12614,9 +12637,9 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        let lambda_literals = self.lambda_literal_args(arg_exprs);
+        let arg_kinds = self.call_arg_kinds(arg_exprs);
         if let Some((selected, sig)) = self
-            .selected_source_extension_with_lambda_args(receiver, name, arg_tys, &lambda_literals)
+            .selected_source_extension(receiver, name, &arg_kinds)
             .filter(|(_, signature)| signature.is_operator() && !signature.vararg())
         {
             self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
@@ -16401,14 +16424,25 @@ impl<'a> Checker<'a> {
         name: &str,
         arguments: &[ExprId],
         argument_types: &mut [Ty],
-        integer_literals: &[bool],
         type_arguments: &[Ty],
     ) {
+        let arg_kinds: Vec<CallArgKind> = arguments
+            .iter()
+            .zip(argument_types.iter())
+            .map(|(&arg, &ty)| {
+                if matches!(self.file.expr(arg), Expr::Lambda { .. }) {
+                    CallArgKind::LambdaLiteral(ty)
+                } else if self.is_integer_literal_arg(arg) {
+                    CallArgKind::Typed(Ty::Const(intern_ty(Ty::Int)))
+                } else {
+                    CallArgKind::Typed(ty)
+                }
+            })
+            .collect();
         let expectations = self.resolver().extension_argument_expectations(
             receiver,
             name,
-            argument_types,
-            integer_literals,
+            &arg_kinds,
             type_arguments,
         );
         for (index, expected_argument) in expectations.into_iter().enumerate() {
@@ -16445,9 +16479,7 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         partial: &[Option<Ty>],
     ) -> Option<Vec<Option<Vec<Ty>>>> {
-        let lambda_literals = self.lambda_literal_args(args);
-        let integer_literals = self.integer_literal_args(args);
-        let provisional = args
+        let provisional: Vec<Ty> = args
             .iter()
             .enumerate()
             .map(|(index, &arg)| {
@@ -16455,70 +16487,125 @@ impl<'a> Checker<'a> {
                     .or_else(|| partial.get(index).copied().flatten())
                     .unwrap_or(Ty::Error)
             })
-            .collect::<Vec<_>>();
-        let candidate = self
-            .resolver()
-            .resolve_symbol_with_literal_and_lambda_args(
-                receiver,
-                name,
-                &provisional,
-                &integer_literals,
-                &lambda_literals,
-                &[],
-            )?
-            .selected_member()?;
-        Some(
-            crate::symbol_resolver::specialized_sam_member_params(
-                &candidate,
-                &provisional,
-                &lambda_literals,
-            )
-            .into_iter()
-            .enumerate()
-            .map(|(index, param)| {
-                if lambda_literals.get(index) == Some(&true) {
-                    crate::symbol_resolver::classpath_sam_signature(&*self.syms.libraries, param)
-                        .map(|sam| sam.params)
+            .collect();
+        let arg_kinds: Vec<CallArgKind> = args
+            .iter()
+            .zip(provisional)
+            .map(|(&arg, ty)| {
+                if matches!(self.file.expr(arg), Expr::Lambda { .. }) {
+                    CallArgKind::LambdaLiteral(ty)
+                } else if self.is_integer_literal_arg(arg) {
+                    CallArgKind::Typed(Ty::Const(intern_ty(Ty::Int)))
                 } else {
-                    None
+                    CallArgKind::Typed(ty)
                 }
             })
-            .collect(),
+            .collect();
+        let candidate = self
+            .resolver()
+            .resolve_symbol_with_literal_and_lambda_args(receiver, name, &arg_kinds, &[])?
+            .selected_member()?;
+        Some(
+            crate::symbol_resolver::specialized_sam_member_params(&candidate, &arg_kinds)
+                .into_iter()
+                .enumerate()
+                .map(|(index, param)| {
+                    if arg_kinds
+                        .get(index)
+                        .is_some_and(|arg| arg.is_lambda_literal())
+                    {
+                        crate::symbol_resolver::classpath_sam_signature(
+                            &*self.syms.libraries,
+                            param,
+                        )
+                        .map(|sam| sam.params)
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
         )
     }
 
-    fn classpath_sam_arg_tys(
+    /// The [`CallArgKind`] for an already-checked argument — pure, no checking side effects.
+    fn call_arg_kind(&self, arg: ExprId) -> CallArgKind {
+        if matches!(self.file.expr(arg), Expr::Lambda { .. }) {
+            let ty = match self.expr_types[arg.0 as usize] {
+                Ty::Error => self.lambda_probe_ty(arg).unwrap_or(Ty::Error),
+                ty => ty,
+            };
+            CallArgKind::LambdaLiteral(ty)
+        } else if self.is_integer_literal_arg(arg) {
+            CallArgKind::Typed(Ty::Const(intern_ty(Ty::Int)))
+        } else {
+            CallArgKind::Typed(self.expr_types[arg.0 as usize])
+        }
+    }
+
+    fn call_arg_kinds(&mut self, args: &[ExprId]) -> Vec<CallArgKind> {
+        // Ensure each NON-lambda argument has been type-checked so the lowerer sees real types.
+        // A lambda argument is NOT checked here: its parameter types come from the selected
+        // overload's (SAM) parameter, applied by the call paths via `check_lambda_with_types`.
+        // Checking it eagerly would bind `it`/the parameters as `Any` and record spurious
+        // diagnostics before the expected type is known. Checked arguments are skipped to avoid
+        // duplicate work.
+        for &arg in args {
+            if !matches!(self.file.expr(arg), Expr::Lambda { .. })
+                && self.expr_types[arg.0 as usize] == Ty::Error
+            {
+                self.expr(arg);
+            }
+        }
+        args.iter().map(|&arg| self.call_arg_kind(arg)).collect()
+    }
+
+    /// Kinds for arguments that are all known to be checked already (no re-check, so no duplicate
+    /// diagnostics from re-walking an erroneous argument).
+    fn checked_call_arg_kinds(&self, args: &[ExprId]) -> Vec<CallArgKind> {
+        args.iter().map(|&arg| self.call_arg_kind(arg)).collect()
+    }
+
+    /// Argument kinds for a classpath static/companion call whose parameters may be Java SAM
+    /// interfaces. Non-lambda arguments are checked normally; a lambda argument is checked against
+    /// the selected candidate's SPECIALIZED SAM parameter types (so `it` gets the SAM method's
+    /// parameter type, not `Any`), falling back to a plain check when no SAM signature applies.
+    fn classpath_sam_arg_kinds(
         &mut self,
         receiver: crate::symbol_resolver::SymRecv<'_>,
         name: &str,
         args: &[ExprId],
-    ) -> Vec<Ty> {
-        let partial = args
+    ) -> Vec<CallArgKind> {
+        let partial: Vec<Option<Ty>> = args
             .iter()
-            .map(|&arg| self.lambda_probe_ty(arg).is_none().then(|| self.expr(arg)))
-            .collect::<Vec<_>>();
+            .map(|&arg| (self.lambda_probe_ty(arg).is_none()).then(|| self.expr(arg)))
+            .collect();
         let lambda_params = self.classpath_sam_param_types(receiver, name, args, &partial);
-        let mut types = Vec::with_capacity(args.len());
-        for (index, &arg) in args.iter().enumerate() {
-            if let Some(params) = lambda_params
-                .as_ref()
-                .and_then(|all| all.get(index))
-                .and_then(Option::as_deref)
-            {
-                types.push(self.check_lambda_with_types(arg, params));
-            } else {
-                types.push(partial[index].unwrap_or_else(|| self.expr(arg)));
-            }
-        }
-        types
-    }
-
-    fn lambda_literal_args(&self, args: &[ExprId]) -> Vec<bool> {
         args.iter()
-            .map(|&arg| matches!(self.file.expr(arg), Expr::Lambda { .. }))
+            .enumerate()
+            .map(|(index, &arg)| {
+                if matches!(self.file.expr(arg), Expr::Lambda { .. }) {
+                    let ty = match lambda_params
+                        .as_ref()
+                        .and_then(|all| all.get(index))
+                        .and_then(Option::as_deref)
+                    {
+                        Some(params) => self.check_lambda_with_types(arg, params),
+                        None => partial[index].unwrap_or_else(|| self.expr(arg)),
+                    };
+                    CallArgKind::LambdaLiteral(ty)
+                } else if self.is_integer_literal_arg(arg) {
+                    CallArgKind::Typed(Ty::Const(intern_ty(Ty::Int)))
+                } else {
+                    CallArgKind::Typed(partial[index].unwrap_or(Ty::Error))
+                }
+            })
             .collect()
     }
 
+    /// The checker-side view of [`is_integer_literal_arg`]: a literal or a constant fold over
+    /// literals (unary `-3`, arithmetic `1_700_000_000 + 1`). Provenance is SYNTACTIC — the
+    /// checker's expression types stay runtime types; the `Const` wrapper is only synthesized for
+    /// [`CallArgKind`] at call-argument positions.
     fn is_integer_literal_arg(&self, expr: ExprId) -> bool {
         match self.file.expr(expr) {
             Expr::IntLit(_) => true,
@@ -16526,14 +16613,15 @@ impl<'a> Checker<'a> {
                 op: UnOp::Neg | UnOp::Plus,
                 operand,
             } => self.is_integer_literal_arg(*operand),
+            Expr::Binary { op, lhs, rhs, .. } => {
+                matches!(
+                    op,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+                ) && self.is_integer_literal_arg(*lhs)
+                    && self.is_integer_literal_arg(*rhs)
+            }
             _ => false,
         }
-    }
-
-    fn integer_literal_args(&self, args: &[ExprId]) -> Vec<bool> {
-        args.iter()
-            .map(|&arg| self.is_integer_literal_arg(arg))
-            .collect()
     }
 
     fn integer_literal_adapts_to(&self, expected: Ty, actual: Ty, expr: ExprId) -> bool {
@@ -17446,9 +17534,9 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                let lambda_literals = self.lambda_literal_args(&indices);
+                let index_kinds = self.call_arg_kinds(&indices);
                 if let Some((selected, sig)) = self
-                    .selected_source_extension_with_lambda_args(at, "get", &its, &lambda_literals)
+                    .selected_source_extension(at, "get", &index_kinds)
                     .filter(|(_, signature)| signature.is_operator())
                 {
                     for (i, &pt) in sig.params.iter().enumerate() {
@@ -17483,8 +17571,13 @@ impl<'a> Checker<'a> {
                     self.resolved_calls.insert(e, ResolvedCall::Member(m));
                     return self.set(e, ret);
                 }
-                if let Some(ret) = self.record_library_extension_call(Some(e), "get", at, &its, &[])
-                {
+                if let Some(ret) = self.record_library_extension_call_with_arg_kinds(
+                    Some(e),
+                    "get",
+                    at,
+                    &index_kinds,
+                    &[],
+                ) {
                     return self.set(e, ret);
                 }
                 self.diags.error(
@@ -18025,6 +18118,7 @@ impl<'a> Checker<'a> {
                             let recv = rt.non_null();
                             let type_args = self.resolved_explicit_type_args(e);
                             let arg_tys = self.ext_arg_tys(e, recv, &name, a, &type_args);
+                            let arg_kinds = self.call_arg_kinds(a);
                             if !type_args.is_empty() {
                                 self.resolved_call_type_args
                                     .insert(e, type_args.iter().copied().map(Some).collect());
@@ -18044,11 +18138,11 @@ impl<'a> Checker<'a> {
                                 ) {
                                     ret
                                 } else {
-                                    self.record_library_extension_call(
+                                    self.record_library_extension_call_with_arg_kinds(
                                         Some(e),
                                         &name,
                                         recv,
-                                        &arg_tys,
+                                        &arg_kinds,
                                         &type_args,
                                     )
                                     .unwrap_or(Ty::Error)
@@ -18119,11 +18213,11 @@ impl<'a> Checker<'a> {
                                     // lowerer's `lower_ext_call_on(e)` reads it instead of re-resolving. One
                                     // resolution admits `@InlineOnly` (`takeIf`) — no separate inline path.
                                     .or_else(|| {
-                                        self.record_library_extension_call(
+                                        self.record_library_extension_call_with_arg_kinds(
                                             Some(e),
                                             &name,
                                             recv,
-                                            &arg_tys,
+                                            &arg_kinds,
                                             &type_args,
                                         )
                                     })
@@ -18133,11 +18227,11 @@ impl<'a> Checker<'a> {
                                     e, recv, &name, a, &arg_tys,
                                 )
                                 .or_else(|| {
-                                    self.record_library_extension_call(
+                                    self.record_library_extension_call_with_arg_kinds(
                                         Some(e),
                                         &name,
                                         recv,
-                                        &arg_tys,
+                                        &arg_kinds,
                                         &type_args,
                                     )
                                 })
@@ -18152,13 +18246,10 @@ impl<'a> Checker<'a> {
                 let result = if result == Ty::Error {
                     let arg_exprs = args.as_deref().unwrap_or_default();
                     let arg_tys = self.arg_tys(arg_exprs);
-                    let lambda_literals = self.lambda_literal_args(arg_exprs);
-                    if let Some((selected, sig)) = self.selected_source_extension_with_lambda_args(
-                        rt.non_null(),
-                        &name,
-                        &arg_tys,
-                        &lambda_literals,
-                    ) {
+                    let arg_kinds = self.call_arg_kinds(arg_exprs);
+                    if let Some((selected, sig)) =
+                        self.selected_source_extension(rt.non_null(), &name, &arg_kinds)
+                    {
                         self.expect_call_args(&sig.params, false, arg_exprs, &arg_tys);
                         self.mark_source_call(e, selected.source_key);
                         let owner =
@@ -18627,9 +18718,14 @@ impl<'a> Checker<'a> {
                     // `list + element` → the element overload), so a reference right operand is fine.
                     if let Some(fname) = op_name {
                         if rt != Ty::Error {
-                            if let Some(ret) =
-                                self.record_library_extension_call(Some(e), fname, lt, &[rt], &[])
-                            {
+                            let rhs_kinds = self.call_arg_kinds(&[rhs]);
+                            if let Some(ret) = self.record_library_extension_call_with_arg_kinds(
+                                Some(e),
+                                fname,
+                                lt,
+                                &rhs_kinds,
+                                &[],
+                            ) {
                                 return self.set(e, ret);
                             }
                         }
@@ -18643,14 +18739,9 @@ impl<'a> Checker<'a> {
                     && lt.nullable_primitive().is_some()
                     && rt != Ty::Error
                 {
-                    let lambda_literals = self.lambda_literal_args(&[rhs]);
+                    let rhs_kinds = self.call_arg_kinds(&[rhs]);
                     if let Some((selected, signature)) = self
-                        .selected_source_extension_with_lambda_args(
-                            lt,
-                            "compareTo",
-                            &[rt],
-                            &lambda_literals,
-                        )
+                        .selected_source_extension(lt, "compareTo", &rhs_kinds)
                         .filter(|(_, signature)| {
                             signature.is_operator() && signature.ret == Ty::Int
                         })
@@ -20098,9 +20189,9 @@ impl<'a> Checker<'a> {
         // A MODULE extension on the receiver (`fun Recv.name(args)` declared in this compilation) — keyed
         // by the receiver's erased key, exactly as a qualified `recv.name(args)` extension call
         // resolves. Lets a bare call inside a receiver lambda reach a same-module extension on `this`.
-        let lambda_literals = self.lambda_literal_args(args);
+        let arg_kinds = self.call_arg_kinds(args);
         if let Some((selected, sig)) = self
-            .selected_source_extension_with_lambda_args(rt, name, arg_tys, &lambda_literals)
+            .selected_source_extension(rt, name, &arg_kinds)
             .filter(|(_, signature)| !signature.vararg())
         {
             self.mark_source_call(call, selected.source_key);
@@ -20119,7 +20210,9 @@ impl<'a> Checker<'a> {
         {
             return Some(ret);
         }
-        if let Some(ret) = self.record_library_extension_call(Some(call), name, rt, arg_tys, &[]) {
+        if let Some(ret) =
+            self.record_library_extension_call_with_arg_kinds(Some(call), name, rt, &arg_kinds, &[])
+        {
             return Some(ret);
         }
         if let Some(ret) = self.library_extension_inline_return(name, rt, arg_tys) {
@@ -20523,58 +20616,24 @@ impl<'a> Checker<'a> {
         (t != Ty::Error).then_some(t)
     }
 
-    /// Resolve and record a classpath/library extension call. This keeps the legacy classpath-call
-    /// side-channel in one place while the call-resolution surface is being migrated to
-    /// `FunctionSet`/`ResolvedCall`.
-    fn record_library_extension_call(
+    fn record_library_extension_call_with_arg_kinds(
         &mut self,
         call: Option<ExprId>,
         name: &str,
         receiver: Ty,
-        arg_tys: &[Ty],
-        type_args: &[Ty],
-    ) -> Option<Ty> {
-        self.record_library_extension_call_with_literal_args(
-            call,
-            name,
-            receiver,
-            arg_tys,
-            &[],
-            type_args,
-        )
-    }
-
-    fn record_library_extension_call_with_literal_args(
-        &mut self,
-        call: Option<ExprId>,
-        name: &str,
-        receiver: Ty,
-        arg_tys: &[Ty],
-        integer_literals: &[bool],
+        args: &[CallArgKind],
         type_args: &[Ty],
     ) -> Option<Ty> {
         crate::trace_compiler!(
             "resolve",
-            "record_library_extension_call {name} recv={receiver:?} args={arg_tys:?} targs={type_args:?}"
+            "record_library_extension_call {name} recv={receiver:?} args={args:?} targs={type_args:?}"
         );
-        let lambda_literals = call
-            .and_then(|call| match self.file.expr(call) {
-                Expr::Call { args, .. } => Some(self.lambda_literal_args(args)),
-                Expr::SafeCall {
-                    args: Some(args), ..
-                } => Some(self.lambda_literal_args(args)),
-                _ => None,
-            })
-            .filter(|literals| literals.len() == arg_tys.len())
-            .unwrap_or_default();
         let c = self
             .resolver()
             .resolve_symbol_with_literal_and_lambda_args(
                 crate::symbol_resolver::SymRecv::Value(receiver),
                 name,
-                arg_tys,
-                integer_literals,
-                &lambda_literals,
+                args,
                 type_args,
             )
             .and_then(crate::symbol_resolver::Symbol::extension_call)?;
@@ -20875,11 +20934,12 @@ impl<'a> Checker<'a> {
         name: &str,
         params: &[Ty],
     ) -> Option<DestructureComponentTarget> {
-        let (_, sig) =
-            self.selected_source_extension(recv, name, params)
-                .filter(|(_, signature)| {
-                    !signature.vararg() && signature.params.as_slice() == params
-                })?;
+        let arg_kinds: Vec<CallArgKind> = params.iter().map(|&ty| CallArgKind::Typed(ty)).collect();
+        let (_, sig) = self
+            .selected_source_extension(recv, name, &arg_kinds)
+            .filter(|(_, signature)| {
+                !signature.vararg() && signature.params.as_slice() == params
+            })?;
         Some(DestructureComponentTarget::ModuleExtension {
             receiver: recv,
             name: name.to_string(),
@@ -22955,23 +23015,11 @@ impl<'a> Checker<'a> {
             return ClasspathMemberSlotCall::NoMatch;
         }
         if candidates.iter().all(|(score, _, _, _)| score.is_none()) {
-            let arg_tys: Vec<Ty> = args
-                .iter()
-                .map(|argument| self.expr_types[argument.0 as usize])
-                .collect();
-            let integer_literals = self.integer_literal_args(args);
-            let lambda_literals = self.lambda_literal_args(args);
+            let arg_kinds = self.call_arg_kinds(args);
             let type_args = self.resolved_explicit_type_args(call);
             let extension_applies = self
                 .resolver()
-                .resolve_symbol_with_literal_and_lambda_args(
-                    receiver,
-                    name,
-                    &arg_tys,
-                    &integer_literals,
-                    &lambda_literals,
-                    &type_args,
-                )
+                .resolve_symbol_with_literal_and_lambda_args(receiver, name, &arg_kinds, &type_args)
                 .and_then(crate::symbol_resolver::Symbol::extension_call)
                 .is_some();
             if extension_applies {
@@ -23277,6 +23325,8 @@ impl<'a> Checker<'a> {
         trailing_lambda: bool,
     ) -> Option<(usize, std::cmp::Reverse<usize>, bool)> {
         let score = |expected: Ty, actual: Ty| {
+            // Score against the RUNTIME type (see `positional_score`).
+            let actual = actual.normalize();
             if expected == actual {
                 Some(4)
             } else if expected.is_erased_top()
@@ -24331,6 +24381,7 @@ impl<'a> Checker<'a> {
                         return Ty::Error;
                     }
                     let arg_tys = self.arg_tys(args);
+                    let arg_kinds = self.call_arg_kinds(args);
                     // A `super<T>` qualifier matches a supertype by its simple name.
                     let matches_qual = |internal: TypeName| {
                         super_ty
@@ -24363,7 +24414,8 @@ impl<'a> Checker<'a> {
                                 return sig.ret;
                             }
                             // A classpath base-class method (`class C : ArrayList<…>() { … super.add(x) }`).
-                            if let Some(m) = self.resolve_super_instance_name(sup, &name, &arg_tys)
+                            if let Some(m) =
+                                self.resolve_super_instance_name(sup, &name, &arg_kinds)
                             {
                                 self.resolved_super_calls.insert(
                                     call,
@@ -24415,20 +24467,14 @@ impl<'a> Checker<'a> {
                 if let Expr::Member { .. } = self.file.expr(receiver) {
                     if let Some(internal) = self.classpath_type_receiver_internal(receiver) {
                         let fq = internal.render();
-                        let arg_tys = self.classpath_sam_arg_tys(
+                        let arg_kinds = self.classpath_sam_arg_kinds(
                             crate::symbol_resolver::SymRecv::Type(&fq),
                             &name,
                             args,
                         );
-                        let integer_literals = self.integer_literal_args(args);
-                        let lambda_literals = self.lambda_literal_args(args);
-                        if let Some(m) = self.resolve_companion_with_literal_args(
-                            &fq,
-                            &name,
-                            &arg_tys,
-                            &integer_literals,
-                            &lambda_literals,
-                        ) {
+                        if let Some(m) =
+                            self.resolve_companion_with_literal_args(&fq, &name, &arg_kinds)
+                        {
                             self.set(receiver, Ty::obj(&fq));
                             let ret = m.ret;
                             self.resolved_calls.insert(call, ResolvedCall::Companion(m));
@@ -24548,20 +24594,13 @@ impl<'a> Checker<'a> {
                             .imported_type_internal(&cls)
                             .or_else(|| self.imports.get(&cls).cloned());
                         if let Some(internal) = receiver_class {
-                            let arg_tys = self.classpath_sam_arg_tys(
+                            let arg_kinds = self.classpath_sam_arg_kinds(
                                 crate::symbol_resolver::SymRecv::Type(&internal),
                                 &name,
                                 args,
                             );
-                            let integer_literals = self.integer_literal_args(args);
-                            let lambda_literals = self.lambda_literal_args(args);
-                            let companion = self.resolve_companion_with_literal_args(
-                                &internal,
-                                &name,
-                                &arg_tys,
-                                &integer_literals,
-                                &lambda_literals,
-                            );
+                            let companion = self
+                                .resolve_companion_with_literal_args(&internal, &name, &arg_kinds);
                             return match companion {
                                 Some(m) => {
                                     // Type the class-name receiver as its own type so the LOWERING emits
@@ -24584,9 +24623,7 @@ impl<'a> Checker<'a> {
                                             self.resolve_instance_member_with_literal_and_lambda_args(
                                                 Ty::obj_name(cty),
                                                 &name,
-                                                &arg_tys,
-                                                &integer_literals,
-                                                &lambda_literals,
+                                                &arg_kinds,
                                             )
                                             .map(|m| (cty, m))
                                         });
@@ -24628,9 +24665,7 @@ impl<'a> Checker<'a> {
                                                     .resolve_instance_member_with_literal_and_lambda_args(
                                                         Ty::obj(&internal),
                                                         &name,
-                                                        &arg_tys,
-                                                        &integer_literals,
-                                                        &lambda_literals,
+                                                        &arg_kinds,
                                                     )
                                                 {
                                                     crate::trace_compiler!(
@@ -24920,16 +24955,20 @@ impl<'a> Checker<'a> {
                         })
                         .collect()
                 });
-                let integer_literals = self.integer_literal_args(args);
-                let extension_lambda_literals = self.lambda_literal_args(args);
+                let arg_kinds = self.call_arg_kinds(args);
                 let has_classpath_sam = classpath_sam_pts
                     .as_ref()
                     .is_some_and(|params| params.iter().any(Option::is_some));
-                let lambda_literals = if has_classpath_sam {
-                    extension_lambda_literals.clone()
-                } else {
-                    Vec::new()
-                };
+                let classpath_arg_kinds: Vec<CallArgKind> = arg_kinds
+                    .iter()
+                    .map(|arg| {
+                        if has_classpath_sam {
+                            *arg
+                        } else {
+                            CallArgKind::Typed(arg.ty())
+                        }
+                    })
+                    .collect();
                 if rt == Ty::Error {
                     return Ty::Error;
                 }
@@ -24979,15 +25018,17 @@ impl<'a> Checker<'a> {
                     if let Some(m) = self.resolve_instance_member_with_literal_and_lambda_args(
                         rt,
                         &name,
-                        &arg_tys,
-                        &integer_literals,
-                        &lambda_literals,
+                        &classpath_arg_kinds,
                     ) {
                         let ret = m.ret;
                         self.resolved_calls.insert(call, ResolvedCall::Member(m));
                         return ret;
                     }
-                    match (name.as_str(), arg_tys.as_slice()) {
+                    // The hardcoded builtin shapes compare RUNTIME types — a `Const(Int)` literal
+                    // argument matches the `Int` shape.
+                    let runtime_arg_tys: Vec<Ty> =
+                        arg_tys.iter().map(|ty| ty.normalize()).collect();
+                    match (name.as_str(), runtime_arg_tys.as_slice()) {
                         ("substring", [Ty::Int]) | ("substring", [Ty::Int, Ty::Int]) => {
                             return Ty::String;
                         }
@@ -25011,9 +25052,7 @@ impl<'a> Checker<'a> {
                     if let Some(m) = self.resolve_instance_member_with_literal_and_lambda_args(
                         rt,
                         &name,
-                        &arg_tys,
-                        &integer_literals,
-                        &lambda_literals,
+                        &classpath_arg_kinds,
                     ) {
                         crate::trace_compiler!(
                             "resolve",
@@ -25135,9 +25174,12 @@ impl<'a> Checker<'a> {
                     &name,
                     args,
                     &mut arg_tys,
-                    &integer_literals,
                     &call_targs,
                 );
+                // Re-derive the argument kinds: the retarget re-checks postponed generic arguments
+                // (`mutableSetOf()` → `MutableSet<Module>`), and the resolutions below must see the
+                // RETARGETED types, exactly as they saw the mutated `arg_tys` before `CallArgKind`.
+                let arg_kinds = self.checked_call_arg_kinds(args);
                 // Member extensions precede imported extensions.
                 if let Some(ret) =
                     self.check_member_extension_function_call(call, rt, &name, args, &arg_tys)
@@ -25153,12 +25195,15 @@ impl<'a> Checker<'a> {
                 ) {
                     return ret;
                 }
-                if let Some(ret) = self.record_library_extension_call_with_literal_args(
+                // The EXTENSION resolution needs the FULL argument kinds: a lambda literal keeps its
+                // marker (unit-coercion of a non-`Unit` body, SAM inference) exactly as the pre-`CallArgKind`
+                // flow, which re-derived the lambda flags from the call expression. The collapsed
+                // `classpath_arg_kinds` is only for the instance-member candidates above.
+                if let Some(ret) = self.record_library_extension_call_with_arg_kinds(
                     Some(call),
                     &name,
                     rt,
-                    &arg_tys,
-                    &integer_literals,
+                    &arg_kinds,
                     &call_targs,
                 ) {
                     return ret;
@@ -25202,14 +25247,9 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // (`@InlineOnly` extensions — scope fns `takeIf`/`let`/… — are resolved and recorded by
-                // `record_library_extension_call` above: one extension resolution admits inline, and the
-                // lowerer splices via the callable's `inline` flag. No separate inline path here.)
-                if let Some((fi, sig)) = self.selected_source_extension_with_lambda_args(
-                    rt,
-                    &name,
-                    &arg_tys,
-                    &extension_lambda_literals,
-                ) {
+                // `record_library_extension_call_with_arg_kinds` above: one extension resolution admits
+                // inline, and the lowerer splices via the callable's `inline` flag. No separate inline path here.)
+                if let Some((fi, sig)) = self.selected_source_extension(rt, &name, &arg_kinds) {
                     self.mark_source_call(call, fi.source_key);
                     let owner =
                         sig.source_file
@@ -25528,13 +25568,19 @@ impl<'a> Checker<'a> {
                         )
                         .map(crate::symbol_resolver::Symbol::overloads)
                         .is_some_and(|overloads| !overloads.is_empty())
-                        || matches!(
-                            (non_null, name.as_str(), arg_tys.as_slice()),
-                            (Ty::String, "substring", [Ty::Int])
-                                | (Ty::String, "substring", [Ty::Int, Ty::Int])
-                                | (Ty::String, "indexOf", [Ty::String])
-                                | (Ty::String, "concat", [Ty::String])
-                        )
+                        || {
+                            // Literal arguments carry the `Const` provenance wrapper — compare the
+                            // runtime types so `substring(1)` still matches the builtin shape.
+                            let arg_tys: Vec<Ty> =
+                                arg_tys.iter().map(|ty| ty.normalize()).collect();
+                            matches!(
+                                (non_null, name.as_str(), arg_tys.as_slice()),
+                                (Ty::String, "substring", [Ty::Int])
+                                    | (Ty::String, "substring", [Ty::Int, Ty::Int])
+                                    | (Ty::String, "indexOf", [Ty::String])
+                                    | (Ty::String, "concat", [Ty::String])
+                            )
+                        }
                         || (name == CALLABLE_INVOKE_OPERATOR && matches!(non_null, Ty::Fun(_)))
                         || (name == "equals" && arg_tys.len() == 1 && non_null.is_reference())
                         || callable_property_exists;
@@ -27606,12 +27652,11 @@ impl<'a> Checker<'a> {
                         }
                         None => (args.to_vec(), arg_tys.clone(), None),
                     };
-                    let integer_literals = self.integer_literal_args(&sel_args);
+                    let arg_kinds = self.call_arg_kinds(&sel_args);
                     let resolved = match expected {
                         Some(expected) => self.resolver().resolve_top_level_with_expected(
                             &fname,
-                            &arg_tys,
-                            &integer_literals,
+                            &arg_kinds,
                             &call_targs,
                             expected,
                         ),
@@ -27620,8 +27665,7 @@ impl<'a> Checker<'a> {
                             .resolve_symbol_with_literal_args(
                                 crate::symbol_resolver::SymRecv::TopLevel,
                                 &fname,
-                                &arg_tys,
-                                &integer_literals,
+                                &arg_kinds,
                                 &call_targs,
                             )
                             .and_then(crate::symbol_resolver::Symbol::top_level_call),
@@ -28128,7 +28172,10 @@ impl<'a> Checker<'a> {
                         }
                         d
                     }
-                    None => it,
+                    // An inferred local takes the initializer's RUNTIME type: `var s = 0` is an `Int`,
+                    // not a `Const(Int)` — the constant provenance only matters at call-argument
+                    // positions, never in a declared (stored) type.
+                    None => it.normalize(),
                 };
                 // Record the resolved ANNOTATION type so the lowerer reuses it (a library type resolved
                 // through imports survives even when the initializer is `null`/less specific).

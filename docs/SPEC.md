@@ -1426,6 +1426,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `invokestatic` (previously the checker resolved it but the emit bailed). Test:
   `java_instance_e2e::calls_java_static_overloaded_methods`.
 
+- **Integer-literal widening in overload resolution (`Instant.ofEpochSecond(1_700_000_000)`).**
+  Overload resolution receives call arguments as `CallArgKind::{Typed, LambdaLiteral}` (replacing the
+  parallel `integer_literals`/`lambda_literals` flag arrays); an integer-literal argument carries
+  `Ty::Const(Int)`, a compile-time-constant provenance wrapper that fits a `Long` (or wider numeric)
+  parameter via literal adaptation. Literal provenance is SYNTACTIC (`is_integer_literal_arg`): a literal,
+  a unary `-`/`+` of one, or a constant-foldable arithmetic expression over literals — so
+  `1_700_000_000 + 1` widens like a bare literal (unlike kotlinc, overflow/div-by-zero of such a fold is
+  not rejected at compile time). `Const` is only ever synthesized for `CallArgKind` and never stored in
+  expression types, signatures, or generic bindings: stored/bound types are normalized
+  (`Ty::normalize`), exact-match probes compare runtime types, and the lowerer reads checked types
+  through `TypeInfo::ty`, which strips the wrapper. This also lets the lightweight signature inferer
+  used during property signature collection infer the type of a property initialized by a JDK static
+  factory. Test: `classpath_jdk_static_e2e::jdk_static_call_return_type_inferred_for_private_property`.
+
 - **Static call on a bare same-package (incl. ROOT-package) classpath class name (`J.greet()`).** Kotlin
   makes same-package declarations visible without an import, and the file's own package — the root
   package for an unpackaged file — is an implicit wildcard (`import_wildcards`). The checker's

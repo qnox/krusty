@@ -228,6 +228,7 @@ pub fn type_descriptor(ty: Ty) -> String {
             Ty::ULong => obj_desc("kotlin/ULong"),
             other => type_descriptor(other.boxed_ref().unwrap_or(other)),
         },
+        Ty::Const(inner) => type_descriptor(*inner),
         Ty::TyParam(_, bound) => type_descriptor(*bound),
     }
 }
