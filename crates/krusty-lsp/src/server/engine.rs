@@ -427,11 +427,14 @@ impl CommandReceiver {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
         loop {
-            if let Some(command) = state.take() {
+            if let Some(command) = state.pending.pop_front() {
                 return CommandReceive::Command(command);
             }
             if state.disconnected {
                 return CommandReceive::Disconnected;
+            }
+            if let Some(command) = state.take() {
+                return CommandReceive::Command(command);
             }
             if let Some(deadline) = deadline {
                 let remaining = deadline.saturating_duration_since(Instant::now());
@@ -563,6 +566,7 @@ fn run<A: Analysis>(
             Some(EngineCommand::Analyze(job)) => {
                 Some(format!("Analyzing {} files", job.documents.len()))
             }
+            Some(EngineCommand::Index(job)) => Some(format!("Indexing {} files", job.uris.len())),
             _ => None,
         };
         if let Some(message) = working {
@@ -647,6 +651,9 @@ fn run<A: Analysis>(
                     })))
                     .is_err()
                 {
+                    break;
+                }
+                if send_status(&events, ServerStatus::Ready).is_err() {
                     break;
                 }
             }
@@ -1403,5 +1410,76 @@ mod tests {
             queued += job.uris.len();
         }
         assert_eq!(queued, MAX_QUEUED_INDEX_FILES);
+    }
+    #[test]
+    fn index_chunks_report_progress_as_working_status() {
+        use std::sync::mpsc::sync_channel;
+        use std::time::Duration;
+
+        struct Mock;
+        impl Analysis for Mock {
+            fn analyze(&mut self, s: &[&str]) -> Vec<DocumentAnalysis> {
+                s.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+            fn index_workspace_files(&mut self, uris: &[&str]) -> Vec<IndexedFile> {
+                uris.iter()
+                    .map(|uri| IndexedFile {
+                        uri: (*uri).to_string(),
+                        diagnostics: Vec::new(),
+                        text_hash: 0,
+                    })
+                    .collect()
+            }
+        }
+
+        let (tx, rx) = sync_channel(16);
+        let engine = AnalysisEngine::spawn(Mock, tx);
+        engine.submit(EngineCommand::Index(IndexJob {
+            priority: IndexPriority::Sweep,
+            uris: vec!["file:///w/A.kt".into(), "file:///w/B.kt".into()],
+        }));
+
+        let mut statuses = Vec::new();
+        while statuses.len() < 2 {
+            match rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(Incoming::Engine(EngineEvent::Status(status))) => statuses.push(status),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        assert_eq!(
+            statuses,
+            vec![
+                ServerStatus::Working("Indexing 2 files".to_string()),
+                ServerStatus::Ready,
+            ]
+        );
+        engine.join();
+    }
+
+    #[test]
+    fn a_disconnected_queue_abandons_index_work_but_finishes_interactive_work() {
+        let (sender, receiver) = command_queue();
+        sender.send(EngineCommand::Analyze(AnalysisJob {
+            documents: vec![("file:///w/Open.kt".into(), String::new(), 1)],
+            open_uris: vec!["file:///w/Open.kt".into()],
+        }));
+        sender.send(EngineCommand::Index(IndexJob {
+            priority: IndexPriority::Sweep,
+            uris: vec!["file:///w/Swept.kt".into()],
+        }));
+        sender.disconnect();
+
+        assert!(
+            matches!(
+                receiver.recv(None),
+                CommandReceive::Command(EngineCommand::Analyze(_))
+            ),
+            "interactive work already queued still completes across a shutdown"
+        );
+        assert!(
+            matches!(receiver.recv(None), CommandReceive::Disconnected),
+            "queued sweep work is abandoned rather than drained, so exit stays prompt"
+        );
     }
 }
