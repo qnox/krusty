@@ -3795,6 +3795,11 @@ pub fn lower_file_at_reporting(
                             return None;
                         }
                         let target_tys = tys_to_ir(resolved.target.params());
+                        // Same rule as an ordinary constructor call: a temp per argument only buys
+                        // source-order evaluation when the LOAD order differs, and it costs a local
+                        // typed by the target parameter — which the value-class pass then boxes.
+                        let delegation_reordered =
+                            resolved.argument_slots.windows(2).any(|w| w[0] > w[1]);
                         let mut slot_temps: Vec<Vec<(u32, Ty, bool)>> =
                             vec![Vec::new(); target_tys.len()];
                         let mut delegate_prelude = Vec::new();
@@ -3804,11 +3809,18 @@ pub fn lower_file_at_reporting(
                             .zip(&resolved.argument_types)
                         {
                             let expected = ty_to_ir(expected);
-                            let value = lo.lower_arg(argument, &expected)?;
-                            let temp = lo.fresh_value();
-                            delegate_prelude.push(lo.emit_variable(temp, expected, Some(value)));
+                            let mut value = lo.lower_arg(argument, &expected)?;
+                            if delegation_reordered {
+                                let temp = lo.fresh_value();
+                                delegate_prelude.push(lo.emit_variable(
+                                    temp,
+                                    expected,
+                                    Some(value),
+                                ));
+                                value = lo.emit_get_value(temp);
+                            }
                             slot_temps.get_mut(slot)?.push((
-                                temp,
+                                value,
                                 expected,
                                 lo.afile.is_spread_arg(argument),
                             ));
@@ -3821,20 +3833,18 @@ pub fn lower_file_at_reporting(
                                     && supplied[0].1 == parameter
                                     && supplied[0].2
                                 {
-                                    delegate_args.push(lo.emit_get_value(supplied[0].0));
+                                    delegate_args.push(supplied[0].0);
                                 } else {
-                                    let elements = supplied
-                                        .iter()
-                                        .map(|(temp, _, _)| lo.emit_get_value(*temp))
-                                        .collect();
+                                    let elements =
+                                        supplied.iter().map(|(value, _, _)| *value).collect();
                                     let spreads =
                                         supplied.iter().map(|(_, _, spread)| *spread).collect();
                                     delegate_args.push(
                                         lo.emit_vararg_with_spreads(parameter, elements, spreads),
                                     );
                                 }
-                            } else if let [(temp, _, _)] = supplied.as_slice() {
-                                delegate_args.push(lo.emit_get_value(*temp));
+                            } else if let [(value, _, _)] = supplied.as_slice() {
+                                delegate_args.push(*value);
                             } else if supplied.is_empty() && resolved.omitted.contains(&slot) {
                                 delegate_args.push(lo.zero_placeholder(parameter));
                             } else {
