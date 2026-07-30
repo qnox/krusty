@@ -3456,35 +3456,6 @@ fn generic_value_operand_slots(function: &FunDecl, owner_type_params: &[String])
 
 /// Like `collect_signatures` but also seeds class names and type aliases from the target's
 /// libraries (a JVM classpath, a klib), eliminating the need for any hardcoded type lists.
-/// A class with NO primary constructor names its base class WITHOUT parentheses — `class D : Base {
-/// constructor(): super(…) }` — because the base arguments come from each secondary `super(…)`. The
-/// parser parks every parenless supertype in `supertypes` and promotes only the ones naming a class
-/// declared in the SAME FILE (`fixup_parenless_base_classes`); it cannot see the classpath, where a
-/// base class and an interface look identical. Callers that do have a classpath pass `is_base_class`
-/// and get back the supertype that is really the base.
-pub(crate) fn parenless_base_supertype(
-    class: &ClassDecl,
-    mut is_base_class: impl FnMut(&str) -> bool,
-) -> Option<&str> {
-    if class.has_primary_ctor || class.base_class.is_some() {
-        return None;
-    }
-    let delegates_to_super = class.secondary_ctors.iter().any(|constructor| {
-        matches!(
-            constructor.delegation,
-            crate::ast::CtorDelegation::Super(_) | crate::ast::CtorDelegation::None
-        )
-    });
-    if !delegates_to_super {
-        return None;
-    }
-    class
-        .supertypes
-        .iter()
-        .map(|supertype| supertype.name.as_str())
-        .find(|name| is_base_class(name))
-}
-
 pub fn collect_signatures_with_cp(
     files: &[File],
     libraries: Box<dyn SemanticPlatform>,
@@ -4995,7 +4966,7 @@ pub fn collect_signatures_with_cp(
                     // interface (`class D : Base { constructor(): super(…) }`). The parser's own fixup
                     // can only recognize a base declared in the same FILE — there, `Base` and an
                     // interface are syntactically identical. The classpath is in hand here, so ask it.
-                    let parenless_base = parenless_base_supertype(c, |name| {
+                    let parenless_base = crate::ast::parenless_base_supertype(c, |name| {
                         declared_supertype_name(c, name, &class_names).is_some_and(|internal| {
                             libraries
                                 .resolve_type_name(internal)
@@ -14644,6 +14615,19 @@ impl<'a> Checker<'a> {
     /// Whether a DECLARED type mentions one of `tparams` — the class's own type parameters — directly, as
     /// a type argument, or inside a function type. The erased `Ty` cannot answer this: `<T>` erases to a
     /// non-null `kotlin/Any`, indistinguishable from a parameter genuinely declared `Any`.
+    /// Whether an argument for a parameter declared as `reference` must escape judgement against the
+    /// parameter's ERASED type. That is so when the parameter IS one of the class's type parameters
+    /// (`x: T` — the call is what binds it, and `<T>` erases to a non-null `Any`), and when it is a
+    /// FUNCTION type mentioning one (the erasure says nothing about the lambda's own parameter and
+    /// return types). A CONSTRUCTED type still constrains its argument by its head: `value: List<T>`
+    /// accepts a list and never a `String`, and judging that is what tells the primary
+    /// `ICs(value: List<T>)` from the secondary `ICs(value: T)`. Only its type ARGUMENTS are free.
+    fn type_ref_escapes_judgement(reference: &TypeRef, tparams: &[String]) -> bool {
+        tparams.contains(&reference.name)
+            || (!reference.fun_params.is_empty()
+                && Self::type_ref_mentions_type_param(reference, tparams))
+    }
+
     fn type_ref_mentions_type_param(reference: &TypeRef, tparams: &[String]) -> bool {
         if tparams.contains(&reference.name) {
             return true;
@@ -14692,7 +14676,7 @@ impl<'a> Checker<'a> {
                     .props
                     .iter()
                     .map(|parameter| {
-                        Self::type_ref_mentions_type_param(&parameter.ty, &declaration.type_params)
+                        Self::type_ref_escapes_judgement(&parameter.ty, &declaration.type_params)
                     })
                     .collect(),
             });
@@ -28164,7 +28148,7 @@ impl<'a> Checker<'a> {
                             .props
                             .iter()
                             .map(|parameter| {
-                                Self::type_ref_mentions_type_param(
+                                Self::type_ref_escapes_judgement(
                                     &parameter.ty,
                                     &declaration.type_params,
                                 )

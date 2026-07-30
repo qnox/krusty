@@ -803,7 +803,7 @@ pub fn lower_file_at_reporting(
             // A parenless supertype naming a CLASSPATH class is the base class, not an interface — the
             // parser can only promote a base declared in the same file. Same probe the checker uses, so
             // the two agree on which supertype is the base.
-            let parenless_base = crate::resolve::parenless_base_supertype(c, |name| {
+            let parenless_base = crate::ast::parenless_base_supertype(c, |name| {
                 lo.syms.class_names.get(name).is_some_and(|internal| {
                     lo.syms
                         .libraries
@@ -5638,6 +5638,7 @@ impl<'a> Lower<'a> {
             vararg,
             default_masks,
             value_class,
+            slot_prims,
         } = plan;
         if args.len() != argument_slots.len() || args.len() != argument_types.len() {
             return None;
@@ -5658,7 +5659,17 @@ impl<'a> Lower<'a> {
         let mut prelude = Vec::new();
         for ((&argument, &slot), &expected) in args.iter().zip(argument_slots).zip(argument_types) {
             let expected = ty_to_ir(expected);
-            let mut value = self.lower_arg(argument, &expected)?;
+            // A type-parameter slot bound to a PRIMITIVE by an explicit type argument (`Box<Long>(-1)`)
+            // erases to `Object`: lowering the argument straight to the erasure boxes the `Int` literal
+            // as `Integer`, and the `Long` read back throws `ClassCastException`. Lower it as the bound
+            // primitive first, then box through the erasure — kotlinc adapts the literal the same way.
+            let mut value = match slot_prims.get(slot).copied().flatten() {
+                Some(primitive) if expected.is_erased_top() => {
+                    let value = self.lower_arg(argument, &ty_to_ir(primitive))?;
+                    self.emit_type_op(IrTypeOp::ImplicitCoercion, value, expected)
+                }
+                _ => self.lower_arg(argument, &expected)?,
+            };
             if reordered {
                 let temp = self.fresh_value();
                 prelude.push(self.emit_variable(temp, expected, Some(value)));
@@ -7542,6 +7553,7 @@ impl<'a> Lower<'a> {
                             vararg,
                             default_masks: &default_masks,
                             value_class,
+                            slot_prims: &[],
                         },
                     )?;
                 if value_param_primary {
@@ -22278,6 +22290,19 @@ impl<'a> Lower<'a> {
                             .call_arg_names
                             .get(&e.0)
                             .map_or(true, |ns| ns.iter().all(|n| n.is_none()));
+                        // Per PARAMETER slot (not source-argument position), so a named/reordered call
+                        // still coerces the right argument.
+                        let slot_prims: Vec<Option<Ty>> = prop_tys
+                            .iter()
+                            .map(|prop| {
+                                tparams
+                                    .iter()
+                                    .position(|tparam| tparam == prop)
+                                    .and_then(|index| targs.get(index))
+                                    .copied()
+                                    .filter(|ty| self.has_scalar_value_repr(*ty))
+                            })
+                            .collect();
                         if let Some(ResolvedConstructor::Source {
                             primary,
                             params,
@@ -22300,6 +22325,7 @@ impl<'a> Lower<'a> {
                                         vararg,
                                         default_masks: &default_masks,
                                         value_class,
+                                        slot_prims: &slot_prims,
                                     },
                                 )?;
                             let exact_params =
@@ -25117,6 +25143,10 @@ struct ResolvedSourceConstructorPlan<'a> {
     vararg: Option<usize>,
     default_masks: &'a [i32],
     value_class: bool,
+    /// Per PARAMETER slot: the primitive the call's explicit type argument binds that slot's type
+    /// parameter to (`Box<Long>(-1)` → `Long` for slot 0). `None` for a slot whose declared type is not
+    /// one of the class's type parameters, or whose type argument is not a primitive.
+    slot_prims: &'a [Option<Ty>],
 }
 
 pub(crate) fn ty_to_ir(t: Ty) -> Ty {
