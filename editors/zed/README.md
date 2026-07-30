@@ -130,4 +130,6 @@ Known limitations:
 
 - Only the most recently analyzed group's primary documents are dumpable. With files from two
   modules open, the action can legitimately offer nothing for the module you're looking at.
-- A dump requested while an edit is still being analyzed can replay pre-edit state.
+- A dump requested while an edit is still being analyzed can replay pre-edit state. The `source
+  hash` in the document's header identifies the text it was rendered from, so a stale dump is
+  recognizable even when the edit preserved the file's length.

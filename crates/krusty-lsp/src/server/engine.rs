@@ -226,8 +226,12 @@ impl CommandState {
             EngineCommand::Materialize(job) => {
                 self.pending.push_back(EngineCommand::Materialize(job));
             }
-            // Queued behind any pending analysis on purpose: the dump replays the payload the
-            // worker last analyzed, so running it after a queued re-analysis keeps it current.
+            // Appended in arrival order, which is the whole guarantee: a dump does NOT wait for a
+            // fresher analysis. `Analyze` coalescing drops the pending job and pushes its
+            // replacement at the back, so an edit arriving after this dump is analyzed after it.
+            // A dump therefore replays whatever payload the last completed pass retained, which can
+            // predate the buffer on screen; the source hash in the document's header is what tells
+            // the reader which text it was rendered from.
             EngineCommand::Dump(job) => {
                 self.pending.push_back(EngineCommand::Dump(job));
             }
@@ -706,6 +710,31 @@ mod tests {
         assert!(matches!(
             state.pending.pop_front(),
             Some(EngineCommand::ProjectChange { .. })
+        ));
+        assert!(matches!(
+            state.pending.pop_front(),
+            Some(EngineCommand::Analyze(_))
+        ));
+    }
+
+    #[test]
+    fn a_queued_dump_is_not_reordered_behind_a_later_analysis() {
+        let mut state = CommandState::default();
+        state.enqueue(EngineCommand::Dump(DumpJob {
+            token: 0,
+            uri: "file:///a.kt".into(),
+        }));
+        state.enqueue(EngineCommand::Analyze(AnalysisJob {
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 2)],
+            open_uris: Vec::new(),
+        }));
+
+        // The dump runs first, so it replays the payload the previous pass retained rather than the
+        // edit still queued behind it. Nothing in the queue makes a dump current; only the source
+        // hash in the rendered header says which text it saw.
+        assert!(matches!(
+            state.pending.pop_front(),
+            Some(EngineCommand::Dump(_))
         ));
         assert!(matches!(
             state.pending.pop_front(),

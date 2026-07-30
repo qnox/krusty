@@ -79,6 +79,7 @@ pub fn render_dump(input: &DumpInput<'_>) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# krusty dump — {}", input.label);
     let _ = writeln!(out, "\nsource bytes: {}", input.source.len());
+    let _ = writeln!(out, "source hash: {:016x}", source_hash(input.source));
 
     let _ = writeln!(out, "\n## AST\n");
     let _ = writeln!(out, "```");
@@ -129,6 +130,22 @@ pub fn render_dump(input: &DumpInput<'_>) -> String {
     let _ = writeln!(out, "```");
 
     out
+}
+
+/// Stable, non-cryptographic digest of the text the document was rendered from.
+///
+/// A dump replays whatever source its producer last analyzed, which can predate the buffer on
+/// screen. `source bytes` alone does not reveal that: a length-preserving edit — renaming `foo` to
+/// `bar` — leaves the byte count identical, so a stale document reads exactly like a current one.
+/// The hash is what a reader compares against the file they are actually looking at.
+///
+/// Deliberately reuses the compiler's own hasher: dumps are diffed against each other, so the digest
+/// has to be identical across runs and processes, and no seeded or randomized hasher would be.
+fn source_hash(source: &str) -> u64 {
+    use std::hash::Hasher as _;
+    let mut hasher = crate::name_tree::FxHasher::default();
+    hasher.write(source.as_bytes());
+    hasher.finish()
 }
 
 fn severity_label(severity: crate::diag::Severity) -> &'static str {
@@ -212,6 +229,39 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("functions ("), "{text}");
+    }
+
+    #[test]
+    fn the_header_hash_separates_length_preserving_edits() {
+        let render = |source: &str| {
+            let mut diags = DiagSink::new();
+            let files = [parse_source_with_detected_features(source, &mut diags)];
+            render_dump(&DumpInput {
+                label: "src/Main.kt",
+                source,
+                file: &files[0],
+                info: None,
+                diagnostics: &[],
+                ir: Err("frontend errors"),
+            })
+        };
+
+        // Renaming `foo` to `bar` keeps every byte count identical, so `source bytes` cannot tell a
+        // stale dump from a current one on its own.
+        let before = render("fun foo() {}\n");
+        let after = render("fun bar() {}\n");
+        let header = |text: &str| {
+            text.lines()
+                .find(|line| line.starts_with("source hash: "))
+                .expect("the header states which text was rendered")
+                .to_string()
+        };
+
+        assert!(before.contains("source bytes: 13"), "{before}");
+        assert!(after.contains("source bytes: 13"), "{after}");
+        assert_ne!(header(&before), header(&after));
+        // Stable across renders: dumps are diffed against each other.
+        assert_eq!(header(&before), header(&render("fun foo() {}\n")));
     }
 
     #[test]
