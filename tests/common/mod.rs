@@ -143,9 +143,16 @@ fn scratch_namespace() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("target/scratch")
 }
 
+fn stale_scratch_roots() -> [PathBuf; 2] {
+    [
+        scratch_namespace(),
+        std::env::temp_dir().join("krusty_scratch"),
+    ]
+}
+
 /// Allocate a unique directory below this process's private scratch root.
 #[allow(dead_code)]
-fn scratch_dir() -> Option<PathBuf> {
+pub fn scratch_dir() -> Option<PathBuf> {
     static ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -182,16 +189,12 @@ fn scratch_dir() -> Option<PathBuf> {
 fn sweep_stale_temp_dirs() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
-        for (root, private) in [
-            (scratch_namespace(), true),
-            (std::env::temp_dir().join("krusty_scratch"), true),
-            (std::env::temp_dir(), false),
-        ] {
+        for root in stale_scratch_roots() {
             let Ok(rd) = std::fs::read_dir(root) else {
                 continue;
             };
             for e in rd.flatten() {
-                let Some(pid) = scratch_owner_pid(&e.file_name(), private) else {
+                let Some(pid) = scratch_owner_pid(&e.file_name()) else {
                     continue;
                 };
                 if temp_dir_owner_is_dead(pid) {
@@ -202,25 +205,18 @@ fn sweep_stale_temp_dirs() {
     });
 }
 
-fn scratch_owner_pid(name: &std::ffi::OsStr, private: bool) -> Option<i32> {
+fn scratch_owner_pid(name: &std::ffi::OsStr) -> Option<i32> {
     let name = name.to_str()?;
-    if private {
-        let pid = match name.split_once('_') {
-            Some((pid, suffix))
-                if !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()) =>
-            {
-                pid
-            }
-            Some(_) => return None,
-            None => name,
-        };
-        return pid.parse().ok();
-    }
-    name.strip_prefix("krusty_")?
-        .rsplit('_')
-        .next()?
-        .parse()
-        .ok()
+    let pid = match name.split_once('_') {
+        Some((pid, suffix))
+            if !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            pid
+        }
+        Some(_) => return None,
+        None => name,
+    };
+    pid.parse().ok()
 }
 
 /// Only `ESRCH` proves that an owner is dead; `EPERM` can describe a live process.
@@ -2217,7 +2213,7 @@ mod scratch_tests {
         let root = dir.parent().expect("scratch dir has a root");
         assert_eq!(root.parent(), Some(super::scratch_namespace().as_path()));
         assert_eq!(
-            super::scratch_owner_pid(root.file_name().unwrap(), true),
+            super::scratch_owner_pid(root.file_name().unwrap()),
             Some(std::process::id() as i32)
         );
         assert!(dir.is_dir());
@@ -2227,13 +2223,21 @@ mod scratch_tests {
     fn scratch_owner_accepts_only_reserved_root_names() {
         use std::ffi::OsStr;
 
-        assert_eq!(super::scratch_owner_pid(OsStr::new("123"), true), Some(123));
+        assert_eq!(super::scratch_owner_pid(OsStr::new("123")), Some(123));
+        assert_eq!(super::scratch_owner_pid(OsStr::new("123_4")), Some(123));
+        assert_eq!(super::scratch_owner_pid(OsStr::new("123_bad")), None);
+        assert_eq!(super::scratch_owner_pid(OsStr::new("123_")), None);
+    }
+
+    #[test]
+    fn stale_sweep_is_limited_to_private_roots() {
         assert_eq!(
-            super::scratch_owner_pid(OsStr::new("123_4"), true),
-            Some(123)
+            super::stale_scratch_roots(),
+            [
+                super::scratch_namespace(),
+                std::env::temp_dir().join("krusty_scratch"),
+            ]
         );
-        assert_eq!(super::scratch_owner_pid(OsStr::new("123_bad"), true), None);
-        assert_eq!(super::scratch_owner_pid(OsStr::new("123_"), true), None);
     }
 
     #[test]
