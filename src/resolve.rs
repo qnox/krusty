@@ -10089,6 +10089,7 @@ fn check_file_at_impl_mode(
                             let arguments = CtorDelegationCall {
                                 args: Vec::new(),
                                 names: Vec::new(),
+                                trailing_lambda: false,
                             };
                             let candidates = c.super_ctor_delegation_candidates(cl);
                             c.select_ctor_delegation(
@@ -14980,7 +14981,7 @@ impl<'a> Checker<'a> {
             required_arity(params.len(), &candidate.defaults),
             &candidate.defaults,
             candidate.vararg,
-            false,
+            arguments.trailing_lambda,
         )
         .ok()?;
         let argument_slots = arguments
@@ -28091,6 +28092,7 @@ impl<'a> Checker<'a> {
                         let arguments = CtorDelegationCall {
                             args: args.to_vec(),
                             names,
+                            trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
                         };
                         let candidates = self.source_constructor_candidates(&declaration, &cls);
                         let Some(selected) =

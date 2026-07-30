@@ -3157,7 +3157,11 @@ impl<'a> Parser<'a> {
                                 String::new()
                             };
                             let (args, names) = self.parse_call_arguments_with_names();
-                            let delegation_call = crate::ast::CtorDelegationCall { args, names };
+                            let delegation_call = crate::ast::CtorDelegationCall {
+                                args,
+                                names,
+                                trailing_lambda: false,
+                            };
                             delegation = match target.as_str() {
                                 "this" => CtorDelegation::This(delegation_call),
                                 "super" => CtorDelegation::Super(delegation_call),

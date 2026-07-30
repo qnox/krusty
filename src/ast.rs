@@ -984,6 +984,10 @@ pub enum CtorDelegation {
 pub struct CtorDelegationCall {
     pub args: Vec<ExprId>,
     pub names: Vec<Option<String>>,
+    /// Whether the last argument was written as a SYNTACTIC trailing lambda (`f(1) {}`). A `this(…)` /
+    /// `super(…)` delegation can never have one; a constructor CALL can, and the distinction decides
+    /// whether that argument may fill a `vararg` slot.
+    pub trailing_lambda: bool,
 }
 
 /// A primary-constructor init step (source-ordered): a body-property initializer or an `init` block.
