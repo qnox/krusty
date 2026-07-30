@@ -116,6 +116,13 @@ fn nonempty_path(value: Option<OsString>) -> Option<PathBuf> {
     value.filter(|value| !value.is_empty()).map(PathBuf::from)
 }
 
+fn jdk_home_from(java_home: Option<OsString>, reference_home: Option<OsString>) -> Option<PathBuf> {
+    // Shell parameter expansion treats an empty JAVA_HOME as unset. Keep the library locator on
+    // exactly that contract so `run-tests.sh`, integration tests, and survey runs cannot select
+    // different boot classpaths solely because the variable is exported with an empty value.
+    nonempty_path(java_home).or_else(|| nonempty_path(reference_home))
+}
+
 fn reference_version_from(env: Option<String>) -> String {
     env.filter(|v| !v.is_empty())
         .unwrap_or_else(|| max_reference_version().to_string())
@@ -347,17 +354,14 @@ pub fn coroutines_jar() -> Option<PathBuf> {
 /// The JDK `lib/modules` jimage (the bootclasspath the front-end resolves `java.*` against). Explicit
 /// `KRUSTY_SURVEY_JDK_MODULES` override, else derived from `JAVA_HOME`/`KRUSTY_REF_JAVA_HOME`.
 pub fn jdk_modules() -> Option<PathBuf> {
-    if let Some(p) = std::env::var("KRUSTY_SURVEY_JDK_MODULES")
-        .ok()
-        .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
-    {
+    if let Some(p) = nonempty_path(std::env::var_os("KRUSTY_SURVEY_JDK_MODULES")) {
         return p.is_file().then_some(p);
     }
-    let home = std::env::var("JAVA_HOME")
-        .or_else(|_| std::env::var("KRUSTY_REF_JAVA_HOME"))
-        .ok()?;
-    let p = PathBuf::from(home).join("lib").join("modules");
+    let home = jdk_home_from(
+        std::env::var_os("JAVA_HOME"),
+        std::env::var_os("KRUSTY_REF_JAVA_HOME"),
+    )?;
+    let p = home.join("lib").join("modules");
     p.is_file().then_some(p)
 }
 
@@ -438,5 +442,23 @@ mod tests {
         );
         assert_eq!(nonempty_path(Some(OsString::new())), None);
         assert_eq!(nonempty_path(None), None);
+    }
+
+    #[test]
+    fn empty_java_home_falls_back_to_reference_jdk() {
+        assert_eq!(
+            jdk_home_from(
+                Some(OsString::new()),
+                Some(OsString::from("/reference-jdk"))
+            ),
+            Some(PathBuf::from("/reference-jdk"))
+        );
+        assert_eq!(
+            jdk_home_from(
+                Some(OsString::from("/primary-jdk")),
+                Some(OsString::from("/reference-jdk"))
+            ),
+            Some(PathBuf::from("/primary-jdk"))
+        );
     }
 }

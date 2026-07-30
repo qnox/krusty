@@ -329,6 +329,10 @@ impl WorkerProcess {
     fn spawn(executable: &Path, arguments: &[String]) -> io::Result<Self> {
         let mut child = Command::new(executable)
             .arg("--analysis-worker")
+            // Supply the identity rather than making the child discover it after exec. If the
+            // server is killed in that interval, getppid() already names the reaper and a worker
+            // that sampled only its current parent could mistake that process for its server.
+            .arg(std::process::id().to_string())
             .args(arguments)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

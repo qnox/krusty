@@ -11,6 +11,8 @@ use krusty_lsp::{
     ProjectSources, ProjectSync, ProviderKind, RefreshOutcome, SystemEnvironment,
 };
 
+#[cfg(unix)]
+const ORPHAN_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const WORKER_RECONFIGURE_RETRY_INITIAL_MS: u64 = 1_000;
 const WORKER_RECONFIGURE_RETRY_MAX_MS: u64 = 30_000;
 const MAX_RETAINED_SUPPORT_DOCUMENTS: usize = 32 * 1024;
@@ -101,22 +103,67 @@ fn parse_cache_command(args: &[String]) -> Result<(bool, Option<PathBuf>), Strin
     Ok((all, root))
 }
 
+/// Remove the private worker-mode marker and the spawning server's PID from an argument vector.
+///
+/// The PID is positional and mandatory because this is an internal exec protocol, not a user-facing
+/// option. Keeping it next to the marker also prevents either value from reaching `LspOptions`.
+fn take_worker_parent(arguments: &mut Vec<String>) -> Result<Option<u32>, String> {
+    let Some(index) = arguments
+        .iter()
+        .position(|argument| argument == "--analysis-worker")
+    else {
+        return Ok(None);
+    };
+    arguments.remove(index);
+    let parent = arguments
+        .get(index)
+        .ok_or_else(|| "--analysis-worker requires the server PID".to_string())?
+        .parse::<u32>()
+        .map_err(|_| "--analysis-worker server PID must be an unsigned integer".to_string())?;
+    arguments.remove(index);
+    Ok(Some(parent))
+}
+
+/// Terminate the worker once its server is gone.
+///
+/// The worker normally stops when the server closes its stdin, but a worker busy in
+/// analysis never reaches the next read and would survive as an orphan burning a core.
+/// Watching for reparenting catches that case without touching the analysis path. The
+/// expected PID comes from the spawning server, closing the race where the server exits
+/// before the worker can sample its current parent.
+#[cfg(unix)]
+fn exit_when_orphaned(server: u32) {
+    use std::os::unix::process::parent_id;
+
+    std::thread::spawn(move || loop {
+        // Check before sleeping so a worker whose server died during exec exits promptly instead
+        // of adopting the reaper as its baseline or doing unnecessary compiler initialization.
+        if parent_id() != server {
+            std::process::exit(0);
+        }
+        std::thread::sleep(ORPHAN_CHECK_INTERVAL);
+    });
+}
+
+#[cfg(not(unix))]
+fn exit_when_orphaned(_server: u32) {}
+
 fn main() {
     let mut arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.first().map(String::as_str) == Some("cache") {
         run_cache_command(&arguments[1..]);
         return;
     }
-    let worker_mode = arguments
-        .iter()
-        .position(|argument| argument == "--analysis-worker")
-        .map(|index| arguments.remove(index))
-        .is_some();
+    let worker_parent = take_worker_parent(&mut arguments).unwrap_or_else(|error| {
+        eprintln!("krusty-lsp: {error}");
+        std::process::exit(2);
+    });
     let options = LspOptions::parse(arguments.clone()).unwrap_or_else(|error| {
         eprintln!("krusty-lsp: {error}");
         std::process::exit(2);
     });
-    if worker_mode {
+    if let Some(server) = worker_parent {
+        exit_when_orphaned(server);
         let stdin = io::stdin();
         let stdout = io::stdout();
         if let Err(error) = krusty_lsp::run_analysis_worker(
@@ -1049,6 +1096,23 @@ mod tests {
         );
         assert!(parse_cache_command(&args(&["clean", "-deps-cache-dir"])).is_err());
         assert!(parse_cache_command(&args(&["clean", "--unknown"])).is_err());
+    }
+
+    #[test]
+    fn worker_parent_protocol_is_required_and_removed_before_option_parsing() {
+        let mut arguments = vec![
+            "-classpath".to_string(),
+            "/project/classes".to_string(),
+            "--analysis-worker".to_string(),
+            "42".to_string(),
+        ];
+        assert_eq!(take_worker_parent(&mut arguments).unwrap(), Some(42));
+        assert_eq!(arguments, ["-classpath", "/project/classes"]);
+
+        let mut missing = vec!["--analysis-worker".to_string()];
+        assert!(take_worker_parent(&mut missing).is_err());
+        let mut invalid = vec!["--analysis-worker".to_string(), "parent".to_string()];
+        assert!(take_worker_parent(&mut invalid).is_err());
     }
 
     #[test]
